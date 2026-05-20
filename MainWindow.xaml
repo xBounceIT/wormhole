@@ -13,15 +13,23 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <Grid x:Name="AppTitleBar" Grid.Row="0" Height="40" Background="Transparent">
+        <Grid x:Name="AppTitleBar" Grid.Row="0" Height="48" Background="Transparent">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="148" />
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0" Text="Wormhole"
                        Style="{StaticResource CaptionTextBlockStyle}"
                        VerticalAlignment="Center"
                        Margin="16,0,0,0" />
+
+            <controls:QuickConnectBar Grid.Column="1"
+                                      HorizontalAlignment="Stretch"
+                                      VerticalAlignment="Center"
+                                      MaxWidth="900"
+                                      MinWidth="320"
+                                      Margin="24,6,24,6" />
         </Grid>
 
         <NavigationView
@@ -32,14 +40,11 @@
             PaneDisplayMode="Left"
             OpenPaneLength="320"
             IsPaneOpen="True"
-            IsPaneToggleButtonVisible="True"
+            IsPaneToggleButtonVisible="False"
             ItemInvoked="NavView_ItemInvoked">
 
             <NavigationView.PaneCustomContent>
-                <StackPanel Spacing="8" Padding="8,4,8,8">
-                    <controls:QuickConnectBar />
-                    <controls:ConnectionTreeView />
-                </StackPanel>
+                <controls:ConnectionTreeView Margin="8,4,8,8" />
             </NavigationView.PaneCustomContent>
 
             <NavigationView.FooterMenuItems>
