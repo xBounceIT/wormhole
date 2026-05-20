@@ -41,11 +41,18 @@ public sealed partial class SshTerminalView : UserControl
     // The VM outlives the view (it lives in ShellViewModel.Tabs across navigations),
     // so we must unsubscribe here or every navigation accumulates a stale handler
     // that keeps the old SshTerminalView alive and double-runs init on retry.
+    // Also unhook the one-shot WebView2 ready handler — if the user closes the tab
+    // before "ready" arrives, an in-flight WebMessageReceived would otherwise fire
+    // on a torn-down view and call AttachAsync against a disposed control.
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         if (_viewModel is not null)
         {
             _viewModel.InitializationRetryRequested -= OnInitializationRetryRequested;
+        }
+        if (TerminalView.CoreWebView2 is not null)
+        {
+            TerminalView.CoreWebView2.WebMessageReceived -= OnReadyMessage;
         }
     }
 

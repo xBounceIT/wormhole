@@ -63,14 +63,25 @@ public partial class ConnectionTreeViewModel : ObservableObject
     {
         if (vm is null || vm.Kind != NodeKind.Connection) return;
 
-        var all = await _repository.GetAllAsync();
-        var byId = all.ToDictionary(n => n.Id);
-        if (!byId.TryGetValue(vm.Node.Id, out var node)) return;
+        try
+        {
+            var all = await _repository.GetAllAsync();
+            var byId = all.ToDictionary(n => n.Id);
+            if (!byId.TryGetValue(vm.Node.Id, out var node)) return;
 
-        var profile = _inheritanceResolver.Resolve(node, byId);
-        // Factory dispatches by protocol: SSH gets the real terminal, RDP/SFTP get
-        // placeholder tabs whose DataTemplate renders the "not implemented yet" notice.
-        _tabFactory.Open(profile);
+            var profile = _inheritanceResolver.Resolve(node, byId);
+            // Factory dispatches by protocol: SSH gets the real terminal, RDP/SFTP get
+            // placeholder tabs whose DataTemplate renders the "not implemented yet" notice.
+            _tabFactory.Open(profile);
+        }
+        catch (Exception ex)
+        {
+            // Mirror the add/edit/delete error-path convention: log and surface the
+            // failure via a dialog instead of letting the exception escape as an
+            // unhandled RelayCommand failure.
+            _logger.LogError(ex, "Failed to open connection '{Name}'", vm.Name);
+            await _dialog.ShowMessageAsync("Couldn't open connection", ex.Message);
+        }
     }
 
     [RelayCommand]
