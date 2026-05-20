@@ -21,6 +21,7 @@ public sealed partial class SshTerminalView : UserControl
     private SshSessionViewModel? _viewModel;
     private bool _handshakeReceived;
     private int _initInProgress;
+    private TerminalSize _lastSize = TerminalSize.Default;
 
     public SshTerminalView()
     {
@@ -41,9 +42,20 @@ public sealed partial class SshTerminalView : UserControl
             _viewModel.InitializationRetryRequested += OnInitializationRetryRequested;
         }
 
-        // Already attached to the SSH session — nothing more to do until the
-        // VM signals a retry.
-        if (_handshakeReceived) return;
+        // Same instance is being reloaded (e.g. NavigationView swap, tab content
+        // recycle): the WebView2 and its in-page xterm.js are still alive but
+        // OnUnloaded disposed the bridge. Rebind without re-navigating, otherwise
+        // the terminal would appear dead — _handshakeReceived gates re-init so
+        // a normal flow would short-circuit here and never call AttachAsync.
+        if (_handshakeReceived)
+        {
+            if (TerminalView.CoreWebView2 is not null)
+            {
+                try { await _viewModel.AttachAsync(TerminalView.CoreWebView2, _lastSize).ConfigureAwait(true); }
+                catch (Exception ex) { _viewModel.ReportFailure(ex.Message); }
+            }
+            return;
+        }
         await InitializeWebViewAsync().ConfigureAwait(true);
     }
 
@@ -125,6 +137,7 @@ public sealed partial class SshTerminalView : UserControl
                 size = new TerminalSize(cols, rows);
             }
         }
+        _lastSize = size;
 
         var vm = _viewModel;
         if (vm is null) return;
