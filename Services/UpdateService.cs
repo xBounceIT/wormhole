@@ -18,6 +18,7 @@ namespace Wormhole.Services;
 public sealed class UpdateService : IUpdateService, IDisposable
 {
     public const string HttpClientName = "github";
+    public const string DownloadHttpClientName = "github-download";
     private const string InstallerArguments = "/SILENT /RESTARTAPP";
 
     private static readonly Regex GithubUrlPattern = new(
@@ -171,7 +172,9 @@ public sealed class UpdateService : IUpdateService, IDisposable
             var partPath = finalPath + ".part";
             File.Delete(partPath);
 
-            var http = _httpClientFactory.CreateClient(HttpClientName);
+            // Use the dedicated download client with a long timeout; the default 30s on the
+            // metadata client would cancel large installer downloads on slow connections.
+            var http = _httpClientFactory.CreateClient(DownloadHttpClientName);
             using var response = await http.GetAsync(
                 update.InstallerUrl,
                 HttpCompletionOption.ResponseHeadersRead,

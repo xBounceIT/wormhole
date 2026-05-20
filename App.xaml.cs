@@ -86,6 +86,14 @@ public partial class App : Application
             client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
             client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
         });
+        services.AddHttpClient(UpdateService.DownloadHttpClientName, client =>
+        {
+            // Installer downloads can be tens to hundreds of MB on slow connections —
+            // give them a generous window. Cancellation still propagates via the
+            // service's CancellationTokenSource on app shutdown.
+            client.Timeout = TimeSpan.FromMinutes(30);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd($"Wormhole/{assemblyVersion}");
+        });
         services.AddSingleton<IInstallerLauncher, DefaultInstallerLauncher>();
         services.AddSingleton<IUpdateService, UpdateService>();
 
