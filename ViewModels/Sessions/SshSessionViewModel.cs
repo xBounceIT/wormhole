@@ -29,6 +29,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private CoreWebView2? _webView;
     private XamlRoot? _xamlRoot;
     private string? _initialKnownFingerprint;
+    private int _connectInFlight;
 
     public SshSessionViewModel(
         ISshSessionService sshService,
@@ -94,23 +95,13 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
     public async Task DetachAsync()
     {
+        // Signal cancel to any in-flight ConnectAsync; do NOT Dispose() — the awaiter still
+        // holds the token. The CTS is GC-eligible once both sides drop their references.
         var cts = _cts;
         _cts = null;
         try { cts?.Cancel(); } catch { /* already disposed */ }
 
-        var bridge = _bridge;
-        _bridge = null;
-        bridge?.Dispose();
-
-        var session = _session;
-        _session = null;
-        if (session is not null)
-        {
-            try { await session.DisposeAsync().ConfigureAwait(true); }
-            catch (Exception ex) { _logger.LogWarning(ex, "Error disposing SSH session."); }
-        }
-
-        cts?.Dispose();
+        await SafeDisposeSessionAsync().ConfigureAwait(true);
         Status = SessionStatus.Disconnected;
     }
 
@@ -123,11 +114,13 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private async Task ConnectAsync()
     {
         if (Profile is null || _webView is null || _xamlRoot is null) return;
+        if (Interlocked.CompareExchange(ref _connectInFlight, 1, 0) != 0) return;
 
         Status = SessionStatus.Connecting;
         ErrorMessage = null;
-        _cts = new CancellationTokenSource();
-        var token = _cts.Token;
+        var cts = new CancellationTokenSource();
+        _cts = cts;
+        var token = cts.Token;
 
         try
         {
@@ -178,19 +171,28 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             ReportFailure(ex.Message);
             _logger.LogError(ex, "SSH connect failed for {Host}.", Profile.Host);
         }
+        finally
+        {
+            Interlocked.Exchange(ref _connectInFlight, 0);
+        }
     }
 
     private async Task SafeDisposeSessionAsync()
     {
         var bridge = _bridge;
         _bridge = null;
-        bridge?.Dispose();
+        if (bridge is not null)
+        {
+            try { bridge.Dispose(); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Error disposing TerminalBridge."); }
+        }
 
         var session = _session;
         _session = null;
         if (session is not null)
         {
-            try { await session.DisposeAsync().ConfigureAwait(true); } catch { /* best effort */ }
+            try { await session.DisposeAsync().ConfigureAwait(true); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Error disposing SSH session."); }
         }
     }
 }

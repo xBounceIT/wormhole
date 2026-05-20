@@ -26,8 +26,18 @@ public sealed class TerminalBridge : IDisposable
     private void OnDataReceived(object? sender, ReadOnlyMemory<byte> data)
     {
         // TODO: throttle/coalesce writes to avoid postMessage backpressure on bursts.
-        var encoded = Convert.ToBase64String(data.Span);
-        _webView.PostWebMessageAsString("d:" + encoded);
+        if (_disposed) return;
+        try
+        {
+            var encoded = Convert.ToBase64String(data.Span);
+            _webView.PostWebMessageAsString("d:" + encoded);
+        }
+        catch (ObjectDisposedException) { /* raced with Dispose */ }
+        catch (InvalidOperationException ex)
+        {
+            // WebView2 throws this when the CoreWebView2 has been closed.
+            _logger.LogDebug(ex, "PostWebMessageAsString rejected after WebView shutdown.");
+        }
     }
 
     private async void OnWebMessageReceived(CoreWebView2 sender, CoreWebView2WebMessageReceivedEventArgs args)

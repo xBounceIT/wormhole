@@ -13,7 +13,7 @@ internal sealed class SshSession : ISshSession
     private readonly CancellationTokenSource _cts = new();
     private readonly ILogger<SshSession> _logger;
     private readonly Task _readPump;
-    private bool _disposed;
+    private int _disposed;
 
     public SshSession(SshClient client, ShellStream stream, string hostFingerprint, ILogger<SshSession> logger)
     {
@@ -28,20 +28,27 @@ internal sealed class SshSession : ISshSession
 
     public event EventHandler<ReadOnlyMemory<byte>>? DataReceived;
 
+    private bool IsDisposed => Volatile.Read(ref _disposed) != 0;
+
     public async Task WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
     {
-        if (_disposed) return;
-        await _stream.WriteAsync(data, cancellationToken).ConfigureAwait(false);
-        await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+        if (IsDisposed) return;
+        try
+        {
+            await _stream.WriteAsync(data, cancellationToken).ConfigureAwait(false);
+            await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (ObjectDisposedException) { /* raced with Dispose */ }
     }
 
     public Task ResizeAsync(uint columns, uint rows)
     {
-        if (_disposed) return Task.CompletedTask;
+        if (IsDisposed) return Task.CompletedTask;
         try
         {
             _stream.ChangeWindowSize(columns, rows, 0, 0);
         }
+        catch (ObjectDisposedException) { /* raced with Dispose */ }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "ChangeWindowSize failed for {Cols}x{Rows}.", columns, rows);
@@ -71,14 +78,22 @@ internal sealed class SshSession : ISshSession
 
             var snapshot = new byte[n];
             Array.Copy(buffer, snapshot, n);
-            DataReceived?.Invoke(this, snapshot);
+
+            // Subscriber exceptions (e.g. WebView2 disposed mid-send) must not kill the pump.
+            try
+            {
+                DataReceived?.Invoke(this, snapshot);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "DataReceived subscriber threw; continuing.");
+            }
         }
     }
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed) return;
-        _disposed = true;
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
 
         try { _cts.Cancel(); } catch { /* already disposed */ }
 
