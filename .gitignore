@@ -39,3 +39,4 @@ Assets/web/vendor/
 Thumbs.db
 desktop.ini
 .DS_Store
+.claude/

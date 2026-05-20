@@ -82,4 +82,32 @@ public class HostSpecParserTests
     [Fact]
     public void Bracketed_OnlyColonSuffix_Throws()
         => Assert.Throws<System.FormatException>(() => HostSpecParser.Parse("[host]:"));
+
+    // Port range — out-of-range values must not slip through as a "valid" port.
+    [Theory]
+    [InlineData("host:0")]
+    [InlineData("host:-1")]
+    [InlineData("host:65536")]
+    [InlineData("host:99999")]
+    public void OutOfRange_Port_NotTreatedAsPort(string input)
+    {
+        // Falls through to "no port" — the suffix isn't a valid port so we don't strip it.
+        var spec = HostSpecParser.Parse(input);
+        Assert.Null(spec.Port);
+        Assert.Equal(input, spec.Host);
+    }
+
+    [Fact]
+    public void Bracketed_OutOfRangePort_Throws()
+        => Assert.Throws<System.FormatException>(() => HostSpecParser.Parse("[::1]:70000"));
+
+    [Fact]
+    public void Bracketed_PortOne_Allowed() => Assert.Equal(
+        new HostSpec(null, "::1", 1),
+        HostSpecParser.Parse("[::1]:1"));
+
+    [Fact]
+    public void Bracketed_PortMax_Allowed() => Assert.Equal(
+        new HostSpec(null, "::1", 65535),
+        HostSpecParser.Parse("[::1]:65535"));
 }

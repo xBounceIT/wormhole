@@ -27,6 +27,7 @@ internal sealed class SshSession : ISshSession
     public string HostFingerprint { get; }
 
     public event EventHandler<ReadOnlyMemory<byte>>? DataReceived;
+    public event EventHandler? Closed;
 
     private bool IsDisposed => Volatile.Read(ref _disposed) != 0;
 
@@ -60,33 +61,55 @@ internal sealed class SshSession : ISshSession
     {
         var ct = _cts.Token;
         var buffer = new byte[8192];
-        while (!ct.IsCancellationRequested)
+        var remoteClosed = false;
+        try
         {
-            int n;
-            try
+            while (!ct.IsCancellationRequested)
             {
-                n = await _stream.ReadAsync(buffer.AsMemory(), ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) { return; }
-            catch (ObjectDisposedException) { return; }
-            catch (Exception ex)
-            {
-                _logger.LogInformation(ex, "SSH read pump terminated.");
-                return;
-            }
-            if (n <= 0) return;
+                int n;
+                try
+                {
+                    n = await _stream.ReadAsync(buffer.AsMemory(), ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) { return; }
+                catch (ObjectDisposedException) { return; }
+                catch (Exception ex)
+                {
+                    // Treat unexpected I/O failures as a remote-side disconnect so the VM
+                    // doesn't lie to the user about an active session.
+                    _logger.LogInformation(ex, "SSH read pump terminated.");
+                    remoteClosed = true;
+                    return;
+                }
+                if (n <= 0)
+                {
+                    remoteClosed = true;
+                    return;
+                }
 
-            var snapshot = new byte[n];
-            Array.Copy(buffer, snapshot, n);
+                var snapshot = new byte[n];
+                Array.Copy(buffer, snapshot, n);
 
-            // Subscriber exceptions (e.g. WebView2 disposed mid-send) must not kill the pump.
-            try
-            {
-                DataReceived?.Invoke(this, snapshot);
+                // Subscriber exceptions (e.g. WebView2 disposed mid-send) must not kill the pump.
+                try
+                {
+                    DataReceived?.Invoke(this, snapshot);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "DataReceived subscriber threw; continuing.");
+                }
             }
-            catch (Exception ex)
+        }
+        finally
+        {
+            // Only surface Closed if the *remote* end ended the session. Our own
+            // DisposeAsync cancels the CTS first; we don't want to fire Closed on a
+            // user-initiated tear-down (the VM is already managing that state).
+            if (remoteClosed && !IsDisposed)
             {
-                _logger.LogWarning(ex, "DataReceived subscriber threw; continuing.");
+                try { Closed?.Invoke(this, EventArgs.Empty); }
+                catch (Exception ex) { _logger.LogWarning(ex, "Closed subscriber threw."); }
             }
         }
     }

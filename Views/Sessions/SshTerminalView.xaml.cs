@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Web.WebView2.Core;
@@ -12,7 +13,7 @@ namespace Wormhole.Views.Sessions;
 public sealed partial class SshTerminalView : UserControl
 {
     private SshSessionViewModel? _viewModel;
-    private bool _initialized;
+    private bool _webViewReady;
 
     public SshTerminalView()
     {
@@ -22,12 +23,24 @@ public sealed partial class SshTerminalView : UserControl
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
-        if (_initialized) return;
-        _initialized = true;
+        var newVm = DataContext as SshSessionViewModel;
+        if (newVm is null) return;
 
-        _viewModel = DataContext as SshSessionViewModel;
-        if (_viewModel is null) return;
+        if (!ReferenceEquals(newVm, _viewModel))
+        {
+            if (_viewModel is not null) _viewModel.InitializationRetryRequested -= OnInitializationRetryRequested;
+            _viewModel = newVm;
+            _viewModel.InitializationRetryRequested += OnInitializationRetryRequested;
+        }
 
+        if (_webViewReady) return;
+        await InitializeWebViewAsync().ConfigureAwait(true);
+    }
+
+    private async Task InitializeWebViewAsync()
+    {
+        var vm = _viewModel;
+        if (vm is null) return;
         try
         {
             await TerminalView.EnsureCoreWebView2Async();
@@ -42,11 +55,19 @@ public sealed partial class SshTerminalView : UserControl
 
             TerminalView.CoreWebView2.WebMessageReceived += OnReadyMessage;
             TerminalView.CoreWebView2.Navigate("https://terminal.wormhole/terminal.html");
+            _webViewReady = true;
         }
         catch (Exception ex)
         {
-            _viewModel.ReportFailure("Failed to initialize WebView2: " + ex.Message);
+            // Leave _webViewReady false so a Retry click can re-attempt init.
+            vm.ReportFailure("Failed to initialize WebView2: " + ex.Message);
         }
+    }
+
+    private async void OnInitializationRetryRequested()
+    {
+        if (_webViewReady) return;
+        await InitializeWebViewAsync().ConfigureAwait(true);
     }
 
     private async void OnReadyMessage(CoreWebView2 sender, CoreWebView2WebMessageReceivedEventArgs args)

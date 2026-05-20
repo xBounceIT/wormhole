@@ -28,6 +28,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private CancellationTokenSource? _cts;
     private CoreWebView2? _webView;
     private XamlRoot? _xamlRoot;
+    private Microsoft.UI.Dispatching.DispatcherQueue? _uiDispatcher;
     private string? _initialKnownFingerprint;
     private TerminalSize _initialSize = TerminalSize.Default;
     private int _connectInFlight;
@@ -77,6 +78,9 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         _webView = webView;
         _xamlRoot = xamlRoot;
         _initialSize = initialSize;
+        // AttachAsync is called from the UI thread (SshTerminalView's ready handler);
+        // capture the dispatcher now so background callbacks (Closed) can marshal back.
+        _uiDispatcher ??= Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
 
         // Navigating away from Sessions and back rebuilds the tab content (new
         // UserControl + WebView2) while the VM stays alive in ShellViewModel.Tabs. Skip the
@@ -95,10 +99,22 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         await ConnectAsync().ConfigureAwait(true);
     }
 
+    /// <summary>
+    /// Raised when <see cref="RetryAsync"/> is invoked but the view's WebView2 never
+    /// finished initializing. The view subscribes and re-runs its init path so the
+    /// Retry button isn't dead in WebView2-failure scenarios.
+    /// </summary>
+    public event Action? InitializationRetryRequested;
+
     [RelayCommand]
     public async Task RetryAsync()
     {
-        if (_webView is null || _xamlRoot is null) return;
+        ErrorMessage = null;
+        if (_webView is null || _xamlRoot is null)
+        {
+            InitializationRetryRequested?.Invoke();
+            return;
+        }
         await DetachAsync().ConfigureAwait(true);
         ErrorMessage = null;
         await ConnectAsync().ConfigureAwait(true);
@@ -125,6 +141,22 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         Status = SessionStatus.Failed;
     }
 
+    private void OnSessionClosed(object? sender, EventArgs e)
+    {
+        // Fired from the SSH read-pump thread; marshal to the captured UI dispatcher
+        // before touching observable properties.
+        var dispatcher = _uiDispatcher;
+        if (dispatcher is null) return;
+        dispatcher.TryEnqueue(() =>
+        {
+            if (Status == SessionStatus.Connected)
+            {
+                Status = SessionStatus.Disconnected;
+                ErrorMessage = "Remote session closed.";
+            }
+        });
+    }
+
     private async Task ConnectAsync()
     {
         var profile = Profile;
@@ -149,6 +181,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             }
 
             _session = await _sshService.ConnectAsync(profile, creds, _initialSize, token).ConfigureAwait(true);
+            _session.Closed += OnSessionClosed;
             _bridge = new TerminalBridge(webView, _session, _loggerFactory.CreateLogger<TerminalBridge>());
 
             if (_initialKnownFingerprint is null && _session is SshSession concrete && !string.IsNullOrEmpty(concrete.HostFingerprint))

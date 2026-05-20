@@ -36,7 +36,7 @@ public static class HostSpecParser
                 {
                     return new HostSpec(user, host, null);
                 }
-                if (rest.Length > 1 && rest[0] == ':' && int.TryParse(rest.AsSpan(1), out var bp))
+                if (rest.Length > 1 && rest[0] == ':' && TryParsePort(rest.AsSpan(1), out var bp))
                 {
                     return new HostSpec(user, host, bp);
                 }
@@ -57,13 +57,23 @@ public static class HostSpecParser
 
         int? port = null;
         var colon = s.LastIndexOf(':');
-        if (colon > 0 && int.TryParse(s.AsSpan(colon + 1), out var p))
+        if (colon > 0 && TryParsePort(s.AsSpan(colon + 1), out var p))
         {
             port = p;
             s = s.Substring(0, colon);
         }
 
         return new HostSpec(user, s, port);
+    }
+
+    private static bool TryParsePort(ReadOnlySpan<char> text, out int port)
+    {
+        if (int.TryParse(text, out port) && port >= 1 && port <= 65535)
+        {
+            return true;
+        }
+        port = 0;
+        return false;
     }
 
     private static int CountChar(string s, char c)
