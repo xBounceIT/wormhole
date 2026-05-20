@@ -5,8 +5,14 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:Microsoft.UI.Xaml.Controls">
 
-    <Grid Background="#0c0c0c">
-        <controls:WebView2 x:Name="TerminalView" />
+    <Grid Background="#0c0c0c"
+          HorizontalAlignment="Stretch"
+          VerticalAlignment="Stretch"
+          MinHeight="240">
+        <controls:WebView2 x:Name="TerminalView"
+                           HorizontalAlignment="Stretch"
+                           VerticalAlignment="Stretch"
+                           MinHeight="240" />
 
         <Border Background="#CC0c0c0c"
                 Visibility="{Binding IsConnecting, Converter={StaticResource BoolToVisibilityConverter}}">
@@ -16,6 +22,23 @@
                            HorizontalAlignment="Center"
                            Foreground="#e0e0e0" />
             </StackPanel>
+        </Border>
+
+        <Border Background="#CC20242f"
+                BorderBrush="#4456677a"
+                BorderThickness="1"
+                CornerRadius="4"
+                Padding="10,6"
+                Margin="16"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Top"
+                MaxWidth="360"
+                IsHitTestVisible="False"
+                Visibility="{Binding IsWaitingForRemoteOutput, Converter={StaticResource BoolToVisibilityConverter}}">
+            <TextBlock Text="Connected. Waiting for remote shell output..."
+                       TextWrapping="Wrap"
+                       Foreground="#e0e0e0"
+                       FontSize="12" />
         </Border>
 
         <Border Background="#E60c0c0c"
