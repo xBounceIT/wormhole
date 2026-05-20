@@ -13,6 +13,8 @@ public sealed class AppSettingsService : IAppSettingsService
         WriteIndented = true,
     };
 
+    private readonly object _writeLock = new();
+
     public AppSettings Current { get; private set; }
 
     public event EventHandler? SettingsChanged;
@@ -24,8 +26,14 @@ public sealed class AppSettingsService : IAppSettingsService
 
     public void Save()
     {
-        Directory.CreateDirectory(AppPaths.GetAppDataDirectory());
-        File.WriteAllText(AppPaths.GetSettingsFilePath(), JsonSerializer.Serialize(Current, JsonOptions));
+        // Serialize the read of Current + the file write so concurrent callers (e.g. the
+        // UI thread toggling a setting and the background update check stamping
+        // LastUpdateCheck) cannot collide on File.WriteAllText and surface an IOException.
+        lock (_writeLock)
+        {
+            Directory.CreateDirectory(AppPaths.GetAppDataDirectory());
+            File.WriteAllText(AppPaths.GetSettingsFilePath(), JsonSerializer.Serialize(Current, JsonOptions));
+        }
         SettingsChanged?.Invoke(this, EventArgs.Empty);
     }
 

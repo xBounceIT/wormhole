@@ -1,3 +1,5 @@
+using System;
+using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -27,6 +29,17 @@ public sealed partial class MainWindow : Window
 
         _navigationService.Initialize(ContentFrame);
         _navigationService.Navigate(typeof(SessionsPage));
+
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            await ViewModel.Update.RunStartupCheckAsync().ConfigureAwait(false);
+        });
+    }
+
+    private void UpdateInfoBar_CloseButtonClick(InfoBar sender, object args)
+    {
+        ViewModel.Update.DismissCommand.Execute(null);
     }
 
     private void NavView_ItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)

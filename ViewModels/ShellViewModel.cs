@@ -13,8 +13,11 @@ public partial class ShellViewModel : ObservableObject
 
     public ConnectionTreeViewModel Tree { get; }
 
-    public ShellViewModel(ConnectionTreeViewModel tree)
+    public UpdateViewModel Update { get; }
+
+    public ShellViewModel(ConnectionTreeViewModel tree, UpdateViewModel update)
     {
         Tree = tree;
+        Update = update;
     }
 }
