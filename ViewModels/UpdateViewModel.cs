@@ -53,8 +53,13 @@ public partial class UpdateViewModel : ObservableObject
     public async Task RunStartupCheckAsync()
     {
         if (!_settings.Current.AutoCheckForUpdates) return;
-        var last = _settings.Current.LastUpdateCheck;
-        if (last is not null && DateTimeOffset.UtcNow - last < StartupThrottle) return;
+        if (_settings.Current.LastUpdateCheck is { } lastCheck)
+        {
+            // Bail only when the stored timestamp is in the recent past — a future timestamp
+            // (clock skew, NTP correction) would otherwise suppress checks indefinitely.
+            var elapsed = DateTimeOffset.UtcNow - lastCheck;
+            if (elapsed >= TimeSpan.Zero && elapsed < StartupThrottle) return;
+        }
         try { await CheckNowAsync().ConfigureAwait(false); }
         catch (Exception ex) { _logger.LogWarning(ex, "Startup update check failed."); }
     }
