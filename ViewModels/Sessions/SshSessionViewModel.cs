@@ -29,6 +29,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private CoreWebView2? _webView;
     private XamlRoot? _xamlRoot;
     private string? _initialKnownFingerprint;
+    private TerminalSize _initialSize = TerminalSize.Default;
     private int _connectInFlight;
 
     public SshSessionViewModel(
@@ -62,15 +63,13 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     public bool IsConnected => Status == SessionStatus.Connected;
     public bool IsFailed => Status == SessionStatus.Failed;
 
-    public void Initialize(ConnectionProfile profile)
+    public override void Initialize(ConnectionProfile profile)
     {
-        Profile = profile;
-        Title = string.IsNullOrEmpty(profile.Name) ? profile.Host : profile.Name;
-        Status = SessionStatus.Disconnected;
+        base.Initialize(profile);
         _initialKnownFingerprint = profile.SshKnownHostFingerprint;
     }
 
-    public async Task AttachAsync(CoreWebView2 webView, XamlRoot xamlRoot)
+    public async Task AttachAsync(CoreWebView2 webView, XamlRoot xamlRoot, TerminalSize initialSize)
     {
         if (Profile is null)
             throw new InvalidOperationException("Initialize must be called before AttachAsync.");
@@ -78,6 +77,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
         _webView = webView;
         _xamlRoot = xamlRoot;
+        _initialSize = initialSize;
         await ConnectAsync().ConfigureAwait(true);
     }
 
@@ -134,7 +134,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
                 return;
             }
 
-            _session = await _sshService.ConnectAsync(profile, creds.Password, creds.PrivateKey, token).ConfigureAwait(true);
+            _session = await _sshService.ConnectAsync(profile, creds, _initialSize, token).ConfigureAwait(true);
             _bridge = new TerminalBridge(webView, _session, _loggerFactory.CreateLogger<TerminalBridge>());
 
             if (_initialKnownFingerprint is null && _session is SshSession concrete && !string.IsNullOrEmpty(concrete.HostFingerprint))

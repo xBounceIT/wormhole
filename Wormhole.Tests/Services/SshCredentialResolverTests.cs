@@ -94,8 +94,10 @@ public class SshCredentialResolverTests
         Assert.Equal(0, dialogs.PromptCount);
     }
 
+    // Regression: previously the passphrase landed in Password, so a failed key auth would
+    // cause SSH.NET to send the passphrase as a login attempt. Must stay in KeyPassphrase only.
     [Fact]
-    public async Task Resolve_KeyCredential_WithPassphrase_PassesPassphraseAsPassword()
+    public async Task Resolve_KeyCredential_WithPassphrase_PassesPassphraseAsKeyPassphraseOnly()
     {
         var credId = Guid.NewGuid();
         var dialogs = new FakeDialogService(null);
@@ -108,7 +110,8 @@ public class SshCredentialResolverTests
 
         var creds = await resolver.ResolveAsync(MakeProfile(credentialId: credId), null!);
 
-        Assert.Equal("passphrase", creds.Password);
+        Assert.Null(creds.Password);
+        Assert.Equal("passphrase", creds.KeyPassphrase);
         Assert.NotNull(creds.PrivateKey);
     }
 

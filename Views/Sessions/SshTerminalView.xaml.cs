@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Web.WebView2.Core;
 using Wormhole.Helpers;
+using Wormhole.Services;
 using Wormhole.ViewModels.Sessions;
 
 namespace Wormhole.Views.Sessions;
@@ -51,16 +52,32 @@ public sealed partial class SshTerminalView : UserControl
     private async void OnReadyMessage(CoreWebView2 sender, CoreWebView2WebMessageReceivedEventArgs args)
     {
         var msg = args.TryGetWebMessageAsString();
-        if (msg != "ready") return;
+        if (msg is null || !msg.StartsWith("ready", StringComparison.Ordinal)) return;
 
         // Self-unsubscribe so a second navigation doesn't double-attach.
         TerminalView.CoreWebView2.WebMessageReceived -= OnReadyMessage;
+
+        // The handshake carries the initial xterm.js geometry as "ready:COLSxROWS" so the
+        // SSH shell can be allocated at the correct size. If parsing fails, fall back to
+        // the protocol default — better than 80x24 stuck forever.
+        var size = TerminalSize.Default;
+        if (msg.Length > 6 && msg[5] == ':')
+        {
+            var parts = msg.Substring(6).Split('x');
+            if (parts.Length == 2 &&
+                uint.TryParse(parts[0], out var cols) &&
+                uint.TryParse(parts[1], out var rows) &&
+                cols > 0 && rows > 0)
+            {
+                size = new TerminalSize(cols, rows);
+            }
+        }
 
         var vm = _viewModel;
         if (vm is null) return;
         try
         {
-            await vm.AttachAsync(TerminalView.CoreWebView2, XamlRoot);
+            await vm.AttachAsync(TerminalView.CoreWebView2, XamlRoot, size);
         }
         catch (Exception ex)
         {

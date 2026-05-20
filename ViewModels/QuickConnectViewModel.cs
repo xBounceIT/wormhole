@@ -58,15 +58,7 @@ public partial class QuickConnectViewModel : ObservableObject
             Username = !string.IsNullOrEmpty(spec.User) ? spec.User : (string.IsNullOrEmpty(Username) ? null : Username),
         };
 
-        switch (Protocol)
-        {
-            case ProtocolType.Ssh:
-                _tabFactory.OpenSsh(profile);
-                break;
-            default:
-                // RDP/SFTP UI surfaces land in follow-up PRs.
-                throw new NotSupportedException($"Quick-connect for {Protocol} is not implemented yet.");
-        }
+        _tabFactory.Open(profile);
     }
 
     private static int DefaultPort(ProtocolType protocol) => protocol switch

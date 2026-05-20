@@ -61,15 +61,9 @@ public partial class ConnectionTreeViewModel : ObservableObject
         if (!byId.TryGetValue(vm.Node.Id, out var node)) return;
 
         var profile = _inheritanceResolver.Resolve(node, byId);
-
-        switch (profile.Protocol)
-        {
-            case ProtocolType.Ssh:
-                _tabFactory.OpenSsh(profile);
-                break;
-            default:
-                throw new NotSupportedException($"Protocol {profile.Protocol} is not yet implemented.");
-        }
+        // Factory dispatches by protocol: SSH gets the real terminal, RDP/SFTP get
+        // placeholder tabs whose DataTemplate renders the "not implemented yet" notice.
+        _tabFactory.Open(profile);
     }
 
     private async Task LoadAsync()

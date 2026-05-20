@@ -23,8 +23,8 @@ public sealed class SshSessionService : ISshSessionService
 
     public async Task<ISshSession> ConnectAsync(
         ConnectionProfile profile,
-        string? password,
-        byte[]? privateKey,
+        SshCredentials credentials,
+        TerminalSize initialSize,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(profile.Host))
@@ -33,7 +33,7 @@ public sealed class SshSessionService : ISshSessionService
             throw new InvalidOperationException(
                 $"Connection '{profile.Name}' has no username; provide one before connecting.");
 
-        var authMethods = BuildAuthMethods(profile.Username!, password, privateKey);
+        var authMethods = BuildAuthMethods(profile.Username!, credentials);
         if (authMethods.Count == 0)
         {
             throw new InvalidOperationException(
@@ -91,7 +91,9 @@ public sealed class SshSessionService : ISshSessionService
         ShellStream stream;
         try
         {
-            stream = client.CreateShellStream("xterm-256color", 80, 24, 0, 0, 8192);
+            var cols = initialSize.Columns == 0 ? TerminalSize.Default.Columns : initialSize.Columns;
+            var rows = initialSize.Rows == 0 ? TerminalSize.Default.Rows : initialSize.Rows;
+            stream = client.CreateShellStream("xterm-256color", cols, rows, 0, 0, 8192);
         }
         catch
         {
@@ -106,22 +108,22 @@ public sealed class SshSessionService : ISshSessionService
         return new SshSession(client, stream, capturedFingerprint!, _loggerFactory.CreateLogger<SshSession>());
     }
 
-    private static List<AuthenticationMethod> BuildAuthMethods(string username, string? password, byte[]? privateKey)
+    private static List<AuthenticationMethod> BuildAuthMethods(string username, SshCredentials credentials)
     {
         var methods = new List<AuthenticationMethod>();
-        if (privateKey is not null)
+        if (credentials.PrivateKey is { Length: > 0 })
         {
-            // Treat the password (if any) as the key passphrase. SSH.NET surfaces a
-            // SshPassPhraseNullOrEmptyException at parse time when the key is encrypted
-            // and no passphrase was supplied; the VM catches that and re-prompts.
-            var keyFile = string.IsNullOrEmpty(password)
-                ? new PrivateKeyFile(new MemoryStream(privateKey))
-                : new PrivateKeyFile(new MemoryStream(privateKey), password);
+            // KeyPassphrase is consumed locally to decrypt the key — never sent as a login
+            // password. SSH.NET throws SshPassPhraseNullOrEmptyException at parse time if the
+            // key is encrypted and we passed no passphrase; the VM catches and re-prompts.
+            var keyFile = string.IsNullOrEmpty(credentials.KeyPassphrase)
+                ? new PrivateKeyFile(new MemoryStream(credentials.PrivateKey))
+                : new PrivateKeyFile(new MemoryStream(credentials.PrivateKey), credentials.KeyPassphrase);
             methods.Add(new PrivateKeyAuthenticationMethod(username, keyFile));
         }
-        if (!string.IsNullOrEmpty(password))
+        if (!string.IsNullOrEmpty(credentials.Password))
         {
-            methods.Add(new PasswordAuthenticationMethod(username, password));
+            methods.Add(new PasswordAuthenticationMethod(username, credentials.Password));
         }
         return methods;
     }

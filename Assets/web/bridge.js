@@ -83,10 +83,13 @@
       resizeTimer = window.setTimeout(reportSize, 50);
     });
 
-    // Send the initial geometry, then the ready handshake. Order matters: the C# side
-    // attaches the bridge on "ready" and uses the latest geometry to size the PTY.
-    reportSize();
-    post("ready");
+    // Carry the initial geometry inside the handshake: the C# bridge isn't attached yet,
+    // so a standalone "r:" right here would be dropped. The host parses "ready:COLSxROWS"
+    // and uses it for CreateShellStream so the PTY starts at the right size.
+    if (fit) {
+      try { fit.fit(); } catch (_) { /* container hidden */ }
+    }
+    post("ready:" + term.cols + "x" + term.rows);
   }
 
   if (document.readyState === "loading") {

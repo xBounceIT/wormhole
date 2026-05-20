@@ -9,7 +9,7 @@ namespace Wormhole.Services;
 
 public interface ISessionTabFactory
 {
-    void OpenSsh(ConnectionProfile profile);
+    void Open(ConnectionProfile profile);
 }
 
 public sealed class SessionTabFactory : ISessionTabFactory
@@ -23,15 +23,19 @@ public sealed class SessionTabFactory : ISessionTabFactory
         _navigation = navigation;
     }
 
-    public void OpenSsh(ConnectionProfile profile)
+    public void Open(ConnectionProfile profile)
     {
-        if (profile.Protocol != ProtocolType.Ssh)
-            throw new ArgumentException($"OpenSsh requires an SSH profile; got {profile.Protocol}.", nameof(profile));
-
         // Resolve ShellViewModel lazily — eager injection would create a cycle:
         // ShellVM -> ConnectionTreeVM -> ISessionTabFactory -> ShellVM.
         var shell = _serviceProvider.GetRequiredService<ShellViewModel>();
-        var vm = _serviceProvider.GetRequiredService<SshSessionViewModel>();
+        SessionTabViewModel vm = profile.Protocol switch
+        {
+            ProtocolType.Ssh => _serviceProvider.GetRequiredService<SshSessionViewModel>(),
+            ProtocolType.Rdp => _serviceProvider.GetRequiredService<RdpSessionViewModel>(),
+            ProtocolType.Sftp => _serviceProvider.GetRequiredService<SftpSessionViewModel>(),
+            _ => throw new ArgumentOutOfRangeException(nameof(profile),
+                $"Unknown protocol {profile.Protocol}.")
+        };
         vm.Initialize(profile);
         shell.Tabs.Add(vm);
         shell.SelectedTab = vm;
