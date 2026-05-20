@@ -22,7 +22,7 @@
             <ToggleSwitch Header="Confirm before closing a connected tab"
                           IsOn="{x:Bind ViewModel.ConfirmOnTabClose, Mode=TwoWay}" />
 
-            <TextBlock Text="Wormhole 0.1.0 — scaffold build"
+            <TextBlock Text="Wormhole 0.1.0"
                        Style="{StaticResource CaptionTextBlockStyle}"
                        Opacity="0.6"
                        Margin="0,24,0,0" />

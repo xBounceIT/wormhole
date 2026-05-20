@@ -19,13 +19,10 @@
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="148" />
             </Grid.ColumnDefinitions>
-            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8"
-                        VerticalAlignment="Center" Margin="16,0,0,0">
-                <Image Source="ms-appx:///Assets/app.ico" Width="20" Height="20" />
-                <TextBlock Text="Wormhole"
-                           Style="{StaticResource CaptionTextBlockStyle}"
-                           VerticalAlignment="Center" />
-            </StackPanel>
+            <TextBlock Grid.Column="0" Text="Wormhole"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       VerticalAlignment="Center"
+                       Margin="16,0,0,0" />
 
             <controls:QuickConnectBar Grid.Column="1"
                                       HorizontalAlignment="Center"
