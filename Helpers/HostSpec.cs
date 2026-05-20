@@ -32,6 +32,11 @@ public static class HostSpecParser
             {
                 var host = s.Substring(1, closeBracket - 1);
                 var rest = s.Substring(closeBracket + 1);
+                if (host.Length == 0)
+                {
+                    throw new FormatException(
+                        $"Invalid host specifier '{input}': bracketed host is empty.");
+                }
                 if (rest.Length == 0)
                 {
                     return new HostSpec(user, host, null);
@@ -52,6 +57,8 @@ public static class HostSpecParser
         // protocol default port. Users who want an explicit IPv6 port must bracket the host.
         if (CountChar(s, ':') > 1)
         {
+            if (s.Length == 0)
+                throw new FormatException($"Invalid host specifier '{input}': host is empty.");
             return new HostSpec(user, s, null);
         }
 
@@ -61,6 +68,12 @@ public static class HostSpecParser
         {
             port = p;
             s = s.Substring(0, colon);
+        }
+
+        if (s.Length == 0)
+        {
+            throw new FormatException(
+                $"Invalid host specifier '{input}': host is empty.");
         }
 
         return new HostSpec(user, s, port);

@@ -30,15 +30,18 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
     private readonly ICredentialRepository _credentialRepo;
     private readonly ICredentialService _credentialService;
     private readonly IDialogService _dialogs;
+    private readonly IPrivateKeyInspector _keyInspector;
 
     public SshCredentialResolver(
         ICredentialRepository credentialRepo,
         ICredentialService credentialService,
-        IDialogService dialogs)
+        IDialogService dialogs,
+        IPrivateKeyInspector keyInspector)
     {
         _credentialRepo = credentialRepo;
         _credentialService = credentialService;
         _dialogs = dialogs;
+        _keyInspector = keyInspector;
     }
 
     public async Task<SshCredentials> ResolveAsync(ConnectionProfile profile, CancellationToken cancellationToken = default)
@@ -68,6 +71,20 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
             // also try it as PasswordAuthenticationMethod.
             var passphrase = await _credentialService.ReadPasswordAsync(credential.Id).ConfigureAwait(true);
             cancellationToken.ThrowIfCancellationRequested();
+            // If no passphrase was stored, probe whether the key actually needs one.
+            // If encrypted, prompt rather than handing the blob to SshSessionService
+            // where it would surface as a generic failed connect with no recovery.
+            if (string.IsNullOrEmpty(passphrase) && _keyInspector.IsEncrypted(key))
+            {
+                passphrase = await _dialogs.PromptPasswordAsync(
+                    "SSH key passphrase",
+                    "Enter the passphrase for the SSH key:").ConfigureAwait(true);
+                cancellationToken.ThrowIfCancellationRequested();
+                if (string.IsNullOrEmpty(passphrase))
+                {
+                    return SshCredentials.Empty;
+                }
+            }
             return new SshCredentials(null, passphrase, key);
         }
 

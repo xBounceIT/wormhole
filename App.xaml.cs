@@ -75,6 +75,7 @@ public partial class App : Application
         services.AddSingleton<INavigationService, NavigationService>();
         services.AddSingleton<IDialogService, DialogService>();
         services.AddSingleton<ISshSessionService, SshSessionService>();
+        services.AddSingleton<IPrivateKeyInspector, SshNetPrivateKeyInspector>();
         services.AddSingleton<ISshCredentialResolver, SshCredentialResolver>();
         services.AddSingleton<ISessionTabFactory, SessionTabFactory>();
         services.AddSingleton<IRdpSessionService, RdpSessionService>();

@@ -110,4 +110,14 @@ public class HostSpecParserTests
     public void Bracketed_PortMax_Allowed() => Assert.Equal(
         new HostSpec(null, "::1", 65535),
         HostSpecParser.Parse("[::1]:65535"));
+
+    // Empty-host inputs must fail fast at parse time, not get a tab created that
+    // dies later with a generic host-validation error from ConnectAsync.
+    [Theory]
+    [InlineData("alice@")]
+    [InlineData("[]")]
+    [InlineData("[]:22")]
+    [InlineData("alice@[]")]
+    public void EmptyHost_Throws(string input)
+        => Assert.Throws<System.FormatException>(() => HostSpecParser.Parse(input));
 }
