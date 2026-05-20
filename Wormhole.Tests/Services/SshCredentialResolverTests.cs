@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.UI.Xaml;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
@@ -22,7 +21,7 @@ public class SshCredentialResolverTests
             new FakeCredentialService(),
             dialogs);
 
-        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: null), null!);
+        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: null));
 
         Assert.Equal("prompted-pwd", creds.Password);
         Assert.Null(creds.PrivateKey);
@@ -38,7 +37,7 @@ public class SshCredentialResolverTests
             new FakeCredentialService(),
             dialogs);
 
-        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: null), null!);
+        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: null));
 
         Assert.False(creds.HasAny);
     }
@@ -53,7 +52,7 @@ public class SshCredentialResolverTests
             new FakeCredentialService(passwords: new() { [credId] = "stored-pwd" }),
             dialogs);
 
-        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: credId), null!);
+        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: credId));
 
         Assert.Equal("stored-pwd", creds.Password);
         Assert.Null(creds.PrivateKey);
@@ -70,7 +69,7 @@ public class SshCredentialResolverTests
             new FakeCredentialService(),
             dialogs);
 
-        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: credId), null!);
+        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: credId));
 
         Assert.Equal("typed-pwd", creds.Password);
         Assert.Equal(1, dialogs.PromptCount);
@@ -87,7 +86,7 @@ public class SshCredentialResolverTests
             new FakeCredentialService(keys: new() { [credId] = keyBytes }),
             dialogs);
 
-        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: credId), null!);
+        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: credId));
 
         Assert.Equal(keyBytes, creds.PrivateKey);
         Assert.Null(creds.Password);
@@ -108,7 +107,7 @@ public class SshCredentialResolverTests
                 passwords: new() { [credId] = "passphrase" }),
             dialogs);
 
-        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: credId), null!);
+        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: credId));
 
         Assert.Null(creds.Password);
         Assert.Equal("passphrase", creds.KeyPassphrase);
@@ -125,7 +124,7 @@ public class SshCredentialResolverTests
             new FakeCredentialService(),
             dialogs);
 
-        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: credId), null!);
+        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: credId));
 
         Assert.Equal("fallback-pwd", creds.Password);
         Assert.Null(creds.PrivateKey);
@@ -140,7 +139,7 @@ public class SshCredentialResolverTests
             new FakeCredentialService(),
             dialogs);
 
-        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: Guid.NewGuid()), null!);
+        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: Guid.NewGuid()));
 
         Assert.Equal("guessed-pwd", creds.Password);
     }
@@ -164,9 +163,11 @@ public class SshCredentialResolverTests
 
         public FakeDialogService(string? response) { _response = response; }
 
-        public Task ShowMessageAsync(XamlRoot xamlRoot, string title, string message) => Task.CompletedTask;
-        public Task<bool> ConfirmAsync(XamlRoot xamlRoot, string title, string message) => Task.FromResult(false);
-        public Task<string?> PromptPasswordAsync(XamlRoot xamlRoot, string title, string message)
+        public Task ShowMessageAsync(string title, string message) => Task.CompletedTask;
+        public Task<bool> ConfirmAsync(string title, string message, string primaryText = "Yes", string closeText = "No") => Task.FromResult(false);
+        public Task<string?> PromptForTextAsync(string title, string label, string defaultValue = "") => Task.FromResult<string?>(null);
+        public Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null) => Task.FromResult<NewConnectionDraft?>(null);
+        public Task<string?> PromptPasswordAsync(string title, string message)
         {
             PromptCount++;
             return Task.FromResult(_response);

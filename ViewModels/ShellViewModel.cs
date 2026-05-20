@@ -14,11 +14,14 @@ public partial class ShellViewModel : ObservableObject
 
     public ConnectionTreeViewModel Tree { get; }
 
+    public UpdateViewModel Update { get; }
+
     public bool HasNoTabs => Tabs.Count == 0;
 
-    public ShellViewModel(ConnectionTreeViewModel tree)
+    public ShellViewModel(ConnectionTreeViewModel tree, UpdateViewModel update)
     {
         Tree = tree;
+        Update = update;
         Tabs.CollectionChanged += OnTabsChanged;
     }
 

@@ -14,11 +14,18 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     private bool confirmOnTabClose;
 
-    public SettingsViewModel(IAppSettingsService settingsService)
+    [ObservableProperty]
+    private bool autoCheckForUpdates;
+
+    public UpdateViewModel Update { get; }
+
+    public SettingsViewModel(IAppSettingsService settingsService, UpdateViewModel update)
     {
         _settingsService = settingsService;
+        Update = update;
         theme = _settingsService.Current.Theme;
         confirmOnTabClose = _settingsService.Current.ConfirmOnTabClose;
+        autoCheckForUpdates = _settingsService.Current.AutoCheckForUpdates;
     }
 
     partial void OnThemeChanged(ApplicationTheme value)
@@ -30,6 +37,12 @@ public partial class SettingsViewModel : ObservableObject
     partial void OnConfirmOnTabCloseChanged(bool value)
     {
         _settingsService.Current.ConfirmOnTabClose = value;
+        _settingsService.Save();
+    }
+
+    partial void OnAutoCheckForUpdatesChanged(bool value)
+    {
+        _settingsService.Current.AutoCheckForUpdates = value;
         _settingsService.Save();
     }
 }

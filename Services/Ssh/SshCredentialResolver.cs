@@ -1,6 +1,5 @@
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.UI.Xaml;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 
@@ -8,7 +7,7 @@ namespace Wormhole.Services.Ssh;
 
 public interface ISshCredentialResolver
 {
-    Task<SshCredentials> ResolveAsync(ConnectionProfile profile, XamlRoot xamlRoot, CancellationToken cancellationToken = default);
+    Task<SshCredentials> ResolveAsync(ConnectionProfile profile, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -42,18 +41,18 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
         _dialogs = dialogs;
     }
 
-    public async Task<SshCredentials> ResolveAsync(ConnectionProfile profile, XamlRoot xamlRoot, CancellationToken cancellationToken = default)
+    public async Task<SshCredentials> ResolveAsync(ConnectionProfile profile, CancellationToken cancellationToken = default)
     {
         if (profile.CredentialId is null)
         {
-            return await PromptForPasswordAsync(profile, xamlRoot, cancellationToken).ConfigureAwait(true);
+            return await PromptForPasswordAsync(profile, cancellationToken).ConfigureAwait(true);
         }
 
         var credential = await _credentialRepo.GetByIdAsync(profile.CredentialId.Value, cancellationToken).ConfigureAwait(true);
         cancellationToken.ThrowIfCancellationRequested();
         if (credential is null)
         {
-            return await PromptForPasswordAsync(profile, xamlRoot, cancellationToken).ConfigureAwait(true);
+            return await PromptForPasswordAsync(profile, cancellationToken).ConfigureAwait(true);
         }
 
         if (credential.Kind == CredentialKind.SshKey)
@@ -62,7 +61,7 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
             cancellationToken.ThrowIfCancellationRequested();
             if (key is null || key.Length == 0)
             {
-                return await PromptForPasswordAsync(profile, xamlRoot, cancellationToken).ConfigureAwait(true);
+                return await PromptForPasswordAsync(profile, cancellationToken).ConfigureAwait(true);
             }
             // Any stored secret for a key credential is the passphrase used to *decrypt the
             // key*, not a login password. Surface it in KeyPassphrase so the service won't
@@ -78,15 +77,14 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
         {
             return new SshCredentials(stored, null, null);
         }
-        return await PromptForPasswordAsync(profile, xamlRoot, cancellationToken).ConfigureAwait(true);
+        return await PromptForPasswordAsync(profile, cancellationToken).ConfigureAwait(true);
     }
 
-    private async Task<SshCredentials> PromptForPasswordAsync(ConnectionProfile profile, XamlRoot xamlRoot, CancellationToken cancellationToken)
+    private async Task<SshCredentials> PromptForPasswordAsync(ConnectionProfile profile, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var user = string.IsNullOrEmpty(profile.Username) ? profile.Host : profile.Username + "@" + profile.Host;
         var password = await _dialogs.PromptPasswordAsync(
-            xamlRoot,
             "SSH password",
             "Enter the password for " + user + ":").ConfigureAwait(true);
         // Re-check after the await: the user may have closed the tab (canceling the

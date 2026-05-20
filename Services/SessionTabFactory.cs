@@ -7,11 +7,6 @@ using Wormhole.Views.Pages;
 
 namespace Wormhole.Services;
 
-public interface ISessionTabFactory
-{
-    void Open(ConnectionProfile profile);
-}
-
 public sealed class SessionTabFactory : ISessionTabFactory
 {
     private readonly IServiceProvider _serviceProvider;

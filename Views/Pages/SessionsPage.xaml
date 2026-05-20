@@ -34,7 +34,7 @@
                     VerticalAlignment="Center"
                     Spacing="12"
                     MaxWidth="420"
-                    Visibility="{x:Bind ViewModel.HasNoTabs, Mode=OneWay, Converter={StaticResource BoolToVis}}">
+                    Visibility="{x:Bind ViewModel.HasNoTabs, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
             <FontIcon Glyph="&#xE968;" FontSize="48" Opacity="0.5" />
             <TextBlock Text="No active sessions"
                        Style="{StaticResource SubtitleTextBlockStyle}"

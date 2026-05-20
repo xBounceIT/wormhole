@@ -1,11 +1,13 @@
 using System.Threading.Tasks;
-using Microsoft.UI.Xaml;
+using Wormhole.Models;
 
 namespace Wormhole.Services;
 
 public interface IDialogService
 {
-    Task ShowMessageAsync(XamlRoot xamlRoot, string title, string message);
-    Task<bool> ConfirmAsync(XamlRoot xamlRoot, string title, string message);
-    Task<string?> PromptPasswordAsync(XamlRoot xamlRoot, string title, string message);
+    Task ShowMessageAsync(string title, string message);
+    Task<bool> ConfirmAsync(string title, string message, string primaryText = "Yes", string closeText = "No");
+    Task<string?> PromptForTextAsync(string title, string label, string defaultValue = "");
+    Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null);
+    Task<string?> PromptPasswordAsync(string title, string message);
 }

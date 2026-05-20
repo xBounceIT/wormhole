@@ -10,39 +10,56 @@
     <Grid x:Name="RootGrid">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <Grid x:Name="AppTitleBar" Grid.Row="0" Height="40" Background="Transparent">
+        <Grid x:Name="AppTitleBar" Grid.Row="0" Height="48" Background="Transparent">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="148" />
             </Grid.ColumnDefinitions>
-            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8"
-                        VerticalAlignment="Center" Margin="16,0,0,0">
-                <Image Source="ms-appx:///Assets/app.ico" Width="20" Height="20" />
-                <TextBlock Text="Wormhole"
-                           Style="{StaticResource CaptionTextBlockStyle}"
-                           VerticalAlignment="Center" />
-            </StackPanel>
+            <TextBlock Grid.Column="0" Text="Wormhole"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       VerticalAlignment="Center"
+                       Margin="16,0,0,0" />
+
+            <controls:QuickConnectBar Grid.Column="1"
+                                      HorizontalAlignment="Stretch"
+                                      VerticalAlignment="Center"
+                                      MaxWidth="900"
+                                      MinWidth="320"
+                                      Margin="24,6,24,6" />
         </Grid>
+
+        <InfoBar Grid.Row="1"
+                 x:Name="UpdateInfoBar"
+                 Margin="12,0,12,4"
+                 IsOpen="{x:Bind ViewModel.Update.IsUpdateAvailable, Mode=TwoWay}"
+                 IsClosable="True"
+                 CloseButtonClick="UpdateInfoBar_CloseButtonClick"
+                 Severity="Informational"
+                 Title="Update available"
+                 Message="{x:Bind ViewModel.Update.InfoBarMessage, Mode=OneWay}">
+            <InfoBar.ActionButton>
+                <Button Content="Install" Command="{x:Bind ViewModel.Update.InstallCommand}" />
+            </InfoBar.ActionButton>
+        </InfoBar>
 
         <NavigationView
             x:Name="NavView"
-            Grid.Row="1"
+            Grid.Row="2"
             IsBackButtonVisible="Collapsed"
             IsSettingsVisible="False"
             PaneDisplayMode="Left"
             OpenPaneLength="320"
             IsPaneOpen="True"
-            IsPaneToggleButtonVisible="True"
+            IsPaneToggleButtonVisible="False"
             ItemInvoked="NavView_ItemInvoked">
 
             <NavigationView.PaneCustomContent>
-                <StackPanel Spacing="8" Padding="8,4,8,8">
-                    <controls:QuickConnectBar />
-                    <controls:ConnectionTreeView />
-                </StackPanel>
+                <controls:ConnectionTreeView Margin="8,4,8,8" />
             </NavigationView.PaneCustomContent>
 
             <NavigationView.FooterMenuItems>

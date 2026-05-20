@@ -32,6 +32,11 @@ internal static class AppPaths
         return Path.Combine(GetAppDataDirectory(), "keys");
     }
 
+    public static string GetUpdateCacheDirectory()
+    {
+        return Path.Combine(GetAppDataDirectory(), "cache", "updates");
+    }
+
     public static string GetWebAssetsDirectory()
     {
         return Path.Combine(AppContext.BaseDirectory, "Assets", "web");

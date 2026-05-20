@@ -4,7 +4,6 @@ using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
-using Microsoft.UI.Xaml;
 using Microsoft.Web.WebView2.Core;
 using Renci.SshNet.Common;
 using Wormhole.Data.Repositories;
@@ -27,7 +26,6 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private TerminalBridge? _bridge;
     private CancellationTokenSource? _cts;
     private CoreWebView2? _webView;
-    private XamlRoot? _xamlRoot;
     private Microsoft.UI.Dispatching.DispatcherQueue? _uiDispatcher;
     private string? _initialKnownFingerprint;
     private TerminalSize _initialSize = TerminalSize.Default;
@@ -70,13 +68,12 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         _initialKnownFingerprint = profile.SshKnownHostFingerprint;
     }
 
-    public async Task AttachAsync(CoreWebView2 webView, XamlRoot xamlRoot, TerminalSize initialSize)
+    public async Task AttachAsync(CoreWebView2 webView, TerminalSize initialSize)
     {
         if (Profile is null)
             throw new InvalidOperationException("Initialize must be called before AttachAsync.");
 
         _webView = webView;
-        _xamlRoot = xamlRoot;
         _initialSize = initialSize;
         // AttachAsync is called from the UI thread (SshTerminalView's ready handler);
         // capture the dispatcher now so background callbacks (Closed) can marshal back.
@@ -110,7 +107,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     public async Task RetryAsync()
     {
         ErrorMessage = null;
-        if (_webView is null || _xamlRoot is null)
+        if (_webView is null)
         {
             InitializationRetryRequested?.Invoke();
             return;
@@ -161,8 +158,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     {
         var profile = Profile;
         var webView = _webView;
-        var xamlRoot = _xamlRoot;
-        if (profile is null || webView is null || xamlRoot is null) return;
+        if (profile is null || webView is null) return;
         if (Interlocked.CompareExchange(ref _connectInFlight, 1, 0) != 0) return;
 
         Status = SessionStatus.Connecting;
@@ -173,7 +169,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
         try
         {
-            var creds = await _credentialResolver.ResolveAsync(profile, xamlRoot, token).ConfigureAwait(true);
+            var creds = await _credentialResolver.ResolveAsync(profile, token).ConfigureAwait(true);
             if (!creds.HasAny)
             {
                 ReportFailure("No credentials provided.");

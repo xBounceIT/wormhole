@@ -98,7 +98,7 @@ public sealed partial class SshTerminalView : UserControl
         if (vm is null) return;
         try
         {
-            await vm.AttachAsync(TerminalView.CoreWebView2, XamlRoot, size);
+            await vm.AttachAsync(TerminalView.CoreWebView2, size);
         }
         catch (Exception ex)
         {

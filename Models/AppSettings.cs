@@ -1,3 +1,5 @@
+using System;
+
 namespace Wormhole.Models;
 
 public sealed class AppSettings
@@ -6,6 +8,10 @@ public sealed class AppSettings
     public bool ConfirmOnTabClose { get; set; } = true;
     public string DefaultSshFont { get; set; } = "Cascadia Mono";
     public int DefaultSshFontSize { get; set; } = 12;
+
+    public bool AutoCheckForUpdates { get; set; } = true;
+    public DateTimeOffset? LastUpdateCheck { get; set; }
+    public string? SkippedUpdateVersion { get; set; }
 }
 
 public enum ApplicationTheme
