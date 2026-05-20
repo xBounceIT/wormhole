@@ -83,7 +83,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         // UserControl + WebView2) while the VM stays alive in ShellViewModel.Tabs. Skip the
         // expensive credential prompt + SSH connect; just rebind the bridge to the new
         // WebView and resync the geometry. The terminal scrollback is lost (xterm.js is
-        // fresh) but typing/output continue to work on the same SSH session.
+        // fresh) but typing/output continue to work on the same SSH session. We don't
+        // re-call Start() — the pump was already running from the first connect.
         if (_session is not null)
         {
             var oldBridge = _bridge;
@@ -185,8 +186,11 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             }
 
             _session = await _sshService.ConnectAsync(profile, creds, _initialSize, token).ConfigureAwait(true);
+            // Subscribe BEFORE Start() so we don't miss a Closed that fires immediately
+            // (forced-command accounts, EOF-on-connect, etc.).
             _session.Closed += OnSessionClosed;
             _bridge = new TerminalBridge(webView, _session, _loggerFactory.CreateLogger<TerminalBridge>());
+            _session.Start();
 
             // Mirror SshHostKeyValidator.Decide which treats null *and* empty as unpinned —
             // otherwise a profile with SshKnownHostFingerprint == "" (e.g. from imported

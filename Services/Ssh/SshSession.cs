@@ -12,8 +12,9 @@ internal sealed class SshSession : ISshSession
     private readonly ShellStream _stream;
     private readonly CancellationTokenSource _cts = new();
     private readonly ILogger<SshSession> _logger;
-    private readonly Task _readPump;
+    private Task? _readPump;
     private int _disposed;
+    private int _started;
 
     public SshSession(SshClient client, ShellStream stream, string hostFingerprint, ILogger<SshSession> logger)
     {
@@ -21,6 +22,12 @@ internal sealed class SshSession : ISshSession
         _stream = stream;
         _logger = logger;
         HostFingerprint = hostFingerprint;
+    }
+
+    public void Start()
+    {
+        if (Interlocked.Exchange(ref _started, 1) != 0) return;
+        if (IsDisposed) return;
         _readPump = Task.Run(ReadPumpAsync);
     }
 
@@ -120,11 +127,14 @@ internal sealed class SshSession : ISshSession
 
         try { _cts.Cancel(); } catch { /* already disposed */ }
 
-        try
+        if (_readPump is not null)
         {
-            await _readPump.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+            try
+            {
+                await _readPump.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+            }
+            catch { /* pump might throw on shutdown; ignore */ }
         }
-        catch { /* pump might throw on shutdown; ignore */ }
 
         try { _stream.Close(); } catch { /* socket may already be torn down */ }
         try { _stream.Dispose(); } catch { /* idempotent */ }

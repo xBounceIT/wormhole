@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Windows.ApplicationModel.DataTransfer;
@@ -60,12 +61,24 @@ public sealed partial class ConnectionTreeView : UserControl
         args.Handled = true;
     }
 
-    private void Tree_ItemInvoked(TreeView sender, TreeViewItemInvokedEventArgs args)
+    private void OnNodeDoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs args)
     {
-        if (args.InvokedItem is TreeNodeViewModel vm &&
+        if (sender is FrameworkElement fe &&
+            fe.DataContext is TreeNodeViewModel vm &&
             ViewModel.OpenConnectionCommand.CanExecute(vm))
         {
             ViewModel.OpenConnectionCommand.Execute(vm);
+            args.Handled = true;
+        }
+    }
+
+    private void OnOpenAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
+    {
+        if (Tree.SelectedItem is TreeNodeViewModel vm &&
+            ViewModel.OpenConnectionCommand.CanExecute(vm))
+        {
+            ViewModel.OpenConnectionCommand.Execute(vm);
+            args.Handled = true;
         }
     }
 }
