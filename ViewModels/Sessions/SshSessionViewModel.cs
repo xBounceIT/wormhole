@@ -151,8 +151,10 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             // user clicks Retry) goes through the full ConnectAsync path instead of
             // rebinding to a dead transport.
             await SafeDisposeSessionAsync().ConfigureAwait(true);
-            Status = SessionStatus.Disconnected;
-            ErrorMessage = "Remote session closed.";
+            // Use Failed (not Disconnected) so the in-tab failure overlay with the
+            // Retry button becomes visible — otherwise users have no recovery path
+            // after a transient network drop without closing the tab.
+            ReportFailure("Remote session closed.");
         });
     }
 
@@ -182,7 +184,10 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             _session.Closed += OnSessionClosed;
             _bridge = new TerminalBridge(webView, _session, _loggerFactory.CreateLogger<TerminalBridge>());
 
-            if (_initialKnownFingerprint is null && _session is SshSession concrete && !string.IsNullOrEmpty(concrete.HostFingerprint))
+            // Mirror SshHostKeyValidator.Decide which treats null *and* empty as unpinned —
+            // otherwise a profile with SshKnownHostFingerprint == "" (e.g. from imported
+            // data) would never pin and continue to TOFU-accept on every reconnect.
+            if (string.IsNullOrEmpty(_initialKnownFingerprint) && _session is SshSession concrete && !string.IsNullOrEmpty(concrete.HostFingerprint))
             {
                 // Pin the captured fingerprint on the in-memory profile *before* any retry so a
                 // disconnect/reconnect inside this tab actually validates against it instead of
