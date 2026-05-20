@@ -46,44 +46,52 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
     {
         if (profile.CredentialId is null)
         {
-            return await PromptForPasswordAsync(profile, xamlRoot).ConfigureAwait(true);
+            return await PromptForPasswordAsync(profile, xamlRoot, cancellationToken).ConfigureAwait(true);
         }
 
         var credential = await _credentialRepo.GetByIdAsync(profile.CredentialId.Value, cancellationToken).ConfigureAwait(true);
+        cancellationToken.ThrowIfCancellationRequested();
         if (credential is null)
         {
-            return await PromptForPasswordAsync(profile, xamlRoot).ConfigureAwait(true);
+            return await PromptForPasswordAsync(profile, xamlRoot, cancellationToken).ConfigureAwait(true);
         }
 
         if (credential.Kind == CredentialKind.SshKey)
         {
             var key = await _credentialService.ReadPrivateKeyAsync(credential.Id).ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
             if (key is null || key.Length == 0)
             {
-                return await PromptForPasswordAsync(profile, xamlRoot).ConfigureAwait(true);
+                return await PromptForPasswordAsync(profile, xamlRoot, cancellationToken).ConfigureAwait(true);
             }
             // Any stored secret for a key credential is the passphrase used to *decrypt the
             // key*, not a login password. Surface it in KeyPassphrase so the service won't
             // also try it as PasswordAuthenticationMethod.
             var passphrase = await _credentialService.ReadPasswordAsync(credential.Id).ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
             return new SshCredentials(null, passphrase, key);
         }
 
         var stored = await _credentialService.ReadPasswordAsync(credential.Id).ConfigureAwait(true);
+        cancellationToken.ThrowIfCancellationRequested();
         if (!string.IsNullOrEmpty(stored))
         {
             return new SshCredentials(stored, null, null);
         }
-        return await PromptForPasswordAsync(profile, xamlRoot).ConfigureAwait(true);
+        return await PromptForPasswordAsync(profile, xamlRoot, cancellationToken).ConfigureAwait(true);
     }
 
-    private async Task<SshCredentials> PromptForPasswordAsync(ConnectionProfile profile, XamlRoot xamlRoot)
+    private async Task<SshCredentials> PromptForPasswordAsync(ConnectionProfile profile, XamlRoot xamlRoot, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var user = string.IsNullOrEmpty(profile.Username) ? profile.Host : profile.Username + "@" + profile.Host;
         var password = await _dialogs.PromptPasswordAsync(
             xamlRoot,
             "SSH password",
             "Enter the password for " + user + ":").ConfigureAwait(true);
+        // Re-check after the await: the user may have closed the tab (canceling the
+        // connect CTS) while the dialog was open. Don't act on a stale password.
+        cancellationToken.ThrowIfCancellationRequested();
         return string.IsNullOrEmpty(password) ? SshCredentials.Empty : new SshCredentials(password, null, null);
     }
 }

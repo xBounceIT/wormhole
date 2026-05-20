@@ -67,13 +67,26 @@ foreach ($asset in $assets) {
 
     $expectedHash = $null
     if ($integrity.ContainsKey($asset.Relative)) { $expectedHash = $integrity[$asset.Relative] }
-    if ((Test-Path $destination) -and $expectedHash -and -not $Force) {
+    $exists = Test-Path $destination
+
+    # Honor existing files even without an integrity manifest entry. This makes the script
+    # idempotent across `dotnet clean` (which wipes obj/) and works on offline machines
+    # that copied the vendor folder in by hand. Hash is captured into the manifest on
+    # first sight so future runs can verify.
+    if ($exists -and -not $Force) {
         $actual = Get-FileSha256 $destination
-        if ($actual -eq $expectedHash) {
-            Write-Info "OK    $($asset.Relative)"
+        if ($expectedHash) {
+            if ($actual -eq $expectedHash) {
+                Write-Info "OK    $($asset.Relative)"
+                continue
+            }
+            Write-Info "STALE $($asset.Relative) - re-downloading"
+        }
+        else {
+            Write-Info "ADOPT $($asset.Relative) (pinning hash from existing file)"
+            $integrity[$asset.Relative] = $actual
             continue
         }
-        Write-Info "STALE $($asset.Relative) - re-downloading"
     }
 
     Write-Info "FETCH $($asset.Url) -> $($asset.Relative)"
