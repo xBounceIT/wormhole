@@ -217,11 +217,37 @@ public class UpdateServiceTests
     }
 
     [Fact]
-    public async Task CheckAsync_NoUpdate_OnHttpError()
+    public async Task CheckAsync_ReportsFailure_OnHttpError()
     {
         var service = NewService(req => new HttpResponseMessage(HttpStatusCode.NotFound));
         var result = await service.CheckAsync();
         Assert.False(result.IsUpdateAvailable);
+        Assert.True(result.CheckFailed);
+    }
+
+    [Fact]
+    public async Task CheckAsync_DoesNotPersistLastCheck_OnHttpError()
+    {
+        var settings = new FakeAppSettingsService();
+        var service = NewService(
+            req => new HttpResponseMessage(HttpStatusCode.ServiceUnavailable),
+            settings: settings);
+
+        await service.CheckAsync();
+        Assert.Null(settings.Current.LastUpdateCheck);
+    }
+
+    [Fact]
+    public async Task CheckAsync_DoesNotPersistLastCheck_OnTransportException()
+    {
+        var settings = new FakeAppSettingsService();
+        var service = NewService(
+            req => throw new HttpRequestException("network is down"),
+            settings: settings);
+
+        var result = await service.CheckAsync();
+        Assert.True(result.CheckFailed);
+        Assert.Null(settings.Current.LastUpdateCheck);
     }
 
     [Fact]

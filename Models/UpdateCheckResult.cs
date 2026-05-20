@@ -6,6 +6,7 @@ public sealed record UpdateCheckResult(
     Version CurrentVersion,
     Version? LatestVersion,
     bool IsUpdateAvailable,
+    bool CheckFailed,
     string? ReleaseTag,
     string? ReleaseName,
     string? ReleaseUrl,
@@ -16,5 +17,8 @@ public sealed record UpdateCheckResult(
     string? InstallerSha256)
 {
     public static UpdateCheckResult NoUpdate(Version currentVersion, Version? latest = null) =>
-        new(currentVersion, latest, false, null, null, null, null, null, null, null, null);
+        new(currentVersion, latest, false, false, null, null, null, null, null, null, null, null);
+
+    public static UpdateCheckResult Failed(Version currentVersion) =>
+        new(currentVersion, null, false, true, null, null, null, null, null, null, null, null);
 }

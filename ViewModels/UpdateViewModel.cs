@@ -142,6 +142,13 @@ public partial class UpdateViewModel : ObservableObject
 
     private void ApplyResult(UpdateCheckResult result)
     {
+        if (result.CheckFailed)
+        {
+            // Leave any previously surfaced update visible; just report the failure.
+            Status = "Couldn't reach the update server. Try again later.";
+            return;
+        }
+
         ReleaseUrl = result.ReleaseUrl;
         ReleaseNotes = result.ReleaseNotes ?? string.Empty;
         if (result.IsUpdateAvailable && result.LatestVersion is not null)

@@ -78,16 +78,18 @@ public sealed class UpdateService : IUpdateService, IDisposable
                 HttpCompletionOption.ResponseHeadersRead,
                 linkedCts.Token).ConfigureAwait(false);
 
-            _settingsService.Current.LastUpdateCheck = DateTimeOffset.UtcNow;
-            _settingsService.Save();
-
             if (!response.IsSuccessStatusCode)
             {
                 _logger.LogWarning(
                     "GitHub releases/latest returned {StatusCode} for {Owner}/{Repo}.",
                     (int)response.StatusCode, owner, repo);
-                return RememberResult(UpdateCheckResult.NoUpdate(currentVersion));
+                return RememberResult(UpdateCheckResult.Failed(currentVersion));
             }
+
+            // Persist the throttle marker only when GitHub gave us a real answer. Transient
+            // 403/5xx or transport failures should not suppress the next startup check.
+            _settingsService.Current.LastUpdateCheck = DateTimeOffset.UtcNow;
+            _settingsService.Save();
 
             await using var stream = await response.Content.ReadAsStreamAsync(linkedCts.Token).ConfigureAwait(false);
             var release = await JsonSerializer.DeserializeAsync<GitHubRelease>(stream, JsonOptions, linkedCts.Token).ConfigureAwait(false);
@@ -124,6 +126,7 @@ public sealed class UpdateService : IUpdateService, IDisposable
                 CurrentVersion: currentVersion,
                 LatestVersion: latestVersion,
                 IsUpdateAvailable: true,
+                CheckFailed: false,
                 ReleaseTag: release.TagName,
                 ReleaseName: release.Name,
                 ReleaseUrl: release.HtmlUrl,
@@ -142,7 +145,7 @@ public sealed class UpdateService : IUpdateService, IDisposable
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Update check failed.");
-            return RememberResult(UpdateCheckResult.NoUpdate(GetCurrentVersion()));
+            return RememberResult(UpdateCheckResult.Failed(GetCurrentVersion()));
         }
         finally
         {
