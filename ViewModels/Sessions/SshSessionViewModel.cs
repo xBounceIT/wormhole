@@ -146,10 +146,14 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         if (dispatcher is null) return;
         dispatcher.TryEnqueue(async () =>
         {
-            if (Status != SessionStatus.Connected) return;
-            // Drop the dead session/bridge so a re-attach (e.g. tab view recreated, or
-            // user clicks Retry) goes through the full ConnectAsync path instead of
-            // rebinding to a dead transport.
+            // _session being null means we've already disposed (consumer-initiated
+            // tear-down ran first). Failed/Disconnected from a prior path also means
+            // we're already in the right terminal state. Otherwise: tear down the
+            // dead transport and surface the failure overlay. Status==Connecting can
+            // happen if the server immediately closes the shell after auth (e.g.
+            // forced-command accounts).
+            if (_session is null) return;
+            if (Status == SessionStatus.Failed || Status == SessionStatus.Disconnected) return;
             await SafeDisposeSessionAsync().ConfigureAwait(true);
             // Use Failed (not Disconnected) so the in-tab failure overlay with the
             // Retry button becomes visible — otherwise users have no recovery path

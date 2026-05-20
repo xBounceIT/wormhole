@@ -14,6 +14,20 @@ public partial class QuickConnectViewModel : ObservableObject
     [ObservableProperty]
     private ProtocolType protocol = ProtocolType.Ssh;
 
+    // Bound to the ComboBox.SelectedIndex (which doesn't speak ProtocolType natively).
+    // Enum members are ordered Ssh, Rdp, Sftp — same order as the ComboBoxItems.
+    public int ProtocolIndex
+    {
+        get => (int)Protocol;
+        set
+        {
+            if (value < 0) return;
+            Protocol = (ProtocolType)value;
+        }
+    }
+
+    partial void OnProtocolChanged(ProtocolType value) => OnPropertyChanged(nameof(ProtocolIndex));
+
     [ObservableProperty]
     private string host = string.Empty;
 

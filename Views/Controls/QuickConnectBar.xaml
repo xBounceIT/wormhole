@@ -15,7 +15,7 @@
 
         <ComboBox Grid.Column="0"
                   x:Name="ProtocolPicker"
-                  SelectedIndex="0"
+                  SelectedIndex="{x:Bind ViewModel.ProtocolIndex, Mode=TwoWay}"
                   MinWidth="80">
             <ComboBoxItem Content="SSH" Tag="Ssh" />
             <ComboBoxItem Content="RDP" Tag="Rdp" />
