@@ -71,6 +71,13 @@ public sealed class TerminalBridge : IDisposable
                 var payload = Encoding.UTF8.GetBytes(msg.AsSpan(2).ToString());
                 await _session.WriteAsync(payload);
             }
+            else if (msg.StartsWith("b:", StringComparison.Ordinal))
+            {
+                // xterm's onBinary path (e.g. legacy mouse reports): payload is raw bytes
+                // base64-encoded by JS, NOT UTF-8 text. Decode and forward verbatim.
+                var payload = Convert.FromBase64String(msg.Substring(2));
+                await _session.WriteAsync(payload);
+            }
             else if (msg.StartsWith("r:", StringComparison.Ordinal))
             {
                 var parts = msg.AsSpan(2).ToString().Split('x');

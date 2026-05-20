@@ -58,6 +58,19 @@
       post("d:" + data);
     });
 
+    // term.onBinary fires for non-UTF-8 input (notably legacy X10/X11 mouse reports).
+    // The payload is a binary string — each charCodeAt is a byte 0..255 — which btoa can
+    // base64-encode directly. The host decodes "b:" as raw bytes (no UTF-8 round-trip).
+    if (typeof term.onBinary === "function") {
+      term.onBinary(function (data) {
+        try {
+          post("b:" + btoa(data));
+        } catch (err) {
+          console.error("Failed to encode binary input:", err);
+        }
+      });
+    }
+
     if (window.chrome && window.chrome.webview) {
       window.chrome.webview.addEventListener("message", function (e) {
         const msg = typeof e.data === "string" ? e.data : "";
