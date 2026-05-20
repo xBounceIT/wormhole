@@ -35,8 +35,10 @@ jobs:
       - name: Resolve version
         id: ver
         shell: pwsh
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
-          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          $tag = $env:INPUT_TAG
           $version = $tag -replace '^v', ''
           "tag=$tag"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
@@ -52,9 +54,12 @@ jobs:
 
       - name: Package zip
         shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
         run: |
-          $zip = "Wormhole-${{ steps.ver.outputs.version }}-win-${{ matrix.platform }}.zip"
-          Compress-Archive -Path artifacts/publish/win-${{ matrix.platform }}/* -DestinationPath $zip
+          $zip = "Wormhole-$env:VERSION-win-$env:PLATFORM.zip"
+          Compress-Archive -Path "artifacts/publish/win-$env:PLATFORM/*" -DestinationPath $zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -80,13 +85,17 @@ jobs:
 
       - name: Resolve tag
         id: tag
-        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          printf 'tag=%s\n' "$INPUT_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Create release with auto-generated notes
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
-          gh release create "${{ steps.tag.outputs.tag }}" \
-            --title "${{ steps.tag.outputs.tag }}" \
+          gh release create "$TAG" \
+            --title "$TAG" \
             --generate-notes \
             artifacts/*.zip
