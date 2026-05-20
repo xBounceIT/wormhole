@@ -20,7 +20,7 @@
     <AssemblyVersion>0.1.0.0</AssemblyVersion>
     <InformationalVersion>$(Version)</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
-    <RepositoryUrl>https://github.com/wormhole-project/wormhole</RepositoryUrl>
+    <RepositoryUrl>https://github.com/xBounceIT/wormhole</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
   </PropertyGroup>
 

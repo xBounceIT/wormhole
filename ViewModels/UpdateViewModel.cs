@@ -14,6 +14,17 @@ public partial class UpdateViewModel : ObservableObject
 {
     private static readonly TimeSpan StartupThrottle = TimeSpan.FromHours(24);
 
+    // static readonly (not const) so the compiler doesn't mark the
+    // post-early-return code as unreachable in either build flavor.
+#if DEBUG
+    private static readonly bool IsDevelopmentBuild = true;
+#else
+    private static readonly bool IsDevelopmentBuild = false;
+#endif
+
+    private const string DevModeStatus =
+        "Update checks are disabled in development builds.";
+
     private readonly IUpdateService _updateService;
     private readonly IAppSettingsService _settings;
     private readonly ILogger<UpdateViewModel> _logger;
@@ -46,12 +57,15 @@ public partial class UpdateViewModel : ObservableObject
         var assemblyVersion = Assembly.GetEntryAssembly()?.GetName().Version?.ToString();
         currentVersionText = $"Wormhole {infoVersion ?? assemblyVersion ?? "0.0.0"}";
         lastCheckText = FormatLastCheck(_settings.Current.LastUpdateCheck);
+        if (IsDevelopmentBuild)
+            status = DevModeStatus;
 
         _updateService.UpdateAvailable += OnUpdateAvailable;
     }
 
     public async Task RunStartupCheckAsync()
     {
+        if (IsDevelopmentBuild) return;
         if (!_settings.Current.AutoCheckForUpdates) return;
         if (_settings.Current.LastUpdateCheck is { } lastCheck)
         {
@@ -67,6 +81,11 @@ public partial class UpdateViewModel : ObservableObject
     [RelayCommand]
     private async Task CheckNowAsync()
     {
+        if (IsDevelopmentBuild)
+        {
+            Marshal(() => Status = DevModeStatus);
+            return;
+        }
         if (IsBusy) return;
         Marshal(() => { IsBusy = true; Status = "Checking for updates…"; });
         try
