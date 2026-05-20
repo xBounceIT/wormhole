@@ -14,15 +14,6 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <!-- Absorbs default initial focus on launch so the QuickConnectBar's
-             ComboBox doesn't open the app with a visible focus ring. -->
-        <Button x:Name="InitialFocusSink"
-                Grid.Row="0"
-                Width="0" Height="0"
-                Opacity="0"
-                IsTabStop="False"
-                IsHitTestVisible="False" />
-
         <Grid x:Name="AppTitleBar" Grid.Row="0" Height="48" Background="Transparent">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />

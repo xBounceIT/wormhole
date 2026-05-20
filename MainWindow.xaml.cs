@@ -56,7 +56,13 @@ public sealed partial class MainWindow : Window
     {
         if (args.WindowActivationState == WindowActivationState.Deactivated) return;
         Activated -= OnFirstActivated;
-        InitialFocusSink.Focus(FocusState.Programmatic);
+        // Focus the content Frame so the QuickConnect ComboBox (first focusable
+        // element in the title-bar row) doesn't keep default launch focus and
+        // draw a focus ring. Frame is a Control with IsTabStop=true and a
+        // template that draws no focus visual, so this absorbs focus silently.
+        // (An IsTabStop=false sink wouldn't work — programmatic Focus returns
+        // false in that state in WinUI 3.)
+        ContentFrame.Focus(FocusState.Programmatic);
     }
 
     private void UpdateInfoBar_CloseButtonClick(InfoBar sender, object args)
@@ -147,6 +153,12 @@ public sealed partial class MainWindow : Window
 
     private void SidebarResizer_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
     {
+        // Cancel paths (capture stolen, window deactivated, etc.) reach here without
+        // a prior PointerReleased, so persist the in-memory width so the resize
+        // isn't lost. Normal release short-circuits: PointerReleased clears the
+        // flag before ReleasePointerCapture, so this fires with flag=false.
+        if (!_isResizingSidebar) return;
         _isResizingSidebar = false;
+        ViewModel.PersistSidebarWidth();
     }
 }
