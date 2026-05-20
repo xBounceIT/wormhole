@@ -1,6 +1,7 @@
 using System;
 using System.Threading.Tasks;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -106,6 +107,15 @@ public sealed partial class MainWindow : Window
     private void SidebarResizer_PointerPressed(object sender, PointerRoutedEventArgs e)
     {
         if (sender is not UIElement element) return;
+        // Mouse: only the primary (left) button starts a resize so right/middle
+        // clicks don't capture the pointer and accidentally shift the pane.
+        // Touch/pen presses are inherently primary — no button to gate on.
+        var point = e.GetCurrentPoint(element);
+        if (e.Pointer.PointerDeviceType == PointerDeviceType.Mouse
+            && !point.Properties.IsLeftButtonPressed)
+        {
+            return;
+        }
         if (!element.CapturePointer(e.Pointer)) return;
         _isResizingSidebar = true;
         _resizeStartWidth = ViewModel.SidebarWidth;
