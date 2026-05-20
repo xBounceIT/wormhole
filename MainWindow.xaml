@@ -20,7 +20,6 @@
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8"
                         VerticalAlignment="Center" Margin="16,0,0,0">
-                <Image Source="ms-appx:///Assets/app.ico" Width="20" Height="20" />
                 <TextBlock Text="Wormhole"
                            Style="{StaticResource CaptionTextBlockStyle}"
                            VerticalAlignment="Center" />
