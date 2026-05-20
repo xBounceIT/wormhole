@@ -39,8 +39,12 @@ public sealed partial class SshTerminalView : UserControl
         {
             if (_viewModel is not null) _viewModel.InitializationRetryRequested -= OnInitializationRetryRequested;
             _viewModel = newVm;
-            _viewModel.InitializationRetryRequested += OnInitializationRetryRequested;
         }
+        // Always (re)subscribe — OnUnloaded unsubscribes on every unload, so a same-VM
+        // reload would otherwise leave the event with no listener and RetryAsync (the
+        // _webView == null branch) would be a no-op.
+        _viewModel.InitializationRetryRequested -= OnInitializationRetryRequested;
+        _viewModel.InitializationRetryRequested += OnInitializationRetryRequested;
 
         // Same instance is being reloaded (e.g. NavigationView swap, tab content
         // recycle): the WebView2 and its in-page xterm.js are still alive but

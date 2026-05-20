@@ -241,7 +241,14 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
                 }
             }
 
-            Status = SessionStatus.Connected;
+            // Guard against an immediate remote close (forced-command / EOF) that
+            // already ran OnSessionClosed while we were awaiting fingerprint
+            // persistence — that handler will have set Status to Failed. Don't flip
+            // it back to Connected and lie about a dead tab being active.
+            if (_session is not null && Status == SessionStatus.Connecting)
+            {
+                Status = SessionStatus.Connected;
+            }
         }
         catch (OperationCanceledException)
         {
