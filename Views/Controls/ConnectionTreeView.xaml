@@ -55,10 +55,13 @@
                   CanDragItems="True"
                   CanReorderItems="True"
                   AllowDrop="True"
-                  DragItemsCompleted="OnDragItemsCompleted">
-            <!-- Use DoubleTapped on the item template (below) rather than
-                 TreeView.ItemInvoked: ItemInvoked fires on single-click, which
-                 turns simple selection into accidental session opens. -->
+                  DragItemsCompleted="OnDragItemsCompleted"
+                  ItemInvoked="OnTreeItemInvoked">
+            <!-- ItemInvoked fires on single-click: we toggle folder expansion (so the
+                 whole row is a hit target, not just the chevron) but ignore connection
+                 nodes — those still open via DoubleTapped on the item template, since
+                 single-click would cause accidental session opens. -->
+
 
             <TreeView.ContextFlyout>
                 <MenuFlyout>
@@ -72,27 +75,25 @@
             <TreeView.ItemTemplate>
                 <DataTemplate x:DataType="vm:TreeNodeViewModel">
                     <TreeViewItem ItemsSource="{x:Bind Children}"
-                                  IsExpanded="{x:Bind IsExpanded, Mode=TwoWay}">
+                                  IsExpanded="{x:Bind IsExpanded, Mode=TwoWay}"
+                                  DoubleTapped="OnNodeDoubleTapped">
                         <TreeViewItem.ContextFlyout>
+                            <!-- Click handlers (not Command bindings) because ElementName binding
+                                 can't escape the DataTemplate's namescope into the MenuFlyout popup. -->
                             <MenuFlyout>
                                 <MenuFlyoutItem Text="New folder"
-                                                Command="{Binding ViewModel.AddFolderCommand, ElementName=Root}"
-                                                CommandParameter="{Binding}" />
+                                                Click="OnAddFolderItemClick" />
                                 <MenuFlyoutItem Text="New connection"
-                                                Command="{Binding ViewModel.AddConnectionCommand, ElementName=Root}"
-                                                CommandParameter="{Binding}" />
+                                                Click="OnAddConnectionItemClick" />
                                 <MenuFlyoutSeparator />
                                 <MenuFlyoutItem Text="Edit"
-                                                Command="{Binding ViewModel.EditCommand, ElementName=Root}"
-                                                CommandParameter="{Binding}" />
+                                                Click="OnEditItemClick" />
                                 <MenuFlyoutItem Text="Delete"
-                                                Command="{Binding ViewModel.DeleteCommand, ElementName=Root}"
-                                                CommandParameter="{Binding}" />
+                                                Click="OnDeleteItemClick" />
                             </MenuFlyout>
                         </TreeViewItem.ContextFlyout>
 
-                        <StackPanel Orientation="Horizontal" Spacing="6"
-                                    DoubleTapped="OnNodeDoubleTapped">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
                             <FontIcon FontSize="14" Glyph="{x:Bind Glyph, Mode=OneWay}" />
                             <TextBlock Text="{x:Bind Name, Mode=OneWay}" VerticalAlignment="Center" />
                         </StackPanel>

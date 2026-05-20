@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
+using Wormhole.Models;
 using Wormhole.ViewModels;
 
 namespace Wormhole.Views.Controls;
@@ -76,6 +77,50 @@ public sealed partial class ConnectionTreeView : UserControl
         {
             ViewModel.OpenConnectionCommand.Execute(vm);
             args.Handled = true;
+        }
+    }
+
+    private void OnTreeItemInvoked(TreeView sender, TreeViewItemInvokedEventArgs args)
+    {
+        // Single-click on a folder toggles expansion so the entire row is a hit target.
+        // Connections fall through to the DoubleTapped handler to avoid accidental opens.
+        if (args.InvokedItem is TreeNodeViewModel vm && vm.Kind == NodeKind.Folder)
+        {
+            vm.IsExpanded = !vm.IsExpanded;
+        }
+    }
+
+    // Per-node MenuFlyout items dispatch via Click because ElementName bindings
+    // can't reach Root from inside a Popup nested in a DataTemplate.
+    private void OnAddFolderItemClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.DataContext is TreeNodeViewModel vm)
+        {
+            ViewModel.AddFolderCommand.Execute(vm);
+        }
+    }
+
+    private void OnAddConnectionItemClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.DataContext is TreeNodeViewModel vm)
+        {
+            ViewModel.AddConnectionCommand.Execute(vm);
+        }
+    }
+
+    private void OnEditItemClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.DataContext is TreeNodeViewModel vm)
+        {
+            ViewModel.EditCommand.Execute(vm);
+        }
+    }
+
+    private void OnDeleteItemClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.DataContext is TreeNodeViewModel vm)
+        {
+            ViewModel.DeleteCommand.Execute(vm);
         }
     }
 
