@@ -47,35 +47,48 @@
             </InfoBar.ActionButton>
         </InfoBar>
 
-        <NavigationView
-            x:Name="NavView"
-            Grid.Row="2"
-            IsBackButtonVisible="Collapsed"
-            IsSettingsVisible="False"
-            PaneDisplayMode="Left"
-            OpenPaneLength="320"
-            IsPaneOpen="True"
-            IsPaneToggleButtonVisible="False"
-            ItemInvoked="NavView_ItemInvoked">
+        <Grid Grid.Row="2">
+            <NavigationView
+                x:Name="NavView"
+                IsBackButtonVisible="Collapsed"
+                IsSettingsVisible="False"
+                PaneDisplayMode="Left"
+                OpenPaneLength="{x:Bind ViewModel.SidebarWidth, Mode=OneWay}"
+                IsPaneOpen="True"
+                IsPaneToggleButtonVisible="False"
+                Loaded="NavView_Loaded"
+                ItemInvoked="NavView_ItemInvoked">
 
-            <NavigationView.PaneCustomContent>
-                <controls:ConnectionTreeView Margin="8,4,8,8" />
-            </NavigationView.PaneCustomContent>
+                <NavigationView.PaneCustomContent>
+                    <controls:ConnectionTreeView x:Name="ConnectionsTree" Margin="8,4,8,8" />
+                </NavigationView.PaneCustomContent>
 
-            <NavigationView.FooterMenuItems>
-                <NavigationViewItem Content="Sessions" Tag="Sessions">
-                    <NavigationViewItem.Icon>
-                        <FontIcon Glyph="&#xE8A1;" />
-                    </NavigationViewItem.Icon>
-                </NavigationViewItem>
-                <NavigationViewItem Content="Settings" Tag="Settings">
-                    <NavigationViewItem.Icon>
-                        <FontIcon Glyph="&#xE713;" />
-                    </NavigationViewItem.Icon>
-                </NavigationViewItem>
-            </NavigationView.FooterMenuItems>
+                <NavigationView.FooterMenuItems>
+                    <NavigationViewItem x:Name="SessionsItem" Content="Sessions" Tag="Sessions">
+                        <NavigationViewItem.Icon>
+                            <FontIcon Glyph="&#xE8A1;" />
+                        </NavigationViewItem.Icon>
+                    </NavigationViewItem>
+                    <NavigationViewItem x:Name="SettingsItem" Content="Settings" Tag="Settings">
+                        <NavigationViewItem.Icon>
+                            <FontIcon Glyph="&#xE713;" />
+                        </NavigationViewItem.Icon>
+                    </NavigationViewItem>
+                </NavigationView.FooterMenuItems>
 
-            <Frame x:Name="ContentFrame" />
-        </NavigationView>
+                <Frame x:Name="ContentFrame" />
+            </NavigationView>
+
+            <controls:SidebarResizer
+                Canvas.ZIndex="1"
+                Width="{x:Bind ViewModel.SidebarResizerHitWidth, Mode=OneTime}"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Stretch"
+                Margin="{x:Bind ViewModel.SidebarResizerMargin, Mode=OneWay}"
+                PointerPressed="SidebarResizer_PointerPressed"
+                PointerMoved="SidebarResizer_PointerMoved"
+                PointerReleased="SidebarResizer_PointerReleased"
+                PointerCaptureLost="SidebarResizer_PointerCaptureLost" />
+        </Grid>
     </Grid>
 </Window>

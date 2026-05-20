@@ -12,6 +12,8 @@ public sealed class AppSettings
     public bool AutoCheckForUpdates { get; set; } = true;
     public DateTimeOffset? LastUpdateCheck { get; set; }
     public string? SkippedUpdateVersion { get; set; }
+
+    public int SidebarWidth { get; set; } = 320;
 }
 
 public enum ApplicationTheme
