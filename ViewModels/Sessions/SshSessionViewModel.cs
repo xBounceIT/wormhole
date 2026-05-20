@@ -113,7 +113,10 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
     private async Task ConnectAsync()
     {
-        if (Profile is null || _webView is null || _xamlRoot is null) return;
+        var profile = Profile;
+        var webView = _webView;
+        var xamlRoot = _xamlRoot;
+        if (profile is null || webView is null || xamlRoot is null) return;
         if (Interlocked.CompareExchange(ref _connectInFlight, 1, 0) != 0) return;
 
         Status = SessionStatus.Connecting;
@@ -124,26 +127,31 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
         try
         {
-            var creds = await _credentialResolver.ResolveAsync(Profile, _xamlRoot, token).ConfigureAwait(true);
+            var creds = await _credentialResolver.ResolveAsync(profile, xamlRoot, token).ConfigureAwait(true);
             if (!creds.HasAny)
             {
                 ReportFailure("No credentials provided.");
                 return;
             }
 
-            _session = await _sshService.ConnectAsync(Profile, creds.Password, creds.PrivateKey, token).ConfigureAwait(true);
-            _bridge = new TerminalBridge(_webView, _session, _loggerFactory.CreateLogger<TerminalBridge>());
+            _session = await _sshService.ConnectAsync(profile, creds.Password, creds.PrivateKey, token).ConfigureAwait(true);
+            _bridge = new TerminalBridge(webView, _session, _loggerFactory.CreateLogger<TerminalBridge>());
 
             if (_initialKnownFingerprint is null && _session is SshSession concrete && !string.IsNullOrEmpty(concrete.HostFingerprint))
             {
+                // Pin the captured fingerprint on the in-memory profile *before* any retry so a
+                // disconnect/reconnect inside this tab actually validates against it instead of
+                // TOFU-accepting whatever the server presents.
+                profile = profile with { SshKnownHostFingerprint = concrete.HostFingerprint };
+                Profile = profile;
+                _initialKnownFingerprint = concrete.HostFingerprint;
                 try
                 {
-                    await _connectionRepo.UpdateHostFingerprintAsync(Profile.NodeId, concrete.HostFingerprint, token).ConfigureAwait(true);
-                    _initialKnownFingerprint = concrete.HostFingerprint;
+                    await _connectionRepo.UpdateHostFingerprintAsync(profile.NodeId, concrete.HostFingerprint, token).ConfigureAwait(true);
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogWarning(ex, "Could not persist host fingerprint for {Host}.", Profile.Host);
+                    _logger.LogWarning(ex, "Could not persist host fingerprint for {Host}.", profile.Host);
                 }
             }
 
@@ -158,7 +166,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         {
             await SafeDisposeSessionAsync().ConfigureAwait(true);
             ReportFailure(ex.Message);
-            _logger.LogWarning("Host key mismatch for {Host}.", Profile.Host);
+            _logger.LogWarning("Host key mismatch for {Host}.", profile.Host);
         }
         catch (SshAuthenticationException ex)
         {
@@ -169,7 +177,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         {
             await SafeDisposeSessionAsync().ConfigureAwait(true);
             ReportFailure(ex.Message);
-            _logger.LogError(ex, "SSH connect failed for {Host}.", Profile.Host);
+            _logger.LogError(ex, "SSH connect failed for {Host}.", profile.Host);
         }
         finally
         {

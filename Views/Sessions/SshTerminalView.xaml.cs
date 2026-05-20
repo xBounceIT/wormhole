@@ -68,15 +68,15 @@ public sealed partial class SshTerminalView : UserControl
         }
     }
 
+    // Unloaded fires on every tab content swap, not just close. Tear-down belongs to the
+    // explicit close (SessionsPage.TabCloseRequested calls DetachAsync) and Disconnect
+    // commands; here we only unhook the WebView2 event so the handler can't fire after
+    // the control leaves the visual tree.
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         if (TerminalView.CoreWebView2 is not null)
         {
             TerminalView.CoreWebView2.WebMessageReceived -= OnReadyMessage;
         }
-
-        var vm = _viewModel;
-        if (vm is null) return;
-        _ = vm.DetachAsync();
     }
 }
