@@ -18,12 +18,10 @@
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
-            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="8"
-                        VerticalAlignment="Center" Margin="16,0,0,0">
-                <TextBlock Text="Wormhole"
-                           Style="{StaticResource CaptionTextBlockStyle}"
-                           VerticalAlignment="Center" />
-            </StackPanel>
+            <TextBlock Grid.Column="0" Text="Wormhole"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       VerticalAlignment="Center"
+                       Margin="16,0,0,0" />
         </Grid>
 
         <NavigationView
