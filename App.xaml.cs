@@ -77,10 +77,23 @@ public partial class App : Application
         services.AddSingleton<IRdpSessionService, RdpSessionService>();
         services.AddSingleton<ISftpService, SftpService>();
 
+        var assemblyVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "0.0.0";
+        services.AddHttpClient(UpdateService.HttpClientName, client =>
+        {
+            client.BaseAddress = new Uri("https://api.github.com/");
+            client.Timeout = TimeSpan.FromSeconds(30);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd($"Wormhole/{assemblyVersion}");
+            client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+            client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
+        });
+        services.AddSingleton<IInstallerLauncher, DefaultInstallerLauncher>();
+        services.AddSingleton<IUpdateService, UpdateService>();
+
         services.AddSingleton<ShellViewModel>();
         services.AddSingleton<ConnectionTreeViewModel>();
         services.AddSingleton<QuickConnectViewModel>();
         services.AddSingleton<SettingsViewModel>();
+        services.AddSingleton<UpdateViewModel>();
         services.AddTransient<ConnectionEditorViewModel>();
         services.AddTransient<SshSessionViewModel>();
         services.AddTransient<RdpSessionViewModel>();

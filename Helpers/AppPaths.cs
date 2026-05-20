@@ -31,4 +31,9 @@ internal static class AppPaths
     {
         return Path.Combine(GetAppDataDirectory(), "keys");
     }
+
+    public static string GetUpdateCacheDirectory()
+    {
+        return Path.Combine(GetAppDataDirectory(), "cache", "updates");
+    }
 }

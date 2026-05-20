@@ -10,6 +10,7 @@
     <Grid x:Name="RootGrid">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
@@ -27,9 +28,23 @@
             </StackPanel>
         </Grid>
 
+        <InfoBar Grid.Row="1"
+                 x:Name="UpdateInfoBar"
+                 Margin="12,0,12,4"
+                 IsOpen="{x:Bind ViewModel.Update.IsUpdateAvailable, Mode=TwoWay}"
+                 IsClosable="True"
+                 CloseButtonClick="UpdateInfoBar_CloseButtonClick"
+                 Severity="Informational"
+                 Title="Update available"
+                 Message="{x:Bind ViewModel.Update.InfoBarMessage, Mode=OneWay}">
+            <InfoBar.ActionButton>
+                <Button Content="Install" Command="{x:Bind ViewModel.Update.InstallCommand}" />
+            </InfoBar.ActionButton>
+        </InfoBar>
+
         <NavigationView
             x:Name="NavView"
-            Grid.Row="1"
+            Grid.Row="2"
             IsBackButtonVisible="Collapsed"
             IsSettingsVisible="False"
             PaneDisplayMode="Left"

@@ -22,10 +22,33 @@
             <ToggleSwitch Header="Confirm before closing a connected tab"
                           IsOn="{x:Bind ViewModel.ConfirmOnTabClose, Mode=TwoWay}" />
 
-            <TextBlock Text="Wormhole 0.1.0 — scaffold build"
+            <TextBlock Text="Updates" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
+            <TextBlock Text="{x:Bind ViewModel.Update.CurrentVersionText, Mode=OneWay}"
+                       Style="{StaticResource BodyTextBlockStyle}" />
+            <TextBlock Text="{x:Bind ViewModel.Update.LastCheckText, Mode=OneWay}"
                        Style="{StaticResource CaptionTextBlockStyle}"
-                       Opacity="0.6"
-                       Margin="0,24,0,0" />
+                       Opacity="0.6" />
+            <ToggleSwitch Header="Automatically check for updates on startup"
+                          IsOn="{x:Bind ViewModel.AutoCheckForUpdates, Mode=TwoWay}" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button Content="Check now"
+                        Command="{x:Bind ViewModel.Update.CheckNowCommand}"
+                        IsEnabled="{x:Bind ViewModel.Update.IsBusy, Mode=OneWay, Converter={StaticResource InverseBoolConverter}, FallbackValue=True}" />
+                <Button Content="Install update"
+                        Command="{x:Bind ViewModel.Update.InstallCommand}"
+                        Visibility="{x:Bind ViewModel.Update.IsUpdateAvailable, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                <Button Content="View release notes"
+                        Command="{x:Bind ViewModel.Update.OpenReleasePageCommand}"
+                        Visibility="{x:Bind ViewModel.Update.IsUpdateAvailable, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                <ProgressRing IsActive="{x:Bind ViewModel.Update.IsBusy, Mode=OneWay}"
+                              Width="20" Height="20" />
+            </StackPanel>
+            <TextBlock Text="{x:Bind ViewModel.Update.Status, Mode=OneWay}"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Opacity="0.7" />
+            <ProgressBar Minimum="0" Maximum="1"
+                         Value="{x:Bind ViewModel.Update.DownloadProgress, Mode=OneWay}"
+                         Visibility="{x:Bind ViewModel.Update.IsBusy, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
         </StackPanel>
     </ScrollViewer>
 </Page>
