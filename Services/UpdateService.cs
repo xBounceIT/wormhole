@@ -178,9 +178,9 @@ public sealed class UpdateService : IUpdateService, IDisposable
             long downloaded = 0;
             using var sha = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
 
-            await using (var network = await response.Content.ReadAsStreamAsync(linkedCts.Token).ConfigureAwait(false))
-            await using (var file = new FileStream(partPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, useAsync: true))
             {
+                await using var network = await response.Content.ReadAsStreamAsync(linkedCts.Token).ConfigureAwait(false);
+                await using var file = new FileStream(partPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, useAsync: true);
                 var buffer = new byte[81920];
                 int read;
                 while ((read = await network.ReadAsync(buffer, linkedCts.Token).ConfigureAwait(false)) > 0)
@@ -192,7 +192,7 @@ public sealed class UpdateService : IUpdateService, IDisposable
                 }
             }
 
-            var computed = Convert.ToHexString(sha.GetHashAndReset()).ToLowerInvariant();
+            var computed = Convert.ToHexStringLower(sha.GetHashAndReset());
             if (!string.IsNullOrWhiteSpace(update.InstallerSha256))
             {
                 var expected = update.InstallerSha256.Trim().ToLowerInvariant();
@@ -212,7 +212,7 @@ public sealed class UpdateService : IUpdateService, IDisposable
 
             File.Move(partPath, finalPath, overwrite: true);
 
-            TryStripMarkOfTheWeb(finalPath);
+            StripMarkOfTheWeb(finalPath);
             return finalPath;
         }
         finally
@@ -329,7 +329,7 @@ public sealed class UpdateService : IUpdateService, IDisposable
     private static bool IsHexChar(char c) =>
         (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 
-    private void TryStripMarkOfTheWeb(string path)
+    private void StripMarkOfTheWeb(string path)
     {
         try { File.Delete(path + ":Zone.Identifier"); }
         catch (FileNotFoundException) { }
