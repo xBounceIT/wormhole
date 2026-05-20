@@ -549,6 +549,47 @@ public class ConnectionTreeViewModelTests : IDisposable
         Assert.Equal(beforeUpdated, afterUpdated);
     }
 
+    [Fact]
+    public async Task Edit_RepositoryFailure_RevertsInMemoryName()
+    {
+        var failing = new ThrowOnUpdateRepository(_repo);
+        var dialog = new FakeDialogService { TextPromptResult = "original" };
+        var vm = new ConnectionTreeViewModel(failing, dialog, NullLogger<ConnectionTreeViewModel>.Instance);
+        await vm.RefreshAsync();
+        await vm.AddFolderCommand.ExecuteAsync(null);
+
+        failing.ThrowNext = true;
+        dialog.TextPromptResult = "renamed";
+        await vm.EditCommand.ExecuteAsync(vm.Roots.Single());
+
+        Assert.Equal("original", vm.Roots.Single().Name);
+        Assert.Equal("original", (await _repo.GetAllAsync()).Single().Name);
+    }
+
+    private sealed class ThrowOnUpdateRepository : IConnectionRepository
+    {
+        private readonly IConnectionRepository _inner;
+        public bool ThrowNext { get; set; }
+
+        public ThrowOnUpdateRepository(IConnectionRepository inner) => _inner = inner;
+
+        public Task<IReadOnlyList<ConnectionNode>> GetAllAsync(System.Threading.CancellationToken ct = default)
+            => _inner.GetAllAsync(ct);
+        public Task<ConnectionNode?> GetByIdAsync(Guid id, System.Threading.CancellationToken ct = default)
+            => _inner.GetByIdAsync(id, ct);
+        public Task AddAsync(ConnectionNode node, System.Threading.CancellationToken ct = default)
+            => _inner.AddAsync(node, ct);
+        public Task UpdateAsync(ConnectionNode node, System.Threading.CancellationToken ct = default)
+        {
+            if (ThrowNext) { ThrowNext = false; throw new InvalidOperationException("simulated"); }
+            return _inner.UpdateAsync(node, ct);
+        }
+        public Task UpdateManyAsync(IReadOnlyCollection<ConnectionNode> nodes, System.Threading.CancellationToken ct = default)
+            => _inner.UpdateManyAsync(nodes, ct);
+        public Task DeleteAsync(Guid id, System.Threading.CancellationToken ct = default)
+            => _inner.DeleteAsync(id, ct);
+    }
+
     private sealed class FakeDialogService : IDialogService
     {
         public string? TextPromptResult { get; set; }

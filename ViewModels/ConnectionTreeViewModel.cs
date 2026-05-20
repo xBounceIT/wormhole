@@ -156,6 +156,9 @@ public partial class ConnectionTreeViewModel : ObservableObject
         {
             _logger.LogError(ex, "Failed to update {Kind} '{Name}'", node.Kind, node.Name);
             await _dialog.ShowMessageAsync("Couldn't save", ex.Message);
+            // Edit mutates clicked.Node in place before persistence; reload from the DB
+            // so the tree reflects what was actually committed, not the unsaved draft.
+            await RefreshAsync();
         }
     }
 
