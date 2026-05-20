@@ -109,7 +109,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
             node.Port,
             node.Username);
         var draft = await _dialog.PromptForConnectionAsync(initial);
-        if (draft is null) return;
+        if (draft is null || draft == initial) return;
 
         node.Name = draft.Name;
         node.Protocol = draft.Protocol;
@@ -174,8 +174,13 @@ public partial class ConnectionTreeViewModel : ObservableObject
     {
         // The TreeView has already mutated Roots/Children to reflect the drop. Validate
         // the new shape, then write back any node whose ParentId or SortOrder changed.
+        // A folder dropped onto its own descendant can disappear from Roots (TreeView removes
+        // it from the old parent, attaches it under the descendant), so the cycle ends up
+        // disconnected from this walk. seen.Count < _lastSnapshot.Count catches that orphan
+        // case alongside ordinary cycles and invalid connection parents.
         var seen = new HashSet<Guid>();
-        if (HasCycleOrInvalidParent(Roots, seen))
+        var structurallyInvalid = HasCycleOrInvalidParent(Roots, seen);
+        if (structurallyInvalid || seen.Count != _lastSnapshot.Count)
         {
             _logger.LogWarning("Rejected drag-drop: result would create a cycle or place a child under a connection.");
             await _dialog.ShowMessageAsync(

@@ -87,8 +87,8 @@
                         </TreeViewItem.ContextFlyout>
 
                         <StackPanel Orientation="Horizontal" Spacing="6">
-                            <FontIcon FontSize="14" Glyph="{x:Bind Glyph}" />
-                            <TextBlock Text="{x:Bind Name}" VerticalAlignment="Center" />
+                            <FontIcon FontSize="14" Glyph="{x:Bind Glyph, Mode=OneWay}" />
+                            <TextBlock Text="{x:Bind Name, Mode=OneWay}" VerticalAlignment="Center" />
                         </StackPanel>
                     </TreeViewItem>
                 </DataTemplate>

@@ -351,18 +351,23 @@ public class ConnectionTreeViewModelTests : IDisposable
         await vm.AddFolderCommand.ExecuteAsync(parent);
         var child = vm.Roots.Single().Children.Single();
 
-        // Cycle: drag Parent into its own Child.
+        // The catastrophic drop: TreeView removes Parent from Roots and attaches it under
+        // Child, so the resulting cycle is disconnected from Roots (Roots is now empty).
         vm.Roots.Remove(parent);
         child.Children.Add(parent);
+        Assert.Empty(vm.Roots);
 
         await vm.PersistTreeStructureAsync();
 
-        // DB should be untouched; refresh restored the original shape.
+        // DB untouched; in-memory tree restored from the DB.
         var rows = await _repo.GetAllAsync();
         var parentRow = rows.Single(r => r.Name == "Parent");
         var childRow = rows.Single(r => r.Name == "Child");
         Assert.Null(parentRow.ParentId);
         Assert.Equal(parentRow.Id, childRow.ParentId);
+        Assert.Single(vm.Roots);
+        Assert.Equal("Parent", vm.Roots.Single().Name);
+        Assert.Equal("Child", vm.Roots.Single().Children.Single().Name);
     }
 
     [Fact]
@@ -401,6 +406,25 @@ public class ConnectionTreeViewModelTests : IDisposable
         Assert.Equal("new.example.com", row.Host);
         Assert.Equal(3389, row.Port);
         Assert.Equal("alice", row.Username);
+    }
+
+    [Fact]
+    public async Task Edit_ConnectionUnchanged_DoesNotWrite()
+    {
+        var dialog = new FakeDialogService
+        {
+            ConnectionPromptResult = new NewConnectionDraft(
+                "prod", ProtocolType.Ssh, "host", 22, "alice"),
+        };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+        await vm.AddConnectionCommand.ExecuteAsync(null);
+        var before = (await _repo.GetAllAsync()).Single().UpdatedAt;
+
+        // Re-submit identical values.
+        await vm.EditCommand.ExecuteAsync(vm.Roots.Single());
+
+        Assert.Equal(before, (await _repo.GetAllAsync()).Single().UpdatedAt);
     }
 
     [Fact]
