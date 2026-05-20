@@ -71,6 +71,8 @@
                           Condition="Exists('$(TargetDir)Views\Pages')" />
       <_WinUIControlResource Include="$(TargetDir)Views\Controls\**\*.xbf"
                              Condition="Exists('$(TargetDir)Views\Controls')" />
+      <_WinUIDialogResource Include="$(TargetDir)Views\Dialogs\**\*.xbf"
+                            Condition="Exists('$(TargetDir)Views\Dialogs')" />
     </ItemGroup>
 
     <Copy SourceFiles="@(_WinUIRootResource)"
@@ -83,6 +85,10 @@
 
     <Copy SourceFiles="@(_WinUIControlResource)"
           DestinationFiles="@(_WinUIControlResource->'$(PublishDir)Views\Controls\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+
+    <Copy SourceFiles="@(_WinUIDialogResource)"
+          DestinationFiles="@(_WinUIDialogResource->'$(PublishDir)Views\Dialogs\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
   </Target>
 

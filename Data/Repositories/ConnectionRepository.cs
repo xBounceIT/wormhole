@@ -87,6 +87,38 @@ public sealed class ConnectionRepository : IConnectionRepository
             WHERE Id = @Id;", node, cancellationToken: cancellationToken));
     }
 
+    public async Task UpdateManyAsync(IReadOnlyCollection<ConnectionNode> nodes, CancellationToken cancellationToken = default)
+    {
+        if (nodes.Count == 0) return;
+        var now = DateTime.UtcNow;
+        foreach (var node in nodes) node.UpdatedAt = now;
+
+        using var connection = _factory.Open();
+        using var tx = connection.BeginTransaction();
+        await connection.ExecuteAsync(new CommandDefinition(@"
+            UPDATE Nodes SET
+                ParentId = @ParentId,
+                Name = @Name,
+                Kind = @Kind,
+                SortOrder = @SortOrder,
+                Protocol = @Protocol,
+                Host = @Host,
+                Port = @Port,
+                Username = @Username,
+                CredentialId = @CredentialId,
+                RdpDomain = @RdpDomain,
+                RdpScreenSize = @RdpScreenSize,
+                RdpFullScreen = @RdpFullScreen,
+                SshKeyFileName = @SshKeyFileName,
+                SshKnownHostFingerprint = @SshKnownHostFingerprint,
+                UpdatedAt = @UpdatedAt
+            WHERE Id = @Id;",
+            nodes,
+            transaction: tx,
+            cancellationToken: cancellationToken));
+        tx.Commit();
+    }
+
     public async Task DeleteAsync(Guid id, CancellationToken cancellationToken = default)
     {
         using var connection = _factory.Open();

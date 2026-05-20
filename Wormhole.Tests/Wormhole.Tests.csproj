@@ -6,6 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+    <NoWarn>$(NoWarn);MVVMTK0045</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
@@ -19,6 +20,7 @@
     <PackageReference Include="Dapper" Version="2.1.66" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
       <PrivateAssets>all</PrivateAssets>
@@ -29,6 +31,7 @@
   <ItemGroup>
     <Compile Include="..\Models\ConnectionNode.cs" Link="Models\ConnectionNode.cs" />
     <Compile Include="..\Models\ConnectionProfile.cs" Link="Models\ConnectionProfile.cs" />
+    <Compile Include="..\Models\NewConnectionDraft.cs" Link="Models\NewConnectionDraft.cs" />
     <Compile Include="..\Models\NodeKind.cs" Link="Models\NodeKind.cs" />
     <Compile Include="..\Models\ProtocolType.cs" Link="Models\ProtocolType.cs" />
     <Compile Include="..\Models\AppSettings.cs" Link="Models\AppSettings.cs" />
@@ -42,6 +45,11 @@
     <Compile Include="..\Data\SqliteConnectionFactory.cs" Link="Data\SqliteConnectionFactory.cs" />
     <Compile Include="..\Data\SqliteTypeHandlers.cs" Link="Data\SqliteTypeHandlers.cs" />
     <Compile Include="..\Data\MigrationRunner.cs" Link="Data\MigrationRunner.cs" />
+    <Compile Include="..\Data\Repositories\IConnectionRepository.cs" Link="Data\Repositories\IConnectionRepository.cs" />
+    <Compile Include="..\Data\Repositories\ConnectionRepository.cs" Link="Data\Repositories\ConnectionRepository.cs" />
+    <Compile Include="..\Services\IDialogService.cs" Link="Services\IDialogService.cs" />
+    <Compile Include="..\Helpers\Glyphs.cs" Link="Helpers\Glyphs.cs" />
+    <Compile Include="..\ViewModels\ConnectionTreeViewModel.cs" Link="ViewModels\ConnectionTreeViewModel.cs" />
   </ItemGroup>
 
 </Project>
