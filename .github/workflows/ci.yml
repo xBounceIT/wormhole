@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build & test (${{ matrix.platform }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [x64]
+        configuration: [Debug]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore Wormhole
+        run: dotnet restore Wormhole.csproj -p:Platform=${{ matrix.platform }}
+
+      - name: Build Wormhole
+        run: dotnet build Wormhole.csproj -c ${{ matrix.configuration }} -p:Platform=${{ matrix.platform }} --no-restore
+
+      - name: Restore tests
+        run: dotnet restore Wormhole.Tests/Wormhole.Tests.csproj
+
+      - name: Run tests
+        run: dotnet test Wormhole.Tests/Wormhole.Tests.csproj -c ${{ matrix.configuration }} --no-restore --logger "trx;LogFileName=test-results.trx"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.platform }}-${{ matrix.configuration }}
+          path: Wormhole.Tests/TestResults/*.trx
+          if-no-files-found: ignore
