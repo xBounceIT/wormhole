@@ -1,6 +1,7 @@
 using System;
 using System.Text;
 using Microsoft.Extensions.Logging;
+using Microsoft.UI.Dispatching;
 using Microsoft.Web.WebView2.Core;
 using Wormhole.Services;
 
@@ -11,6 +12,7 @@ public sealed class TerminalBridge : IDisposable
     private readonly CoreWebView2 _webView;
     private readonly ISshSession _session;
     private readonly ILogger<TerminalBridge> _logger;
+    private readonly DispatcherQueue _dispatcher;
     private bool _disposed;
 
     public TerminalBridge(CoreWebView2 webView, ISshSession session, ILogger<TerminalBridge> logger)
@@ -18,6 +20,12 @@ public sealed class TerminalBridge : IDisposable
         _webView = webView;
         _session = session;
         _logger = logger;
+        // WebView2 is thread-affine to its creator. Capture the dispatcher at construction
+        // (always called from the UI thread via SshTerminalView.OnReadyMessage) so we can
+        // marshal SSH-pump callbacks back to the UI thread before touching the WebView.
+        _dispatcher = DispatcherQueue.GetForCurrentThread()
+            ?? throw new InvalidOperationException(
+                "TerminalBridge must be constructed on a thread with a DispatcherQueue (the UI thread).");
 
         _session.DataReceived += OnDataReceived;
         _webView.WebMessageReceived += OnWebMessageReceived;
@@ -26,6 +34,15 @@ public sealed class TerminalBridge : IDisposable
     private void OnDataReceived(object? sender, ReadOnlyMemory<byte> data)
     {
         // TODO: throttle/coalesce writes to avoid postMessage backpressure on bursts.
+        if (_disposed) return;
+        // SSH read pump fires on a background thread; marshal to the UI thread before
+        // calling any WebView2 method (they're thread-affine to the creator thread).
+        var snapshot = data;
+        _dispatcher.TryEnqueue(() => PostBytesToWebView(snapshot));
+    }
+
+    private void PostBytesToWebView(ReadOnlyMemory<byte> data)
+    {
         if (_disposed) return;
         try
         {
