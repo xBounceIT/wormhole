@@ -17,7 +17,6 @@ public sealed partial class SshTerminalView : UserControl
     {
         InitializeComponent();
         Loaded += OnLoaded;
-        Unloaded += OnUnloaded;
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -54,6 +53,7 @@ public sealed partial class SshTerminalView : UserControl
         var msg = args.TryGetWebMessageAsString();
         if (msg != "ready") return;
 
+        // Self-unsubscribe so a second navigation doesn't double-attach.
         TerminalView.CoreWebView2.WebMessageReceived -= OnReadyMessage;
 
         var vm = _viewModel;
@@ -65,18 +65,6 @@ public sealed partial class SshTerminalView : UserControl
         catch (Exception ex)
         {
             vm.ReportFailure(ex.Message);
-        }
-    }
-
-    // Unloaded fires on every tab content swap, not just close. Tear-down belongs to the
-    // explicit close (SessionsPage.TabCloseRequested calls DetachAsync) and Disconnect
-    // commands; here we only unhook the WebView2 event so the handler can't fire after
-    // the control leaves the visual tree.
-    private void OnUnloaded(object sender, RoutedEventArgs e)
-    {
-        if (TerminalView.CoreWebView2 is not null)
-        {
-            TerminalView.CoreWebView2.WebMessageReceived -= OnReadyMessage;
         }
     }
 }

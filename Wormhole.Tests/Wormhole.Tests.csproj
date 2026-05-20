@@ -36,6 +36,7 @@
     <Compile Include="..\Services\IDialogService.cs" Link="Services\IDialogService.cs" />
     <Compile Include="..\Services\Ssh\SshHostKeyValidator.cs" Link="Services\Ssh\SshHostKeyValidator.cs" />
     <Compile Include="..\Services\Ssh\SshCredentialResolver.cs" Link="Services\Ssh\SshCredentialResolver.cs" />
+    <Compile Include="..\Helpers\HostSpec.cs" Link="Helpers\HostSpec.cs" />
   </ItemGroup>
 
 </Project>
