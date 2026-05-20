@@ -62,7 +62,6 @@
                  nodes — those still open via DoubleTapped on the item template, since
                  single-click would cause accidental session opens. -->
 
-
             <TreeView.ContextFlyout>
                 <MenuFlyout>
                     <MenuFlyoutItem Text="New folder"

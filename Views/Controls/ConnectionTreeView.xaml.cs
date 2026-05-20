@@ -87,6 +87,7 @@ public sealed partial class ConnectionTreeView : UserControl
         if (args.InvokedItem is TreeNodeViewModel vm && vm.Kind == NodeKind.Folder)
         {
             vm.IsExpanded = !vm.IsExpanded;
+            args.Handled = true;
         }
     }
 
