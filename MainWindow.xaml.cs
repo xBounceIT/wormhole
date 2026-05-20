@@ -43,6 +43,13 @@ public sealed partial class MainWindow : Window
         _navigationService.Initialize(ContentFrame);
         _navigationService.Navigate(typeof(SessionsPage));
 
+        // Keep the VM informed of the window's content width so the sidebar can
+        // re-clamp on window shrink and the resizer stays reachable on-screen.
+        RootGrid.SizeChanged += (_, args) =>
+        {
+            ViewModel.MaxAvailableWidth = args.NewSize.Width;
+        };
+
         Activated += OnFirstActivated;
 
         _ = Task.Run(async () =>

@@ -31,9 +31,30 @@ public partial class ShellViewModel : ObservableObject
             var clamped = value;
             if (clamped < MinSidebarWidth) clamped = MinSidebarWidth;
             if (clamped > MaxSidebarWidth) clamped = MaxSidebarWidth;
+            // Cap to the host's current width so the resizer (positioned at the
+            // pane's right edge) stays inside the window after a shrink. The
+            // NavigationView already renders min(OpenPaneLength, windowWidth),
+            // but the overlay margin is computed from the raw value.
+            if (clamped > maxAvailableWidth) clamped = maxAvailableWidth;
             if (SetProperty(ref sidebarWidth, clamped))
             {
                 OnPropertyChanged(nameof(SidebarResizerMargin));
+            }
+        }
+    }
+
+    private double maxAvailableWidth = double.PositiveInfinity;
+    public double MaxAvailableWidth
+    {
+        get => maxAvailableWidth;
+        set
+        {
+            if (value <= 0) return;
+            if (SetProperty(ref maxAvailableWidth, value))
+            {
+                // Re-apply the clamp so a window shrink pulls the sidebar back
+                // to a width where the drag handle is reachable on-screen.
+                SidebarWidth = sidebarWidth;
             }
         }
     }
