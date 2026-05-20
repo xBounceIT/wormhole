@@ -73,11 +73,25 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     {
         if (Profile is null)
             throw new InvalidOperationException("Initialize must be called before AttachAsync.");
-        if (_session is not null) return;
 
         _webView = webView;
         _xamlRoot = xamlRoot;
         _initialSize = initialSize;
+
+        // Navigating away from Sessions and back rebuilds the tab content (new
+        // UserControl + WebView2) while the VM stays alive in ShellViewModel.Tabs. Skip the
+        // expensive credential prompt + SSH connect; just rebind the bridge to the new
+        // WebView and resync the geometry. The terminal scrollback is lost (xterm.js is
+        // fresh) but typing/output continue to work on the same SSH session.
+        if (_session is not null)
+        {
+            var oldBridge = _bridge;
+            _bridge = new TerminalBridge(webView, _session, _loggerFactory.CreateLogger<TerminalBridge>());
+            oldBridge?.Dispose();
+            await _session.ResizeAsync(initialSize.Columns, initialSize.Rows).ConfigureAwait(true);
+            return;
+        }
+
         await ConnectAsync().ConfigureAwait(true);
     }
 
