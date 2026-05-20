@@ -25,9 +25,9 @@
                        Margin="16,0,0,0" />
 
             <controls:QuickConnectBar Grid.Column="1"
-                                      HorizontalAlignment="Center"
+                                      HorizontalAlignment="Stretch"
                                       VerticalAlignment="Center"
-                                      MaxWidth="560"
+                                      MaxWidth="900"
                                       MinWidth="320"
                                       Margin="24,6,24,6" />
         </Grid>
