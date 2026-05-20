@@ -166,8 +166,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private async Task ConnectAsync()
     {
         var profile = Profile;
-        var webView = _webView;
-        if (profile is null || webView is null) return;
+        if (profile is null || _webView is null) return;
         if (Interlocked.CompareExchange(ref _connectInFlight, 1, 0) != 0) return;
 
         Status = SessionStatus.Connecting;
@@ -186,10 +185,21 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             }
 
             _session = await _sshService.ConnectAsync(profile, creds, _initialSize, token).ConfigureAwait(true);
+            // Re-read _webView after the awaits: if the user navigated away and back
+            // during credential prompt / SSH connect, AttachAsync swapped _webView to the
+            // freshly-created control but bailed on _connectInFlight, so the original
+            // local would bind the bridge to a stale/disposed WebView.
+            var liveWebView = _webView;
+            if (liveWebView is null)
+            {
+                await SafeDisposeSessionAsync().ConfigureAwait(true);
+                Status = SessionStatus.Disconnected;
+                return;
+            }
             // Subscribe BEFORE Start() so we don't miss a Closed that fires immediately
             // (forced-command accounts, EOF-on-connect, etc.).
             _session.Closed += OnSessionClosed;
-            _bridge = new TerminalBridge(webView, _session, _loggerFactory.CreateLogger<TerminalBridge>());
+            _bridge = new TerminalBridge(liveWebView, _session, _loggerFactory.CreateLogger<TerminalBridge>());
             _session.Start();
 
             // Mirror SshHostKeyValidator.Decide which treats null *and* empty as unpinned —
