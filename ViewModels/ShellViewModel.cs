@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Wormhole.ViewModels.Sessions;
 
@@ -13,8 +14,16 @@ public partial class ShellViewModel : ObservableObject
 
     public ConnectionTreeViewModel Tree { get; }
 
+    public bool HasNoTabs => Tabs.Count == 0;
+
     public ShellViewModel(ConnectionTreeViewModel tree)
     {
         Tree = tree;
+        Tabs.CollectionChanged += OnTabsChanged;
+    }
+
+    private void OnTabsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        OnPropertyChanged(nameof(HasNoTabs));
     }
 }

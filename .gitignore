@@ -32,6 +32,9 @@ logs/
 # Installer outputs
 installer/output/
 
+# Fetched web assets (xterm.js etc.) — populated by scripts/Fetch-WebAssets.ps1
+Assets/web/vendor/
+
 # OS noise
 Thumbs.db
 desktop.ini

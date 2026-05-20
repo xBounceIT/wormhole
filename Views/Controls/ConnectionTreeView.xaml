@@ -20,7 +20,8 @@
         <TreeView Grid.Row="1"
                   x:Name="Tree"
                   ItemsSource="{x:Bind ViewModel.Roots, Mode=OneWay}"
-                  SelectionMode="Single">
+                  SelectionMode="Single"
+                  ItemInvoked="Tree_ItemInvoked">
             <TreeView.ItemTemplate>
                 <DataTemplate x:DataType="vm:TreeNodeViewModel">
                     <TreeViewItem ItemsSource="{x:Bind Children}">

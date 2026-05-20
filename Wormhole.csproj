@@ -54,6 +54,18 @@
     <EmbeddedResource Include="Data\Migrations\*.sql" />
   </ItemGroup>
 
+  <Target Name="FetchWebAssets"
+          BeforeTargets="BeforeBuild"
+          Inputs="scripts\Fetch-WebAssets.ps1"
+          Outputs="Assets\web\vendor\xterm\xterm.js;Assets\web\vendor\xterm\xterm.css;Assets\web\vendor\addon-fit\addon-fit.js">
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\scripts\Fetch-WebAssets.ps1&quot; -Quiet" />
+    <ItemGroup>
+      <None Include="Assets\web\vendor\**\*">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </None>
+    </ItemGroup>
+  </Target>
+
   <Target Name="CopyWinUIAppResourcesToPublish"
           AfterTargets="Publish"
           Condition="'$(UseWinUI)' == 'true'">

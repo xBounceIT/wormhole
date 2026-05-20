@@ -13,4 +13,13 @@ public sealed partial class ConnectionTreeView : UserControl
         ViewModel = App.Current.Services.GetRequiredService<ConnectionTreeViewModel>();
         this.InitializeComponent();
     }
+
+    private void Tree_ItemInvoked(TreeView sender, TreeViewItemInvokedEventArgs args)
+    {
+        if (args.InvokedItem is TreeNodeViewModel vm &&
+            ViewModel.OpenConnectionCommand.CanExecute(vm))
+        {
+            ViewModel.OpenConnectionCommand.Execute(vm);
+        }
+    }
 }

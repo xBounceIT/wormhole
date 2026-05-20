@@ -87,6 +87,15 @@ public sealed class ConnectionRepository : IConnectionRepository
             WHERE Id = @Id;", node, cancellationToken: cancellationToken));
     }
 
+    public async Task UpdateHostFingerprintAsync(Guid nodeId, string fingerprint, CancellationToken cancellationToken = default)
+    {
+        using var connection = _factory.Open();
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE Nodes SET SshKnownHostFingerprint = @fingerprint, UpdatedAt = @now WHERE Id = @nodeId;",
+            new { nodeId, fingerprint, now = DateTime.UtcNow },
+            cancellationToken: cancellationToken));
+    }
+
     public async Task DeleteAsync(Guid id, CancellationToken cancellationToken = default)
     {
         using var connection = _factory.Open();

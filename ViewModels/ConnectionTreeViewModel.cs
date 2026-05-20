@@ -1,18 +1,23 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.Linq;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Wormhole.Data;
 using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Models;
+using Wormhole.Services;
 
 namespace Wormhole.ViewModels;
 
 public partial class ConnectionTreeViewModel : ObservableObject
 {
     private readonly IConnectionRepository _repository;
+    private readonly InheritanceResolver _inheritanceResolver;
+    private readonly ISessionTabFactory _tabFactory;
     private bool _isLoading;
 
     public ObservableCollection<TreeNodeViewModel> Roots { get; } = new();
@@ -20,9 +25,14 @@ public partial class ConnectionTreeViewModel : ObservableObject
     [ObservableProperty]
     private TreeNodeViewModel? selectedNode;
 
-    public ConnectionTreeViewModel(IConnectionRepository repository)
+    public ConnectionTreeViewModel(
+        IConnectionRepository repository,
+        InheritanceResolver inheritanceResolver,
+        ISessionTabFactory tabFactory)
     {
         _repository = repository;
+        _inheritanceResolver = inheritanceResolver;
+        _tabFactory = tabFactory;
         _ = RefreshAsync();
     }
 
@@ -38,6 +48,27 @@ public partial class ConnectionTreeViewModel : ObservableObject
         finally
         {
             _isLoading = false;
+        }
+    }
+
+    [RelayCommand]
+    public async Task OpenConnectionAsync(TreeNodeViewModel? vm)
+    {
+        if (vm is null || vm.Kind != NodeKind.Connection) return;
+
+        var all = await _repository.GetAllAsync();
+        var byId = all.ToDictionary(n => n.Id);
+        if (!byId.TryGetValue(vm.Node.Id, out var node)) return;
+
+        var profile = _inheritanceResolver.Resolve(node, byId);
+
+        switch (profile.Protocol)
+        {
+            case ProtocolType.Ssh:
+                _tabFactory.OpenSsh(profile);
+                break;
+            default:
+                throw new NotSupportedException($"Protocol {profile.Protocol} is not yet implemented.");
         }
     }
 

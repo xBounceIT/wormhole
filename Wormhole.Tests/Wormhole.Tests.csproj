@@ -24,12 +24,18 @@
   <ItemGroup>
     <Compile Include="..\Models\ConnectionNode.cs" Link="Models\ConnectionNode.cs" />
     <Compile Include="..\Models\ConnectionProfile.cs" Link="Models\ConnectionProfile.cs" />
+    <Compile Include="..\Models\CredentialProfile.cs" Link="Models\CredentialProfile.cs" />
     <Compile Include="..\Models\NodeKind.cs" Link="Models\NodeKind.cs" />
     <Compile Include="..\Models\ProtocolType.cs" Link="Models\ProtocolType.cs" />
     <Compile Include="..\Data\InheritanceResolver.cs" Link="Data\InheritanceResolver.cs" />
+    <Compile Include="..\Data\Repositories\ICredentialRepository.cs" Link="Data\Repositories\ICredentialRepository.cs" />
     <Compile Include="..\Data\SqliteConnectionFactory.cs" Link="Data\SqliteConnectionFactory.cs" />
     <Compile Include="..\Data\SqliteTypeHandlers.cs" Link="Data\SqliteTypeHandlers.cs" />
     <Compile Include="..\Data\MigrationRunner.cs" Link="Data\MigrationRunner.cs" />
+    <Compile Include="..\Services\ICredentialService.cs" Link="Services\ICredentialService.cs" />
+    <Compile Include="..\Services\IDialogService.cs" Link="Services\IDialogService.cs" />
+    <Compile Include="..\Services\Ssh\SshHostKeyValidator.cs" Link="Services\Ssh\SshHostKeyValidator.cs" />
+    <Compile Include="..\Services\Ssh\SshCredentialResolver.cs" Link="Services\Ssh\SshCredentialResolver.cs" />
   </ItemGroup>
 
 </Project>
