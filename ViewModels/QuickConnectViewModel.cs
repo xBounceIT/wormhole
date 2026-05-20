@@ -23,6 +23,9 @@ public partial class QuickConnectViewModel : ObservableObject
     [ObservableProperty]
     private string username = string.Empty;
 
+    [ObservableProperty]
+    private string? errorMessage;
+
     public QuickConnectViewModel(ISessionTabFactory tabFactory)
     {
         _tabFactory = tabFactory;
@@ -31,9 +34,20 @@ public partial class QuickConnectViewModel : ObservableObject
     [RelayCommand]
     public void Connect()
     {
+        ErrorMessage = null;
         if (string.IsNullOrWhiteSpace(Host)) return;
 
-        var spec = HostSpecParser.Parse(Host);
+        HostSpec spec;
+        try
+        {
+            spec = HostSpecParser.Parse(Host);
+        }
+        catch (FormatException ex)
+        {
+            ErrorMessage = ex.Message;
+            return;
+        }
+
         var profile = new ConnectionProfile
         {
             NodeId = Guid.NewGuid(),

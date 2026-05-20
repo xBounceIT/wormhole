@@ -70,4 +70,16 @@ public class HostSpecParserTests
     public void NonNumeric_Suffix_NotTreatedAsPort() => Assert.Equal(
         new HostSpec(null, "host:noport", null),
         HostSpecParser.Parse("host:noport"));
+
+    [Fact]
+    public void Bracketed_TrailingGarbage_Throws()
+        => Assert.Throws<System.FormatException>(() => HostSpecParser.Parse("[2001:db8::1]:22x"));
+
+    [Fact]
+    public void Bracketed_NonColonSuffix_Throws()
+        => Assert.Throws<System.FormatException>(() => HostSpecParser.Parse("[host]abc"));
+
+    [Fact]
+    public void Bracketed_OnlyColonSuffix_Throws()
+        => Assert.Throws<System.FormatException>(() => HostSpecParser.Parse("[host]:"));
 }

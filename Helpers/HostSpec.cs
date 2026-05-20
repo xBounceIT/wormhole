@@ -32,12 +32,18 @@ public static class HostSpecParser
             {
                 var host = s.Substring(1, closeBracket - 1);
                 var rest = s.Substring(closeBracket + 1);
-                int? bracketPort = null;
+                if (rest.Length == 0)
+                {
+                    return new HostSpec(user, host, null);
+                }
                 if (rest.Length > 1 && rest[0] == ':' && int.TryParse(rest.AsSpan(1), out var bp))
                 {
-                    bracketPort = bp;
+                    return new HostSpec(user, host, bp);
                 }
-                return new HostSpec(user, host, bracketPort);
+                // Reject garbage after the closing bracket so callers don't silently
+                // connect to the wrong endpoint with the trailing chars stripped.
+                throw new FormatException(
+                    $"Invalid host specifier '{input}': unexpected characters after ']'.");
             }
         }
 
