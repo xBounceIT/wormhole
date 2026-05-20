@@ -141,16 +141,18 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private void OnSessionClosed(object? sender, EventArgs e)
     {
         // Fired from the SSH read-pump thread; marshal to the captured UI dispatcher
-        // before touching observable properties.
+        // before touching observable properties or disposing the session.
         var dispatcher = _uiDispatcher;
         if (dispatcher is null) return;
-        dispatcher.TryEnqueue(() =>
+        dispatcher.TryEnqueue(async () =>
         {
-            if (Status == SessionStatus.Connected)
-            {
-                Status = SessionStatus.Disconnected;
-                ErrorMessage = "Remote session closed.";
-            }
+            if (Status != SessionStatus.Connected) return;
+            // Drop the dead session/bridge so a re-attach (e.g. tab view recreated, or
+            // user clicks Retry) goes through the full ConnectAsync path instead of
+            // rebinding to a dead transport.
+            await SafeDisposeSessionAsync().ConfigureAwait(true);
+            Status = SessionStatus.Disconnected;
+            ErrorMessage = "Remote session closed.";
         });
     }
 

@@ -19,6 +19,7 @@ public sealed partial class SshTerminalView : UserControl
     {
         InitializeComponent();
         Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -35,6 +36,17 @@ public sealed partial class SshTerminalView : UserControl
 
         if (_webViewReady) return;
         await InitializeWebViewAsync().ConfigureAwait(true);
+    }
+
+    // The VM outlives the view (it lives in ShellViewModel.Tabs across navigations),
+    // so we must unsubscribe here or every navigation accumulates a stale handler
+    // that keeps the old SshTerminalView alive and double-runs init on retry.
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is not null)
+        {
+            _viewModel.InitializationRetryRequested -= OnInitializationRetryRequested;
+        }
     }
 
     private async Task InitializeWebViewAsync()
