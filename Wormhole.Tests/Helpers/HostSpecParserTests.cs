@@ -120,4 +120,13 @@ public class HostSpecParserTests
     [InlineData("alice@[]")]
     public void EmptyHost_Throws(string input)
         => Assert.Throws<System.FormatException>(() => HostSpecParser.Parse(input));
+
+    // Missing closing bracket: previously fell through to the no-port path and was
+    // treated as a literal hostname with brackets in it, then died later in DNS.
+    [Theory]
+    [InlineData("[2001:db8::1")]
+    [InlineData("[host")]
+    [InlineData("alice@[2001:db8::1")]
+    public void MissingClosingBracket_Throws(string input)
+        => Assert.Throws<System.FormatException>(() => HostSpecParser.Parse(input));
 }

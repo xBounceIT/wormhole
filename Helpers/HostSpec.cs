@@ -28,28 +28,30 @@ public static class HostSpecParser
         if (s.StartsWith('['))
         {
             var closeBracket = s.IndexOf(']');
-            if (closeBracket > 0)
+            if (closeBracket < 0)
             {
-                var host = s.Substring(1, closeBracket - 1);
-                var rest = s.Substring(closeBracket + 1);
-                if (host.Length == 0)
-                {
-                    throw new FormatException(
-                        $"Invalid host specifier '{input}': bracketed host is empty.");
-                }
-                if (rest.Length == 0)
-                {
-                    return new HostSpec(user, host, null);
-                }
-                if (rest.Length > 1 && rest[0] == ':' && TryParsePort(rest.AsSpan(1), out var bp))
-                {
-                    return new HostSpec(user, host, bp);
-                }
-                // Reject garbage after the closing bracket so callers don't silently
-                // connect to the wrong endpoint with the trailing chars stripped.
                 throw new FormatException(
-                    $"Invalid host specifier '{input}': unexpected characters after ']'.");
+                    $"Invalid host specifier '{input}': missing ']' to close bracketed host.");
             }
+            var host = s.Substring(1, closeBracket - 1);
+            var rest = s.Substring(closeBracket + 1);
+            if (host.Length == 0)
+            {
+                throw new FormatException(
+                    $"Invalid host specifier '{input}': bracketed host is empty.");
+            }
+            if (rest.Length == 0)
+            {
+                return new HostSpec(user, host, null);
+            }
+            if (rest.Length > 1 && rest[0] == ':' && TryParsePort(rest.AsSpan(1), out var bp))
+            {
+                return new HostSpec(user, host, bp);
+            }
+            // Reject garbage after the closing bracket so callers don't silently
+            // connect to the wrong endpoint with the trailing chars stripped.
+            throw new FormatException(
+                $"Invalid host specifier '{input}': unexpected characters after ']'.");
         }
 
         // Bracketless IPv6 literal: more than one ':' means we can't tell which is the port
