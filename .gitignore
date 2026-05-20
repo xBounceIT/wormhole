@@ -1,0 +1,38 @@
+# Build outputs
+bin/
+obj/
+artifacts/
+*.binlog
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+
+# Rider / VS Code
+.idea/
+.vscode/
+*.swp
+
+# Generated WinUI files
+*.g.cs
+*.g.i.cs
+*.xbf
+*.pri
+
+# Logs
+logs/
+*.log
+
+# Local database files (developer scratch only; runtime DB lives in %LOCALAPPDATA%)
+*.db
+*.db-shm
+*.db-wal
+
+# Installer outputs
+installer/output/
+
+# OS noise
+Thumbs.db
+desktop.ini
+.DS_Store

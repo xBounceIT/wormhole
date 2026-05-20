@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Wormhole.Views.Controls.QuickConnectBar"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:Wormhole.ViewModels"
+    xmlns:models="using:Wormhole.Models">
+
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+
+        <ComboBox Grid.Column="0"
+                  x:Name="ProtocolPicker"
+                  SelectedIndex="0"
+                  MinWidth="80">
+            <ComboBoxItem Content="SSH" Tag="Ssh" />
+            <ComboBoxItem Content="RDP" Tag="Rdp" />
+            <ComboBoxItem Content="SFTP" Tag="Sftp" />
+        </ComboBox>
+
+        <TextBox Grid.Column="1"
+                 PlaceholderText="user@host"
+                 Margin="6,0,6,0"
+                 Text="{x:Bind ViewModel.Host, Mode=TwoWay}" />
+
+        <Button Grid.Column="2"
+                Content="Connect"
+                Command="{x:Bind ViewModel.ConnectCommand}" />
+    </Grid>
+</UserControl>

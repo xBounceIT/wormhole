@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="Wormhole.Views.Pages.SettingsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:models="using:Wormhole.Models">
+
+    <ScrollViewer Padding="24">
+        <StackPanel Spacing="16" MaxWidth="720" HorizontalAlignment="Left">
+            <TextBlock Text="Settings" Style="{StaticResource TitleTextBlockStyle}" />
+
+            <TextBlock Text="Appearance" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
+            <ComboBox Header="Theme"
+                      SelectedIndex="{x:Bind ThemeIndex, Mode=TwoWay}"
+                      Width="240">
+                <ComboBoxItem Content="System default" />
+                <ComboBoxItem Content="Light" />
+                <ComboBoxItem Content="Dark" />
+            </ComboBox>
+
+            <TextBlock Text="Tabs" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
+            <ToggleSwitch Header="Confirm before closing a connected tab"
+                          IsOn="{x:Bind ViewModel.ConfirmOnTabClose, Mode=TwoWay}" />
+
+            <TextBlock Text="Wormhole 0.1.0 — scaffold build"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Opacity="0.6"
+                       Margin="0,24,0,0" />
+        </StackPanel>
+    </ScrollViewer>
+</Page>

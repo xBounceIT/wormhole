@@ -1,0 +1,86 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <RootNamespace>Wormhole</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
+    <Platforms>x64;arm64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <UseWinUI>true</UseWinUI>
+    <WindowsPackageType>None</WindowsPackageType>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <DefaultItemExcludes>$(DefaultItemExcludes);Wormhole.Tests\**;Assets\web\node_modules\**</DefaultItemExcludes>
+    <NoWarn>$(NoWarn);MVVMTK0045</NoWarn>
+    <DefaultLanguage>en-US</DefaultLanguage>
+    <Version>0.1.0</Version>
+    <AssemblyVersion>0.1.0.0</AssemblyVersion>
+    <InformationalVersion>$(Version)</InformationalVersion>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260209005" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3967.48" />
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+    <PackageReference Include="Serilog" Version="4.3.1" />
+    <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
+    <PackageReference Include="Serilog.Extensions.Logging" Version="9.0.2" />
+    <PackageReference Include="SSH.NET" Version="2025.1.0" />
+    <PackageReference Include="Meziantou.Framework.Win32.CredentialManager" Version="2.0.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
+    <PackageReference Include="System.Security.Cryptography.Xml" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+    <PackageReference Include="Dapper" Version="2.1.66" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="Assets\app.ico">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="Assets\web\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="Data\Migrations\*.sql" />
+  </ItemGroup>
+
+  <Target Name="CopyWinUIAppResourcesToPublish"
+          AfterTargets="Publish"
+          Condition="'$(UseWinUI)' == 'true'">
+    <ItemGroup>
+      <_WinUIRootResource Include="$(TargetDir)$(AssemblyName).pri"
+                          Condition="Exists('$(TargetDir)$(AssemblyName).pri')" />
+      <_WinUIRootResource Include="$(TargetDir)App.xbf"
+                          Condition="Exists('$(TargetDir)App.xbf')" />
+      <_WinUIRootResource Include="$(TargetDir)MainWindow.xbf"
+                          Condition="Exists('$(TargetDir)MainWindow.xbf')" />
+      <_WinUIPageResource Include="$(TargetDir)Views\Pages\**\*.xbf"
+                          Condition="Exists('$(TargetDir)Views\Pages')" />
+      <_WinUIControlResource Include="$(TargetDir)Views\Controls\**\*.xbf"
+                             Condition="Exists('$(TargetDir)Views\Controls')" />
+    </ItemGroup>
+
+    <Copy SourceFiles="@(_WinUIRootResource)"
+          DestinationFiles="@(_WinUIRootResource->'$(PublishDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+
+    <Copy SourceFiles="@(_WinUIPageResource)"
+          DestinationFiles="@(_WinUIPageResource->'$(PublishDir)Views\Pages\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+
+    <Copy SourceFiles="@(_WinUIControlResource)"
+          DestinationFiles="@(_WinUIControlResource->'$(PublishDir)Views\Controls\%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

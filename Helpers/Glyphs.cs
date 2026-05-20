@@ -1,0 +1,15 @@
+namespace Wormhole.Helpers;
+
+/// <summary>
+/// Segoe Fluent Icons glyph constants used in the UI. Keep this list small and
+/// only add a constant when a glyph is referenced from C# (XAML can use the
+/// literal character directly).
+/// </summary>
+public static class Glyphs
+{
+    public const string Folder  = ""; // Folder
+    public const string Ssh     = ""; // CommandPrompt
+    public const string Rdp     = ""; // NetworkAdapter
+    public const string Sftp    = ""; // SyncFolder
+    public const string Generic = ""; // Devices
+}

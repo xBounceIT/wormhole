@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260209005" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
+    <PackageReference Include="Dapper" Version="2.1.66" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="..\Models\ConnectionNode.cs" Link="Models\ConnectionNode.cs" />
+    <Compile Include="..\Models\ConnectionProfile.cs" Link="Models\ConnectionProfile.cs" />
+    <Compile Include="..\Models\NodeKind.cs" Link="Models\NodeKind.cs" />
+    <Compile Include="..\Models\ProtocolType.cs" Link="Models\ProtocolType.cs" />
+    <Compile Include="..\Data\InheritanceResolver.cs" Link="Data\InheritanceResolver.cs" />
+    <Compile Include="..\Data\SqliteConnectionFactory.cs" Link="Data\SqliteConnectionFactory.cs" />
+    <Compile Include="..\Data\SqliteTypeHandlers.cs" Link="Data\SqliteTypeHandlers.cs" />
+    <Compile Include="..\Data\MigrationRunner.cs" Link="Data\MigrationRunner.cs" />
+  </ItemGroup>
+
+</Project>

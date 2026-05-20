@@ -1,0 +1,99 @@
+using System;
+using System.IO;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.UI.Xaml;
+using Serilog;
+using Wormhole.Data;
+using Wormhole.Data.Repositories;
+using Wormhole.Helpers;
+using Wormhole.Services;
+using Wormhole.ViewModels;
+using Wormhole.ViewModels.Sessions;
+
+namespace Wormhole;
+
+public partial class App : Application
+{
+    public new static App Current => (App)Application.Current;
+
+    public IServiceProvider Services { get; }
+
+    public MainWindow? MainWindow { get; private set; }
+
+    public App()
+    {
+        this.InitializeComponent();
+        SqliteTypeHandlers.Register();
+        Services = ConfigureServices();
+        UnhandledException += OnUnhandledException;
+    }
+
+    protected override async void OnLaunched(LaunchActivatedEventArgs args)
+    {
+        Directory.CreateDirectory(AppPaths.GetAppDataDirectory());
+
+        var runner = Services.GetRequiredService<MigrationRunner>();
+        await runner.RunAsync();
+
+        MainWindow = Services.GetRequiredService<MainWindow>();
+        MainWindow.Activate();
+    }
+
+    private static IServiceProvider ConfigureServices()
+    {
+        Directory.CreateDirectory(AppPaths.GetLogsDirectory());
+
+        Log.Logger = new LoggerConfiguration()
+            .MinimumLevel.Information()
+            .Enrich.FromLogContext()
+            .WriteTo.File(
+                Path.Combine(AppPaths.GetLogsDirectory(), "wormhole-.log"),
+                rollingInterval: RollingInterval.Day,
+                retainedFileCountLimit: 14,
+                shared: true)
+            .CreateLogger();
+
+        var services = new ServiceCollection();
+
+        services.AddLogging(builder =>
+        {
+            builder.ClearProviders();
+            builder.AddSerilog(dispose: true);
+        });
+
+        var connectionString = $"Data Source={AppPaths.GetDatabaseFilePath()}";
+        services.AddSingleton<ISqliteConnectionFactory>(_ => new SqliteConnectionFactory(connectionString));
+        services.AddSingleton<MigrationRunner>();
+
+        services.AddSingleton<IAppSettingsService, AppSettingsService>();
+        services.AddSingleton<ICredentialService, CredentialService>();
+        services.AddSingleton<IConnectionRepository, ConnectionRepository>();
+        services.AddSingleton<ICredentialRepository, CredentialRepository>();
+        services.AddSingleton<InheritanceResolver>();
+        services.AddSingleton<INavigationService, NavigationService>();
+        services.AddSingleton<IDialogService, DialogService>();
+        services.AddSingleton<ISshSessionService, SshSessionService>();
+        services.AddSingleton<IRdpSessionService, RdpSessionService>();
+        services.AddSingleton<ISftpService, SftpService>();
+
+        services.AddSingleton<ShellViewModel>();
+        services.AddSingleton<ConnectionTreeViewModel>();
+        services.AddSingleton<QuickConnectViewModel>();
+        services.AddSingleton<SettingsViewModel>();
+        services.AddTransient<ConnectionEditorViewModel>();
+        services.AddTransient<SshSessionViewModel>();
+        services.AddTransient<RdpSessionViewModel>();
+        services.AddTransient<SftpSessionViewModel>();
+
+        services.AddSingleton<MainWindow>();
+
+        return services.BuildServiceProvider();
+    }
+
+    private void OnUnhandledException(object sender, Microsoft.UI.Xaml.UnhandledExceptionEventArgs e)
+    {
+        var logger = Services.GetService<ILogger<App>>();
+        logger?.LogError(e.Exception, "Unhandled exception reached App boundary.");
+    }
+}
