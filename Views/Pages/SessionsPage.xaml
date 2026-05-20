@@ -3,7 +3,31 @@
     x:Class="Wormhole.Views.Pages.SessionsPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:sessions="using:Wormhole.ViewModels.Sessions">
+    xmlns:sessions="using:Wormhole.ViewModels.Sessions"
+    xmlns:sessionViews="using:Wormhole.Views.Sessions">
+
+    <Page.Resources>
+        <DataTemplate x:Key="SshSessionTemplate" x:DataType="sessions:SshSessionViewModel">
+            <sessionViews:SshTerminalView />
+        </DataTemplate>
+
+        <DataTemplate x:Key="ProtocolPlaceholderTemplate" x:DataType="sessions:SessionTabViewModel">
+            <Grid Padding="16" Background="{ThemeResource LayerFillColorDefaultBrush}">
+                <TextBlock Style="{StaticResource BodyTextBlockStyle}"
+                           TextWrapping="Wrap"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center"
+                           Opacity="0.7"
+                           Text="This protocol surface is not implemented yet." />
+            </Grid>
+        </DataTemplate>
+
+        <sessionViews:SessionContentSelector x:Key="SessionContentSelector"
+                                             SshTemplate="{StaticResource SshSessionTemplate}"
+                                             RdpTemplate="{StaticResource ProtocolPlaceholderTemplate}"
+                                             SftpTemplate="{StaticResource ProtocolPlaceholderTemplate}"
+                                             PlaceholderTemplate="{StaticResource ProtocolPlaceholderTemplate}" />
+    </Page.Resources>
 
     <Grid>
         <StackPanel HorizontalAlignment="Center"
@@ -11,7 +35,7 @@
                     Spacing="12"
                     MaxWidth="420"
                     Visibility="{x:Bind ViewModel.IsEmpty, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}">
-            <FontIcon Glyph="" FontSize="48" Opacity="0.5" />
+            <FontIcon Glyph="&#xE968;" FontSize="48" Opacity="0.5" />
             <TextBlock Text="No active sessions"
                        Style="{StaticResource SubtitleTextBlockStyle}"
                        HorizontalAlignment="Center" />
@@ -29,19 +53,18 @@
                  IsAddTabButtonVisible="False"
                  CanReorderTabs="True"
                  CanDragTabs="True"
+                 TabCloseRequested="SessionTabs_TabCloseRequested"
                  Background="Transparent"
                  Visibility="{x:Bind ViewModel.HasTabs, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}">
+
             <TabView.TabItemTemplate>
                 <DataTemplate x:DataType="sessions:SessionTabViewModel">
                     <TabViewItem Header="{x:Bind Title, Mode=OneWay}">
-                        <Grid Padding="16" Background="{ThemeResource LayerFillColorDefaultBrush}">
-                            <TextBlock Style="{StaticResource BodyTextBlockStyle}"
-                                       TextWrapping="Wrap"
-                                       HorizontalAlignment="Center"
-                                       VerticalAlignment="Center"
-                                       Opacity="0.7"
-                                       Text="Session content will render here once the protocol surface is implemented." />
-                        </Grid>
+                        <ContentControl Content="{x:Bind}"
+                                        ContentTemplateSelector="{StaticResource SessionContentSelector}"
+                                        HorizontalContentAlignment="Stretch"
+                                        VerticalContentAlignment="Stretch"
+                                        IsTabStop="False" />
                     </TabViewItem>
                 </DataTemplate>
             </TabView.TabItemTemplate>

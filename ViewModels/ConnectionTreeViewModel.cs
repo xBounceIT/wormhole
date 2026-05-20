@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
+using Wormhole.Data;
 using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Models;
@@ -16,6 +17,8 @@ namespace Wormhole.ViewModels;
 public partial class ConnectionTreeViewModel : ObservableObject
 {
     private readonly IConnectionRepository _repository;
+    private readonly InheritanceResolver _inheritanceResolver;
+    private readonly ISessionTabFactory _tabFactory;
     private readonly IDialogService _dialog;
     private readonly ILogger<ConnectionTreeViewModel> _logger;
     private IReadOnlyList<ConnectionNode> _lastSnapshot = Array.Empty<ConnectionNode>();
@@ -28,10 +31,14 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     public ConnectionTreeViewModel(
         IConnectionRepository repository,
+        InheritanceResolver inheritanceResolver,
+        ISessionTabFactory tabFactory,
         IDialogService dialog,
         ILogger<ConnectionTreeViewModel> logger)
     {
         _repository = repository;
+        _inheritanceResolver = inheritanceResolver;
+        _tabFactory = tabFactory;
         _dialog = dialog;
         _logger = logger;
     }
@@ -48,6 +55,32 @@ public partial class ConnectionTreeViewModel : ObservableObject
         finally
         {
             _isLoading = false;
+        }
+    }
+
+    [RelayCommand]
+    public async Task OpenConnectionAsync(TreeNodeViewModel? vm)
+    {
+        if (vm is null || vm.Kind != NodeKind.Connection) return;
+
+        try
+        {
+            var all = await _repository.GetAllAsync();
+            var byId = all.ToDictionary(n => n.Id);
+            if (!byId.TryGetValue(vm.Node.Id, out var node)) return;
+
+            var profile = _inheritanceResolver.Resolve(node, byId);
+            // Factory dispatches by protocol: SSH gets the real terminal, RDP/SFTP get
+            // placeholder tabs whose DataTemplate renders the "not implemented yet" notice.
+            _tabFactory.Open(profile);
+        }
+        catch (Exception ex)
+        {
+            // Mirror the add/edit/delete error-path convention: log and surface the
+            // failure via a dialog instead of letting the exception escape as an
+            // unhandled RelayCommand failure.
+            _logger.LogError(ex, "Failed to open connection '{Name}'", vm.Name);
+            await _dialog.ShowMessageAsync("Couldn't open connection", ex.Message);
         }
     }
 

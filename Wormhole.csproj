@@ -57,6 +57,19 @@
     <EmbeddedResource Include="Data\Migrations\*.sql" />
   </ItemGroup>
 
+  <!-- Intentionally non-incremental: the script's job includes SHA256 verification of
+       pinned vendor files. If we let MSBuild skip the target once the outputs exist,
+       a tampered vendor file would never be re-verified on incremental builds.
+       The script is idempotent and fast (sub-second when hashes match). -->
+  <Target Name="FetchWebAssets" BeforeTargets="BeforeBuild">
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\scripts\Fetch-WebAssets.ps1&quot; -Quiet" />
+    <ItemGroup>
+      <None Include="Assets\web\vendor\**\*">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </None>
+    </ItemGroup>
+  </Target>
+
   <Target Name="CopyWinUIAppResourcesToPublish"
           AfterTargets="Publish"
           Condition="'$(UseWinUI)' == 'true'">
@@ -67,28 +80,16 @@
                           Condition="Exists('$(TargetDir)App.xbf')" />
       <_WinUIRootResource Include="$(TargetDir)MainWindow.xbf"
                           Condition="Exists('$(TargetDir)MainWindow.xbf')" />
-      <_WinUIPageResource Include="$(TargetDir)Views\Pages\**\*.xbf"
-                          Condition="Exists('$(TargetDir)Views\Pages')" />
-      <_WinUIControlResource Include="$(TargetDir)Views\Controls\**\*.xbf"
-                             Condition="Exists('$(TargetDir)Views\Controls')" />
-      <_WinUIDialogResource Include="$(TargetDir)Views\Dialogs\**\*.xbf"
-                            Condition="Exists('$(TargetDir)Views\Dialogs')" />
+      <_WinUIViewResource Include="$(TargetDir)Views\**\*.xbf"
+                          Condition="Exists('$(TargetDir)Views')" />
     </ItemGroup>
 
     <Copy SourceFiles="@(_WinUIRootResource)"
           DestinationFiles="@(_WinUIRootResource->'$(PublishDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
 
-    <Copy SourceFiles="@(_WinUIPageResource)"
-          DestinationFiles="@(_WinUIPageResource->'$(PublishDir)Views\Pages\%(RecursiveDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="true" />
-
-    <Copy SourceFiles="@(_WinUIControlResource)"
-          DestinationFiles="@(_WinUIControlResource->'$(PublishDir)Views\Controls\%(RecursiveDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="true" />
-
-    <Copy SourceFiles="@(_WinUIDialogResource)"
-          DestinationFiles="@(_WinUIDialogResource->'$(PublishDir)Views\Dialogs\%(RecursiveDir)%(Filename)%(Extension)')"
+    <Copy SourceFiles="@(_WinUIViewResource)"
+          DestinationFiles="@(_WinUIViewResource->'$(PublishDir)Views\%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
   </Target>
 

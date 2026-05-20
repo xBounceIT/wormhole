@@ -12,6 +12,7 @@
         <KeyboardAccelerator Modifiers="Control" Key="N" Invoked="OnNewConnectionAccelerator" />
         <KeyboardAccelerator Key="F2" Invoked="OnRenameAccelerator" />
         <KeyboardAccelerator Key="Delete" Invoked="OnDeleteAccelerator" />
+        <KeyboardAccelerator Key="Enter" Invoked="OnOpenAccelerator" />
     </UserControl.KeyboardAccelerators>
 
     <Grid>
@@ -55,6 +56,10 @@
                   CanReorderItems="True"
                   AllowDrop="True"
                   DragItemsCompleted="OnDragItemsCompleted">
+            <!-- Use DoubleTapped on the item template (below) rather than
+                 TreeView.ItemInvoked: ItemInvoked fires on single-click, which
+                 turns simple selection into accidental session opens. -->
+
             <TreeView.ContextFlyout>
                 <MenuFlyout>
                     <MenuFlyoutItem Text="New folder"
@@ -86,7 +91,8 @@
                             </MenuFlyout>
                         </TreeViewItem.ContextFlyout>
 
-                        <StackPanel Orientation="Horizontal" Spacing="6">
+                        <StackPanel Orientation="Horizontal" Spacing="6"
+                                    DoubleTapped="OnNodeDoubleTapped">
                             <FontIcon FontSize="14" Glyph="{x:Bind Glyph, Mode=OneWay}" />
                             <TextBlock Text="{x:Bind Name, Mode=OneWay}" VerticalAlignment="Center" />
                         </StackPanel>

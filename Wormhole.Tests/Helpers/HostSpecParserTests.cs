@@ -1,0 +1,132 @@
+using Wormhole.Helpers;
+using Xunit;
+
+namespace Wormhole.Tests.Helpers;
+
+public class HostSpecParserTests
+{
+    [Fact]
+    public void Plain_Hostname() => Assert.Equal(
+        new HostSpec(null, "example.com", null),
+        HostSpecParser.Parse("example.com"));
+
+    [Fact]
+    public void Hostname_With_Port() => Assert.Equal(
+        new HostSpec(null, "example.com", 2222),
+        HostSpecParser.Parse("example.com:2222"));
+
+    [Fact]
+    public void User_Host() => Assert.Equal(
+        new HostSpec("alice", "example.com", null),
+        HostSpecParser.Parse("alice@example.com"));
+
+    [Fact]
+    public void User_Host_Port() => Assert.Equal(
+        new HostSpec("alice", "example.com", 2222),
+        HostSpecParser.Parse("alice@example.com:2222"));
+
+    [Fact]
+    public void Trims_Surrounding_Whitespace() => Assert.Equal(
+        new HostSpec("alice", "example.com", 22),
+        HostSpecParser.Parse("  alice@example.com:22  "));
+
+    [Fact]
+    public void Ipv4_Hostname() => Assert.Equal(
+        new HostSpec(null, "192.0.2.1", 2222),
+        HostSpecParser.Parse("192.0.2.1:2222"));
+
+    // The IPv6 fix — bare bracketless literals must not have their last hextet treated as a port.
+    [Fact]
+    public void Bracketless_Ipv6_NoPort() => Assert.Equal(
+        new HostSpec(null, "2001:db8::1", null),
+        HostSpecParser.Parse("2001:db8::1"));
+
+    [Fact]
+    public void Bracketless_Ipv6_WithUser() => Assert.Equal(
+        new HostSpec("alice", "2001:db8::1", null),
+        HostSpecParser.Parse("alice@2001:db8::1"));
+
+    [Fact]
+    public void Bracketless_Loopback_Ipv6() => Assert.Equal(
+        new HostSpec(null, "::1", null),
+        HostSpecParser.Parse("::1"));
+
+    [Fact]
+    public void Bracketed_Ipv6_NoPort() => Assert.Equal(
+        new HostSpec(null, "2001:db8::1", null),
+        HostSpecParser.Parse("[2001:db8::1]"));
+
+    [Fact]
+    public void Bracketed_Ipv6_WithPort() => Assert.Equal(
+        new HostSpec(null, "2001:db8::1", 2222),
+        HostSpecParser.Parse("[2001:db8::1]:2222"));
+
+    [Fact]
+    public void User_Bracketed_Ipv6_WithPort() => Assert.Equal(
+        new HostSpec("alice", "::1", 22),
+        HostSpecParser.Parse("alice@[::1]:22"));
+
+    [Fact]
+    public void NonNumeric_Suffix_NotTreatedAsPort() => Assert.Equal(
+        new HostSpec(null, "host:noport", null),
+        HostSpecParser.Parse("host:noport"));
+
+    [Fact]
+    public void Bracketed_TrailingGarbage_Throws()
+        => Assert.Throws<System.FormatException>(() => HostSpecParser.Parse("[2001:db8::1]:22x"));
+
+    [Fact]
+    public void Bracketed_NonColonSuffix_Throws()
+        => Assert.Throws<System.FormatException>(() => HostSpecParser.Parse("[host]abc"));
+
+    [Fact]
+    public void Bracketed_OnlyColonSuffix_Throws()
+        => Assert.Throws<System.FormatException>(() => HostSpecParser.Parse("[host]:"));
+
+    // Port range — out-of-range values must not slip through as a "valid" port.
+    [Theory]
+    [InlineData("host:0")]
+    [InlineData("host:-1")]
+    [InlineData("host:65536")]
+    [InlineData("host:99999")]
+    public void OutOfRange_Port_NotTreatedAsPort(string input)
+    {
+        // Falls through to "no port" — the suffix isn't a valid port so we don't strip it.
+        var spec = HostSpecParser.Parse(input);
+        Assert.Null(spec.Port);
+        Assert.Equal(input, spec.Host);
+    }
+
+    [Fact]
+    public void Bracketed_OutOfRangePort_Throws()
+        => Assert.Throws<System.FormatException>(() => HostSpecParser.Parse("[::1]:70000"));
+
+    [Fact]
+    public void Bracketed_PortOne_Allowed() => Assert.Equal(
+        new HostSpec(null, "::1", 1),
+        HostSpecParser.Parse("[::1]:1"));
+
+    [Fact]
+    public void Bracketed_PortMax_Allowed() => Assert.Equal(
+        new HostSpec(null, "::1", 65535),
+        HostSpecParser.Parse("[::1]:65535"));
+
+    // Empty-host inputs must fail fast at parse time, not get a tab created that
+    // dies later with a generic host-validation error from ConnectAsync.
+    [Theory]
+    [InlineData("alice@")]
+    [InlineData("[]")]
+    [InlineData("[]:22")]
+    [InlineData("alice@[]")]
+    public void EmptyHost_Throws(string input)
+        => Assert.Throws<System.FormatException>(() => HostSpecParser.Parse(input));
+
+    // Missing closing bracket: previously fell through to the no-port path and was
+    // treated as a literal hostname with brackets in it, then died later in DNS.
+    [Theory]
+    [InlineData("[2001:db8::1")]
+    [InlineData("[host")]
+    [InlineData("alice@[2001:db8::1")]
+    public void MissingClosingBracket_Throws(string input)
+        => Assert.Throws<System.FormatException>(() => HostSpecParser.Parse(input));
+}

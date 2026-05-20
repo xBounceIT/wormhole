@@ -8,6 +8,7 @@ using Wormhole.Data;
 using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Services;
+using Wormhole.Services.Ssh;
 using Wormhole.ViewModels;
 using Wormhole.ViewModels.Sessions;
 
@@ -74,6 +75,9 @@ public partial class App : Application
         services.AddSingleton<INavigationService, NavigationService>();
         services.AddSingleton<IDialogService, DialogService>();
         services.AddSingleton<ISshSessionService, SshSessionService>();
+        services.AddSingleton<IPrivateKeyInspector, SshNetPrivateKeyInspector>();
+        services.AddSingleton<ISshCredentialResolver, SshCredentialResolver>();
+        services.AddSingleton<ISessionTabFactory, SessionTabFactory>();
         services.AddSingleton<IRdpSessionService, RdpSessionService>();
         services.AddSingleton<ISftpService, SftpService>();
 

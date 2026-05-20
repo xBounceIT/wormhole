@@ -2,7 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
     <title>Wormhole terminal</title>
+    <link rel="stylesheet" href="vendor/xterm/xterm.css" />
     <style>
       html, body {
         margin: 0;
@@ -15,24 +18,22 @@
       }
       #terminal {
         height: 100vh;
+        padding: 4px;
+        box-sizing: border-box;
       }
-      .placeholder {
-        padding: 16px;
-        color: #6e6e6e;
+      .xterm-viewport::-webkit-scrollbar {
+        width: 8px;
+      }
+      .xterm-viewport::-webkit-scrollbar-thumb {
+        background: #3a3a3a;
+        border-radius: 4px;
       }
     </style>
-    <!--
-      TODO (SSH feature PR): drop the xterm.js bundle into Assets/web/vendor/xterm/
-      and replace the placeholder below with:
-        <link rel="stylesheet" href="vendor/xterm/xterm.css" />
-        <script src="vendor/xterm/xterm.js"></script>
-        <script src="bridge.js"></script>
-    -->
+    <script src="vendor/xterm/xterm.js"></script>
+    <script src="vendor/addon-fit/addon-fit.js"></script>
   </head>
   <body>
-    <div id="terminal" class="placeholder">
-      Terminal renderer not yet bundled. The WebView2 host loads this file via
-      <code>SetVirtualHostNameToFolderMapping</code>; wire xterm.js + bridge.js in the SSH feature PR.
-    </div>
+    <div id="terminal"></div>
+    <script src="bridge.js"></script>
   </body>
 </html>

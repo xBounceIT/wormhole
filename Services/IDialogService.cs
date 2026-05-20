@@ -9,4 +9,5 @@ public interface IDialogService
     Task<bool> ConfirmAsync(string title, string message, string primaryText = "Yes", string closeText = "No");
     Task<string?> PromptForTextAsync(string title, string label, string defaultValue = "");
     Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null);
+    Task<string?> PromptPasswordAsync(string title, string message);
 }

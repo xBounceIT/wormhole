@@ -119,6 +119,19 @@ public sealed class ConnectionRepository : IConnectionRepository
         tx.Commit();
     }
 
+    public async Task UpdateHostFingerprintAsync(Guid nodeId, string fingerprint, CancellationToken cancellationToken = default)
+    {
+        if (nodeId == Guid.Empty) throw new ArgumentException("nodeId must not be empty.", nameof(nodeId));
+        if (string.IsNullOrWhiteSpace(fingerprint))
+            throw new ArgumentException("fingerprint must be a non-empty string.", nameof(fingerprint));
+
+        using var connection = _factory.Open();
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE Nodes SET SshKnownHostFingerprint = @fingerprint, UpdatedAt = @now WHERE Id = @nodeId;",
+            new { nodeId, fingerprint, now = DateTime.UtcNow },
+            cancellationToken: cancellationToken));
+    }
+
     public async Task DeleteAsync(Guid id, CancellationToken cancellationToken = default)
     {
         using var connection = _factory.Open();

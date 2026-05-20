@@ -69,6 +69,8 @@ public class ConnectionTreeViewModelTests : IDisposable
 
     private ConnectionTreeViewModel CreateVm(FakeDialogService? dialog = null) => new(
         _repo,
+        new InheritanceResolver(),
+        new NullSessionTabFactory(),
         dialog ?? new FakeDialogService(),
         NullLogger<ConnectionTreeViewModel>.Instance);
 
@@ -554,7 +556,12 @@ public class ConnectionTreeViewModelTests : IDisposable
     {
         var failing = new ThrowOnUpdateRepository(_repo);
         var dialog = new FakeDialogService { TextPromptResult = "original" };
-        var vm = new ConnectionTreeViewModel(failing, dialog, NullLogger<ConnectionTreeViewModel>.Instance);
+        var vm = new ConnectionTreeViewModel(
+            failing,
+            new InheritanceResolver(),
+            new NullSessionTabFactory(),
+            dialog,
+            NullLogger<ConnectionTreeViewModel>.Instance);
         await vm.RefreshAsync();
         await vm.AddFolderCommand.ExecuteAsync(null);
 
@@ -586,8 +593,15 @@ public class ConnectionTreeViewModelTests : IDisposable
         }
         public Task UpdateManyAsync(IReadOnlyCollection<ConnectionNode> nodes, System.Threading.CancellationToken ct = default)
             => _inner.UpdateManyAsync(nodes, ct);
+        public Task UpdateHostFingerprintAsync(Guid nodeId, string fingerprint, System.Threading.CancellationToken ct = default)
+            => _inner.UpdateHostFingerprintAsync(nodeId, fingerprint, ct);
         public Task DeleteAsync(Guid id, System.Threading.CancellationToken ct = default)
             => _inner.DeleteAsync(id, ct);
+    }
+
+    private sealed class NullSessionTabFactory : ISessionTabFactory
+    {
+        public void Open(ConnectionProfile profile) { /* tests don't exercise tab opening */ }
     }
 
     private sealed class FakeDialogService : IDialogService
@@ -603,5 +617,7 @@ public class ConnectionTreeViewModelTests : IDisposable
             => Task.FromResult(TextPromptResult);
         public Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null)
             => Task.FromResult(ConnectionPromptResult);
+        public Task<string?> PromptPasswordAsync(string title, string message)
+            => Task.FromResult<string?>(null);
     }
 }

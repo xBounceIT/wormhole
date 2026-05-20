@@ -14,6 +14,13 @@ public abstract partial class SessionTabViewModel : ObservableObject
     public ConnectionProfile? Profile { get; protected set; }
 
     public abstract ProtocolType Protocol { get; }
+
+    public virtual void Initialize(ConnectionProfile profile)
+    {
+        Profile = profile;
+        Title = string.IsNullOrEmpty(profile.Name) ? profile.Host : profile.Name;
+        Status = SessionStatus.Disconnected;
+    }
 }
 
 public enum SessionStatus

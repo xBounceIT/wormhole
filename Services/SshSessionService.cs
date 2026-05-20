@@ -1,28 +1,135 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
+using Renci.SshNet;
 using Wormhole.Models;
+using Wormhole.Services.Ssh;
 
 namespace Wormhole.Services;
 
 public sealed class SshSessionService : ISshSessionService
 {
     private readonly ILogger<SshSessionService> _logger;
+    private readonly ILoggerFactory _loggerFactory;
 
-    public SshSessionService(ILogger<SshSessionService> logger)
+    public SshSessionService(ILogger<SshSessionService> logger, ILoggerFactory loggerFactory)
     {
         _logger = logger;
+        _loggerFactory = loggerFactory;
     }
 
-    public Task<ISshSession> ConnectAsync(
+    public async Task<ISshSession> ConnectAsync(
         ConnectionProfile profile,
-        string? password,
-        byte[]? privateKey,
+        SshCredentials credentials,
+        TerminalSize initialSize,
         CancellationToken cancellationToken = default)
     {
-        _logger.LogInformation("ConnectAsync placeholder for {Host}:{Port}", profile.Host, profile.Port);
-        throw new NotImplementedException(
-            "SshSessionService.ConnectAsync is a scaffold placeholder. Wire SSH.NET ShellStream here in the SSH feature PR.");
+        if (string.IsNullOrWhiteSpace(profile.Host))
+            throw new ArgumentException("Connection profile must have a host.", nameof(profile));
+        if (string.IsNullOrWhiteSpace(profile.Username))
+            throw new InvalidOperationException(
+                $"Connection '{profile.Name}' has no username; provide one before connecting.");
+
+        var authMethods = BuildAuthMethods(profile.Username!, credentials);
+        if (authMethods.Count == 0)
+        {
+            throw new InvalidOperationException(
+                $"Connection '{profile.Name}' has no usable credentials (password or private key).");
+        }
+
+        var connectionInfo = new ConnectionInfo(profile.Host, profile.Port, profile.Username, authMethods.ToArray())
+        {
+            Timeout = TimeSpan.FromSeconds(15),
+        };
+
+        var client = new SshClient(connectionInfo);
+        string? capturedFingerprint = null;
+        SshHostKeyMismatchException? mismatch = null;
+
+        client.HostKeyReceived += (_, e) =>
+        {
+            capturedFingerprint = SshHostKeyValidator.ComputeFingerprint(e.HostKey);
+            var decision = SshHostKeyValidator.Decide(profile.SshKnownHostFingerprint, capturedFingerprint);
+            if (decision == HostKeyDecision.Mismatch)
+            {
+                e.CanTrust = false;
+                mismatch = new SshHostKeyMismatchException(
+                    profile.Host, profile.SshKnownHostFingerprint!, capturedFingerprint);
+                return;
+            }
+            e.CanTrust = true;
+        };
+
+        try
+        {
+            // Task.Run's CT only governs scheduling; SSH.NET's sync Connect ignores CT once
+            // started. WaitAsync gives the awaiter an exit path; the catch block disposes
+            // the client to interrupt the in-flight socket.
+            await Task.Run(client.Connect).WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            SafeDispose(client);
+            throw;
+        }
+        catch
+        {
+            SafeDispose(client);
+            if (mismatch is not null) throw mismatch;
+            throw;
+        }
+
+        if (mismatch is not null)
+        {
+            SafeDispose(client);
+            throw mismatch;
+        }
+
+        ShellStream stream;
+        try
+        {
+            var cols = initialSize.Columns == 0 ? TerminalSize.Default.Columns : initialSize.Columns;
+            var rows = initialSize.Rows == 0 ? TerminalSize.Default.Rows : initialSize.Rows;
+            stream = client.CreateShellStream("xterm-256color", cols, rows, 0, 0, 8192);
+        }
+        catch
+        {
+            SafeDispose(client);
+            throw;
+        }
+
+        _logger.LogInformation(
+            "SSH connected to {Host}:{Port} as {User}; fingerprint {Fingerprint}.",
+            profile.Host, profile.Port, profile.Username, capturedFingerprint);
+
+        return new SshSession(client, stream, capturedFingerprint!, _loggerFactory.CreateLogger<SshSession>());
+    }
+
+    private static List<AuthenticationMethod> BuildAuthMethods(string username, SshCredentials credentials)
+    {
+        var methods = new List<AuthenticationMethod>();
+        if (credentials.PrivateKey is { Length: > 0 })
+        {
+            // KeyPassphrase is consumed locally to decrypt the key — never sent as a login
+            // password. SSH.NET throws SshPassPhraseNullOrEmptyException at parse time if the
+            // key is encrypted and we passed no passphrase; the VM catches and re-prompts.
+            var keyFile = string.IsNullOrEmpty(credentials.KeyPassphrase)
+                ? new PrivateKeyFile(new MemoryStream(credentials.PrivateKey))
+                : new PrivateKeyFile(new MemoryStream(credentials.PrivateKey), credentials.KeyPassphrase);
+            methods.Add(new PrivateKeyAuthenticationMethod(username, keyFile));
+        }
+        if (!string.IsNullOrEmpty(credentials.Password))
+        {
+            methods.Add(new PasswordAuthenticationMethod(username, credentials.Password));
+        }
+        return methods;
+    }
+
+    private static void SafeDispose(SshClient client)
+    {
+        try { client.Dispose(); } catch { /* best effort */ }
     }
 }
