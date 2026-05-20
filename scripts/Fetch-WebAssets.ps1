@@ -34,7 +34,23 @@ function Write-Info($message) {
 }
 
 function Get-FileSha256($path) {
-    return (Get-FileHash -Path $path -Algorithm SHA256).Hash.ToLowerInvariant()
+    # Compute via System.Security.Cryptography directly. Avoids depending on the
+    # Get-FileHash cmdlet — which is unexpectedly missing under MSBuild's invocation
+    # of powershell.exe on GitHub-hosted Windows runners (works in interactive PS).
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($path)
+        try {
+            $hash = $sha.ComputeHash($stream)
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    finally {
+        $sha.Dispose()
+    }
+    return -join ($hash | ForEach-Object { $_.ToString("x2") })
 }
 
 if (-not (Test-Path $vendorRoot)) {
