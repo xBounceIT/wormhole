@@ -251,6 +251,54 @@ public class UpdateServiceTests
     }
 
     [Fact]
+    public async Task CheckAsync_DoesNotPersistLastCheck_OnMalformedJson()
+    {
+        var settings = new FakeAppSettingsService();
+        var service = NewService(
+            req => new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("this is not json", Encoding.UTF8, "application/json"),
+            },
+            settings: settings);
+
+        var result = await service.CheckAsync();
+        Assert.True(result.CheckFailed);
+        Assert.Null(settings.Current.LastUpdateCheck);
+    }
+
+    [Fact]
+    public async Task CheckAsync_PreservesLatestKnown_AcrossFailure()
+    {
+        UpdateService.TryGetTargetArchitecture(out var arch);
+        var goodJson = MakeReleaseJson(
+            tag: "v9.9.9",
+            draft: false,
+            prerelease: false,
+            assets: new[] { ($"Wormhole-9.9.9-win-{arch}-setup.exe", "https://example.invalid/installer.exe") });
+
+        var attempt = 0;
+        var service = NewService(req =>
+        {
+            attempt++;
+            return attempt == 1
+                ? OkJson(goodJson)
+                : new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+        });
+
+        var first = await service.CheckAsync();
+        Assert.True(first.IsUpdateAvailable);
+
+        var second = await service.CheckAsync();
+        Assert.True(second.CheckFailed);
+
+        // LatestKnown must still reflect the earlier successful update so the user can
+        // still install it from the InfoBar / Settings card.
+        Assert.NotNull(service.LatestKnown);
+        Assert.True(service.LatestKnown!.IsUpdateAvailable);
+        Assert.Equal(new Version(9, 9, 9), service.LatestKnown.LatestVersion);
+    }
+
+    [Fact]
     public async Task LaunchInstallerAndExitAsync_DoesNothing_WhenFileMissing()
     {
         var launcher = new FakeInstallerLauncher();

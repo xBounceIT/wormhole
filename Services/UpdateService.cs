@@ -86,13 +86,14 @@ public sealed class UpdateService : IUpdateService, IDisposable
                 return RememberResult(UpdateCheckResult.Failed(currentVersion));
             }
 
-            // Persist the throttle marker only when GitHub gave us a real answer. Transient
-            // 403/5xx or transport failures should not suppress the next startup check.
-            _settingsService.Current.LastUpdateCheck = DateTimeOffset.UtcNow;
-            _settingsService.Save();
-
             await using var stream = await response.Content.ReadAsStreamAsync(linkedCts.Token).ConfigureAwait(false);
             var release = await JsonSerializer.DeserializeAsync<GitHubRelease>(stream, JsonOptions, linkedCts.Token).ConfigureAwait(false);
+
+            // Persist the throttle marker only once we have a parseable answer from GitHub.
+            // Non-2xx, transport failures, and malformed JSON should not suppress the next
+            // startup check.
+            _settingsService.Current.LastUpdateCheck = DateTimeOffset.UtcNow;
+            _settingsService.Save();
 
             if (release is null || release.Draft || release.Prerelease)
             {
@@ -363,7 +364,12 @@ public sealed class UpdateService : IUpdateService, IDisposable
 
     private UpdateCheckResult RememberResult(UpdateCheckResult result)
     {
-        LatestKnown = result;
+        // Don't clobber a previously known update with a failed check — the user could
+        // still want to install what we found earlier.
+        if (!result.CheckFailed)
+        {
+            LatestKnown = result;
+        }
         if (result.IsUpdateAvailable)
         {
             try { UpdateAvailable?.Invoke(this, result); }
