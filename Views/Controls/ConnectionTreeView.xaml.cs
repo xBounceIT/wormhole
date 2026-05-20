@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Windows.ApplicationModel.DataTransfer;
+using Windows.Foundation;
 using Wormhole.ViewModels;
 
 namespace Wormhole.Views.Controls;
@@ -22,6 +23,12 @@ public sealed partial class ConnectionTreeView : UserControl
             _loaded = true;
             await ViewModel.RefreshAsync();
         };
+    }
+
+    public double MeasureHeaderDesiredWidth()
+    {
+        HeaderRow.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        return HeaderRow.DesiredSize.Width;
     }
 
     private void OnNewFolderAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)

@@ -9,7 +9,8 @@
         <StackPanel HorizontalAlignment="Center"
                     VerticalAlignment="Center"
                     Spacing="12"
-                    MaxWidth="420">
+                    MaxWidth="420"
+                    Visibility="{x:Bind ViewModel.IsEmpty, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}">
             <FontIcon Glyph="" FontSize="48" Opacity="0.5" />
             <TextBlock Text="No active sessions"
                        Style="{StaticResource SubtitleTextBlockStyle}"
@@ -28,7 +29,8 @@
                  IsAddTabButtonVisible="False"
                  CanReorderTabs="True"
                  CanDragTabs="True"
-                 Background="Transparent">
+                 Background="Transparent"
+                 Visibility="{x:Bind ViewModel.HasTabs, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}">
             <TabView.TabItemTemplate>
                 <DataTemplate x:DataType="sessions:SessionTabViewModel">
                     <TabViewItem Header="{x:Bind Title, Mode=OneWay}">
