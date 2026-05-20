@@ -139,6 +139,24 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         Status = SessionStatus.Failed;
     }
 
+    /// <summary>
+    /// Called by the view on Unloaded — releases the WebView2 binding without tearing
+    /// down the SSH session. Background SSH output still arrives on the read pump but
+    /// the bridge is gone, so it isn't routed to a disposed WebView2 (no more
+    /// repeated InvalidOperationException spam). The next AttachAsync rebinds.
+    /// </summary>
+    public void DetachView()
+    {
+        var bridge = _bridge;
+        _bridge = null;
+        if (bridge is not null)
+        {
+            try { bridge.Dispose(); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Error disposing TerminalBridge on view unload."); }
+        }
+        _webView = null;
+    }
+
     private void OnSessionClosed(object? sender, EventArgs e)
     {
         // Fired from the SSH read-pump thread; marshal to the captured UI dispatcher

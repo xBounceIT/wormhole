@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.Threading.Tasks;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.Web.WebView2.Core;
@@ -12,8 +13,14 @@ namespace Wormhole.Views.Sessions;
 
 public sealed partial class SshTerminalView : UserControl
 {
+    // How long to wait for the JS "ready" handshake after navigation completes before
+    // surfacing a failure. Missing/corrupt xterm assets, JS errors in bridge.js, or
+    // a stuck WebView all show up as "no handshake."
+    private static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(10);
+
     private SshSessionViewModel? _viewModel;
-    private bool _webViewReady;
+    private bool _handshakeReceived;
+    private int _initInProgress;
 
     public SshTerminalView()
     {
@@ -34,32 +41,20 @@ public sealed partial class SshTerminalView : UserControl
             _viewModel.InitializationRetryRequested += OnInitializationRetryRequested;
         }
 
-        if (_webViewReady) return;
+        // Already attached to the SSH session — nothing more to do until the
+        // VM signals a retry.
+        if (_handshakeReceived) return;
         await InitializeWebViewAsync().ConfigureAwait(true);
-    }
-
-    // The VM outlives the view (it lives in ShellViewModel.Tabs across navigations),
-    // so we must unsubscribe here or every navigation accumulates a stale handler
-    // that keeps the old SshTerminalView alive and double-runs init on retry.
-    // Also unhook the one-shot WebView2 ready handler — if the user closes the tab
-    // before "ready" arrives, an in-flight WebMessageReceived would otherwise fire
-    // on a torn-down view and call AttachAsync against a disposed control.
-    private void OnUnloaded(object sender, RoutedEventArgs e)
-    {
-        if (_viewModel is not null)
-        {
-            _viewModel.InitializationRetryRequested -= OnInitializationRetryRequested;
-        }
-        if (TerminalView.CoreWebView2 is not null)
-        {
-            TerminalView.CoreWebView2.WebMessageReceived -= OnReadyMessage;
-        }
     }
 
     private async Task InitializeWebViewAsync()
     {
+        // Re-entrancy guard: OnLoaded racing with InitializationRetryRequested could
+        // otherwise double-fire Navigate.
+        if (System.Threading.Interlocked.CompareExchange(ref _initInProgress, 1, 0) != 0) return;
+
         var vm = _viewModel;
-        if (vm is null) return;
+        if (vm is null) { _initInProgress = 0; return; }
         try
         {
             await TerminalView.EnsureCoreWebView2Async();
@@ -72,20 +67,36 @@ public sealed partial class SshTerminalView : UserControl
             TerminalView.CoreWebView2.Settings.AreDevToolsEnabled = Debugger.IsAttached;
             TerminalView.CoreWebView2.Settings.AreDefaultContextMenusEnabled = Debugger.IsAttached;
 
+            // -= then += so a Retry doesn't accumulate handlers.
+            TerminalView.CoreWebView2.WebMessageReceived -= OnReadyMessage;
             TerminalView.CoreWebView2.WebMessageReceived += OnReadyMessage;
             TerminalView.CoreWebView2.Navigate("https://terminal.wormhole/terminal.html");
-            _webViewReady = true;
+
+            _ = ScheduleHandshakeTimeoutAsync(vm);
         }
         catch (Exception ex)
         {
-            // Leave _webViewReady false so a Retry click can re-attempt init.
+            // _handshakeReceived stays false so a Retry click re-runs init.
             vm.ReportFailure("Failed to initialize WebView2: " + ex.Message);
         }
+        finally
+        {
+            _initInProgress = 0;
+        }
+    }
+
+    private async Task ScheduleHandshakeTimeoutAsync(SshSessionViewModel vm)
+    {
+        await Task.Delay(HandshakeTimeout).ConfigureAwait(true);
+        if (_handshakeReceived) return;
+        if (!ReferenceEquals(vm, _viewModel)) return;
+        vm.ReportFailure("Terminal page did not finish loading (no 'ready' handshake). " +
+                         "The xterm.js assets may be missing or corrupted.");
     }
 
     private async void OnInitializationRetryRequested()
     {
-        if (_webViewReady) return;
+        if (_handshakeReceived) return;
         await InitializeWebViewAsync().ConfigureAwait(true);
     }
 
@@ -94,8 +105,10 @@ public sealed partial class SshTerminalView : UserControl
         var msg = args.TryGetWebMessageAsString();
         if (msg is null || !msg.StartsWith("ready", StringComparison.Ordinal)) return;
 
-        // Self-unsubscribe so a second navigation doesn't double-attach.
+        // Self-unsubscribe and mark handshake done so future navigations / retries don't
+        // double-attach.
         TerminalView.CoreWebView2.WebMessageReceived -= OnReadyMessage;
+        _handshakeReceived = true;
 
         // The handshake carries the initial xterm.js geometry as "ready:COLSxROWS" so the
         // SSH shell can be allocated at the correct size. If parsing fails, fall back to
@@ -122,6 +135,24 @@ public sealed partial class SshTerminalView : UserControl
         catch (Exception ex)
         {
             vm.ReportFailure(ex.Message);
+        }
+    }
+
+    // The VM outlives the view (it lives in ShellViewModel.Tabs across navigations),
+    // so we must unsubscribe here or every navigation accumulates a stale handler
+    // that keeps the old SshTerminalView alive and double-runs init on retry.
+    // Also tell the VM to drop the bridge — otherwise background SSH output keeps
+    // posting to a disposed WebView2 until reconnect or tab close.
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        if (_viewModel is not null)
+        {
+            _viewModel.InitializationRetryRequested -= OnInitializationRetryRequested;
+            _viewModel.DetachView();
+        }
+        if (TerminalView.CoreWebView2 is not null)
+        {
+            TerminalView.CoreWebView2.WebMessageReceived -= OnReadyMessage;
         }
     }
 }
