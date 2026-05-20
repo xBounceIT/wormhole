@@ -57,10 +57,11 @@
     <EmbeddedResource Include="Data\Migrations\*.sql" />
   </ItemGroup>
 
-  <Target Name="FetchWebAssets"
-          BeforeTargets="BeforeBuild"
-          Inputs="scripts\Fetch-WebAssets.ps1"
-          Outputs="Assets\web\vendor\xterm\xterm.js;Assets\web\vendor\xterm\xterm.css;Assets\web\vendor\addon-fit\addon-fit.js">
+  <!-- Intentionally non-incremental: the script's job includes SHA256 verification of
+       pinned vendor files. If we let MSBuild skip the target once the outputs exist,
+       a tampered vendor file would never be re-verified on incremental builds.
+       The script is idempotent and fast (sub-second when hashes match). -->
+  <Target Name="FetchWebAssets" BeforeTargets="BeforeBuild">
     <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\scripts\Fetch-WebAssets.ps1&quot; -Quiet" />
     <ItemGroup>
       <None Include="Assets\web\vendor\**\*">
