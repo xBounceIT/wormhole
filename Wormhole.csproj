@@ -7,6 +7,11 @@
     <RootNamespace>Wormhole</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <Platforms>x64;arm64</Platforms>
+    <PlatformTarget Condition="('$(PlatformTarget)' == '' Or '$(PlatformTarget)' == 'AnyCPU' Or '$(PlatformTarget)' == 'Any CPU') And '$(RuntimeIdentifier)' == 'win-x64'">x64</PlatformTarget>
+    <PlatformTarget Condition="('$(PlatformTarget)' == '' Or '$(PlatformTarget)' == 'AnyCPU' Or '$(PlatformTarget)' == 'Any CPU') And '$(RuntimeIdentifier)' == 'win-arm64'">ARM64</PlatformTarget>
+    <PlatformTarget Condition="('$(PlatformTarget)' == '' Or '$(PlatformTarget)' == 'AnyCPU' Or '$(PlatformTarget)' == 'Any CPU') And '$(RuntimeIdentifier)' == '' And ('$(Platform)' == '' Or '$(Platform)' == 'AnyCPU' Or '$(Platform)' == 'Any CPU')">x64</PlatformTarget>
+    <PlatformTarget Condition="('$(PlatformTarget)' == '' Or '$(PlatformTarget)' == 'AnyCPU' Or '$(PlatformTarget)' == 'Any CPU') And '$(RuntimeIdentifier)' == '' And '$(Platform)' == 'x64'">x64</PlatformTarget>
+    <PlatformTarget Condition="('$(PlatformTarget)' == '' Or '$(PlatformTarget)' == 'AnyCPU' Or '$(PlatformTarget)' == 'Any CPU') And '$(RuntimeIdentifier)' == '' And ('$(Platform)' == 'arm64' Or '$(Platform)' == 'ARM64')">ARM64</PlatformTarget>
     <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
     <UseWinUI>true</UseWinUI>
     <WindowsPackageType>None</WindowsPackageType>
@@ -22,6 +27,11 @@
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <RepositoryUrl>https://github.com/xBounceIT/wormhole</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
+    <_WebView2LoaderRid Condition="'$(RuntimeIdentifier)' == 'win-x64'">win-x64</_WebView2LoaderRid>
+    <_WebView2LoaderRid Condition="'$(RuntimeIdentifier)' == 'win-arm64'">win-arm64</_WebView2LoaderRid>
+    <_WebView2LoaderRid Condition="'$(_WebView2LoaderRid)' == '' And '$(PlatformTarget)' == 'x64'">win-x64</_WebView2LoaderRid>
+    <_WebView2LoaderRid Condition="'$(_WebView2LoaderRid)' == '' And ('$(PlatformTarget)' == 'arm64' Or '$(PlatformTarget)' == 'ARM64')">win-arm64</_WebView2LoaderRid>
+    <_WebView2LoaderRid Condition="'$(_WebView2LoaderRid)' == '' And ('$(PlatformTarget)' == 'AnyCPU' Or '$(PlatformTarget)' == 'Any CPU')">win-x64</_WebView2LoaderRid>
   </PropertyGroup>
 
   <ItemGroup>
@@ -30,7 +40,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260209005" />
-    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3967.48" />
+    <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3967.48" GeneratePathProperty="true" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.0" />
@@ -45,6 +55,15 @@
     <PackageReference Include="System.Security.Cryptography.Xml" Version="10.0.8" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
     <PackageReference Include="Dapper" Version="2.1.66" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="$(PkgMicrosoft_Web_WebView2)\runtimes\$(_WebView2LoaderRid)\native\WebView2Loader.dll"
+          Link="WebView2Loader.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest"
+          Visible="false"
+          Condition="'$(PkgMicrosoft_Web_WebView2)' != '' And '$(_WebView2LoaderRid)' != '' And Exists('$(PkgMicrosoft_Web_WebView2)\runtimes\$(_WebView2LoaderRid)\native\WebView2Loader.dll')" />
   </ItemGroup>
 
   <ItemGroup>

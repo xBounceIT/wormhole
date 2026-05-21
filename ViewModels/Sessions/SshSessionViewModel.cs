@@ -16,6 +16,8 @@ namespace Wormhole.ViewModels.Sessions;
 
 public sealed partial class SshSessionViewModel : SessionTabViewModel
 {
+    private static readonly TimeSpan RemoteOutputWaitDelay = TimeSpan.FromSeconds(2);
+
     private readonly ISshSessionService _sshService;
     private readonly ISshCredentialResolver _credentialResolver;
     private readonly IConnectionRepository _connectionRepo;
@@ -29,6 +31,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private Microsoft.UI.Dispatching.DispatcherQueue? _uiDispatcher;
     private string? _initialKnownFingerprint;
     private TerminalSize _initialSize = TerminalSize.Default;
+    private CancellationTokenSource? _outputWaitCts;
     private int _connectInFlight;
 
     public SshSessionViewModel(
@@ -57,6 +60,12 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
     [ObservableProperty]
     private string? errorMessage;
+
+    [ObservableProperty]
+    private bool hasReceivedOutput;
+
+    [ObservableProperty]
+    private bool isWaitingForRemoteOutput;
 
     public bool IsConnecting => Status == SessionStatus.Connecting;
     public bool IsConnected => Status == SessionStatus.Connected;
@@ -91,6 +100,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             _bridge = new TerminalBridge(webView, _session, _loggerFactory.CreateLogger<TerminalBridge>());
             oldBridge?.Dispose();
             await _session.ResizeAsync(initialSize.Columns, initialSize.Rows).ConfigureAwait(true);
+            _bridge.RequestFocus();
+            EnsureRemoteOutputWaitTimer();
             return;
         }
 
@@ -108,6 +119,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     public async Task RetryAsync()
     {
         ErrorMessage = null;
+        ResetOutputState();
         if (_webView is null)
         {
             InitializationRetryRequested?.Invoke();
@@ -135,6 +147,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
     public void ReportFailure(string message)
     {
+        CancelRemoteOutputWaitTimer();
+        IsWaitingForRemoteOutput = false;
         ErrorMessage = message;
         Status = SessionStatus.Failed;
     }
@@ -157,12 +171,29 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         _webView = null;
     }
 
+    internal void AttachConnectedSessionForTesting(ISshSession session)
+    {
+        ResetOutputState();
+        if (_session is not null)
+        {
+            _session.DataReceived -= OnSessionDataReceived;
+            _session.Closed -= OnSessionClosed;
+        }
+
+        _session = session;
+        _session.DataReceived += OnSessionDataReceived;
+        _session.Closed += OnSessionClosed;
+        Status = SessionStatus.Connected;
+        StartRemoteOutputWaitTimer();
+    }
+
     private void OnSessionClosed(object? sender, EventArgs e)
     {
         // Fired from the SSH read-pump thread; marshal to the captured UI dispatcher
         // before touching observable properties or disposing the session.
         var dispatcher = _uiDispatcher;
         if (dispatcher is null) return;
+        var closedSession = sender as ISshSession;
         dispatcher.TryEnqueue(async () =>
         {
             // _session being null means we've already disposed (consumer-initiated
@@ -171,7 +202,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             // dead transport and surface the failure overlay. Status==Connecting can
             // happen if the server immediately closes the shell after auth (e.g.
             // forced-command accounts).
-            if (_session is null) return;
+            if (!ReferenceEquals(closedSession, _session)) return;
             if (Status == SessionStatus.Failed || Status == SessionStatus.Disconnected) return;
             await SafeDisposeSessionAsync().ConfigureAwait(true);
             // Use Failed (not Disconnected) so the in-tab failure overlay with the
@@ -189,6 +220,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
         Status = SessionStatus.Connecting;
         ErrorMessage = null;
+        ResetOutputState();
         var cts = new CancellationTokenSource();
         _cts = cts;
         var token = cts.Token;
@@ -216,6 +248,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             }
             // Subscribe BEFORE Start() so we don't miss a Closed that fires immediately
             // (forced-command accounts, EOF-on-connect, etc.).
+            _session.DataReceived += OnSessionDataReceived;
             _session.Closed += OnSessionClosed;
             _bridge = new TerminalBridge(liveWebView, _session, _loggerFactory.CreateLogger<TerminalBridge>());
             _session.Start();
@@ -223,17 +256,17 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             // Mirror SshHostKeyValidator.Decide which treats null *and* empty as unpinned —
             // otherwise a profile with SshKnownHostFingerprint == "" (e.g. from imported
             // data) would never pin and continue to TOFU-accept on every reconnect.
-            if (string.IsNullOrEmpty(_initialKnownFingerprint) && _session is SshSession concrete && !string.IsNullOrEmpty(concrete.HostFingerprint))
+            if (string.IsNullOrEmpty(_initialKnownFingerprint) && !string.IsNullOrEmpty(_session.HostFingerprint))
             {
                 // Pin the captured fingerprint on the in-memory profile *before* any retry so a
                 // disconnect/reconnect inside this tab actually validates against it instead of
                 // TOFU-accepting whatever the server presents.
-                profile = profile with { SshKnownHostFingerprint = concrete.HostFingerprint };
+                profile = profile with { SshKnownHostFingerprint = _session.HostFingerprint };
                 Profile = profile;
-                _initialKnownFingerprint = concrete.HostFingerprint;
+                _initialKnownFingerprint = _session.HostFingerprint;
                 try
                 {
-                    await _connectionRepo.UpdateHostFingerprintAsync(profile.NodeId, concrete.HostFingerprint, token).ConfigureAwait(true);
+                    await _connectionRepo.UpdateHostFingerprintAsync(profile.NodeId, _session.HostFingerprint, token).ConfigureAwait(true);
                 }
                 catch (Exception ex)
                 {
@@ -248,6 +281,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             if (_session is not null && Status == SessionStatus.Connecting)
             {
                 Status = SessionStatus.Connected;
+                _bridge?.RequestFocus();
+                StartRemoteOutputWaitTimer();
             }
         }
         catch (OperationCanceledException)
@@ -278,8 +313,103 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         }
     }
 
+    private void OnSessionDataReceived(object? sender, ReadOnlyMemory<byte> data)
+    {
+        if (data.Length == 0 || HasReceivedOutput) return;
+        var sourceSession = sender as ISshSession;
+
+        var dispatcher = _uiDispatcher;
+        if (dispatcher is null)
+        {
+            MarkOutputReceived(sourceSession);
+            return;
+        }
+
+        if (!dispatcher.TryEnqueue(() => MarkOutputReceived(sourceSession)))
+        {
+            _logger.LogWarning("Failed to enqueue SSH output state update.");
+        }
+    }
+
+    private void MarkOutputReceived(ISshSession? sourceSession)
+    {
+        if (!ReferenceEquals(sourceSession, _session)) return;
+        if (HasReceivedOutput) return;
+        CancelRemoteOutputWaitTimer();
+        HasReceivedOutput = true;
+        IsWaitingForRemoteOutput = false;
+    }
+
+    private void ResetOutputState()
+    {
+        CancelRemoteOutputWaitTimer();
+        HasReceivedOutput = false;
+        IsWaitingForRemoteOutput = false;
+    }
+
+    private void EnsureRemoteOutputWaitTimer()
+    {
+        if (Status != SessionStatus.Connected) return;
+        if (HasReceivedOutput || IsWaitingForRemoteOutput || _outputWaitCts is not null) return;
+        StartRemoteOutputWaitTimer();
+    }
+
+    private void StartRemoteOutputWaitTimer()
+    {
+        CancelRemoteOutputWaitTimer();
+        if (Status != SessionStatus.Connected || HasReceivedOutput) return;
+
+        IsWaitingForRemoteOutput = false;
+        var cts = new CancellationTokenSource();
+        _outputWaitCts = cts;
+        _ = WaitForRemoteOutputAsync(cts.Token);
+    }
+
+    private async Task WaitForRemoteOutputAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(RemoteOutputWaitDelay, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        void ShowWaiting()
+        {
+            if (cancellationToken.IsCancellationRequested) return;
+            if (Status != SessionStatus.Connected || HasReceivedOutput) return;
+            _outputWaitCts = null;
+            IsWaitingForRemoteOutput = true;
+        }
+
+        var dispatcher = _uiDispatcher;
+        if (dispatcher is null)
+        {
+            ShowWaiting();
+        }
+        else if (!dispatcher.TryEnqueue(ShowWaiting))
+        {
+            _outputWaitCts = null;
+            _logger.LogWarning("Failed to enqueue SSH no-output state update.");
+        }
+    }
+
+    private void CancelRemoteOutputWaitTimer()
+    {
+        var cts = _outputWaitCts;
+        _outputWaitCts = null;
+        if (cts is null) return;
+        try { cts.Cancel(); }
+        catch (ObjectDisposedException) { /* already disposed */ }
+    }
+
     private async Task SafeDisposeSessionAsync()
     {
+        CancelRemoteOutputWaitTimer();
+        IsWaitingForRemoteOutput = false;
+
         var bridge = _bridge;
         _bridge = null;
         if (bridge is not null)
@@ -292,6 +422,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         _session = null;
         if (session is not null)
         {
+            session.DataReceived -= OnSessionDataReceived;
+            session.Closed -= OnSessionClosed;
             try { await session.DisposeAsync().ConfigureAwait(true); }
             catch (Exception ex) { _logger.LogWarning(ex, "Error disposing SSH session."); }
         }
