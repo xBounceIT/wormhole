@@ -1,7 +1,4 @@
-using System;
-using System.IO;
 using System.Security.Cryptography;
-using System.Threading.Tasks;
 using Meziantou.Framework.Win32;
 using Microsoft.Extensions.Logging;
 using Wormhole.Helpers;

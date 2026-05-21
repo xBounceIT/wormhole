@@ -1,8 +1,4 @@
-using System;
-using System.Collections.Generic;
 using System.Collections.ObjectModel;
-using System.Linq;
-using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
@@ -301,9 +297,9 @@ public partial class ConnectionTreeViewModel : ObservableObject
     }
 
     private static Guid? ResolveParentId(TreeNodeViewModel? clicked) =>
-        clicked is null                   ? null
-      : clicked.Kind == NodeKind.Folder   ? clicked.Node.Id
-      :                                     clicked.Node.ParentId;
+        clicked is null ? null
+      : clicked.Kind == NodeKind.Folder ? clicked.Node.Id
+      : clicked.Node.ParentId;
 
     private int NextSortOrder(Guid? parentId) =>
         _lastSnapshot.Where(n => n.ParentId == parentId)

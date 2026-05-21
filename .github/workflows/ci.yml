@@ -50,3 +50,23 @@ jobs:
           name: test-results-${{ matrix.platform }}-${{ matrix.configuration }}
           path: Wormhole.Tests/TestResults/*.trx
           if-no-files-found: ignore
+
+  format:
+    name: Format check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Restore local tools
+        run: dotnet tool restore
+
+      - name: Restore Wormhole solution
+        run: dotnet restore Wormhole.sln
+
+      - name: Verify formatting
+        run: dotnet format Wormhole.sln --verify-no-changes --severity warn --no-restore

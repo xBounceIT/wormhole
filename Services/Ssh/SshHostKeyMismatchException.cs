@@ -1,5 +1,3 @@
-using System;
-
 namespace Wormhole.Services.Ssh;
 
 public sealed class SshHostKeyMismatchException : Exception
