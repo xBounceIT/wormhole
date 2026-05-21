@@ -96,10 +96,9 @@ public sealed partial class MainWindow : Window
         DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () => ContentFrame.Focus(FocusState.Programmatic));
     }
 
-    private void AdjustContentMargin(bool? force = null)
+    private void AdjustContentMargin(bool force = false)
     {
-        if (_windowPresenter is null ||
-            (_windowPresenter.State == _currentWindowState && force is not true))
+        if (_windowPresenter is null || (!force && _windowPresenter.State == _currentWindowState))
         {
             return;
         }
@@ -107,7 +106,8 @@ public sealed partial class MainWindow : Window
         var top = _windowPresenter.State == OverlappedPresenterState.Maximized ? -1d : -2d;
         var infoBarMargin = UpdateInfoBar.Margin;
         UpdateInfoBar.Margin = new Thickness(infoBarMargin.Left, top, infoBarMargin.Right, infoBarMargin.Bottom);
-        ContentArea.Margin = new Thickness(0, top, 0, 0);
+        var contentMargin = ContentArea.Margin;
+        ContentArea.Margin = new Thickness(contentMargin.Left, top, contentMargin.Right, contentMargin.Bottom);
         _currentWindowState = _windowPresenter.State;
     }
 
