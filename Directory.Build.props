@@ -1,5 +1,31 @@
 <Project>
   <PropertyGroup>
+    <!-- Existing -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
+
+    <!-- Language -->
+    <LangVersion>latest</LangVersion>
+
+    <!-- Analyzers -->
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <AnalysisMode>Recommended</AnalysisMode>
+
+    <!-- IDE0xxx style rules participate in the build -->
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+
+    <!-- Do NOT promote warnings to errors (per project decision) -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
   </PropertyGroup>
+
+  <!-- Auto-install Husky.NET hooks on first build for non-CI environments.
+       Skips on CI (which runs format checks via the workflow directly) and when
+       hooks are already installed. ContinueOnError keeps fresh clones building
+       even if tool restore fails for some transient reason. -->
+  <Target Name="HuskyInstall"
+          BeforeTargets="Restore"
+          Condition="'$(CI)' != 'true' AND '$(HUSKY_SKIP_INSTALL)' != 'true' AND !Exists('$(MSBuildThisFileDirectory).husky/_/husky.sh')">
+    <Exec Command="dotnet tool restore" WorkingDirectory="$(MSBuildThisFileDirectory)" ContinueOnError="true" />
+    <Exec Command="dotnet husky install" WorkingDirectory="$(MSBuildThisFileDirectory)" ContinueOnError="true" />
+  </Target>
 </Project>

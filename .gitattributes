@@ -1,0 +1,27 @@
+# Normalize line endings: CRLF in the working tree on Windows, normalized in the repo.
+* text=auto eol=crlf
+
+# Hint git's diff machinery for C# files
+*.cs text diff=csharp
+
+# Shell scripts and Husky hooks: LF only. Git on Windows runs hooks via sh,
+# which chokes on CRLF in the shebang line.
+.husky/* text eol=lf
+*.sh     text eol=lf
+
+# Binary file types this project may track
+*.png binary
+*.ico binary
+*.dll binary
+*.exe binary
+*.pri binary
+*.xbf binary
+
+# Vendored web assets - skip GitHub language stats and collapse in diffs
+Assets/web/vendor/**     linguist-vendored=true binary
+Assets/web/bridge.js     linguist-vendored=true
+Assets/web/terminal.html linguist-vendored=true
+
+# Generated files
+*.g.cs   linguist-generated=true
+*.g.i.cs linguist-generated=true

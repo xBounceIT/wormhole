@@ -1,6 +1,4 @@
-using System;
 using Microsoft.UI.Xaml.Controls;
-
 namespace Wormhole.Services;
 
 public sealed class NavigationService : INavigationService

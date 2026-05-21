@@ -1,7 +1,5 @@
-using System.IO;
 using Renci.SshNet;
 using Renci.SshNet.Common;
-
 namespace Wormhole.Services.Ssh;
 
 public sealed class SshNetPrivateKeyInspector : IPrivateKeyInspector

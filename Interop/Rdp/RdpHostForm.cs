@@ -1,5 +1,3 @@
-using System;
-
 namespace Wormhole.Interop.Rdp;
 
 public sealed class RdpHostForm : IDisposable
