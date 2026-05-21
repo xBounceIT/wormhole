@@ -54,11 +54,21 @@ public sealed partial class NewConnectionDialog : UserControl, IDraftForm<NewCon
         var protocol = (ProtocolType)ProtocolBox.SelectedItem;
         int? port = double.IsNaN(PortBox.Value) ? null : (int)PortBox.Value;
         var selectedCredential = (CredentialBox.SelectedItem as CredentialChoice)?.Profile;
-        // Username field is hidden while a credential is selected; drop its (possibly stale) text.
-        string? username = null;
-        if (selectedCredential is null && !string.IsNullOrWhiteSpace(UsernameBox.Text))
+        // Snapshot the credential's username onto the connection so the SSH/RDP services
+        // (which read profile.Username directly) have a usable login. Manual entry only
+        // applies when no credential is selected.
+        string? username;
+        if (selectedCredential is not null)
+        {
+            username = selectedCredential.Username;
+        }
+        else if (!string.IsNullOrWhiteSpace(UsernameBox.Text))
         {
             username = UsernameBox.Text.Trim();
+        }
+        else
+        {
+            username = null;
         }
 
         return new NewConnectionDraft(
