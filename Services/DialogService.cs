@@ -71,10 +71,25 @@ public sealed class DialogService : IDialogService
 
     public async Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null)
     {
-        var dialog = new NewConnectionDialog { XamlRoot = RequireXamlRoot() };
-        if (initial is not null) dialog.InitializeForEdit(initial);
+        var form = new NewConnectionDialog();
+        if (initial is not null) form.LoadDraft(initial);
+
+        var dialog = new ContentDialog
+        {
+            Title = initial is null ? "New connection" : "Edit connection",
+            Content = form,
+            PrimaryButtonText = initial is null ? "Create" : "Save",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = RequireXamlRoot(),
+            IsPrimaryButtonEnabled = form.IsValid,
+        };
+
+        form.ValidityChanged += (_, _) => dialog.IsPrimaryButtonEnabled = form.IsValid;
+        dialog.Opened += (_, _) => form.FocusNameField();
+
         var result = await dialog.ShowAsync();
-        return result == ContentDialogResult.Primary ? dialog.Result : null;
+        return result == ContentDialogResult.Primary ? form.BuildDraft() : null;
     }
 
     public async Task<string?> PromptPasswordAsync(string title, string message)
