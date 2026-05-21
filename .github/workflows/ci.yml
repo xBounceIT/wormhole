@@ -62,9 +62,6 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Restore local tools
-        run: dotnet tool restore
-
       - name: Restore Wormhole solution
         run: dotnet restore Wormhole.sln
 
