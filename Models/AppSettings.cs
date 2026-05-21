@@ -8,6 +8,7 @@ public sealed class AppSettings
     public bool ConfirmOnTabClose { get; set; } = true;
     public string DefaultSshFont { get; set; } = "Cascadia Mono";
     public int DefaultSshFontSize { get; set; } = 12;
+    public bool AutoCopyOnSelect { get; set; } = true;
 
     public bool AutoCheckForUpdates { get; set; } = true;
     public DateTimeOffset? LastUpdateCheck { get; set; }

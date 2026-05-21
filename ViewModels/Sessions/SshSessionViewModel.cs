@@ -21,6 +21,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private readonly ISshSessionService _sshService;
     private readonly ISshCredentialResolver _credentialResolver;
     private readonly IConnectionRepository _connectionRepo;
+    private readonly IAppSettingsService _settingsService;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<SshSessionViewModel> _logger;
 
@@ -38,11 +39,13 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         ISshSessionService sshService,
         ISshCredentialResolver credentialResolver,
         IConnectionRepository connectionRepo,
+        IAppSettingsService settingsService,
         ILoggerFactory loggerFactory)
     {
         _sshService = sshService;
         _credentialResolver = credentialResolver;
         _connectionRepo = connectionRepo;
+        _settingsService = settingsService;
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<SshSessionViewModel>();
         PropertyChanged += (_, args) =>
@@ -97,7 +100,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         if (_session is not null)
         {
             var oldBridge = _bridge;
-            _bridge = new TerminalBridge(webView, _session, _loggerFactory.CreateLogger<TerminalBridge>());
+            _bridge = new TerminalBridge(webView, _session, _loggerFactory.CreateLogger<TerminalBridge>(), _settingsService);
             oldBridge?.Dispose();
             await _session.ResizeAsync(initialSize.Columns, initialSize.Rows).ConfigureAwait(true);
             _bridge.RequestFocus();
@@ -250,7 +253,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             // (forced-command accounts, EOF-on-connect, etc.).
             _session.DataReceived += OnSessionDataReceived;
             _session.Closed += OnSessionClosed;
-            _bridge = new TerminalBridge(liveWebView, _session, _loggerFactory.CreateLogger<TerminalBridge>());
+            _bridge = new TerminalBridge(liveWebView, _session, _loggerFactory.CreateLogger<TerminalBridge>(), _settingsService);
             _session.Start();
 
             // Mirror SshHostKeyValidator.Decide which treats null *and* empty as unpinned —
