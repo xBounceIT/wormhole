@@ -139,6 +139,9 @@ public sealed class SshSessionViewModelTests
         vm.Status = SessionStatus.Connecting;
         Assert.False(vm.RetryCommand.CanExecute(null));
 
+        vm.Status = SessionStatus.Connected;
+        Assert.True(vm.RetryCommand.CanExecute(null));
+
         vm.Status = SessionStatus.Disconnected;
         Assert.True(vm.RetryCommand.CanExecute(null));
     }
