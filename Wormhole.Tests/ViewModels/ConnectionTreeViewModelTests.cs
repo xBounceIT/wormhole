@@ -646,7 +646,7 @@ public class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
-    public async Task SearchText_MatchesFolderName_ShowsFolderAndItsChildren()
+    public async Task SearchText_MatchesFolderName_ShowsAndExpandsFolderWithChildren()
     {
         var dialog = new FakeDialogService();
         var vm = CreateVm(dialog);
@@ -662,10 +662,36 @@ public class ConnectionTreeViewModelTests : IDisposable
             "beta", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(folder);
 
+        Assert.False(folder.IsExpanded);
+
         vm.SearchText = "Lin";
 
         Assert.True(folder.IsVisible);
+        Assert.True(folder.IsExpanded);
         Assert.All(folder.Children, child => Assert.True(child.IsVisible));
+    }
+
+    [Fact]
+    public async Task SearchText_FolderNameMatchCleared_RestoresCollapsedState()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Linux";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var folder = vm.Roots.Single();
+        dialog.ConnectionPromptResult = new NewConnectionDraft(
+            "alpha", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(folder);
+
+        Assert.False(folder.IsExpanded);
+
+        vm.SearchText = "Lin";
+        Assert.True(folder.IsExpanded);
+
+        vm.SearchText = string.Empty;
+        Assert.False(folder.IsExpanded);
     }
 
     [Fact]

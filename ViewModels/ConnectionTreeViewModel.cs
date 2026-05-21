@@ -394,9 +394,12 @@ public partial class ConnectionTreeViewModel : ObservableObject
             {
                 if (nameMatches)
                 {
-                    // Folder name matched — show the folder and everything beneath it
-                    // (the user wants to see what's inside the matching folder).
+                    // Folder name matched — show the folder and everything beneath it,
+                    // and expand it so the contents the user searched for are actually
+                    // visible. The pre-filter IsExpanded value is in the snapshot, so
+                    // clearing the search will restore the original collapsed state.
                     node.IsVisible = true;
+                    node.IsExpanded = true;
                     MarkAllVisible(node.Children);
                 }
                 else
