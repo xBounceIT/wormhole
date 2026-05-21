@@ -105,6 +105,7 @@
             Condition="Exists('$(MSBuildProjectDirectory)\obj\wgproxy\$(_WgProxyArch)\wormhole-wgproxy.exe')">
         <Link>wormhole-wgproxy.exe</Link>
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
         <Visible>false</Visible>
       </None>
     </ItemGroup>
