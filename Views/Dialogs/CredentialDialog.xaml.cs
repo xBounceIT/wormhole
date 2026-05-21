@@ -14,6 +14,7 @@ public sealed partial class CredentialDialog : UserControl, IDraftForm<Credentia
         this.InitializeComponent();
     }
 
+    // Sftp intentionally omitted: SFTP sessions run over SSH and reuse an SSH credential.
     public ProtocolType[] Protocols { get; } = new[] { ProtocolType.Ssh, ProtocolType.Rdp };
 
     private ProtocolType SelectedProtocol =>

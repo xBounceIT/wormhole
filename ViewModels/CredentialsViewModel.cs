@@ -88,6 +88,14 @@ public partial class CredentialsViewModel : ObservableObject
         var draft = await _dialog.PromptForCredentialAsync();
         if (draft is null) return;
 
+        if (NameExists(draft.Name, excludingId: null))
+        {
+            await _dialog.ShowMessageAsync(
+                "Name already in use",
+                $"A credential named '{draft.Name}' already exists. Pick a different name.");
+            return;
+        }
+
         var profile = new CredentialProfile
         {
             Name = draft.Name,
@@ -140,6 +148,14 @@ public partial class CredentialsViewModel : ObservableObject
 
         var draft = await _dialog.PromptForCredentialAsync(initial);
         if (draft is null) return;
+
+        if (NameExists(draft.Name, excludingId: profile.Id))
+        {
+            await _dialog.ShowMessageAsync(
+                "Name already in use",
+                $"A credential named '{draft.Name}' already exists. Pick a different name.");
+            return;
+        }
 
         var updated = new CredentialProfile
         {
@@ -195,4 +211,9 @@ public partial class CredentialsViewModel : ObservableObject
 
     private static bool Contains(string? haystack, string needle) =>
         haystack is not null && haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
+
+    private bool NameExists(string name, Guid? excludingId) =>
+        Credentials.Any(c =>
+            (excludingId is null || c.Id != excludingId.Value) &&
+            string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
 }
