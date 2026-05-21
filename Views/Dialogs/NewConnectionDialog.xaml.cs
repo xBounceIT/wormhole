@@ -5,7 +5,7 @@ using Wormhole.Models;
 
 namespace Wormhole.Views.Dialogs;
 
-public sealed partial class NewConnectionDialog : UserControl
+public sealed partial class NewConnectionDialog : UserControl, IDraftForm<NewConnectionDraft>
 {
     public event EventHandler? ValidityChanged;
 

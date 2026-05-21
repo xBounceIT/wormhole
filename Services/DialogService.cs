@@ -69,14 +69,21 @@ public sealed class DialogService : IDialogService
         return result == ContentDialogResult.Primary ? textBox.Text.Trim() : null;
     }
 
-    public async Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null)
+    public Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null) =>
+        ShowFormDialogAsync(new NewConnectionDialog(), initial, "connection");
+
+    public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null) =>
+        ShowFormDialogAsync(new CredentialDialog(), initial, "credential");
+
+    private async Task<TDraft?> ShowFormDialogAsync<TForm, TDraft>(TForm form, TDraft? initial, string entityName)
+        where TForm : UserControl, IDraftForm<TDraft>
+        where TDraft : class
     {
-        var form = new NewConnectionDialog();
         if (initial is not null) form.LoadDraft(initial);
 
         var dialog = new ContentDialog
         {
-            Title = initial is null ? "New connection" : "Edit connection",
+            Title = initial is null ? $"New {entityName}" : $"Edit {entityName}",
             Content = form,
             PrimaryButtonText = initial is null ? "Create" : "Save",
             CloseButtonText = "Cancel",

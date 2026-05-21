@@ -34,16 +34,16 @@
                        VerticalAlignment="Center" />
 
             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2">
-                <Button Command="{x:Bind ViewModel.AddFolderCommand}"
+                <Button Style="{StaticResource IconButtonStyle}"
+                        Command="{x:Bind ViewModel.AddFolderCommand}"
                         ToolTipService.ToolTip="New folder (Ctrl+Shift+N)"
-                        AutomationProperties.Name="New folder"
-                        Background="Transparent" BorderBrush="Transparent" Padding="6">
+                        AutomationProperties.Name="New folder">
                     <FontIcon FontSize="14" Glyph="&#xE8F4;" />
                 </Button>
-                <Button Command="{x:Bind ViewModel.AddConnectionCommand}"
+                <Button Style="{StaticResource IconButtonStyle}"
+                        Command="{x:Bind ViewModel.AddConnectionCommand}"
                         ToolTipService.ToolTip="New connection (Ctrl+N)"
-                        AutomationProperties.Name="New connection"
-                        Background="Transparent" BorderBrush="Transparent" Padding="6">
+                        AutomationProperties.Name="New connection">
                     <FontIcon FontSize="14" Glyph="&#xE710;" />
                 </Button>
             </StackPanel>
