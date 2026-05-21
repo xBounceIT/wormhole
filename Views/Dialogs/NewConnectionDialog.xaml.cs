@@ -5,8 +5,10 @@ using Wormhole.Models;
 
 namespace Wormhole.Views.Dialogs;
 
-public sealed partial class NewConnectionDialog : ContentDialog
+public sealed partial class NewConnectionDialog : UserControl
 {
+    public event EventHandler? ValidityChanged;
+
     public NewConnectionDialog()
     {
         this.InitializeComponent();
@@ -14,21 +16,34 @@ public sealed partial class NewConnectionDialog : ContentDialog
 
     public ProtocolType[] Protocols { get; } = Enum.GetValues<ProtocolType>();
 
-    public NewConnectionDraft? Result { get; private set; }
+    public bool IsValid =>
+        !string.IsNullOrWhiteSpace(NameBox.Text) &&
+        !string.IsNullOrWhiteSpace(HostBox.Text);
 
-    public void InitializeForEdit(NewConnectionDraft initial)
+    public void LoadDraft(NewConnectionDraft initial)
     {
-        Title = "Edit connection";
-        PrimaryButtonText = "Save";
         NameBox.Text = initial.Name;
         ProtocolBox.SelectedItem = initial.Protocol;
         HostBox.Text = initial.Host;
         if (initial.Port is { } port) PortBox.Value = port;
         UsernameBox.Text = initial.Username ?? string.Empty;
-        IsPrimaryButtonEnabled = true;
     }
 
-    private void OnOpened(ContentDialog sender, ContentDialogOpenedEventArgs args)
+    public NewConnectionDraft BuildDraft()
+    {
+        var protocol = (ProtocolType)ProtocolBox.SelectedItem;
+        int? port = double.IsNaN(PortBox.Value) ? null : (int)PortBox.Value;
+        var username = string.IsNullOrWhiteSpace(UsernameBox.Text) ? null : UsernameBox.Text.Trim();
+
+        return new NewConnectionDraft(
+            NameBox.Text.Trim(),
+            protocol,
+            HostBox.Text.Trim(),
+            port,
+            username);
+    }
+
+    public void FocusNameField()
     {
         NameBox.Focus(FocusState.Programmatic);
         NameBox.SelectAll();
@@ -36,22 +51,6 @@ public sealed partial class NewConnectionDialog : ContentDialog
 
     private void OnFieldChanged(object sender, TextChangedEventArgs e)
     {
-        IsPrimaryButtonEnabled =
-            !string.IsNullOrWhiteSpace(NameBox.Text) &&
-            !string.IsNullOrWhiteSpace(HostBox.Text);
-    }
-
-    private void OnPrimaryButtonClick(ContentDialog sender, ContentDialogButtonClickEventArgs args)
-    {
-        var protocol = (ProtocolType)ProtocolBox.SelectedItem;
-        int? port = double.IsNaN(PortBox.Value) ? null : (int)PortBox.Value;
-        var username = string.IsNullOrWhiteSpace(UsernameBox.Text) ? null : UsernameBox.Text.Trim();
-
-        Result = new NewConnectionDraft(
-            NameBox.Text.Trim(),
-            protocol,
-            HostBox.Text.Trim(),
-            port,
-            username);
+        ValidityChanged?.Invoke(this, EventArgs.Empty);
     }
 }
