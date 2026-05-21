@@ -121,6 +121,9 @@ public sealed partial class MainWindow : Window
         if (args.InvokedItemContainer is not NavigationViewItem item) return;
         switch (item.Tag as string)
         {
+            case "Credentials":
+                _navigationService.Navigate(typeof(CredentialsPage));
+                break;
             case "Sessions":
                 _navigationService.Navigate(typeof(SessionsPage));
                 break;
@@ -145,7 +148,7 @@ public sealed partial class MainWindow : Window
     private void ComputeMinSidebarWidth()
     {
         double maxItemWidth = 0;
-        foreach (var item in new[] { SessionsItem, TunnelsItem, SettingsItem })
+        foreach (var item in new[] { CredentialsItem, SessionsItem, TunnelsItem, SettingsItem })
         {
             if (item is null) continue;
             item.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));

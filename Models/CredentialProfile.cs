@@ -10,6 +10,7 @@ public class CredentialProfile
     public string? Domain { get; set; }
     public CredentialKind Kind { get; set; } = CredentialKind.Password;
     public string? PrivateKeyFileName { get; set; }
+    public ProtocolType Protocol { get; set; } = ProtocolType.Ssh;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 

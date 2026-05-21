@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Input;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
@@ -37,6 +38,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private CancellationTokenSource? _outputWaitCts;
     private int _connectInFlight;
     private ITunnelInstance? _tunnel;
+    private bool _reconnectRequestedWhileDetached;
 
     public SshSessionViewModel(
         ISshSessionService sshService,
@@ -60,11 +62,14 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
                 OnPropertyChanged(nameof(IsConnecting));
                 OnPropertyChanged(nameof(IsConnected));
                 OnPropertyChanged(nameof(IsFailed));
+                RetryCommand.NotifyCanExecuteChanged();
             }
         };
     }
 
     public override ProtocolType Protocol => ProtocolType.Ssh;
+
+    public override ICommand? ReconnectCommand => RetryCommand;
 
     [ObservableProperty]
     private string? errorMessage;
@@ -96,6 +101,18 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         // capture the dispatcher now so background callbacks (Closed) can marshal back.
         _uiDispatcher ??= Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
 
+        // Reconnect was requested from the tab context menu while the view was unloaded
+        // (background tab) — RetryAsync couldn't fan out to the now-unsubscribed init
+        // event, so it stashed the intent here. Honor it before the "session alive →
+        // just rebind bridge" path below.
+        if (_reconnectRequestedWhileDetached)
+        {
+            _reconnectRequestedWhileDetached = false;
+            await DetachAsync().ConfigureAwait(true);
+            await ConnectAsync().ConfigureAwait(true);
+            return;
+        }
+
         // Navigating away from Sessions and back rebuilds the tab content (new
         // UserControl + WebView2) while the VM stays alive in ShellViewModel.Tabs. Skip the
         // expensive credential prompt + SSH connect; just rebind the bridge to the new
@@ -123,20 +140,29 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     /// </summary>
     public event Action? InitializationRetryRequested;
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false, CanExecute = nameof(CanRetry))]
     public async Task RetryAsync()
     {
         ErrorMessage = null;
         ResetOutputState();
         if (_webView is null)
         {
-            InitializationRetryRequested?.Invoke();
+            // A null handler means the view is unloaded (background tab): OnUnloaded
+            // already detached it, so firing the event would no-op. Stash the intent
+            // for the next AttachAsync. A non-null handler means the view is loaded
+            // but WebView2 init failed — preserve the existing "retry init" fan-out.
+            var handler = InitializationRetryRequested;
+            if (handler is not null) handler();
+            else _reconnectRequestedWhileDetached = true;
             return;
         }
         await DetachAsync().ConfigureAwait(true);
         ErrorMessage = null;
         await ConnectAsync().ConfigureAwait(true);
     }
+
+    // While Connecting, an in-flight ConnectAsync still holds _connectInFlight; a second one from RetryAsync would silently no-op.
+    private bool CanRetry() => Status != SessionStatus.Connecting;
 
     [RelayCommand]
     public Task DisconnectAsync() => DetachAsync();

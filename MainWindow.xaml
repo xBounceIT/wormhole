@@ -57,6 +57,11 @@
                 </NavigationView.PaneCustomContent>
 
                 <NavigationView.FooterMenuItems>
+                    <NavigationViewItem x:Name="CredentialsItem" Content="Credentials" Tag="Credentials">
+                        <NavigationViewItem.Icon>
+                            <FontIcon Glyph="&#xE192;" />
+                        </NavigationViewItem.Icon>
+                    </NavigationViewItem>
                     <NavigationViewItem x:Name="SessionsItem" Content="Sessions" Tag="Sessions">
                         <NavigationViewItem.Icon>
                             <FontIcon Glyph="&#xE8A1;" />

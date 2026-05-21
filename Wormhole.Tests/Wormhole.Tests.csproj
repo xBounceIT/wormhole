@@ -35,6 +35,7 @@
     <Compile Include="..\Models\ConnectionProfile.cs" Link="Models\ConnectionProfile.cs" />
     <Compile Include="..\Models\CredentialProfile.cs" Link="Models\CredentialProfile.cs" />
     <Compile Include="..\Models\NewConnectionDraft.cs" Link="Models\NewConnectionDraft.cs" />
+    <Compile Include="..\Models\CredentialDraft.cs" Link="Models\CredentialDraft.cs" />
     <Compile Include="..\Models\NodeKind.cs" Link="Models\NodeKind.cs" />
     <Compile Include="..\Models\ProtocolType.cs" Link="Models\ProtocolType.cs" />
     <Compile Include="..\Models\AppSettings.cs" Link="Models\AppSettings.cs" />
@@ -73,8 +74,11 @@
     <Compile Include="..\Data\SqliteTypeHandlers.cs" Link="Data\SqliteTypeHandlers.cs" />
     <Compile Include="..\Data\MigrationRunner.cs" Link="Data\MigrationRunner.cs" />
     <Compile Include="..\ViewModels\ConnectionTreeViewModel.cs" Link="ViewModels\ConnectionTreeViewModel.cs" />
+    <Compile Include="..\ViewModels\CredentialsViewModel.cs" Link="ViewModels\CredentialsViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\SessionTabViewModel.cs" Link="ViewModels\Sessions\SessionTabViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\SshSessionViewModel.cs" Link="ViewModels\Sessions\SshSessionViewModel.cs" />
+    <Compile Include="..\ViewModels\Sessions\RdpSessionViewModel.cs" Link="ViewModels\Sessions\RdpSessionViewModel.cs" />
+    <Compile Include="..\ViewModels\Sessions\SftpSessionViewModel.cs" Link="ViewModels\Sessions\SftpSessionViewModel.cs" />
     <Compile Include="..\Interop\Terminal\TerminalBridge.cs" Link="Interop\Terminal\TerminalBridge.cs" />
   </ItemGroup>
 

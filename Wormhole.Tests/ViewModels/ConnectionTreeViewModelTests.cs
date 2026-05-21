@@ -16,7 +16,7 @@ namespace Wormhole.Tests.ViewModels;
 
 public class ConnectionTreeViewModelTests : IDisposable
 {
-    // Inlined from Data/Migrations/0001_initial.sql + 0002_add_tunnel_config.sql: the test
+    // Inlined from Data/Migrations/0001_initial.sql + 0003_add_tunnel_config.sql: the test
     // project links source files rather than referencing the main assembly, so the embedded
     // .sql resources are not available. Keep in lockstep with the migration files.
     private const string SchemaSql = @"
@@ -895,6 +895,8 @@ public class ConnectionTreeViewModelTests : IDisposable
             => Task.FromResult(TextPromptResult);
         public Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null)
             => Task.FromResult(ConnectionPromptResult);
+        public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null)
+            => Task.FromResult<CredentialDraft?>(null);
         public Task<string?> PromptPasswordAsync(string title, string message)
             => Task.FromResult<string?>(null);
     }
