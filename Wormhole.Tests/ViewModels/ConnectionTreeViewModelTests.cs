@@ -573,6 +573,247 @@ public class ConnectionTreeViewModelTests : IDisposable
         Assert.Equal("original", (await _repo.GetAllAsync()).Single().Name);
     }
 
+    [Fact]
+    public async Task SearchText_EmptyByDefault_AllNodesVisible()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Parent";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        dialog.ConnectionPromptResult = new NewConnectionDraft(
+            "leaf", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(vm.Roots.Single());
+
+        Assert.Equal(string.Empty, vm.SearchText);
+        var parent = vm.Roots.Single();
+        Assert.True(parent.IsVisible);
+        Assert.True(parent.Children.Single().IsVisible);
+    }
+
+    [Fact]
+    public async Task SearchText_MatchesConnectionByName_OnlyThatBranchVisible()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Servers";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        dialog.TextPromptResult = "Other";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+
+        var servers = vm.Roots.Single(r => r.Name == "Servers");
+        var other = vm.Roots.Single(r => r.Name == "Other");
+
+        dialog.ConnectionPromptResult = new NewConnectionDraft(
+            "prod-web", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(servers);
+        dialog.ConnectionPromptResult = new NewConnectionDraft(
+            "leaf", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(other);
+
+        vm.SearchText = "prod";
+
+        Assert.True(servers.IsVisible);
+        Assert.True(servers.Children.Single().IsVisible);
+        Assert.False(other.IsVisible);
+        Assert.False(other.Children.Single().IsVisible);
+    }
+
+    [Fact]
+    public async Task SearchText_MatchesNestedConnection_AutoExpandsAncestorFolder()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Parent";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var parent = vm.Roots.Single();
+        dialog.ConnectionPromptResult = new NewConnectionDraft(
+            "prod-web", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(parent);
+
+        Assert.False(parent.IsExpanded);
+
+        vm.SearchText = "prod";
+
+        Assert.True(parent.IsExpanded);
+        Assert.True(parent.IsVisible);
+        Assert.True(parent.Children.Single().IsVisible);
+    }
+
+    [Fact]
+    public async Task SearchText_MatchesFolderName_ShowsFolderAndItsChildren()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Linux";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var folder = vm.Roots.Single();
+        dialog.ConnectionPromptResult = new NewConnectionDraft(
+            "alpha", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(folder);
+        dialog.ConnectionPromptResult = new NewConnectionDraft(
+            "beta", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(folder);
+
+        vm.SearchText = "Lin";
+
+        Assert.True(folder.IsVisible);
+        Assert.All(folder.Children, child => Assert.True(child.IsVisible));
+    }
+
+    [Fact]
+    public async Task SearchText_CaseInsensitive()
+    {
+        var dialog = new FakeDialogService { TextPromptResult = "Linux" };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+        await vm.AddFolderCommand.ExecuteAsync(null);
+
+        vm.SearchText = "LINUX";
+
+        Assert.True(vm.Roots.Single().IsVisible);
+    }
+
+    [Fact]
+    public async Task SearchText_Cleared_RestoresPriorExpandedState()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Parent";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var parent = vm.Roots.Single();
+        dialog.ConnectionPromptResult = new NewConnectionDraft(
+            "leaf", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(parent);
+
+        // User left the folder collapsed before searching.
+        Assert.False(parent.IsExpanded);
+
+        // Search force-expands the parent so the matching child is visible.
+        vm.SearchText = "leaf";
+        Assert.True(parent.IsExpanded);
+
+        // Clearing the search must restore the prior collapsed state.
+        vm.SearchText = string.Empty;
+        Assert.False(parent.IsExpanded);
+        Assert.True(parent.IsVisible);
+        Assert.True(parent.Children.Single().IsVisible);
+    }
+
+    [Fact]
+    public async Task SearchText_NoMatches_AllNodesHidden()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Parent";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        dialog.ConnectionPromptResult = new NewConnectionDraft(
+            "leaf", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(vm.Roots.Single());
+
+        vm.SearchText = "zzz-no-match-zzz";
+
+        var parent = vm.Roots.Single();
+        Assert.False(parent.IsVisible);
+        Assert.False(parent.Children.Single().IsVisible);
+    }
+
+    [Fact]
+    public async Task RefreshAsync_WhileFiltered_ReappliesFilterToNewNodes()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Parent";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+
+        vm.SearchText = "prod";
+
+        // Adding a connection triggers RefreshAsync internally. The new node must be
+        // evaluated against the live filter, not appear with its default IsVisible=true.
+        dialog.ConnectionPromptResult = new NewConnectionDraft(
+            "prod-web", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(vm.Roots.Single());
+
+        var parent = vm.Roots.Single();
+        Assert.True(parent.IsVisible);
+        Assert.True(parent.Children.Single(c => c.Name == "prod-web").IsVisible);
+
+        // And an unrelated new connection added under the same filter must stay hidden.
+        dialog.ConnectionPromptResult = new NewConnectionDraft(
+            "other", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(parent);
+
+        Assert.False(parent.Children.Single(c => c.Name == "other").IsVisible);
+    }
+
+    [Fact]
+    public async Task SearchText_WhitespaceOnly_TreatsAsEmpty()
+    {
+        var dialog = new FakeDialogService { TextPromptResult = "Item" };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+        await vm.AddFolderCommand.ExecuteAsync(null);
+
+        vm.SearchText = "   ";
+
+        Assert.True(vm.Roots.Single().IsVisible);
+    }
+
+    [Fact]
+    public async Task SearchText_LeadingTrailingSpaces_MatchTrimmedQuery()
+    {
+        var dialog = new FakeDialogService { TextPromptResult = "Linux" };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+        await vm.AddFolderCommand.ExecuteAsync(null);
+
+        vm.SearchText = "  Lin  ";
+
+        Assert.True(vm.Roots.Single().IsVisible);
+    }
+
+    [Fact]
+    public async Task SearchText_NestedMatchAndClear_RestoresEveryAncestorExpansion()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Parent";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var parent = vm.Roots.Single();
+        dialog.TextPromptResult = "Child";
+        await vm.AddFolderCommand.ExecuteAsync(parent);
+        var child = parent.Children.Single();
+        dialog.ConnectionPromptResult = new NewConnectionDraft(
+            "leaf", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(child);
+
+        Assert.False(parent.IsExpanded);
+        Assert.False(child.IsExpanded);
+
+        vm.SearchText = "leaf";
+        Assert.True(parent.IsExpanded);
+        Assert.True(child.IsExpanded);
+
+        vm.SearchText = string.Empty;
+        Assert.False(parent.IsExpanded);
+        Assert.False(child.IsExpanded);
+    }
+
     private sealed class ThrowOnUpdateRepository : IConnectionRepository
     {
         private readonly IConnectionRepository _inner;
