@@ -17,6 +17,9 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     private bool autoCheckForUpdates;
 
+    [ObservableProperty]
+    private bool autoCopyOnSelect;
+
     public UpdateViewModel Update { get; }
 
     public SettingsViewModel(IAppSettingsService settingsService, UpdateViewModel update)
@@ -26,6 +29,7 @@ public partial class SettingsViewModel : ObservableObject
         theme = _settingsService.Current.Theme;
         confirmOnTabClose = _settingsService.Current.ConfirmOnTabClose;
         autoCheckForUpdates = _settingsService.Current.AutoCheckForUpdates;
+        autoCopyOnSelect = _settingsService.Current.AutoCopyOnSelect;
     }
 
     partial void OnThemeChanged(ApplicationTheme value)
@@ -43,6 +47,12 @@ public partial class SettingsViewModel : ObservableObject
     partial void OnAutoCheckForUpdatesChanged(bool value)
     {
         _settingsService.Current.AutoCheckForUpdates = value;
+        _settingsService.Save();
+    }
+
+    partial void OnAutoCopyOnSelectChanged(bool value)
+    {
+        _settingsService.Current.AutoCopyOnSelect = value;
         _settingsService.Save();
     }
 }

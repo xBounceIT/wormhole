@@ -111,6 +111,7 @@ public sealed class SshSessionViewModelTests
             new FakeSshSessionService(),
             new FakeCredentialResolver(),
             new FakeConnectionRepository(),
+            new FakeAppSettingsService(),
             NullLoggerFactory.Instance);
 
     private static ConnectionProfile CreateProfile() =>
@@ -140,6 +141,13 @@ public sealed class SshSessionViewModelTests
             ConnectionProfile profile,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(SshCredentials.Empty);
+    }
+
+    private sealed class FakeAppSettingsService : IAppSettingsService
+    {
+        public AppSettings Current { get; } = new();
+        public event EventHandler? SettingsChanged { add { } remove { } }
+        public void Save() { }
     }
 
     private sealed class FakeConnectionRepository : IConnectionRepository
