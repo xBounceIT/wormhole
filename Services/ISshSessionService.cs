@@ -3,6 +3,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Wormhole.Models;
 using Wormhole.Services.Ssh;
+using Wormhole.Services.Tunneling;
 
 namespace Wormhole.Services;
 
@@ -17,6 +18,7 @@ public interface ISshSessionService
         ConnectionProfile profile,
         SshCredentials credentials,
         TerminalSize initialSize,
+        ITunnelInstance? tunnel = null,
         CancellationToken cancellationToken = default);
 }
 

@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Page
+    x:Class="Wormhole.Views.Pages.TunnelConfigsPage"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:models="using:Wormhole.Models"
+    Loaded="Page_Loaded">
+
+    <Grid Padding="24" ColumnSpacing="24" RowSpacing="12">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="280" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Grid.ColumnSpan="2"
+                   Text="VPN tunnels"
+                   Style="{StaticResource TitleTextBlockStyle}" />
+
+        <Grid Grid.Row="1" Grid.Column="0" RowSpacing="8">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+            <TextBlock Grid.Row="0" Text="Saved tunnels" Style="{StaticResource SubtitleTextBlockStyle}" />
+            <Button Grid.Row="1" Content="New WireGuard tunnel" Command="{x:Bind ViewModel.NewConfigCommand}" />
+            <ListView Grid.Row="2"
+                      ItemsSource="{x:Bind ViewModel.Configs}"
+                      SelectedItem="{x:Bind ViewModel.SelectedConfig, Mode=TwoWay}"
+                      SelectionMode="Single">
+                <ListView.ItemTemplate>
+                    <DataTemplate x:DataType="models:TunnelConfig">
+                        <StackPanel Padding="4,2">
+                            <TextBlock Text="{x:Bind Name}" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Text="{x:Bind Kind}" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.6" />
+                        </StackPanel>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+        </Grid>
+
+        <ScrollViewer Grid.Row="1" Grid.Column="1">
+            <StackPanel Spacing="10" MaxWidth="520" HorizontalAlignment="Left">
+                <TextBlock Text="Editor" Style="{StaticResource SubtitleTextBlockStyle}" />
+                <TextBox Header="Name" Text="{x:Bind ViewModel.EditorName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                <TextBlock Text="WireGuard interface" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,8,0,0" />
+                <TextBox Header="Private key (base64)"
+                         Text="{x:Bind ViewModel.InterfacePrivateKey, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         FontFamily="Consolas" />
+                <TextBox Header="Address (e.g. 10.0.0.2/32)"
+                         Text="{x:Bind ViewModel.InterfaceAddress, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBox Header="MTU (optional)"
+                         Text="{x:Bind ViewModel.MtuText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         Width="120"
+                         HorizontalAlignment="Left" />
+                <TextBox Header="DNS (comma-separated, optional)"
+                         Text="{x:Bind ViewModel.DnsText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+                <TextBlock Text="WireGuard peer" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,8,0,0" />
+                <TextBox Header="Public key (base64)"
+                         Text="{x:Bind ViewModel.PeerPublicKey, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         FontFamily="Consolas" />
+                <TextBox Header="Preshared key (base64, optional)"
+                         Text="{x:Bind ViewModel.PeerPresharedKey, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         FontFamily="Consolas" />
+                <TextBox Header="Endpoint (host:port)"
+                         Text="{x:Bind ViewModel.PeerEndpoint, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBox Header="Allowed IPs (comma-separated, e.g. 0.0.0.0/0)"
+                         Text="{x:Bind ViewModel.AllowedIpsText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                <TextBox Header="Persistent keepalive seconds (optional)"
+                         Text="{x:Bind ViewModel.PersistentKeepaliveText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         Width="160"
+                         HorizontalAlignment="Left" />
+
+                <StackPanel Orientation="Horizontal" Spacing="8" Margin="0,12,0,0">
+                    <Button Content="Save"
+                            Style="{StaticResource AccentButtonStyle}"
+                            Command="{x:Bind ViewModel.SaveCommand}"
+                            IsEnabled="{x:Bind ViewModel.IsBusy, Mode=OneWay, Converter={StaticResource InverseBoolConverter}, FallbackValue=True}" />
+                    <Button Content="Delete"
+                            Command="{x:Bind ViewModel.DeleteCommand}"
+                            IsEnabled="{x:Bind ViewModel.IsBusy, Mode=OneWay, Converter={StaticResource InverseBoolConverter}, FallbackValue=True}" />
+                    <ProgressRing IsActive="{x:Bind ViewModel.IsBusy, Mode=OneWay}" Width="20" Height="20" />
+                </StackPanel>
+
+                <TextBlock Text="{x:Bind ViewModel.StatusMessage, Mode=OneWay}"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Opacity="0.7" />
+                <TextBlock Text="{x:Bind ViewModel.ErrorMessage, Mode=OneWay}"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</Page>

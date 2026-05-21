@@ -1,0 +1,54 @@
+using System;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
+using Wormhole.Helpers;
+using Wormhole.Models;
+
+namespace Wormhole.Services.Tunneling.WireGuard;
+
+public sealed class WireGuardTunnelProvider : ITunnelProvider
+{
+    private readonly ILogger<WireGuardTunnelProvider> _logger;
+    private readonly ILoggerFactory _loggerFactory;
+
+    public WireGuardTunnelProvider(ILogger<WireGuardTunnelProvider> logger, ILoggerFactory loggerFactory)
+    {
+        _logger = logger;
+        _loggerFactory = loggerFactory;
+    }
+
+    public TunnelKind Kind => TunnelKind.WireGuard;
+
+    public async Task<ITunnelInstance> EstablishAsync(TunnelConfig config, byte[] secretBlob, CancellationToken cancellationToken)
+    {
+        var settings = JsonSerializer.Deserialize<WireGuardSettings>(secretBlob)
+            ?? throw new InvalidOperationException($"Tunnel config '{config.Name}' has an empty/invalid WireGuard payload.");
+
+        var sidecar = new WireGuardSidecarConfig
+        {
+            InterfacePrivateKey = settings.InterfacePrivateKey,
+            InterfaceAddress = settings.InterfaceAddress,
+            Mtu = settings.Mtu,
+            Dns = settings.Dns ?? new(),
+            PeerPublicKey = settings.PeerPublicKey,
+            PeerPresharedKey = settings.PeerPresharedKey,
+            PeerEndpoint = settings.PeerEndpoint,
+            AllowedIps = settings.AllowedIps ?? new(),
+            PersistentKeepaliveSeconds = settings.PersistentKeepaliveSeconds,
+        };
+
+        var sidecarPath = AppPaths.GetWgProxyExecutablePath();
+        _logger.LogDebug("Launching WireGuard sidecar at {Path}.", sidecarPath);
+
+        var host = await WireGuardProcessHost.StartAsync(
+            sidecarPath, sidecar, _loggerFactory.CreateLogger<WireGuardProcessHost>(), cancellationToken)
+            .ConfigureAwait(false);
+
+        return new SocksTunnelInstance(
+            host.SocksEndpoint,
+            _loggerFactory.CreateLogger<SocksTunnelInstance>(),
+            onDispose: async () => await host.DisposeAsync().ConfigureAwait(false));
+    }
+}

@@ -49,18 +49,36 @@ public sealed class CredentialService : ICredentialService
         return Task.CompletedTask;
     }
 
-    public async Task StorePrivateKeyAsync(Guid credentialId, byte[] privateKeyBytes)
+    public Task StorePrivateKeyAsync(Guid credentialId, byte[] privateKeyBytes) =>
+        WriteProtectedAsync(KeyPath(credentialId), privateKeyBytes);
+
+    public Task<byte[]?> ReadPrivateKeyAsync(Guid credentialId) =>
+        ReadProtectedAsync(KeyPath(credentialId));
+
+    public Task DeletePrivateKeyAsync(Guid credentialId) =>
+        DeleteFileIfExistsAsync(KeyPath(credentialId));
+
+    public Task StoreTunnelConfigAsync(Guid tunnelConfigId, byte[] configBytes) =>
+        WriteProtectedAsync(TunnelConfigPath(tunnelConfigId), configBytes);
+
+    public Task<byte[]?> ReadTunnelConfigAsync(Guid tunnelConfigId) =>
+        ReadProtectedAsync(TunnelConfigPath(tunnelConfigId));
+
+    public Task DeleteTunnelConfigAsync(Guid tunnelConfigId) =>
+        DeleteFileIfExistsAsync(TunnelConfigPath(tunnelConfigId));
+
+    private static async Task WriteProtectedAsync(string path, byte[] data)
     {
-        Directory.CreateDirectory(AppPaths.GetKeysDirectory());
-        var protectedBlob = ProtectedData.Protect(privateKeyBytes, optionalEntropy: null, DataProtectionScope.CurrentUser);
-        await File.WriteAllBytesAsync(KeyPath(credentialId), protectedBlob);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var protectedBlob = ProtectedData.Protect(data, optionalEntropy: null, DataProtectionScope.CurrentUser);
+        await File.WriteAllBytesAsync(path, protectedBlob);
     }
 
-    public async Task<byte[]?> ReadPrivateKeyAsync(Guid credentialId)
+    private static async Task<byte[]?> ReadProtectedAsync(string path)
     {
         try
         {
-            var protectedBlob = await File.ReadAllBytesAsync(KeyPath(credentialId));
+            var protectedBlob = await File.ReadAllBytesAsync(path);
             return ProtectedData.Unprotect(protectedBlob, optionalEntropy: null, DataProtectionScope.CurrentUser);
         }
         catch (FileNotFoundException)
@@ -73,11 +91,11 @@ public sealed class CredentialService : ICredentialService
         }
     }
 
-    public Task DeletePrivateKeyAsync(Guid credentialId)
+    private static Task DeleteFileIfExistsAsync(string path)
     {
         try
         {
-            File.Delete(KeyPath(credentialId));
+            File.Delete(path);
         }
         catch (FileNotFoundException)
         {
@@ -92,4 +110,7 @@ public sealed class CredentialService : ICredentialService
 
     private static string KeyPath(Guid credentialId) =>
         Path.Combine(AppPaths.GetKeysDirectory(), credentialId.ToString("N") + ".dpapi");
+
+    private static string TunnelConfigPath(Guid tunnelConfigId) =>
+        Path.Combine(AppPaths.GetTunnelConfigsDirectory(), tunnelConfigId.ToString("N") + ".dpapi");
 }

@@ -16,8 +16,9 @@ namespace Wormhole.Tests.ViewModels;
 
 public class ConnectionTreeViewModelTests : IDisposable
 {
-    // Inlined from Data/Migrations/0001_initial.sql: the test project links source files
-    // rather than referencing the main assembly, so the embedded .sql is not available.
+    // Inlined from Data/Migrations/0001_initial.sql + 0002_add_tunnel_config.sql: the test
+    // project links source files rather than referencing the main assembly, so the embedded
+    // .sql resources are not available. Keep in lockstep with the migration files.
     private const string SchemaSql = @"
         CREATE TABLE Nodes (
             Id                       TEXT     PRIMARY KEY NOT NULL,
@@ -35,10 +36,20 @@ public class ConnectionTreeViewModelTests : IDisposable
             RdpFullScreen            INTEGER  NULL,
             SshKeyFileName           TEXT     NULL,
             SshKnownHostFingerprint  TEXT     NULL,
+            TunnelEnabled            INTEGER  NULL,
+            TunnelConfigId           TEXT     NULL,
             CreatedAt                TEXT     NOT NULL,
             UpdatedAt                TEXT     NOT NULL
         );
-        CREATE INDEX IX_Nodes_ParentId ON Nodes(ParentId);";
+        CREATE INDEX IX_Nodes_ParentId ON Nodes(ParentId);
+        CREATE TABLE TunnelConfigs (
+            Id         TEXT     PRIMARY KEY NOT NULL,
+            Name       TEXT     NOT NULL,
+            Kind       INTEGER  NOT NULL,
+            CreatedAt  TEXT     NOT NULL,
+            UpdatedAt  TEXT     NOT NULL
+        );
+        CREATE UNIQUE INDEX UX_TunnelConfigs_Name ON TunnelConfigs(Name);";
 
     private readonly string _dbPath;
     private readonly string _connectionString;

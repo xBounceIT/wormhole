@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging;
 using Renci.SshNet;
 using Wormhole.Models;
 using Wormhole.Services.Ssh;
+using Wormhole.Services.Tunneling;
 
 namespace Wormhole.Services;
 
@@ -25,6 +26,7 @@ public sealed class SshSessionService : ISshSessionService
         ConnectionProfile profile,
         SshCredentials credentials,
         TerminalSize initialSize,
+        ITunnelInstance? tunnel = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(profile.Host))
@@ -40,10 +42,28 @@ public sealed class SshSessionService : ISshSessionService
                 $"Connection '{profile.Name}' has no usable credentials (password or private key).");
         }
 
-        var connectionInfo = new ConnectionInfo(profile.Host, profile.Port, profile.Username, authMethods.ToArray())
+        ConnectionInfo connectionInfo;
+        if (tunnel is null)
         {
-            Timeout = TimeSpan.FromSeconds(15),
-        };
+            connectionInfo = new ConnectionInfo(profile.Host, profile.Port, profile.Username, authMethods.ToArray());
+        }
+        else
+        {
+            // SSH dials a stream-oriented socket: it needs a SOCKS5 endpoint to proxy through.
+            // A tunnel kind that omits SOCKS5 (none exist yet, but future providers might)
+            // must explicitly throw here rather than silently fall through to a non-tunneled
+            // connect — that would leak the SSH bytes outside the tunnel.
+            var socks = tunnel.Socks5Endpoint
+                ?? throw new InvalidOperationException(
+                    $"Tunnel for '{profile.Name}' does not expose a SOCKS5 endpoint; SSH cannot route through it.");
+            connectionInfo = new ConnectionInfo(
+                profile.Host, profile.Port, profile.Username,
+                ProxyTypes.Socks5, socks.Address.ToString(), socks.Port,
+                proxyUsername: string.Empty, proxyPassword: string.Empty,
+                authMethods.ToArray());
+            _logger.LogDebug("Routing SSH connect through SOCKS5 tunnel at {Endpoint}.", socks);
+        }
+        connectionInfo.Timeout = TimeSpan.FromSeconds(15);
 
         var client = new SshClient(connectionInfo);
         string? capturedFingerprint = null;

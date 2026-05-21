@@ -15,6 +15,7 @@ public sealed class ConnectionRepository : IConnectionRepository
         Protocol, Host, Port, Username, CredentialId,
         RdpDomain, RdpScreenSize, RdpFullScreen,
         SshKeyFileName, SshKnownHostFingerprint,
+        TunnelEnabled, TunnelConfigId,
         CreatedAt, UpdatedAt";
 
     private readonly ISqliteConnectionFactory _factory;
@@ -53,12 +54,14 @@ public sealed class ConnectionRepository : IConnectionRepository
                 Protocol, Host, Port, Username, CredentialId,
                 RdpDomain, RdpScreenSize, RdpFullScreen,
                 SshKeyFileName, SshKnownHostFingerprint,
+                TunnelEnabled, TunnelConfigId,
                 CreatedAt, UpdatedAt
             ) VALUES (
                 @Id, @ParentId, @Name, @Kind, @SortOrder,
                 @Protocol, @Host, @Port, @Username, @CredentialId,
                 @RdpDomain, @RdpScreenSize, @RdpFullScreen,
                 @SshKeyFileName, @SshKnownHostFingerprint,
+                @TunnelEnabled, @TunnelConfigId,
                 @CreatedAt, @UpdatedAt
             );", node, cancellationToken: cancellationToken));
     }
@@ -83,6 +86,8 @@ public sealed class ConnectionRepository : IConnectionRepository
                 RdpFullScreen = @RdpFullScreen,
                 SshKeyFileName = @SshKeyFileName,
                 SshKnownHostFingerprint = @SshKnownHostFingerprint,
+                TunnelEnabled = @TunnelEnabled,
+                TunnelConfigId = @TunnelConfigId,
                 UpdatedAt = @UpdatedAt
             WHERE Id = @Id;", node, cancellationToken: cancellationToken));
     }
@@ -111,6 +116,8 @@ public sealed class ConnectionRepository : IConnectionRepository
                 RdpFullScreen = @RdpFullScreen,
                 SshKeyFileName = @SshKeyFileName,
                 SshKnownHostFingerprint = @SshKnownHostFingerprint,
+                TunnelEnabled = @TunnelEnabled,
+                TunnelConfigId = @TunnelConfigId,
                 UpdatedAt = @UpdatedAt
             WHERE Id = @Id;",
             nodes,

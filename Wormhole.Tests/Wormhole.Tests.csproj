@@ -40,6 +40,17 @@
     <Compile Include="..\Models\AppSettings.cs" Link="Models\AppSettings.cs" />
     <Compile Include="..\Models\GitHubRelease.cs" Link="Models\GitHubRelease.cs" />
     <Compile Include="..\Models\UpdateCheckResult.cs" Link="Models\UpdateCheckResult.cs" />
+    <Compile Include="..\Models\TunnelConfig.cs" Link="Models\TunnelConfig.cs" />
+    <Compile Include="..\Models\TunnelKind.cs" Link="Models\TunnelKind.cs" />
+    <Compile Include="..\Models\TunnelState.cs" Link="Models\TunnelState.cs" />
+    <Compile Include="..\Models\WireGuardSettings.cs" Link="Models\WireGuardSettings.cs" />
+    <Compile Include="..\Services\Tunneling\ITunnelProvider.cs" Link="Services\Tunneling\ITunnelProvider.cs" />
+    <Compile Include="..\Services\Tunneling\ITunnelInstance.cs" Link="Services\Tunneling\ITunnelInstance.cs" />
+    <Compile Include="..\Services\Tunneling\TunnelManager.cs" Link="Services\Tunneling\TunnelManager.cs" />
+    <Compile Include="..\Services\Tunneling\SocksTunnelInstance.cs" Link="Services\Tunneling\SocksTunnelInstance.cs" />
+    <Compile Include="..\Services\Tunneling\Socks5Client.cs" Link="Services\Tunneling\Socks5Client.cs" />
+    <Compile Include="..\Services\Tunneling\LocalTcpForwarder.cs" Link="Services\Tunneling\LocalTcpForwarder.cs" />
+    <Compile Include="..\Data\Repositories\ITunnelConfigRepository.cs" Link="Data\Repositories\ITunnelConfigRepository.cs" />
     <Compile Include="..\Helpers\AppPaths.cs" Link="Helpers\AppPaths.cs" />
     <Compile Include="..\Helpers\Glyphs.cs" Link="Helpers\Glyphs.cs" />
     <Compile Include="..\Helpers\HostSpec.cs" Link="Helpers\HostSpec.cs" />

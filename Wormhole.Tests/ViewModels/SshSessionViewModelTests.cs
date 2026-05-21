@@ -2,11 +2,14 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
 using Wormhole.Services.Ssh;
+using Wormhole.Services.Tunneling;
+using Wormhole.Tests.Fakes;
 using Wormhole.ViewModels.Sessions;
 using Xunit;
 
@@ -106,13 +109,23 @@ public sealed class SshSessionViewModelTests
         Assert.False(vm.IsWaitingForRemoteOutput);
     }
 
-    private static SshSessionViewModel CreateViewModel() =>
-        new(
+    private static SshSessionViewModel CreateViewModel()
+    {
+        var credService = new FakeCredentialService();
+        var configs = new FakeTunnelConfigRepository();
+        var tunnels = new TunnelManager(
+            Array.Empty<ITunnelProvider>(),
+            configs,
+            credService,
+            NullLoggerFactory.Instance.CreateLogger<TunnelManager>());
+        return new SshSessionViewModel(
             new FakeSshSessionService(),
             new FakeCredentialResolver(),
             new FakeConnectionRepository(),
             new FakeAppSettingsService(),
+            tunnels,
             NullLoggerFactory.Instance);
+    }
 
     private static ConnectionProfile CreateProfile() =>
         new()
@@ -131,9 +144,11 @@ public sealed class SshSessionViewModelTests
             ConnectionProfile profile,
             SshCredentials credentials,
             TerminalSize initialSize,
+            ITunnelInstance? tunnel = null,
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException("Tests attach fake sessions directly.");
     }
+
 
     private sealed class FakeCredentialResolver : ISshCredentialResolver
     {

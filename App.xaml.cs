@@ -9,6 +9,8 @@ using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Services;
 using Wormhole.Services.Ssh;
+using Wormhole.Services.Tunneling;
+using Wormhole.Services.Tunneling.WireGuard;
 using Wormhole.ViewModels;
 using Wormhole.ViewModels.Sessions;
 
@@ -71,7 +73,11 @@ public partial class App : Application
         services.AddSingleton<ICredentialService, CredentialService>();
         services.AddSingleton<IConnectionRepository, ConnectionRepository>();
         services.AddSingleton<ICredentialRepository, CredentialRepository>();
+        services.AddSingleton<ITunnelConfigRepository, TunnelConfigRepository>();
         services.AddSingleton<InheritanceResolver>();
+
+        services.AddSingleton<ITunnelProvider, WireGuardTunnelProvider>();
+        services.AddSingleton<TunnelManager>();
         services.AddSingleton<INavigationService, NavigationService>();
         services.AddSingleton<IDialogService, DialogService>();
         services.AddSingleton<ISshSessionService, SshSessionService>();
@@ -110,6 +116,7 @@ public partial class App : Application
         services.AddTransient<SshSessionViewModel>();
         services.AddTransient<RdpSessionViewModel>();
         services.AddTransient<SftpSessionViewModel>();
+        services.AddTransient<TunnelConfigsViewModel>();
 
         services.AddSingleton<MainWindow>();
 

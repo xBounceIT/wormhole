@@ -1,3 +1,5 @@
+using System;
+using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Wormhole.Models;
 
@@ -19,4 +21,14 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     [ObservableProperty]
     private string username = string.Empty;
+
+    // Tri-state: null = inherit from ancestor folder, false = explicitly off, true = explicitly on.
+    // Matches the existing RdpFullScreen shape so the UI control can bind directly.
+    [ObservableProperty]
+    private bool? tunnelEnabled;
+
+    [ObservableProperty]
+    private Guid? selectedTunnelConfigId;
+
+    public ObservableCollection<TunnelConfig> AvailableTunnelConfigs { get; } = new();
 }
