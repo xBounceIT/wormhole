@@ -4,6 +4,7 @@ using System.Runtime.InteropServices.ComTypes;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.CSharp.RuntimeBinder;
+using Microsoft.Extensions.Logging;
 using Wormhole.Helpers;
 using Wormhole.Models;
 using FormsForm = System.Windows.Forms.Form;
@@ -21,7 +22,8 @@ internal sealed class RdpHostForm : FormsForm
     private static readonly Guid IMsTscAxEventsIid = new("336D5562-EFA8-482E-8CB3-C5C0FC7A7DB6");
 
     private readonly AxMsRdpClient9NotSafeForScripting _ax;
-    private readonly MsTscAxEventsSink _sink = new();
+    private readonly MsTscAxEventsSink _sink;
+    private readonly ILogger? _logger;
     private IConnectionPoint? _connectionPoint;
     private int _adviseCookie;
     private bool _connectStarted;
@@ -34,9 +36,13 @@ internal sealed class RdpHostForm : FormsForm
     public event Action<int, bool, int, int>? AutoReconnecting2;
     public event Action? AutoReconnected;
 
-    public RdpHostForm()
+    public RdpHostForm(ILogger<RdpHostForm>? logger = null)
     {
         EnsureStaThread();
+
+        _logger = logger;
+        _sink = new MsTscAxEventsSink((handler, ex) =>
+            _logger?.LogDebug(ex, "RDP event sink handler {Handler} threw.", handler));
 
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
@@ -133,7 +139,18 @@ internal sealed class RdpHostForm : FormsForm
             try
             {
                 dynamic transport = ocx.TransportSettings2;
-                transport.GatewayUsageMethod = (uint)profile.RdpGatewayUsageMethod;
+                // "Bypass RD Gateway server for local addresses" maps mstsc's mode 3
+                // (TSC_PROXY_MODE_DEFAULT — use default profile) → 4 (TSC_PROXY_MODE_NONE_DETECT
+                // — use default profile but detect direct connection first). The other modes
+                // encode bypass intrinsically: 0 = no gateway (irrelevant), 1 = always use (no
+                // bypass), 2 = detect (already bypasses for direct-reachable). So we only
+                // promote when the user chose "Use default" *and* checked bypass.
+                var usageMethod = (uint)profile.RdpGatewayUsageMethod;
+                if (profile.RdpGatewayUsageMethod == 3 && profile.RdpGatewayBypassLocal)
+                {
+                    usageMethod = 4;
+                }
+                transport.GatewayUsageMethod = usageMethod;
                 if (!string.IsNullOrEmpty(profile.RdpGatewayHostname))
                     transport.GatewayHostname = profile.RdpGatewayHostname;
                 // GatewayCredSharing: when set, the OCX reuses the main connection
@@ -160,7 +177,7 @@ internal sealed class RdpHostForm : FormsForm
             catch (Exception ex) when (ex is COMException or RuntimeBinderException)
             {
                 throw new InvalidOperationException(
-                    "Could not apply RD Gateway settings (server doesn't expose TransportSettings2).", ex);
+                    "Could not apply RD Gateway settings (local mstscax build doesn't expose ITransportSettings2 — install a current Remote Desktop client).", ex);
             }
         }
 
@@ -184,7 +201,7 @@ internal sealed class RdpHostForm : FormsForm
         // and Retry button instead), in exchange for not leaving the plaintext sitting
         // in COM-owned memory across the connection's lifetime.
         try { ocx.AdvancedSettings9.ClearTextPassword = string.Empty; }
-        catch { /* best-effort scrub */ }
+        catch (Exception ex) { _logger?.LogDebug(ex, "Post-Connect ClearTextPassword scrub failed (suppressed)."); }
     }
 
     /// <summary>Idempotent disconnect. Tolerates the OCX already being in a disconnected state.
@@ -203,9 +220,10 @@ internal sealed class RdpHostForm : FormsForm
             try { state = (int)ocx.Connected; } catch (RuntimeBinderException) { } catch (COMException) { }
             if (state != 0) ocx.Disconnect();
         }
-        catch
+        catch (Exception ex)
         {
-            // intentional: best-effort teardown
+            // Best-effort teardown — log so a swallowed RPC/COM error doesn't vanish entirely.
+            _logger?.LogDebug(ex, "RDP Disconnect threw during teardown (suppressed).");
         }
     }
 
@@ -265,11 +283,16 @@ internal sealed class RdpHostForm : FormsForm
         {
             if (_adviseCookie != 0) cp.Unadvise(_adviseCookie);
         }
-        catch { /* COM may already have torn down */ }
+        catch (Exception ex)
+        {
+            // COM may have already torn down — log so a real leak isn't silent.
+            _logger?.LogDebug(ex, "Unadvise failed during DetachEventsSink (suppressed).");
+        }
         finally
         {
             _adviseCookie = 0;
-            try { Marshal.ReleaseComObject(cp); } catch { }
+            try { Marshal.ReleaseComObject(cp); }
+            catch (Exception ex) { _logger?.LogDebug(ex, "ReleaseComObject on connection point threw (suppressed)."); }
         }
     }
 
@@ -277,9 +300,11 @@ internal sealed class RdpHostForm : FormsForm
     {
         if (disposing)
         {
-            try { Disconnect(); } catch { }
+            try { Disconnect(); }
+            catch (Exception ex) { _logger?.LogDebug(ex, "Disconnect during Dispose threw (suppressed)."); }
             DetachEventsSink();
-            try { _ax?.Dispose(); } catch { }
+            try { _ax?.Dispose(); }
+            catch (Exception ex) { _logger?.LogDebug(ex, "AxHost Dispose threw (suppressed)."); }
         }
         base.Dispose(disposing);
     }

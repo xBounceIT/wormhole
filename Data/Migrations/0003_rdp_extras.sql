@@ -1,4 +1,4 @@
--- 0002_rdp_extras: full mstsc-style RDP setting columns on Nodes.
+-- 0003_rdp_extras: full mstsc-style RDP setting columns on Nodes.
 -- All columns nullable so values inherit from a parent folder when unset.
 -- INTEGER NULL is used for booleans (0 / 1 / NULL) to match the existing convention.
 -- MigrationRunner already wraps this script in a transaction; no explicit BEGIN/COMMIT.

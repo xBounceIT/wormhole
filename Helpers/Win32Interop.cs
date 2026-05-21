@@ -38,7 +38,4 @@ internal static class Win32Interop
     public const int GWL_STYLE = -16;
     public const int WS_CHILD = 0x40000000;
     public const int WS_POPUP = unchecked((int)0x80000000);
-    public const int WS_VISIBLE = 0x10000000;
-    public const int WS_CLIPCHILDREN = 0x02000000;
-    public const int WS_CLIPSIBLINGS = 0x04000000;
 }

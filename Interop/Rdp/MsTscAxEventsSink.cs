@@ -51,14 +51,22 @@ public interface IMsTscAxEvents
 /// <summary>
 /// Concrete managed sink. We pass an instance of this into IConnectionPoint.Advise; the OCX
 /// then dispatches event methods to it. Each method forwards to a corresponding C# event
-/// that <see cref="RdpHostForm"/> subscribes to. Errors swallowed (logged at host level) so a
-/// buggy callback doesn't break the OCX's event pump.
+/// that <see cref="RdpHostForm"/> subscribes to. Exceptions from handlers are routed through
+/// <see cref="_onHandlerFault"/> (set by the host) so they're surfaced as a debug log entry
+/// instead of vanishing — a buggy subscriber would otherwise be invisible from telemetry.
 /// </summary>
 [ComVisible(true)]
 [ClassInterface(ClassInterfaceType.None)]
 [Guid("4A77F7F2-AD7C-4B30-BD53-9C9C00B61F86")]
 public sealed class MsTscAxEventsSink : IMsTscAxEvents
 {
+    private readonly Action<string, Exception>? _onHandlerFault;
+
+    public MsTscAxEventsSink(Action<string, Exception>? onHandlerFault = null)
+    {
+        _onHandlerFault = onHandlerFault;
+    }
+
     public event Action? Connecting;
     public event Action? Connected;
     public event Action? LoginComplete;
@@ -69,16 +77,22 @@ public sealed class MsTscAxEventsSink : IMsTscAxEvents
     public event Action<int, int>? AutoReconnecting;
     public event Action? AutoReconnected;
 
-    public void OnConnecting() { try { Connecting?.Invoke(); } catch { } }
-    public void OnConnected() { try { Connected?.Invoke(); } catch { } }
-    public void OnLoginComplete() { try { LoginComplete?.Invoke(); } catch { } }
-    public void OnDisconnected(int discReason) { try { Disconnected?.Invoke(discReason); } catch { } }
+    private void Safe(string handler, Action invoke)
+    {
+        try { invoke(); }
+        catch (Exception ex) { _onHandlerFault?.Invoke(handler, ex); }
+    }
+
+    public void OnConnecting() => Safe(nameof(OnConnecting), () => Connecting?.Invoke());
+    public void OnConnected() => Safe(nameof(OnConnected), () => Connected?.Invoke());
+    public void OnLoginComplete() => Safe(nameof(OnLoginComplete), () => LoginComplete?.Invoke());
+    public void OnDisconnected(int discReason) => Safe(nameof(OnDisconnected), () => Disconnected?.Invoke(discReason));
     public void OnEnterFullScreenMode() { }
     public void OnLeaveFullScreenMode() { }
     public void OnChannelReceivedData(string chanName, string data) { }
     public void OnRequestGoFullScreen() { }
     public void OnRequestLeaveFullScreen() { }
-    public void OnFatalError(int errorCode) { try { FatalError?.Invoke(errorCode); } catch { } }
+    public void OnFatalError(int errorCode) => Safe(nameof(OnFatalError), () => FatalError?.Invoke(errorCode));
     public void OnWarning(int warningCode) { }
     public void OnRemoteDesktopSizeChange(int width, int height) { }
     public void OnIdleTimeoutNotification() { }
@@ -88,14 +102,14 @@ public sealed class MsTscAxEventsSink : IMsTscAxEvents
     public void OnAutoReconnecting(int disconnectReason, int attemptCount, out int arcContinueStatus)
     {
         arcContinueStatus = 0; // 0 = continueReconnecting per IMsRdpClientAdvancedSettings.EnableAutoReconnect docs
-        try { AutoReconnecting?.Invoke(disconnectReason, attemptCount); } catch { }
+        Safe(nameof(OnAutoReconnecting), () => AutoReconnecting?.Invoke(disconnectReason, attemptCount));
     }
     public void OnAuthenticationWarningDisplayed() { }
     public void OnAuthenticationWarningDismissed() { }
     public void OnRemoteProgramResult(string remoteProgramName, int execResult, int rawResult) { }
     public void OnRemoteProgramDisplayed(bool displayed, uint exStyle) { }
     public void OnRemoteWindowDisplayed(bool displayed, IntPtr hwnd, int remoteWindowDisplayedAttribute) { }
-    public void OnLogonError(int lError) { try { LogonError?.Invoke(lError); } catch { } }
+    public void OnLogonError(int lError) => Safe(nameof(OnLogonError), () => LogonError?.Invoke(lError));
     public void OnFocusReleased(int iDirection) { }
     public void OnUserNameAcquired(string newUserName) { }
     public void OnMouseInputModeChanged(bool fMouseModeRelative) { }
@@ -103,11 +117,10 @@ public sealed class MsTscAxEventsSink : IMsTscAxEvents
     public void OnConnectionBarPullDown() { }
     public void OnNetworkStatusChanged(uint qualityFlags, int bandwidth, int rtt) { }
     public void OnDevicesButtonPressed() { }
-    public void OnAutoReconnected() { try { AutoReconnected?.Invoke(); } catch { } }
+    public void OnAutoReconnected() => Safe(nameof(OnAutoReconnected), () => AutoReconnected?.Invoke());
     public void OnAutoReconnecting2(int disconnectReason, bool networkAvailable, int attemptCount, int maxAttemptCount)
-    {
-        try { AutoReconnecting2?.Invoke(disconnectReason, networkAvailable, attemptCount, maxAttemptCount); } catch { }
-    }
+        => Safe(nameof(OnAutoReconnecting2),
+            () => AutoReconnecting2?.Invoke(disconnectReason, networkAvailable, attemptCount, maxAttemptCount));
 
     /// <summary>
     /// Release all managed event subscribers. Called by <see cref="RdpHostForm.DetachEventsSink"/>

@@ -216,9 +216,15 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     public bool IsGatewayEnabled => RdpGatewayUsageMethod != 0;
 
+    /// <summary>
+    /// Only mode 1 ("Always use an RD Gateway server") requires the user to supply a hostname.
+    /// Mode 2 ("Detect automatically") resolves the gateway from network/admin policy and mode 3
+    /// ("Use default RD Gateway server settings") inherits the hostname from the system default
+    /// profile — both are valid configurations with an empty hostname.
+    /// </summary>
     public string? GatewayHostnameError =>
-        IsGatewayEnabled && string.IsNullOrWhiteSpace(RdpGatewayHostname)
-            ? "Gateway hostname is required when a gateway usage method other than Direct is selected."
+        RdpGatewayUsageMethod == 1 && string.IsNullOrWhiteSpace(RdpGatewayHostname)
+            ? "Gateway hostname is required when 'Always use an RD Gateway server' is selected."
             : null;
 
     public bool IsGatewayHostnameErrorOpen => GatewayHostnameError is not null;

@@ -11,11 +11,13 @@ namespace Wormhole.Services;
 
 public sealed class RdpSessionService : IRdpSessionService
 {
+    private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<RdpSessionService> _logger;
 
-    public RdpSessionService(ILogger<RdpSessionService> logger)
+    public RdpSessionService(ILoggerFactory loggerFactory)
     {
-        _logger = logger;
+        _loggerFactory = loggerFactory;
+        _logger = loggerFactory.CreateLogger<RdpSessionService>();
     }
 
     public Task<IRdpSession> ConnectAsync(
@@ -33,12 +35,24 @@ public sealed class RdpSessionService : IRdpSessionService
         }
         cancellationToken.ThrowIfCancellationRequested();
 
-        var form = new RdpHostForm();
+        var form = new RdpHostForm(_loggerFactory.CreateLogger<RdpHostForm>());
         try
         {
             _ = form.Hwnd; // force handle creation + AxHost CreateControl before Configure / SetParent
             form.Configure(profile, password, gatewayUsername, gatewayPassword);
             cancellationToken.ThrowIfCancellationRequested();
+
+            // WinForms creates a top-level Form with WS_POPUP. SetParent alone leaves that bit
+            // set, which produces a popup hosted inside another window: focus, clipping, and
+            // Alt-Tab all misbehave. Switch the style to WS_CHILD before reparenting — this is
+            // the canonical Win32 recipe for embedding a foreign HWND into a host window.
+            var style = Win32Interop.GetWindowLong(form.Hwnd, Win32Interop.GWL_STYLE);
+            var childStyle = (style & ~Win32Interop.WS_POPUP) | Win32Interop.WS_CHILD;
+            if (childStyle != style)
+            {
+                Win32Interop.SetWindowLong(form.Hwnd, Win32Interop.GWL_STYLE, childStyle);
+            }
+
             // SetParent returns the previous parent on success and IntPtr.Zero on failure.
             // A top-level WinForms Form has the desktop as parent before reparenting, so
             // success returns the desktop HWND (non-zero); Zero unambiguously means failure.
@@ -54,12 +68,16 @@ public sealed class RdpSessionService : IRdpSessionService
         }
         catch
         {
-            try { form.Dispose(); } catch { }
+            try { form.Dispose(); }
+            catch (Exception disposeEx)
+            {
+                _logger.LogWarning(disposeEx, "RDP host form Dispose failed during cleanup of a failed Connect.");
+            }
             throw;
         }
 
         _logger.LogInformation("RDP session opened to {Host}:{Port}.", profile.Host, profile.Port);
-        return Task.FromResult<IRdpSession>(new RdpSessionAdapter(form));
+        return Task.FromResult<IRdpSession>(new RdpSessionAdapter(form, _logger));
     }
 
     /// <summary>
@@ -72,12 +90,14 @@ public sealed class RdpSessionService : IRdpSessionService
     private sealed class RdpSessionAdapter : IRdpSession
     {
         private readonly RdpHostForm _form;
+        private readonly ILogger _logger;
         private bool _loggedOn;
         private HostBounds _lastBounds = HostBounds.Empty;
 
-        public RdpSessionAdapter(RdpHostForm form)
+        public RdpSessionAdapter(RdpHostForm form, ILogger logger)
         {
             _form = form;
+            _logger = logger;
             _form.Connected += () =>
             {
                 _loggedOn = true;
@@ -124,7 +144,12 @@ public sealed class RdpSessionService : IRdpSessionService
 
         public void Dispose()
         {
-            try { _form.Dispose(); } catch { /* COM may throw during teardown */ }
+            try { _form.Dispose(); }
+            catch (Exception ex)
+            {
+                // COM may throw mid-teardown — log so a real leak isn't silent.
+                _logger.LogWarning(ex, "RdpSessionAdapter.Dispose suppressed an exception from the host form.");
+            }
         }
     }
 }

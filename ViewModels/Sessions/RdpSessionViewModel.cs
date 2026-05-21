@@ -122,7 +122,11 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     }
 
     [RelayCommand]
-    public Task DisconnectAsync() => FullTeardownAsync();
+    public Task DisconnectAsync()
+    {
+        FullTeardown();
+        return Task.CompletedTask;
+    }
 
     [RelayCommand]
     public async Task RetryAsync()
@@ -130,7 +134,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         if (Profile is null || _ownerHwnd == IntPtr.Zero) return;
 
         var forcePrompt = FailedDueToCredentials;
-        await FullTeardownAsync().ConfigureAwait(true);
+        FullTeardown();
 
         // Geometry will be re-supplied by the surface host's first SetBounds after the new
         // session attaches; seed with a 1x1 so the form is valid until that arrives.
@@ -140,7 +144,11 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     [RelayCommand]
     public void ToggleMaximize() => IsMaximized = !IsMaximized;
 
-    public override async ValueTask CloseAsync() => await FullTeardownAsync().ConfigureAwait(true);
+    public override ValueTask CloseAsync()
+    {
+        FullTeardown();
+        return ValueTask.CompletedTask;
+    }
 
     private async Task ConnectAsync(IntPtr ownerHwnd, HostBounds initialBounds, bool forcePromptForPassword)
     {
@@ -189,13 +197,13 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         }
         catch (OperationCanceledException)
         {
-            await DisposeSessionSilentlyAsync().ConfigureAwait(true);
+            DisposeSessionSilently();
             Status = SessionStatus.Disconnected;
         }
         catch (System.Runtime.InteropServices.COMException ex) when ((uint)ex.HResult == 0x80040154)
         {
             // REGDB_E_CLASSNOTREG — mstscax not registered (Server Core, N edition).
-            await DisposeSessionSilentlyAsync().ConfigureAwait(true);
+            DisposeSessionSilently();
             ReportFailure(
                 "Microsoft Remote Desktop ActiveX (mstscax.dll) is not registered on this system. " +
                 "Install the Remote Desktop Connection client.",
@@ -204,7 +212,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         }
         catch (Exception ex)
         {
-            await DisposeSessionSilentlyAsync().ConfigureAwait(true);
+            DisposeSessionSilently();
             ReportFailure(ex.Message, dueToCredentials: false);
             _logger.LogError(ex, "RDP connect failed for {Host}:{Port}.", profile.Host, profile.Port);
         }
@@ -288,21 +296,21 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
     private void OnSessionDisconnected(object? sender, RdpDisconnectInfo info)
     {
-        MarshalToUi(() => DisposeAndTransitionAsync(
+        MarshalToUi(() => DisposeAndTransition(
             failureMessage: info.IsClean ? null : info.Description,
             dueToCredentials: false));
     }
 
     private void OnSessionLogonError(object? sender, int code)
     {
-        MarshalToUi(() => DisposeAndTransitionAsync(
+        MarshalToUi(() => DisposeAndTransition(
             failureMessage: RdpLogonErrors.Describe(code),
             dueToCredentials: true));
     }
 
     private void OnSessionFatalError(object? sender, int code)
     {
-        MarshalToUi(() => DisposeAndTransitionAsync(
+        MarshalToUi(() => DisposeAndTransition(
             failureMessage: $"RDP fatal error (code {code}).",
             dueToCredentials: false));
     }
@@ -347,13 +355,13 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     /// User-initiated teardown (Disconnect / Retry / tab close): cancel any in-flight
     /// connect, dispose the session, return to a clean Disconnected state.
     /// </summary>
-    private async Task FullTeardownAsync()
+    private void FullTeardown()
     {
         var cts = _cts;
         _cts = null;
         try { cts?.Cancel(); } catch { /* already disposed */ }
 
-        await DisposeSessionSilentlyAsync().ConfigureAwait(true);
+        DisposeSessionSilently();
         Status = SessionStatus.Disconnected;
         ErrorMessage = null;
         FailedDueToCredentials = false;
@@ -364,9 +372,9 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     /// (clean shutdown) or surface the failure overlay. Called from OnSessionDisconnected /
     /// OnSessionLogonError / OnSessionFatalError so the shape stays consistent.
     /// </summary>
-    private async Task DisposeAndTransitionAsync(string? failureMessage, bool dueToCredentials)
+    private void DisposeAndTransition(string? failureMessage, bool dueToCredentials)
     {
-        await DisposeSessionSilentlyAsync().ConfigureAwait(true);
+        DisposeSessionSilently();
         if (failureMessage is null)
         {
             Status = SessionStatus.Disconnected;
@@ -379,11 +387,11 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         }
     }
 
-    private Task DisposeSessionSilentlyAsync()
+    private void DisposeSessionSilently()
     {
         var session = _session;
         _session = null;
-        if (session is null) return Task.CompletedTask;
+        if (session is null) return;
 
         session.Connected -= OnSessionConnected;
         session.Disconnected -= OnSessionDisconnected;
@@ -396,8 +404,6 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
         try { session.Dispose(); }
         catch (Exception ex) { _logger.LogWarning(ex, "Dispose threw during teardown."); }
-
-        return Task.CompletedTask;
     }
 
     // Test-only hook mirroring the SSH pattern — lets unit tests bypass the real service.
