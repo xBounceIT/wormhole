@@ -17,11 +17,12 @@ public sealed partial class SessionsPage : Page
 
     private async void SessionTabs_TabCloseRequested(TabView sender, TabViewTabCloseRequestedEventArgs args)
     {
-        if (args.Item is SshSessionViewModel ssh)
+        if (args.Item is not SessionTabViewModel tab) return;
+        try
         {
-            await ssh.DetachAsync();
+            await tab.CloseAsync();
         }
-        if (args.Item is SessionTabViewModel tab)
+        finally
         {
             ViewModel.Tabs.Remove(tab);
         }

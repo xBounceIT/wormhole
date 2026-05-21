@@ -28,7 +28,6 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private TerminalBridge? _bridge;
     private CancellationTokenSource? _cts;
     private CoreWebView2? _webView;
-    private Microsoft.UI.Dispatching.DispatcherQueue? _uiDispatcher;
     private string? _initialKnownFingerprint;
     private TerminalSize _initialSize = TerminalSize.Default;
     private CancellationTokenSource? _outputWaitCts;
@@ -86,7 +85,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         _initialSize = initialSize;
         // AttachAsync is called from the UI thread (SshTerminalView's ready handler);
         // capture the dispatcher now so background callbacks (Closed) can marshal back.
-        _uiDispatcher ??= Microsoft.UI.Dispatching.DispatcherQueue.GetForCurrentThread();
+        EnsureDispatcher();
 
         // Navigating away from Sessions and back rebuilds the tab content (new
         // UserControl + WebView2) while the VM stays alive in ShellViewModel.Tabs. Skip the
@@ -132,6 +131,11 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
     [RelayCommand]
     public Task DisconnectAsync() => DetachAsync();
+
+    public override async ValueTask CloseAsync()
+    {
+        await DetachAsync().ConfigureAwait(true);
+    }
 
     public async Task DetachAsync()
     {
@@ -189,12 +193,10 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
     private void OnSessionClosed(object? sender, EventArgs e)
     {
-        // Fired from the SSH read-pump thread; marshal to the captured UI dispatcher
-        // before touching observable properties or disposing the session.
-        var dispatcher = _uiDispatcher;
-        if (dispatcher is null) return;
+        // Fired from the SSH read-pump thread; marshal to the UI dispatcher before
+        // touching observable properties or disposing the session.
         var closedSession = sender as ISshSession;
-        dispatcher.TryEnqueue(async () =>
+        MarshalToUi(async () =>
         {
             // _session being null means we've already disposed (consumer-initiated
             // tear-down ran first). Failed/Disconnected from a prior path also means
@@ -317,18 +319,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     {
         if (data.Length == 0 || HasReceivedOutput) return;
         var sourceSession = sender as ISshSession;
-
-        var dispatcher = _uiDispatcher;
-        if (dispatcher is null)
-        {
-            MarkOutputReceived(sourceSession);
-            return;
-        }
-
-        if (!dispatcher.TryEnqueue(() => MarkOutputReceived(sourceSession)))
-        {
-            _logger.LogWarning("Failed to enqueue SSH output state update.");
-        }
+        MarshalToUi(() => MarkOutputReceived(sourceSession));
     }
 
     private void MarkOutputReceived(ISshSession? sourceSession)
@@ -376,24 +367,13 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             return;
         }
 
-        void ShowWaiting()
+        MarshalToUi(() =>
         {
             if (cancellationToken.IsCancellationRequested) return;
             if (Status != SessionStatus.Connected || HasReceivedOutput) return;
             _outputWaitCts = null;
             IsWaitingForRemoteOutput = true;
-        }
-
-        var dispatcher = _uiDispatcher;
-        if (dispatcher is null)
-        {
-            ShowWaiting();
-        }
-        else if (!dispatcher.TryEnqueue(ShowWaiting))
-        {
-            _outputWaitCts = null;
-            _logger.LogWarning("Failed to enqueue SSH no-output state update.");
-        }
+        });
     }
 
     private void CancelRemoteOutputWaitTimer()

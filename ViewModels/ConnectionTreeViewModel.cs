@@ -103,21 +103,17 @@ public partial class ConnectionTreeViewModel : ObservableObject
     [RelayCommand]
     private async Task AddConnection(TreeNodeViewModel? clicked)
     {
-        var draft = await _dialog.PromptForConnectionAsync();
-        if (draft is null) return;
-
         var parentId = ResolveParentId(clicked);
-        await SafeAddAsync(new ConnectionNode
+        var seed = new ConnectionNode
         {
-            Name = draft.Name,
             Kind = NodeKind.Connection,
             ParentId = parentId,
             SortOrder = NextSortOrder(parentId),
-            Protocol = draft.Protocol,
-            Host = draft.Host,
-            Port = draft.Port,
-            Username = draft.Username,
-        });
+            Protocol = ProtocolType.Ssh,
+        };
+        var edited = await _dialog.EditConnectionAsync(seed, isNew: true);
+        if (edited is null) return;
+        await SafeAddAsync(edited);
     }
 
     [RelayCommand]
@@ -135,21 +131,9 @@ public partial class ConnectionTreeViewModel : ObservableObject
             return;
         }
 
-        var initial = new NewConnectionDraft(
-            node.Name,
-            node.Protocol ?? ProtocolType.Ssh,
-            node.Host ?? string.Empty,
-            node.Port,
-            node.Username);
-        var draft = await _dialog.PromptForConnectionAsync(initial);
-        if (draft is null || draft == initial) return;
-
-        node.Name = draft.Name;
-        node.Protocol = draft.Protocol;
-        node.Host = draft.Host;
-        node.Port = draft.Port;
-        node.Username = draft.Username;
-        await SafeUpdateAsync(node);
+        var edited = await _dialog.EditConnectionAsync(node, isNew: false);
+        if (edited is null) return;
+        await SafeUpdateAsync(edited);
     }
 
     [RelayCommand]

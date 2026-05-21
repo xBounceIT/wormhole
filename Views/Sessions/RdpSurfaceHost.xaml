@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Wormhole.Views.Sessions.RdpSurfaceHost"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:sessions="using:Wormhole.ViewModels.Sessions">
+
+    <Grid>
+        <Grid.ContextFlyout>
+            <MenuFlyout>
+                <MenuFlyoutItem Text="Disconnect"
+                                Command="{x:Bind ViewModel.DisconnectCommand}"
+                                IsEnabled="{x:Bind ViewModel.IsConnected, Mode=OneWay}">
+                    <MenuFlyoutItem.Icon>
+                        <FontIcon Glyph="&#xE8BB;" />
+                    </MenuFlyoutItem.Icon>
+                </MenuFlyoutItem>
+                <MenuFlyoutItem Text="Reconnect"
+                                Command="{x:Bind ViewModel.RetryCommand}">
+                    <MenuFlyoutItem.Icon>
+                        <FontIcon Glyph="&#xE72C;" />
+                    </MenuFlyoutItem.Icon>
+                </MenuFlyoutItem>
+                <MenuFlyoutSeparator />
+                <ToggleMenuFlyoutItem Text="Maximize within tab"
+                                      IsChecked="{x:Bind ViewModel.IsMaximized, Mode=TwoWay}"
+                                      Command="{x:Bind ViewModel.ToggleMaximizeCommand}" />
+            </MenuFlyout>
+        </Grid.ContextFlyout>
+
+        <!-- Reserved layout slot for the reparented WinForms+ActiveX host. The actual native
+             child window is positioned in window-client physical pixels via MoveWindow from
+             the code-behind on every LayoutUpdated tick. This Grid stays empty visually but
+             is the size/position anchor. -->
+        <Grid x:Name="HostSurface"
+              Background="#FF000000"
+              HorizontalAlignment="Stretch"
+              VerticalAlignment="Stretch" />
+
+        <!-- Connecting overlay -->
+        <Grid x:Name="ConnectingOverlay"
+              Background="{ThemeResource LayerFillColorDefaultBrush}"
+              Visibility="{x:Bind ViewModel.IsConnecting, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+            <StackPanel HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Spacing="12"
+                        MaxWidth="320">
+                <ProgressRing IsActive="True" Width="32" Height="32" />
+                <TextBlock Text="Connecting…"
+                           Style="{StaticResource BodyStrongTextBlockStyle}"
+                           HorizontalAlignment="Center" />
+                <TextBlock x:Name="ReconnectAttemptText"
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           HorizontalAlignment="Center"
+                           TextAlignment="Center"
+                           Opacity="0.7"
+                           Visibility="Collapsed" />
+            </StackPanel>
+        </Grid>
+
+        <!-- Failure overlay -->
+        <Grid x:Name="FailedOverlay"
+              Background="{ThemeResource LayerFillColorDefaultBrush}"
+              Visibility="{x:Bind ViewModel.IsFailed, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+            <StackPanel HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Spacing="16"
+                        MaxWidth="420">
+                <FontIcon Glyph="&#xE783;" FontSize="32" HorizontalAlignment="Center" />
+                <TextBlock Text="Connection failed"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           HorizontalAlignment="Center" />
+                <TextBlock Text="{x:Bind ViewModel.ErrorMessage, Mode=OneWay}"
+                           Style="{StaticResource BodyTextBlockStyle}"
+                           Opacity="0.8"
+                           HorizontalAlignment="Center"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap" />
+                <StackPanel Orientation="Horizontal"
+                            Spacing="8"
+                            HorizontalAlignment="Center">
+                    <Button Content="Retry"
+                            Command="{x:Bind ViewModel.RetryCommand}"
+                            Style="{StaticResource AccentButtonStyle}" />
+                </StackPanel>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</UserControl>

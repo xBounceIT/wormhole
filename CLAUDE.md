@@ -26,7 +26,7 @@ mRemoteNG. This file orients agents touching the codebase.
 ## Architecture pillars (the parts to handle with care)
 
 - **Folder-level inheritance** (`Data/InheritanceResolver.cs`) is the load-bearing domain concept. It is the single thing that makes Wormhole feel like mRemoteNG. Always run its tests before touching it.
-- **RDP host** must be on STA. The ActiveX `AxMsRdpClient9NotSafeForScripting` lives in a WinForms `Form` reparented into a WinUI 3 placeholder via Win32 `SetParent`. See [Interop/Rdp/RdpHostForm.cs](Interop/Rdp/RdpHostForm.cs).
+- **RDP host** must be on STA. The ActiveX `MsRdpClient9NotSafeForScripting` lives in a WinForms `Form` (see [Interop/Rdp/RdpHostForm.cs](Interop/Rdp/RdpHostForm.cs)) reparented into the WinUI 3 main window via Win32 `SetParent`, then positioned by [Views/Sessions/RdpSurfaceHost.xaml.cs](Views/Sessions/RdpSurfaceHost.xaml.cs) on every layout tick. COM interop is hand-rolled in [Interop/Rdp/AxMsRdpClient9.cs](Interop/Rdp/AxMsRdpClient9.cs) and [Interop/Rdp/MsTscAxEventsSink.cs](Interop/Rdp/MsTscAxEventsSink.cs) — no AxImp-generated wrappers; property access is dynamic via `GetOcx()`, events go through `IConnectionPointContainer.Advise` with a managed `IMsTscAxEvents` sink.
 - **SSH terminal** is xterm.js inside a `WebView2` bridged to SSH.NET `ShellStream` by [Interop/Terminal/TerminalBridge.cs](Interop/Terminal/TerminalBridge.cs). xterm.js bundle lives under `Assets/web/`.
 - **Threading**: UI thread is STA. Use `Task.Run` for SSH/SFTP I/O, marshal back via `DispatcherQueue.TryEnqueue`.
 
@@ -37,12 +37,7 @@ mRemoteNG. This file orients agents touching the codebase.
 
 ## What this scaffold does NOT do yet
 
-- SSH protocol surface (`SshSessionService` throws `NotImplementedException`).
-- RDP host (`RdpHostForm`/`RdpSessionService` throw `NotImplementedException`).
 - SFTP browser (`SftpService` throws `NotImplementedException`).
-- Connection editor UI (`ConnectionEditorPage` is a placeholder).
-- Real connection tree (the tree binds to an empty SQLite DB on first run).
 - Installer (`scripts/Build-Installer.ps1` is a `-DryRun`-only scaffold).
-- xterm.js bundle (`Assets/web/terminal.html` is a placeholder; drop the JS in during the SSH feature PR).
 
 Each item above is a follow-up feature PR.

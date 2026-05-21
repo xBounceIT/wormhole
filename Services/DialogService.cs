@@ -69,16 +69,16 @@ public sealed class DialogService : IDialogService
         return result == ContentDialogResult.Primary ? textBox.Text.Trim() : null;
     }
 
-    public async Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null)
+    public async Task<ConnectionNode?> EditConnectionAsync(ConnectionNode initial, bool isNew)
     {
         var form = new NewConnectionDialog();
-        if (initial is not null) form.LoadDraft(initial);
+        await form.LoadAsync(initial);
 
         var dialog = new ContentDialog
         {
-            Title = initial is null ? "New connection" : "Edit connection",
+            Title = isNew ? "New connection" : "Edit connection",
             Content = form,
-            PrimaryButtonText = initial is null ? "Create" : "Save",
+            PrimaryButtonText = isNew ? "Create" : "Save",
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Primary,
             XamlRoot = RequireXamlRoot(),
@@ -89,7 +89,13 @@ public sealed class DialogService : IDialogService
         dialog.Opened += (_, _) => form.FocusNameField();
 
         var result = await dialog.ShowAsync();
-        return result == ContentDialogResult.Primary ? form.BuildDraft() : null;
+        if (result != ContentDialogResult.Primary) return null;
+
+        // Produce a fresh node mirroring `initial`'s identity/parent so the caller can update
+        // storage without mutating the input. WriteTo only touches editable fields.
+        var output = ConnectionNode.CloneIdentityFrom(initial);
+        form.WriteTo(output);
+        return output;
     }
 
     public async Task<string?> PromptPasswordAsync(string title, string message)

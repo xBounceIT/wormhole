@@ -1,56 +1,72 @@
 using System;
-using Microsoft.UI.Xaml;
+using System.ComponentModel;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.UI.Xaml.Controls;
 using Wormhole.Models;
+using Wormhole.ViewModels;
 
 namespace Wormhole.Views.Dialogs;
 
+/// <summary>
+/// Multi-tab connection editor backing <see cref="Services.IDialogService.EditConnectionAsync"/>.
+/// Hosts a <see cref="ConnectionEditorViewModel"/> resolved from DI; tabs for RDP-specific
+/// settings (Display / Local Resources / Experience / Advanced) self-collapse when Protocol
+/// is not RDP via x:Bind to <c>ViewModel.IsRdp</c>.
+/// </summary>
 public sealed partial class NewConnectionDialog : UserControl
 {
     public event EventHandler? ValidityChanged;
 
     public NewConnectionDialog()
     {
+        ViewModel = App.Current.Services.GetRequiredService<ConnectionEditorViewModel>();
         this.InitializeComponent();
+        ViewModel.PropertyChanged += OnViewModelPropertyChanged;
     }
+
+    public ConnectionEditorViewModel ViewModel { get; }
 
     public ProtocolType[] Protocols { get; } = Enum.GetValues<ProtocolType>();
 
-    public bool IsValid =>
-        !string.IsNullOrWhiteSpace(NameBox.Text) &&
-        !string.IsNullOrWhiteSpace(HostBox.Text);
-
-    public void LoadDraft(NewConnectionDraft initial)
+    /// <summary>
+    /// Bridge between NumberBox.Value (double, NaN-able) and ConnectionEditorViewModel.Port (int?).
+    /// NumberBox uses NaN to mean "empty" — we map NaN ↔ null.
+    /// </summary>
+    public double PortBindable
     {
-        NameBox.Text = initial.Name;
-        ProtocolBox.SelectedItem = initial.Protocol;
-        HostBox.Text = initial.Host;
-        if (initial.Port is { } port) PortBox.Value = port;
-        UsernameBox.Text = initial.Username ?? string.Empty;
+        get => ViewModel.Port is { } p ? p : double.NaN;
+        set
+        {
+            int? port = double.IsNaN(value) ? null : (int)value;
+            if (ViewModel.Port == port) return;
+            ViewModel.Port = port;
+        }
     }
 
-    public NewConnectionDraft BuildDraft()
-    {
-        var protocol = (ProtocolType)ProtocolBox.SelectedItem;
-        int? port = double.IsNaN(PortBox.Value) ? null : (int)PortBox.Value;
-        var username = string.IsNullOrWhiteSpace(UsernameBox.Text) ? null : UsernameBox.Text.Trim();
+    public bool IsValid => ViewModel.IsValid;
 
-        return new NewConnectionDraft(
-            NameBox.Text.Trim(),
-            protocol,
-            HostBox.Text.Trim(),
-            port,
-            username);
+    /// <summary>Load credentials and copy field values from <paramref name="initial"/> into the VM.</summary>
+    public async System.Threading.Tasks.Task LoadAsync(ConnectionNode initial)
+    {
+        await ViewModel.LoadCredentialsAsync();
+        ViewModel.LoadFrom(initial);
     }
+
+    /// <summary>Copy field values back into the supplied node. Caller is responsible for the
+    /// Id and parent linkage.</summary>
+    public void WriteTo(ConnectionNode node) => ViewModel.WriteTo(node);
 
     public void FocusNameField()
     {
-        NameBox.Focus(FocusState.Programmatic);
+        NameBox.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
         NameBox.SelectAll();
     }
 
-    private void OnFieldChanged(object sender, TextChangedEventArgs e)
+    private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        ValidityChanged?.Invoke(this, EventArgs.Empty);
+        if (e.PropertyName == nameof(ConnectionEditorViewModel.IsValid))
+        {
+            ValidityChanged?.Invoke(this, EventArgs.Empty);
+        }
     }
 }

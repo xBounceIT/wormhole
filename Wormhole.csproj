@@ -39,6 +39,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WindowsForms" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260209005" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3967.48" GeneratePathProperty="true" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
