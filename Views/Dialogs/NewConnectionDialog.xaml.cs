@@ -85,7 +85,14 @@ public sealed partial class NewConnectionDialog : UserControl, IDraftForm<NewCon
     {
         // XAML SelectedIndex="0" can fire this before CredentialBox is wired up.
         if (CredentialBox is null) return;
-        var preserved = (CredentialBox.SelectedItem as CredentialChoice)?.Profile?.Id;
+        if (ProtocolBox.SelectedItem is not ProtocolType newProtocol) return;
+        // Only carry the selection forward when the credential still matches the new
+        // filter — otherwise the stale-splice path below would re-introduce it and
+        // silently expose a protocol-incompatible choice (e.g. SSH cred on RDP conn).
+        var current = (CredentialBox.SelectedItem as CredentialChoice)?.Profile;
+        var preserved = current is not null && current.Protocol == CredentialProtocolFor(newProtocol)
+            ? current.Id
+            : (Guid?)null;
         RebuildCredentialList(preservedSelectionId: preserved);
     }
 
