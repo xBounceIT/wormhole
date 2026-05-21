@@ -14,24 +14,17 @@
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
-        <Grid x:Name="AppTitleBar" Grid.Row="0" Height="48" Background="Transparent">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="148" />
-            </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" Text="Wormhole"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       VerticalAlignment="Center"
-                       Margin="16,0,0,0" />
-
-            <controls:QuickConnectBar Grid.Column="1"
-                                      HorizontalAlignment="Stretch"
-                                      VerticalAlignment="Center"
-                                      MaxWidth="900"
-                                      MinWidth="320"
-                                      Margin="24,6,24,6" />
-        </Grid>
+        <TitleBar x:Name="AppTitleBar"
+                  Grid.Row="0"
+                  Title="Wormhole">
+            <TitleBar.Content>
+                <controls:QuickConnectBar HorizontalAlignment="Stretch"
+                                          VerticalAlignment="Center"
+                                          MaxWidth="900"
+                                          MinWidth="320"
+                                          Margin="24,6,24,6" />
+            </TitleBar.Content>
+        </TitleBar>
 
         <InfoBar Grid.Row="1"
                  x:Name="UpdateInfoBar"
@@ -47,7 +40,7 @@
             </InfoBar.ActionButton>
         </InfoBar>
 
-        <Grid Grid.Row="2">
+        <Grid x:Name="ContentArea" Grid.Row="2">
             <NavigationView
                 x:Name="NavView"
                 IsBackButtonVisible="Collapsed"
