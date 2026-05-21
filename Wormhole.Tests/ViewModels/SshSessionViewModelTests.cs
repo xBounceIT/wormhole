@@ -90,6 +90,33 @@ public sealed class SshSessionViewModelTests
     }
 
     [Fact]
+    public void CanReconnect_IsTrue_ForSshSession()
+    {
+        var vm = CreateViewModel();
+
+        Assert.True(vm.CanReconnect);
+        Assert.NotNull(vm.ReconnectCommand);
+    }
+
+    [Fact]
+    public void CanReconnect_IsFalse_ForRdpSession()
+    {
+        var vm = new RdpSessionViewModel();
+
+        Assert.False(vm.CanReconnect);
+        Assert.Null(vm.ReconnectCommand);
+    }
+
+    [Fact]
+    public void CanReconnect_IsFalse_ForSftpSession()
+    {
+        var vm = new SftpSessionViewModel();
+
+        Assert.False(vm.CanReconnect);
+        Assert.Null(vm.ReconnectCommand);
+    }
+
+    [Fact]
     public async Task DetachAsync_DisposesSessionAndIgnoresLateOutput()
     {
         var vm = CreateViewModel();
