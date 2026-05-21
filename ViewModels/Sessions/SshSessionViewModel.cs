@@ -129,10 +129,17 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         // already shows the prior render.
         if (_session is not null)
         {
+            // Snapshot BEFORE subscribing the new bridge: a byte that lands on the SSH
+            // read pump after the new bridge subscribes would otherwise be rendered
+            // live AND included in the snapshot, duplicating on replay (e.g. tail -f
+            // mid-reattach). The reverse race — bytes between snapshot and subscribe —
+            // stays in the ring buffer and surfaces on the next reattach; a far less
+            // visible cosmetic issue than the duplicated stream.
+            var snapshot = xtermIsFresh ? _replayBuffer.Snapshot() : null;
             var oldBridge = _bridge;
             _bridge = new TerminalBridge(webView, _session, _loggerFactory.CreateLogger<TerminalBridge>(), _settingsService);
             oldBridge?.Dispose();
-            if (xtermIsFresh) _bridge.Replay(_replayBuffer.Snapshot());
+            if (snapshot is not null) _bridge.Replay(snapshot);
             await _session.ResizeAsync(initialSize.Columns, initialSize.Rows).ConfigureAwait(true);
             _bridge.RequestFocus();
             EnsureRemoteOutputWaitTimer();
