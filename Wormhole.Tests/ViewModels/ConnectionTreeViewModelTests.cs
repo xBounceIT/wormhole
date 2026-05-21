@@ -153,6 +153,66 @@ public class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task AddConnection_WithCredentialId_PersistsCredentialId()
+    {
+        var credentialId = Guid.NewGuid();
+        var dialog = new FakeDialogService
+        {
+            ConnectionPromptResult = new NewConnectionDraft(
+                "prod-web", ProtocolType.Ssh, "example.com", 22, null, credentialId),
+        };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        await vm.AddConnectionCommand.ExecuteAsync(null);
+
+        var row = Assert.Single(await _repo.GetAllAsync());
+        Assert.Equal(credentialId, row.CredentialId);
+    }
+
+    [Fact]
+    public async Task Edit_OpensDialogWithSavedCredentialId()
+    {
+        var credentialId = Guid.NewGuid();
+        var dialog = new FakeDialogService
+        {
+            ConnectionPromptResult = new NewConnectionDraft(
+                "prod", ProtocolType.Ssh, "host", 22, null, credentialId),
+        };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+        await vm.AddConnectionCommand.ExecuteAsync(null);
+
+        // Re-submitting the same draft is a no-op, but Edit still has to construct
+        // the initial draft from the node — verify the CredentialId is carried over.
+        await vm.EditCommand.ExecuteAsync(vm.Roots.Single());
+
+        Assert.NotNull(dialog.LastConnectionPromptInitial);
+        Assert.Equal(credentialId, dialog.LastConnectionPromptInitial!.CredentialId);
+    }
+
+    [Fact]
+    public async Task Edit_AssignsCredentialId_PersistsToDb()
+    {
+        var dialog = new FakeDialogService
+        {
+            ConnectionPromptResult = new NewConnectionDraft(
+                "prod", ProtocolType.Ssh, "host", 22, "alice"),
+        };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+        await vm.AddConnectionCommand.ExecuteAsync(null);
+
+        var credentialId = Guid.NewGuid();
+        dialog.ConnectionPromptResult = new NewConnectionDraft(
+            "prod", ProtocolType.Ssh, "host", 22, null, credentialId);
+        await vm.EditCommand.ExecuteAsync(vm.Roots.Single());
+
+        var row = (await _repo.GetAllAsync()).Single();
+        Assert.Equal(credentialId, row.CredentialId);
+    }
+
+    [Fact]
     public async Task AddConnection_NullPortAndUsername_StoredAsNull()
     {
         var dialog = new FakeDialogService
@@ -875,6 +935,7 @@ public class ConnectionTreeViewModelTests : IDisposable
     {
         public string? TextPromptResult { get; set; }
         public NewConnectionDraft? ConnectionPromptResult { get; set; }
+        public NewConnectionDraft? LastConnectionPromptInitial { get; private set; }
         public bool ConfirmResult { get; set; } = true;
 
         public Task ShowMessageAsync(string title, string message) => Task.CompletedTask;
@@ -883,7 +944,10 @@ public class ConnectionTreeViewModelTests : IDisposable
         public Task<string?> PromptForTextAsync(string title, string label, string defaultValue = "")
             => Task.FromResult(TextPromptResult);
         public Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null)
-            => Task.FromResult(ConnectionPromptResult);
+        {
+            LastConnectionPromptInitial = initial;
+            return Task.FromResult(ConnectionPromptResult);
+        }
         public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null)
             => Task.FromResult<CredentialDraft?>(null);
         public Task<string?> PromptPasswordAsync(string title, string message)

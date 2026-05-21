@@ -15,6 +15,7 @@
                   Header="Protocol"
                   ItemsSource="{x:Bind Protocols}"
                   SelectedIndex="0"
+                  SelectionChanged="OnProtocolChanged"
                   HorizontalAlignment="Stretch">
             <ComboBox.ItemTemplate>
                 <DataTemplate x:DataType="models:ProtocolType">
@@ -34,6 +35,12 @@
                    Minimum="1"
                    Maximum="65535"
                    SpinButtonPlacementMode="Hidden" />
+
+        <ComboBox x:Name="CredentialBox"
+                  Header="Credential"
+                  DisplayMemberPath="DisplayName"
+                  SelectionChanged="OnCredentialChanged"
+                  HorizontalAlignment="Stretch" />
 
         <TextBox x:Name="UsernameBox"
                  Header="Username"
