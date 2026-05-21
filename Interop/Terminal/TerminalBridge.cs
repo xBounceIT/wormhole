@@ -9,11 +9,17 @@ namespace Wormhole.Interop.Terminal;
 
 public sealed class TerminalBridge : IDisposable
 {
+    private const uint MinimumUsableColumns = 20;
+    private const uint MinimumUsableRows = 8;
+
     private readonly CoreWebView2 _webView;
     private readonly ISshSession _session;
     private readonly ILogger<TerminalBridge> _logger;
     private readonly DispatcherQueue _dispatcher;
     private bool _disposed;
+    private bool _firstOutputLogged;
+    private uint _lastColumns;
+    private uint _lastRows;
 
     public TerminalBridge(CoreWebView2 webView, ISshSession session, ILogger<TerminalBridge> logger)
     {
@@ -35,10 +41,28 @@ public sealed class TerminalBridge : IDisposable
     {
         // TODO: throttle/coalesce writes to avoid postMessage backpressure on bursts.
         if (_disposed) return;
+        if (!_firstOutputLogged && data.Length > 0)
+        {
+            _firstOutputLogged = true;
+            _logger.LogInformation("First SSH shell output received: {ByteCount} bytes.", data.Length);
+        }
+
         // SSH read pump fires on a background thread; marshal to the UI thread before
         // calling any WebView2 method (they're thread-affine to the creator thread).
         var snapshot = data;
-        _dispatcher.TryEnqueue(() => PostBytesToWebView(snapshot));
+        if (!_dispatcher.TryEnqueue(() => PostBytesToWebView(snapshot)))
+        {
+            _logger.LogWarning("Failed to enqueue SSH output for WebView posting.");
+        }
+    }
+
+    public void RequestFocus()
+    {
+        if (_disposed) return;
+        if (!_dispatcher.TryEnqueue(PostFocusToWebView))
+        {
+            _logger.LogWarning("Failed to enqueue terminal focus request.");
+        }
     }
 
     private void PostBytesToWebView(ReadOnlyMemory<byte> data)
@@ -49,11 +73,31 @@ public sealed class TerminalBridge : IDisposable
             var encoded = Convert.ToBase64String(data.Span);
             _webView.PostWebMessageAsString("d:" + encoded);
         }
-        catch (ObjectDisposedException) { /* raced with Dispose */ }
+        catch (ObjectDisposedException ex)
+        {
+            _logger.LogDebug(ex, "PostWebMessageAsString raced with WebView disposal.");
+        }
         catch (InvalidOperationException ex)
         {
             // WebView2 throws this when the CoreWebView2 has been closed.
-            _logger.LogDebug(ex, "PostWebMessageAsString rejected after WebView shutdown.");
+            _logger.LogWarning(ex, "PostWebMessageAsString rejected while posting SSH output.");
+        }
+    }
+
+    private void PostFocusToWebView()
+    {
+        if (_disposed) return;
+        try
+        {
+            _webView.PostWebMessageAsString("f:");
+        }
+        catch (ObjectDisposedException ex)
+        {
+            _logger.LogDebug(ex, "Terminal focus request raced with WebView disposal.");
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogWarning(ex, "PostWebMessageAsString rejected while requesting terminal focus.");
         }
     }
 
@@ -85,8 +129,27 @@ public sealed class TerminalBridge : IDisposable
                     uint.TryParse(parts[0], out var cols) &&
                     uint.TryParse(parts[1], out var rows))
                 {
+                    if (cols < MinimumUsableColumns || rows < MinimumUsableRows)
+                    {
+                        _logger.LogInformation(
+                            "Ignoring collapsed terminal resize request: {Columns}x{Rows}.",
+                            cols,
+                            rows);
+                        return;
+                    }
+
+                    if (cols != _lastColumns || rows != _lastRows)
+                    {
+                        _lastColumns = cols;
+                        _lastRows = rows;
+                        _logger.LogInformation("Terminal resize requested: {Columns}x{Rows}.", cols, rows);
+                    }
                     await _session.ResizeAsync(cols, rows);
                 }
+            }
+            else if (msg.StartsWith("z:collapsed-fit:", StringComparison.Ordinal))
+            {
+                _logger.LogInformation("Terminal ignored collapsed fit measurement: {Measurement}.", msg.Substring("z:collapsed-fit:".Length));
             }
         }
         catch (Exception ex)

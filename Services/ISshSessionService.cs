@@ -22,6 +22,8 @@ public interface ISshSessionService
 
 public interface ISshSession : IAsyncDisposable
 {
+    string? HostFingerprint { get; }
+
     event EventHandler<ReadOnlyMemory<byte>>? DataReceived;
     /// <summary>
     /// Raised once when the underlying SSH stream closes (EOF, network drop, or remote

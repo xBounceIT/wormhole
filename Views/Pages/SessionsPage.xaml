@@ -8,7 +8,9 @@
 
     <Page.Resources>
         <DataTemplate x:Key="SshSessionTemplate" x:DataType="sessions:SshSessionViewModel">
-            <sessionViews:SshTerminalView />
+            <sessionViews:SshTerminalView HorizontalAlignment="Stretch"
+                                          VerticalAlignment="Stretch"
+                                          MinHeight="240" />
         </DataTemplate>
 
         <DataTemplate x:Key="ProtocolPlaceholderTemplate" x:DataType="sessions:SessionTabViewModel">
@@ -55,11 +57,15 @@
                  CanDragTabs="True"
                  TabCloseRequested="SessionTabs_TabCloseRequested"
                  Background="Transparent"
+                 HorizontalAlignment="Stretch"
+                 VerticalAlignment="Stretch"
                  Visibility="{x:Bind ViewModel.HasTabs, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}">
 
             <TabView.TabItemTemplate>
                 <DataTemplate x:DataType="sessions:SessionTabViewModel">
-                    <TabViewItem Header="{x:Bind Title, Mode=OneWay}">
+                    <TabViewItem Header="{x:Bind Title, Mode=OneWay}"
+                                 HorizontalContentAlignment="Stretch"
+                                 VerticalContentAlignment="Stretch">
                         <TabViewItem.ContextFlyout>
                             <!-- Click handlers (not Command bindings) because ElementName binding
                                  can't escape the DataTemplate's namescope into the MenuFlyout popup. -->
@@ -74,8 +80,11 @@
                         </TabViewItem.ContextFlyout>
                         <ContentControl Content="{x:Bind}"
                                         ContentTemplateSelector="{StaticResource SessionContentSelector}"
+                                        HorizontalAlignment="Stretch"
+                                        VerticalAlignment="Stretch"
                                         HorizontalContentAlignment="Stretch"
                                         VerticalContentAlignment="Stretch"
+                                        MinHeight="240"
                                         IsTabStop="False" />
                     </TabViewItem>
                 </DataTemplate>

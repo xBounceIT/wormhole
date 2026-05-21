@@ -69,7 +69,10 @@ public sealed partial class MainWindow : Window
         // template that draws no focus visual, so this absorbs focus silently.
         // (An IsTabStop=false sink wouldn't work — programmatic Focus returns
         // false in that state in WinUI 3.)
-        ContentFrame.Focus(FocusState.Programmatic);
+        // Deferred to a low-priority dispatcher tick because the framework's
+        // initial-focus pass runs after Activated and would otherwise overwrite
+        // our override back onto the ComboBox.
+        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () => ContentFrame.Focus(FocusState.Programmatic));
     }
 
     private void UpdateInfoBar_CloseButtonClick(InfoBar sender, object args)
