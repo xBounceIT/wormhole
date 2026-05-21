@@ -48,6 +48,21 @@ public sealed partial class SessionsPage : Page
         }
     }
 
+    private void OnTabReconnectClick(object sender, RoutedEventArgs e)
+    {
+        // Activate the tab before MenuFlyoutItem invokes the Reconnect Command (Click
+        // fires first, Command.Execute second). For background SSH tabs the view is
+        // unloaded and _webView is null, so RetryAsync would otherwise fan out into a
+        // detached InitializationRetryRequested and silently no-op — selecting the tab
+        // schedules its view to re-Load, where AttachAsync consumes the reconnect intent.
+        if (sender is FrameworkElement fe &&
+            fe.DataContext is SessionTabViewModel tab &&
+            !ReferenceEquals(ViewModel.SelectedTab, tab))
+        {
+            ViewModel.SelectedTab = tab;
+        }
+    }
+
     private async void OnTabCloseClick(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement fe && fe.DataContext is SessionTabViewModel tab)

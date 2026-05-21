@@ -72,6 +72,7 @@
                             <MenuFlyout>
                                 <MenuFlyoutItem Text="Duplicate" Click="OnTabDuplicateClick" />
                                 <MenuFlyoutItem Text="Reconnect"
+                                                Click="OnTabReconnectClick"
                                                 Command="{x:Bind ReconnectCommand, Mode=OneTime}"
                                                 Visibility="{x:Bind CanReconnect, Converter={StaticResource BoolToVisibilityConverter}}" />
                                 <MenuFlyoutSeparator />

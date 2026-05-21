@@ -147,6 +147,36 @@ public sealed class SshSessionViewModelTests
     }
 
     [Fact]
+    public async Task RetryAsync_WithDetachedViewAndNoSubscribers_PreservesSession()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        var session = new FakeSshSession();
+        vm.AttachConnectedSessionForTesting(session);
+        vm.DetachView();
+
+        await vm.RetryAsync();
+
+        // Background-tab case: the session is left alive so AttachAsync can tear it down
+        // and reconnect when the tab activates and its view re-Loads.
+        Assert.Equal(0, session.DisposeCount);
+    }
+
+    [Fact]
+    public async Task RetryAsync_WithDetachedViewAndSubscriber_FiresInitializationRetry()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        var raised = 0;
+        vm.InitializationRetryRequested += () => raised++;
+
+        await vm.RetryAsync();
+
+        // View-loaded-but-WebView2-init-failed case: existing fan-out is preserved.
+        Assert.Equal(1, raised);
+    }
+
+    [Fact]
     public async Task DetachAsync_DisposesSessionAndIgnoresLateOutput()
     {
         var vm = CreateViewModel();
