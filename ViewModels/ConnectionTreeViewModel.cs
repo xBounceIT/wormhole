@@ -29,6 +29,32 @@ public partial class ConnectionTreeViewModel : ObservableObject
     [ObservableProperty]
     private TreeNodeViewModel? selectedNode;
 
+    [ObservableProperty]
+    private string searchText = string.Empty;
+
+    // Captured the moment a filter starts so clearing the search restores the tree
+    // to exactly how the user had it expanded before they typed.
+    private Dictionary<Guid, bool>? _expandStateBeforeFilter;
+
+    partial void OnSearchTextChanged(string? oldValue, string newValue)
+    {
+        var wasFiltering = !string.IsNullOrWhiteSpace(oldValue);
+        var isFiltering = !string.IsNullOrWhiteSpace(newValue);
+
+        if (!wasFiltering && isFiltering)
+        {
+            _expandStateBeforeFilter = SnapshotExpandState(Roots);
+        }
+
+        ApplyFilter(newValue);
+
+        if (wasFiltering && !isFiltering && _expandStateBeforeFilter is not null)
+        {
+            RestoreExpandState(Roots, _expandStateBeforeFilter);
+            _expandStateBeforeFilter = null;
+        }
+    }
+
     public ConnectionTreeViewModel(
         IConnectionRepository repository,
         InheritanceResolver inheritanceResolver,
@@ -327,6 +353,103 @@ public partial class ConnectionTreeViewModel : ObservableObject
         {
             SelectedNode = null;
         }
+
+        // New nodes default to IsVisible=true, so skip the rewalk when no filter is
+        // active — Reconcile already produced the correct state.
+        if (!string.IsNullOrWhiteSpace(SearchText))
+        {
+            ApplyFilter(SearchText);
+        }
+    }
+
+    private void ApplyFilter(string query)
+    {
+        var trimmed = query.Trim();
+        if (trimmed.Length == 0)
+        {
+            MarkAllVisible(Roots);
+            return;
+        }
+
+        EvaluateFilter(Roots, trimmed);
+    }
+
+    private static void MarkAllVisible(IEnumerable<TreeNodeViewModel> level)
+    {
+        foreach (var node in level)
+        {
+            node.IsVisible = true;
+            MarkAllVisible(node.Children);
+        }
+    }
+
+    private static bool EvaluateFilter(IEnumerable<TreeNodeViewModel> level, string query)
+    {
+        var anyVisible = false;
+        foreach (var node in level)
+        {
+            var nameMatches = node.Name.Contains(query, StringComparison.OrdinalIgnoreCase);
+
+            if (node.Kind == NodeKind.Folder)
+            {
+                if (nameMatches)
+                {
+                    // Folder name matched — show the folder and everything beneath it,
+                    // and expand it so the contents the user searched for are actually
+                    // visible. The pre-filter IsExpanded value is in the snapshot, so
+                    // clearing the search will restore the original collapsed state.
+                    node.IsVisible = true;
+                    node.IsExpanded = true;
+                    MarkAllVisible(node.Children);
+                }
+                else
+                {
+                    var hasVisibleChild = EvaluateFilter(node.Children, query);
+                    node.IsVisible = hasVisibleChild;
+                    // Auto-expand non-matching folders that contain a match so the
+                    // matching descendant is actually rendered.
+                    if (hasVisibleChild) node.IsExpanded = true;
+                }
+            }
+            else
+            {
+                node.IsVisible = nameMatches;
+            }
+
+            if (node.IsVisible) anyVisible = true;
+        }
+        return anyVisible;
+    }
+
+    private static Dictionary<Guid, bool> SnapshotExpandState(IEnumerable<TreeNodeViewModel> level)
+    {
+        var snapshot = new Dictionary<Guid, bool>();
+        CollectExpandState(level, snapshot);
+        return snapshot;
+    }
+
+    private static void CollectExpandState(IEnumerable<TreeNodeViewModel> level, Dictionary<Guid, bool> snapshot)
+    {
+        foreach (var node in level)
+        {
+            if (node.Kind == NodeKind.Folder)
+            {
+                snapshot[node.Node.Id] = node.IsExpanded;
+            }
+            CollectExpandState(node.Children, snapshot);
+        }
+    }
+
+    private static void RestoreExpandState(IEnumerable<TreeNodeViewModel> level, IReadOnlyDictionary<Guid, bool> snapshot)
+    {
+        foreach (var node in level)
+        {
+            if (node.Kind == NodeKind.Folder && snapshot.TryGetValue(node.Node.Id, out var wasExpanded))
+            {
+                node.IsExpanded = wasExpanded;
+            }
+            RestoreExpandState(node.Children, snapshot);
+        }
     }
 
     // Mutates `current` in place to match `target` (and recursively each node's children),
@@ -396,6 +519,11 @@ public sealed partial class TreeNodeViewModel : ObservableObject
 
     [ObservableProperty]
     private bool isExpanded;
+
+    // Drives the per-row Visibility binding when a search filter is active.
+    // Default true so unfiltered loads render the whole tree.
+    [ObservableProperty]
+    private bool isVisible = true;
 
     public string Glyph => Kind == NodeKind.Folder
         ? Glyphs.Folder

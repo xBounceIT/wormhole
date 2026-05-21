@@ -18,6 +18,7 @@
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
@@ -48,7 +49,14 @@
             </StackPanel>
         </Grid>
 
-        <TreeView Grid.Row="1"
+        <AutoSuggestBox Grid.Row="1"
+                        Margin="4,0,4,4"
+                        PlaceholderText="Search"
+                        QueryIcon="Find"
+                        AutomationProperties.Name="Search connections"
+                        Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+        <TreeView Grid.Row="2"
                   x:Name="Tree"
                   ItemsSource="{x:Bind ViewModel.Roots, Mode=OneWay}"
                   SelectionMode="Single"
@@ -83,6 +91,7 @@
                 <DataTemplate x:DataType="vm:TreeNodeViewModel">
                     <TreeViewItem ItemsSource="{x:Bind Children}"
                                   IsExpanded="{x:Bind IsExpanded, Mode=TwoWay}"
+                                  Visibility="{x:Bind IsVisible, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
                                   DoubleTapped="OnNodeDoubleTapped">
                         <TreeViewItem.ContextFlyout>
                             <!-- Click handlers (not Command bindings) because ElementName binding
