@@ -65,9 +65,17 @@
             <TreeView.ContextFlyout>
                 <MenuFlyout>
                     <MenuFlyoutItem Text="New folder"
-                                    Command="{x:Bind ViewModel.AddFolderCommand}" />
+                                    Command="{x:Bind ViewModel.AddFolderCommand}">
+                        <MenuFlyoutItem.Icon>
+                            <FontIcon Glyph="&#xE8F4;" />
+                        </MenuFlyoutItem.Icon>
+                    </MenuFlyoutItem>
                     <MenuFlyoutItem Text="New connection"
-                                    Command="{x:Bind ViewModel.AddConnectionCommand}" />
+                                    Command="{x:Bind ViewModel.AddConnectionCommand}">
+                        <MenuFlyoutItem.Icon>
+                            <FontIcon Glyph="&#xE710;" />
+                        </MenuFlyoutItem.Icon>
+                    </MenuFlyoutItem>
                 </MenuFlyout>
             </TreeView.ContextFlyout>
 
@@ -81,14 +89,30 @@
                                  can't escape the DataTemplate's namescope into the MenuFlyout popup. -->
                             <MenuFlyout>
                                 <MenuFlyoutItem Text="New folder"
-                                                Click="OnAddFolderItemClick" />
+                                                Click="OnAddFolderItemClick">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE8F4;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
                                 <MenuFlyoutItem Text="New connection"
-                                                Click="OnAddConnectionItemClick" />
+                                                Click="OnAddConnectionItemClick">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE710;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
                                 <MenuFlyoutSeparator />
                                 <MenuFlyoutItem Text="Edit"
-                                                Click="OnEditItemClick" />
+                                                Click="OnEditItemClick">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE70F;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
                                 <MenuFlyoutItem Text="Delete"
-                                                Click="OnDeleteItemClick" />
+                                                Click="OnDeleteItemClick">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE74D;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
                             </MenuFlyout>
                         </TreeViewItem.ContextFlyout>
 
