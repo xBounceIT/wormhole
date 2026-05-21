@@ -143,6 +143,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
             Host = draft.Host,
             Port = draft.Port,
             Username = draft.Username,
+            CredentialId = draft.CredentialId,
         });
     }
 
@@ -166,7 +167,8 @@ public partial class ConnectionTreeViewModel : ObservableObject
             node.Protocol ?? ProtocolType.Ssh,
             node.Host ?? string.Empty,
             node.Port,
-            node.Username);
+            node.Username,
+            node.CredentialId);
         var draft = await _dialog.PromptForConnectionAsync(initial);
         if (draft is null || draft == initial) return;
 
@@ -175,6 +177,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
         node.Host = draft.Host;
         node.Port = draft.Port;
         node.Username = draft.Username;
+        node.CredentialId = draft.CredentialId;
         await SafeUpdateAsync(node);
     }
 

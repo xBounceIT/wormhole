@@ -153,6 +153,45 @@ public class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task AddConnection_WithCredentialId_PersistsCredentialId()
+    {
+        var credentialId = Guid.NewGuid();
+        var dialog = new FakeDialogService
+        {
+            ConnectionPromptResult = new NewConnectionDraft(
+                "prod-web", ProtocolType.Ssh, "example.com", 22, null, credentialId),
+        };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        await vm.AddConnectionCommand.ExecuteAsync(null);
+
+        var row = Assert.Single(await _repo.GetAllAsync());
+        Assert.Equal(credentialId, row.CredentialId);
+    }
+
+    [Fact]
+    public async Task Edit_AssignsCredentialId_PersistsToDb()
+    {
+        var dialog = new FakeDialogService
+        {
+            ConnectionPromptResult = new NewConnectionDraft(
+                "prod", ProtocolType.Ssh, "host", 22, "alice"),
+        };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+        await vm.AddConnectionCommand.ExecuteAsync(null);
+
+        var credentialId = Guid.NewGuid();
+        dialog.ConnectionPromptResult = new NewConnectionDraft(
+            "prod", ProtocolType.Ssh, "host", 22, null, credentialId);
+        await vm.EditCommand.ExecuteAsync(vm.Roots.Single());
+
+        var row = (await _repo.GetAllAsync()).Single();
+        Assert.Equal(credentialId, row.CredentialId);
+    }
+
+    [Fact]
     public async Task AddConnection_NullPortAndUsername_StoredAsNull()
     {
         var dialog = new FakeDialogService

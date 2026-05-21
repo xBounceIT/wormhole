@@ -2,6 +2,7 @@ using System;
 using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Views.Dialogs;
 
@@ -9,6 +10,13 @@ namespace Wormhole.Services;
 
 public sealed class DialogService : IDialogService
 {
+    private readonly ICredentialRepository _credentialRepository;
+
+    public DialogService(ICredentialRepository credentialRepository)
+    {
+        _credentialRepository = credentialRepository;
+    }
+
     public Task ShowMessageAsync(string title, string message)
     {
         var dialog = new ContentDialog
@@ -69,8 +77,13 @@ public sealed class DialogService : IDialogService
         return result == ContentDialogResult.Primary ? textBox.Text.Trim() : null;
     }
 
-    public Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null) =>
-        ShowFormDialogAsync(new NewConnectionDialog(), initial, "connection");
+    public async Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null)
+    {
+        var dialog = new NewConnectionDialog();
+        var credentials = await _credentialRepository.GetAllAsync();
+        dialog.SetAvailableCredentials(credentials);
+        return await ShowFormDialogAsync(dialog, initial, "connection");
+    }
 
     public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null) =>
         ShowFormDialogAsync(new CredentialDialog(), initial, "credential");

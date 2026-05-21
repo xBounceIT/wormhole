@@ -1,3 +1,5 @@
+using System;
+
 namespace Wormhole.Models;
 
 public sealed record NewConnectionDraft(
@@ -5,4 +7,5 @@ public sealed record NewConnectionDraft(
     ProtocolType Protocol,
     string Host,
     int? Port,
-    string? Username);
+    string? Username,
+    Guid? CredentialId = null);
