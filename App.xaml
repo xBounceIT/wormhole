@@ -12,6 +12,7 @@
             </ResourceDictionary.MergedDictionaries>
             <conv:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter" />
             <conv:InverseBoolConverter x:Key="InverseBoolConverter" />
+            <conv:ToUpperConverter x:Key="ToUpperConverter" />
         </ResourceDictionary>
     </Application.Resources>
 </Application>
