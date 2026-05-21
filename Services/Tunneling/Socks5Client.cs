@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -24,7 +25,16 @@ public static class Socks5Client
         if (string.IsNullOrWhiteSpace(targetHost)) throw new ArgumentException("target host required", nameof(targetHost));
         if (targetPort is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(targetPort));
 
-        var hostBytes = Encoding.ASCII.GetBytes(targetHost);
+        // SOCKS5 DOMAINNAME is ASCII-only per RFC 1928. Punycode-convert IDN hostnames so a
+        // profile like "münchen.example.com" doesn't get silently mangled into "b?nchen..."
+        // by Encoding.ASCII and then fail downstream as a confusing NXDOMAIN.
+        string asciiHost;
+        try { asciiHost = new IdnMapping().GetAscii(targetHost); }
+        catch (ArgumentException ex)
+        {
+            throw new ArgumentException($"target host '{targetHost}' is not a valid IDN/ASCII hostname", nameof(targetHost), ex);
+        }
+        var hostBytes = Encoding.ASCII.GetBytes(asciiHost);
         if (hostBytes.Length > 255) throw new ArgumentException("target host too long for SOCKS5 DOMAINNAME (>255)", nameof(targetHost));
 
         var socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
