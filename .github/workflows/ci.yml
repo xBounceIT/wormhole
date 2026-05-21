@@ -62,8 +62,13 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # -p:Platform=x64 is required so the Wormhole.csproj WinUI 3 / win-x64 project
+      # actually restores. Without it `dotnet restore Wormhole.sln` silently skips the
+      # main project (its <Platforms>x64;arm64</Platforms> has no AnyCPU mapping), so the
+      # subsequent `dotnet format` workspace load fails with CS0246 on every package type
+      # (Serilog/Dapper/SSH.NET/WinUI). The test project is AnyCPU and restores either way.
       - name: Restore Wormhole solution
-        run: dotnet restore Wormhole.sln
+        run: dotnet restore Wormhole.sln -p:Platform=x64
 
       - name: Verify formatting
         run: dotnet format Wormhole.sln --verify-no-changes --severity warn --no-restore
