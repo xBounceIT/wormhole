@@ -53,7 +53,10 @@ public abstract partial class SessionTabViewModel : ObservableObject
 
     /// <summary>
     /// Marshal an action to the captured UI dispatcher. Falls through to synchronous
-    /// execution when no dispatcher was captured (unit tests, etc.).
+    /// execution when no dispatcher was captured (unit tests, etc.). Logs to
+    /// <see cref="OnDispatchEnqueueFailed"/> if <see cref="DispatcherQueue.TryEnqueue(DispatcherQueueHandler)"/>
+    /// rejects the work — a dropped status notification can otherwise strand the VM in
+    /// <see cref="SessionStatus.Connecting"/> with no recovery path.
     /// </summary>
     protected void MarshalToUi(Action action)
     {
@@ -63,7 +66,10 @@ public abstract partial class SessionTabViewModel : ObservableObject
             action();
             return;
         }
-        dispatcher.TryEnqueue(() => action());
+        if (!dispatcher.TryEnqueue(() => action()))
+        {
+            OnDispatchEnqueueFailed();
+        }
     }
 
     /// <summary>
@@ -79,7 +85,10 @@ public abstract partial class SessionTabViewModel : ObservableObject
             _ = RunSafe(action);
             return;
         }
-        dispatcher.TryEnqueue(async () => await RunSafe(action).ConfigureAwait(true));
+        if (!dispatcher.TryEnqueue(async () => await RunSafe(action).ConfigureAwait(true)))
+        {
+            OnDispatchEnqueueFailed();
+        }
     }
 
     private async Task RunSafe(Func<Task> action)
@@ -99,6 +108,13 @@ public abstract partial class SessionTabViewModel : ObservableObject
     /// dispatched continuation. Default: nothing — subclasses override to surface failure UI.
     /// </summary>
     protected virtual void OnDispatchedException(Exception ex) { }
+
+    /// <summary>
+    /// Invoked when <see cref="DispatcherQueue.TryEnqueue(DispatcherQueueHandler)"/> rejects
+    /// the work item (queue shutting down, etc.). Default: nothing — subclasses override to
+    /// log the dropped notification.
+    /// </summary>
+    protected virtual void OnDispatchEnqueueFailed() { }
 
     private static DispatcherQueue? TryGetDispatcher()
     {

@@ -291,6 +291,11 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         }
     }
 
+    protected override void OnDispatchEnqueueFailed()
+    {
+        _logger.LogWarning("Failed to enqueue RDP UI update — dispatcher queue may be shutting down.");
+    }
+
     private void ReportFailure(string message, bool dueToCredentials)
     {
         ErrorMessage = message;

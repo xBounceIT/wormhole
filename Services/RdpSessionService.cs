@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -35,7 +36,18 @@ public sealed class RdpSessionService : IRdpSessionService
         {
             _ = form.Hwnd; // force handle creation + AxHost CreateControl before Configure / SetParent
             form.Configure(profile, password);
-            Win32Interop.SetParent(form.Hwnd, ownerHwnd);
+            cancellationToken.ThrowIfCancellationRequested();
+            // SetParent returns the previous parent on success and IntPtr.Zero on failure.
+            // A top-level WinForms Form has the desktop as parent before reparenting, so
+            // success returns the desktop HWND (non-zero); Zero unambiguously means failure.
+            var oldParent = Win32Interop.SetParent(form.Hwnd, ownerHwnd);
+            if (oldParent == IntPtr.Zero)
+            {
+                var err = Marshal.GetLastWin32Error();
+                throw new InvalidOperationException(
+                    $"SetParent failed reparenting the RDP host onto the WinUI main window (Win32 error {err}).");
+            }
+            cancellationToken.ThrowIfCancellationRequested();
             form.Start();
         }
         catch

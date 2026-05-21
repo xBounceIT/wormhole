@@ -94,7 +94,9 @@ internal sealed class RdpHostForm : FormsForm
         dynamic adv = ocx.AdvancedSettings9;
         adv.RDPPort = profile.Port;
 
-        // mstsc-style: pass password through ClearTextPassword. Cleared at end-of-Connect.
+        // mstsc-style: pass password through ClearTextPassword. The OCX consumes it during
+        // Connect() and then we proactively clear it in Start() so the plaintext doesn't
+        // linger in OCX-owned memory longer than necessary.
         if (!string.IsNullOrEmpty(password)) adv.ClearTextPassword = password;
 
         adv.RedirectClipboard = profile.RdpRedirectClipboard;
@@ -148,9 +150,21 @@ internal sealed class RdpHostForm : FormsForm
         _connectStarted = true;
         dynamic ocx = RequireOcx();
         ocx.Connect();
+        // Clear the plaintext password from the OCX's settings now that Connect() has
+        // consumed it for the authentication handshake. The OCX retains the value for
+        // auto-reconnect, so this is a trade-off: we accept that auto-reconnect of a
+        // dropped session can't replay the password (the user gets the failure overlay
+        // and Retry button instead), in exchange for not leaving the plaintext sitting
+        // in COM-owned memory across the connection's lifetime.
+        try { ocx.AdvancedSettings9.ClearTextPassword = string.Empty; }
+        catch { /* best-effort scrub */ }
     }
 
-    /// <summary>Idempotent disconnect. Tolerates the OCX already being in a disconnected state.</summary>
+    /// <summary>Idempotent disconnect. Tolerates the OCX already being in a disconnected state.
+    /// All-exception catch is intentional: teardown must not throw — a server-side termination
+    /// can surface as a COMException (RPC), the OCX may not expose <c>Disconnect</c> on an older
+    /// build (RuntimeBinderException), and racing with the OCX's own teardown can produce
+    /// InvalidOperationException. None of those should propagate to the caller.</summary>
     public void Disconnect()
     {
         if (TryGetOcx() is not { } ocxObj) return;
@@ -162,9 +176,9 @@ internal sealed class RdpHostForm : FormsForm
             try { state = (int)ocx.Connected; } catch (RuntimeBinderException) { } catch (COMException) { }
             if (state != 0) ocx.Disconnect();
         }
-        catch (COMException)
+        catch
         {
-            /* RPC error after server-side termination is expected */
+            // intentional: best-effort teardown
         }
     }
 
@@ -352,8 +366,10 @@ internal sealed class RdpHostForm : FormsForm
         }
         catch (Exception ex) when (ex is COMException or RuntimeBinderException)
         {
-            // Older OCX exposes only the bool — degrade to all-or-none.
-            adv.RedirectDrives = true;
+            // Older OCX exposes only the bool. Degrade to "no drives" rather than "all" —
+            // the user opted into a specific letter list, so silently expanding to every
+            // drive (including network/USB/removable) would be a least-privilege violation.
+            adv.RedirectDrives = false;
         }
     }
 }
