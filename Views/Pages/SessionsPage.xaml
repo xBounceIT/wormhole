@@ -60,6 +60,18 @@
             <TabView.TabItemTemplate>
                 <DataTemplate x:DataType="sessions:SessionTabViewModel">
                     <TabViewItem Header="{x:Bind Title, Mode=OneWay}">
+                        <TabViewItem.ContextFlyout>
+                            <!-- Click handlers (not Command bindings) because ElementName binding
+                                 can't escape the DataTemplate's namescope into the MenuFlyout popup. -->
+                            <MenuFlyout>
+                                <MenuFlyoutItem Text="Duplicate" Click="OnTabDuplicateClick" />
+                                <MenuFlyoutItem Text="Reconnect"
+                                                Command="{x:Bind ReconnectCommand, Mode=OneTime}"
+                                                Visibility="{x:Bind CanReconnect, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                <MenuFlyoutSeparator />
+                                <MenuFlyoutItem Text="Close" Click="OnTabCloseClick" />
+                            </MenuFlyout>
+                        </TabViewItem.ContextFlyout>
                         <ContentControl Content="{x:Bind}"
                                         ContentTemplateSelector="{StaticResource SessionContentSelector}"
                                         HorizontalContentAlignment="Stretch"

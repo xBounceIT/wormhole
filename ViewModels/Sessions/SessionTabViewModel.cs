@@ -1,3 +1,4 @@
+using System.Windows.Input;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Wormhole.Models;
 
@@ -14,6 +15,10 @@ public abstract partial class SessionTabViewModel : ObservableObject
     public ConnectionProfile? Profile { get; protected set; }
 
     public abstract ProtocolType Protocol { get; }
+
+    public virtual ICommand? ReconnectCommand => null;
+
+    public bool CanReconnect => ReconnectCommand is not null;
 
     public virtual void Initialize(ConnectionProfile profile)
     {

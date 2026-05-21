@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Input;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
@@ -54,6 +55,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     }
 
     public override ProtocolType Protocol => ProtocolType.Ssh;
+
+    public override ICommand? ReconnectCommand => RetryCommand;
 
     [ObservableProperty]
     private string? errorMessage;
