@@ -11,7 +11,7 @@ namespace Wormhole.Data.Repositories;
 public sealed class CredentialRepository : ICredentialRepository
 {
     private const string SelectColumns = @"
-        Id, Name, Username, Domain, Kind, PrivateKeyFileName, CreatedAt";
+        Id, Name, Username, Domain, Kind, PrivateKeyFileName, Protocol, CreatedAt";
 
     private readonly ISqliteConnectionFactory _factory;
 
@@ -43,9 +43,9 @@ public sealed class CredentialRepository : ICredentialRepository
         using var connection = _factory.Open();
         await connection.ExecuteAsync(new CommandDefinition(@"
             INSERT INTO CredentialProfiles
-                (Id, Name, Username, Domain, Kind, PrivateKeyFileName, CreatedAt)
+                (Id, Name, Username, Domain, Kind, PrivateKeyFileName, Protocol, CreatedAt)
             VALUES
-                (@Id, @Name, @Username, @Domain, @Kind, @PrivateKeyFileName, @CreatedAt);",
+                (@Id, @Name, @Username, @Domain, @Kind, @PrivateKeyFileName, @Protocol, @CreatedAt);",
             profile,
             cancellationToken: cancellationToken));
     }
@@ -59,7 +59,8 @@ public sealed class CredentialRepository : ICredentialRepository
                 Username = @Username,
                 Domain = @Domain,
                 Kind = @Kind,
-                PrivateKeyFileName = @PrivateKeyFileName
+                PrivateKeyFileName = @PrivateKeyFileName,
+                Protocol = @Protocol
             WHERE Id = @Id;",
             profile,
             cancellationToken: cancellationToken));

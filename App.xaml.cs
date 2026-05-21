@@ -105,6 +105,7 @@ public partial class App : Application
         services.AddSingleton<ConnectionTreeViewModel>();
         services.AddSingleton<QuickConnectViewModel>();
         services.AddSingleton<SettingsViewModel>();
+        services.AddSingleton<CredentialsViewModel>();
         services.AddSingleton<UpdateViewModel>();
         services.AddTransient<ConnectionEditorViewModel>();
         services.AddTransient<SshSessionViewModel>();

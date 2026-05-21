@@ -884,6 +884,8 @@ public class ConnectionTreeViewModelTests : IDisposable
             => Task.FromResult(TextPromptResult);
         public Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null)
             => Task.FromResult(ConnectionPromptResult);
+        public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null)
+            => Task.FromResult<CredentialDraft?>(null);
         public Task<string?> PromptPasswordAsync(string title, string message)
             => Task.FromResult<string?>(null);
     }

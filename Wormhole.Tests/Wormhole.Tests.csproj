@@ -35,6 +35,7 @@
     <Compile Include="..\Models\ConnectionProfile.cs" Link="Models\ConnectionProfile.cs" />
     <Compile Include="..\Models\CredentialProfile.cs" Link="Models\CredentialProfile.cs" />
     <Compile Include="..\Models\NewConnectionDraft.cs" Link="Models\NewConnectionDraft.cs" />
+    <Compile Include="..\Models\CredentialDraft.cs" Link="Models\CredentialDraft.cs" />
     <Compile Include="..\Models\NodeKind.cs" Link="Models\NodeKind.cs" />
     <Compile Include="..\Models\ProtocolType.cs" Link="Models\ProtocolType.cs" />
     <Compile Include="..\Models\AppSettings.cs" Link="Models\AppSettings.cs" />
