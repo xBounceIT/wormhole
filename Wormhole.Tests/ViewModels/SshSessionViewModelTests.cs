@@ -117,6 +117,33 @@ public sealed class SshSessionViewModelTests
     }
 
     [Fact]
+    public void RetryCommand_CanExecute_IsFalse_WhileConnecting()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+
+        vm.Status = SessionStatus.Connecting;
+
+        Assert.False(vm.RetryCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public void RetryCommand_CanExecute_TracksStatusTransitions()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+
+        vm.Status = SessionStatus.Failed;
+        Assert.True(vm.RetryCommand.CanExecute(null));
+
+        vm.Status = SessionStatus.Connecting;
+        Assert.False(vm.RetryCommand.CanExecute(null));
+
+        vm.Status = SessionStatus.Disconnected;
+        Assert.True(vm.RetryCommand.CanExecute(null));
+    }
+
+    [Fact]
     public async Task DetachAsync_DisposesSessionAndIgnoresLateOutput()
     {
         var vm = CreateViewModel();

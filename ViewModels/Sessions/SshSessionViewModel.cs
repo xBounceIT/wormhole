@@ -53,6 +53,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
                 OnPropertyChanged(nameof(IsConnecting));
                 OnPropertyChanged(nameof(IsConnected));
                 OnPropertyChanged(nameof(IsFailed));
+                RetryCommand.NotifyCanExecuteChanged();
             }
         };
     }
@@ -118,7 +119,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     /// </summary>
     public event Action? InitializationRetryRequested;
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false, CanExecute = nameof(CanRetry))]
     public async Task RetryAsync()
     {
         ErrorMessage = null;
@@ -132,6 +133,12 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         ErrorMessage = null;
         await ConnectAsync().ConfigureAwait(true);
     }
+
+    // Guards the context-menu Reconnect (and the failure-overlay Retry button) against
+    // firing while a ConnectAsync is mid-flight: DetachAsync cancels the in-flight
+    // operation but does not await its finally, so a second ConnectAsync from here would
+    // hit the _connectInFlight interlock and silently no-op, stranding the tab.
+    private bool CanRetry() => Status != SessionStatus.Connecting;
 
     [RelayCommand]
     public Task DisconnectAsync() => DetachAsync();
