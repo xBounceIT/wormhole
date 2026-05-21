@@ -1,6 +1,4 @@
-using System;
 using Microsoft.UI.Xaml.Data;
-
 namespace Wormhole.Helpers.Converters;
 
 public sealed class InverseBoolConverter : IValueConverter

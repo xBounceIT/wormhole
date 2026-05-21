@@ -1,5 +1,3 @@
-using System;
-
 namespace Wormhole.Views.Dialogs;
 
 public interface IDraftForm<T> where T : class

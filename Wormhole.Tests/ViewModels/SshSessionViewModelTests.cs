@@ -236,7 +236,6 @@ public sealed class SshSessionViewModelTests
             throw new NotSupportedException("Tests attach fake sessions directly.");
     }
 
-
     private sealed class FakeCredentialResolver : ISshCredentialResolver
     {
         public Task<SshCredentials> ResolveAsync(

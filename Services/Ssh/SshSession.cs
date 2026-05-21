@@ -1,9 +1,5 @@
-using System;
-using System.Threading;
-using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Renci.SshNet;
-
 namespace Wormhole.Services.Ssh;
 
 internal sealed class SshSession : ISshSession

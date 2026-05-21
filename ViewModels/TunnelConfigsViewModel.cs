@@ -279,9 +279,9 @@ public sealed partial class TunnelConfigsViewModel : ObservableObject
     {
         var sb = new StringBuilder();
         if (string.IsNullOrWhiteSpace(wg.InterfacePrivateKey)) sb.AppendLine("Interface private key is required.");
-        if (string.IsNullOrWhiteSpace(wg.InterfaceAddress))    sb.AppendLine("Interface address is required (e.g. 10.0.0.2/32).");
-        if (string.IsNullOrWhiteSpace(wg.PeerPublicKey))        sb.AppendLine("Peer public key is required.");
-        if (string.IsNullOrWhiteSpace(wg.PeerEndpoint))         sb.AppendLine("Peer endpoint is required (host:port).");
+        if (string.IsNullOrWhiteSpace(wg.InterfaceAddress)) sb.AppendLine("Interface address is required (e.g. 10.0.0.2/32).");
+        if (string.IsNullOrWhiteSpace(wg.PeerPublicKey)) sb.AppendLine("Peer public key is required.");
+        if (string.IsNullOrWhiteSpace(wg.PeerEndpoint)) sb.AppendLine("Peer endpoint is required (host:port).");
         if (sb.Length > 0) throw new InvalidOperationException(sb.ToString().TrimEnd());
     }
 }
