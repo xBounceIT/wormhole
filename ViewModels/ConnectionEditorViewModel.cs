@@ -266,6 +266,10 @@ public partial class ConnectionEditorViewModel : ObservableObject
         {
             if (string.IsNullOrWhiteSpace(Name)) return false;
             if (string.IsNullOrWhiteSpace(Host)) return false;
+            // Port is int?: null means "use the inherited / protocol-default port" (the
+            // "Default for protocol" NumberBox placeholder). C# property pattern matching
+            // treats null as not matching either side, so this only rejects an explicit
+            // out-of-range value — not null.
             if (Port is < 1 or > 65535) return false;
             if (IsRdp)
             {

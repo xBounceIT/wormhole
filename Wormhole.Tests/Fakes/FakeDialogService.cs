@@ -83,6 +83,9 @@ public class FakeDialogService : IDialogService
         return Task.FromResult<ConnectionNode?>(output);
     }
 
+    public virtual Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null)
+        => Task.FromResult<CredentialDraft?>(null);
+
     public virtual Task<string?> PromptPasswordAsync(string title, string message)
     {
         PasswordPromptCount++;

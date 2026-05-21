@@ -74,7 +74,11 @@ internal sealed class RdpHostForm : FormsForm
     /// All access is via <c>dynamic</c> against the OCX's IDispatch — we don't ship typed
     /// COM wrappers, but the property names and types match the published MsRdpClient API.
     /// </summary>
-    public void Configure(ConnectionProfile profile, string? password)
+    public void Configure(
+        ConnectionProfile profile,
+        string? password,
+        string? gatewayUsername = null,
+        string? gatewayPassword = null)
     {
         EnsureStaThread();
         dynamic ocx = RequireOcx();
@@ -89,6 +93,10 @@ internal sealed class RdpHostForm : FormsForm
         ocx.DesktopWidth = dw;
         ocx.DesktopHeight = dh;
         ocx.ColorDepth = NormaliseColorDepth(profile.RdpColorDepth);
+        // UseMultimon is exposed via IMsRdpClientNonScriptable5 — IDispatch lookup against
+        // the OCX finds it directly. Older builds without the interface return E_NOTFOUND
+        // which TrySetOptional swallows. Pair with mstsc-style "Use all my monitors" UX.
+        TrySetOptional(() => ocx.UseMultimon = profile.RdpUseAllMonitors);
 
         // --- Advanced settings (port, audio, redirection, gateway, experience, auth) ---
         dynamic adv = ocx.AdvancedSettings9;
@@ -128,9 +136,28 @@ internal sealed class RdpHostForm : FormsForm
                 transport.GatewayUsageMethod = (uint)profile.RdpGatewayUsageMethod;
                 if (!string.IsNullOrEmpty(profile.RdpGatewayHostname))
                     transport.GatewayHostname = profile.RdpGatewayHostname;
-                transport.GatewayCredsSource = 0u; // 0 = NTLM (Negotiate)
+                // GatewayCredSharing: when set, the OCX reuses the main connection
+                // credentials for the gateway instead of presenting a separate prompt — this
+                // is the "Use my RD Gateway credentials for the remote computer" toggle in
+                // the editor.
+                TrySetOptional(() => transport.GatewayCredSharing = profile.RdpGatewayUseSameCreds ? 1u : 0u);
+                // Apply the resolved gateway credentials when the user supplied them.
+                if (!string.IsNullOrEmpty(gatewayUsername))
+                {
+                    var capturedUser = gatewayUsername;
+                    TrySetOptional(() => transport.GatewayUsername = capturedUser);
+                }
+                if (!string.IsNullOrEmpty(gatewayPassword))
+                {
+                    var capturedPwd = gatewayPassword;
+                    TrySetOptional(() => transport.GatewayPassword = capturedPwd);
+                }
+                // GatewayCredsSource intentionally left at its OCX default — the property
+                // chooses between NTLM/SmartCard/Cookie auth, and forcing NTLM (=0) breaks
+                // smart-card scenarios. Users who need explicit control can set
+                // GatewayUsageMethod=3 (default RDG) and configure the gateway via mstsc.
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is COMException or RuntimeBinderException)
             {
                 throw new InvalidOperationException(
                     "Could not apply RD Gateway settings (server doesn't expose TransportSettings2).", ex);
@@ -209,9 +236,11 @@ internal sealed class RdpHostForm : FormsForm
         cpc.FindConnectionPoint(ref iid, out _connectionPoint);
         if (_connectionPoint is null) return;
 
-        // Hook each sink event before Advise so initial messages aren't lost.
-        _sink.Connected += () => Connected?.Invoke();
-        _sink.LoginComplete += () => Connected?.Invoke();  // mstsc considers LoginComplete as "ready"
+        // Hook each sink event before Advise so initial messages aren't lost. Only
+        // OnLoginComplete (post-auth, shell up) maps to our Connected event — OnConnected
+        // fires after the TLS handshake but before NLA/credential validation, so emitting
+        // it would briefly flip the VM to Connected even when a logon error follows.
+        _sink.LoginComplete += () => Connected?.Invoke();
         _sink.Disconnected += code => Disconnected?.Invoke(code);
         _sink.FatalError += code => FatalError?.Invoke(code);
         _sink.LogonError += code => LogonError?.Invoke(code);

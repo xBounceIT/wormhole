@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
+using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
 
@@ -16,6 +17,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
     private readonly IRdpSessionService _rdpService;
     private readonly ICredentialService _credentialService;
+    private readonly ICredentialRepository _credentialRepository;
     private readonly IDialogService _dialog;
     private readonly ILogger<RdpSessionViewModel> _logger;
 
@@ -27,11 +29,13 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     public RdpSessionViewModel(
         IRdpSessionService rdpService,
         ICredentialService credentialService,
+        ICredentialRepository credentialRepository,
         IDialogService dialog,
         ILoggerFactory loggerFactory)
     {
         _rdpService = rdpService;
         _credentialService = credentialService;
+        _credentialRepository = credentialRepository;
         _dialog = dialog;
         _logger = loggerFactory.CreateLogger<RdpSessionViewModel>();
 
@@ -171,7 +175,9 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 return;
             }
 
-            _session = await _rdpService.ConnectAsync(profile, password, ownerHwnd, token).ConfigureAwait(true);
+            var (gwUser, gwPassword) = await ResolveGatewayCredentialsAsync(profile, token).ConfigureAwait(true);
+            _session = await _rdpService.ConnectAsync(
+                profile, password, ownerHwnd, gwUser, gwPassword, token).ConfigureAwait(true);
             _session.Connected += OnSessionConnected;
             _session.Disconnected += OnSessionDisconnected;
             _session.FatalError += OnSessionFatalError;
@@ -235,6 +241,40 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             : $"Enter password for {prefix}@{profile.Host}";
 
         return await _dialog.PromptPasswordAsync("RDP credentials", promptMsg).ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Look up the gateway credential profile (username + Credential-Manager password) when
+    /// the connection routes through an RD Gateway. Returns nulls when no gateway is
+    /// configured, no gateway credential is picked, or the profile/password is missing —
+    /// callers pass the nulls through, and the OCX falls back to its own prompt if the
+    /// gateway requires interactive auth.
+    /// </summary>
+    private async Task<(string? Username, string? Password)> ResolveGatewayCredentialsAsync(ConnectionProfile profile, CancellationToken token)
+    {
+        if (profile.RdpGatewayUsageMethod == 0) return (null, null);
+        if (profile.RdpGatewayCredentialId is not { } gwCredId) return (null, null);
+
+        CredentialProfile? gwProfile = null;
+        try
+        {
+            gwProfile = await _credentialRepository.GetByIdAsync(gwCredId, token).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to read gateway credential profile {CredentialId}.", gwCredId);
+        }
+        if (gwProfile is null) return (null, null);
+
+        var username = string.IsNullOrEmpty(gwProfile.Domain)
+            ? gwProfile.Username
+            : $"{gwProfile.Domain}\\{gwProfile.Username}";
+
+        string? password = null;
+        try { password = await _credentialService.ReadPasswordAsync(gwCredId).ConfigureAwait(true); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Failed to read gateway credential password."); }
+
+        return (username, password);
     }
 
     private void OnSessionConnected(object? sender, EventArgs e)

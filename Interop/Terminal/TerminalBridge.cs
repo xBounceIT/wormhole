@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 using Microsoft.Web.WebView2.Core;
+using Windows.ApplicationModel.DataTransfer;
 using Wormhole.Services;
 
 namespace Wormhole.Interop.Terminal;
@@ -15,17 +16,23 @@ public sealed class TerminalBridge : IDisposable
     private readonly CoreWebView2 _webView;
     private readonly ISshSession _session;
     private readonly ILogger<TerminalBridge> _logger;
+    private readonly IAppSettingsService _settingsService;
     private readonly DispatcherQueue _dispatcher;
     private bool _disposed;
     private bool _firstOutputLogged;
     private uint _lastColumns;
     private uint _lastRows;
 
-    public TerminalBridge(CoreWebView2 webView, ISshSession session, ILogger<TerminalBridge> logger)
+    public TerminalBridge(
+        CoreWebView2 webView,
+        ISshSession session,
+        ILogger<TerminalBridge> logger,
+        IAppSettingsService settingsService)
     {
         _webView = webView;
         _session = session;
         _logger = logger;
+        _settingsService = settingsService;
         // WebView2 is thread-affine to its creator. Capture the dispatcher at construction
         // (always called from the UI thread via SshTerminalView.OnReadyMessage) so we can
         // marshal SSH-pump callbacks back to the UI thread before touching the WebView.
@@ -68,36 +75,29 @@ public sealed class TerminalBridge : IDisposable
     private void PostBytesToWebView(ReadOnlyMemory<byte> data)
     {
         if (_disposed) return;
-        try
-        {
-            var encoded = Convert.ToBase64String(data.Span);
-            _webView.PostWebMessageAsString("d:" + encoded);
-        }
-        catch (ObjectDisposedException ex)
-        {
-            _logger.LogDebug(ex, "PostWebMessageAsString raced with WebView disposal.");
-        }
-        catch (InvalidOperationException ex)
-        {
-            // WebView2 throws this when the CoreWebView2 has been closed.
-            _logger.LogWarning(ex, "PostWebMessageAsString rejected while posting SSH output.");
-        }
+        PostStringToWebView("d:" + Convert.ToBase64String(data.Span), "posting SSH output");
     }
 
     private void PostFocusToWebView()
     {
+        PostStringToWebView("f:", "requesting terminal focus");
+    }
+
+    private void PostStringToWebView(string message, string operation)
+    {
         if (_disposed) return;
         try
         {
-            _webView.PostWebMessageAsString("f:");
+            _webView.PostWebMessageAsString(message);
         }
         catch (ObjectDisposedException ex)
         {
-            _logger.LogDebug(ex, "Terminal focus request raced with WebView disposal.");
+            _logger.LogDebug(ex, "PostWebMessageAsString raced with WebView disposal while {Operation}.", operation);
         }
         catch (InvalidOperationException ex)
         {
-            _logger.LogWarning(ex, "PostWebMessageAsString rejected while requesting terminal focus.");
+            // WebView2 throws this when the CoreWebView2 has been closed.
+            _logger.LogWarning(ex, "PostWebMessageAsString rejected while {Operation}.", operation);
         }
     }
 
@@ -150,6 +150,50 @@ public sealed class TerminalBridge : IDisposable
             else if (msg.StartsWith("z:collapsed-fit:", StringComparison.Ordinal))
             {
                 _logger.LogInformation("Terminal ignored collapsed fit measurement: {Measurement}.", msg.Substring("z:collapsed-fit:".Length));
+            }
+            else if (msg.StartsWith("c:", StringComparison.Ordinal))
+            {
+                // Read the toggle fresh every time so flipping it in Settings takes effect
+                // immediately without pushing config to JS.
+                if (!_settingsService.Current.AutoCopyOnSelect) return;
+                try
+                {
+                    var text = Encoding.UTF8.GetString(Convert.FromBase64String(msg.Substring(2)));
+                    if (string.IsNullOrEmpty(text)) return;
+                    var pkg = new DataPackage();
+                    pkg.SetText(text);
+                    // WebMessageReceived fires on the UI thread (WebView2 is thread-affine
+                    // to its creator), so Clipboard.SetContent is safe to call directly.
+                    Clipboard.SetContent(pkg);
+                    // Flush so the data survives the source app closing — otherwise the
+                    // DataPackage is invalidated when Wormhole exits and the user can't
+                    // paste the just-copied selection anywhere.
+                    Clipboard.Flush();
+                }
+                catch (Exception ex)
+                {
+                    // Clipboard.SetContent can throw COMException when another app holds
+                    // the clipboard. Never let that tear down the SSH session.
+                    _logger.LogWarning(ex, "TerminalBridge: failed to copy selection to clipboard.");
+                }
+            }
+            else if (msg.StartsWith("p:", StringComparison.Ordinal))
+            {
+                try
+                {
+                    var view = Clipboard.GetContent();
+                    if (view is null || !view.Contains(StandardDataFormats.Text)) return;
+                    var text = await view.GetTextAsync();
+                    if (string.IsNullOrEmpty(text)) return;
+                    var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(text));
+                    // Echo back to JS so xterm.js applies bracketed-paste mode and CRLF
+                    // normalization, rather than writing raw bytes straight to the shell.
+                    PostStringToWebView("paste:" + encoded, "replying with paste");
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "TerminalBridge: failed to read clipboard for paste.");
+                }
             }
         }
         catch (Exception ex)

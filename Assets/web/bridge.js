@@ -3,9 +3,12 @@
 // Wire format (must stay in sync with Interop/Terminal/TerminalBridge.cs):
 //   C# -> JS: "d:" + base64(shell-output-bytes)   (arbitrary bytes including ANSI escapes)
 //   C# -> JS: "f:"                                (focus the terminal)
+//   C# -> JS: "paste:" + base64(utf8(text))       (clipboard text in reply to a "p:" request)
 //   JS -> C#: "d:" + utf8(typed-input)            (user keystrokes; C# does Encoding.UTF8.GetBytes)
 //   JS -> C#: "b:" + base64(raw-input-bytes)      (non-UTF-8 terminal input)
 //   JS -> C#: "r:COLSxROWS"                      (geometry after ready)
+//   JS -> C#: "c:" + base64(utf8(selection))     (selection changed; C# decides whether to copy)
+//   JS -> C#: "p:"                               (right-click paste request)
 //   JS -> C#: "ready:COLSxROWS"                  (one-shot handshake after usable layout)
 //   JS -> C#: "error:" + message                 (terminal initialization failure)
 //   JS -> C#: "z:collapsed-fit:..."              (safe layout diagnostic)
@@ -26,6 +29,28 @@
       out[i] = bin.charCodeAt(i);
     }
     return out;
+  }
+
+  // btoa only accepts Latin-1 — round-trip through UTF-8 so non-ASCII selections
+  // (accented chars, CJK, emoji) survive the trip to C#. The encode/decode loops
+  // avoid String.fromCharCode.apply (stack overflow on large selections) and the
+  // deprecated escape/unescape globals.
+  function utf8ToBase64(text) {
+    const bytes = new TextEncoder().encode(text);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) {
+      bin += String.fromCharCode(bytes[i]);
+    }
+    return btoa(bin);
+  }
+
+  function base64ToUtf8(b64) {
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) {
+      bytes[i] = bin.charCodeAt(i);
+    }
+    return new TextDecoder().decode(bytes);
   }
 
   function post(msg) {
@@ -94,6 +119,34 @@
         }
       });
     }
+
+    // xterm fires onSelectionChange on every pixel of a mouse drag, so debounce on the
+    // trailing edge — otherwise a single drag would hammer the Windows clipboard dozens of
+    // times and pollute clipboard-history apps. Mirrors the 50ms resize debounce below.
+    // Empty selections (deselect click) are dropped so toggling off doesn't leave stale text.
+    if (typeof term.onSelectionChange === "function") {
+      let selectionTimer = 0;
+      term.onSelectionChange(function () {
+        if (selectionTimer) window.clearTimeout(selectionTimer);
+        selectionTimer = window.setTimeout(function () {
+          try {
+            if (!term.hasSelection()) return;
+            const sel = term.getSelection();
+            if (!sel) return;
+            post("c:" + utf8ToBase64(sel));
+          } catch (err) {
+            console.error("Failed to report selection:", err);
+          }
+        }, 50);
+      });
+    }
+
+    // Right-click pastes unconditionally; preventDefault keeps WebView2's chrome menu
+    // from showing in Debug builds (it's already disabled in Release).
+    container.addEventListener("contextmenu", function (e) {
+      e.preventDefault();
+      post("p:");
+    });
 
     let readySent = false;
     let readyTimer = 0;
@@ -187,11 +240,22 @@
           window.setTimeout(function () { term.focus(); }, 250);
           return;
         }
-        if (!msg.startsWith("d:")) return;
-        try {
-          term.write(base64ToUint8Array(msg.slice(2)));
-        } catch (err) {
-          console.error("Failed to decode shell output:", err);
+        if (msg.startsWith("d:")) {
+          try {
+            term.write(base64ToUint8Array(msg.slice(2)));
+          } catch (err) {
+            console.error("Failed to decode shell output:", err);
+          }
+          return;
+        }
+        if (msg.startsWith("paste:")) {
+          try {
+            // term.paste applies bracketed-paste mode when the shell enabled it, so
+            // multi-line pastes are safe; it also normalizes CRLF to LF.
+            term.paste(base64ToUtf8(msg.slice(6)));
+          } catch (err) {
+            console.error("Failed to apply paste:", err);
+          }
         }
       });
     }

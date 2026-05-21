@@ -18,6 +18,7 @@
     <Grid>
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
@@ -33,22 +34,29 @@
                        VerticalAlignment="Center" />
 
             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2">
-                <Button Command="{x:Bind ViewModel.AddFolderCommand}"
+                <Button Style="{StaticResource IconButtonStyle}"
+                        Command="{x:Bind ViewModel.AddFolderCommand}"
                         ToolTipService.ToolTip="New folder (Ctrl+Shift+N)"
-                        AutomationProperties.Name="New folder"
-                        Background="Transparent" BorderBrush="Transparent" Padding="6">
+                        AutomationProperties.Name="New folder">
                     <FontIcon FontSize="14" Glyph="&#xE8F4;" />
                 </Button>
-                <Button Command="{x:Bind ViewModel.AddConnectionCommand}"
+                <Button Style="{StaticResource IconButtonStyle}"
+                        Command="{x:Bind ViewModel.AddConnectionCommand}"
                         ToolTipService.ToolTip="New connection (Ctrl+N)"
-                        AutomationProperties.Name="New connection"
-                        Background="Transparent" BorderBrush="Transparent" Padding="6">
+                        AutomationProperties.Name="New connection">
                     <FontIcon FontSize="14" Glyph="&#xE710;" />
                 </Button>
             </StackPanel>
         </Grid>
 
-        <TreeView Grid.Row="1"
+        <AutoSuggestBox Grid.Row="1"
+                        Margin="4,0,4,4"
+                        PlaceholderText="Search"
+                        QueryIcon="Find"
+                        AutomationProperties.Name="Search connections"
+                        Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+        <TreeView Grid.Row="2"
                   x:Name="Tree"
                   ItemsSource="{x:Bind ViewModel.Roots, Mode=OneWay}"
                   SelectionMode="Single"
@@ -65,9 +73,17 @@
             <TreeView.ContextFlyout>
                 <MenuFlyout>
                     <MenuFlyoutItem Text="New folder"
-                                    Command="{x:Bind ViewModel.AddFolderCommand}" />
+                                    Command="{x:Bind ViewModel.AddFolderCommand}">
+                        <MenuFlyoutItem.Icon>
+                            <FontIcon Glyph="&#xE8F4;" />
+                        </MenuFlyoutItem.Icon>
+                    </MenuFlyoutItem>
                     <MenuFlyoutItem Text="New connection"
-                                    Command="{x:Bind ViewModel.AddConnectionCommand}" />
+                                    Command="{x:Bind ViewModel.AddConnectionCommand}">
+                        <MenuFlyoutItem.Icon>
+                            <FontIcon Glyph="&#xE710;" />
+                        </MenuFlyoutItem.Icon>
+                    </MenuFlyoutItem>
                 </MenuFlyout>
             </TreeView.ContextFlyout>
 
@@ -75,20 +91,37 @@
                 <DataTemplate x:DataType="vm:TreeNodeViewModel">
                     <TreeViewItem ItemsSource="{x:Bind Children}"
                                   IsExpanded="{x:Bind IsExpanded, Mode=TwoWay}"
+                                  Visibility="{x:Bind IsVisible, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
                                   DoubleTapped="OnNodeDoubleTapped">
                         <TreeViewItem.ContextFlyout>
                             <!-- Click handlers (not Command bindings) because ElementName binding
                                  can't escape the DataTemplate's namescope into the MenuFlyout popup. -->
                             <MenuFlyout>
                                 <MenuFlyoutItem Text="New folder"
-                                                Click="OnAddFolderItemClick" />
+                                                Click="OnAddFolderItemClick">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE8F4;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
                                 <MenuFlyoutItem Text="New connection"
-                                                Click="OnAddConnectionItemClick" />
+                                                Click="OnAddConnectionItemClick">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE710;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
                                 <MenuFlyoutSeparator />
                                 <MenuFlyoutItem Text="Edit"
-                                                Click="OnEditItemClick" />
+                                                Click="OnEditItemClick">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE70F;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
                                 <MenuFlyoutItem Text="Delete"
-                                                Click="OnDeleteItemClick" />
+                                                Click="OnDeleteItemClick">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE74D;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
                             </MenuFlyout>
                         </TreeViewItem.ContextFlyout>
 

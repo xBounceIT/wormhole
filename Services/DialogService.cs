@@ -98,6 +98,33 @@ public sealed class DialogService : IDialogService
         return output;
     }
 
+    public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null) =>
+        ShowFormDialogAsync(new CredentialDialog(), initial, "credential");
+
+    private async Task<TDraft?> ShowFormDialogAsync<TForm, TDraft>(TForm form, TDraft? initial, string entityName)
+        where TForm : UserControl, IDraftForm<TDraft>
+        where TDraft : class
+    {
+        if (initial is not null) form.LoadDraft(initial);
+
+        var dialog = new ContentDialog
+        {
+            Title = initial is null ? $"New {entityName}" : $"Edit {entityName}",
+            Content = form,
+            PrimaryButtonText = initial is null ? "Create" : "Save",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = RequireXamlRoot(),
+            IsPrimaryButtonEnabled = form.IsValid,
+        };
+
+        form.ValidityChanged += (_, _) => dialog.IsPrimaryButtonEnabled = form.IsValid;
+        dialog.Opened += (_, _) => form.FocusNameField();
+
+        var result = await dialog.ShowAsync();
+        return result == ContentDialogResult.Primary ? form.BuildDraft() : null;
+    }
+
     public async Task<string?> PromptPasswordAsync(string title, string message)
     {
         var passwordBox = new PasswordBox

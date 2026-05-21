@@ -22,6 +22,10 @@
             <ToggleSwitch Header="Confirm before closing a connected tab"
                           IsOn="{x:Bind ViewModel.ConfirmOnTabClose, Mode=TwoWay}" />
 
+            <TextBlock Text="Terminal" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
+            <ToggleSwitch Header="Auto-copy selection to clipboard"
+                          IsOn="{x:Bind ViewModel.AutoCopyOnSelect, Mode=TwoWay}" />
+
             <TextBlock Text="Updates" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
             <TextBlock Text="{x:Bind ViewModel.Update.CurrentVersionText, Mode=OneWay}"
                        Style="{StaticResource BodyTextBlockStyle}" />

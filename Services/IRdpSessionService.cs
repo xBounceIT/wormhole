@@ -11,6 +11,8 @@ public interface IRdpSessionService
         ConnectionProfile profile,
         string? password,
         IntPtr ownerHwnd,
+        string? gatewayUsername = null,
+        string? gatewayPassword = null,
         CancellationToken cancellationToken = default);
 }
 

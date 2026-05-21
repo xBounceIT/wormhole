@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
+using System.Windows.Input;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Microsoft.UI.Dispatching;
 using Wormhole.Models;
@@ -25,6 +26,10 @@ public abstract partial class SessionTabViewModel : ObservableObject
     /// to synchronous execution in that case.
     /// </summary>
     protected DispatcherQueue? UiDispatcher { get; private set; }
+
+    public virtual ICommand? ReconnectCommand => null;
+
+    public bool CanReconnect => ReconnectCommand is not null;
 
     public virtual void Initialize(ConnectionProfile profile)
     {

@@ -22,6 +22,8 @@ public sealed class RdpSessionService : IRdpSessionService
         ConnectionProfile profile,
         string? password,
         IntPtr ownerHwnd,
+        string? gatewayUsername = null,
+        string? gatewayPassword = null,
         CancellationToken cancellationToken = default)
     {
         // Must run on the WinUI UI thread (STA). The form constructor enforces this.
@@ -35,7 +37,7 @@ public sealed class RdpSessionService : IRdpSessionService
         try
         {
             _ = form.Hwnd; // force handle creation + AxHost CreateControl before Configure / SetParent
-            form.Configure(profile, password);
+            form.Configure(profile, password, gatewayUsername, gatewayPassword);
             cancellationToken.ThrowIfCancellationRequested();
             // SetParent returns the previous parent on success and IntPtr.Zero on failure.
             // A top-level WinForms Form has the desktop as parent before reparenting, so

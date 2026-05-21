@@ -19,5 +19,7 @@ public interface IDialogService
     /// <param name="isNew">Controls dialog title and button copy.</param>
     Task<ConnectionNode?> EditConnectionAsync(ConnectionNode initial, bool isNew);
 
+    Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null);
+
     Task<string?> PromptPasswordAsync(string title, string message);
 }

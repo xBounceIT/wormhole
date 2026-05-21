@@ -265,6 +265,21 @@ public class ConnectionEditorViewModelTests
         Assert.True(vm.IsValid);
     }
 
+    [Fact]
+    public async Task IsValid_AllowsNullPortForProtocolDefault()
+    {
+        // Regression test: null Port means "inherit / use protocol default" and must not
+        // gate saving. The NumberBox's "Default for protocol" placeholder relies on this —
+        // re-saving an existing connection without typing a number must keep the Save button
+        // enabled.
+        var vm = await NewEditorAsync();
+        vm.Name = "n";
+        vm.Host = "h";
+        vm.Port = null;
+
+        Assert.True(vm.IsValid);
+    }
+
     private static async Task<ConnectionEditorViewModel> NewEditorAsync()
     {
         var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository());

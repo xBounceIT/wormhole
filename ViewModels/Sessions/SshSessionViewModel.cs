@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Input;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
@@ -21,6 +22,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private readonly ISshSessionService _sshService;
     private readonly ISshCredentialResolver _credentialResolver;
     private readonly IConnectionRepository _connectionRepo;
+    private readonly IAppSettingsService _settingsService;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<SshSessionViewModel> _logger;
 
@@ -32,16 +34,19 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private TerminalSize _initialSize = TerminalSize.Default;
     private CancellationTokenSource? _outputWaitCts;
     private int _connectInFlight;
+    private bool _reconnectRequestedWhileDetached;
 
     public SshSessionViewModel(
         ISshSessionService sshService,
         ISshCredentialResolver credentialResolver,
         IConnectionRepository connectionRepo,
+        IAppSettingsService settingsService,
         ILoggerFactory loggerFactory)
     {
         _sshService = sshService;
         _credentialResolver = credentialResolver;
         _connectionRepo = connectionRepo;
+        _settingsService = settingsService;
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<SshSessionViewModel>();
         PropertyChanged += (_, args) =>
@@ -51,11 +56,14 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
                 OnPropertyChanged(nameof(IsConnecting));
                 OnPropertyChanged(nameof(IsConnected));
                 OnPropertyChanged(nameof(IsFailed));
+                RetryCommand.NotifyCanExecuteChanged();
             }
         };
     }
 
     public override ProtocolType Protocol => ProtocolType.Ssh;
+
+    public override ICommand? ReconnectCommand => RetryCommand;
 
     [ObservableProperty]
     private string? errorMessage;
@@ -87,6 +95,18 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         // capture the dispatcher now so background callbacks (Closed) can marshal back.
         EnsureDispatcher();
 
+        // Reconnect was requested from the tab context menu while the view was unloaded
+        // (background tab) — RetryAsync couldn't fan out to the now-unsubscribed init
+        // event, so it stashed the intent here. Honor it before the "session alive →
+        // just rebind bridge" path below.
+        if (_reconnectRequestedWhileDetached)
+        {
+            _reconnectRequestedWhileDetached = false;
+            await DetachAsync().ConfigureAwait(true);
+            await ConnectAsync().ConfigureAwait(true);
+            return;
+        }
+
         // Navigating away from Sessions and back rebuilds the tab content (new
         // UserControl + WebView2) while the VM stays alive in ShellViewModel.Tabs. Skip the
         // expensive credential prompt + SSH connect; just rebind the bridge to the new
@@ -96,7 +116,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         if (_session is not null)
         {
             var oldBridge = _bridge;
-            _bridge = new TerminalBridge(webView, _session, _loggerFactory.CreateLogger<TerminalBridge>());
+            _bridge = new TerminalBridge(webView, _session, _loggerFactory.CreateLogger<TerminalBridge>(), _settingsService);
             oldBridge?.Dispose();
             await _session.ResizeAsync(initialSize.Columns, initialSize.Rows).ConfigureAwait(true);
             _bridge.RequestFocus();
@@ -114,20 +134,29 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     /// </summary>
     public event Action? InitializationRetryRequested;
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false, CanExecute = nameof(CanRetry))]
     public async Task RetryAsync()
     {
         ErrorMessage = null;
         ResetOutputState();
         if (_webView is null)
         {
-            InitializationRetryRequested?.Invoke();
+            // A null handler means the view is unloaded (background tab): OnUnloaded
+            // already detached it, so firing the event would no-op. Stash the intent
+            // for the next AttachAsync. A non-null handler means the view is loaded
+            // but WebView2 init failed — preserve the existing "retry init" fan-out.
+            var handler = InitializationRetryRequested;
+            if (handler is not null) handler();
+            else _reconnectRequestedWhileDetached = true;
             return;
         }
         await DetachAsync().ConfigureAwait(true);
         ErrorMessage = null;
         await ConnectAsync().ConfigureAwait(true);
     }
+
+    // While Connecting, an in-flight ConnectAsync still holds _connectInFlight; a second one from RetryAsync would silently no-op.
+    private bool CanRetry() => Status != SessionStatus.Connecting;
 
     [RelayCommand]
     public Task DisconnectAsync() => DetachAsync();
@@ -252,7 +281,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             // (forced-command accounts, EOF-on-connect, etc.).
             _session.DataReceived += OnSessionDataReceived;
             _session.Closed += OnSessionClosed;
-            _bridge = new TerminalBridge(liveWebView, _session, _loggerFactory.CreateLogger<TerminalBridge>());
+            _bridge = new TerminalBridge(liveWebView, _session, _loggerFactory.CreateLogger<TerminalBridge>(), _settingsService);
             _session.Start();
 
             // Mirror SshHostKeyValidator.Decide which treats null *and* empty as unpinned —

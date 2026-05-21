@@ -90,6 +90,119 @@ public sealed class SshSessionViewModelTests
     }
 
     [Fact]
+    public void CanReconnect_IsTrue_ForSshSession()
+    {
+        var vm = CreateViewModel();
+
+        Assert.True(vm.CanReconnect);
+        Assert.NotNull(vm.ReconnectCommand);
+    }
+
+    [Fact]
+    public void CanReconnect_IsFalse_ForRdpSession()
+    {
+        // RDP has its own RetryCommand (in-tab Retry button on the failure overlay) rather
+        // than the SessionTabViewModel.ReconnectCommand surface — base CanReconnect stays false.
+        var vm = new RdpSessionViewModel(
+            new NullRdpSessionService(),
+            new Fakes.FakeCredentialService(),
+            new NullCredentialRepository(),
+            new Fakes.FakeDialogService(),
+            NullLoggerFactory.Instance);
+
+        Assert.False(vm.CanReconnect);
+        Assert.Null(vm.ReconnectCommand);
+    }
+
+    private sealed class NullRdpSessionService : IRdpSessionService
+    {
+        public Task<IRdpSession> ConnectAsync(
+            ConnectionProfile profile, string? password, IntPtr ownerHwnd,
+            string? gatewayUsername = null, string? gatewayPassword = null,
+            CancellationToken cancellationToken = default)
+            => throw new NotImplementedException();
+    }
+
+    private sealed class NullCredentialRepository : ICredentialRepository
+    {
+        public Task<IReadOnlyList<CredentialProfile>> GetAllAsync(CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<CredentialProfile>>(Array.Empty<CredentialProfile>());
+        public Task<CredentialProfile?> GetByIdAsync(Guid id, CancellationToken ct = default) => Task.FromResult<CredentialProfile?>(null);
+        public Task AddAsync(CredentialProfile profile, CancellationToken ct = default) => Task.CompletedTask;
+        public Task UpdateAsync(CredentialProfile profile, CancellationToken ct = default) => Task.CompletedTask;
+        public Task DeleteAsync(Guid id, CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    [Fact]
+    public void CanReconnect_IsFalse_ForSftpSession()
+    {
+        var vm = new SftpSessionViewModel();
+
+        Assert.False(vm.CanReconnect);
+        Assert.Null(vm.ReconnectCommand);
+    }
+
+    [Fact]
+    public void RetryCommand_CanExecute_IsFalse_WhileConnecting()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+
+        vm.Status = SessionStatus.Connecting;
+
+        Assert.False(vm.RetryCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public void RetryCommand_CanExecute_TracksStatusTransitions()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+
+        vm.Status = SessionStatus.Failed;
+        Assert.True(vm.RetryCommand.CanExecute(null));
+
+        vm.Status = SessionStatus.Connecting;
+        Assert.False(vm.RetryCommand.CanExecute(null));
+
+        vm.Status = SessionStatus.Connected;
+        Assert.True(vm.RetryCommand.CanExecute(null));
+
+        vm.Status = SessionStatus.Disconnected;
+        Assert.True(vm.RetryCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public async Task RetryAsync_WithDetachedViewAndNoSubscribers_PreservesSession()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        var session = new FakeSshSession();
+        vm.AttachConnectedSessionForTesting(session);
+        vm.DetachView();
+
+        await vm.RetryAsync();
+
+        // Background-tab case: the session is left alive so AttachAsync can tear it down
+        // and reconnect when the tab activates and its view re-Loads.
+        Assert.Equal(0, session.DisposeCount);
+    }
+
+    [Fact]
+    public async Task RetryAsync_WithDetachedViewAndSubscriber_FiresInitializationRetry()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        var raised = 0;
+        vm.InitializationRetryRequested += () => raised++;
+
+        await vm.RetryAsync();
+
+        // View-loaded-but-WebView2-init-failed case: existing fan-out is preserved.
+        Assert.Equal(1, raised);
+    }
+
+    [Fact]
     public async Task DetachAsync_DisposesSessionAndIgnoresLateOutput()
     {
         var vm = CreateViewModel();
@@ -111,6 +224,7 @@ public sealed class SshSessionViewModelTests
             new FakeSshSessionService(),
             new FakeCredentialResolver(),
             new FakeConnectionRepository(),
+            new FakeAppSettingsService(),
             NullLoggerFactory.Instance);
 
     private static ConnectionProfile CreateProfile() =>
@@ -140,6 +254,13 @@ public sealed class SshSessionViewModelTests
             ConnectionProfile profile,
             CancellationToken cancellationToken = default) =>
             Task.FromResult(SshCredentials.Empty);
+    }
+
+    private sealed class FakeAppSettingsService : IAppSettingsService
+    {
+        public AppSettings Current { get; } = new();
+        public event EventHandler? SettingsChanged { add { } remove { } }
+        public void Save() { }
     }
 
     private sealed class FakeConnectionRepository : IConnectionRepository

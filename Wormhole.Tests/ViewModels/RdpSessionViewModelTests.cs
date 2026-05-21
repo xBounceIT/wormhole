@@ -180,7 +180,8 @@ public class RdpSessionViewModelTests
         var svc = new FakeRdpSessionService();
         var creds = new FakeCredentialService();
         var dlg = new FakeDialogService();
-        var vm = new RdpSessionViewModel(svc, creds, dlg, NullLoggerFactory.Instance);
+        var repo = new EmptyCredentialRepository();
+        var vm = new RdpSessionViewModel(svc, creds, repo, dlg, NullLoggerFactory.Instance);
         return (vm, svc, creds, dlg);
     }
 
@@ -188,10 +189,26 @@ public class RdpSessionViewModelTests
     {
         public IRdpSession? NextSession { get; set; }
 
-        public Task<IRdpSession> ConnectAsync(ConnectionProfile profile, string? password, IntPtr ownerHwnd, CancellationToken cancellationToken = default)
+        public Task<IRdpSession> ConnectAsync(
+            ConnectionProfile profile,
+            string? password,
+            IntPtr ownerHwnd,
+            string? gatewayUsername = null,
+            string? gatewayPassword = null,
+            CancellationToken cancellationToken = default)
         {
             if (NextSession is null) throw new InvalidOperationException("FakeRdpSessionService.NextSession not assigned.");
             return Task.FromResult(NextSession);
         }
+    }
+
+    private sealed class EmptyCredentialRepository : Wormhole.Data.Repositories.ICredentialRepository
+    {
+        public Task<System.Collections.Generic.IReadOnlyList<CredentialProfile>> GetAllAsync(CancellationToken ct = default)
+            => Task.FromResult<System.Collections.Generic.IReadOnlyList<CredentialProfile>>(System.Array.Empty<CredentialProfile>());
+        public Task<CredentialProfile?> GetByIdAsync(System.Guid id, CancellationToken ct = default) => Task.FromResult<CredentialProfile?>(null);
+        public Task AddAsync(CredentialProfile profile, CancellationToken ct = default) => Task.CompletedTask;
+        public Task UpdateAsync(CredentialProfile profile, CancellationToken ct = default) => Task.CompletedTask;
+        public Task DeleteAsync(System.Guid id, CancellationToken ct = default) => Task.CompletedTask;
     }
 }

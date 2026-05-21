@@ -36,7 +36,13 @@
                                   Header="Protocol"
                                   ItemsSource="{x:Bind Protocols}"
                                   SelectedItem="{x:Bind ViewModel.Protocol, Mode=TwoWay}"
-                                  HorizontalAlignment="Stretch" />
+                                  HorizontalAlignment="Stretch">
+                            <ComboBox.ItemTemplate>
+                                <DataTemplate x:DataType="models:ProtocolType">
+                                    <TextBlock Text="{x:Bind Converter={StaticResource ToUpperConverter}}" />
+                                </DataTemplate>
+                            </ComboBox.ItemTemplate>
+                        </ComboBox>
 
                         <TextBox x:Name="HostBox"
                                  Header="Host"
