@@ -9,7 +9,7 @@ public static class Glyphs
 {
     public const string Folder  = ""; // Folder
     public const string Ssh     = ""; // CommandPrompt
-    public const string Rdp     = ""; // NetworkAdapter
+    public const string Rdp     = ""; // TVMonitor
     public const string Sftp    = ""; // SyncFolder
     public const string Generic = ""; // Devices
 }
