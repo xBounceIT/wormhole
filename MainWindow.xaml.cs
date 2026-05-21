@@ -2,6 +2,7 @@ using System;
 using System.Threading.Tasks;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Input;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -26,6 +27,9 @@ public sealed partial class MainWindow : Window
     private double _resizeStartPointerX;
     private bool _minSidebarMeasured;
 
+    private OverlappedPresenter? _windowPresenter;
+    private OverlappedPresenterState _currentWindowState;
+
     public ShellViewModel ViewModel { get; }
 
     public MainWindow(ShellViewModel viewModel, INavigationService navigationService)
@@ -37,6 +41,23 @@ public sealed partial class MainWindow : Window
 
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
+        // The native TitleBar control renders at ~48 px; match the AppWindow's
+        // caption-button strip so they don't draw at different heights and leave
+        // a visible seam.
+        AppWindow.TitleBar.PreferredHeightOption = TitleBarHeightOption.Tall;
+
+        // Workaround for WinUI issue #9934 (microsoft/microsoft-ui-xaml): even
+        // with PreferredHeightOption.Tall, a 1-2 px gap remains between the
+        // system caption buttons and the content below the title bar. Pull
+        // the content up by a small negative margin to close it, and re-apply
+        // on window-state changes since the inset differs when maximized.
+        if (AppWindow.Presenter is OverlappedPresenter presenter)
+        {
+            _windowPresenter = presenter;
+            _currentWindowState = presenter.State;
+            AdjustContentMargin(force: true);
+            AppWindow.Changed += (_, _) => AdjustContentMargin();
+        }
 
         SystemBackdrop = new MicaBackdrop { Kind = Microsoft.UI.Composition.SystemBackdrops.MicaKind.Base };
 
@@ -73,6 +94,21 @@ public sealed partial class MainWindow : Window
         // initial-focus pass runs after Activated and would otherwise overwrite
         // our override back onto the ComboBox.
         DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () => ContentFrame.Focus(FocusState.Programmatic));
+    }
+
+    private void AdjustContentMargin(bool force = false)
+    {
+        if (_windowPresenter is null || (!force && _windowPresenter.State == _currentWindowState))
+        {
+            return;
+        }
+
+        var top = _windowPresenter.State == OverlappedPresenterState.Maximized ? -1d : -2d;
+        var infoBarMargin = UpdateInfoBar.Margin;
+        UpdateInfoBar.Margin = new Thickness(infoBarMargin.Left, top, infoBarMargin.Right, infoBarMargin.Bottom);
+        var contentMargin = ContentArea.Margin;
+        ContentArea.Margin = new Thickness(contentMargin.Left, top, contentMargin.Right, contentMargin.Bottom);
+        _currentWindowState = _windowPresenter.State;
     }
 
     private void UpdateInfoBar_CloseButtonClick(InfoBar sender, object args)
