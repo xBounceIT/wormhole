@@ -1,8 +1,3 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Threading.Tasks;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Data;
@@ -186,6 +181,43 @@ public class ConnectionTreeViewModelTests : IDisposable
         Assert.Equal("example.com", row.Host);
         Assert.Equal(2222, row.Port);
         Assert.Equal("daniel", row.Username);
+    }
+
+    [Fact]
+    public async Task AddConnection_WithCredentialId_PersistsCredentialId()
+    {
+        var credentialId = Guid.NewGuid();
+        var draft = MakeConnectionDraft("prod-web", ProtocolType.Ssh, "example.com", 22, null);
+        draft.CredentialId = credentialId;
+        var dialog = new FakeDialogService { EditConnectionResult = draft };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        await vm.AddConnectionCommand.ExecuteAsync(null);
+
+        var row = Assert.Single(await _repo.GetAllAsync());
+        Assert.Equal(credentialId, row.CredentialId);
+    }
+
+    [Fact]
+    public async Task Edit_AssignsCredentialId_PersistsToDb()
+    {
+        var dialog = new FakeDialogService
+        {
+            EditConnectionResult = MakeConnectionDraft("prod", ProtocolType.Ssh, "host", 22, "alice"),
+        };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+        await vm.AddConnectionCommand.ExecuteAsync(null);
+
+        var credentialId = Guid.NewGuid();
+        var nextDraft = MakeConnectionDraft("prod", ProtocolType.Ssh, "host", 22, null);
+        nextDraft.CredentialId = credentialId;
+        dialog.EditConnectionResult = nextDraft;
+        await vm.EditCommand.ExecuteAsync(vm.Roots.Single());
+
+        var row = (await _repo.GetAllAsync()).Single();
+        Assert.Equal(credentialId, row.CredentialId);
     }
 
     [Fact]

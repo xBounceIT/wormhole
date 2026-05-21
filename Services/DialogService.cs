@@ -1,7 +1,6 @@
-using System;
-using System.Threading.Tasks;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Views.Dialogs;
 
@@ -9,6 +8,13 @@ namespace Wormhole.Services;
 
 public sealed class DialogService : IDialogService
 {
+    private readonly ICredentialRepository _credentialRepository;
+
+    public DialogService(ICredentialRepository credentialRepository)
+    {
+        _credentialRepository = credentialRepository;
+    }
+
     public Task ShowMessageAsync(string title, string message)
     {
         var dialog = new ContentDialog

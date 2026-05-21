@@ -6,7 +6,10 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
-    <NoWarn>$(NoWarn);MVVMTK0045</NoWarn>
+    <!-- Suppress IDE0005 in the test project because shared <Compile Include="..\main\file.cs">
+         links cause dotnet format to see conflicting using-removal proposals across compilation
+         contexts. Main project still enforces IDE0005. -->
+    <NoWarn>$(NoWarn);MVVMTK0045;IDE0005</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

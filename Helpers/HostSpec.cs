@@ -1,5 +1,3 @@
-using System;
-
 namespace Wormhole.Helpers;
 
 public readonly record struct HostSpec(string? User, string Host, int? Port);

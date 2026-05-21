@@ -1,4 +1,3 @@
-using System;
 using System.ComponentModel;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.UI.Xaml.Controls;
@@ -46,7 +45,7 @@ public sealed partial class NewConnectionDialog : UserControl
     public bool IsValid => ViewModel.IsValid;
 
     /// <summary>Load credentials and copy field values from <paramref name="initial"/> into the VM.</summary>
-    public async System.Threading.Tasks.Task LoadAsync(ConnectionNode initial)
+    public async Task LoadAsync(ConnectionNode initial)
     {
         await ViewModel.LoadCredentialsAsync();
         ViewModel.LoadFrom(initial);

@@ -1,5 +1,3 @@
-using System;
-
 namespace Wormhole.Models;
 
 public class CredentialProfile

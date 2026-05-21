@@ -3,7 +3,6 @@ using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-
 namespace Wormhole.Views.Controls;
 
 // ContentControl's default template doesn't render Background, so setting Background

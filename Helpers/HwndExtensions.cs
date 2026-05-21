@@ -1,7 +1,5 @@
-using System;
 using Microsoft.UI.Xaml;
 using WinRT.Interop;
-
 namespace Wormhole.Helpers;
 
 internal static class HwndExtensions

@@ -1,7 +1,5 @@
-using System;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.ComTypes;
-using System.Threading;
 using System.Windows.Forms;
 using Microsoft.CSharp.RuntimeBinder;
 using Microsoft.Extensions.Logging;
