@@ -23,8 +23,14 @@ public partial class CredentialsViewModel : ObservableObject
 
     public bool IsEmpty => Credentials.Count == 0;
 
+    public bool HasMatches => FilteredCredentials.Count > 0;
+
+    public bool HasNoMatches => !IsEmpty && !HasMatches;
+
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(FilteredCredentials))]
+    [NotifyPropertyChangedFor(nameof(HasMatches))]
+    [NotifyPropertyChangedFor(nameof(HasNoMatches))]
     private string searchText = string.Empty;
 
     public IReadOnlyList<CredentialProfile> FilteredCredentials
@@ -60,6 +66,8 @@ public partial class CredentialsViewModel : ObservableObject
         {
             OnPropertyChanged(nameof(FilteredCredentials));
             OnPropertyChanged(nameof(IsEmpty));
+            OnPropertyChanged(nameof(HasMatches));
+            OnPropertyChanged(nameof(HasNoMatches));
         };
     }
 

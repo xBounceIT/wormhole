@@ -18,7 +18,7 @@ public sealed partial class CredentialDialog : UserControl, IDraftForm<Credentia
     public ProtocolType[] Protocols { get; } = new[] { ProtocolType.Ssh, ProtocolType.Rdp };
 
     private ProtocolType SelectedProtocol =>
-        TypeBox.SelectedItem is ProtocolType p ? p : ProtocolType.Ssh;
+        ProtocolBox.SelectedItem is ProtocolType p ? p : ProtocolType.Ssh;
 
     public bool IsValid =>
         !string.IsNullOrWhiteSpace(NameBox.Text) &&
@@ -29,7 +29,7 @@ public sealed partial class CredentialDialog : UserControl, IDraftForm<Credentia
     public void LoadDraft(CredentialDraft initial)
     {
         NameBox.Text = initial.Name;
-        TypeBox.SelectedItem = initial.Protocol;
+        ProtocolBox.SelectedItem = initial.Protocol;
         UsernameBox.Text = initial.Username;
         DomainBox.Text = initial.Domain ?? string.Empty;
         PasswordField.Password = initial.Password;
@@ -67,7 +67,7 @@ public sealed partial class CredentialDialog : UserControl, IDraftForm<Credentia
         ValidityChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    private void OnTypeChanged(object sender, SelectionChangedEventArgs e)
+    private void OnProtocolChanged(object sender, SelectionChangedEventArgs e)
     {
         UpdateDomainVisibility();
         ValidityChanged?.Invoke(this, EventArgs.Empty);

@@ -250,6 +250,34 @@ public class CredentialsViewModelTests
     }
 
     [Fact]
+    public async Task HasNoMatches_is_true_when_search_filters_everything_out()
+    {
+        var repo = new FakeCredentialRepository(MakeProfile("alpha", ProtocolType.Ssh));
+        var vm = NewVm(repo);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.False(vm.IsEmpty);
+        Assert.True(vm.HasMatches);
+        Assert.False(vm.HasNoMatches);
+
+        vm.SearchText = "no-such-thing";
+
+        Assert.False(vm.IsEmpty);
+        Assert.False(vm.HasMatches);
+        Assert.True(vm.HasNoMatches);
+    }
+
+    [Fact]
+    public void HasNoMatches_is_false_when_collection_is_empty()
+    {
+        var vm = NewVm(new FakeCredentialRepository());
+
+        Assert.True(vm.IsEmpty);
+        Assert.False(vm.HasMatches);
+        Assert.False(vm.HasNoMatches);
+    }
+
+    [Fact]
     public async Task FilteredCredentials_matches_across_name_username_and_domain()
     {
         var repo = new FakeCredentialRepository(
