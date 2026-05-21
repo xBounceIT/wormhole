@@ -32,13 +32,25 @@
   }
 
   // btoa only accepts Latin-1 — round-trip through UTF-8 so non-ASCII selections
-  // (accented chars, CJK, emoji) survive the trip to C#.
+  // (accented chars, CJK, emoji) survive the trip to C#. The encode/decode loops
+  // avoid String.fromCharCode.apply (stack overflow on large selections) and the
+  // deprecated escape/unescape globals.
   function utf8ToBase64(text) {
-    return btoa(unescape(encodeURIComponent(text)));
+    const bytes = new TextEncoder().encode(text);
+    let bin = "";
+    for (let i = 0; i < bytes.length; i++) {
+      bin += String.fromCharCode(bytes[i]);
+    }
+    return btoa(bin);
   }
 
   function base64ToUtf8(b64) {
-    return decodeURIComponent(escape(atob(b64)));
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) {
+      bytes[i] = bin.charCodeAt(i);
+    }
+    return new TextDecoder().decode(bytes);
   }
 
   function post(msg) {

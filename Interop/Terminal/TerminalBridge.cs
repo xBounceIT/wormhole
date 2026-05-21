@@ -165,6 +165,10 @@ public sealed class TerminalBridge : IDisposable
                     // WebMessageReceived fires on the UI thread (WebView2 is thread-affine
                     // to its creator), so Clipboard.SetContent is safe to call directly.
                     Clipboard.SetContent(pkg);
+                    // Flush so the data survives the source app closing — otherwise the
+                    // DataPackage is invalidated when Wormhole exits and the user can't
+                    // paste the just-copied selection anywhere.
+                    Clipboard.Flush();
                 }
                 catch (Exception ex)
                 {
