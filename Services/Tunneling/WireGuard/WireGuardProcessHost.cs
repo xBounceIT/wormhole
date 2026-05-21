@@ -21,7 +21,7 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
     private readonly ILogger _logger;
     private readonly Process _process;
     private readonly Task _stderrPump;
-    private bool _disposed;
+    private int _disposedFlag;
 
     private WireGuardProcessHost(Process process, ILogger logger)
     {
@@ -118,14 +118,25 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed) return;
-        _disposed = true;
+        // Interlocked guard so concurrent dispose calls (the SocksTunnelInstance onDispose
+        // hook plus, e.g., a direct teardown on the same path) don't double-kill the
+        // process or race the stderr pump.
+        if (Interlocked.Exchange(ref _disposedFlag, 1) != 0) return;
 
         try
         {
             // Closing stdin signals graceful shutdown to the sidecar.
             try { _process.StandardInput.Close(); } catch { /* best effort */ }
-            if (!_process.WaitForExit(2000))
+
+            // Async wait — DisposeAsync runs on session-teardown continuations, so blocking
+            // the calling thread for up to 2s with the synchronous overload would stall the
+            // dispatcher behind it.
+            using var waitCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            try
+            {
+                await _process.WaitForExitAsync(waitCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
             {
                 try { _process.Kill(entireProcessTree: true); } catch { /* best effort */ }
             }

@@ -1,4 +1,4 @@
--- 0002_add_tunnel_config: per-connection in-process VPN tunnel support.
+-- 0003_add_tunnel_config: per-connection in-process VPN tunnel support.
 --
 -- TunnelEnabled is tri-state (NULL = inherit from ancestor folder, 0 = off, 1 = on),
 -- matching the existing RdpFullScreen shape so InheritanceResolver can treat it the same.

@@ -86,25 +86,50 @@ if ($release) {
     return
 }
 
-# Step 2: try to build from source if Go is installed.
+# Step 2: try to build from source if Go is installed. Per the WireGuard tunnel PR's
+# explicit design, the sidecar is optional and a build miss must NOT fail the .NET build --
+# WireGuardTunnelProvider surfaces a clean runtime error if the binary is missing. We
+# therefore catch every go-related failure here and downgrade it to a warning.
 $go = Get-Command go -ErrorAction SilentlyContinue
 if ($go) {
     Write-Info "BUILD wormhole-wgproxy.exe ($Arch) from source"
     $env:GOOS = "windows"
     $env:GOARCH = if ($Arch -eq "arm64") { "arm64" } else { "amd64" }
+    $buildOk = $false
+    $failureDetail = $null
     Push-Location $sourceDir
     try {
-        & go build -trimpath -ldflags "-s -w" -o $binaryPath .
+        # `go mod download` populates go.sum on first run. Without this step, a fresh checkout
+        # (no committed go.sum -- intentional for this tool, since the .NET build is the source
+        # of truth and go.sum would otherwise need to be regenerated on every dependency bump)
+        # fails strict-mode `go build` with "missing go.sum entry for module ...".
+        & go mod download 2>&1 | ForEach-Object { Write-Info $_ }
         if ($LASTEXITCODE -ne 0) {
-            throw "go build exited with code $LASTEXITCODE"
+            $failureDetail = "go mod download exited with code $LASTEXITCODE"
         }
+        else {
+            & go build -trimpath -ldflags "-s -w" -o $binaryPath . 2>&1 | ForEach-Object { Write-Info $_ }
+            if ($LASTEXITCODE -eq 0) {
+                $buildOk = $true
+            }
+            else {
+                $failureDetail = "go build exited with code $LASTEXITCODE"
+            }
+        }
+    }
+    catch {
+        $failureDetail = "unexpected error during go build: $_"
     }
     finally {
         Pop-Location
         Remove-Item Env:\GOOS -ErrorAction SilentlyContinue
         Remove-Item Env:\GOARCH -ErrorAction SilentlyContinue
     }
-    Write-Info "OK    wormhole-wgproxy.exe ($Arch) (built)"
+    if ($buildOk) {
+        Write-Info "OK    wormhole-wgproxy.exe ($Arch) (built)"
+        return
+    }
+    Write-Warning "wormhole-wgproxy.exe build failed ($failureDetail). Continuing without the sidecar; WireGuard tunnels will surface a runtime error if used."
     return
 }
 

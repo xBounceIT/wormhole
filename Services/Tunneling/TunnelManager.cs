@@ -28,7 +28,21 @@ public sealed class TunnelManager
         ICredentialService credentials,
         ILogger<TunnelManager> logger)
     {
-        _providers = providers.ToDictionary(p => p.Kind);
+        // Group rather than ToDictionary so a duplicate registration (two providers claiming
+        // the same TunnelKind) surfaces an actionable message instead of the raw
+        // "An item with the same key has already been added." from ToDictionary.
+        var byKind = new Dictionary<TunnelKind, ITunnelProvider>();
+        foreach (var provider in providers)
+        {
+            if (byKind.TryGetValue(provider.Kind, out var existing))
+            {
+                throw new InvalidOperationException(
+                    $"Multiple ITunnelProvider implementations registered for {provider.Kind}: " +
+                    $"'{existing.GetType().FullName}' and '{provider.GetType().FullName}'. Register exactly one per kind.");
+            }
+            byKind[provider.Kind] = provider;
+        }
+        _providers = byKind;
         _configs = configs;
         _credentials = credentials;
         _logger = logger;
