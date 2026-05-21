@@ -134,10 +134,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         await ConnectAsync().ConfigureAwait(true);
     }
 
-    // Guards the context-menu Reconnect (and the failure-overlay Retry button) against
-    // firing while a ConnectAsync is mid-flight: DetachAsync cancels the in-flight
-    // operation but does not await its finally, so a second ConnectAsync from here would
-    // hit the _connectInFlight interlock and silently no-op, stranding the tab.
+    // While Connecting, an in-flight ConnectAsync still holds _connectInFlight; a second one from RetryAsync would silently no-op.
     private bool CanRetry() => Status != SessionStatus.Connecting;
 
     [RelayCommand]
