@@ -5,7 +5,18 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:models="using:Wormhole.Models">
 
-    <StackPanel Spacing="12" MinWidth="360" MaxWidth="440">
+    <!-- ContentDialog's internal ScrollViewer doesn't kick in when the hosted UserControl reports
+         its full natural height — the inner ScrollViewer here forces a scroll boundary at MaxHeight
+         so the Endpoint / AllowedIps / PersistentKeepalive fields below the fold remain reachable.
+         Padding="0,0,12,0" reserves space for the scrollbar so it doesn't overlap input chrome. -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                  VerticalScrollMode="Enabled"
+                  HorizontalScrollMode="Disabled"
+                  HorizontalScrollBarVisibility="Disabled"
+                  MaxHeight="520"
+                  MinWidth="360"
+                  MaxWidth="440">
+    <StackPanel Spacing="12" Padding="0,0,12,0">
         <TextBox x:Name="NameBox"
                  Header="Name"
                  PlaceholderText="corp-vpn"
@@ -63,4 +74,5 @@
                      HorizontalAlignment="Left" />
         </StackPanel>
     </StackPanel>
+    </ScrollViewer>
 </UserControl>
