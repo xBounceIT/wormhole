@@ -188,7 +188,27 @@ public sealed partial class TunnelConfigsViewModel : ObservableObject
                     Kind = EditorKind,
                 };
                 await _repo.AddAsync(record).ConfigureAwait(true);
-                await _credentials.StoreTunnelConfigAsync(record.Id, secretBytes).ConfigureAwait(true);
+                try
+                {
+                    await _credentials.StoreTunnelConfigAsync(record.Id, secretBytes).ConfigureAwait(true);
+                }
+                catch
+                {
+                    // Compensate: a half-created config (DB row but no secret blob on disk) is
+                    // worse than nothing — TunnelConfigs.Name is UNIQUE, so the user can't even
+                    // retry the save with the same name without hitting the constraint. Roll
+                    // the row back so the failed save looks like nothing happened. If the
+                    // rollback itself fails, log and let the original exception propagate; the
+                    // user can recover by editing the DB or restarting.
+                    try { await _repo.DeleteAsync(record.Id).ConfigureAwait(true); }
+                    catch (Exception rollbackEx)
+                    {
+                        _logger.LogWarning(rollbackEx,
+                            "Failed to roll back orphan tunnel config row {Id} after secret-write failed.",
+                            record.Id);
+                    }
+                    throw;
+                }
                 Configs.Add(record);
                 SelectedConfig = record;
                 StatusMessage = $"Created '{record.Name}'.";
@@ -201,6 +221,8 @@ public sealed partial class TunnelConfigsViewModel : ObservableObject
                 // next Page_Loaded refresh — no need to thread it back from the repo.
                 var newName = EditorName.Trim();
                 var newKind = EditorKind;
+                var oldName = SelectedConfig.Name;
+                var oldKind = SelectedConfig.Kind;
                 var snapshot = new TunnelConfig
                 {
                     Id = SelectedConfig.Id,
@@ -210,7 +232,36 @@ public sealed partial class TunnelConfigsViewModel : ObservableObject
                     UpdatedAt = SelectedConfig.UpdatedAt,
                 };
                 await _repo.UpdateAsync(snapshot).ConfigureAwait(true);
-                await _credentials.StoreTunnelConfigAsync(SelectedConfig.Id, secretBytes).ConfigureAwait(true);
+                try
+                {
+                    await _credentials.StoreTunnelConfigAsync(SelectedConfig.Id, secretBytes).ConfigureAwait(true);
+                }
+                catch
+                {
+                    // Same compensate pattern as create: an updated row pointing at an
+                    // unchanged secret blob means the user thinks they saved new values but
+                    // the on-disk secret is still the old one. Roll the row back to the old
+                    // name/kind so row and blob stay in sync.
+                    try
+                    {
+                        var restore = new TunnelConfig
+                        {
+                            Id = SelectedConfig.Id,
+                            Name = oldName,
+                            Kind = oldKind,
+                            CreatedAt = SelectedConfig.CreatedAt,
+                            UpdatedAt = SelectedConfig.UpdatedAt,
+                        };
+                        await _repo.UpdateAsync(restore).ConfigureAwait(true);
+                    }
+                    catch (Exception rollbackEx)
+                    {
+                        _logger.LogWarning(rollbackEx,
+                            "Failed to roll back tunnel config row {Id} after secret-write failed.",
+                            SelectedConfig.Id);
+                    }
+                    throw;
+                }
                 SelectedConfig.Name = newName;
                 SelectedConfig.Kind = newKind;
                 StatusMessage = $"Saved '{SelectedConfig.Name}'.";
