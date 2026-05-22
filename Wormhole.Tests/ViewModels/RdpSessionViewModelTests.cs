@@ -2,8 +2,10 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
+using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Services.Rdp;
 using Wormhole.Tests.Fakes;
 using Wormhole.ViewModels.Sessions;
 using Xunit;
@@ -15,7 +17,7 @@ public class RdpSessionViewModelTests
     [Fact]
     public void Initialize_PutsVmInDisconnectedState_NoError()
     {
-        var (vm, _, _, _) = CreateVm();
+        var (vm, _, _, _, _) = CreateVm();
         vm.Initialize(MakeProfile());
 
         Assert.Equal(SessionStatus.Disconnected, vm.Status);
@@ -28,7 +30,7 @@ public class RdpSessionViewModelTests
     [Fact]
     public void AttachConnectedSessionForTesting_FakeRaisesConnected_StatusFlipsToConnected()
     {
-        var (vm, _, _, _) = CreateVm();
+        var (vm, _, _, _, _) = CreateVm();
         vm.Initialize(MakeProfile());
         var fake = new FakeRdpSession();
         vm.AttachConnectedSessionForTesting(fake);
@@ -43,7 +45,7 @@ public class RdpSessionViewModelTests
     [Fact]
     public void Disconnected_CleanCode_TransitionsToDisconnected_NoError()
     {
-        var (vm, _, _, _) = CreateVm();
+        var (vm, _, _, _, _) = CreateVm();
         vm.Initialize(MakeProfile());
         var fake = new FakeRdpSession();
         vm.AttachConnectedSessionForTesting(fake);
@@ -58,7 +60,7 @@ public class RdpSessionViewModelTests
     [Fact]
     public void Disconnected_FaultCode_TransitionsToFailed_WithDescription()
     {
-        var (vm, _, _, _) = CreateVm();
+        var (vm, _, _, _, _) = CreateVm();
         vm.Initialize(MakeProfile());
         var fake = new FakeRdpSession();
         vm.AttachConnectedSessionForTesting(fake);
@@ -75,7 +77,7 @@ public class RdpSessionViewModelTests
     {
         // Per IMsTscAxEvents.OnLogonError docs, -3 = pre-authentication failed → the user
         // should be prompted to re-enter credentials on retry.
-        var (vm, _, _, _) = CreateVm();
+        var (vm, _, _, _, _) = CreateVm();
         vm.Initialize(MakeProfile());
         var fake = new FakeRdpSession();
         vm.AttachConnectedSessionForTesting(fake);
@@ -93,7 +95,7 @@ public class RdpSessionViewModelTests
         // -2 = user dismissed the OCX's credentials dialog. That's a user action, not an
         // auth failure — the VM should transition to Disconnected without surfacing the
         // failure overlay.
-        var (vm, _, _, _) = CreateVm();
+        var (vm, _, _, _, _) = CreateVm();
         vm.Initialize(MakeProfile());
         var fake = new FakeRdpSession();
         vm.AttachConnectedSessionForTesting(fake);
@@ -110,7 +112,7 @@ public class RdpSessionViewModelTests
     {
         // -5 = informational dialog displayed (e.g. "Lock Workstation Failed"). Not an auth
         // problem; surface the message but don't prompt for credentials on retry.
-        var (vm, _, _, _) = CreateVm();
+        var (vm, _, _, _, _) = CreateVm();
         vm.Initialize(MakeProfile());
         var fake = new FakeRdpSession();
         vm.AttachConnectedSessionForTesting(fake);
@@ -125,7 +127,7 @@ public class RdpSessionViewModelTests
     [Fact]
     public void FatalError_TransitionsToFailed()
     {
-        var (vm, _, _, _) = CreateVm();
+        var (vm, _, _, _, _) = CreateVm();
         vm.Initialize(MakeProfile());
         var fake = new FakeRdpSession();
         vm.AttachConnectedSessionForTesting(fake);
@@ -139,7 +141,7 @@ public class RdpSessionViewModelTests
     [Fact]
     public void AutoReconnecting_BumpsReconnectAttempt_KeepsConnectingStatus()
     {
-        var (vm, _, _, _) = CreateVm();
+        var (vm, _, _, _, _) = CreateVm();
         vm.Initialize(MakeProfile());
         var fake = new FakeRdpSession();
         vm.AttachConnectedSessionForTesting(fake);
@@ -156,7 +158,7 @@ public class RdpSessionViewModelTests
         // Without forwarding OnAutoReconnected, AutoReconnecting drove Status to Connecting
         // and nothing transitioned back — a successful auto-reconnect after a transient drop
         // would leave the tab stuck on the "Reconnecting…" banner forever.
-        var (vm, _, _, _) = CreateVm();
+        var (vm, _, _, _, _) = CreateVm();
         vm.Initialize(MakeProfile());
         var fake = new FakeRdpSession();
         vm.AttachConnectedSessionForTesting(fake);
@@ -174,7 +176,7 @@ public class RdpSessionViewModelTests
     [Fact]
     public async Task CloseAsync_DisposesSessionAndStaysDisconnected()
     {
-        var (vm, _, _, _) = CreateVm();
+        var (vm, _, _, _, _) = CreateVm();
         vm.Initialize(MakeProfile());
         var fake = new FakeRdpSession();
         vm.AttachConnectedSessionForTesting(fake);
@@ -188,7 +190,7 @@ public class RdpSessionViewModelTests
     [Fact]
     public async Task DisconnectAsync_DisposesAndStaysDisconnected()
     {
-        var (vm, _, _, _) = CreateVm();
+        var (vm, _, _, _, _) = CreateVm();
         vm.Initialize(MakeProfile());
         var fake = new FakeRdpSession();
         vm.AttachConnectedSessionForTesting(fake);
@@ -197,6 +199,151 @@ public class RdpSessionViewModelTests
 
         Assert.Equal(SessionStatus.Disconnected, vm.Status);
         Assert.True(fake.Disposed);
+    }
+
+    // --- ShouldUseExternalClientAsync (runtime AAD guard) ---------------------------------
+    //
+    // The PR-22 production crash was: user has CredentialId=null ("Prompt every time") and
+    // RdpUseExternalClient=0, and types AzureAD\... credentials at the OCX prompt. The
+    // routing decision must NOT silently fall through to the embedded path when there are
+    // node-level AAD signals — the embedded mstscax crash kills the process and the log
+    // entry "RDP session opened" lies about success because it fires before the WAM
+    // delay-load failure. These tests pin down every input combination explicitly.
+
+    [Fact]
+    public async Task ShouldUseExternalClient_OptInFlag_AlwaysTrue()
+    {
+        var (vm, _, _, _, _) = CreateVm();
+        var profile = MakeProfile() with { RdpUseExternalClient = true };
+        Assert.True(await vm.ShouldUseExternalClientAsync(profile));
+    }
+
+    [Fact]
+    public async Task ShouldUseExternalClient_NodeRdpDomainAzureAD_RoutesExternal()
+    {
+        // The exact production scenario from the crash logs: user typed "AzureAD" into the
+        // node's Domain field with no saved credential. Before the fix, this returned false
+        // and the embedded host crashed mid-handshake.
+        var (vm, _, _, _, _) = CreateVm();
+        var profile = MakeProfile() with
+        {
+            RdpUseExternalClient = false,
+            CredentialId = null,
+            RdpDomain = "AzureAD",
+        };
+        Assert.True(await vm.ShouldUseExternalClientAsync(profile));
+    }
+
+    [Fact]
+    public async Task ShouldUseExternalClient_NodeUsernameAzureAdPrefix_RoutesExternal()
+    {
+        var (vm, _, _, _, _) = CreateVm();
+        var profile = MakeProfile() with
+        {
+            RdpUseExternalClient = false,
+            CredentialId = null,
+            Username = "AzureAD\\alice@tenant.com",
+        };
+        Assert.True(await vm.ShouldUseExternalClientAsync(profile));
+    }
+
+    [Fact]
+    public async Task ShouldUseExternalClient_SavedCredentialIsAzureAd_RoutesExternal()
+    {
+        // Credential-side detection through the repository. The credential is fetched only
+        // when the flag is false and no node-level signals fired — exercising the DB path.
+        var credId = Guid.NewGuid();
+        var aadCred = new CredentialProfile
+        {
+            Id = credId,
+            Name = "aad",
+            Domain = "AzureAD",
+            Protocol = ProtocolType.Rdp,
+        };
+        var vm = CreateVmWith(new SingleCredentialRepository(aadCred));
+        var profile = MakeProfile() with
+        {
+            RdpUseExternalClient = false,
+            CredentialId = credId,
+        };
+
+        Assert.True(await vm.ShouldUseExternalClientAsync(profile));
+    }
+
+    [Fact]
+    public async Task ShouldUseExternalClient_NoAadSignalsAnywhere_StaysEmbedded()
+    {
+        var credId = Guid.NewGuid();
+        var nonAadCred = new CredentialProfile
+        {
+            Id = credId,
+            Name = "onprem",
+            Domain = "CORP",
+            Username = "alice",
+            Protocol = ProtocolType.Rdp,
+        };
+        var vm = CreateVmWith(new SingleCredentialRepository(nonAadCred));
+        var profile = MakeProfile() with
+        {
+            RdpUseExternalClient = false,
+            CredentialId = credId,
+            RdpDomain = "CORP",
+            Username = "alice",
+        };
+
+        Assert.False(await vm.ShouldUseExternalClientAsync(profile));
+    }
+
+    [Fact]
+    public async Task ShouldUseExternalClient_CredentialLookupThrows_FailsSafeToEmbedded()
+    {
+        // A repository hiccup must surface as embedded-routing (per the implementation's
+        // documented contract). The user can still manually set the flag if they hit issues.
+        var vm = CreateVmWith(new ThrowingCredentialRepository());
+        var profile = MakeProfile() with
+        {
+            RdpUseExternalClient = false,
+            CredentialId = Guid.NewGuid(),
+        };
+
+        Assert.False(await vm.ShouldUseExternalClientAsync(profile));
+    }
+
+    [Fact]
+    public async Task ShouldUseExternalClient_UncheckedFlagWithAadDomain_OverrideIgnored()
+    {
+        // The user-visible regression that motivated this whole branch: pre-fix, unchecking
+        // the box would route embedded → crash. Post-fix, an AAD-flagged node ignores the
+        // unchecked state because no managed handler can catch the native WAM crash.
+        var (vm, _, _, _, _) = CreateVm();
+        var profile = MakeProfile() with
+        {
+            RdpUseExternalClient = false, // user explicitly tried to override
+            RdpDomain = "AzureAD",
+        };
+
+        Assert.True(await vm.ShouldUseExternalClientAsync(profile));
+    }
+
+    // --- Crash sentinel + Status hook ownership -------------------------------------------
+
+    [Fact]
+    public void StatusHook_OnStatusChangeWithoutOurMark_DoesNotClearSentinel()
+    {
+        // The multi-tab race: an external-client tab whose Status flips through
+        // Connecting → Connected → Disconnected must NOT clear a sentinel some other VM
+        // wrote for an embedded attempt. _ownsCrashSentinel gates the clear so unowned
+        // transitions are no-ops.
+        var (vm, _, _, _, sentinel) = CreateVm();
+        vm.Initialize(MakeProfile());
+
+        // Drive Status transitions without going through ConnectAsync, so _ownsCrashSentinel
+        // stays false. This mirrors the external-client path which sets Status directly.
+        vm.Status = SessionStatus.Connecting;
+        vm.Status = SessionStatus.Connected;
+        vm.Status = SessionStatus.Disconnected;
+
+        Assert.Equal(0, sentinel.ClearCount);
     }
 
     private static ConnectionProfile MakeProfile(bool fullScreen = false)
@@ -210,14 +357,28 @@ public class RdpSessionViewModelTests
             RdpFullScreen = fullScreen,
         };
 
-    private static (RdpSessionViewModel vm, FakeRdpSessionService svc, FakeCredentialService creds, FakeDialogService dlg) CreateVm()
+    private static (RdpSessionViewModel vm, FakeRdpSessionService svc, FakeCredentialService creds, FakeDialogService dlg, FakeRdpCrashSentinelService sentinel) CreateVm()
     {
         var svc = new FakeRdpSessionService();
         var creds = new FakeCredentialService();
         var dlg = new FakeDialogService();
         var repo = new EmptyCredentialRepository();
-        var vm = new RdpSessionViewModel(svc, creds, repo, dlg, NullLoggerFactory.Instance);
-        return (vm, svc, creds, dlg);
+        var sentinel = new FakeRdpCrashSentinelService();
+        var vm = new RdpSessionViewModel(svc, creds, repo, dlg, sentinel, NullLoggerFactory.Instance);
+        return (vm, svc, creds, dlg, sentinel);
+    }
+
+    internal static RdpSessionViewModel CreateVmWith(
+        ICredentialRepository credentialRepository,
+        IRdpCrashSentinelService? sentinel = null)
+    {
+        return new RdpSessionViewModel(
+            new FakeRdpSessionService(),
+            new FakeCredentialService(),
+            credentialRepository,
+            new FakeDialogService(),
+            sentinel ?? new FakeRdpCrashSentinelService(),
+            NullLoggerFactory.Instance);
     }
 
     private sealed class FakeRdpSessionService : IRdpSessionService
@@ -245,6 +406,30 @@ public class RdpSessionViewModelTests
         public Task<System.Collections.Generic.IReadOnlyList<CredentialProfile>> GetAllAsync(CancellationToken ct = default)
             => Task.FromResult<System.Collections.Generic.IReadOnlyList<CredentialProfile>>(System.Array.Empty<CredentialProfile>());
         public Task<CredentialProfile?> GetByIdAsync(System.Guid id, CancellationToken ct = default) => Task.FromResult<CredentialProfile?>(null);
+        public Task AddAsync(CredentialProfile profile, CancellationToken ct = default) => Task.CompletedTask;
+        public Task UpdateAsync(CredentialProfile profile, CancellationToken ct = default) => Task.CompletedTask;
+        public Task DeleteAsync(System.Guid id, CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    private sealed class SingleCredentialRepository : Wormhole.Data.Repositories.ICredentialRepository
+    {
+        private readonly CredentialProfile _credential;
+        public SingleCredentialRepository(CredentialProfile credential) => _credential = credential;
+        public Task<System.Collections.Generic.IReadOnlyList<CredentialProfile>> GetAllAsync(CancellationToken ct = default)
+            => Task.FromResult<System.Collections.Generic.IReadOnlyList<CredentialProfile>>(new[] { _credential });
+        public Task<CredentialProfile?> GetByIdAsync(System.Guid id, CancellationToken ct = default)
+            => Task.FromResult<CredentialProfile?>(id == _credential.Id ? _credential : null);
+        public Task AddAsync(CredentialProfile profile, CancellationToken ct = default) => Task.CompletedTask;
+        public Task UpdateAsync(CredentialProfile profile, CancellationToken ct = default) => Task.CompletedTask;
+        public Task DeleteAsync(System.Guid id, CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    private sealed class ThrowingCredentialRepository : Wormhole.Data.Repositories.ICredentialRepository
+    {
+        public Task<System.Collections.Generic.IReadOnlyList<CredentialProfile>> GetAllAsync(CancellationToken ct = default)
+            => throw new InvalidOperationException("simulated repository fault");
+        public Task<CredentialProfile?> GetByIdAsync(System.Guid id, CancellationToken ct = default)
+            => throw new InvalidOperationException("simulated repository fault");
         public Task AddAsync(CredentialProfile profile, CancellationToken ct = default) => Task.CompletedTask;
         public Task UpdateAsync(CredentialProfile profile, CancellationToken ct = default) => Task.CompletedTask;
         public Task DeleteAsync(System.Guid id, CancellationToken ct = default) => Task.CompletedTask;

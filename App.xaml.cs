@@ -6,6 +6,7 @@ using Wormhole.Data;
 using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Services;
+using Wormhole.Services.Rdp;
 using Wormhole.Services.Ssh;
 using Wormhole.Services.Tunneling;
 using Wormhole.Services.Tunneling.WireGuard;
@@ -45,8 +46,57 @@ public partial class App : Application
         var runner = Services.GetRequiredService<MigrationRunner>();
         await runner.RunAsync();
 
+        await RecoverFromRdpCrashSentinelAsync().ConfigureAwait(true);
+
         MainWindow = Services.GetRequiredService<MainWindow>();
         MainWindow.Activate();
+    }
+
+    /// <summary>
+    /// Check whether the previous run died mid-handshake on an embedded RDP connect and, if
+    /// so, auto-flag the offending profile to route through mstsc.exe. The motivating case
+    /// is Azure-AD-joined targets whose WAM delay-load fault (SEH 0xC06D007F) the CLR can't
+    /// translate to a catchable exception — without the sentinel-driven recovery the user
+    /// reopens the same profile and crashes again, in a death loop. Runs once at startup,
+    /// before the first window is activated, so a banner / refresh later in startup sees the
+    /// updated DB state.
+    /// </summary>
+    private async Task RecoverFromRdpCrashSentinelAsync()
+    {
+        var logger = Services.GetRequiredService<ILoggerFactory>().CreateLogger("RdpCrashRecovery");
+        try
+        {
+            var sentinel = Services.GetRequiredService<IRdpCrashSentinelService>();
+            var orphan = await sentinel.TryClaimOrphanAsync().ConfigureAwait(true);
+            if (orphan is null) return;
+
+            logger.LogWarning(
+                "Detected orphan RDP crash sentinel: previous run died mid-handshake on {Host} (node {NodeId}, started {StartedAtUtc}). Auto-flagging the profile to use mstsc.exe.",
+                orphan.Host, orphan.NodeId, orphan.StartedAtUtc);
+
+            var repo = Services.GetRequiredService<IConnectionRepository>();
+            var node = await repo.GetByIdAsync(orphan.NodeId).ConfigureAwait(true);
+            if (node is null)
+            {
+                logger.LogWarning("Orphan sentinel referenced a node ({NodeId}) that no longer exists — skipping auto-flag.", orphan.NodeId);
+                return;
+            }
+            if (node.RdpUseExternalClient == true)
+            {
+                logger.LogInformation("Orphan node {NodeId} already routed via mstsc.exe — sentinel cleared without further action.", orphan.NodeId);
+                return;
+            }
+            node.RdpUseExternalClient = true;
+            await repo.UpdateAsync(node).ConfigureAwait(true);
+            logger.LogInformation("Auto-flagged node {NodeId} ({Host}) for external mstsc.exe routing.", orphan.NodeId, orphan.Host);
+        }
+        catch (Exception ex)
+        {
+            // Recovery must never block startup. Worst case, the user hits the same crash
+            // again — but at least the rest of the app comes up so they can fix things
+            // manually via the editor.
+            logger.LogError(ex, "RDP crash sentinel recovery failed; continuing startup.");
+        }
     }
 
     private static ServiceProvider ConfigureServices()
@@ -91,6 +141,7 @@ public partial class App : Application
         services.AddSingleton<ISshCredentialResolver, SshCredentialResolver>();
         services.AddSingleton<ISessionTabFactory, SessionTabFactory>();
         services.AddSingleton<IRdpSessionService, RdpSessionService>();
+        services.AddSingleton<IRdpCrashSentinelService, RdpCrashSentinelService>();
         services.AddSingleton<ISftpService, SftpService>();
 
         var assemblyVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "0.0.0";

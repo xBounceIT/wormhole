@@ -8,8 +8,10 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
 using Wormhole.Data.Repositories;
+using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Services.Rdp;
 
 namespace Wormhole.ViewModels.Sessions;
 
@@ -23,6 +25,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     private readonly ICredentialService _credentialService;
     private readonly ICredentialRepository _credentialRepository;
     private readonly IDialogService _dialog;
+    private readonly IRdpCrashSentinelService _crashSentinel;
     private readonly ILogger<RdpSessionViewModel> _logger;
 
     private IRdpSession? _session;
@@ -33,22 +36,36 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     // the system Remote Desktop client instead of the embedded ActiveX. Tracked so we can
     // clean up the Exited subscription on teardown without killing the user's session.
     private Process? _externalProcess;
+    // True while THIS VM owns the active embedded-RDP crash sentinel — i.e. we wrote the
+    // mark and the OCX handshake has not yet reached a terminal state. The flag exists so
+    // that, in a multi-RDP-tab scenario where Tab A is external and Tab B is embedded, a
+    // Status transition on Tab A doesn't clear the sentinel Tab B just wrote. Only the VM
+    // that owns the mark may clear it.
+    private bool _ownsCrashSentinel;
 
     public RdpSessionViewModel(
         IRdpSessionService rdpService,
         ICredentialService credentialService,
         ICredentialRepository credentialRepository,
         IDialogService dialog,
+        IRdpCrashSentinelService crashSentinel,
         ILoggerFactory loggerFactory)
     {
         _rdpService = rdpService;
         _credentialService = credentialService;
         _credentialRepository = credentialRepository;
         _dialog = dialog;
+        _crashSentinel = crashSentinel;
         _logger = loggerFactory.CreateLogger<RdpSessionViewModel>();
 
         // Status lives on the base class — re-broadcast its dependents from the derived VM
         // since [NotifyPropertyChangedFor] only sees properties on its own partial class.
+        // We also use the Status change to clear the crash sentinel: once the embedded
+        // session reaches any non-Connecting state, the WAM delay-load danger window has
+        // closed (either we made it past the auth handshake, or we got a managed failure
+        // we can recover from cleanly). Fire-and-forget is fine — the sentinel writes are
+        // small, idempotent, and a missed clear just causes a benign auto-flag on the next
+        // launch (the user can uncheck if they disagree).
         PropertyChanged += (_, args) =>
         {
             if (args.PropertyName == nameof(Status))
@@ -57,6 +74,12 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 OnPropertyChanged(nameof(IsConnected));
                 OnPropertyChanged(nameof(IsFailed));
                 RetryCommand.NotifyCanExecuteChanged();
+
+                if (Status != SessionStatus.Connecting && _ownsCrashSentinel)
+                {
+                    _ownsCrashSentinel = false;
+                    _ = _crashSentinel.ClearAsync();
+                }
             }
         };
     }
@@ -183,20 +206,39 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         var profile = Profile;
         if (profile is null) return;
 
-        // External-client opt-in: skip the embedded mstscax ActiveX entirely and launch
-        // the system mstsc.exe in its own process. Required for Azure-AD-joined targets —
-        // mstscax delay-loads WAM broker DLLs during AAD auth which our unpackaged WinUI
-        // process can't satisfy (manifests as SEH 0xC06D007F and kills the process).
-        // mstsc.exe is a packaged-trusted system binary and handles AAD cleanly. We don't
-        // grab _connectInFlight for this path because there's no async handshake to guard
-        // and Process.Start completes synchronously.
-        if (profile.RdpUseExternalClient)
+        // External-client routing: opt-in flag OR auto-detected Azure-AD credential. The
+        // embedded mstscax delay-loads WAM broker DLLs during AAD auth, which our unpackaged
+        // WinUI process can't satisfy — the failure surfaces as SEH 0xC06D007F deep below
+        // any managed frame and kills the process unrecoverably. mstsc.exe is a packaged-
+        // trusted system binary that handles AAD cleanly. For AAD credentials this branch
+        // fires UNCONDITIONALLY (the editor checkbox is informational in that case) so a
+        // user who clears the flag can't accidentally take down the app. The flag still
+        // honours opt-in for non-AAD targets (e.g. broken embedded session, custom client).
+        // We don't grab _connectInFlight for this path because there's no async handshake
+        // to guard and Process.Start completes synchronously.
+        if (await ShouldUseExternalClientAsync(profile).ConfigureAwait(true))
         {
             LaunchExternalProcess(profile);
             return;
         }
 
         if (Interlocked.CompareExchange(ref _connectInFlight, 1, 0) != 0) return;
+
+        // Write the crash sentinel BEFORE flipping Status — the PropertyChanged hook above
+        // clears the sentinel on any non-Connecting transition, so we'd race-clear the very
+        // sentinel we just wrote if we ordered this the other way. The mark must be in place
+        // before the OCX touches mstscax (where the native WAM crash originates) so that a
+        // process death in that window leaves the sentinel behind for the next launch to
+        // claim. Mark+Connecting+Connect must run as a single logical step from the caller's
+        // perspective — any code between here and ConfigureAndStart() that throws would
+        // leave Status=Connecting with no clear, but that path also surfaces a managed
+        // exception that the catch-block below transitions to Failed (which clears).
+        //
+        // _ownsCrashSentinel pairs the mark with the clear so that a Status transition on a
+        // sibling VM (e.g. an external-client tab whose mstsc.exe exited) can't accidentally
+        // clear THIS VM's sentinel.
+        _ownsCrashSentinel = true;
+        await _crashSentinel.MarkConnectInFlightAsync(profile.NodeId, profile.Host).ConfigureAwait(true);
 
         Status = SessionStatus.Connecting;
         ErrorMessage = null;
@@ -499,6 +541,50 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         if (ext is null) return;
         try { ext.EnableRaisingEvents = false; } catch { /* may have already exited */ }
         try { ext.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Disposing external mstsc.exe handle threw (suppressed)."); }
+    }
+
+    /// <summary>
+    /// Decide whether to route this connect through the system mstsc.exe instead of the
+    /// embedded mstscax host. Two triggers:
+    /// <list type="number">
+    ///   <item>The per-profile opt-in flag the editor lets users set for any reason.</item>
+    ///   <item>The profile looks Azure-AD-joined per
+    ///         <see cref="AzureAdCredentialDetector.IsAzureAd(ConnectionProfile, CredentialProfile?)"/>
+    ///         — which considers both the linked saved credential AND the node's own
+    ///         <c>Username</c>/<c>RdpDomain</c> fields. The latter matters for "Prompt
+    ///         every time" connections where Wormhole has no saved credential to
+    ///         inspect but the user typed "AzureAD" into the node's Domain field.</item>
+    /// </list>
+    /// The AAD branch fires regardless of the flag because the embedded path crashes the
+    /// process from native code that managed handlers can't catch — honouring an explicit
+    /// "uncheck to override" would let users deterministically crash the app. Internal so
+    /// the test project (which links this source) can verify the decision without spawning
+    /// mstsc.exe.
+    /// </summary>
+    internal async Task<bool> ShouldUseExternalClientAsync(ConnectionProfile profile)
+    {
+        if (profile.RdpUseExternalClient) return true;
+
+        // Cheap node-side signals first — no DB round-trip needed. Covers users on
+        // "Prompt every time" who typed AzureAD into the node's Domain/Username.
+        if (AzureAdCredentialDetector.HasAzureAdDomain(profile.RdpDomain)) return true;
+        if (AzureAdCredentialDetector.HasAzureAdPrefix(profile.Username)) return true;
+
+        if (profile.CredentialId is not { } credId) return false;
+        CredentialProfile? credential;
+        try
+        {
+            credential = await _credentialRepository.GetByIdAsync(credId).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            // A repository hiccup must not silently route to embedded for an AAD credential —
+            // that's a crash. Log and assume non-AAD; the user can still set the flag manually
+            // if they hit issues.
+            _logger.LogWarning(ex, "Credential lookup for AAD detection failed; assuming non-AAD.");
+            return false;
+        }
+        return AzureAdCredentialDetector.IsAzureAd(credential);
     }
 
     /// <summary>

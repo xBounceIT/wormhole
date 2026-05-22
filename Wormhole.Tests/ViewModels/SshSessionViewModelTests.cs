@@ -111,6 +111,7 @@ public sealed class SshSessionViewModelTests
             new Fakes.FakeCredentialService(),
             new NullCredentialRepository(),
             new Fakes.FakeDialogService(),
+            new Fakes.FakeRdpCrashSentinelService(),
             NullLoggerFactory.Instance);
 
         Assert.True(vm.CanReconnect);
@@ -125,6 +126,7 @@ public sealed class SshSessionViewModelTests
             new Fakes.FakeCredentialService(),
             new NullCredentialRepository(),
             new Fakes.FakeDialogService(),
+            new Fakes.FakeRdpCrashSentinelService(),
             NullLoggerFactory.Instance);
 
         vm.Status = SessionStatus.Failed;

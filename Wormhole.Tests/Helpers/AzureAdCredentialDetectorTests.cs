@@ -54,4 +54,86 @@ public class AzureAdCredentialDetectorTests
         var cred = new CredentialProfile { Name = "x", Domain = domain, Username = username };
         Assert.False(AzureAdCredentialDetector.IsAzureAd(cred));
     }
+
+    // --- Standalone field probes ----------------------------------------------------------
+
+    [Theory]
+    [InlineData("AzureAD", true)]
+    [InlineData("azuread", true)]
+    [InlineData("  AzureAD  ", true)] // trims surrounding whitespace
+    [InlineData("AzureADish", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void HasAzureAdDomain_MatchesExactValueIgnoringCaseAndWhitespace(string? value, bool expected)
+    {
+        Assert.Equal(expected, AzureAdCredentialDetector.HasAzureAdDomain(value));
+    }
+
+    [Theory]
+    [InlineData("AzureAD\\alice", true)]
+    [InlineData("  AzureAD\\alice", true)] // trims leading whitespace
+    [InlineData("azuread\\bob", true)]
+    [InlineData("MYCORP\\alice", false)]
+    [InlineData("AzureAD", false)] // missing backslash → not a UPN-style prefix
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void HasAzureAdPrefix_MatchesUsernamePrefixIgnoringCaseAndLeadingWhitespace(string? value, bool expected)
+    {
+        Assert.Equal(expected, AzureAdCredentialDetector.HasAzureAdPrefix(value));
+    }
+
+    // --- Profile overload: node fields trigger detection even without a saved credential.
+
+    [Fact]
+    public void Profile_WithAzureAdDomainOnNode_DetectedEvenWithNullCredential()
+    {
+        // The motivating scenario from the production crash log: user has "Prompt every
+        // time" (CredentialId = null), but typed "AzureAD" into the node's Domain field.
+        // The credential-only overload returned false here and the embedded path crashed
+        // the app deterministically. The profile overload must catch this.
+        var profile = MakeProfile(rdpDomain: "AzureAD");
+        Assert.True(AzureAdCredentialDetector.IsAzureAd(profile, credential: null));
+    }
+
+    [Fact]
+    public void Profile_WithAzureAdUsernameOnNode_DetectedEvenWithNullCredential()
+    {
+        var profile = MakeProfile(username: "AzureAD\\alice@tenant.com");
+        Assert.True(AzureAdCredentialDetector.IsAzureAd(profile, credential: null));
+    }
+
+    [Fact]
+    public void Profile_OnlyCredentialIsAzureAd_StillDetected()
+    {
+        var profile = MakeProfile();
+        var cred = new CredentialProfile { Name = "x", Domain = "AzureAD" };
+        Assert.True(AzureAdCredentialDetector.IsAzureAd(profile, cred));
+    }
+
+    [Fact]
+    public void Profile_NoAzureAdSignalsAnywhere_NotDetected()
+    {
+        var profile = MakeProfile(rdpDomain: "CORP", username: "alice");
+        var cred = new CredentialProfile { Name = "x", Domain = "CORP", Username = "alice" };
+        Assert.False(AzureAdCredentialDetector.IsAzureAd(profile, cred));
+    }
+
+    [Fact]
+    public void Profile_NullArgument_Throws()
+    {
+        Assert.Throws<ArgumentNullException>(
+            () => AzureAdCredentialDetector.IsAzureAd(profile: null!, credential: null));
+    }
+
+    private static ConnectionProfile MakeProfile(string? rdpDomain = null, string? username = null) =>
+        new()
+        {
+            NodeId = Guid.NewGuid(),
+            Name = "test",
+            Protocol = ProtocolType.Rdp,
+            Host = "host",
+            Port = 3389,
+            RdpDomain = rdpDomain,
+            Username = username,
+        };
 }

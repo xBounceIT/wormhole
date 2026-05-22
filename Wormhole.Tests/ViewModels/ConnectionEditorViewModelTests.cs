@@ -526,6 +526,99 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task TypingAzureAdIntoRdpDomain_AutoFlagsAndDisablesCheckbox()
+    {
+        // The "Prompt every time" workflow that broke production: user has no saved
+        // credential, types "AzureAD" into Domain, and expects the editor to react. The
+        // earlier credential-only heuristic missed this case entirely.
+        var vm = await NewEditorAsync();
+        vm.Protocol = ProtocolType.Rdp;
+
+        Assert.False(vm.RdpUseExternalClient);
+        Assert.True(vm.IsRdpUseExternalClientEditable);
+
+        vm.RdpDomain = "AzureAD";
+
+        Assert.True(vm.RdpUseExternalClient);
+        Assert.True(vm.IsAzureAdCredential);
+        Assert.False(vm.IsRdpUseExternalClientEditable);
+    }
+
+    [Theory]
+    [InlineData("AzureAD")]
+    [InlineData("azuread")]
+    [InlineData("  AzureAD  ")] // editor strips whitespace via the detector
+    public async Task RdpDomainAzureAdVariations_AllDetected(string domain)
+    {
+        var vm = await NewEditorAsync();
+        vm.Protocol = ProtocolType.Rdp;
+
+        vm.RdpDomain = domain;
+
+        Assert.True(vm.IsAzureAdCredential);
+    }
+
+    [Fact]
+    public async Task TypingAzureAdPrefixIntoUsername_AutoFlagsAndDisablesCheckbox()
+    {
+        var vm = await NewEditorAsync();
+        vm.Protocol = ProtocolType.Rdp;
+
+        vm.Username = "AzureAD\\alice@contoso.onmicrosoft.com";
+
+        Assert.True(vm.RdpUseExternalClient);
+        Assert.True(vm.IsAzureAdCredential);
+        Assert.False(vm.IsRdpUseExternalClientEditable);
+    }
+
+    [Fact]
+    public async Task ClearingAzureAdSignal_ReEnablesCheckbox()
+    {
+        // The checkbox is locked while ANY signal matches. Once the user clears all the
+        // signals (e.g. typed AzureAD then re-typed CORP), the checkbox should regain its
+        // editable state so they can opt in/out for non-AAD targets.
+        var vm = await NewEditorAsync();
+        vm.Protocol = ProtocolType.Rdp;
+        vm.RdpDomain = "AzureAD";
+        Assert.False(vm.IsRdpUseExternalClientEditable);
+
+        vm.RdpDomain = "CORP";
+
+        Assert.True(vm.IsRdpUseExternalClientEditable);
+        Assert.False(vm.IsAzureAdCredential);
+    }
+
+    [Fact]
+    public async Task LoadFrom_AzureAdNodeFields_DoesNotAutoFlipUserDisabledState()
+    {
+        // Same suppress-during-load semantics for the node-side handlers as for the
+        // credential one. Without this, a user who unchecked the box would see it re-tick
+        // every editor open because LoadFrom assigns RdpDomain before restoring the flag.
+        var vm = await NewEditorAsync();
+
+        var node = new ConnectionNode
+        {
+            Kind = NodeKind.Connection,
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Rdp,
+            RdpDomain = "AzureAD",
+            Username = "AzureAD\\alice",
+            RdpUseExternalClient = false, // user explicitly disabled
+        };
+
+        vm.LoadFrom(node);
+
+        // The persisted false survives — IsRdpUseExternalClientEditable still goes false
+        // (the checkbox is locked because the signals are still there), but the underlying
+        // value didn't auto-flip during LoadFrom. The runtime guard catches the override
+        // at connect time; we don't fight the user in the editor.
+        Assert.False(vm.RdpUseExternalClient);
+        Assert.True(vm.IsAzureAdCredential);
+        Assert.False(vm.IsRdpUseExternalClientEditable);
+    }
+
+    [Fact]
     public async Task UncheckingExternalClient_SurvivesProtocolUnchangedSave()
     {
         // The override (uncheck after auto-flag) must persist across WriteTo round-trips —

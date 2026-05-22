@@ -55,13 +55,15 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private int? port;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsAzureAdCredential), nameof(IsRdpUseExternalClientEditable))]
     private string username = string.Empty;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsAzureAdCredential), nameof(IsRdpUseExternalClientEditable))]
     private string rdpDomain = string.Empty;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(SelectedCredential), nameof(IsAzureAdCredential))]
+    [NotifyPropertyChangedFor(nameof(SelectedCredential), nameof(IsAzureAdCredential), nameof(IsRdpUseExternalClientEditable))]
     private Guid? credentialId;
 
     /// <summary>Sentinel for "no credential — prompt every time". ComboBox.PlaceholderText
@@ -80,12 +82,26 @@ public partial class ConnectionEditorViewModel : ObservableObject
     }
 
     /// <summary>
-    /// True when the currently-selected credential looks Azure-AD-joined. Drives the
-    /// editor's auto-flag of <see cref="RdpUseExternalClient"/> on credential change
-    /// (see <see cref="OnCredentialIdChanged"/>) and the InfoBar shown next to the
-    /// credential picker.
+    /// True when any AAD signal is present: the linked saved credential's Domain/Username,
+    /// or the node-level <see cref="Username"/>/<see cref="RdpDomain"/> fields the user types
+    /// into directly (covers "Prompt every time" connections that have no saved credential).
+    /// Drives the editor's auto-flag of <see cref="RdpUseExternalClient"/> on credential change
+    /// (see <see cref="OnCredentialIdChanged"/>), the InfoBar shown next to the credential
+    /// picker, and the disabled state of the external-client checkbox.
     /// </summary>
-    public bool IsAzureAdCredential => AzureAdCredentialDetector.IsAzureAd(SelectedCredential);
+    public bool IsAzureAdCredential =>
+        AzureAdCredentialDetector.IsAzureAd(SelectedCredential)
+        || AzureAdCredentialDetector.HasAzureAdDomain(RdpDomain)
+        || AzureAdCredentialDetector.HasAzureAdPrefix(Username);
+
+    /// <summary>
+    /// False when the AAD heuristic matched — the embedded host would crash on connect, so
+    /// <see cref="ViewModels.Sessions.RdpSessionViewModel"/> routes external regardless of
+    /// <see cref="RdpUseExternalClient"/>. The checkbox is disabled so the user understands
+    /// the override is unavailable for AAD targets (vs. silently ignored). For non-AAD targets
+    /// it stays editable as the manual opt-in.
+    /// </summary>
+    public bool IsRdpUseExternalClientEditable => !IsAzureAdCredential;
 
     public bool IsRdp => Protocol == ProtocolType.Rdp;
     public bool IsSsh => Protocol == ProtocolType.Ssh;
@@ -423,6 +439,30 @@ public partial class ConnectionEditorViewModel : ObservableObject
         {
             AppendStaleSelection(id);
             OnPropertyChanged(nameof(SelectedGatewayCredential));
+        }
+    }
+
+    // The username + domain auto-flag handlers mirror OnCredentialIdChanged: when the user
+    // types "AzureAD" into the Domain box or "AzureAD\..." into Username (typical for the
+    // "Prompt every time" workflow that has no saved credential), tick the external-client
+    // box so the editor reflects the routing decision the runtime will enforce anyway.
+    // Suppressed during LoadFrom for the same reason as the credential handler — otherwise
+    // a re-opened profile would re-tick the box even if the persisted value was false.
+    partial void OnUsernameChanged(string value)
+    {
+        if (_suppressAadAutoFlag) return;
+        if (!RdpUseExternalClient && AzureAdCredentialDetector.HasAzureAdPrefix(value))
+        {
+            RdpUseExternalClient = true;
+        }
+    }
+
+    partial void OnRdpDomainChanged(string value)
+    {
+        if (_suppressAadAutoFlag) return;
+        if (!RdpUseExternalClient && AzureAdCredentialDetector.HasAzureAdDomain(value))
+        {
+            RdpUseExternalClient = true;
         }
     }
 

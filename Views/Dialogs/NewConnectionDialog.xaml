@@ -78,8 +78,8 @@
                         <InfoBar Severity="Informational"
                                  IsClosable="False"
                                  IsOpen="{x:Bind ViewModel.IsAzureAdCredential, Mode=OneWay}"
-                                 Title="Azure AD credential"
-                                 Message="Wormhole will open this connection in the system Remote Desktop client (mstsc.exe). The embedded host can't authenticate AAD targets in our unpackaged build. To override, uncheck 'Open with system Remote Desktop' in the Advanced tab." />
+                                 Title="Azure AD target"
+                                 Message="Wormhole detected an Azure AD signal (credential, username, or domain) and will open this connection in the system Remote Desktop client (mstsc.exe). The embedded host can't load the WAM broker in our unpackaged build and crashes mid-handshake on AAD auth — for safety, this routing is enforced even if you uncheck the box below." />
                     </StackPanel>
                 </ScrollViewer>
             </TabViewItem>
@@ -258,12 +258,13 @@
                                    Style="{StaticResource BodyStrongTextBlockStyle}"
                                    Margin="0,8,0,0" />
                         <CheckBox Content="Open with system Remote Desktop (mstsc.exe)"
-                                  IsChecked="{x:Bind ViewModel.RdpUseExternalClient, Mode=TwoWay}" />
-                        <TextBlock Text="Recommended for Azure AD–joined targets. The embedded host can't load the WAM broker in an unpackaged build, which crashes on AAD auth; mstsc.exe handles AAD cleanly but runs in its own window."
+                                  IsChecked="{x:Bind ViewModel.RdpUseExternalClient, Mode=TwoWay}"
+                                  IsEnabled="{x:Bind ViewModel.IsRdpUseExternalClientEditable, Mode=OneWay}" />
+                        <TextBlock Text="Manual opt-in for non-AAD targets — e.g. a flaky embedded session you'd rather run via the system client. AAD targets are handled automatically (see banner on the General tab)."
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Opacity="0.7"
                                    TextWrapping="Wrap" />
-                        <TextBlock Text="Auto-checked because the selected credential looks Azure AD. Uncheck to attempt the embedded host anyway (will likely crash)."
+                        <TextBlock Text="Locked on for Azure AD targets. The embedded host's WAM delay-load crashes the process unrecoverably, so Wormhole forces mstsc.exe regardless of this checkbox."
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Opacity="0.7"
                                    TextWrapping="Wrap"
