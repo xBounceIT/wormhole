@@ -9,4 +9,8 @@ public interface ICredentialService
     Task StorePrivateKeyAsync(Guid credentialId, byte[] privateKeyBytes);
     Task<byte[]?> ReadPrivateKeyAsync(Guid credentialId);
     Task DeletePrivateKeyAsync(Guid credentialId);
+
+    Task StoreTunnelConfigAsync(Guid tunnelConfigId, byte[] configBytes);
+    Task<byte[]?> ReadTunnelConfigAsync(Guid tunnelConfigId);
+    Task DeleteTunnelConfigAsync(Guid tunnelConfigId);
 }

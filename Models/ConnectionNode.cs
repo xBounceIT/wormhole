@@ -21,6 +21,9 @@ public class ConnectionNode
     public string? SshKeyFileName { get; set; }
     public string? SshKnownHostFingerprint { get; set; }
 
+    public bool? TunnelEnabled { get; set; }
+    public Guid? TunnelConfigId { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
 }

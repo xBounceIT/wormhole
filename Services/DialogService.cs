@@ -86,6 +86,9 @@ public sealed class DialogService : IDialogService
     public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null) =>
         ShowFormDialogAsync(new CredentialDialog(), initial, "credential");
 
+    public Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null) =>
+        ShowFormDialogAsync(new TunnelDialog(), initial, "VPN tunnel");
+
     private async Task<TDraft?> ShowFormDialogAsync<TForm, TDraft>(TForm form, TDraft? initial, string entityName)
         where TForm : UserControl, IDraftForm<TDraft>
         where TDraft : class

@@ -9,5 +9,6 @@ public interface IDialogService
     Task<string?> PromptForTextAsync(string title, string label, string defaultValue = "");
     Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null);
     Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null);
+    Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null);
     Task<string?> PromptPasswordAsync(string title, string message);
 }

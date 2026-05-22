@@ -11,8 +11,9 @@ namespace Wormhole.Tests.ViewModels;
 
 public class ConnectionTreeViewModelTests : IDisposable
 {
-    // Inlined from Data/Migrations/0001_initial.sql: the test project links source files
-    // rather than referencing the main assembly, so the embedded .sql is not available.
+    // Inlined from Data/Migrations/0001_initial.sql + 0003_add_tunnel_config.sql: the test
+    // project links source files rather than referencing the main assembly, so the embedded
+    // .sql resources are not available. Keep in lockstep with the migration files.
     private const string SchemaSql = @"
         CREATE TABLE Nodes (
             Id                       TEXT     PRIMARY KEY NOT NULL,
@@ -30,10 +31,20 @@ public class ConnectionTreeViewModelTests : IDisposable
             RdpFullScreen            INTEGER  NULL,
             SshKeyFileName           TEXT     NULL,
             SshKnownHostFingerprint  TEXT     NULL,
+            TunnelEnabled            INTEGER  NULL,
+            TunnelConfigId           TEXT     NULL,
             CreatedAt                TEXT     NOT NULL,
             UpdatedAt                TEXT     NOT NULL
         );
-        CREATE INDEX IX_Nodes_ParentId ON Nodes(ParentId);";
+        CREATE INDEX IX_Nodes_ParentId ON Nodes(ParentId);
+        CREATE TABLE TunnelConfigs (
+            Id         TEXT     PRIMARY KEY NOT NULL,
+            Name       TEXT     NOT NULL,
+            Kind       INTEGER  NOT NULL,
+            CreatedAt  TEXT     NOT NULL,
+            UpdatedAt  TEXT     NOT NULL
+        );
+        CREATE UNIQUE INDEX UX_TunnelConfigs_Name ON TunnelConfigs(Name);";
 
     private readonly string _dbPath;
     private readonly string _connectionString;
@@ -906,6 +917,8 @@ public class ConnectionTreeViewModelTests : IDisposable
             => _inner.GetAllAsync(ct);
         public Task<ConnectionNode?> GetByIdAsync(Guid id, System.Threading.CancellationToken ct = default)
             => _inner.GetByIdAsync(id, ct);
+        public Task<IReadOnlyList<(Guid Id, string Name)>> GetByTunnelConfigIdAsync(Guid tunnelConfigId, int limit, System.Threading.CancellationToken ct = default)
+            => _inner.GetByTunnelConfigIdAsync(tunnelConfigId, limit, ct);
         public Task AddAsync(ConnectionNode node, System.Threading.CancellationToken ct = default)
             => _inner.AddAsync(node, ct);
         public Task UpdateAsync(ConnectionNode node, System.Threading.CancellationToken ct = default)
@@ -945,6 +958,8 @@ public class ConnectionTreeViewModelTests : IDisposable
         }
         public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null)
             => Task.FromResult<CredentialDraft?>(null);
+        public Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null)
+            => Task.FromResult<TunnelDraft?>(null);
         public Task<string?> PromptPasswordAsync(string title, string message)
             => Task.FromResult<string?>(null);
     }

@@ -10,6 +10,7 @@ public sealed class ConnectionRepository : IConnectionRepository
         Protocol, Host, Port, Username, CredentialId,
         RdpDomain, RdpScreenSize, RdpFullScreen,
         SshKeyFileName, SshKnownHostFingerprint,
+        TunnelEnabled, TunnelConfigId,
         CreatedAt, UpdatedAt";
 
     private readonly ISqliteConnectionFactory _factory;
@@ -37,6 +38,20 @@ public sealed class ConnectionRepository : IConnectionRepository
             cancellationToken: cancellationToken));
     }
 
+    public async Task<IReadOnlyList<(Guid Id, string Name)>> GetByTunnelConfigIdAsync(
+        Guid tunnelConfigId, int limit, CancellationToken cancellationToken = default)
+    {
+        if (limit <= 0) return Array.Empty<(Guid, string)>();
+        using var connection = _factory.Open();
+        var rows = await connection.QueryAsync<TunnelRefRow>(new CommandDefinition(
+            "SELECT Id, Name FROM Nodes WHERE TunnelConfigId = @tunnelConfigId LIMIT @limit;",
+            new { tunnelConfigId, limit },
+            cancellationToken: cancellationToken));
+        return rows.Select(r => (r.Id, r.Name)).ToList();
+    }
+
+    private sealed record TunnelRefRow(Guid Id, string Name);
+
     public async Task AddAsync(ConnectionNode node, CancellationToken cancellationToken = default)
     {
         node.CreatedAt = DateTime.UtcNow;
@@ -48,12 +63,14 @@ public sealed class ConnectionRepository : IConnectionRepository
                 Protocol, Host, Port, Username, CredentialId,
                 RdpDomain, RdpScreenSize, RdpFullScreen,
                 SshKeyFileName, SshKnownHostFingerprint,
+                TunnelEnabled, TunnelConfigId,
                 CreatedAt, UpdatedAt
             ) VALUES (
                 @Id, @ParentId, @Name, @Kind, @SortOrder,
                 @Protocol, @Host, @Port, @Username, @CredentialId,
                 @RdpDomain, @RdpScreenSize, @RdpFullScreen,
                 @SshKeyFileName, @SshKnownHostFingerprint,
+                @TunnelEnabled, @TunnelConfigId,
                 @CreatedAt, @UpdatedAt
             );", node, cancellationToken: cancellationToken));
     }
@@ -78,6 +95,8 @@ public sealed class ConnectionRepository : IConnectionRepository
                 RdpFullScreen = @RdpFullScreen,
                 SshKeyFileName = @SshKeyFileName,
                 SshKnownHostFingerprint = @SshKnownHostFingerprint,
+                TunnelEnabled = @TunnelEnabled,
+                TunnelConfigId = @TunnelConfigId,
                 UpdatedAt = @UpdatedAt
             WHERE Id = @Id;", node, cancellationToken: cancellationToken));
     }
@@ -106,6 +125,8 @@ public sealed class ConnectionRepository : IConnectionRepository
                 RdpFullScreen = @RdpFullScreen,
                 SshKeyFileName = @SshKeyFileName,
                 SshKnownHostFingerprint = @SshKnownHostFingerprint,
+                TunnelEnabled = @TunnelEnabled,
+                TunnelConfigId = @TunnelConfigId,
                 UpdatedAt = @UpdatedAt
             WHERE Id = @Id;",
             nodes,

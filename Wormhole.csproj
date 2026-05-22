@@ -89,6 +89,28 @@
     </ItemGroup>
   </Target>
 
+  <!-- WireGuard userspace sidecar. The script either downloads a pinned release or, failing
+       that, builds from tools\wormhole-wgproxy\ with the system Go toolchain. If neither is
+       available it emits a warning but does not break the build (WireGuard tunnels will
+       surface a clear runtime error instead). Non-incremental for the same reason as
+       FetchWebAssets above. -->
+  <Target Name="FetchWgProxy" BeforeTargets="BeforeBuild">
+    <PropertyGroup>
+      <_WgProxyArch Condition="'$(PlatformTarget)' == 'ARM64' Or '$(PlatformTarget)' == 'arm64'">arm64</_WgProxyArch>
+      <_WgProxyArch Condition="'$(_WgProxyArch)' == ''">x64</_WgProxyArch>
+    </PropertyGroup>
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\scripts\Fetch-WgProxy.ps1&quot; -Arch $(_WgProxyArch) -Quiet" />
+    <ItemGroup>
+      <None Include="$(MSBuildProjectDirectory)\obj\wgproxy\$(_WgProxyArch)\wormhole-wgproxy.exe"
+            Condition="Exists('$(MSBuildProjectDirectory)\obj\wgproxy\$(_WgProxyArch)\wormhole-wgproxy.exe')">
+        <Link>wormhole-wgproxy.exe</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        <Visible>false</Visible>
+      </None>
+    </ItemGroup>
+  </Target>
+
   <Target Name="CopyWinUIAppResourcesToPublish"
           AfterTargets="Publish"
           Condition="'$(UseWinUI)' == 'true'">
