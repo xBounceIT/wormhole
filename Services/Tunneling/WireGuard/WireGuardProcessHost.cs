@@ -78,8 +78,21 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
 
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutCts.CancelAfter(ReadyTimeout);
-            var line = await process.StandardOutput.ReadLineAsync(timeoutCts.Token).ConfigureAwait(false)
-                ?? throw new IOException("WireGuard sidecar exited before becoming ready.");
+            string? line;
+            try
+            {
+                line = await process.StandardOutput.ReadLineAsync(timeoutCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                // Timeout fired (not the caller cancelling) — raise a concrete TimeoutException
+                // so SshSessionViewModel.ConnectAsync's generic catch surfaces an actionable
+                // "tunnel sidecar didn't become ready" message instead of swallowing this as
+                // the user-cancel path that quietly transitions to Disconnected.
+                throw new TimeoutException(
+                    $"WireGuard sidecar did not produce a READY line within {ReadyTimeout.TotalSeconds:F0}s.");
+            }
+            if (line is null) throw new IOException("WireGuard sidecar exited before becoming ready.");
 
             // Expected: "READY <port>"
             if (!line.StartsWith("READY ", StringComparison.Ordinal) ||
