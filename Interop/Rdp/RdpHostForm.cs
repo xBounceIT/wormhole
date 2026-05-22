@@ -160,17 +160,26 @@ internal sealed class RdpHostForm : FormsForm
                 // credentials for the gateway instead of presenting a separate prompt — this
                 // is the "Use my RD Gateway credentials for the remote computer" toggle in
                 // the editor.
+                //
+                // Per the IMsRdpClientTransportSettings2 docs, credential sharing and the
+                // explicit GatewayUsername/GatewayPassword properties are MUTUALLY EXCLUSIVE:
+                // the docs explicitly state that sharing does not support password sharing
+                // via GatewayPassword/ClearTextPassword. Setting both can fall back to
+                // prompts or fail authentication unexpectedly, so we apply explicit gateway
+                // credentials only when sharing is off.
                 TrySetOptional(() => transport.GatewayCredSharing = profile.RdpGatewayUseSameCreds ? 1u : 0u);
-                // Apply the resolved gateway credentials when the user supplied them.
-                if (!string.IsNullOrEmpty(gatewayUsername))
+                if (!profile.RdpGatewayUseSameCreds)
                 {
-                    var capturedUser = gatewayUsername;
-                    TrySetOptional(() => transport.GatewayUsername = capturedUser);
-                }
-                if (!string.IsNullOrEmpty(gatewayPassword))
-                {
-                    var capturedPwd = gatewayPassword;
-                    TrySetOptional(() => transport.GatewayPassword = capturedPwd);
+                    if (!string.IsNullOrEmpty(gatewayUsername))
+                    {
+                        var capturedUser = gatewayUsername;
+                        TrySetOptional(() => transport.GatewayUsername = capturedUser);
+                    }
+                    if (!string.IsNullOrEmpty(gatewayPassword))
+                    {
+                        var capturedPwd = gatewayPassword;
+                        TrySetOptional(() => transport.GatewayPassword = capturedPwd);
+                    }
                 }
                 // GatewayCredsSource intentionally left at its OCX default — the property
                 // chooses between NTLM/SmartCard/Cookie auth, and forcing NTLM (=0) breaks
