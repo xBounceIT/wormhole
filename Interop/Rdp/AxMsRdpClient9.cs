@@ -7,7 +7,7 @@ namespace Wormhole.Interop.Rdp;
 
 /// <summary>
 /// Hand-rolled <see cref="AxHost"/> subclass for the <c>MsRdpClient9NotSafeForScripting</c>
-/// ActiveX control (CLSID <c>{54D38BF7-B1EF-4479-9674-1BD6EA465258}</c>). We don't ship
+/// ActiveX control (CLSID <c>{8B918B82-7985-4C24-89DF-C33AD2BBFBCD}</c>). We don't ship
 /// AxImp-generated wrappers — Windows SDK NETFX Tools aren't always installed and the COM
 /// surface we need is small. Property access is dynamic via <see cref="AxHost.GetOcx"/>;
 /// events are wired in <see cref="RdpHostForm"/> through IConnectionPointContainer rather
@@ -17,8 +17,8 @@ namespace Wormhole.Interop.Rdp;
 public sealed class AxMsRdpClient9NotSafeForScripting : AxHost
 {
     /// <summary>CLSID for MsRdpClient9NotSafeForScripting (mstscax.dll). Documented in
-    /// the MSDN Remote Desktop ActiveX reference.</summary>
-    public const string ClsidString = "54D38BF7-B1EF-4479-9674-1BD6EA465258";
+    /// the MSDN Remote Desktop ActiveX reference; ProgID MsTscAxNotSafeForScripting.9.</summary>
+    public const string ClsidString = "8B918B82-7985-4C24-89DF-C33AD2BBFBCD";
 
     public AxMsRdpClient9NotSafeForScripting() : base(ClsidString)
     {

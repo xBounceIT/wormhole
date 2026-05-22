@@ -34,16 +34,18 @@ public interface IMsTscAxEvents
     [DispId(18)] void OnAuthenticationWarningDisplayed();
     [DispId(19)] void OnAuthenticationWarningDismissed();
     [DispId(20)] void OnRemoteProgramResult(string remoteProgramName, int execResult, int rawResult);
-    [DispId(21)] void OnRemoteProgramDisplayed(bool displayed, uint exStyle);
-    [DispId(22)] void OnRemoteWindowDisplayed(bool displayed, IntPtr hwnd, int remoteWindowDisplayedAttribute);
-    [DispId(23)] void OnLogonError(int lError);
-    [DispId(24)] void OnFocusReleased(int iDirection);
-    [DispId(25)] void OnUserNameAcquired(string newUserName);
-    [DispId(26)] void OnMouseInputModeChanged(bool fMouseModeRelative);
-    [DispId(27)] void OnServiceMessageReceived(string serviceMessage);
-    [DispId(28)] void OnConnectionBarPullDown();
-    [DispId(29)] void OnNetworkStatusChanged(uint qualityFlags, int bandwidth, int rtt);
-    [DispId(30)] void OnDevicesButtonPressed();
+    [DispId(21)] void OnRemoteWindowDisplayed(bool displayed, IntPtr hwnd, int remoteWindowDisplayedAttribute);
+    [DispId(22)] void OnLogonError(int lError);
+    [DispId(23)] void OnFocusReleased(int iDirection);
+    [DispId(24)] void OnUserNameAcquired(string newUserName);
+    [DispId(25)] void OnMouseInputModeChanged(bool fMouseModeRelative);
+    [DispId(26)] void OnServiceMessageReceived(string serviceMessage);
+    [DispId(27)] void OnConnectionBarPullDown();
+    [DispId(28)] void OnNetworkStatusChanged(uint qualityFlags, int bandwidth, int rtt);
+    [DispId(29)] void OnDevicesButtonPressed();
+    // OnRemoteProgramDisplayed was added later in the dispinterface (v8+) with id 30; it slots
+    // after OnDevicesButtonPressed, not next to OnRemoteProgramResult.
+    [DispId(30)] void OnRemoteProgramDisplayed(bool displayed, uint exStyle);
     [DispId(31)] void OnAutoReconnected();
     [DispId(32)] void OnAutoReconnecting2(int disconnectReason, bool networkAvailable, int attemptCount, int maxAttemptCount);
 }
