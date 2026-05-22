@@ -35,8 +35,8 @@
                 <ListView.ItemTemplate>
                     <DataTemplate x:DataType="models:TunnelConfig">
                         <StackPanel Padding="4,2">
-                            <TextBlock Text="{x:Bind Name}" Style="{StaticResource BodyStrongTextBlockStyle}" />
-                            <TextBlock Text="{x:Bind Kind}" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.6" />
+                            <TextBlock Text="{x:Bind Name, Mode=OneWay}" Style="{StaticResource BodyStrongTextBlockStyle}" />
+                            <TextBlock Text="{x:Bind Kind, Mode=OneWay}" Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.6" />
                         </StackPanel>
                     </DataTemplate>
                 </ListView.ItemTemplate>
