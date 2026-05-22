@@ -59,6 +59,25 @@ if (-not (Test-Path $stagingDir)) {
     New-Item -ItemType Directory -Path $stagingDir -Force | Out-Null
 }
 
+# Drop any previously-staged binary on a fallback/failure path. The csproj's
+# FetchWgProxy target gates its <None Include> on `Exists(...)` of $binaryPath, so a
+# stale binary left here from a prior successful build would silently get copied into
+# every subsequent output despite the script warning that the sidecar is unavailable --
+# protocol drift / wrong-binary behavior at runtime, exactly opposite of what the
+# warning advertises. Best-effort delete; if it fails the worst outcome is the staleness
+# we wanted to avoid, and the user sees the warning either way.
+function Remove-StagedBinary {
+    if (Test-Path $binaryPath) {
+        try {
+            Remove-Item -Force $binaryPath
+            Write-Info "REMOVE stale $binaryPath"
+        }
+        catch {
+            Write-Warning "Could not remove stale wormhole-wgproxy.exe at '$binaryPath': $_"
+        }
+    }
+}
+
 # Step 1: if a pinned release is configured for this arch, prefer it.
 $release = $releases[$Arch]
 if ($release) {
@@ -129,10 +148,12 @@ if ($go) {
         Write-Info "OK    wormhole-wgproxy.exe ($Arch) (built)"
         return
     }
+    Remove-StagedBinary
     Write-Warning "wormhole-wgproxy.exe build failed ($failureDetail). Continuing without the sidecar; WireGuard tunnels will surface a runtime error if used."
     return
 }
 
 # Step 3: no release pinned and no Go toolchain. Don't fail the build -- the rest of Wormhole
 # is fully functional; only WireGuard tunnels will surface a clean runtime error.
+Remove-StagedBinary
 Write-Warning "wormhole-wgproxy.exe not built: no pinned release for arch '$Arch' and 'go' is not on PATH. WireGuard tunnels will be unavailable at runtime until this sidecar is provided."
