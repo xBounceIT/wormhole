@@ -29,6 +29,10 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private TerminalBridge? _bridge;
     private CancellationTokenSource? _cts;
     private CoreWebView2? _webView;
+    // Survives DetachView so AttachAsync can tell a same-WebView reattach (tab
+    // switch — xterm.js still rendering) from a fresh-WebView attach (Sessions ↔
+    // Settings nav — new control). Used by ReferenceEquals only.
+    private object? _lastAttachedWebView;
     private Microsoft.UI.Dispatching.DispatcherQueue? _uiDispatcher;
     private string? _initialKnownFingerprint;
     private TerminalSize _initialSize = TerminalSize.Default;
@@ -36,6 +40,12 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private int _connectInFlight;
     private ITunnelInstance? _tunnel;
     private bool _reconnectRequestedWhileDetached;
+
+    // The VM outlives the view: when SshTerminalView is unloaded and a fresh one is
+    // created (Sessions ↔ Settings navigation), the new xterm.js has no scrollback,
+    // and an idle prompt sends nothing new. AttachAsync's rebind path replays this
+    // buffer so the user doesn't see a black void.
+    private readonly TerminalReplayBuffer _replayBuffer = new(256 * 1024);
 
     public SshSessionViewModel(
         ISshSessionService sshService,
@@ -92,6 +102,11 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         if (Profile is null)
             throw new InvalidOperationException("Initialize must be called before AttachAsync.");
 
+        // A fresh WebView2 (new control after Sessions↔Settings nav) means xterm.js
+        // was just navigated to terminal.html and has an empty screen. A same-WebView
+        // reattach (tab switch) means xterm.js is still rendering the prior session;
+        // replaying onto it would duplicate every byte the user already sees.
+        var xtermIsFresh = RegisterAttachedWebView(webView);
         _webView = webView;
         _initialSize = initialSize;
         // AttachAsync is called from the UI thread (SshTerminalView's ready handler);
@@ -110,17 +125,23 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             return;
         }
 
-        // Navigating away from Sessions and back rebuilds the tab content (new
-        // UserControl + WebView2) while the VM stays alive in ShellViewModel.Tabs. Skip the
-        // expensive credential prompt + SSH connect; just rebind the bridge to the new
-        // WebView and resync the geometry. The terminal scrollback is lost (xterm.js is
-        // fresh) but typing/output continue to work on the same SSH session. We don't
-        // re-call Start() — the pump was already running from the first connect.
+        // VM survives view rebuilds while the SSH pump keeps running. Skip credential
+        // prompt + connect — rebind the bridge to the (possibly new) WebView and
+        // resync geometry. Replay only when xterm.js is fresh; same-WebView reattach
+        // already shows the prior render.
         if (_session is not null)
         {
+            // Snapshot BEFORE subscribing the new bridge: a byte that lands on the SSH
+            // read pump after the new bridge subscribes would otherwise be rendered
+            // live AND included in the snapshot, duplicating on replay (e.g. tail -f
+            // mid-reattach). The reverse race — bytes between snapshot and subscribe —
+            // stays in the ring buffer and surfaces on the next reattach; a far less
+            // visible cosmetic issue than the duplicated stream.
+            var snapshot = xtermIsFresh ? _replayBuffer.Snapshot() : null;
             var oldBridge = _bridge;
             _bridge = new TerminalBridge(webView, _session, _loggerFactory.CreateLogger<TerminalBridge>(), _settingsService);
             oldBridge?.Dispose();
+            if (snapshot is not null) _bridge.Replay(snapshot);
             await _session.ResizeAsync(initialSize.Columns, initialSize.Rows).ConfigureAwait(true);
             _bridge.RequestFocus();
             EnsureRemoteOutputWaitTimer();
@@ -205,6 +226,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     internal void AttachConnectedSessionForTesting(ISshSession session)
     {
         ResetOutputState();
+        _replayBuffer.Clear();
         if (_session is not null)
         {
             _session.DataReceived -= OnSessionDataReceived;
@@ -347,8 +369,17 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
     private void OnSessionDataReceived(object? sender, ReadOnlyMemory<byte> data)
     {
-        if (data.Length == 0 || HasReceivedOutput) return;
+        if (data.Length == 0) return;
         var sourceSession = sender as ISshSession;
+        // Drop callbacks from a session we've already swapped out. The read of _session
+        // is unbarriered on the SSH pump thread, so a stale-true result can still slip
+        // through; the Append lands in a buffer about to be cleared by teardown, and
+        // MarkOutputReceived re-checks identity under the UI dispatcher.
+        if (!ReferenceEquals(sourceSession, _session)) return;
+
+        _replayBuffer.Append(data.Span);
+
+        if (HasReceivedOutput) return;
 
         var dispatcher = _uiDispatcher;
         if (dispatcher is null)
@@ -467,5 +498,22 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             try { await tunnel.DisposeAsync().ConfigureAwait(true); }
             catch (Exception ex) { _logger.LogWarning(ex, "Error tearing down session tunnel."); }
         }
+
+        // DetachView (view-only teardown) deliberately keeps the buffer — replaying
+        // across the detach window is the whole point. Session teardown clears it so
+        // a same-VM reconnect doesn't bleed the old session's output into the new one.
+        _replayBuffer.Clear();
+    }
+
+    internal byte[] PeekReplayBufferForTesting() => _replayBuffer.Snapshot();
+
+    // Records the just-attached WebView2 (or any object identity in tests) and
+    // returns whether it differs from the previous attach — used by AttachAsync
+    // to decide whether to replay scrollback.
+    internal bool RegisterAttachedWebView(object webView)
+    {
+        var isFresh = !ReferenceEquals(webView, _lastAttachedWebView);
+        _lastAttachedWebView = webView;
+        return isFresh;
     }
 }

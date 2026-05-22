@@ -71,6 +71,21 @@ public sealed class TerminalBridge : IDisposable
         }
     }
 
+    /// <summary>
+    /// Posts a captured run of SSH output bytes to xterm.js using the same protocol
+    /// as live output. Used to repaint a freshly-recreated xterm.js with prior
+    /// scrollback after a view detach/reattach, since an idle shell won't send
+    /// anything new to render against.
+    /// </summary>
+    public void Replay(ReadOnlyMemory<byte> data)
+    {
+        if (_disposed || data.Length == 0) return;
+        if (!_dispatcher.TryEnqueue(() => PostBytesToWebView(data)))
+        {
+            _logger.LogWarning("Failed to enqueue terminal replay.");
+        }
+    }
+
     private void PostBytesToWebView(ReadOnlyMemory<byte> data)
     {
         if (_disposed) return;

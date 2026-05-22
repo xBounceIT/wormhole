@@ -196,6 +196,111 @@ public sealed class SshSessionViewModelTests
         Assert.False(vm.IsWaitingForRemoteOutput);
     }
 
+    [Fact]
+    public void ReplayBuffer_CapturesDataReceivedFromSession()
+    {
+        var (vm, session) = CreateConnectedVm();
+
+        session.RaiseData((byte)'h', (byte)'i', (byte)'\n');
+        session.RaiseData((byte)'$', (byte)' ');
+
+        Assert.Equal(
+            new byte[] { (byte)'h', (byte)'i', (byte)'\n', (byte)'$', (byte)' ' },
+            vm.PeekReplayBufferForTesting());
+    }
+
+    [Fact]
+    public void ReplayBuffer_ClearsOnSessionSwap()
+    {
+        var (vm, first) = CreateConnectedVm();
+        first.RaiseData((byte)'a', (byte)'b', (byte)'c');
+
+        var second = new FakeSshSession();
+        vm.AttachConnectedSessionForTesting(second);
+
+        Assert.Empty(vm.PeekReplayBufferForTesting());
+
+        second.RaiseData((byte)'x', (byte)'y');
+        Assert.Equal(new byte[] { (byte)'x', (byte)'y' }, vm.PeekReplayBufferForTesting());
+    }
+
+    [Fact]
+    public void ReplayBuffer_IgnoresLateDataFromPreviousSession()
+    {
+        var (vm, first) = CreateConnectedVm();
+        var second = new FakeSshSession();
+        vm.AttachConnectedSessionForTesting(second);
+
+        first.RaiseData((byte)'$');
+
+        Assert.Empty(vm.PeekReplayBufferForTesting());
+    }
+
+    [Fact]
+    public void ReplayBuffer_PreservedAcrossDetachView()
+    {
+        // DetachView is the view-only teardown — preserving the buffer across the
+        // detach window is the whole reason it exists.
+        var (vm, session) = CreateConnectedVm();
+        session.RaiseData((byte)'h', (byte)'i');
+
+        vm.DetachView();
+
+        Assert.Equal(new byte[] { (byte)'h', (byte)'i' }, vm.PeekReplayBufferForTesting());
+    }
+
+    [Fact]
+    public async Task ReplayBuffer_ClearedOnDetachAsync()
+    {
+        // DetachAsync tears down the session; the next session must start clean.
+        var (vm, session) = CreateConnectedVm();
+        session.RaiseData((byte)'h', (byte)'i');
+
+        await vm.DetachAsync();
+
+        Assert.Empty(vm.PeekReplayBufferForTesting());
+    }
+
+    [Fact]
+    public void RegisterAttachedWebView_FirstCall_ReportsFresh()
+    {
+        var vm = CreateViewModel();
+
+        Assert.True(vm.RegisterAttachedWebView(new object()));
+    }
+
+    [Fact]
+    public void RegisterAttachedWebView_SameInstance_ReportsNotFresh()
+    {
+        // Tab-switch case: same WebView2 reattaches; replay would duplicate the
+        // already-rendered screen, so the decision is "not fresh, skip replay".
+        var vm = CreateViewModel();
+        var webView = new object();
+        vm.RegisterAttachedWebView(webView);
+
+        Assert.False(vm.RegisterAttachedWebView(webView));
+    }
+
+    [Fact]
+    public void RegisterAttachedWebView_DifferentInstance_ReportsFresh()
+    {
+        // Sessions↔Settings nav case: new WebView2 with an empty xterm.js; replay
+        // restores the prior screen, so the decision is "fresh, replay scrollback".
+        var vm = CreateViewModel();
+        vm.RegisterAttachedWebView(new object());
+
+        Assert.True(vm.RegisterAttachedWebView(new object()));
+    }
+
+    private static (SshSessionViewModel Vm, FakeSshSession Session) CreateConnectedVm()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        var session = new FakeSshSession();
+        vm.AttachConnectedSessionForTesting(session);
+        return (vm, session);
+    }
+
     private static SshSessionViewModel CreateViewModel()
     {
         var credService = new FakeCredentialService();
