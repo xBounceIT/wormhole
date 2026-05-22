@@ -74,6 +74,12 @@
                                       ItemTemplate="{StaticResource CredentialItemTemplate}"
                                       SelectedItem="{x:Bind ViewModel.SelectedCredential, Mode=TwoWay}" />
                         </StackPanel>
+
+                        <InfoBar Severity="Informational"
+                                 IsClosable="False"
+                                 IsOpen="{x:Bind ViewModel.IsAzureAdCredential, Mode=OneWay}"
+                                 Title="Azure AD credential"
+                                 Message="Wormhole will open this connection in the system Remote Desktop client (mstsc.exe). The embedded host can't authenticate AAD targets in our unpackaged build. To override, uncheck 'Open with system Remote Desktop' in the Advanced tab." />
                     </StackPanel>
                 </ScrollViewer>
             </TabViewItem>
@@ -257,6 +263,11 @@
                                    Style="{StaticResource CaptionTextBlockStyle}"
                                    Opacity="0.7"
                                    TextWrapping="Wrap" />
+                        <TextBlock Text="Auto-checked because the selected credential looks Azure AD. Uncheck to attempt the embedded host anyway (will likely crash)."
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Opacity="0.7"
+                                   TextWrapping="Wrap"
+                                   Visibility="{x:Bind ViewModel.IsAzureAdCredential, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
                     </StackPanel>
                 </ScrollViewer>
             </TabViewItem>

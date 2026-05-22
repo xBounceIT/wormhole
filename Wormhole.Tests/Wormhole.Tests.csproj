@@ -56,6 +56,7 @@
     <Compile Include="..\Services\Tunneling\LocalTcpForwarder.cs" Link="Services\Tunneling\LocalTcpForwarder.cs" />
     <Compile Include="..\Data\Repositories\ITunnelConfigRepository.cs" Link="Data\Repositories\ITunnelConfigRepository.cs" />
     <Compile Include="..\Helpers\AppPaths.cs" Link="Helpers\AppPaths.cs" />
+    <Compile Include="..\Helpers\AzureAdCredentialDetector.cs" Link="Helpers\AzureAdCredentialDetector.cs" />
     <Compile Include="..\Helpers\Glyphs.cs" Link="Helpers\Glyphs.cs" />
     <Compile Include="..\Helpers\HostSpec.cs" Link="Helpers\HostSpec.cs" />
     <Compile Include="..\Helpers\RdpDriveList.cs" Link="Helpers\RdpDriveList.cs" />

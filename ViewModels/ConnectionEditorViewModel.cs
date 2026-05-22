@@ -21,6 +21,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private readonly ICredentialRepository _credentialRepository;
     private readonly List<CredentialProfile> _allCredentials = new();
     private bool _suppressPresetSync;
+    private bool _suppressAadAutoFlag;
 
     public ConnectionEditorViewModel(ICredentialRepository credentialRepository)
     {
@@ -60,7 +61,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private string rdpDomain = string.Empty;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(SelectedCredential))]
+    [NotifyPropertyChangedFor(nameof(SelectedCredential), nameof(IsAzureAdCredential))]
     private Guid? credentialId;
 
     /// <summary>Sentinel for "no credential — prompt every time". ComboBox.PlaceholderText
@@ -77,6 +78,14 @@ public partial class ConnectionEditorViewModel : ObservableObject
         get => CredentialId is null ? NoneCredential : GetCredentialById(CredentialId);
         set => CredentialId = (value is null || value.Id == Guid.Empty) ? null : value.Id;
     }
+
+    /// <summary>
+    /// True when the currently-selected credential looks Azure-AD-joined. Drives the
+    /// editor's auto-flag of <see cref="RdpUseExternalClient"/> on credential change
+    /// (see <see cref="OnCredentialIdChanged"/>) and the InfoBar shown next to the
+    /// credential picker.
+    /// </summary>
+    public bool IsAzureAdCredential => AzureAdCredentialDetector.IsAzureAd(SelectedCredential);
 
     public bool IsRdp => Protocol == ProtocolType.Rdp;
     public bool IsSsh => Protocol == ProtocolType.Ssh;
@@ -385,13 +394,26 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     // Pull a stale (protocol-mismatched) credential into AvailableCredentials when LoadFrom
     // assigns one — without this, the ComboBox round-trips to its placeholder on edit and the
-    // user loses sight of the saved binding.
+    // user loses sight of the saved binding. Also auto-flag RdpUseExternalClient when the
+    // user picks an Azure-AD-joined credential: the embedded mstscax host crashes on AAD
+    // auth in our unpackaged build (SEH 0xC06D007F), so routing to external mstsc.exe is the
+    // only stable path. The auto-flag is suppressed during LoadFrom — without that guard, a
+    // user who explicitly unchecked the box for an AAD profile would see it tick back on
+    // every editor re-open because line 415 fires this handler before line 469 restores the
+    // persisted value. _suppressAadAutoFlag makes the suppression explicit instead of
+    // relying on assignment-order coincidence.
     partial void OnCredentialIdChanged(Guid? value)
     {
         if (value is { } id && !AvailableCredentials.Any(c => c.Id == id))
         {
             AppendStaleSelection(id);
             OnPropertyChanged(nameof(SelectedCredential));
+        }
+
+        if (_suppressAadAutoFlag) return;
+        if (!RdpUseExternalClient && IsAzureAdCredential)
+        {
+            RdpUseExternalClient = true;
         }
     }
 
@@ -406,67 +428,78 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     public void LoadFrom(ConnectionNode node)
     {
-        Name = node.Name;
-        Protocol = node.Protocol ?? ProtocolType.Ssh;
-        Host = node.Host ?? string.Empty;
-        Port = node.Port;
-        Username = node.Username ?? string.Empty;
-        RdpDomain = node.RdpDomain ?? string.Empty;
-        CredentialId = node.CredentialId;
-
-        RdpScreenSize = node.RdpScreenSize;
-        RdpFullScreen = node.RdpFullScreen ?? false;
-        RdpColorDepth = node.RdpColorDepth ?? 32;
-        RdpUseAllMonitors = node.RdpUseAllMonitors ?? false;
-
-        RdpAudioMode = node.RdpAudioMode ?? 0;
-        RdpAudioCaptureMode = node.RdpAudioCaptureMode ?? 0;
-        RdpKeyboardHookMode = node.RdpKeyboardHookMode ?? 2;
-        RdpRedirectClipboard = node.RdpRedirectClipboard ?? true;
-        RdpRedirectPrinters = node.RdpRedirectPrinters ?? false;
-        RdpRedirectSmartCards = node.RdpRedirectSmartCards ?? false;
-        RdpRedirectPorts = node.RdpRedirectPorts ?? false;
-        RdpRedirectDevices = node.RdpRedirectDevices ?? false;
-        var drives = node.RdpRedirectDrives ?? string.Empty;
-        if (string.IsNullOrEmpty(drives))
+        // Suppress AAD auto-flag side effect during bulk load — line 469 below restores the
+        // persisted RdpUseExternalClient value, so the user's explicit choice survives a
+        // re-open even when the linked credential still matches AAD heuristics.
+        _suppressAadAutoFlag = true;
+        try
         {
-            RdpDriveRedirectMode = "none";
-            RdpCustomDriveList = string.Empty;
+            Name = node.Name;
+            Protocol = node.Protocol ?? ProtocolType.Ssh;
+            Host = node.Host ?? string.Empty;
+            Port = node.Port;
+            Username = node.Username ?? string.Empty;
+            RdpDomain = node.RdpDomain ?? string.Empty;
+            CredentialId = node.CredentialId;
+
+            RdpScreenSize = node.RdpScreenSize;
+            RdpFullScreen = node.RdpFullScreen ?? false;
+            RdpColorDepth = node.RdpColorDepth ?? 32;
+            RdpUseAllMonitors = node.RdpUseAllMonitors ?? false;
+
+            RdpAudioMode = node.RdpAudioMode ?? 0;
+            RdpAudioCaptureMode = node.RdpAudioCaptureMode ?? 0;
+            RdpKeyboardHookMode = node.RdpKeyboardHookMode ?? 2;
+            RdpRedirectClipboard = node.RdpRedirectClipboard ?? true;
+            RdpRedirectPrinters = node.RdpRedirectPrinters ?? false;
+            RdpRedirectSmartCards = node.RdpRedirectSmartCards ?? false;
+            RdpRedirectPorts = node.RdpRedirectPorts ?? false;
+            RdpRedirectDevices = node.RdpRedirectDevices ?? false;
+            var drives = node.RdpRedirectDrives ?? string.Empty;
+            if (string.IsNullOrEmpty(drives))
+            {
+                RdpDriveRedirectMode = "none";
+                RdpCustomDriveList = string.Empty;
+            }
+            else if (string.Equals(drives, RdpDriveList.AllSentinel, StringComparison.OrdinalIgnoreCase))
+            {
+                RdpDriveRedirectMode = "all";
+                RdpCustomDriveList = string.Empty;
+            }
+            else
+            {
+                RdpDriveRedirectMode = "custom";
+                RdpCustomDriveList = drives;
+            }
+
+            // Avoid the preset side-effect during bulk load — the persisted experience flags below
+            // are the source of truth. try/finally ensures the flag is cleared even if a future
+            // setter throws.
+            _suppressPresetSync = true;
+            try { RdpConnectionSpeed = node.RdpConnectionSpeed ?? 7; }
+            finally { _suppressPresetSync = false; }
+
+            RdpDesktopBackground = node.RdpDesktopBackground ?? true;
+            RdpFontSmoothing = node.RdpFontSmoothing ?? true;
+            RdpDesktopComposition = node.RdpDesktopComposition ?? true;
+            RdpWindowDrag = node.RdpWindowDrag ?? true;
+            RdpMenuAnimation = node.RdpMenuAnimation ?? true;
+            RdpVisualStyles = node.RdpVisualStyles ?? true;
+            RdpBitmapCaching = node.RdpBitmapCaching ?? true;
+            RdpAutoReconnect = node.RdpAutoReconnect ?? true;
+
+            RdpServerAuthentication = node.RdpServerAuthentication ?? 0;
+            RdpGatewayUsageMethod = node.RdpGatewayUsageMethod ?? 0;
+            RdpGatewayHostname = node.RdpGatewayHostname ?? string.Empty;
+            RdpGatewayCredentialId = node.RdpGatewayCredentialId;
+            RdpGatewayBypassLocal = node.RdpGatewayBypassLocal ?? true;
+            RdpGatewayUseSameCreds = node.RdpGatewayUseSameCreds ?? false;
+            RdpUseExternalClient = node.RdpUseExternalClient ?? false;
         }
-        else if (string.Equals(drives, RdpDriveList.AllSentinel, StringComparison.OrdinalIgnoreCase))
+        finally
         {
-            RdpDriveRedirectMode = "all";
-            RdpCustomDriveList = string.Empty;
+            _suppressAadAutoFlag = false;
         }
-        else
-        {
-            RdpDriveRedirectMode = "custom";
-            RdpCustomDriveList = drives;
-        }
-
-        // Avoid the preset side-effect during bulk load — the persisted experience flags below
-        // are the source of truth. try/finally ensures the flag is cleared even if a future
-        // setter throws.
-        _suppressPresetSync = true;
-        try { RdpConnectionSpeed = node.RdpConnectionSpeed ?? 7; }
-        finally { _suppressPresetSync = false; }
-
-        RdpDesktopBackground = node.RdpDesktopBackground ?? true;
-        RdpFontSmoothing = node.RdpFontSmoothing ?? true;
-        RdpDesktopComposition = node.RdpDesktopComposition ?? true;
-        RdpWindowDrag = node.RdpWindowDrag ?? true;
-        RdpMenuAnimation = node.RdpMenuAnimation ?? true;
-        RdpVisualStyles = node.RdpVisualStyles ?? true;
-        RdpBitmapCaching = node.RdpBitmapCaching ?? true;
-        RdpAutoReconnect = node.RdpAutoReconnect ?? true;
-
-        RdpServerAuthentication = node.RdpServerAuthentication ?? 0;
-        RdpGatewayUsageMethod = node.RdpGatewayUsageMethod ?? 0;
-        RdpGatewayHostname = node.RdpGatewayHostname ?? string.Empty;
-        RdpGatewayCredentialId = node.RdpGatewayCredentialId;
-        RdpGatewayBypassLocal = node.RdpGatewayBypassLocal ?? true;
-        RdpGatewayUseSameCreds = node.RdpGatewayUseSameCreds ?? false;
-        RdpUseExternalClient = node.RdpUseExternalClient ?? false;
     }
 
     public void WriteTo(ConnectionNode node)

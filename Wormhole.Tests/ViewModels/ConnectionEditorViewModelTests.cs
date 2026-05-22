@@ -442,6 +442,119 @@ public class ConnectionEditorViewModelTests
         Assert.Equal("alice", node.Username);
     }
 
+    [Fact]
+    public async Task SelectingAzureAdCredential_AutoFlagsRdpUseExternalClient()
+    {
+        // Picking an AAD credential in the editor should tick the "Open with system Remote
+        // Desktop" checkbox without user intervention. Without this, AAD targets crash the
+        // embedded mstscax host on auth (SEH 0xC06D007F) before the user can save and route.
+        var aad = new CredentialProfile
+        {
+            Name = "aad-prod",
+            Domain = "AzureAD",
+            Username = "alice@contoso.onmicrosoft.com",
+            Protocol = ProtocolType.Rdp,
+            Kind = CredentialKind.Password,
+        };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(aad));
+        vm.Protocol = ProtocolType.Rdp;
+        await vm.LoadCredentialsAsync();
+
+        Assert.False(vm.RdpUseExternalClient);
+
+        vm.SelectedCredential = aad;
+
+        Assert.True(vm.RdpUseExternalClient);
+        Assert.True(vm.IsAzureAdCredential);
+    }
+
+    [Fact]
+    public async Task SelectingNonAzureAdCredential_LeavesRdpUseExternalClientAlone()
+    {
+        // A non-AAD credential must not silently route the connection through mstsc.exe —
+        // most users want the embedded experience and the heuristic must not have false
+        // positives (e.g. on-prem AD users syncing UPNs to M365).
+        var nonAad = new CredentialProfile
+        {
+            Name = "onprem",
+            Domain = "CORP",
+            Username = "alice",
+            Protocol = ProtocolType.Rdp,
+            Kind = CredentialKind.Password,
+        };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(nonAad));
+        vm.Protocol = ProtocolType.Rdp;
+        await vm.LoadCredentialsAsync();
+
+        vm.SelectedCredential = nonAad;
+
+        Assert.False(vm.RdpUseExternalClient);
+        Assert.False(vm.IsAzureAdCredential);
+    }
+
+    [Fact]
+    public async Task LoadFrom_DoesNotAutoFlipExternalClientWhenUserPreviouslyDisabled()
+    {
+        // A user with an AAD profile may explicitly uncheck the external-client box (to try
+        // the embedded path for any reason). On re-open, the editor must not silently re-tick
+        // it back — otherwise the override is impossible to express across edit sessions.
+        var aad = new CredentialProfile
+        {
+            Name = "aad-prod",
+            Domain = "AzureAD",
+            Username = "alice@contoso.onmicrosoft.com",
+            Protocol = ProtocolType.Rdp,
+            Kind = CredentialKind.Password,
+        };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(aad));
+        await vm.LoadCredentialsAsync();
+
+        var node = new ConnectionNode
+        {
+            Kind = NodeKind.Connection,
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Rdp,
+            CredentialId = aad.Id,
+            RdpUseExternalClient = false, // user explicitly disabled the auto-flag earlier
+        };
+
+        vm.LoadFrom(node);
+
+        Assert.False(vm.RdpUseExternalClient);
+        Assert.True(vm.IsAzureAdCredential); // InfoBar still surfaces the detection
+    }
+
+    [Fact]
+    public async Task UncheckingExternalClient_SurvivesProtocolUnchangedSave()
+    {
+        // The override (uncheck after auto-flag) must persist across WriteTo round-trips —
+        // WriteTo just copies the current bool, no editor-side mutation should sneak in.
+        var aad = new CredentialProfile
+        {
+            Name = "aad-prod",
+            Domain = "AzureAD",
+            Username = "alice@contoso.onmicrosoft.com",
+            Protocol = ProtocolType.Rdp,
+            Kind = CredentialKind.Password,
+        };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(aad));
+        vm.Protocol = ProtocolType.Rdp;
+        await vm.LoadCredentialsAsync();
+
+        vm.Name = "n";
+        vm.Host = "h";
+        vm.SelectedCredential = aad;
+        Assert.True(vm.RdpUseExternalClient); // auto-flag fired
+
+        vm.RdpUseExternalClient = false; // user override
+
+        var sink = new ConnectionNode { Kind = NodeKind.Connection };
+        vm.WriteTo(sink);
+
+        Assert.False(sink.RdpUseExternalClient);
+    }
+
     private static async Task<ConnectionEditorViewModel> NewEditorAsync()
     {
         var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository());
