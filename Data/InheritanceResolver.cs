@@ -50,6 +50,7 @@ public sealed class InheritanceResolver
         Guid? rdpGatewayCredentialId = null;
         bool? rdpGatewayBypassLocal = null;
         bool? rdpGatewayUseSameCreds = null;
+        bool? rdpUseExternalClient = null;
         string? sshKeyFileName = null;
         string? sshKnownHostFingerprint = null;
 
@@ -89,6 +90,7 @@ public sealed class InheritanceResolver
             rdpGatewayCredentialId ??= ancestor.RdpGatewayCredentialId;
             rdpGatewayBypassLocal ??= ancestor.RdpGatewayBypassLocal;
             rdpGatewayUseSameCreds ??= ancestor.RdpGatewayUseSameCreds;
+            rdpUseExternalClient ??= ancestor.RdpUseExternalClient;
             sshKeyFileName ??= ancestor.SshKeyFileName;
             sshKnownHostFingerprint ??= ancestor.SshKnownHostFingerprint;
         }
@@ -142,6 +144,7 @@ public sealed class InheritanceResolver
             RdpGatewayCredentialId = rdpGatewayCredentialId,
             RdpGatewayBypassLocal = rdpGatewayBypassLocal ?? true,
             RdpGatewayUseSameCreds = rdpGatewayUseSameCreds ?? false,
+            RdpUseExternalClient = rdpUseExternalClient ?? false,
             SshKeyFileName = sshKeyFileName,
             SshKnownHostFingerprint = sshKnownHostFingerprint,
         };

@@ -247,6 +247,16 @@
                         <CheckBox Content="Bypass RD Gateway for local addresses"
                                   IsChecked="{x:Bind ViewModel.RdpGatewayBypassLocal, Mode=TwoWay}"
                                   IsEnabled="{x:Bind ViewModel.IsGatewayEnabled, Mode=OneWay}" />
+
+                        <TextBlock Text="Client"
+                                   Style="{StaticResource BodyStrongTextBlockStyle}"
+                                   Margin="0,8,0,0" />
+                        <CheckBox Content="Open with system Remote Desktop (mstsc.exe)"
+                                  IsChecked="{x:Bind ViewModel.RdpUseExternalClient, Mode=TwoWay}" />
+                        <TextBlock Text="Recommended for Azure AD–joined targets. The embedded host can't load the WAM broker in an unpackaged build, which crashes on AAD auth; mstsc.exe handles AAD cleanly but runs in its own window."
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Opacity="0.7"
+                                   TextWrapping="Wrap" />
                     </StackPanel>
                 </ScrollViewer>
             </TabViewItem>

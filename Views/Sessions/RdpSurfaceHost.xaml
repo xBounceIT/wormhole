@@ -21,6 +21,13 @@
                         <FontIcon Glyph="&#xE72C;" />
                     </MenuFlyoutItem.Icon>
                 </MenuFlyoutItem>
+                <MenuFlyoutSeparator />
+                <MenuFlyoutItem Text="Open in System Remote Desktop"
+                                Command="{Binding UseExternalClientCommand}">
+                    <MenuFlyoutItem.Icon>
+                        <FontIcon Glyph="&#xE8A7;" />
+                    </MenuFlyoutItem.Icon>
+                </MenuFlyoutItem>
             </MenuFlyout>
         </Grid.ContextFlyout>
 
@@ -78,6 +85,8 @@
                     <Button Content="Retry"
                             Command="{Binding RetryCommand}"
                             Style="{StaticResource AccentButtonStyle}" />
+                    <Button Content="Open in System Remote Desktop"
+                            Command="{Binding UseExternalClientCommand}" />
                 </StackPanel>
             </StackPanel>
         </Grid>

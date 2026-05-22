@@ -230,6 +230,16 @@ public partial class ConnectionEditorViewModel : ObservableObject
     [ObservableProperty]
     private bool rdpGatewayUseSameCreds;
 
+    /// <summary>
+    /// Opt-in: route this connection through the system Remote Desktop client (mstsc.exe)
+    /// instead of the embedded ActiveX. Required for Azure-AD-joined targets — the
+    /// unpackaged WinUI process can't load WAM broker DLLs that mstscax delay-loads during
+    /// AAD auth, so the embedded path crashes with SEH 0xC06D007F. mstsc.exe is a
+    /// packaged-trusted system binary and authenticates AAD cleanly.
+    /// </summary>
+    [ObservableProperty]
+    private bool rdpUseExternalClient;
+
     public bool IsGatewayEnabled => RdpGatewayUsageMethod != 0;
 
     /// <summary>
@@ -456,6 +466,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
         RdpGatewayCredentialId = node.RdpGatewayCredentialId;
         RdpGatewayBypassLocal = node.RdpGatewayBypassLocal ?? true;
         RdpGatewayUseSameCreds = node.RdpGatewayUseSameCreds ?? false;
+        RdpUseExternalClient = node.RdpUseExternalClient ?? false;
     }
 
     public void WriteTo(ConnectionNode node)
@@ -522,6 +533,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
             node.RdpGatewayCredentialId = RdpGatewayCredentialId;
             node.RdpGatewayBypassLocal = RdpGatewayBypassLocal;
             node.RdpGatewayUseSameCreds = RdpGatewayUseSameCreds;
+            node.RdpUseExternalClient = RdpUseExternalClient;
         }
     }
 

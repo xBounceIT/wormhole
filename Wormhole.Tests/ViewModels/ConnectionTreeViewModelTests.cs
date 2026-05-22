@@ -56,6 +56,7 @@ public class ConnectionTreeViewModelTests : IDisposable
             RdpGatewayCredentialId   TEXT     NULL,
             RdpGatewayBypassLocal    INTEGER  NULL,
             RdpGatewayUseSameCreds   INTEGER  NULL,
+            RdpUseExternalClient     INTEGER  NULL,
             SshKeyFileName           TEXT     NULL,
             SshKnownHostFingerprint  TEXT     NULL,
             CreatedAt                TEXT     NOT NULL,

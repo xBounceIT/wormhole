@@ -51,6 +51,7 @@ public class ConnectionNode
     public Guid? RdpGatewayCredentialId { get; set; }
     public bool? RdpGatewayBypassLocal { get; set; }
     public bool? RdpGatewayUseSameCreds { get; set; }
+    public bool? RdpUseExternalClient { get; set; }
 
     public string? SshKeyFileName { get; set; }
     public string? SshKnownHostFingerprint { get; set; }

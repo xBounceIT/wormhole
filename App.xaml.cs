@@ -25,7 +25,15 @@ public partial class App : Application
         this.InitializeComponent();
         SqliteTypeHandlers.Register();
         Services = ConfigureServices();
+        // Three independent unhandled-exception sources need separate hooks so we have a
+        // chance to log something before the process dies. None of these will catch a true
+        // native SEH like 0xC06D007F that originates inside mstscax's delay-load helper
+        // (the CLR can't translate those to managed exceptions reliably), but they cover
+        // every catchable managed boundary — and for the SEH case we at least get a final
+        // log line from Serilog's flush-on-exit if anything observable made it that far.
         UnhandledException += OnUnhandledException;
+        AppDomain.CurrentDomain.UnhandledException += OnAppDomainUnhandledException;
+        TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
     }
 
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
@@ -119,5 +127,39 @@ public partial class App : Application
     {
         var logger = Services.GetService<ILogger<App>>();
         logger?.LogError(e.Exception, "Unhandled exception reached App boundary.");
+    }
+
+    private void OnAppDomainUnhandledException(object sender, System.UnhandledExceptionEventArgs e)
+    {
+        // Last-chance hook for exceptions that escape the WinUI dispatcher. e.ExceptionObject
+        // is `object` because pre-2.0 CLR could raise non-Exception types; in practice it's
+        // always an Exception today. e.IsTerminating tells us whether the runtime will exit
+        // after we return — for delay-load SEH and similar fatal failures it's true, so this
+        // is the only place we'll get to record the cause before the process dies.
+        var logger = Services.GetService<ILogger<App>>();
+        var ex = e.ExceptionObject as Exception;
+        logger?.LogCritical(
+            ex,
+            "AppDomain unhandled exception (terminating={Terminating}): {Type} — {Message}",
+            e.IsTerminating,
+            ex?.GetType().FullName ?? e.ExceptionObject?.GetType().FullName ?? "null",
+            ex?.Message ?? "<no message>");
+
+        // Force Serilog to flush before the runtime tears down. Without this, a final
+        // [ERR]/[CRT] line about why we died often gets buffered out of existence and the
+        // user sees the post-crash log file end mid-handshake (which is exactly what
+        // happened with the 0xC06D007F mstscax delay-load crash that motivated this hook).
+        try { Log.CloseAndFlush(); }
+        catch { /* nothing useful to do — we're terminating */ }
+    }
+
+    private void OnUnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs e)
+    {
+        var logger = Services.GetService<ILogger<App>>();
+        logger?.LogError(e.Exception, "Unobserved Task exception.");
+        // Marking observed prevents the runtime from re-raising it on finalizer thread and
+        // taking down the process. The exception is already a bug — but a crash from a
+        // background continuation we forgot to await shouldn't kill the user's session.
+        e.SetObserved();
     }
 }

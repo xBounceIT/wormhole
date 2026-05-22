@@ -25,6 +25,7 @@ public sealed class ConnectionRepository : IConnectionRepository
         "RdpVisualStyles", "RdpBitmapCaching", "RdpAutoReconnect",
         "RdpServerAuthentication", "RdpGatewayUsageMethod", "RdpGatewayHostname",
         "RdpGatewayCredentialId", "RdpGatewayBypassLocal", "RdpGatewayUseSameCreds",
+        "RdpUseExternalClient",
         "SshKeyFileName", "SshKnownHostFingerprint",
         "CreatedAt", "UpdatedAt",
     };

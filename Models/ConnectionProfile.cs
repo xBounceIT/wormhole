@@ -48,6 +48,17 @@ public sealed record ConnectionProfile
     public bool RdpGatewayBypassLocal { get; init; } = true;
     public bool RdpGatewayUseSameCreds { get; init; }
 
+    /// <summary>
+    /// When true, skip the embedded mstscax ActiveX control and launch the system
+    /// Remote Desktop client (mstsc.exe) in a separate process instead. The motivating
+    /// case is Azure-AD-joined targets: WAM/AAD broker DLLs are delay-loaded by mstscax
+    /// during AAD auth, and our unpackaged WinUI process can't load them — the failure
+    /// surfaces as SEH 0xC06D007F and kills the process. mstsc.exe is a packaged-trusted
+    /// system binary that can load WAM. Users with AAD targets opt in here and lose the
+    /// embedded experience in exchange for a stable connection.
+    /// </summary>
+    public bool RdpUseExternalClient { get; init; }
+
     public string? SshKeyFileName { get; init; }
     public string? SshKnownHostFingerprint { get; init; }
 }

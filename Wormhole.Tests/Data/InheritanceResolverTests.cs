@@ -284,6 +284,7 @@ public class InheritanceResolverTests
         Assert.True(profile.RdpBitmapCaching);
         Assert.True(profile.RdpGatewayBypassLocal);
         Assert.Equal(string.Empty, profile.RdpRedirectDrives);
+        Assert.False(profile.RdpUseExternalClient); // embedded ActiveX is the default; opt-in routes through mstsc.exe.
     }
 
     [Fact]

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Input;
@@ -28,6 +29,10 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     private CancellationTokenSource? _cts;
     private int _connectInFlight;
     private IntPtr _ownerHwnd;
+    // Set when the profile (or the user via UseExternalClientCommand) routes this tab to
+    // the system Remote Desktop client instead of the embedded ActiveX. Tracked so we can
+    // clean up the Exited subscription on teardown without killing the user's session.
+    private Process? _externalProcess;
 
     public RdpSessionViewModel(
         IRdpSessionService rdpService,
@@ -103,6 +108,15 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             return;
         }
 
+        // External-client re-attach: mstsc.exe runs in its own window outside the WinUI
+        // surface, so there's nothing to re-bind here. We just need to NOT spawn a second
+        // mstsc.exe — the surface host is recreated on every Sessions↔Settings nav, and
+        // without this guard the VM would launch a duplicate every time the tab is shown.
+        if (_externalProcess is { HasExited: false })
+        {
+            return;
+        }
+
         await ConnectAsync(ownerHwnd, bounds, forcePromptForPassword: false).ConfigureAwait(true);
     }
 
@@ -122,6 +136,22 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     {
         FullTeardown();
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// User-initiated switch to the system mstsc.exe. Available regardless of the profile's
+    /// RdpUseExternalClient setting so the failure overlay can offer it as a fallback after
+    /// an embedded connection error. Tears down any in-flight embedded session first; the
+    /// spawned mstsc.exe lives independently and survives a Wormhole Disconnect / tab close
+    /// (we just stop tracking it — see FullTeardown).
+    /// </summary>
+    [RelayCommand]
+    public void UseExternalClient()
+    {
+        var profile = Profile;
+        if (profile is null) return;
+        FullTeardown();
+        LaunchExternalProcess(profile);
     }
 
     [RelayCommand(AllowConcurrentExecutions = false, CanExecute = nameof(CanRetry))]
@@ -152,6 +182,20 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     {
         var profile = Profile;
         if (profile is null) return;
+
+        // External-client opt-in: skip the embedded mstscax ActiveX entirely and launch
+        // the system mstsc.exe in its own process. Required for Azure-AD-joined targets —
+        // mstscax delay-loads WAM broker DLLs during AAD auth which our unpackaged WinUI
+        // process can't satisfy (manifests as SEH 0xC06D007F and kills the process).
+        // mstsc.exe is a packaged-trusted system binary and handles AAD cleanly. We don't
+        // grab _connectInFlight for this path because there's no async handshake to guard
+        // and Process.Start completes synchronously.
+        if (profile.RdpUseExternalClient)
+        {
+            LaunchExternalProcess(profile);
+            return;
+        }
+
         if (Interlocked.CompareExchange(ref _connectInFlight, 1, 0) != 0) return;
 
         Status = SessionStatus.Connecting;
@@ -435,9 +479,96 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         cts?.Dispose();
 
         DisposeSessionSilently();
+        DetachExternalProcess();
         Status = SessionStatus.Disconnected;
         ErrorMessage = null;
         FailedDueToCredentials = false;
+    }
+
+    /// <summary>
+    /// Stop tracking the spawned mstsc.exe without killing it. The external session is the
+    /// user's RDP connection — they may still be using it after closing the Wormhole tab,
+    /// so the right behaviour is "untrack and let it live" rather than Process.Kill. Setting
+    /// EnableRaisingEvents=false drops the Exited subscription so we don't fire a stale
+    /// state transition into a VM that's already being torn down.
+    /// </summary>
+    private void DetachExternalProcess()
+    {
+        var ext = _externalProcess;
+        _externalProcess = null;
+        if (ext is null) return;
+        try { ext.EnableRaisingEvents = false; } catch { /* may have already exited */ }
+        try { ext.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Disposing external mstsc.exe handle threw (suppressed)."); }
+    }
+
+    /// <summary>
+    /// Spawn mstsc.exe for the given profile. Synchronous (Process.Start returns immediately
+    /// after CreateProcess). Sets the VM into Connected with a "(external)" title suffix and
+    /// hooks Exited so the tab transitions to Disconnected when the user closes the mstsc
+    /// window. Failure to launch (mstsc.exe not on PATH, etc.) flips to Failed with a clear
+    /// message — no crash path.
+    /// </summary>
+    private void LaunchExternalProcess(ConnectionProfile profile)
+    {
+        Status = SessionStatus.Connecting;
+        ErrorMessage = null;
+        FailedDueToCredentials = false;
+        ReconnectAttempt = 0;
+
+        Process? proc;
+        try
+        {
+            // /v:host:port is the canonical way to point mstsc.exe at a target. We do NOT
+            // try to pass a password — mstsc.exe's own UI handles credential entry (and for
+            // AAD targets, the WAM broker flow) far more correctly than any flag we could
+            // pass on the command line. The username/domain are intentionally omitted too;
+            // mstsc.exe will use Windows credential roaming or prompt as appropriate.
+            var psi = new ProcessStartInfo("mstsc.exe", $"/v:\"{profile.Host}:{profile.Port}\"")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = false,
+            };
+            proc = Process.Start(psi);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to launch mstsc.exe for {Host}.", profile.Host);
+            ReportFailure("Failed to launch mstsc.exe: " + ex.Message, dueToCredentials: false);
+            return;
+        }
+
+        if (proc is null)
+        {
+            ReportFailure(
+                "Could not launch mstsc.exe. Ensure the system Remote Desktop client is installed.",
+                dueToCredentials: false);
+            return;
+        }
+
+        _externalProcess = proc;
+        try { proc.EnableRaisingEvents = true; }
+        catch (Exception ex) { _logger.LogDebug(ex, "EnableRaisingEvents on external mstsc.exe threw (suppressed)."); }
+
+        var baseTitle = string.IsNullOrEmpty(profile.Name) ? profile.Host : profile.Name;
+        proc.Exited += (_, _) =>
+        {
+            MarshalToUi(() =>
+            {
+                // If FullTeardown / a Retry has already swapped or detached the tracked
+                // process, ignore this late Exited — it's about a process we no longer own.
+                if (!ReferenceEquals(_externalProcess, proc)) return;
+                _externalProcess = null;
+                Status = SessionStatus.Disconnected;
+                Title = baseTitle;
+                try { proc.Dispose(); } catch { /* nothing to do */ }
+            });
+        };
+
+        Status = SessionStatus.Connected;
+        Title = baseTitle + " (external)";
+        _logger.LogInformation(
+            "Launched mstsc.exe (pid {Pid}) for {Host}:{Port} — external client mode.",
+            proc.Id, profile.Host, profile.Port);
     }
 
     /// <summary>
