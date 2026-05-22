@@ -148,8 +148,11 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         FailedDueToCredentials = false;
         ReconnectAttempt = 0;
 
+        // The CTS exists from the start so FullTeardown / Disconnect can cancel an in-flight
+        // connect, but the ConnectTimeout itself only kicks in once we've actually started
+        // the network handshake. Counting credential-entry time against the 30s budget would
+        // make a slow typist's correct password expire before the OCX ever sees it.
         var cts = new CancellationTokenSource();
-        cts.CancelAfter(ConnectTimeout);
         _cts = cts;
         var token = cts.Token;
 
@@ -172,6 +175,9 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 Status = SessionStatus.Disconnected;
                 return;
             }
+
+            // Credentials are in hand — now bound the actual network handshake by the timeout.
+            cts.CancelAfter(ConnectTimeout);
 
             var (gwUser, gwPassword) = await ResolveGatewayCredentialsAsync(profile, token).ConfigureAwait(true);
             _session = await _rdpService.ConnectAsync(

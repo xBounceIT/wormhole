@@ -67,7 +67,17 @@ public sealed class RdpSessionService : IRdpSessionService
                 }
             }
             cancellationToken.ThrowIfCancellationRequested();
+
+            // Construct the adapter BEFORE Start() so its event subscriptions are in place
+            // when the OCX begins the handshake. Otherwise an early failure (immediate auth
+            // reject, transport error right after Connect) would fire on the form's events
+            // with no subscribers, and the VM would stay stuck in Connecting with no
+            // terminal transition.
+            var adapter = new RdpSessionAdapter(form, _logger);
             form.Start();
+
+            _logger.LogInformation("RDP session opened to {Host}:{Port}.", profile.Host, profile.Port);
+            return Task.FromResult<IRdpSession>(adapter);
         }
         catch
         {
@@ -78,9 +88,6 @@ public sealed class RdpSessionService : IRdpSessionService
             }
             throw;
         }
-
-        _logger.LogInformation("RDP session opened to {Host}:{Port}.", profile.Host, profile.Port);
-        return Task.FromResult<IRdpSession>(new RdpSessionAdapter(form, _logger));
     }
 
     /// <summary>
