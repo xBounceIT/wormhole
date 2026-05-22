@@ -15,6 +15,8 @@ namespace Wormhole.ViewModels.Sessions;
 public sealed partial class RdpSessionViewModel : SessionTabViewModel
 {
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(30);
+    private static readonly string TimeoutMessage =
+        $"RDP server didn't respond within {ConnectTimeout.TotalSeconds:0} seconds.";
 
     private readonly IRdpSessionService _rdpService;
     private readonly ICredentialService _credentialService;
@@ -24,7 +26,6 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
     private IRdpSession? _session;
     private CancellationTokenSource? _cts;
-    private CancellationTokenSource? _timedOutAttempt;
     private int _connectInFlight;
     private IntPtr _ownerHwnd;
 
@@ -50,18 +51,13 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 OnPropertyChanged(nameof(IsConnecting));
                 OnPropertyChanged(nameof(IsConnected));
                 OnPropertyChanged(nameof(IsFailed));
+                RetryCommand.NotifyCanExecuteChanged();
             }
         };
     }
 
     public override ProtocolType Protocol => ProtocolType.Rdp;
 
-    /// <summary>
-    /// Surface <see cref="RetryCommand"/> to the SessionsPage tab context menu's Reconnect
-    /// entry — which gates its visibility on <see cref="SessionTabViewModel.CanReconnect"/>
-    /// (defaults to false when the base ReconnectCommand is null). Without this override,
-    /// RDP tabs would lose the standard reconnect path that SSH tabs have.
-    /// </summary>
     public override ICommand? ReconnectCommand => RetryCommand;
 
     [ObservableProperty]
@@ -128,7 +124,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         return Task.CompletedTask;
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false, CanExecute = nameof(CanRetry))]
     public async Task RetryAsync()
     {
         if (Profile is null || _ownerHwnd == IntPtr.Zero) return;
@@ -140,6 +136,11 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         // session attaches; seed with a 1x1 so the form is valid until that arrives.
         await ConnectAsync(_ownerHwnd, HostBounds.Seed, forcePromptForPassword: forcePrompt).ConfigureAwait(true);
     }
+
+    // Mirrors SshSessionViewModel: while Connecting, an in-flight ConnectAsync still holds
+    // _connectInFlight; a second one from RetryAsync would silently no-op. Disabling the
+    // command keeps the tab context menu / failure overlay in sync with the actual state.
+    private bool CanRetry() => Status != SessionStatus.Connecting;
 
     public override ValueTask CloseAsync()
     {
@@ -162,9 +163,12 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         // connect, but the ConnectTimeout itself only kicks in once we've actually started
         // the network handshake. Counting credential-entry time against the 30s budget would
         // make a slow typist's correct password expire before the OCX ever sees it.
+        var previousCts = _cts;
         var cts = new CancellationTokenSource();
         _cts = cts;
+        previousCts?.Dispose();
         var token = cts.Token;
+        var timedOut = false;
 
         try
         {
@@ -176,48 +180,35 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             }
 
             // ResolvePasswordAsync returns null only when the user cancelled the prompt —
-            // silent return to Disconnected, not Failed (no error message to show). This
-            // covers both "no saved credential, user cancelled" and "credential pointed to
-            // a deleted Credential Manager entry, ResolvePasswordAsync fell through to a
-            // prompt, user cancelled that". Either way, the user said no.
+            // silent return to Disconnected, not Failed (no error message to show). Covers
+            // both "no saved credential" and "credential Id pointed at a deleted Credential
+            // Manager entry, fell through to a prompt, user cancelled". Either way, no.
             if (password is null)
             {
                 Status = SessionStatus.Disconnected;
                 return;
             }
 
-            // Credentials are in hand — now bound the actual network handshake by the timeout.
-            // The CTS firing is observed two ways:
-            //   1. Anything still inside the `await _rdpService.ConnectAsync(...)` below picks
-            //      it up via OperationCanceledException (only useful if Configure / SetParent
-            //      stages somehow hang, since Start itself is synchronous).
-            //   2. The Register callback below is the real watchdog: ConnectAsync returns
-            //      immediately after kicking off the asynchronous OCX handshake, so without
-            //      this we'd have no way to surface a "server never answered" timeout. When
-            //      the token elapses while Status is still Connecting, we tear the session
-            //      down ourselves and fail the VM with a timeout message.
+            // ConnectAsync returns immediately after kicking off the asynchronous OCX
+            // handshake, so without a real watchdog there's no way to surface a "server
+            // never answered" timeout. The Register callback drives both legs: it flips
+            // the captured timedOut flag so the inline OCE catch can distinguish a
+            // watchdog-cancel from a user-cancel (FullTeardown), and it posts to the UI
+            // thread to fail the VM if the await already returned and the OCX is sitting
+            // mid-handshake. The registration's lifetime is the CTS's lifetime — the
+            // previousCts?.Dispose() above and FullTeardown's Dispose release it.
             cts.CancelAfter(ConnectTimeout);
-            // Capture the CTS in the closure and compare with _cts when the callback fires.
-            // Without this, a watchdog from a previous attempt could still fire after the
-            // user retried — the new connect flips Status back to Connecting, and the stale
-            // callback would tear the new session down on the old 30s timer.
-            var attemptCts = cts;
             cts.Token.Register(() =>
             {
-                // Cancel callbacks run synchronously on the thread that triggered the cancel,
-                // BEFORE any awaiter observes IsCancellationRequested. Marking the attempt as
-                // "timed out" here lets the OperationCanceledException catch below distinguish
-                // a watchdog-driven cancel from an external one (FullTeardown / Disconnect),
-                // so the user still sees the timeout message even when the cancel is observed
-                // inline by a pending await rather than via the MarshalToUi path below.
-                if (ReferenceEquals(_cts, attemptCts)) _timedOutAttempt = attemptCts;
+                // User-initiated cancels (FullTeardown) null _cts BEFORE calling Cancel,
+                // so this guard distinguishes timer-fire from user-fire.
+                if (!ReferenceEquals(_cts, cts)) return;
+                timedOut = true;
                 MarshalToUi(() =>
                 {
-                    if (!ReferenceEquals(_cts, attemptCts)) return;
-                    if (Status == SessionStatus.Connecting)
-                    {
-                        DisposeAndTransition("RDP server didn't respond within 30 seconds.", dueToCredentials: false);
-                    }
+                    if (!ReferenceEquals(_cts, cts)) return;
+                    if (Status != SessionStatus.Connecting) return;
+                    DisposeAndTransition(TimeoutMessage, dueToCredentials: false);
                 });
             });
 
@@ -235,6 +226,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                     s.FatalError += OnSessionFatalError;
                     s.LogonError += OnSessionLogonError;
                     s.AutoReconnecting += OnSessionAutoReconnecting;
+                    s.AutoReconnected += OnSessionAutoReconnected;
                 },
                 token).ConfigureAwait(true);
             _session = session;
@@ -242,20 +234,15 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             _session.SetBounds(initialBounds.IsDegenerate(minDim: 1) ? HostBounds.Seed : initialBounds);
             _session.Show();
         }
+        catch (OperationCanceledException) when (timedOut)
+        {
+            DisposeSessionSilently();
+            ReportFailure(TimeoutMessage, dueToCredentials: false);
+        }
         catch (OperationCanceledException)
         {
             DisposeSessionSilently();
-            // If the watchdog cancelled us (vs. user-initiated FullTeardown / Disconnect),
-            // surface the timeout as a recoverable failure with a message — otherwise the
-            // observed-inline cancel would look identical to a silent user disconnect.
-            if (ReferenceEquals(_timedOutAttempt, cts))
-            {
-                ReportFailure("RDP server didn't respond within 30 seconds.", dueToCredentials: false);
-            }
-            else
-            {
-                Status = SessionStatus.Disconnected;
-            }
+            Status = SessionStatus.Disconnected;
         }
         catch (System.Runtime.InteropServices.COMException ex) when ((uint)ex.HResult == 0x80040154)
         {
@@ -394,6 +381,19 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         });
     }
 
+    private void OnSessionAutoReconnected(object? sender, EventArgs e)
+    {
+        // Without this, OnAutoReconnecting drove Status to Connecting and no event would
+        // ever drive it back — the user would see the reconnect banner indefinitely after
+        // a transient drop recovered.
+        MarshalToUi(() =>
+        {
+            ReconnectAttempt = 0;
+            Status = SessionStatus.Connected;
+            ErrorMessage = null;
+        });
+    }
+
     /// <summary>
     /// Recovery path for exceptions escaping the dispatched continuation in
     /// <see cref="SessionTabViewModel.MarshalToUi(Func{Task})"/>. Without this override the
@@ -430,6 +430,9 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         var cts = _cts;
         _cts = null;
         try { cts?.Cancel(); } catch { /* already disposed */ }
+        // Dispose so the underlying Timer (from CancelAfter) and any Register-callback
+        // closures are released — otherwise every Retry leaks a CTS + timer + closure.
+        cts?.Dispose();
 
         DisposeSessionSilently();
         Status = SessionStatus.Disconnected;
@@ -468,6 +471,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         session.FatalError -= OnSessionFatalError;
         session.LogonError -= OnSessionLogonError;
         session.AutoReconnecting -= OnSessionAutoReconnecting;
+        session.AutoReconnected -= OnSessionAutoReconnected;
 
         try { session.Disconnect(); }
         catch (Exception ex) { _logger.LogWarning(ex, "Disconnect threw during teardown."); }
@@ -485,6 +489,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         _session.FatalError += OnSessionFatalError;
         _session.LogonError += OnSessionLogonError;
         _session.AutoReconnecting += OnSessionAutoReconnecting;
+        _session.AutoReconnected += OnSessionAutoReconnected;
         EnsureDispatcher();
         Status = SessionStatus.Connected;
     }

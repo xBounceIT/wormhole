@@ -81,9 +81,9 @@ internal sealed class RdpHostForm : FormsForm
     public void Configure(
         ConnectionProfile profile,
         string? password,
-        IntPtr ownerHwnd = default,
         string? gatewayUsername = null,
-        string? gatewayPassword = null)
+        string? gatewayPassword = null,
+        IntPtr ownerHwnd = default)
     {
         EnsureStaThread();
         dynamic ocx = RequireOcx();
@@ -94,9 +94,9 @@ internal sealed class RdpHostForm : FormsForm
         if (!string.IsNullOrEmpty(profile.RdpDomain)) ocx.Domain = profile.RdpDomain;
 
         // --- Display ---
-        // Pass the future owner HWND so the "Full screen" preset sizes against the monitor
-        // hosting that window, not always against PrimaryScreen. On mixed-DPI multi-monitor
-        // setups this avoids letterboxing / mis-scaling when the app is on a secondary display.
+        // ownerHwnd lets ResolveDesktopSize size the "Full screen" preset against the monitor
+        // hosting the owner window — avoids letterboxing on a secondary display whose DPI /
+        // resolution differs from PrimaryScreen.
         var (dw, dh) = ResolveDesktopSize(profile.RdpScreenSize, ownerHwnd);
         ocx.DesktopWidth = dw;
         ocx.DesktopHeight = dh;
@@ -122,7 +122,7 @@ internal sealed class RdpHostForm : FormsForm
         // RedirectDevices is the AdvSettings8 PnP toggle; older OCX builds may not expose it.
         TrySetOptional(() => adv.RedirectDevices = profile.RdpRedirectDevices);
 
-        ApplyDriveRedirection(ocx, adv, profile.RdpRedirectDrives);
+        ApplyDriveRedirection(ocx, profile.RdpRedirectDrives);
 
         adv.AudioRedirectionMode = profile.RdpAudioMode;
         // AudioCaptureRedirectionMode requires AdvSettings7+.
@@ -243,38 +243,25 @@ internal sealed class RdpHostForm : FormsForm
         }
     }
 
-    /// <summary>Translate the OCX's disconnect code into a human-readable string by
-    /// asking the OCX itself (it ships with a description table).</summary>
-    public string GetDisconnectDescription(int code, int extendedCode)
+    /// <summary>Read the OCX's <c>ExtendedDisconnectReason</c> and translate the pair into
+    /// a human-readable string in one pass. Per the IMsTscAxEvents::OnDisconnected guidance
+    /// the extended reason is what gives the catch-all <c>disconnectReasonNoInfo</c> bucket
+    /// any actionable server-side context. Returns <c>(0, fallback)</c> if the OCX is gone
+    /// or doesn't expose the properties.</summary>
+    public (int Extended, string Description) GetDisconnectInfo(int code)
     {
-        if (TryGetOcx() is not { } ocxObj)
-            return $"Disconnect reason {code} (extended {extendedCode}).";
+        var fallback = $"Disconnect reason {code}.";
+        if (TryGetOcx() is not { } ocxObj) return (0, fallback);
         try
         {
             dynamic ocx = ocxObj;
-            return (string)ocx.GetErrorDescription((uint)code, (uint)extendedCode);
+            int extended = (int)ocx.ExtendedDisconnectReason;
+            string desc = (string)ocx.GetErrorDescription((uint)code, (uint)extended);
+            return (extended, desc);
         }
         catch (Exception ex) when (ex is COMException or RuntimeBinderException)
         {
-            return $"Disconnect reason {code} (extended {extendedCode}).";
-        }
-    }
-
-    /// <summary>Read <c>IMsRdpClient.ExtendedDisconnectReason</c> after the OCX raised
-    /// OnDisconnected. Returns 0 if the OCX is gone or doesn't expose the property; per the
-    /// MSDN guidance for IMsTscAxEvents::OnDisconnected this value should be passed alongside
-    /// the disconnect reason to GetErrorDescription to surface real server-side context.</summary>
-    public int GetExtendedDisconnectReason()
-    {
-        if (TryGetOcx() is not { } ocxObj) return 0;
-        try
-        {
-            dynamic ocx = ocxObj;
-            return (int)ocx.ExtendedDisconnectReason;
-        }
-        catch (Exception ex) when (ex is COMException or RuntimeBinderException)
-        {
-            return 0;
+            return (0, fallback);
         }
     }
 
@@ -397,8 +384,12 @@ internal sealed class RdpHostForm : FormsForm
             Screen? screen = null;
             if (ownerHwnd != IntPtr.Zero)
             {
+                // Screen.FromHandle wraps MonitorFromWindow; on an invalid HWND it returns
+                // PrimaryScreen rather than throwing, but a concurrent display reconfig has
+                // been observed to raise Win32Exception. Narrow the catch accordingly.
                 try { screen = Screen.FromHandle(ownerHwnd); }
-                catch { /* invalid HWND or display reconfig — fall through */ }
+                catch (System.ComponentModel.Win32Exception) { }
+                catch (ArgumentException) { }
             }
             var sb = (screen ?? Screen.PrimaryScreen)?.WorkingArea
                   ?? new System.Drawing.Rectangle(0, 0, 1920, 1080);
@@ -441,17 +432,21 @@ internal sealed class RdpHostForm : FormsForm
         return flags;
     }
 
-    private static void ApplyDriveRedirection(dynamic ocx, dynamic adv, string raw)
+    private static void ApplyDriveRedirection(dynamic ocx, string raw)
     {
-        // mstsc has two ways: "redirect all fixed drives" (the AdvancedSettings.RedirectDrives
-        // bool) or per-letter via DriveCollection, which lives on the OCX's non-scriptable
-        // client interface (IMsRdpClientNonScriptable3.DriveCollection — accessed off the OCX
-        // root, NOT off AdvancedSettings). RdpDriveList.ParseLetters returns null for the
-        // "all" sentinel, empty set for "", or a populated set for an explicit letter list.
+        // AdvancedSettings.RedirectDrives is the master enable; DriveCollection (off the
+        // OCX root, via IMsRdpClientNonScriptable3) provides the per-drive RedirectionState
+        // filter that only takes effect when the master is true. ParseLetters returns null
+        // for "all", empty set for "none", or a populated set for an explicit letter list.
+        dynamic adv = ocx.AdvancedSettings9;
         var letters = RdpDriveList.ParseLetters(raw);
         if (letters is null) { adv.RedirectDrives = true; return; }
         if (letters.Count == 0) { adv.RedirectDrives = false; return; }
 
+        // Custom letters: the master must be true for the per-drive filter to take effect
+        // at all. Set it before walking the collection so a mid-iteration COM failure still
+        // leaves the user with redirection on for whatever the OCX already accepted.
+        adv.RedirectDrives = true;
         try
         {
             dynamic drives = ocx.DriveCollection;

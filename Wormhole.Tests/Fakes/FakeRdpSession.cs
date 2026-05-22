@@ -19,12 +19,14 @@ public sealed class FakeRdpSession : IRdpSession
     public event EventHandler<int>? FatalError;
     public event EventHandler<int>? LogonError;
     public event EventHandler<RdpReconnectInfo>? AutoReconnecting;
+    public event EventHandler? AutoReconnected;
 
     public void RaiseConnected() { IsLoggedOn = true; Connected?.Invoke(this, EventArgs.Empty); }
     public void RaiseDisconnected(RdpDisconnectInfo info) { IsLoggedOn = false; Disconnected?.Invoke(this, info); }
     public void RaiseFatalError(int code) => FatalError?.Invoke(this, code);
     public void RaiseLogonError(int code) => LogonError?.Invoke(this, code);
     public void RaiseAutoReconnecting(RdpReconnectInfo info) => AutoReconnecting?.Invoke(this, info);
+    public void RaiseAutoReconnected() { IsLoggedOn = true; AutoReconnected?.Invoke(this, EventArgs.Empty); }
 
     public void SetBounds(HostBounds bounds) { }
     public void Show() { }

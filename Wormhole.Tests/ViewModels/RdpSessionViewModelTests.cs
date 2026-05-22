@@ -151,6 +151,27 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public void AutoReconnected_RestoresConnectedStatusAndClearsReconnectBanner()
+    {
+        // Without forwarding OnAutoReconnected, AutoReconnecting drove Status to Connecting
+        // and nothing transitioned back — a successful auto-reconnect after a transient drop
+        // would leave the tab stuck on the "Reconnecting…" banner forever.
+        var (vm, _, _, _) = CreateVm();
+        vm.Initialize(MakeProfile());
+        var fake = new FakeRdpSession();
+        vm.AttachConnectedSessionForTesting(fake);
+
+        fake.RaiseAutoReconnecting(new RdpReconnectInfo(2, 20, 0));
+        Assert.Equal(SessionStatus.Connecting, vm.Status);
+
+        fake.RaiseAutoReconnected();
+
+        Assert.Equal(SessionStatus.Connected, vm.Status);
+        Assert.Equal(0, vm.ReconnectAttempt);
+        Assert.Null(vm.ErrorMessage);
+    }
+
+    [Fact]
     public async Task CloseAsync_DisposesSessionAndStaysDisconnected()
     {
         var (vm, _, _, _) = CreateVm();

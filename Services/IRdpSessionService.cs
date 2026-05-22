@@ -49,6 +49,10 @@ public interface IRdpSession : IDisposable
     /// <summary>Raised while ActiveX is in auto-reconnect: attempt # and cap.</summary>
     event EventHandler<RdpReconnectInfo>? AutoReconnecting;
 
+    /// <summary>Raised when ActiveX finishes a successful auto-reconnect — the VM uses
+    /// this to transition back to Connected after a transient drop.</summary>
+    event EventHandler? AutoReconnected;
+
     /// <summary>Position the embedded host inside the parent window's client area.</summary>
     void SetBounds(HostBounds bounds);
 

@@ -97,9 +97,8 @@ public sealed class SshSessionViewModelTests
     [Fact]
     public void CanReconnect_IsTrue_ForRdpSession()
     {
-        // RDP exposes RetryCommand via the SessionTabViewModel.ReconnectCommand surface so
-        // the SessionsPage tab context menu's Reconnect entry shows up for RDP tabs the same
-        // way it does for SSH.
+        // RDP surfaces RetryCommand on the ReconnectCommand override so the tab context
+        // menu's Reconnect entry shows up — the assertion the SSH counterpart already makes.
         var vm = new RdpSessionViewModel(
             new NullRdpSessionService(),
             new Fakes.FakeCredentialService(),
@@ -109,6 +108,26 @@ public sealed class SshSessionViewModelTests
 
         Assert.True(vm.CanReconnect);
         Assert.NotNull(vm.ReconnectCommand);
+    }
+
+    [Fact]
+    public void RdpRetryCommand_CanExecute_TracksStatusTransitions()
+    {
+        var vm = new RdpSessionViewModel(
+            new NullRdpSessionService(),
+            new Fakes.FakeCredentialService(),
+            new NullCredentialRepository(),
+            new Fakes.FakeDialogService(),
+            NullLoggerFactory.Instance);
+
+        vm.Status = SessionStatus.Failed;
+        Assert.True(vm.RetryCommand.CanExecute(null));
+
+        vm.Status = SessionStatus.Connecting;
+        Assert.False(vm.RetryCommand.CanExecute(null));
+
+        vm.Status = SessionStatus.Connected;
+        Assert.True(vm.RetryCommand.CanExecute(null));
     }
 
     private sealed class NullRdpSessionService : IRdpSessionService

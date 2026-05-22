@@ -63,14 +63,9 @@ public partial class ConnectionEditorViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(SelectedCredential))]
     private Guid? credentialId;
 
-    /// <summary>
-    /// Sentinel item the credential picker shows for "no credential — prompt every time".
-    /// ComboBox.PlaceholderText is display-only and not selectable, so without a real item
-    /// at the top of the list, users couldn't unpick a previously-bound credential.
-    /// Identified by <see cref="Guid.Empty"/>; both <see cref="SelectedCredential"/> and
-    /// <see cref="SelectedGatewayCredential"/> map this sentinel to a null
-    /// <see cref="CredentialId"/> / <see cref="RdpGatewayCredentialId"/>.
-    /// </summary>
+    /// <summary>Sentinel for "no credential — prompt every time". ComboBox.PlaceholderText
+    /// isn't selectable, so the picker needs a real item to round-trip to. Both selection
+    /// getters return this when the underlying id is null; setters map it back to null.</summary>
     internal static readonly CredentialProfile NoneCredential = new()
     {
         Id = Guid.Empty,
@@ -327,8 +322,6 @@ public partial class ConnectionEditorViewModel : ObservableObject
         var connectionIsRdp = Protocol == ProtocolType.Rdp;
 
         AvailableCredentials.Clear();
-        // First entry is the "(None)" sentinel so the user can clear a previously-bound
-        // credential back to "prompt every time" — ComboBox.PlaceholderText is not selectable.
         AvailableCredentials.Add(NoneCredential);
         foreach (var c in _allCredentials)
         {

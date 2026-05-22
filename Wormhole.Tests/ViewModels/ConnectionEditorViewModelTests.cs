@@ -352,8 +352,6 @@ public class ConnectionEditorViewModelTests
     [Fact]
     public async Task NoneSentinel_ClearsCredentialBindingBackToPromptEveryTime()
     {
-        // Pre-fix the ComboBox couldn't clear a saved credential — placeholder text isn't a
-        // selectable item. The sentinel entry lets users round-trip back to "no credential".
         var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var repo = new MultiCredentialRepository(cred);
         var vm = new ConnectionEditorViewModel(repo);
@@ -366,9 +364,9 @@ public class ConnectionEditorViewModelTests
         Assert.Equal(Guid.Empty, none.Id);
         vm.SelectedCredential = none;
 
+        // CredentialId reverts to null, but the getter returns the sentinel so the
+        // ComboBox has an in-collection item to display.
         Assert.Null(vm.CredentialId);
-        // Selecting "None" again returns the sentinel from the getter, not raw null — the
-        // ComboBox needs an in-collection item to display.
         Assert.Equal(Guid.Empty, vm.SelectedCredential!.Id);
     }
 
@@ -389,8 +387,6 @@ public class ConnectionEditorViewModelTests
         vm.Protocol = ProtocolType.Rdp;
 
         Assert.Null(vm.CredentialId);
-        // Selected falls back to the None sentinel (Guid.Empty) rather than raw null — the
-        // picker needs an in-collection item to display the cleared state.
         Assert.Equal(Guid.Empty, vm.SelectedCredential!.Id);
     }
 

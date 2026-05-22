@@ -37,7 +37,7 @@ public sealed class RdpSessionService : IRdpSessionService
         try
         {
             _ = form.Hwnd; // force handle creation + AxHost CreateControl before Configure / SetParent
-            form.Configure(profile, password, ownerHwnd, gatewayUsername, gatewayPassword);
+            form.Configure(profile, password, gatewayUsername, gatewayPassword, ownerHwnd);
             cancellationToken.ThrowIfCancellationRequested();
 
             // WinForms creates a top-level Form with WS_POPUP. SetParent alone leaves that bit
@@ -118,12 +118,7 @@ public sealed class RdpSessionService : IRdpSessionService
             _form.Disconnected += code =>
             {
                 _loggedOn = false;
-                // Per the IMsTscAxEvents::OnDisconnected guidance, GetErrorDescription needs
-                // BOTH the disconnect code and the OCX's ExtendedDisconnectReason — passing 0
-                // for the extended slot drops actionable context (especially when discReason
-                // == disconnectReasonNoInfo, which is the catch-all bucket).
-                var extended = _form.GetExtendedDisconnectReason();
-                var desc = _form.GetDisconnectDescription(code, extended);
+                var (extended, desc) = _form.GetDisconnectInfo(code);
                 // Reason codes 0-3 are clean (user-initiated, server-initiated, idle, etc.)
                 // per the IMsTscAxEvents.OnDisconnected reference table. Everything else is
                 // a fault that should surface the failure overlay.
@@ -134,6 +129,11 @@ public sealed class RdpSessionService : IRdpSessionService
             _form.LogonError += code => LogonError?.Invoke(this, code);
             _form.AutoReconnecting2 += (reason, available, attempt, max) =>
                 AutoReconnecting?.Invoke(this, new RdpReconnectInfo(attempt, max, reason));
+            _form.AutoReconnected += () =>
+            {
+                _loggedOn = true;
+                AutoReconnected?.Invoke(this, EventArgs.Empty);
+            };
         }
 
         public IntPtr Hwnd => _form.Hwnd;
@@ -144,6 +144,7 @@ public sealed class RdpSessionService : IRdpSessionService
         public event EventHandler<int>? FatalError;
         public event EventHandler<int>? LogonError;
         public event EventHandler<RdpReconnectInfo>? AutoReconnecting;
+        public event EventHandler? AutoReconnected;
 
         public void SetBounds(HostBounds bounds)
         {
