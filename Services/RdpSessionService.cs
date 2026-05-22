@@ -50,15 +50,21 @@ public sealed class RdpSessionService : IRdpSessionService
                 Win32Interop.SetWindowLong(form.Hwnd, Win32Interop.GWL_STYLE, childStyle);
             }
 
-            // SetParent returns the previous parent on success and IntPtr.Zero on failure.
-            // A top-level WinForms Form has the desktop as parent before reparenting, so
-            // success returns the desktop HWND (non-zero); Zero unambiguously means failure.
+            // SetParent returns the previous parent on success, NULL on failure — but it can
+            // also return NULL on SUCCESS when the window had no previous parent (which is
+            // the normal case for a top-level WinForms Form). The only reliable way to
+            // disambiguate is to clear the last error before the call and consult it only
+            // when the return is NULL: nonzero error means real failure.
+            Marshal.SetLastSystemError(0);
             var oldParent = Win32Interop.SetParent(form.Hwnd, ownerHwnd);
             if (oldParent == IntPtr.Zero)
             {
                 var err = Marshal.GetLastWin32Error();
-                throw new InvalidOperationException(
-                    $"SetParent failed reparenting the RDP host onto the WinUI main window (Win32 error {err}).");
+                if (err != 0)
+                {
+                    throw new InvalidOperationException(
+                        $"SetParent failed reparenting the RDP host onto the WinUI main window (Win32 error {err}).");
+                }
             }
             cancellationToken.ThrowIfCancellationRequested();
             form.Start();
