@@ -42,12 +42,29 @@ public sealed class SocksTunnelInstance : ITunnelInstance
         return await Socks5Client.ConnectAsync(_socksEndpoint, host, port, cancellationToken).ConfigureAwait(false);
     }
 
-    public Task<int> BindLocalForwarderAsync(string host, int port, CancellationToken cancellationToken)
+    public async Task<int> BindLocalForwarderAsync(string host, int port, CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
         var fwd = LocalTcpForwarder.Start(this, host, port, _logger);
-        lock (_gate) _forwarders.Add(fwd);
-        return Task.FromResult(fwd.LocalPort);
+        // Re-check the disposed flag inside the gate: a concurrent DisposeAsync that took the
+        // gate first will already have snapshotted-and-cleared _forwarders, so adding this
+        // forwarder afterwards leaks it (listener still bound, target SOCKS5 endpoint already
+        // gone). Dispose synchronously on the lost race so the listener is reclaimed.
+        bool addedToList = false;
+        lock (_gate)
+        {
+            if (Volatile.Read(ref _disposedFlag) == 0)
+            {
+                _forwarders.Add(fwd);
+                addedToList = true;
+            }
+        }
+        if (!addedToList)
+        {
+            await fwd.DisposeAsync().ConfigureAwait(false);
+            throw new ObjectDisposedException(nameof(SocksTunnelInstance));
+        }
+        return fwd.LocalPort;
     }
 
     public async ValueTask DisposeAsync()
