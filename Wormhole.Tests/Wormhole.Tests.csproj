@@ -49,12 +49,16 @@
     <Compile Include="..\Models\TunnelState.cs" Link="Models\TunnelState.cs" />
     <Compile Include="..\Models\TunnelDraft.cs" Link="Models\TunnelDraft.cs" />
     <Compile Include="..\Models\WireGuardSettings.cs" Link="Models\WireGuardSettings.cs" />
+    <Compile Include="..\Models\FortinetSettings.cs" Link="Models\FortinetSettings.cs" />
     <Compile Include="..\Services\Tunneling\ITunnelProvider.cs" Link="Services\Tunneling\ITunnelProvider.cs" />
     <Compile Include="..\Services\Tunneling\ITunnelInstance.cs" Link="Services\Tunneling\ITunnelInstance.cs" />
     <Compile Include="..\Services\Tunneling\TunnelManager.cs" Link="Services\Tunneling\TunnelManager.cs" />
     <Compile Include="..\Services\Tunneling\SocksTunnelInstance.cs" Link="Services\Tunneling\SocksTunnelInstance.cs" />
     <Compile Include="..\Services\Tunneling\Socks5Client.cs" Link="Services\Tunneling\Socks5Client.cs" />
     <Compile Include="..\Services\Tunneling\LocalTcpForwarder.cs" Link="Services\Tunneling\LocalTcpForwarder.cs" />
+    <Compile Include="..\Services\Tunneling\Fortinet\FortinetTunnelProvider.cs" Link="Services\Tunneling\Fortinet\FortinetTunnelProvider.cs" />
+    <Compile Include="..\Services\Tunneling\Fortinet\FortinetProcessHost.cs" Link="Services\Tunneling\Fortinet\FortinetProcessHost.cs" />
+    <Compile Include="..\Services\Tunneling\Fortinet\FortinetSidecarConfig.cs" Link="Services\Tunneling\Fortinet\FortinetSidecarConfig.cs" />
     <Compile Include="..\Data\Repositories\ITunnelConfigRepository.cs" Link="Data\Repositories\ITunnelConfigRepository.cs" />
     <Compile Include="..\Helpers\AppPaths.cs" Link="Helpers\AppPaths.cs" />
     <Compile Include="..\Helpers\Glyphs.cs" Link="Helpers\Glyphs.cs" />

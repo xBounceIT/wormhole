@@ -172,6 +172,21 @@ public partial class TunnelConfigsViewModel : ObservableObject
             return;
         }
 
+        // Kind-change confirmation: changing Kind discards the previous kind's secret blob
+        // (SerializeSecret routes on draft.Kind, so the unused side is lost on Save). The DPAPI
+        // file is overwritten in place and there's no backup — without this prompt the user
+        // could destroy a populated password / TOTP secret / preshared key by accidentally
+        // toggling the Kind ComboBox before save.
+        if (draft.Kind != config.Kind)
+        {
+            var confirmed = await _dialog.ConfirmAsync(
+                "Change tunnel type?",
+                $"Saving will switch this tunnel from {config.Kind} to {draft.Kind} and discard the {config.Kind} credentials currently stored. This cannot be undone.",
+                primaryText: "Change type",
+                closeText: "Cancel");
+            if (!confirmed) return;
+        }
+
         // Persist row before the secret blob so a failing UpdateAsync doesn't leave the on-disk
         // secret pointing at the new payload while the row still shows the old Name/Kind.
         // Compensate-on-failure: roll the row back to its old Name/Kind if the secret write
@@ -269,12 +284,21 @@ public partial class TunnelConfigsViewModel : ObservableObject
         }
     }
 
-    // Always returns a draft: failures degrade to an empty WireGuardSettings so the user can
+    // Always returns a draft: failures degrade to an empty per-kind settings so the user can
     // re-enter values and Save to repair. The dialog's IsValid gating prevents accidentally
     // saving an empty draft over real data.
+    //
+    // Why default JsonSerializer options (not Disallow): rejecting unknown members would break
+    // forward-compat reads — an older binary opening a blob saved by a newer build with extra
+    // optional fields would throw and silently lose those fields on next Save. Instead we
+    // deserialize permissively, then run a kind-specific "looks plausibly populated" check; if
+    // the blob deserialized to all-default values (the symptom of a kind/blob mismatch where no
+    // property names overlapped), surface that as a warning and keep the empty draft so the
+    // user re-enters values rather than discovering at Save time.
     private async Task<TunnelDraft> ReadDraftAsync(TunnelConfig config)
     {
-        WireGuardSettings wg;
+        var wg = new WireGuardSettings();
+        var fg = new FortinetSettings();
         try
         {
             var secret = await _credentials.ReadTunnelConfigAsync(config.Id);
@@ -283,24 +307,67 @@ public partial class TunnelConfigsViewModel : ObservableObject
                 _logger.LogWarning(
                     "Secret blob missing for tunnel {Id} ('{Name}'); user will re-enter values.",
                     config.Id, config.Name);
-                wg = new WireGuardSettings();
             }
             else
             {
-                wg = JsonSerializer.Deserialize<WireGuardSettings>(secret) ?? new WireGuardSettings();
+                switch (config.Kind)
+                {
+                    case TunnelKind.WireGuard:
+                        wg = JsonSerializer.Deserialize<WireGuardSettings>(secret) ?? new WireGuardSettings();
+                        if (!LooksPopulated(wg))
+                        {
+                            _logger.LogWarning(
+                                "Tunnel {Id} ('{Name}') Kind=WireGuard but secret blob deserialized to defaults; " +
+                                "blob may be corrupted or belong to a different kind. User sees an empty editor.",
+                                config.Id, config.Name);
+                        }
+                        break;
+                    case TunnelKind.Fortinet:
+                        fg = JsonSerializer.Deserialize<FortinetSettings>(secret) ?? new FortinetSettings();
+                        if (!LooksPopulated(fg))
+                        {
+                            _logger.LogWarning(
+                                "Tunnel {Id} ('{Name}') Kind=Fortinet but secret blob deserialized to defaults; " +
+                                "blob may be corrupted or belong to a different kind. User sees an empty editor.",
+                                config.Id, config.Name);
+                        }
+                        break;
+                    default:
+                        // An unknown Kind reached the read path. SerializeSecret/ValidateDraft
+                        // both throw on unknown kinds — keep the read path symmetric by logging
+                        // loudly and returning empty defaults so the user can see the editor
+                        // (rather than silently swallowing the corruption).
+                        _logger.LogError(
+                            "Tunnel {Id} ('{Name}') has unknown Kind={Kind}; user will see an empty editor.",
+                            config.Id, config.Name, config.Kind);
+                        break;
+                }
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to load tunnel secret for '{Name}'", config.Name);
-            wg = new WireGuardSettings();
         }
-        return new TunnelDraft(config.Name, config.Kind, wg);
+        return new TunnelDraft(config.Name, config.Kind, wg, fg);
     }
+
+    // "Looks populated" = at least one of the kind's required fields is non-empty. A blob
+    // that deserialized to all-default values is the symptom of a kind/blob mismatch (no JSON
+    // properties overlapped with the target type) — distinct from "user saved an empty form,"
+    // which is rejected by ValidateDraft before SerializeSecret writes any bytes.
+    private static bool LooksPopulated(WireGuardSettings wg) =>
+        !string.IsNullOrWhiteSpace(wg.InterfacePrivateKey) ||
+        !string.IsNullOrWhiteSpace(wg.PeerPublicKey) ||
+        !string.IsNullOrWhiteSpace(wg.PeerEndpoint);
+
+    private static bool LooksPopulated(FortinetSettings fg) =>
+        !string.IsNullOrWhiteSpace(fg.Host) ||
+        !string.IsNullOrWhiteSpace(fg.Username);
 
     private static byte[] SerializeSecret(TunnelDraft draft) => draft.Kind switch
     {
         TunnelKind.WireGuard => JsonSerializer.SerializeToUtf8Bytes(draft.WireGuard),
+        TunnelKind.Fortinet => JsonSerializer.SerializeToUtf8Bytes(draft.Fortinet),
         _ => throw new InvalidOperationException($"Unsupported tunnel kind '{draft.Kind}'."),
     };
 
@@ -318,6 +385,9 @@ public partial class TunnelConfigsViewModel : ObservableObject
             case TunnelKind.WireGuard:
                 ValidateWireGuard(draft.WireGuard);
                 return;
+            case TunnelKind.Fortinet:
+                ValidateFortinet(draft.Fortinet);
+                return;
             default:
                 throw new InvalidOperationException($"Unsupported tunnel kind '{draft.Kind}'.");
         }
@@ -330,6 +400,19 @@ public partial class TunnelConfigsViewModel : ObservableObject
         if (string.IsNullOrWhiteSpace(wg.InterfaceAddress)) sb.AppendLine("Interface address is required (e.g. 10.0.0.2/32).");
         if (string.IsNullOrWhiteSpace(wg.PeerPublicKey)) sb.AppendLine("Peer public key is required.");
         if (string.IsNullOrWhiteSpace(wg.PeerEndpoint)) sb.AppendLine("Peer endpoint is required (host:port).");
+        if (sb.Length > 0) throw new InvalidOperationException(sb.ToString().TrimEnd());
+    }
+
+    private static void ValidateFortinet(FortinetSettings fg)
+    {
+        var sb = new StringBuilder();
+        if (string.IsNullOrWhiteSpace(fg.Host)) sb.AppendLine("Gateway host is required.");
+        if (fg.Port is < 1 or > 65535) sb.AppendLine("Port must be between 1 and 65535.");
+        if (string.IsNullOrWhiteSpace(fg.Username)) sb.AppendLine("Username is required.");
+        // IsNullOrWhiteSpace mirrors every other required field (and ValidateWireGuard) — a
+        // single space passed as a password would otherwise reach the gateway as %20 and bounce
+        // back as a cryptic 'invalid credentials' instead of a clean client-side rejection.
+        if (string.IsNullOrWhiteSpace(fg.Password)) sb.AppendLine("Password is required.");
         if (sb.Length > 0) throw new InvalidOperationException(sb.ToString().TrimEnd());
     }
 

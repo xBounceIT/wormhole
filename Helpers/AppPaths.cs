@@ -48,4 +48,9 @@ internal static class AppPaths
     {
         return Path.Combine(AppContext.BaseDirectory, "wormhole-wgproxy.exe");
     }
+
+    public static string GetFortiProxyExecutablePath()
+    {
+        return Path.Combine(AppContext.BaseDirectory, "wormhole-fortiproxy.exe");
+    }
 }

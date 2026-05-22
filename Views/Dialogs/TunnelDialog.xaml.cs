@@ -30,8 +30,19 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
                 !string.IsNullOrWhiteSpace(InterfaceAddressBox.Text) &&
                 !string.IsNullOrWhiteSpace(PeerPublicKeyBox.Text) &&
                 !string.IsNullOrWhiteSpace(PeerEndpointBox.Text),
+            TunnelKind.Fortinet =>
+                !string.IsNullOrWhiteSpace(FortinetHostBox.Text) &&
+                IsValidPort(FortinetPortBox.Text) &&
+                !string.IsNullOrWhiteSpace(FortinetUsernameBox.Text) &&
+                // IsNullOrWhiteSpace mirrors the server-side ValidateFortinet check; an
+                // all-whitespace password would otherwise pass the dialog gate and fail at the
+                // gateway with a generic 'invalid credentials' message.
+                !string.IsNullOrWhiteSpace(FortinetPasswordBox.Password),
             _ => false,
         };
+
+    private static bool IsValidPort(string text) =>
+        int.TryParse(text, out var p) && p is >= 1 and <= 65535;
 
     public void LoadDraft(TunnelDraft initial)
     {
@@ -48,6 +59,18 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         PeerEndpointBox.Text = wg.PeerEndpoint;
         AllowedIpsBox.Text = wg.AllowedIps is null ? string.Empty : string.Join(", ", wg.AllowedIps);
         PersistentKeepaliveBox.Text = wg.PersistentKeepaliveSeconds?.ToString() ?? string.Empty;
+
+        var fg = initial.Fortinet;
+        FortinetHostBox.Text = fg.Host;
+        // fg.Port can be 0 when the persisted blob was hand-edited or pre-dates a default —
+        // prefer the XAML default of 443 over showing a value the user must wipe before saving.
+        FortinetPortBox.Text = (fg.Port is >= 1 and <= 65535 ? fg.Port : 443).ToString();
+        FortinetUsernameBox.Text = fg.Username;
+        FortinetPasswordBox.Password = fg.Password;
+        FortinetRealmBox.Text = fg.Realm ?? string.Empty;
+        FortinetTotpSecretBox.Password = fg.TotpSecret ?? string.Empty;
+        FortinetTrustCertCheck.IsChecked = fg.TrustServerCertificate;
+        FortinetCertPinBox.Text = fg.ServerCertSha256Pin ?? string.Empty;
 
         UpdateKindPanels();
     }
@@ -66,7 +89,19 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
             AllowedIps = SplitCsv(AllowedIpsBox.Text),
             PersistentKeepaliveSeconds = TryParseInt(PersistentKeepaliveBox.Text),
         };
-        return new TunnelDraft(NameBox.Text.Trim(), SelectedKind, wg);
+        var totp = FortinetTotpSecretBox.Password;
+        var fg = new FortinetSettings
+        {
+            Host = FortinetHostBox.Text.Trim(),
+            Port = TryParseInt(FortinetPortBox.Text) ?? 443,
+            Username = FortinetUsernameBox.Text.Trim(),
+            Password = FortinetPasswordBox.Password,
+            Realm = string.IsNullOrWhiteSpace(FortinetRealmBox.Text) ? null : FortinetRealmBox.Text.Trim(),
+            TotpSecret = string.IsNullOrWhiteSpace(totp) ? null : totp.Trim(),
+            TrustServerCertificate = FortinetTrustCertCheck.IsChecked == true,
+            ServerCertSha256Pin = string.IsNullOrWhiteSpace(FortinetCertPinBox.Text) ? null : FortinetCertPinBox.Text.Trim(),
+        };
+        return new TunnelDraft(NameBox.Text.Trim(), SelectedKind, wg, fg);
     }
 
     public void FocusNameField()
@@ -80,6 +115,13 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         ValidityChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    private void OnPasswordChanged(object sender, RoutedEventArgs e)
+    {
+        // PasswordBox doesn't raise TextChanged; route its PasswordChanged to the same handler
+        // so the dialog's Save button enables/disables in lockstep with the other fields.
+        ValidityChanged?.Invoke(this, EventArgs.Empty);
+    }
+
     private void OnKindChanged(object sender, SelectionChangedEventArgs e)
     {
         UpdateKindPanels();
@@ -89,6 +131,9 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
     private void UpdateKindPanels()
     {
         WireGuardPanel.Visibility = SelectedKind == TunnelKind.WireGuard
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        FortinetPanel.Visibility = SelectedKind == TunnelKind.Fortinet
             ? Visibility.Visible
             : Visibility.Collapsed;
     }
