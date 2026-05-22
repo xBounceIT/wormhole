@@ -57,6 +57,68 @@ public class Socks5ClientTests
         }
     }
 
+    [Fact]
+    public async Task ConnectAsync_SendsIPv4LiteralAsAtyp1()
+    {
+        using var server = new FakeSocksServer();
+        server.Start();
+
+        try
+        {
+            var stream = await Socks5Client.ConnectAsync(
+                server.LocalEndpoint, "192.0.2.10", 22, CancellationToken.None);
+            await using (stream)
+            {
+                await stream.WriteAsync(Encoding.ASCII.GetBytes("ping"), CancellationToken.None);
+                var buf = new byte[4];
+                await ReadExactAsync(stream, buf, CancellationToken.None);
+                Assert.Equal("pong", Encoding.ASCII.GetString(buf));
+            }
+        }
+        finally
+        {
+            await server.StopAsync();
+        }
+
+        Assert.Equal(0x01, server.LastAtyp);
+        Assert.Equal("192.0.2.10", server.LastRequestedHost);
+        Assert.Equal(22, server.LastRequestedPort);
+    }
+
+    [Fact]
+    public async Task ConnectAsync_SendsIPv6LiteralAsAtyp4()
+    {
+        // Regression: previously every target ran through IdnMapping.GetAscii, which throws
+        // on the colons in an IPv6 literal -- so any tunnel-enabled connection to an IPv6
+        // host would fail before any network I/O. Now IP literals must skip IDN and emit
+        // the right ATYP.
+        using var server = new FakeSocksServer();
+        server.Start();
+
+        try
+        {
+            var stream = await Socks5Client.ConnectAsync(
+                server.LocalEndpoint, "2001:db8::10", 22, CancellationToken.None);
+            await using (stream)
+            {
+                await stream.WriteAsync(Encoding.ASCII.GetBytes("ping"), CancellationToken.None);
+                var buf = new byte[4];
+                await ReadExactAsync(stream, buf, CancellationToken.None);
+                Assert.Equal("pong", Encoding.ASCII.GetString(buf));
+            }
+        }
+        finally
+        {
+            await server.StopAsync();
+        }
+
+        Assert.Equal(0x04, server.LastAtyp);
+        // Server normalizes back to dotted/colon form via IPAddress for equality independent
+        // of how the literal was bracketed in the client.
+        Assert.Equal(IPAddress.Parse("2001:db8::10"), IPAddress.Parse(server.LastRequestedHost!));
+        Assert.Equal(22, server.LastRequestedPort);
+    }
+
     private static async Task<int> ReadExactAsync(Stream s, byte[] buf, CancellationToken ct)
     {
         var read = 0;
@@ -77,6 +139,7 @@ public class Socks5ClientTests
 
         public IPEndPoint LocalEndpoint => (IPEndPoint)_listener.LocalEndpoint;
         public byte ReplyCode { get; set; } = 0x00;
+        public byte LastAtyp { get; private set; }
         public string? LastRequestedHost { get; private set; }
         public int LastRequestedPort { get; private set; }
 
@@ -114,15 +177,41 @@ public class Socks5ClientTests
                 // Request: ver, cmd, rsv, atyp
                 var req = new byte[4];
                 if (await ReadExactAsync(s, req, default) < 4) return;
-                if (req[3] != 0x03) { await s.WriteAsync(new byte[] { 0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0 }); return; }
-                var lenBuf = new byte[1];
-                if (await ReadExactAsync(s, lenBuf, default) < 1) return;
-                var host = new byte[lenBuf[0]];
-                if (await ReadExactAsync(s, host, default) < host.Length) return;
+                LastAtyp = req[3];
+                string parsedHost;
+                switch (req[3])
+                {
+                    case 0x01: // IPv4
+                        {
+                            var ipv4 = new byte[4];
+                            if (await ReadExactAsync(s, ipv4, default) < 4) return;
+                            parsedHost = new IPAddress(ipv4).ToString();
+                            break;
+                        }
+                    case 0x03: // DOMAINNAME
+                        {
+                            var lenBuf = new byte[1];
+                            if (await ReadExactAsync(s, lenBuf, default) < 1) return;
+                            var host = new byte[lenBuf[0]];
+                            if (await ReadExactAsync(s, host, default) < host.Length) return;
+                            parsedHost = Encoding.ASCII.GetString(host);
+                            break;
+                        }
+                    case 0x04: // IPv6
+                        {
+                            var ipv6 = new byte[16];
+                            if (await ReadExactAsync(s, ipv6, default) < 16) return;
+                            parsedHost = new IPAddress(ipv6).ToString();
+                            break;
+                        }
+                    default:
+                        await s.WriteAsync(new byte[] { 0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0 });
+                        return;
+                }
                 var portBuf = new byte[2];
                 if (await ReadExactAsync(s, portBuf, default) < 2) return;
 
-                LastRequestedHost = Encoding.ASCII.GetString(host);
+                LastRequestedHost = parsedHost;
                 LastRequestedPort = (portBuf[0] << 8) | portBuf[1];
 
                 await s.WriteAsync(new byte[] { 0x05, ReplyCode, 0x00, 0x01, 0, 0, 0, 0, 0, 0 });

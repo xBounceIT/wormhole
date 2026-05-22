@@ -10,7 +10,8 @@ using System.Threading.Tasks;
 namespace Wormhole.Services.Tunneling;
 
 /// <summary>
-/// Minimal RFC 1928 SOCKS5 client: no-auth method only, CONNECT command, DOMAINNAME address type.
+/// Minimal RFC 1928 SOCKS5 client: no-auth method only, CONNECT command. Emits ATYP=0x01
+/// (IPv4) / 0x04 (IPv6) for parsed IP literals and ATYP=0x03 (DOMAINNAME) for hostnames.
 /// Sized for the in-process tunnel use case where the SOCKS5 server is always our own sidecar.
 /// </summary>
 public static class Socks5Client
@@ -25,17 +26,57 @@ public static class Socks5Client
         if (string.IsNullOrWhiteSpace(targetHost)) throw new ArgumentException("target host required", nameof(targetHost));
         if (targetPort is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(targetPort));
 
-        // SOCKS5 DOMAINNAME is ASCII-only per RFC 1928. Punycode-convert IDN hostnames so a
-        // profile like "münchen.example.com" doesn't get silently mangled into "b?nchen..."
-        // by Encoding.ASCII and then fail downstream as a confusing NXDOMAIN.
-        string asciiHost;
-        try { asciiHost = new IdnMapping().GetAscii(targetHost); }
-        catch (ArgumentException ex)
+        // Build the address portion of the CONNECT request. SOCKS5 supports three address
+        // families; pick the right one up-front:
+        //   - IPv4 literal  → ATYP=0x01, 4 raw bytes
+        //   - IPv6 literal  → ATYP=0x04, 16 raw bytes (colon-form, MUST NOT go through IdnMapping
+        //                      which throws on colons)
+        //   - hostname      → ATYP=0x03, Punycoded ASCII bytes prefixed by length
+        //
+        // Without the IP-literal branches an IPv6 host like "2001:db8::10" hits
+        // IdnMapping.GetAscii and throws before any I/O, making every IPv6 target through the
+        // tunnel a guaranteed failure even though the sidecar handles ATYP=0x04 fine.
+        byte atyp;
+        byte[] addrBytes;
+        if (IPAddress.TryParse(targetHost, out var ip))
         {
-            throw new ArgumentException($"target host '{targetHost}' is not a valid IDN/ASCII hostname", nameof(targetHost), ex);
+            if (ip.AddressFamily == AddressFamily.InterNetwork)
+            {
+                atyp = 0x01;
+                addrBytes = ip.GetAddressBytes(); // 4 bytes, network order
+            }
+            else if (ip.AddressFamily == AddressFamily.InterNetworkV6)
+            {
+                atyp = 0x04;
+                addrBytes = ip.GetAddressBytes(); // 16 bytes, network order
+            }
+            else
+            {
+                throw new ArgumentException(
+                    $"target host '{targetHost}' parsed as IP but unsupported address family {ip.AddressFamily}.",
+                    nameof(targetHost));
+            }
         }
-        var hostBytes = Encoding.ASCII.GetBytes(asciiHost);
-        if (hostBytes.Length > 255) throw new ArgumentException("target host too long for SOCKS5 DOMAINNAME (>255)", nameof(targetHost));
+        else
+        {
+            // SOCKS5 DOMAINNAME is ASCII-only per RFC 1928. Punycode-convert IDN hostnames so a
+            // profile like "münchen.example.com" doesn't get silently mangled into "b?nchen..."
+            // by Encoding.ASCII and then fail downstream as a confusing NXDOMAIN.
+            string asciiHost;
+            try { asciiHost = new IdnMapping().GetAscii(targetHost); }
+            catch (ArgumentException ex)
+            {
+                throw new ArgumentException($"target host '{targetHost}' is not a valid IDN/ASCII hostname or IP literal", nameof(targetHost), ex);
+            }
+            var hostBytes = Encoding.ASCII.GetBytes(asciiHost);
+            if (hostBytes.Length > 255) throw new ArgumentException("target host too long for SOCKS5 DOMAINNAME (>255)", nameof(targetHost));
+            atyp = 0x03;
+            // DOMAINNAME is length-prefixed; pack [len][bytes] into addrBytes so the wire
+            // assembly below stays uniform across atyp branches.
+            addrBytes = new byte[1 + hostBytes.Length];
+            addrBytes[0] = (byte)hostBytes.Length;
+            Buffer.BlockCopy(hostBytes, 0, addrBytes, 1, hostBytes.Length);
+        }
 
         var socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
         NetworkStream? stream = null;
@@ -52,15 +93,16 @@ public static class Socks5Client
             if (greetingResp[0] != 0x05) throw new IOException($"SOCKS5: unexpected version 0x{greetingResp[0]:x2} in greeting reply");
             if (greetingResp[1] != 0x00) throw new IOException($"SOCKS5: server selected unsupported auth method 0x{greetingResp[1]:x2}");
 
-            var req = new byte[7 + hostBytes.Length];
+            // [VER, CMD, RSV, ATYP, ADDR..., PORT(2)] — uniform across all three atyps because
+            // addrBytes already includes the length byte for DOMAINNAME.
+            var req = new byte[4 + addrBytes.Length + 2];
             req[0] = 0x05;
             req[1] = 0x01;
             req[2] = 0x00;
-            req[3] = 0x03;
-            req[4] = (byte)hostBytes.Length;
-            Buffer.BlockCopy(hostBytes, 0, req, 5, hostBytes.Length);
-            req[5 + hostBytes.Length] = (byte)((targetPort >> 8) & 0xff);
-            req[6 + hostBytes.Length] = (byte)(targetPort & 0xff);
+            req[3] = atyp;
+            Buffer.BlockCopy(addrBytes, 0, req, 4, addrBytes.Length);
+            req[4 + addrBytes.Length] = (byte)((targetPort >> 8) & 0xff);
+            req[5 + addrBytes.Length] = (byte)(targetPort & 0xff);
             await stream.WriteAsync(req, cancellationToken).ConfigureAwait(false);
 
             var head = await ReadExactAsync(stream, 4, cancellationToken).ConfigureAwait(false);
