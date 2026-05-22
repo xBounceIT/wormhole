@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Globalization;
 using System.IO;
 using System.Net;
@@ -16,6 +17,9 @@ namespace Wormhole.Services.Tunneling;
 /// </summary>
 public static class Socks5Client
 {
+    private static readonly byte[] s_greeting = new byte[] { 0x05, 0x01, 0x00 };
+    private static readonly IdnMapping s_idn = new();
+
     public static async Task<Stream> ConnectAsync(
         IPEndPoint socksEndpoint,
         string targetHost,
@@ -63,19 +67,19 @@ public static class Socks5Client
             // profile like "münchen.example.com" doesn't get silently mangled into "b?nchen..."
             // by Encoding.ASCII and then fail downstream as a confusing NXDOMAIN.
             string asciiHost;
-            try { asciiHost = new IdnMapping().GetAscii(targetHost); }
+            try { asciiHost = s_idn.GetAscii(targetHost); }
             catch (ArgumentException ex)
             {
                 throw new ArgumentException($"target host '{targetHost}' is not a valid IDN/ASCII hostname or IP literal", nameof(targetHost), ex);
             }
-            var hostBytes = Encoding.ASCII.GetBytes(asciiHost);
-            if (hostBytes.Length > 255) throw new ArgumentException("target host too long for SOCKS5 DOMAINNAME (>255)", nameof(targetHost));
+            var byteCount = Encoding.ASCII.GetByteCount(asciiHost);
+            if (byteCount > 255) throw new ArgumentException("target host too long for SOCKS5 DOMAINNAME (>255)", nameof(targetHost));
             atyp = 0x03;
             // DOMAINNAME is length-prefixed; pack [len][bytes] into addrBytes so the wire
             // assembly below stays uniform across atyp branches.
-            addrBytes = new byte[1 + hostBytes.Length];
-            addrBytes[0] = (byte)hostBytes.Length;
-            Buffer.BlockCopy(hostBytes, 0, addrBytes, 1, hostBytes.Length);
+            addrBytes = new byte[1 + byteCount];
+            addrBytes[0] = (byte)byteCount;
+            Encoding.ASCII.GetBytes(asciiHost, addrBytes.AsSpan(1));
         }
 
         var socket = new Socket(SocketType.Stream, ProtocolType.Tcp);
@@ -88,8 +92,9 @@ public static class Socks5Client
             // so an earlier version leaked a TcpClient/Socket per SSH session.
             stream = new NetworkStream(socket, ownsSocket: true);
 
-            await stream.WriteAsync(new byte[] { 0x05, 0x01, 0x00 }, cancellationToken).ConfigureAwait(false);
-            var greetingResp = await ReadExactAsync(stream, 2, cancellationToken).ConfigureAwait(false);
+            await stream.WriteAsync(s_greeting, cancellationToken).ConfigureAwait(false);
+            var greetingResp = new byte[2];
+            await stream.ReadExactlyAsync(greetingResp, cancellationToken).ConfigureAwait(false);
             if (greetingResp[0] != 0x05) throw new IOException($"SOCKS5: unexpected version 0x{greetingResp[0]:x2} in greeting reply");
             if (greetingResp[1] != 0x00) throw new IOException($"SOCKS5: server selected unsupported auth method 0x{greetingResp[1]:x2}");
 
@@ -101,23 +106,31 @@ public static class Socks5Client
             req[2] = 0x00;
             req[3] = atyp;
             Buffer.BlockCopy(addrBytes, 0, req, 4, addrBytes.Length);
-            req[4 + addrBytes.Length] = (byte)((targetPort >> 8) & 0xff);
-            req[5 + addrBytes.Length] = (byte)(targetPort & 0xff);
+            BinaryPrimitives.WriteUInt16BigEndian(req.AsSpan(4 + addrBytes.Length), (ushort)targetPort);
             await stream.WriteAsync(req, cancellationToken).ConfigureAwait(false);
 
-            var head = await ReadExactAsync(stream, 4, cancellationToken).ConfigureAwait(false);
+            var head = new byte[4];
+            await stream.ReadExactlyAsync(head, cancellationToken).ConfigureAwait(false);
             if (head[0] != 0x05) throw new IOException($"SOCKS5: unexpected version 0x{head[0]:x2} in connect reply");
             if (head[1] != 0x00) throw new IOException($"SOCKS5: CONNECT failed with reply code 0x{head[1]:x2} ({DescribeReply(head[1])})");
 
-            // Consume BND.ADDR + BND.PORT (we don't use them).
-            int addrSkip = head[3] switch
+            // Consume BND.ADDR + BND.PORT (we don't use them). DOMAINNAME (0x03) carries a
+            // 1-byte length prefix that has to be read out-of-band to size the skip buffer.
+            int addrSkip;
+            switch (head[3])
             {
-                0x01 => 4,
-                0x04 => 16,
-                0x03 => (await ReadExactAsync(stream, 1, cancellationToken).ConfigureAwait(false))[0],
-                _ => throw new IOException($"SOCKS5: unknown bound address type 0x{head[3]:x2}"),
-            };
-            await ReadExactAsync(stream, addrSkip + 2, cancellationToken).ConfigureAwait(false);
+                case 0x01: addrSkip = 4; break;
+                case 0x04: addrSkip = 16; break;
+                case 0x03:
+                    var lenBuf = new byte[1];
+                    await stream.ReadExactlyAsync(lenBuf, cancellationToken).ConfigureAwait(false);
+                    addrSkip = lenBuf[0];
+                    break;
+                default:
+                    throw new IOException($"SOCKS5: unknown bound address type 0x{head[3]:x2}");
+            }
+            var skipBuf = new byte[addrSkip + 2];
+            await stream.ReadExactlyAsync(skipBuf, cancellationToken).ConfigureAwait(false);
 
             return stream;
         }
@@ -127,19 +140,6 @@ public static class Socks5Client
             else socket.Dispose();
             throw;
         }
-    }
-
-    private static async Task<byte[]> ReadExactAsync(NetworkStream stream, int count, CancellationToken ct)
-    {
-        var buf = new byte[count];
-        var read = 0;
-        while (read < count)
-        {
-            var n = await stream.ReadAsync(buf.AsMemory(read, count - read), ct).ConfigureAwait(false);
-            if (n == 0) throw new EndOfStreamException("SOCKS5: unexpected end of stream");
-            read += n;
-        }
-        return buf;
     }
 
     private static string DescribeReply(byte code) => code switch

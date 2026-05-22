@@ -111,7 +111,7 @@ public sealed class LocalTcpForwarder : IAsyncDisposable
                     // loop. WhenAny + force-close-peer unblocks the loser cleanly.
                     var clientToTunnel = clientStream.CopyToAsync(tunnelStream, ct);
                     var tunnelToClient = tunnelStream.CopyToAsync(clientStream, ct);
-                    var first = await Task.WhenAny(clientToTunnel, tunnelToClient).ConfigureAwait(false);
+                    await Task.WhenAny(clientToTunnel, tunnelToClient).ConfigureAwait(false);
                     try { client.Close(); } catch { /* unblock the other copy */ }
                     try { tunnelStream.Close(); } catch { /* unblock the other copy */ }
                     try { await Task.WhenAll(clientToTunnel, tunnelToClient).ConfigureAwait(false); }

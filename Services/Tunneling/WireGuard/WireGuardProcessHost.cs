@@ -17,11 +17,13 @@ namespace Wormhole.Services.Tunneling.WireGuard;
 public sealed class WireGuardProcessHost : IAsyncDisposable
 {
     private static readonly TimeSpan ReadyTimeout = TimeSpan.FromSeconds(15);
+    private static readonly byte[] s_newline = new byte[] { (byte)'\n' };
 
     private readonly ILogger _logger;
     private readonly Process _process;
     private readonly Task _stderrPump;
     private int _disposedFlag;
+    private int _socksPort;
 
     private WireGuardProcessHost(Process process, ILogger logger)
     {
@@ -30,8 +32,7 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
         _stderrPump = Task.Run(PumpStderrAsync);
     }
 
-    public int SocksPort { get; private set; }
-    public IPEndPoint SocksEndpoint => new(IPAddress.Loopback, SocksPort);
+    public IPEndPoint SocksEndpoint => new(IPAddress.Loopback, _socksPort);
 
     public static async Task<WireGuardProcessHost> StartAsync(
         string sidecarPath,
@@ -71,9 +72,15 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
         var host = new WireGuardProcessHost(process, logger);
         try
         {
-            var json = JsonSerializer.Serialize(config);
-            await process.StandardInput.WriteLineAsync(json.AsMemory(), cancellationToken).ConfigureAwait(false);
-            await process.StandardInput.FlushAsync(cancellationToken).ConfigureAwait(false);
+            // Serialize straight to the stdin pipe instead of materializing the JSON as a
+            // string first — saves one full allocation of the (~400 byte) payload on the SSH
+            // connect hot path. The trailing newline is cosmetic for the sidecar's
+            // json.NewDecoder (which terminates on the closing brace) but kept so the line is
+            // visually separated when running the sidecar interactively for debugging.
+            var stdin = process.StandardInput.BaseStream;
+            await JsonSerializer.SerializeAsync(stdin, config, cancellationToken: cancellationToken).ConfigureAwait(false);
+            await stdin.WriteAsync(s_newline, cancellationToken).ConfigureAwait(false);
+            await stdin.FlushAsync(cancellationToken).ConfigureAwait(false);
             // Do NOT close stdin: the sidecar treats EOF as a shutdown signal.
 
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -101,7 +108,7 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
             {
                 throw new IOException($"WireGuard sidecar produced unexpected handshake line: '{line}'.");
             }
-            host.SocksPort = port;
+            host._socksPort = port;
             logger.LogInformation("WireGuard sidecar ready on 127.0.0.1:{Port} (pid {Pid}).", port, process.Id);
             return host;
         }

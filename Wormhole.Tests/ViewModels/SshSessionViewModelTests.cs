@@ -259,6 +259,9 @@ public sealed class SshSessionViewModelTests
         public Task<ConnectionNode?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
             Task.FromResult<ConnectionNode?>(null);
 
+        public Task<IReadOnlyList<(Guid Id, string Name)>> GetByTunnelConfigIdAsync(Guid tunnelConfigId, int limit, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<(Guid, string)>>(Array.Empty<(Guid, string)>());
+
         public Task AddAsync(ConnectionNode node, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
 

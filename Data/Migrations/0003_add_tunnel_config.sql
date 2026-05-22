@@ -10,6 +10,11 @@
 ALTER TABLE Nodes ADD COLUMN TunnelEnabled INTEGER NULL;
 ALTER TABLE Nodes ADD COLUMN TunnelConfigId TEXT NULL;
 
+-- Partial index: the tunnel-delete reference check needs "find nodes pointing at this
+-- TunnelConfigId" cheaply. Restricting to non-null rows keeps the index small because the
+-- vast majority of connections don't opt into a tunnel.
+CREATE INDEX IX_Nodes_TunnelConfigId ON Nodes(TunnelConfigId) WHERE TunnelConfigId IS NOT NULL;
+
 CREATE TABLE TunnelConfigs (
     Id         TEXT     PRIMARY KEY NOT NULL,
     Name       TEXT     NOT NULL,

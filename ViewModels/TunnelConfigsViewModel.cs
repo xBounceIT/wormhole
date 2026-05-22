@@ -122,11 +122,11 @@ public sealed partial class TunnelConfigsViewModel : ObservableObject
             InterfacePrivateKey = wg.InterfacePrivateKey;
             InterfaceAddress = wg.InterfaceAddress;
             MtuText = wg.Mtu?.ToString() ?? string.Empty;
-            DnsText = string.Join(", ", wg.Dns ?? new List<string>());
+            DnsText = wg.Dns is null ? string.Empty : string.Join(", ", wg.Dns);
             PeerPublicKey = wg.PeerPublicKey;
             PeerPresharedKey = wg.PeerPresharedKey ?? string.Empty;
             PeerEndpoint = wg.PeerEndpoint;
-            AllowedIpsText = string.Join(", ", wg.AllowedIps ?? new List<string>());
+            AllowedIpsText = wg.AllowedIps is null ? string.Empty : string.Join(", ", wg.AllowedIps);
             PersistentKeepaliveText = wg.PersistentKeepaliveSeconds?.ToString() ?? string.Empty;
         }
         catch (Exception ex)
@@ -181,6 +181,11 @@ public sealed partial class TunnelConfigsViewModel : ObservableObject
 
             if (SelectedConfig is null)
             {
+                // Compensate-on-failure: a half-created config (DB row but no secret blob) is
+                // worse than nothing — TunnelConfigs.Name is UNIQUE, so the user can't even
+                // retry the save with the same name without hitting the constraint. The
+                // SaveSecretWithCompensationAsync helper deletes the row we just inserted if
+                // the secret write throws, so a retry can use the same name.
                 var record = new TunnelConfig
                 {
                     Id = Guid.NewGuid(),
@@ -188,27 +193,8 @@ public sealed partial class TunnelConfigsViewModel : ObservableObject
                     Kind = EditorKind,
                 };
                 await _repo.AddAsync(record).ConfigureAwait(true);
-                try
-                {
-                    await _credentials.StoreTunnelConfigAsync(record.Id, secretBytes).ConfigureAwait(true);
-                }
-                catch
-                {
-                    // Compensate: a half-created config (DB row but no secret blob on disk) is
-                    // worse than nothing — TunnelConfigs.Name is UNIQUE, so the user can't even
-                    // retry the save with the same name without hitting the constraint. Roll
-                    // the row back so the failed save looks like nothing happened. If the
-                    // rollback itself fails, log and let the original exception propagate; the
-                    // user can recover by editing the DB or restarting.
-                    try { await _repo.DeleteAsync(record.Id).ConfigureAwait(true); }
-                    catch (Exception rollbackEx)
-                    {
-                        _logger.LogWarning(rollbackEx,
-                            "Failed to roll back orphan tunnel config row {Id} after secret-write failed.",
-                            record.Id);
-                    }
-                    throw;
-                }
+                await SaveSecretWithCompensationAsync(
+                    record.Id, secretBytes, rollback: () => _repo.DeleteAsync(record.Id)).ConfigureAwait(true);
                 Configs.Add(record);
                 SelectedConfig = record;
                 StatusMessage = $"Created '{record.Name}'.";
@@ -219,6 +205,10 @@ public sealed partial class TunnelConfigsViewModel : ObservableObject
                 // leave the ListView showing the new name with the old name still in the DB.
                 // UpdatedAt isn't bound to UI so we leave the in-memory copy stale until the
                 // next Page_Loaded refresh — no need to thread it back from the repo.
+                //
+                // Compensate-on-failure: an updated row pointing at an unchanged secret blob
+                // means the user thinks they saved new values but the on-disk secret is still
+                // the old one. The helper restores the old Name/Kind if the secret write throws.
                 var newName = EditorName.Trim();
                 var newKind = EditorKind;
                 var oldName = SelectedConfig.Name;
@@ -232,36 +222,15 @@ public sealed partial class TunnelConfigsViewModel : ObservableObject
                     UpdatedAt = SelectedConfig.UpdatedAt,
                 };
                 await _repo.UpdateAsync(snapshot).ConfigureAwait(true);
-                try
-                {
-                    await _credentials.StoreTunnelConfigAsync(SelectedConfig.Id, secretBytes).ConfigureAwait(true);
-                }
-                catch
-                {
-                    // Same compensate pattern as create: an updated row pointing at an
-                    // unchanged secret blob means the user thinks they saved new values but
-                    // the on-disk secret is still the old one. Roll the row back to the old
-                    // name/kind so row and blob stay in sync.
-                    try
+                await SaveSecretWithCompensationAsync(
+                    SelectedConfig.Id, secretBytes, rollback: () => _repo.UpdateAsync(new TunnelConfig
                     {
-                        var restore = new TunnelConfig
-                        {
-                            Id = SelectedConfig.Id,
-                            Name = oldName,
-                            Kind = oldKind,
-                            CreatedAt = SelectedConfig.CreatedAt,
-                            UpdatedAt = SelectedConfig.UpdatedAt,
-                        };
-                        await _repo.UpdateAsync(restore).ConfigureAwait(true);
-                    }
-                    catch (Exception rollbackEx)
-                    {
-                        _logger.LogWarning(rollbackEx,
-                            "Failed to roll back tunnel config row {Id} after secret-write failed.",
-                            SelectedConfig.Id);
-                    }
-                    throw;
-                }
+                        Id = SelectedConfig.Id,
+                        Name = oldName,
+                        Kind = oldKind,
+                        CreatedAt = SelectedConfig.CreatedAt,
+                        UpdatedAt = SelectedConfig.UpdatedAt,
+                    })).ConfigureAwait(true);
                 SelectedConfig.Name = newName;
                 SelectedConfig.Kind = newKind;
                 StatusMessage = $"Saved '{SelectedConfig.Name}'.";
@@ -294,13 +263,17 @@ public sealed partial class TunnelConfigsViewModel : ObservableObject
             // throws "Tunnel config <guid> was not found" at session start, with no way for
             // the user to recover except by editing the DB by hand. Ask the user to detach
             // first instead.
-            var nodes = await _connectionRepo.GetAllAsync().ConfigureAwait(true);
-            var referencing = nodes.Where(n => n.TunnelConfigId == id).ToList();
+            //
+            // Cap the query at 4 rows so we can render up to three names + an "and N more"
+            // suffix without loading every connection off SQLite. Backed by the partial index
+            // IX_Nodes_TunnelConfigId so this is an index-only lookup, not a table scan.
+            const int sampleCap = 3;
+            var referencing = await _connectionRepo.GetByTunnelConfigIdAsync(id, sampleCap + 1).ConfigureAwait(true);
             if (referencing.Count > 0)
             {
-                var sample = string.Join(", ", referencing.Take(3).Select(n => $"'{n.Name}'"));
-                var more = referencing.Count > 3 ? $" and {referencing.Count - 3} more" : string.Empty;
-                ErrorMessage = $"Cannot delete '{SelectedConfig.Name}': {referencing.Count} connection(s) " +
+                var sample = string.Join(", ", referencing.Take(sampleCap).Select(n => $"'{n.Name}'"));
+                var more = referencing.Count > sampleCap ? " and more" : string.Empty;
+                ErrorMessage = $"Cannot delete '{SelectedConfig.Name}': connections " +
                                $"still reference it ({sample}{more}). Detach the tunnel from those " +
                                "connections first.";
                 return;
@@ -320,6 +293,27 @@ public sealed partial class TunnelConfigsViewModel : ObservableObject
         finally
         {
             IsBusy = false;
+        }
+    }
+
+    // Best-effort compensate when a DPAPI secret write fails after the SQLite row has already
+    // committed. Logs (but does not throw on) rollback failures; the original secret-write
+    // exception always propagates so the user sees the failure.
+    private async Task SaveSecretWithCompensationAsync(Guid id, byte[] secretBytes, Func<Task> rollback)
+    {
+        try
+        {
+            await _credentials.StoreTunnelConfigAsync(id, secretBytes).ConfigureAwait(true);
+        }
+        catch
+        {
+            try { await rollback().ConfigureAwait(true); }
+            catch (Exception rollbackEx)
+            {
+                _logger.LogWarning(rollbackEx,
+                    "Failed to roll back tunnel config row {Id} after secret-write failed.", id);
+            }
+            throw;
         }
     }
 

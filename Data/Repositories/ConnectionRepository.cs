@@ -38,6 +38,20 @@ public sealed class ConnectionRepository : IConnectionRepository
             cancellationToken: cancellationToken));
     }
 
+    public async Task<IReadOnlyList<(Guid Id, string Name)>> GetByTunnelConfigIdAsync(
+        Guid tunnelConfigId, int limit, CancellationToken cancellationToken = default)
+    {
+        if (limit <= 0) return Array.Empty<(Guid, string)>();
+        using var connection = _factory.Open();
+        var rows = await connection.QueryAsync<TunnelRefRow>(new CommandDefinition(
+            "SELECT Id, Name FROM Nodes WHERE TunnelConfigId = @tunnelConfigId LIMIT @limit;",
+            new { tunnelConfigId, limit },
+            cancellationToken: cancellationToken));
+        return rows.Select(r => (r.Id, r.Name)).ToList();
+    }
+
+    private sealed record TunnelRefRow(Guid Id, string Name);
+
     public async Task AddAsync(ConnectionNode node, CancellationToken cancellationToken = default)
     {
         node.CreatedAt = DateTime.UtcNow;

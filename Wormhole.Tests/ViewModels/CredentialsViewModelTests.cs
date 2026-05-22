@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Tests.Fakes;
 using Wormhole.ViewModels;
 using Xunit;
 
@@ -355,59 +356,6 @@ public class CredentialsViewModelTests
         public Task DeleteAsync(Guid id, CancellationToken ct = default)
         {
             Profiles.RemoveAll(p => p.Id == id);
-            return Task.CompletedTask;
-        }
-    }
-
-    private sealed class FakeCredentialService : ICredentialService
-    {
-        public Dictionary<Guid, string> Passwords { get; } = new();
-        public Dictionary<Guid, byte[]> Keys { get; } = new();
-
-        public Task StorePasswordAsync(Guid credentialId, string password)
-        {
-            Passwords[credentialId] = password;
-            return Task.CompletedTask;
-        }
-
-        public Task<string?> ReadPasswordAsync(Guid credentialId)
-            => Task.FromResult(Passwords.TryGetValue(credentialId, out var p) ? p : null);
-
-        public Task DeletePasswordAsync(Guid credentialId)
-        {
-            Passwords.Remove(credentialId);
-            return Task.CompletedTask;
-        }
-
-        public Task StorePrivateKeyAsync(Guid credentialId, byte[] privateKeyBytes)
-        {
-            Keys[credentialId] = privateKeyBytes;
-            return Task.CompletedTask;
-        }
-
-        public Task<byte[]?> ReadPrivateKeyAsync(Guid credentialId)
-            => Task.FromResult(Keys.TryGetValue(credentialId, out var k) ? k : null);
-
-        public Task DeletePrivateKeyAsync(Guid credentialId)
-        {
-            Keys.Remove(credentialId);
-            return Task.CompletedTask;
-        }
-
-        public Dictionary<Guid, byte[]> TunnelConfigs { get; } = new();
-
-        public Task StoreTunnelConfigAsync(Guid tunnelConfigId, byte[] configBytes)
-        {
-            TunnelConfigs[tunnelConfigId] = configBytes;
-            return Task.CompletedTask;
-        }
-
-        public Task<byte[]?> ReadTunnelConfigAsync(Guid tunnelConfigId)
-            => Task.FromResult(TunnelConfigs.TryGetValue(tunnelConfigId, out var b) ? b : null);
-
-        public Task DeleteTunnelConfigAsync(Guid tunnelConfigId)
-        {
-            TunnelConfigs.Remove(tunnelConfigId);
             return Task.CompletedTask;
         }
     }

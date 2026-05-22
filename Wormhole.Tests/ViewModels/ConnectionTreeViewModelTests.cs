@@ -917,6 +917,8 @@ public class ConnectionTreeViewModelTests : IDisposable
             => _inner.GetAllAsync(ct);
         public Task<ConnectionNode?> GetByIdAsync(Guid id, System.Threading.CancellationToken ct = default)
             => _inner.GetByIdAsync(id, ct);
+        public Task<IReadOnlyList<(Guid Id, string Name)>> GetByTunnelConfigIdAsync(Guid tunnelConfigId, int limit, System.Threading.CancellationToken ct = default)
+            => _inner.GetByTunnelConfigIdAsync(tunnelConfigId, limit, ct);
         public Task AddAsync(ConnectionNode node, System.Threading.CancellationToken ct = default)
             => _inner.AddAsync(node, ct);
         public Task UpdateAsync(ConnectionNode node, System.Threading.CancellationToken ct = default)
