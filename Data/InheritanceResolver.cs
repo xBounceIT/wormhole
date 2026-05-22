@@ -4,10 +4,12 @@ namespace Wormhole.Data;
 
 public sealed class InheritanceResolver
 {
+#pragma warning disable CA1822 // kept instance — registered via DI; see CLAUDE.md (load-bearing)
     public ConnectionProfile Resolve(ConnectionNode node, IReadOnlyDictionary<Guid, ConnectionNode> nodesById)
+#pragma warning restore CA1822
     {
-        if (node is null) throw new ArgumentNullException(nameof(node));
-        if (nodesById is null) throw new ArgumentNullException(nameof(nodesById));
+        ArgumentNullException.ThrowIfNull(node);
+        ArgumentNullException.ThrowIfNull(nodesById);
         if (node.Kind != NodeKind.Connection)
         {
             throw new InvalidOperationException(

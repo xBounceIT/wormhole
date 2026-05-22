@@ -59,7 +59,9 @@ public partial class ShellViewModel : ObservableObject
         }
     }
 
+#pragma warning disable CA1822 // kept instance — bound from XAML via {x:Bind ViewModel.SidebarResizerHitWidth}
     public double SidebarResizerHitWidth => ResizerHitWidth;
+#pragma warning restore CA1822
 
     public Thickness SidebarResizerMargin =>
         new(sidebarWidth - (ResizerHitWidth / 2), 0, 0, 0);

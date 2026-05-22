@@ -18,9 +18,11 @@ public sealed class RdpHostForm : IDisposable
             "RdpHostForm.Connect is a scaffold placeholder. Implement ActiveX host in the RDP feature PR.");
     }
 
+#pragma warning disable CA1822 // stub — RDP feature PR will access ActiveX instance state
     public void Disconnect()
     {
     }
+#pragma warning restore CA1822
 
     public void Dispose()
     {

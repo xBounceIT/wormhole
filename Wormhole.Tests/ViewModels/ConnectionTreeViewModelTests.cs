@@ -9,8 +9,11 @@ using Xunit;
 
 namespace Wormhole.Tests.ViewModels;
 
-public class ConnectionTreeViewModelTests : IDisposable
+public sealed class ConnectionTreeViewModelTests : IDisposable
 {
+    private static readonly string[] ExpectedSortOrderAbc = { "A", "B", "C" };
+    private static readonly string[] ExpectedReorderBca = { "B", "C", "A" };
+
     // Inlined from Data/Migrations/0001_initial.sql + 0003_add_tunnel_config.sql: the test
     // project links source files rather than referencing the main assembly, so the embedded
     // .sql resources are not available. Keep in lockstep with the migration files.
@@ -250,7 +253,7 @@ public class ConnectionTreeViewModelTests : IDisposable
         }
 
         var rows = (await _repo.GetAllAsync()).OrderBy(r => r.SortOrder).ToList();
-        Assert.Equal(new[] { "A", "B", "C" }, rows.Select(r => r.Name));
+        Assert.Equal(ExpectedSortOrderAbc, rows.Select(r => r.Name));
         Assert.True(rows[0].SortOrder < rows[1].SortOrder);
         Assert.True(rows[1].SortOrder < rows[2].SortOrder);
     }
@@ -402,7 +405,7 @@ public class ConnectionTreeViewModelTests : IDisposable
         await vm.PersistTreeStructureAsync();
 
         var rows = (await _repo.GetAllAsync()).OrderBy(r => r.SortOrder).ToList();
-        Assert.Equal(new[] { "B", "C", "A" }, rows.Select(r => r.Name));
+        Assert.Equal(ExpectedReorderBca, rows.Select(r => r.Name));
     }
 
     [Fact]

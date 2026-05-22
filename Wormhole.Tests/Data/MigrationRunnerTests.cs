@@ -6,8 +6,11 @@ using Xunit;
 
 namespace Wormhole.Tests.Data;
 
-public class MigrationRunnerTests : IDisposable
+public sealed class MigrationRunnerTests : IDisposable
 {
+    private static readonly string[] ExpectedMigrationsAllApplied = { "0001_one", "0002_two" };
+    private static readonly string[] ExpectedMigrationsAfterRollback = { "0001_one" };
+
     private readonly string _dbPath;
     private readonly SqliteConnectionFactory _factory;
 
@@ -45,7 +48,7 @@ public class MigrationRunnerTests : IDisposable
 
         var applied = (await conn.QueryAsync<string>(
             "SELECT Id FROM __migration_history ORDER BY Id;")).ToList();
-        Assert.Equal(new[] { "0001_one", "0002_two" }, applied);
+        Assert.Equal(ExpectedMigrationsAllApplied, applied);
     }
 
     [Fact]
@@ -112,7 +115,7 @@ public class MigrationRunnerTests : IDisposable
 
         var applied = (await conn.QueryAsync<string>(
             "SELECT Id FROM __migration_history ORDER BY Id;")).ToList();
-        Assert.Equal(new[] { "0001_one" }, applied);
+        Assert.Equal(ExpectedMigrationsAfterRollback, applied);
     }
 
     // Note: the embedded-resource discovery path (LoadEmbeddedMigrations) is exercised at
