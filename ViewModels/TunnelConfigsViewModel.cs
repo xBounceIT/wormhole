@@ -269,20 +269,25 @@ public partial class TunnelConfigsViewModel : ObservableObject
         }
     }
 
-    private async Task<TunnelDraft?> ReadDraftAsync(TunnelConfig config)
+    // Always returns a draft: failures degrade to an empty WireGuardSettings so the user can
+    // re-enter values and Save to repair. The dialog's IsValid gating prevents accidentally
+    // saving an empty draft over real data.
+    private async Task<TunnelDraft> ReadDraftAsync(TunnelConfig config)
     {
         WireGuardSettings wg;
         try
         {
             var secret = await _credentials.ReadTunnelConfigAsync(config.Id);
-            wg = secret is null or { Length: 0 }
-                ? new WireGuardSettings()
-                : JsonSerializer.Deserialize<WireGuardSettings>(secret) ?? new WireGuardSettings();
             if (secret is null or { Length: 0 })
             {
                 _logger.LogWarning(
                     "Secret blob missing for tunnel {Id} ('{Name}'); user will re-enter values.",
                     config.Id, config.Name);
+                wg = new WireGuardSettings();
+            }
+            else
+            {
+                wg = JsonSerializer.Deserialize<WireGuardSettings>(secret) ?? new WireGuardSettings();
             }
         }
         catch (Exception ex)
@@ -301,6 +306,13 @@ public partial class TunnelConfigsViewModel : ObservableObject
 
     private static void ValidateDraft(TunnelDraft draft)
     {
+        // Defense-in-depth: the dialog's IsValid disables Save on an empty name, but if a draft
+        // ever bypasses the dialog (programmatic callers, future PRs) we still want to reject
+        // it rather than INSERT a row with Name = "" that violates the user's expectation but
+        // satisfies the NOT NULL constraint.
+        if (string.IsNullOrWhiteSpace(draft.Name))
+            throw new InvalidOperationException("Name is required.");
+
         switch (draft.Kind)
         {
             case TunnelKind.WireGuard:

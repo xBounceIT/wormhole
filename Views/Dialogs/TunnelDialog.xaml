@@ -55,7 +55,8 @@
                      Header="Endpoint (host:port)"
                      TextChanged="OnFieldChanged" />
             <TextBox x:Name="AllowedIpsBox"
-                     Header="Allowed IPs (comma-separated, e.g. 0.0.0.0/0)" />
+                     Header="Allowed IPs (comma-separated)"
+                     PlaceholderText="leave blank to route all traffic (0.0.0.0/0, ::/0)" />
             <TextBox x:Name="PersistentKeepaliveBox"
                      Header="Persistent keepalive seconds (optional)"
                      Width="160"

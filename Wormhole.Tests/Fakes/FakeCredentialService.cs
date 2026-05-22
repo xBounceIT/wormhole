@@ -36,7 +36,16 @@ public sealed class FakeCredentialService : ICredentialService
         Task.FromResult(PrivateKeys.TryGetValue(credentialId, out var b) ? b : null);
     public Task DeletePrivateKeyAsync(Guid credentialId) { PrivateKeys.Remove(credentialId); return Task.CompletedTask; }
 
-    public Task StoreTunnelConfigAsync(Guid tunnelConfigId, byte[] configBytes) { TunnelConfigs[tunnelConfigId] = configBytes; return Task.CompletedTask; }
+    /// <summary>Set true to make <see cref="StoreTunnelConfigAsync"/> throw — drives the
+    /// VM's compensate-on-failure rollback path under test.</summary>
+    public bool ThrowOnStoreTunnelConfig { get; set; }
+
+    public Task StoreTunnelConfigAsync(Guid tunnelConfigId, byte[] configBytes)
+    {
+        if (ThrowOnStoreTunnelConfig) throw new InvalidOperationException("simulated secret write failure");
+        TunnelConfigs[tunnelConfigId] = configBytes;
+        return Task.CompletedTask;
+    }
     public Task<byte[]?> ReadTunnelConfigAsync(Guid tunnelConfigId) =>
         Task.FromResult(TunnelConfigs.TryGetValue(tunnelConfigId, out var b) ? b : null);
     public Task DeleteTunnelConfigAsync(Guid tunnelConfigId) { TunnelConfigs.Remove(tunnelConfigId); return Task.CompletedTask; }
