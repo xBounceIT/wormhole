@@ -81,6 +81,7 @@ internal sealed class RdpHostForm : FormsForm
     public void Configure(
         ConnectionProfile profile,
         string? password,
+        IntPtr ownerHwnd = default,
         string? gatewayUsername = null,
         string? gatewayPassword = null)
     {
@@ -93,7 +94,10 @@ internal sealed class RdpHostForm : FormsForm
         if (!string.IsNullOrEmpty(profile.RdpDomain)) ocx.Domain = profile.RdpDomain;
 
         // --- Display ---
-        var (dw, dh) = ResolveDesktopSize(profile.RdpScreenSize);
+        // Pass the future owner HWND so the "Full screen" preset sizes against the monitor
+        // hosting that window, not always against PrimaryScreen. On mixed-DPI multi-monitor
+        // setups this avoids letterboxing / mis-scaling when the app is on a secondary display.
+        var (dw, dh) = ResolveDesktopSize(profile.RdpScreenSize, ownerHwnd);
         ocx.DesktopWidth = dw;
         ocx.DesktopHeight = dh;
         ocx.ColorDepth = NormaliseColorDepth(profile.RdpColorDepth);
@@ -363,13 +367,23 @@ internal sealed class RdpHostForm : FormsForm
             _ => 32,
         };
 
-    private static (int Width, int Height) ResolveDesktopSize(string? screenSize)
+    private static (int Width, int Height) ResolveDesktopSize(string? screenSize, IntPtr ownerHwnd)
     {
-        // Null / empty / "Full screen" → use the primary monitor work area (best mstsc-like default).
+        // Null / empty / "Full screen" → use the work area of the monitor that hosts the owner
+        // window (typically the WinUI main window). Falling back to PrimaryScreen would mis-size
+        // the remote desktop whenever the app is running on a secondary monitor that differs in
+        // resolution / DPI from the primary.
         if (string.IsNullOrWhiteSpace(screenSize) ||
             string.Equals(screenSize, RdpScreenSizes.FullScreenSentinel, StringComparison.OrdinalIgnoreCase))
         {
-            var sb = Screen.PrimaryScreen?.WorkingArea ?? new System.Drawing.Rectangle(0, 0, 1920, 1080);
+            Screen? screen = null;
+            if (ownerHwnd != IntPtr.Zero)
+            {
+                try { screen = Screen.FromHandle(ownerHwnd); }
+                catch { /* invalid HWND or display reconfig — fall through */ }
+            }
+            var sb = (screen ?? Screen.PrimaryScreen)?.WorkingArea
+                  ?? new System.Drawing.Rectangle(0, 0, 1920, 1080);
             return (Math.Max(640, sb.Width), Math.Max(480, sb.Height));
         }
         var parts = screenSize.Split('x', 'X');

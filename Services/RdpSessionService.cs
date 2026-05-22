@@ -37,7 +37,7 @@ public sealed class RdpSessionService : IRdpSessionService
         try
         {
             _ = form.Hwnd; // force handle creation + AxHost CreateControl before Configure / SetParent
-            form.Configure(profile, password, gatewayUsername, gatewayPassword);
+            form.Configure(profile, password, ownerHwnd, gatewayUsername, gatewayPassword);
             cancellationToken.ThrowIfCancellationRequested();
 
             // WinForms creates a top-level Form with WS_POPUP. SetParent alone leaves that bit

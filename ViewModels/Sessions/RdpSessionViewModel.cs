@@ -24,6 +24,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
     private IRdpSession? _session;
     private CancellationTokenSource? _cts;
+    private CancellationTokenSource? _timedOutAttempt;
     private int _connectInFlight;
     private IntPtr _ownerHwnd;
 
@@ -201,14 +202,24 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             // user retried — the new connect flips Status back to Connecting, and the stale
             // callback would tear the new session down on the old 30s timer.
             var attemptCts = cts;
-            cts.Token.Register(() => MarshalToUi(() =>
+            cts.Token.Register(() =>
             {
-                if (!ReferenceEquals(_cts, attemptCts)) return;
-                if (Status == SessionStatus.Connecting)
+                // Cancel callbacks run synchronously on the thread that triggered the cancel,
+                // BEFORE any awaiter observes IsCancellationRequested. Marking the attempt as
+                // "timed out" here lets the OperationCanceledException catch below distinguish
+                // a watchdog-driven cancel from an external one (FullTeardown / Disconnect),
+                // so the user still sees the timeout message even when the cancel is observed
+                // inline by a pending await rather than via the MarshalToUi path below.
+                if (ReferenceEquals(_cts, attemptCts)) _timedOutAttempt = attemptCts;
+                MarshalToUi(() =>
                 {
-                    DisposeAndTransition("RDP server didn't respond within 30 seconds.", dueToCredentials: false);
-                }
-            }));
+                    if (!ReferenceEquals(_cts, attemptCts)) return;
+                    if (Status == SessionStatus.Connecting)
+                    {
+                        DisposeAndTransition("RDP server didn't respond within 30 seconds.", dueToCredentials: false);
+                    }
+                });
+            });
 
             var (gwUser, gwPassword) = await ResolveGatewayCredentialsAsync(profile, token).ConfigureAwait(true);
             // Subscribe via the onSessionReady hook (not after the await) so the VM is ready
@@ -234,7 +245,17 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         catch (OperationCanceledException)
         {
             DisposeSessionSilently();
-            Status = SessionStatus.Disconnected;
+            // If the watchdog cancelled us (vs. user-initiated FullTeardown / Disconnect),
+            // surface the timeout as a recoverable failure with a message — otherwise the
+            // observed-inline cancel would look identical to a silent user disconnect.
+            if (ReferenceEquals(_timedOutAttempt, cts))
+            {
+                ReportFailure("RDP server didn't respond within 30 seconds.", dueToCredentials: false);
+            }
+            else
+            {
+                Status = SessionStatus.Disconnected;
+            }
         }
         catch (System.Runtime.InteropServices.COMException ex) when ((uint)ex.HResult == 0x80040154)
         {
