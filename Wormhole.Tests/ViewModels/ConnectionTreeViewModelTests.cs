@@ -958,6 +958,8 @@ public class ConnectionTreeViewModelTests : IDisposable
         }
         public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null)
             => Task.FromResult<CredentialDraft?>(null);
+        public Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null)
+            => Task.FromResult<TunnelDraft?>(null);
         public Task<string?> PromptPasswordAsync(string title, string message)
             => Task.FromResult<string?>(null);
     }

@@ -47,6 +47,7 @@
     <Compile Include="..\Models\TunnelConfig.cs" Link="Models\TunnelConfig.cs" />
     <Compile Include="..\Models\TunnelKind.cs" Link="Models\TunnelKind.cs" />
     <Compile Include="..\Models\TunnelState.cs" Link="Models\TunnelState.cs" />
+    <Compile Include="..\Models\TunnelDraft.cs" Link="Models\TunnelDraft.cs" />
     <Compile Include="..\Models\WireGuardSettings.cs" Link="Models\WireGuardSettings.cs" />
     <Compile Include="..\Services\Tunneling\ITunnelProvider.cs" Link="Services\Tunneling\ITunnelProvider.cs" />
     <Compile Include="..\Services\Tunneling\ITunnelInstance.cs" Link="Services\Tunneling\ITunnelInstance.cs" />

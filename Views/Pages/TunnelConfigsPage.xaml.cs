@@ -1,6 +1,9 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Navigation;
+using Wormhole.Models;
 using Wormhole.ViewModels;
 
 namespace Wormhole.Views.Pages;
@@ -15,8 +18,33 @@ public sealed partial class TunnelConfigsPage : Page
         this.InitializeComponent();
     }
 
-    private async void Page_Loaded(object sender, RoutedEventArgs e)
+    protected override void OnNavigatedTo(NavigationEventArgs e)
     {
-        await ViewModel.LoadAsync();
+        base.OnNavigatedTo(e);
+        _ = ViewModel.LoadCommand.ExecuteAsync(null);
+    }
+
+    private void OnCardDoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: TunnelConfig config })
+        {
+            ViewModel.EditTunnelCommand.Execute(config);
+        }
+    }
+
+    private void OnEditMenuItemClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: TunnelConfig config })
+        {
+            ViewModel.EditTunnelCommand.Execute(config);
+        }
+    }
+
+    private void OnDeleteMenuItemClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: TunnelConfig config })
+        {
+            ViewModel.DeleteTunnelCommand.Execute(config);
+        }
     }
 }

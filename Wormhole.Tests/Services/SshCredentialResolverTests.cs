@@ -203,6 +203,7 @@ public class SshCredentialResolverTests
         public Task<string?> PromptForTextAsync(string title, string label, string defaultValue = "") => Task.FromResult<string?>(null);
         public Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null) => Task.FromResult<NewConnectionDraft?>(null);
         public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null) => Task.FromResult<CredentialDraft?>(null);
+        public Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null) => Task.FromResult<TunnelDraft?>(null);
         public Task<string?> PromptPasswordAsync(string title, string message)
         {
             PromptCount++;

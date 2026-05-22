@@ -4,7 +4,6 @@ using System.Collections.ObjectModel;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
-using System.Threading;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -15,333 +14,302 @@ using Wormhole.Services;
 
 namespace Wormhole.ViewModels;
 
-public sealed partial class TunnelConfigsViewModel : ObservableObject
+public partial class TunnelConfigsViewModel : ObservableObject
 {
     private readonly ITunnelConfigRepository _repo;
     private readonly IConnectionRepository _connectionRepo;
     private readonly ICredentialService _credentials;
+    private readonly IDialogService _dialog;
     private readonly ILogger<TunnelConfigsViewModel> _logger;
-    private CancellationTokenSource? _editorLoadCts;
 
     public TunnelConfigsViewModel(
         ITunnelConfigRepository repo,
         IConnectionRepository connectionRepo,
         ICredentialService credentials,
+        IDialogService dialog,
         ILogger<TunnelConfigsViewModel> logger)
     {
         _repo = repo;
         _connectionRepo = connectionRepo;
         _credentials = credentials;
+        _dialog = dialog;
         _logger = logger;
+        Configs.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(FilteredConfigs));
+            OnPropertyChanged(nameof(IsEmpty));
+            OnPropertyChanged(nameof(HasMatches));
+            OnPropertyChanged(nameof(HasNoMatches));
+        };
     }
 
     public ObservableCollection<TunnelConfig> Configs { get; } = new();
 
+    public bool IsEmpty => Configs.Count == 0;
+
+    public bool HasMatches => FilteredConfigs.Count > 0;
+
+    public bool HasNoMatches => !IsEmpty && !HasMatches;
+
     [ObservableProperty]
-    private TunnelConfig? selectedConfig;
+    [NotifyPropertyChangedFor(nameof(FilteredConfigs))]
+    [NotifyPropertyChangedFor(nameof(HasMatches))]
+    [NotifyPropertyChangedFor(nameof(HasNoMatches))]
+    private string searchText = string.Empty;
 
-    [ObservableProperty] private string editorName = string.Empty;
-    [ObservableProperty] private TunnelKind editorKind = TunnelKind.WireGuard;
-    [ObservableProperty] private string interfacePrivateKey = string.Empty;
-    [ObservableProperty] private string interfaceAddress = string.Empty;
-    [ObservableProperty] private string mtuText = string.Empty;
-    [ObservableProperty] private string dnsText = string.Empty;
-    [ObservableProperty] private string peerPublicKey = string.Empty;
-    [ObservableProperty] private string peerPresharedKey = string.Empty;
-    [ObservableProperty] private string peerEndpoint = string.Empty;
-    [ObservableProperty] private string allowedIpsText = string.Empty;
-    [ObservableProperty] private string persistentKeepaliveText = string.Empty;
-
-    [ObservableProperty] private string? statusMessage;
-    [ObservableProperty] private string? errorMessage;
-    [ObservableProperty] private bool isBusy;
-
-    partial void OnSelectedConfigChanged(TunnelConfig? value)
+    public IReadOnlyList<TunnelConfig> FilteredConfigs
     {
-        // A user flicking through the list would otherwise interleave async loads — whichever
-        // resolved last would win the editor fields, often showing the wrong config. Cancel
-        // any in-flight load on every selection change.
-        var prior = _editorLoadCts;
-        var fresh = new CancellationTokenSource();
-        _editorLoadCts = fresh;
-        try { prior?.Cancel(); } catch { /* already disposed */ }
-        prior?.Dispose();
-        _ = LoadEditorForAsync(value, fresh.Token);
+        get
+        {
+            if (string.IsNullOrWhiteSpace(SearchText))
+            {
+                return Configs.ToList();
+            }
+
+            var q = SearchText.Trim();
+            return Configs
+                .Where(c =>
+                    Contains(c.Name, q) ||
+                    Contains(c.Kind.ToString(), q))
+                .ToList();
+        }
     }
 
-    public async Task LoadAsync()
+    [RelayCommand]
+    private async Task LoadAsync()
     {
         try
         {
-            IsBusy = true;
-            var rows = await _repo.GetAllAsync().ConfigureAwait(true);
+            var rows = await _repo.GetAllAsync();
             Configs.Clear();
-            foreach (var r in rows) Configs.Add(r);
+            foreach (var row in rows)
+            {
+                Configs.Add(row);
+            }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Loading tunnel configs failed.");
-            ErrorMessage = ex.Message;
-        }
-        finally
-        {
-            IsBusy = false;
+            _logger.LogError(ex, "Failed to load tunnel configs");
+            await _dialog.ShowMessageAsync("Couldn't load tunnels", ex.Message);
         }
     }
 
-    private async Task LoadEditorForAsync(TunnelConfig? value, CancellationToken ct)
+    [RelayCommand]
+    private async Task AddTunnelAsync()
     {
-        ErrorMessage = null;
-        StatusMessage = null;
-        if (value is null)
+        var draft = await _dialog.PromptForTunnelAsync();
+        if (draft is null) return;
+
+        if (NameExists(draft.Name, excludingId: null))
         {
-            ResetEditor();
+            await _dialog.ShowMessageAsync(
+                "Name already in use",
+                $"A tunnel named '{draft.Name}' already exists. Pick a different name.");
             return;
         }
 
-        // Sync prefix sets name+kind immediately and CLEARS WireGuard fields so we never show
-        // the previous selection's secrets behind the new selection's name while the async
-        // ReadTunnelConfigAsync below is in flight.
-        EditorName = value.Name;
-        EditorKind = value.Kind;
-        ClearWireGuardFields();
+        try
+        {
+            ValidateDraft(draft);
+        }
+        catch (InvalidOperationException ex)
+        {
+            await _dialog.ShowMessageAsync("Tunnel settings incomplete", ex.Message);
+            return;
+        }
+
+        var record = new TunnelConfig
+        {
+            Id = Guid.NewGuid(),
+            Name = draft.Name,
+            Kind = draft.Kind,
+        };
 
         try
         {
-            var secret = await _credentials.ReadTunnelConfigAsync(value.Id).ConfigureAwait(true);
-            if (ct.IsCancellationRequested) return;
-            if (secret is null || secret.Length == 0)
-            {
-                // Row exists but secret blob doesn't — recover by letting the user re-enter.
-                ClearWireGuardFields();
-                StatusMessage = "Secret blob missing on disk; re-enter values and Save to repair.";
-                return;
-            }
-            var wg = JsonSerializer.Deserialize<WireGuardSettings>(secret) ?? new WireGuardSettings();
-            if (ct.IsCancellationRequested) return;
-            InterfacePrivateKey = wg.InterfacePrivateKey;
-            InterfaceAddress = wg.InterfaceAddress;
-            MtuText = wg.Mtu?.ToString() ?? string.Empty;
-            DnsText = wg.Dns is null ? string.Empty : string.Join(", ", wg.Dns);
-            PeerPublicKey = wg.PeerPublicKey;
-            PeerPresharedKey = wg.PeerPresharedKey ?? string.Empty;
-            PeerEndpoint = wg.PeerEndpoint;
-            AllowedIpsText = wg.AllowedIps is null ? string.Empty : string.Join(", ", wg.AllowedIps);
-            PersistentKeepaliveText = wg.PersistentKeepaliveSeconds?.ToString() ?? string.Empty;
+            await _repo.AddAsync(record);
+            // Compensate: a half-created config (DB row but no secret blob on disk) is worse
+            // than nothing — TunnelConfigs.Name is UNIQUE, so the user can't even retry the
+            // save with the same name without hitting the constraint. Roll the row back if
+            // the secret write throws so a retry can use the same name.
+            await SaveSecretWithCompensationAsync(
+                record.Id,
+                SerializeSecret(draft),
+                rollback: () => _repo.DeleteAsync(record.Id));
+            Configs.Add(record);
         }
         catch (Exception ex)
         {
-            if (ct.IsCancellationRequested) return;
-            _logger.LogError(ex, "Loading tunnel secret for {Id} failed.", value.Id);
-            ErrorMessage = ex.Message;
+            _logger.LogError(ex, "Failed to add tunnel '{Name}'", record.Name);
+            await _dialog.ShowMessageAsync("Couldn't save tunnel", ex.Message);
         }
     }
 
     [RelayCommand]
-    private void NewConfig()
+    private async Task EditTunnelAsync(TunnelConfig? config)
     {
-        SelectedConfig = null;
-        ResetEditor();
-        EditorName = "New WireGuard tunnel";
-        EditorKind = TunnelKind.WireGuard;
-        StatusMessage = "Fill the fields and Save.";
-    }
+        if (config is null) return;
 
-    [RelayCommand]
-    private async Task SaveAsync()
-    {
+        var existing = await ReadDraftAsync(config);
+        var draft = await _dialog.PromptForTunnelAsync(existing);
+        if (draft is null) return;
+
+        if (NameExists(draft.Name, excludingId: config.Id))
+        {
+            await _dialog.ShowMessageAsync(
+                "Name already in use",
+                $"A tunnel named '{draft.Name}' already exists. Pick a different name.");
+            return;
+        }
+
         try
         {
-            IsBusy = true;
-            ErrorMessage = null;
-            StatusMessage = null;
+            ValidateDraft(draft);
+        }
+        catch (InvalidOperationException ex)
+        {
+            await _dialog.ShowMessageAsync("Tunnel settings incomplete", ex.Message);
+            return;
+        }
 
-            if (string.IsNullOrWhiteSpace(EditorName))
-            {
-                ErrorMessage = "Name is required.";
-                return;
-            }
+        // Persist row before the secret blob so a failing UpdateAsync doesn't leave the on-disk
+        // secret pointing at the new payload while the row still shows the old Name/Kind.
+        // Compensate-on-failure: roll the row back to its old Name/Kind if the secret write
+        // throws, so the user doesn't end up with a row claiming new settings while the blob
+        // still holds the old ones.
+        var oldName = config.Name;
+        var oldKind = config.Kind;
+        var snapshot = new TunnelConfig
+        {
+            Id = config.Id,
+            Name = draft.Name,
+            Kind = draft.Kind,
+            CreatedAt = config.CreatedAt,
+            UpdatedAt = config.UpdatedAt,
+        };
 
-            var settings = new WireGuardSettings
-            {
-                InterfacePrivateKey = InterfacePrivateKey.Trim(),
-                InterfaceAddress = InterfaceAddress.Trim(),
-                Mtu = TryParseInt(MtuText),
-                Dns = SplitCsv(DnsText),
-                PeerPublicKey = PeerPublicKey.Trim(),
-                PeerPresharedKey = string.IsNullOrWhiteSpace(PeerPresharedKey) ? null : PeerPresharedKey.Trim(),
-                PeerEndpoint = PeerEndpoint.Trim(),
-                AllowedIps = SplitCsv(AllowedIpsText),
-                PersistentKeepaliveSeconds = TryParseInt(PersistentKeepaliveText),
-            };
-
-            ValidateWireGuard(settings);
-
-            var secretBytes = JsonSerializer.SerializeToUtf8Bytes(settings);
-
-            if (SelectedConfig is null)
-            {
-                // Compensate-on-failure: a half-created config (DB row but no secret blob) is
-                // worse than nothing — TunnelConfigs.Name is UNIQUE, so the user can't even
-                // retry the save with the same name without hitting the constraint. The
-                // SaveSecretWithCompensationAsync helper deletes the row we just inserted if
-                // the secret write throws, so a retry can use the same name.
-                var record = new TunnelConfig
+        try
+        {
+            await _repo.UpdateAsync(snapshot);
+            await SaveSecretWithCompensationAsync(
+                config.Id,
+                SerializeSecret(draft),
+                rollback: () => _repo.UpdateAsync(new TunnelConfig
                 {
-                    Id = Guid.NewGuid(),
-                    Name = EditorName.Trim(),
-                    Kind = EditorKind,
-                };
-                await _repo.AddAsync(record).ConfigureAwait(true);
-                await SaveSecretWithCompensationAsync(
-                    record.Id, secretBytes, rollback: () => _repo.DeleteAsync(record.Id)).ConfigureAwait(true);
-                Configs.Add(record);
-                SelectedConfig = record;
-                StatusMessage = $"Created '{record.Name}'.";
-            }
-            else
-            {
-                // Persist before mutating the bound record so a failing UpdateAsync doesn't
-                // leave the ListView showing the new name with the old name still in the DB.
-                // UpdatedAt isn't bound to UI so we leave the in-memory copy stale until the
-                // next Page_Loaded refresh — no need to thread it back from the repo.
-                //
-                // Compensate-on-failure: an updated row pointing at an unchanged secret blob
-                // means the user thinks they saved new values but the on-disk secret is still
-                // the old one. The helper restores the old Name/Kind if the secret write throws.
-                var newName = EditorName.Trim();
-                var newKind = EditorKind;
-                var oldName = SelectedConfig.Name;
-                var oldKind = SelectedConfig.Kind;
-                var snapshot = new TunnelConfig
-                {
-                    Id = SelectedConfig.Id,
-                    Name = newName,
-                    Kind = newKind,
-                    CreatedAt = SelectedConfig.CreatedAt,
-                    UpdatedAt = SelectedConfig.UpdatedAt,
-                };
-                await _repo.UpdateAsync(snapshot).ConfigureAwait(true);
-                await SaveSecretWithCompensationAsync(
-                    SelectedConfig.Id, secretBytes, rollback: () => _repo.UpdateAsync(new TunnelConfig
-                    {
-                        Id = SelectedConfig.Id,
-                        Name = oldName,
-                        Kind = oldKind,
-                        CreatedAt = SelectedConfig.CreatedAt,
-                        UpdatedAt = SelectedConfig.UpdatedAt,
-                    })).ConfigureAwait(true);
-                SelectedConfig.Name = newName;
-                SelectedConfig.Kind = newKind;
-                StatusMessage = $"Saved '{SelectedConfig.Name}'.";
-            }
+                    Id = config.Id,
+                    Name = oldName,
+                    Kind = oldKind,
+                    CreatedAt = config.CreatedAt,
+                    UpdatedAt = config.UpdatedAt,
+                }));
+            config.Name = draft.Name;
+            config.Kind = draft.Kind;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Saving tunnel config failed.");
-            ErrorMessage = ex.Message;
-        }
-        finally
-        {
-            IsBusy = false;
+            _logger.LogError(ex, "Failed to update tunnel '{Name}'", draft.Name);
+            await _dialog.ShowMessageAsync("Couldn't update tunnel", ex.Message);
+            await LoadAsync();
         }
     }
 
     [RelayCommand]
-    private async Task DeleteAsync()
+    private async Task DeleteTunnelAsync(TunnelConfig? config)
     {
-        if (SelectedConfig is null) return;
+        if (config is null) return;
+
+        // Refuse deletion if any connection node still points at this tunnel: silently
+        // removing the row would leave those connections in a state where TunnelManager
+        // throws "Tunnel config <guid> was not found" at session start, with no way for
+        // the user to recover except by editing the DB by hand. Ask the user to detach
+        // first instead. Cap the query at 4 rows so we can render up to three names + an
+        // "and more" suffix without loading every connection off SQLite. Backed by the
+        // partial index IX_Nodes_TunnelConfigId so this is an index-only lookup.
+        const int sampleCap = 3;
+        IReadOnlyList<(Guid Id, string Name)> referencing;
         try
         {
-            IsBusy = true;
-            ErrorMessage = null;
-            StatusMessage = null;
-            var id = SelectedConfig.Id;
-
-            // Refuse deletion if any connection node still points at this tunnel: silently
-            // removing the row would leave those connections in a state where TunnelManager
-            // throws "Tunnel config <guid> was not found" at session start, with no way for
-            // the user to recover except by editing the DB by hand. Ask the user to detach
-            // first instead.
-            //
-            // Cap the query at 4 rows so we can render up to three names + an "and N more"
-            // suffix without loading every connection off SQLite. Backed by the partial index
-            // IX_Nodes_TunnelConfigId so this is an index-only lookup, not a table scan.
-            const int sampleCap = 3;
-            var referencing = await _connectionRepo.GetByTunnelConfigIdAsync(id, sampleCap + 1).ConfigureAwait(true);
-            if (referencing.Count > 0)
-            {
-                var sample = string.Join(", ", referencing.Take(sampleCap).Select(n => $"'{n.Name}'"));
-                var more = referencing.Count > sampleCap ? " and more" : string.Empty;
-                ErrorMessage = $"Cannot delete '{SelectedConfig.Name}': connections " +
-                               $"still reference it ({sample}{more}). Detach the tunnel from those " +
-                               "connections first.";
-                return;
-            }
-
-            await _repo.DeleteAsync(id).ConfigureAwait(true);
-            await _credentials.DeleteTunnelConfigAsync(id).ConfigureAwait(true);
-            Configs.Remove(SelectedConfig);
-            SelectedConfig = null;
-            StatusMessage = "Deleted.";
+            referencing = await _connectionRepo.GetByTunnelConfigIdAsync(config.Id, sampleCap + 1);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Deleting tunnel config failed.");
-            ErrorMessage = ex.Message;
+            _logger.LogError(ex, "Failed to check tunnel references for '{Name}'", config.Name);
+            await _dialog.ShowMessageAsync("Couldn't delete tunnel", ex.Message);
+            return;
         }
-        finally
-        {
-            IsBusy = false;
-        }
-    }
 
-    // Best-effort compensate when a DPAPI secret write fails after the SQLite row has already
-    // committed. Logs (but does not throw on) rollback failures; the original secret-write
-    // exception always propagates so the user sees the failure.
-    private async Task SaveSecretWithCompensationAsync(Guid id, byte[] secretBytes, Func<Task> rollback)
-    {
+        if (referencing.Count > 0)
+        {
+            var sample = string.Join(", ", referencing.Take(sampleCap).Select(n => $"'{n.Name}'"));
+            var more = referencing.Count > sampleCap ? " and more" : string.Empty;
+            await _dialog.ShowMessageAsync(
+                "Tunnel is in use",
+                $"Can't delete '{config.Name}': connections still reference it ({sample}{more}). " +
+                "Detach the tunnel from those connections first.");
+            return;
+        }
+
+        var confirmed = await _dialog.ConfirmAsync(
+            "Delete tunnel",
+            $"Delete '{config.Name}'? This cannot be undone.",
+            primaryText: "Delete",
+            closeText: "Cancel");
+        if (!confirmed) return;
+
         try
         {
-            await _credentials.StoreTunnelConfigAsync(id, secretBytes).ConfigureAwait(true);
+            await _repo.DeleteAsync(config.Id);
+            await _credentials.DeleteTunnelConfigAsync(config.Id);
+            Configs.Remove(config);
         }
-        catch
+        catch (Exception ex)
         {
-            try { await rollback().ConfigureAwait(true); }
-            catch (Exception rollbackEx)
-            {
-                _logger.LogWarning(rollbackEx,
-                    "Failed to roll back tunnel config row {Id} after secret-write failed.", id);
-            }
-            throw;
+            _logger.LogError(ex, "Failed to delete tunnel '{Name}'", config.Name);
+            await _dialog.ShowMessageAsync("Couldn't delete tunnel", ex.Message);
         }
     }
 
-    private void ResetEditor()
+    private async Task<TunnelDraft?> ReadDraftAsync(TunnelConfig config)
     {
-        EditorName = string.Empty;
-        EditorKind = TunnelKind.WireGuard;
-        ClearWireGuardFields();
+        WireGuardSettings wg;
+        try
+        {
+            var secret = await _credentials.ReadTunnelConfigAsync(config.Id);
+            wg = secret is null or { Length: 0 }
+                ? new WireGuardSettings()
+                : JsonSerializer.Deserialize<WireGuardSettings>(secret) ?? new WireGuardSettings();
+            if (secret is null or { Length: 0 })
+            {
+                _logger.LogWarning(
+                    "Secret blob missing for tunnel {Id} ('{Name}'); user will re-enter values.",
+                    config.Id, config.Name);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load tunnel secret for '{Name}'", config.Name);
+            wg = new WireGuardSettings();
+        }
+        return new TunnelDraft(config.Name, config.Kind, wg);
     }
 
-    private void ClearWireGuardFields()
+    private static byte[] SerializeSecret(TunnelDraft draft) => draft.Kind switch
     {
-        InterfacePrivateKey = string.Empty;
-        InterfaceAddress = string.Empty;
-        MtuText = string.Empty;
-        DnsText = string.Empty;
-        PeerPublicKey = string.Empty;
-        PeerPresharedKey = string.Empty;
-        PeerEndpoint = string.Empty;
-        AllowedIpsText = string.Empty;
-        PersistentKeepaliveText = string.Empty;
+        TunnelKind.WireGuard => JsonSerializer.SerializeToUtf8Bytes(draft.WireGuard),
+        _ => throw new InvalidOperationException($"Unsupported tunnel kind '{draft.Kind}'."),
+    };
+
+    private static void ValidateDraft(TunnelDraft draft)
+    {
+        switch (draft.Kind)
+        {
+            case TunnelKind.WireGuard:
+                ValidateWireGuard(draft.WireGuard);
+                return;
+            default:
+                throw new InvalidOperationException($"Unsupported tunnel kind '{draft.Kind}'.");
+        }
     }
-
-    private static List<string> SplitCsv(string s) =>
-        s.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
-
-    private static int? TryParseInt(string s) =>
-        int.TryParse(s, out var n) ? n : (int?)null;
 
     private static void ValidateWireGuard(WireGuardSettings wg)
     {
@@ -352,4 +320,33 @@ public sealed partial class TunnelConfigsViewModel : ObservableObject
         if (string.IsNullOrWhiteSpace(wg.PeerEndpoint)) sb.AppendLine("Peer endpoint is required (host:port).");
         if (sb.Length > 0) throw new InvalidOperationException(sb.ToString().TrimEnd());
     }
+
+    // Best-effort compensate when a DPAPI secret write fails after the SQLite row has already
+    // committed. Logs (but does not throw on) rollback failures; the original secret-write
+    // exception always propagates so the user sees the failure.
+    private async Task SaveSecretWithCompensationAsync(Guid id, byte[] secretBytes, Func<Task> rollback)
+    {
+        try
+        {
+            await _credentials.StoreTunnelConfigAsync(id, secretBytes);
+        }
+        catch
+        {
+            try { await rollback(); }
+            catch (Exception rollbackEx)
+            {
+                _logger.LogWarning(rollbackEx,
+                    "Failed to roll back tunnel config row {Id} after secret-write failed.", id);
+            }
+            throw;
+        }
+    }
+
+    private static bool Contains(string? haystack, string needle) =>
+        haystack is not null && haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
+
+    private bool NameExists(string name, Guid? excludingId) =>
+        Configs.Any(c =>
+            (excludingId is null || c.Id != excludingId.Value) &&
+            string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
 }

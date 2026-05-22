@@ -390,6 +390,9 @@ public class CredentialsViewModelTests
             return Task.FromResult(CredentialPromptResult);
         }
 
+        public Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null)
+            => Task.FromResult<TunnelDraft?>(null);
+
         public Task<string?> PromptPasswordAsync(string title, string message)
             => Task.FromResult<string?>(null);
     }
