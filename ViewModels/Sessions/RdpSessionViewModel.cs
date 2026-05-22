@@ -175,9 +175,12 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 return;
             }
 
-            // No saved credential and the user cancelled the prompt — silent return to
-            // Disconnected, not Failed (no error message to show).
-            if (password is null && profile.CredentialId is null)
+            // ResolvePasswordAsync returns null only when the user cancelled the prompt —
+            // silent return to Disconnected, not Failed (no error message to show). This
+            // covers both "no saved credential, user cancelled" and "credential pointed to
+            // a deleted Credential Manager entry, ResolvePasswordAsync fell through to a
+            // prompt, user cancelled that". Either way, the user said no.
+            if (password is null)
             {
                 Status = SessionStatus.Disconnected;
                 return;

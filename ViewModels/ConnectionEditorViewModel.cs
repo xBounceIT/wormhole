@@ -19,6 +19,7 @@ namespace Wormhole.ViewModels;
 public partial class ConnectionEditorViewModel : ObservableObject
 {
     private readonly ICredentialRepository _credentialRepository;
+    private readonly List<CredentialProfile> _allCredentials = new();
     private bool _suppressPresetSync;
 
     public ConnectionEditorViewModel(ICredentialRepository credentialRepository)
@@ -26,6 +27,12 @@ public partial class ConnectionEditorViewModel : ObservableObject
         _credentialRepository = credentialRepository;
     }
 
+    /// <summary>
+    /// Filtered view over <see cref="_allCredentials"/> for the current <see cref="Protocol"/>:
+    /// SFTP connections show SSH credentials, SSH shows SSH, RDP shows RDP — and RDP excludes
+    /// <see cref="CredentialKind.SshKey"/> since the RDP host only consumes the password secret.
+    /// Rebuilt on load and whenever Protocol changes.
+    /// </summary>
     public ObservableCollection<CredentialProfile> AvailableCredentials { get; } = new();
 
     #region General
@@ -289,11 +296,92 @@ public partial class ConnectionEditorViewModel : ObservableObject
     public async Task LoadCredentialsAsync()
     {
         var creds = await _credentialRepository.GetAllAsync().ConfigureAwait(true);
+        _allCredentials.Clear();
+        _allCredentials.AddRange(creds);
+        RebuildAvailableCredentials();
+    }
+
+    /// <summary>
+    /// Rebuild <see cref="AvailableCredentials"/> from <see cref="_allCredentials"/> using the
+    /// current Protocol. A currently-selected credential whose protocol no longer matches the
+    /// filter is preserved as a "stale" entry so edit-round-tripping doesn't silently drop the
+    /// binding — but new credentials offered to the user are filtered to compatible ones only.
+    /// </summary>
+    private void RebuildAvailableCredentials()
+    {
+        var credentialProtocol = CredentialProtocolFor(Protocol);
+        var connectionIsRdp = Protocol == ProtocolType.Rdp;
+
         AvailableCredentials.Clear();
-        foreach (var c in creds) AvailableCredentials.Add(c);
-        // SelectedCredential is computed off the collection — re-pull after refresh.
+        foreach (var c in _allCredentials)
+        {
+            if (c.Protocol != credentialProtocol) continue;
+            // RDP login only consumes the password secret — SSH-key credentials would force the
+            // user into a misleading prompt path. Filter them out.
+            if (connectionIsRdp && c.Kind == CredentialKind.SshKey) continue;
+            AvailableCredentials.Add(c);
+        }
+
+        // Preserve the existing main + gateway selections when they no longer match the filter
+        // so edit round-trip doesn't lose the binding on a saved node.
+        AppendStaleSelection(CredentialId);
+        AppendStaleSelection(RdpGatewayCredentialId);
+
         OnPropertyChanged(nameof(SelectedCredential));
         OnPropertyChanged(nameof(SelectedGatewayCredential));
+    }
+
+    private void AppendStaleSelection(Guid? id)
+    {
+        if (id is not { } guid) return;
+        if (AvailableCredentials.Any(c => c.Id == guid)) return;
+        var stale = _allCredentials.FirstOrDefault(c => c.Id == guid);
+        if (stale is not null) AvailableCredentials.Add(stale);
+    }
+
+    /// <summary>SFTP connections reuse SSH credentials per the project's credential model
+    /// (the credential dialog doesn't even let users create SFTP-tagged credentials).</summary>
+    private static ProtocolType CredentialProtocolFor(ProtocolType connectionProtocol) =>
+        connectionProtocol == ProtocolType.Sftp ? ProtocolType.Ssh : connectionProtocol;
+
+    partial void OnProtocolChanged(ProtocolType value)
+    {
+        // When the user explicitly switches the connection protocol, drop a previously-bound
+        // credential that no longer matches the new filter. The alternative — preserving it as
+        // a stale entry — would silently expose a protocol-incompatible binding on save.
+        if (CredentialId is { } id && _allCredentials.FirstOrDefault(c => c.Id == id) is { } cred)
+        {
+            var expectedProtocol = CredentialProtocolFor(value);
+            var connectionIsRdp = value == ProtocolType.Rdp;
+            var stillCompatible = cred.Protocol == expectedProtocol
+                && (!connectionIsRdp || cred.Kind != CredentialKind.SshKey);
+            if (!stillCompatible) CredentialId = null;
+        }
+        // Gateway credential is RDP-only — switching away from RDP makes it meaningless.
+        if (value != ProtocolType.Rdp) RdpGatewayCredentialId = null;
+
+        RebuildAvailableCredentials();
+    }
+
+    // Pull a stale (protocol-mismatched) credential into AvailableCredentials when LoadFrom
+    // assigns one — without this, the ComboBox round-trips to its placeholder on edit and the
+    // user loses sight of the saved binding.
+    partial void OnCredentialIdChanged(Guid? value)
+    {
+        if (value is { } id && !AvailableCredentials.Any(c => c.Id == id))
+        {
+            AppendStaleSelection(id);
+            OnPropertyChanged(nameof(SelectedCredential));
+        }
+    }
+
+    partial void OnRdpGatewayCredentialIdChanged(Guid? value)
+    {
+        if (value is { } id && !AvailableCredentials.Any(c => c.Id == id))
+        {
+            AppendStaleSelection(id);
+            OnPropertyChanged(nameof(SelectedGatewayCredential));
+        }
     }
 
     public void LoadFrom(ConnectionNode node)

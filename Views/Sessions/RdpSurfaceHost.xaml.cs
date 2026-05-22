@@ -113,6 +113,12 @@ public sealed partial class RdpSurfaceHost : UserControl
         ViewModel?.DetachView();
         _attached = false;
 
+        // The session VM survives navigation and is shared across re-mounts of this control.
+        // If we leave the PropertyChanged subscription attached, each unload/reload cycle
+        // keeps the old host rooted by the VM and stacks duplicate callbacks. ViewModel = null
+        // routes through the setter which detaches the handler and drops our reference.
+        ViewModel = null;
+
         if (_trackedXamlRoot is not null)
         {
             _trackedXamlRoot.Changed -= OnXamlRootChanged;

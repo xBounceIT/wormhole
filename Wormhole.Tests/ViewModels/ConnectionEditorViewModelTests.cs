@@ -310,6 +310,87 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task AvailableCredentials_FiltersToConnectionProtocol()
+    {
+        var sshCred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
+        var repo = new MultiCredentialRepository(sshCred, rdpCred);
+        var vm = new ConnectionEditorViewModel(repo);
+        await vm.LoadCredentialsAsync();
+
+        // Default protocol is SSH — only the SSH credential is offered.
+        Assert.Single(vm.AvailableCredentials);
+        Assert.Equal("ssh", vm.AvailableCredentials[0].Name);
+
+        vm.Protocol = ProtocolType.Rdp;
+
+        Assert.Single(vm.AvailableCredentials);
+        Assert.Equal("rdp", vm.AvailableCredentials[0].Name);
+    }
+
+    [Fact]
+    public async Task AvailableCredentials_ExcludesSshKeyCredsForRdpConnections()
+    {
+        // RDP login resolves the password secret only; offering a key-based credential
+        // would funnel the user into a misleading prompt path.
+        var rdpPwd = new CredentialProfile { Name = "rdp-pwd", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
+        var rdpKey = new CredentialProfile { Name = "rdp-key", Protocol = ProtocolType.Rdp, Kind = CredentialKind.SshKey };
+        var repo = new MultiCredentialRepository(rdpPwd, rdpKey);
+        var vm = new ConnectionEditorViewModel(repo);
+        vm.Protocol = ProtocolType.Rdp;
+        await vm.LoadCredentialsAsync();
+
+        Assert.Single(vm.AvailableCredentials);
+        Assert.Equal("rdp-pwd", vm.AvailableCredentials[0].Name);
+    }
+
+    [Fact]
+    public async Task ProtocolChange_ClearsIncompatibleCredentialSelection()
+    {
+        var sshCred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
+        var repo = new MultiCredentialRepository(sshCred, rdpCred);
+        var vm = new ConnectionEditorViewModel(repo);
+        await vm.LoadCredentialsAsync();
+
+        vm.SelectedCredential = sshCred;
+        Assert.Equal(sshCred.Id, vm.CredentialId);
+
+        // Switch the connection to RDP. The SSH cred is no longer a valid pick — the editor
+        // must drop it rather than leave a protocol-incompatible binding to be saved later.
+        vm.Protocol = ProtocolType.Rdp;
+
+        Assert.Null(vm.CredentialId);
+        Assert.Null(vm.SelectedCredential);
+    }
+
+    [Fact]
+    public async Task LoadFrom_StaleCredential_StillVisibleInPicker()
+    {
+        // Edit round-trip: a node bound to a credential whose protocol no longer matches the
+        // connection (e.g. user changed the credential after saving the connection) must still
+        // show the binding in the picker — otherwise opening the editor would silently lose
+        // the existing CredentialId on save.
+        var staleCred = new CredentialProfile { Name = "old-ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var repo = new MultiCredentialRepository(staleCred);
+        var vm = new ConnectionEditorViewModel(repo);
+        await vm.LoadCredentialsAsync();
+
+        var node = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Rdp,
+            CredentialId = staleCred.Id,
+        };
+
+        vm.LoadFrom(node);
+
+        Assert.Contains(vm.AvailableCredentials, c => c.Id == staleCred.Id);
+        Assert.Equal(staleCred.Id, vm.CredentialId);
+    }
+
+    [Fact]
     public async Task WriteTo_ExplicitUsernameOverridesCredentialUsername()
     {
         // The free-text Username field is shown alongside the credential picker so users can
@@ -361,6 +442,19 @@ public class ConnectionEditorViewModelTests
             => Task.FromResult<IReadOnlyList<CredentialProfile>>(new[] { _credential });
         public Task<CredentialProfile?> GetByIdAsync(Guid id, CancellationToken ct = default)
             => Task.FromResult<CredentialProfile?>(id == _credential.Id ? _credential : null);
+        public Task AddAsync(CredentialProfile profile, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task UpdateAsync(CredentialProfile profile, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task DeleteAsync(Guid id, CancellationToken ct = default) => throw new NotImplementedException();
+    }
+
+    private sealed class MultiCredentialRepository : ICredentialRepository
+    {
+        private readonly CredentialProfile[] _credentials;
+        public MultiCredentialRepository(params CredentialProfile[] credentials) => _credentials = credentials;
+        public Task<IReadOnlyList<CredentialProfile>> GetAllAsync(CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<CredentialProfile>>(_credentials);
+        public Task<CredentialProfile?> GetByIdAsync(Guid id, CancellationToken ct = default)
+            => Task.FromResult<CredentialProfile?>(Array.Find(_credentials, c => c.Id == id));
         public Task AddAsync(CredentialProfile profile, CancellationToken ct = default) => throw new NotImplementedException();
         public Task UpdateAsync(CredentialProfile profile, CancellationToken ct = default) => throw new NotImplementedException();
         public Task DeleteAsync(Guid id, CancellationToken ct = default) => throw new NotImplementedException();
