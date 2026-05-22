@@ -187,8 +187,14 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             //      the token elapses while Status is still Connecting, we tear the session
             //      down ourselves and fail the VM with a timeout message.
             cts.CancelAfter(ConnectTimeout);
+            // Capture the CTS in the closure and compare with _cts when the callback fires.
+            // Without this, a watchdog from a previous attempt could still fire after the
+            // user retried — the new connect flips Status back to Connecting, and the stale
+            // callback would tear the new session down on the old 30s timer.
+            var attemptCts = cts;
             cts.Token.Register(() => MarshalToUi(() =>
             {
+                if (!ReferenceEquals(_cts, attemptCts)) return;
                 if (Status == SessionStatus.Connecting)
                 {
                     DisposeAndTransition("RDP server didn't respond within 30 seconds.", dueToCredentials: false);
