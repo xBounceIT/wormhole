@@ -61,4 +61,7 @@ public sealed record ConnectionProfile
 
     public string? SshKeyFileName { get; init; }
     public string? SshKnownHostFingerprint { get; init; }
+
+    public bool TunnelEnabled { get; init; }
+    public Guid? TunnelConfigId { get; init; }
 }

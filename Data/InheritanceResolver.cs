@@ -53,6 +53,8 @@ public sealed class InheritanceResolver
         bool? rdpUseExternalClient = null;
         string? sshKeyFileName = null;
         string? sshKnownHostFingerprint = null;
+        bool? tunnelEnabled = null;
+        Guid? tunnelConfigId = null;
 
         foreach (var ancestor in chain)
         {
@@ -93,6 +95,8 @@ public sealed class InheritanceResolver
             rdpUseExternalClient ??= ancestor.RdpUseExternalClient;
             sshKeyFileName ??= ancestor.SshKeyFileName;
             sshKnownHostFingerprint ??= ancestor.SshKnownHostFingerprint;
+            tunnelEnabled ??= ancestor.TunnelEnabled;
+            tunnelConfigId ??= ancestor.TunnelConfigId;
         }
 
         if (protocol is null)
@@ -147,6 +151,8 @@ public sealed class InheritanceResolver
             RdpUseExternalClient = rdpUseExternalClient ?? false,
             SshKeyFileName = sshKeyFileName,
             SshKnownHostFingerprint = sshKnownHostFingerprint,
+            TunnelEnabled = tunnelEnabled ?? false,
+            TunnelConfigId = tunnelConfigId,
         };
     }
 

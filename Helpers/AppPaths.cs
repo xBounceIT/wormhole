@@ -29,6 +29,11 @@ internal static class AppPaths
         return Path.Combine(GetAppDataDirectory(), "keys");
     }
 
+    public static string GetTunnelConfigsDirectory()
+    {
+        return Path.Combine(GetAppDataDirectory(), "tunnels");
+    }
+
     public static string GetUpdateCacheDirectory()
     {
         return Path.Combine(GetAppDataDirectory(), "cache", "updates");
@@ -37,5 +42,10 @@ internal static class AppPaths
     public static string GetWebAssetsDirectory()
     {
         return Path.Combine(AppContext.BaseDirectory, "Assets", "web");
+    }
+
+    public static string GetWgProxyExecutablePath()
+    {
+        return Path.Combine(AppContext.BaseDirectory, "wormhole-wgproxy.exe");
     }
 }

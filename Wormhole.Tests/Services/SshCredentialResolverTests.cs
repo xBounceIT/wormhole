@@ -213,28 +213,6 @@ public class SshCredentialResolverTests
             => throw new NotImplementedException();
     }
 
-    private sealed class FakeCredentialService : ICredentialService
-    {
-        private readonly Dictionary<Guid, string> _passwords;
-        private readonly Dictionary<Guid, byte[]> _keys;
-
-        public FakeCredentialService(Dictionary<Guid, string>? passwords = null, Dictionary<Guid, byte[]>? keys = null)
-        {
-            _passwords = passwords ?? new();
-            _keys = keys ?? new();
-        }
-
-        public Task StorePasswordAsync(Guid credentialId, string password) => throw new NotImplementedException();
-        public Task<string?> ReadPasswordAsync(Guid credentialId)
-            => Task.FromResult(_passwords.TryGetValue(credentialId, out var p) ? p : null);
-        public Task DeletePasswordAsync(Guid credentialId) => throw new NotImplementedException();
-
-        public Task StorePrivateKeyAsync(Guid credentialId, byte[] privateKeyBytes) => throw new NotImplementedException();
-        public Task<byte[]?> ReadPrivateKeyAsync(Guid credentialId)
-            => Task.FromResult(_keys.TryGetValue(credentialId, out var b) ? b : null);
-        public Task DeletePrivateKeyAsync(Guid credentialId) => throw new NotImplementedException();
-    }
-
     private sealed class FakePrivateKeyInspector : IPrivateKeyInspector
     {
         private readonly bool _isEncrypted;

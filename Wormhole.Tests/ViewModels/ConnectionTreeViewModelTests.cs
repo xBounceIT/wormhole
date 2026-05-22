@@ -12,9 +12,10 @@ namespace Wormhole.Tests.ViewModels;
 
 public class ConnectionTreeViewModelTests : IDisposable
 {
-    // Inlined from Data/Migrations/0001_initial.sql and 0003_rdp_extras.sql: the test project
-    // links source files rather than referencing the main assembly, so embedded .sql resources
-    // are not available. Keep the column set in sync with ConnectionRepository's SELECT/INSERT/UPDATE.
+    // Inlined from Data/Migrations/0001_initial.sql + 0003_add_tunnel_config.sql + 0003_rdp_extras.sql
+    // + 0004_rdp_use_external_client.sql: the test project links source files rather than
+    // referencing the main assembly, so embedded .sql resources are not available. Keep the
+    // column set in sync with ConnectionRepository's SELECT/INSERT/UPDATE.
     private const string SchemaSql = @"
         CREATE TABLE Nodes (
             Id                       TEXT     PRIMARY KEY NOT NULL,
@@ -59,10 +60,20 @@ public class ConnectionTreeViewModelTests : IDisposable
             RdpUseExternalClient     INTEGER  NULL,
             SshKeyFileName           TEXT     NULL,
             SshKnownHostFingerprint  TEXT     NULL,
+            TunnelEnabled            INTEGER  NULL,
+            TunnelConfigId           TEXT     NULL,
             CreatedAt                TEXT     NOT NULL,
             UpdatedAt                TEXT     NOT NULL
         );
-        CREATE INDEX IX_Nodes_ParentId ON Nodes(ParentId);";
+        CREATE INDEX IX_Nodes_ParentId ON Nodes(ParentId);
+        CREATE TABLE TunnelConfigs (
+            Id         TEXT     PRIMARY KEY NOT NULL,
+            Name       TEXT     NOT NULL,
+            Kind       INTEGER  NOT NULL,
+            CreatedAt  TEXT     NOT NULL,
+            UpdatedAt  TEXT     NOT NULL
+        );
+        CREATE UNIQUE INDEX UX_TunnelConfigs_Name ON TunnelConfigs(Name);";
 
     private readonly string _dbPath;
     private readonly string _connectionString;
@@ -886,6 +897,8 @@ public class ConnectionTreeViewModelTests : IDisposable
             => _inner.GetAllAsync(ct);
         public Task<ConnectionNode?> GetByIdAsync(Guid id, System.Threading.CancellationToken ct = default)
             => _inner.GetByIdAsync(id, ct);
+        public Task<IReadOnlyList<(Guid Id, string Name)>> GetByTunnelConfigIdAsync(Guid tunnelConfigId, int limit, System.Threading.CancellationToken ct = default)
+            => _inner.GetByTunnelConfigIdAsync(tunnelConfigId, limit, ct);
         public Task AddAsync(ConnectionNode node, System.Threading.CancellationToken ct = default)
             => _inner.AddAsync(node, ct);
         public Task UpdateAsync(ConnectionNode node, System.Threading.CancellationToken ct = default)
@@ -905,5 +918,4 @@ public class ConnectionTreeViewModelTests : IDisposable
     {
         public void Open(ConnectionProfile profile) { /* tests don't exercise tab opening */ }
     }
-
 }

@@ -9,6 +9,7 @@ using Wormhole.Interop.Terminal;
 using Wormhole.Models;
 using Wormhole.Services;
 using Wormhole.Services.Ssh;
+using Wormhole.Services.Tunneling;
 
 namespace Wormhole.ViewModels.Sessions;
 
@@ -20,6 +21,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private readonly ISshCredentialResolver _credentialResolver;
     private readonly IConnectionRepository _connectionRepo;
     private readonly IAppSettingsService _settingsService;
+    private readonly TunnelManager _tunnels;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<SshSessionViewModel> _logger;
 
@@ -37,6 +39,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private TerminalSize _initialSize = TerminalSize.Default;
     private CancellationTokenSource? _outputWaitCts;
     private int _connectInFlight;
+    private ITunnelInstance? _tunnel;
     private bool _reconnectRequestedWhileDetached;
 
     // The VM outlives the view: when SshTerminalView is unloaded and a fresh one is
@@ -50,12 +53,14 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         ISshCredentialResolver credentialResolver,
         IConnectionRepository connectionRepo,
         IAppSettingsService settingsService,
+        TunnelManager tunnels,
         ILoggerFactory loggerFactory)
     {
         _sshService = sshService;
         _credentialResolver = credentialResolver;
         _connectionRepo = connectionRepo;
         _settingsService = settingsService;
+        _tunnels = tunnels;
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<SshSessionViewModel>();
         PropertyChanged += (_, args) =>
@@ -296,7 +301,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
                 return;
             }
 
-            _session = await _sshService.ConnectAsync(profile, creds, _initialSize, token).ConfigureAwait(true);
+            _tunnel = await _tunnels.EstablishAsync(profile, token).ConfigureAwait(true);
+            _session = await _sshService.ConnectAsync(profile, creds, _initialSize, _tunnel, token).ConfigureAwait(true);
             // Re-read _webView after the awaits: if the user navigated away and back
             // during credential prompt / SSH connect, AttachAsync swapped _webView to the
             // freshly-created control but bailed on _connectInFlight, so the original
@@ -477,6 +483,14 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             session.Closed -= OnSessionClosed;
             try { await session.DisposeAsync().ConfigureAwait(true); }
             catch (Exception ex) { _logger.LogWarning(ex, "Error disposing SSH session."); }
+        }
+
+        var tunnel = _tunnel;
+        _tunnel = null;
+        if (tunnel is not null)
+        {
+            try { await tunnel.DisposeAsync().ConfigureAwait(true); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Error tearing down session tunnel."); }
         }
 
         // DetachView (view-only teardown) deliberately keeps the buffer — replaying

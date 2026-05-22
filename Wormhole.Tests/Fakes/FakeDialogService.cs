@@ -80,11 +80,20 @@ public class FakeDialogService : IDialogService
         output.RdpGatewayCredentialId = src.RdpGatewayCredentialId;
         output.RdpGatewayBypassLocal = src.RdpGatewayBypassLocal;
         output.RdpGatewayUseSameCreds = src.RdpGatewayUseSameCreds;
+        output.RdpUseExternalClient = src.RdpUseExternalClient;
+        output.TunnelEnabled = src.TunnelEnabled;
+        output.TunnelConfigId = src.TunnelConfigId;
         return Task.FromResult<ConnectionNode?>(output);
     }
 
     public virtual Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null)
         => Task.FromResult<CredentialDraft?>(null);
+
+    // Tunnel-create dialog plumbing — main added this to IDialogService when the SSH
+    // tunneling feature landed. Default null mirrors the password / text prompt fakes;
+    // tests that exercise tunnel creation override the method directly.
+    public virtual Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null)
+        => Task.FromResult<TunnelDraft?>(null);
 
     public virtual Task<string?> PromptPasswordAsync(string title, string message)
     {

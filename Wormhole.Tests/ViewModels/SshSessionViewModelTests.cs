@@ -1,8 +1,15 @@
+using System;
+using System.Collections.Generic;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
 using Wormhole.Services.Ssh;
+using Wormhole.Services.Tunneling;
+using Wormhole.Tests.Fakes;
 using Wormhole.ViewModels.Sessions;
 using Xunit;
 
@@ -341,13 +348,23 @@ public sealed class SshSessionViewModelTests
         return (vm, session);
     }
 
-    private static SshSessionViewModel CreateViewModel() =>
-        new(
+    private static SshSessionViewModel CreateViewModel()
+    {
+        var credService = new FakeCredentialService();
+        var configs = new FakeTunnelConfigRepository();
+        var tunnels = new TunnelManager(
+            Array.Empty<ITunnelProvider>(),
+            configs,
+            credService,
+            NullLoggerFactory.Instance.CreateLogger<TunnelManager>());
+        return new SshSessionViewModel(
             new FakeSshSessionService(),
             new FakeCredentialResolver(),
             new FakeConnectionRepository(),
             new FakeAppSettingsService(),
+            tunnels,
             NullLoggerFactory.Instance);
+    }
 
     private static ConnectionProfile CreateProfile() =>
         new()
@@ -366,6 +383,7 @@ public sealed class SshSessionViewModelTests
             ConnectionProfile profile,
             SshCredentials credentials,
             TerminalSize initialSize,
+            ITunnelInstance? tunnel = null,
             CancellationToken cancellationToken = default) =>
             throw new NotSupportedException("Tests attach fake sessions directly.");
     }
@@ -392,6 +410,9 @@ public sealed class SshSessionViewModelTests
 
         public Task<ConnectionNode?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
             Task.FromResult<ConnectionNode?>(null);
+
+        public Task<IReadOnlyList<(Guid Id, string Name)>> GetByTunnelConfigIdAsync(Guid tunnelConfigId, int limit, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<(Guid, string)>>(Array.Empty<(Guid, string)>());
 
         public Task AddAsync(ConnectionNode node, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;

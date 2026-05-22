@@ -2,6 +2,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Tests.Fakes;
 using Wormhole.ViewModels;
 using Xunit;
 
@@ -359,42 +360,6 @@ public class CredentialsViewModelTests
         }
     }
 
-    private sealed class FakeCredentialService : ICredentialService
-    {
-        public Dictionary<Guid, string> Passwords { get; } = new();
-        public Dictionary<Guid, byte[]> Keys { get; } = new();
-
-        public Task StorePasswordAsync(Guid credentialId, string password)
-        {
-            Passwords[credentialId] = password;
-            return Task.CompletedTask;
-        }
-
-        public Task<string?> ReadPasswordAsync(Guid credentialId)
-            => Task.FromResult(Passwords.TryGetValue(credentialId, out var p) ? p : null);
-
-        public Task DeletePasswordAsync(Guid credentialId)
-        {
-            Passwords.Remove(credentialId);
-            return Task.CompletedTask;
-        }
-
-        public Task StorePrivateKeyAsync(Guid credentialId, byte[] privateKeyBytes)
-        {
-            Keys[credentialId] = privateKeyBytes;
-            return Task.CompletedTask;
-        }
-
-        public Task<byte[]?> ReadPrivateKeyAsync(Guid credentialId)
-            => Task.FromResult(Keys.TryGetValue(credentialId, out var k) ? k : null);
-
-        public Task DeletePrivateKeyAsync(Guid credentialId)
-        {
-            Keys.Remove(credentialId);
-            return Task.CompletedTask;
-        }
-    }
-
     private sealed class FakeDialogService : IDialogService
     {
         public List<(string title, string message)> Messages { get; } = new();
@@ -424,6 +389,9 @@ public class CredentialsViewModelTests
             LastCredentialPromptInitial = initial;
             return Task.FromResult(CredentialPromptResult);
         }
+
+        public Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null)
+            => Task.FromResult<TunnelDraft?>(null);
 
         public Task<string?> PromptPasswordAsync(string title, string message)
             => Task.FromResult<string?>(null);

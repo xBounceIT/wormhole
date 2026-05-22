@@ -19,6 +19,6 @@ public interface IDialogService
     Task<ConnectionNode?> EditConnectionAsync(ConnectionNode initial, bool isNew);
 
     Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null);
-
+    Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null);
     Task<string?> PromptPasswordAsync(string title, string message);
 }

@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Wormhole.Views.Dialogs.TunnelDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:models="using:Wormhole.Models">
+
+    <!-- ContentDialog's internal ScrollViewer doesn't kick in when the hosted UserControl reports
+         its full natural height — the inner ScrollViewer here forces a scroll boundary at MaxHeight
+         so the Endpoint / AllowedIps / PersistentKeepalive fields below the fold remain reachable.
+         Padding="0,0,12,0" reserves space for the scrollbar so it doesn't overlap input chrome. -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                  VerticalScrollMode="Enabled"
+                  HorizontalScrollMode="Disabled"
+                  HorizontalScrollBarVisibility="Disabled"
+                  MaxHeight="520"
+                  MinWidth="360"
+                  MaxWidth="440">
+    <StackPanel Spacing="12" Padding="0,0,12,0">
+        <TextBox x:Name="NameBox"
+                 Header="Name"
+                 PlaceholderText="corp-vpn"
+                 TextChanged="OnFieldChanged" />
+
+        <ComboBox x:Name="KindBox"
+                  Header="VPN type"
+                  ItemsSource="{x:Bind Kinds}"
+                  SelectedIndex="0"
+                  SelectionChanged="OnKindChanged"
+                  HorizontalAlignment="Stretch">
+            <ComboBox.ItemTemplate>
+                <DataTemplate x:DataType="models:TunnelKind">
+                    <TextBlock Text="{x:Bind}" />
+                </DataTemplate>
+            </ComboBox.ItemTemplate>
+        </ComboBox>
+
+        <!-- WireGuard fields: shown only when KindBox.SelectedItem == TunnelKind.WireGuard.
+             Future kinds add sibling panels with their own Visibility binding so each tunnel
+             type owns its own form section. -->
+        <StackPanel x:Name="WireGuardPanel" Spacing="10">
+            <TextBlock Text="Interface" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+            <TextBox x:Name="InterfacePrivateKeyBox"
+                     Header="Private key (base64)"
+                     FontFamily="Consolas"
+                     TextChanged="OnFieldChanged" />
+            <TextBox x:Name="InterfaceAddressBox"
+                     Header="Address (e.g. 10.0.0.2/32)"
+                     TextChanged="OnFieldChanged" />
+            <TextBox x:Name="MtuBox"
+                     Header="MTU (optional)"
+                     Width="120"
+                     HorizontalAlignment="Left" />
+            <TextBox x:Name="DnsBox"
+                     Header="DNS (comma-separated, optional)" />
+
+            <TextBlock Text="Peer" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+            <TextBox x:Name="PeerPublicKeyBox"
+                     Header="Public key (base64)"
+                     FontFamily="Consolas"
+                     TextChanged="OnFieldChanged" />
+            <TextBox x:Name="PeerPresharedKeyBox"
+                     Header="Preshared key (base64, optional)"
+                     FontFamily="Consolas" />
+            <TextBox x:Name="PeerEndpointBox"
+                     Header="Endpoint (host:port)"
+                     TextChanged="OnFieldChanged" />
+            <TextBox x:Name="AllowedIpsBox"
+                     Header="Allowed IPs (comma-separated)"
+                     PlaceholderText="leave blank to route all traffic (0.0.0.0/0, ::/0)" />
+            <TextBox x:Name="PersistentKeepaliveBox"
+                     Header="Persistent keepalive seconds (optional)"
+                     Width="160"
+                     HorizontalAlignment="Left" />
+        </StackPanel>
+    </StackPanel>
+    </ScrollViewer>
+</UserControl>

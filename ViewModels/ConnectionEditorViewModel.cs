@@ -600,4 +600,18 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     /// <summary>Convenience pass-through so tests don't need to know about <see cref="RdpDriveList"/>.</summary>
     public static string NormaliseDriveList(string raw) => RdpDriveList.Normalise(raw);
+
+    #region Tunneling (from main)
+
+    // Tri-state: null = inherit from ancestor folder, false = explicitly off, true = explicitly on.
+    // Matches the existing RdpFullScreen shape so the UI control can bind directly.
+    [ObservableProperty]
+    private bool? tunnelEnabled;
+
+    [ObservableProperty]
+    private Guid? selectedTunnelConfigId;
+
+    public ObservableCollection<TunnelConfig> AvailableTunnelConfigs { get; } = new();
+
+    #endregion
 }
