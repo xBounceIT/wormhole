@@ -18,16 +18,19 @@ namespace Wormhole.ViewModels;
 public sealed partial class TunnelConfigsViewModel : ObservableObject
 {
     private readonly ITunnelConfigRepository _repo;
+    private readonly IConnectionRepository _connectionRepo;
     private readonly ICredentialService _credentials;
     private readonly ILogger<TunnelConfigsViewModel> _logger;
     private CancellationTokenSource? _editorLoadCts;
 
     public TunnelConfigsViewModel(
         ITunnelConfigRepository repo,
+        IConnectionRepository connectionRepo,
         ICredentialService credentials,
         ILogger<TunnelConfigsViewModel> logger)
     {
         _repo = repo;
+        _connectionRepo = connectionRepo;
         _credentials = credentials;
         _logger = logger;
     }
@@ -231,7 +234,27 @@ public sealed partial class TunnelConfigsViewModel : ObservableObject
         try
         {
             IsBusy = true;
+            ErrorMessage = null;
+            StatusMessage = null;
             var id = SelectedConfig.Id;
+
+            // Refuse deletion if any connection node still points at this tunnel: silently
+            // removing the row would leave those connections in a state where TunnelManager
+            // throws "Tunnel config <guid> was not found" at session start, with no way for
+            // the user to recover except by editing the DB by hand. Ask the user to detach
+            // first instead.
+            var nodes = await _connectionRepo.GetAllAsync().ConfigureAwait(true);
+            var referencing = nodes.Where(n => n.TunnelConfigId == id).ToList();
+            if (referencing.Count > 0)
+            {
+                var sample = string.Join(", ", referencing.Take(3).Select(n => $"'{n.Name}'"));
+                var more = referencing.Count > 3 ? $" and {referencing.Count - 3} more" : string.Empty;
+                ErrorMessage = $"Cannot delete '{SelectedConfig.Name}': {referencing.Count} connection(s) " +
+                               $"still reference it ({sample}{more}). Detach the tunnel from those " +
+                               "connections first.";
+                return;
+            }
+
             await _repo.DeleteAsync(id).ConfigureAwait(true);
             await _credentials.DeleteTunnelConfigAsync(id).ConfigureAwait(true);
             Configs.Remove(SelectedConfig);

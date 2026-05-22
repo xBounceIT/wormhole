@@ -27,6 +27,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -309,6 +310,25 @@ func resolveEndpoint(parent context.Context, endpoint string) (string, error) {
 	}
 	if len(addrs) == 0 {
 		return "", fmt.Errorf("no IP addresses for %q", host)
+	}
+	// Sort IPv4 first, then IPv6. Resolvers commonly return AAAA records ahead of A per
+	// RFC 6724, and WireGuard peer endpoints in the wild are very often IPv4-only — a
+	// dual-stack client whose first lookup result is IPv6 then ends up with an unreachable
+	// endpoint and an indefinitely-stuck handshake. wireguard-go pins one endpoint per
+	// peer and doesn't re-resolve, so the choice we make here is final until the user
+	// re-establishes the tunnel. Preferring IPv4 covers the common case; the rare
+	// IPv6-only peer still works because the IPv6 candidate is kept as the next-best
+	// option.
+	sort.SliceStable(addrs, func(i, j int) bool {
+		return addrs[i].Is4() && !addrs[j].Is4()
+	})
+	if len(addrs) > 1 {
+		others := make([]string, 0, len(addrs)-1)
+		for _, a := range addrs[1:] {
+			others = append(others, a.Unmap().String())
+		}
+		logf("peer %q resolved to %d addresses; using %s (other candidates: %s)",
+			host, len(addrs), addrs[0].Unmap().String(), strings.Join(others, ", "))
 	}
 	return net.JoinHostPort(addrs[0].Unmap().String(), port), nil
 }
