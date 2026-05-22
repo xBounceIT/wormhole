@@ -26,7 +26,7 @@ public static class Socks5Client
         int targetPort,
         CancellationToken cancellationToken)
     {
-        if (socksEndpoint is null) throw new ArgumentNullException(nameof(socksEndpoint));
+        ArgumentNullException.ThrowIfNull(socksEndpoint);
         if (string.IsNullOrWhiteSpace(targetHost)) throw new ArgumentException("target host required", nameof(targetHost));
         if (targetPort is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(targetPort));
 

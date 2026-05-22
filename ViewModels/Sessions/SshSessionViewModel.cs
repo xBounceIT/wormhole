@@ -13,7 +13,16 @@ using Wormhole.Services.Tunneling;
 
 namespace Wormhole.ViewModels.Sessions;
 
+// CA1001 (owns IDisposable _bridge but isn't IDisposable) is suppressed deliberately:
+// the VM is registered as transient in DI ([App.xaml.cs] AddTransient<SshSessionViewModel>),
+// and Microsoft.Extensions.DependencyInjection captures every transient IDisposable in the
+// root scope's _disposables list for the entire app lifetime — implementing IDisposable
+// here would pin every closed-tab VM (~256 KiB replay buffer each) until process exit.
+// The bridge / session / tunnel / CTS pair are torn down explicitly via DetachAsync /
+// SafeDisposeSessionAsync / CancelRemoteOutputWaitTimer on the documented teardown path.
+#pragma warning disable CA1001
 public sealed partial class SshSessionViewModel : SessionTabViewModel
+#pragma warning restore CA1001
 {
     private static readonly TimeSpan RemoteOutputWaitDelay = TimeSpan.FromSeconds(2);
 

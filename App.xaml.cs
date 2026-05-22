@@ -41,7 +41,7 @@ public partial class App : Application
         MainWindow.Activate();
     }
 
-    private static IServiceProvider ConfigureServices()
+    private static ServiceProvider ConfigureServices()
     {
         Directory.CreateDirectory(AppPaths.GetLogsDirectory());
 
