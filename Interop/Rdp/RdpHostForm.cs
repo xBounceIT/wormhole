@@ -58,15 +58,23 @@ internal sealed class RdpHostForm : FormsForm
     }
 
     /// <summary>HWND of this form. Reading forces handle creation, which is what we want
-    /// before SetParent — the ActiveX host needs a real Win32 window to paint into.</summary>
+    /// before SetParent — the ActiveX host needs a real Win32 window to paint into.
+    /// We also force the AxHost child's HWND explicitly: <see cref="Control.CreateControl()"/>
+    /// short-circuits before creating any child handles when the parent Form is invisible
+    /// (we never call <c>Show()</c> on this form), so without the explicit
+    /// <c>_ = _ax.Handle</c> the AxHost's <c>OnHandleCreated</c> never runs, the OCX is
+    /// never InPlaceActivate'd, and <see cref="RequireOcx"/> throws "not yet realised".</summary>
     public IntPtr Hwnd
     {
         get
         {
             if (!IsHandleCreated)
             {
-                CreateControl();          // realises the AxHost child
                 _ = Handle;               // forces this form's HWND
+            }
+            if (!_ax.IsHandleCreated)
+            {
+                _ = _ax.Handle;           // forces AxHost child HWND → OnHandleCreated → OCX instantiated
             }
             return Handle;
         }
@@ -107,6 +115,15 @@ internal sealed class RdpHostForm : FormsForm
         TrySetOptional(() => ocx.UseMultimon = profile.RdpUseAllMonitors);
 
         // --- Advanced settings (port, audio, redirection, gateway, experience, auth) ---
+        // The properties below are documented on IMsRdpClientAdvancedSettings (the base) or its
+        // numbered successors, but real mstscax IDispatch implementations don't all surface every
+        // documented name — e.g. KeyboardHookMode disappeared on at least one current build and
+        // the dynamic dispatcher throws RuntimeBinderException trying to set it. Anything that
+        // isn't strictly required to make a connection happen (i.e. anything where falling back
+        // to the OCX default is acceptable) is wrapped in TrySetOptional so a missing property
+        // degrades gracefully instead of aborting Configure. Connection-critical setters
+        // (RDPPort, ClearTextPassword) stay loud — if those fail something is very wrong and we
+        // want the exception to surface.
         dynamic adv = ocx.AdvancedSettings9;
         adv.RDPPort = profile.Port;
 
@@ -115,21 +132,24 @@ internal sealed class RdpHostForm : FormsForm
         // linger in OCX-owned memory longer than necessary.
         if (!string.IsNullOrEmpty(password)) adv.ClearTextPassword = password;
 
-        adv.RedirectClipboard = profile.RdpRedirectClipboard;
-        adv.RedirectPrinters = profile.RdpRedirectPrinters;
-        adv.RedirectSmartCards = profile.RdpRedirectSmartCards;
-        adv.RedirectPorts = profile.RdpRedirectPorts;
+        TrySetOptional(() => adv.RedirectClipboard = profile.RdpRedirectClipboard);
+        TrySetOptional(() => adv.RedirectPrinters = profile.RdpRedirectPrinters);
+        TrySetOptional(() => adv.RedirectSmartCards = profile.RdpRedirectSmartCards);
+        TrySetOptional(() => adv.RedirectPorts = profile.RdpRedirectPorts);
         // RedirectDevices is the AdvSettings8 PnP toggle; older OCX builds may not expose it.
         TrySetOptional(() => adv.RedirectDevices = profile.RdpRedirectDevices);
 
         ApplyDriveRedirection(ocx, profile.RdpRedirectDrives);
 
-        adv.AudioRedirectionMode = profile.RdpAudioMode;
+        TrySetOptional(() => adv.AudioRedirectionMode = profile.RdpAudioMode);
         // AudioCaptureRedirectionMode requires AdvSettings7+.
         TrySetOptional(() => adv.AudioCaptureRedirectionMode = profile.RdpAudioCaptureMode);
-        adv.KeyboardHookMode = profile.RdpKeyboardHookMode;
+        // KeyboardHookMode is documented on IMsRdpClientAdvancedSettings (the base) but the
+        // mstscax shipping in this environment doesn't surface it via IDispatch — fall back to
+        // the OCX default (2 = FullScreenOnly) when the binder can't resolve the name.
+        TrySetOptional(() => adv.KeyboardHookMode = profile.RdpKeyboardHookMode);
 
-        adv.PerformanceFlags = BuildPerformanceFlags(profile);
+        TrySetOptional(() => adv.PerformanceFlags = BuildPerformanceFlags(profile));
         // Persistent bitmap cache. The property name landed on IMsRdpClientAdvancedSettings5
         // as BitmapCachePersistEnable; older OCX builds expose a typo-laden BitmapPeristence
         // (with a single 'r') as a fallback. Try the modern name first, then the legacy.
@@ -137,8 +157,8 @@ internal sealed class RdpHostForm : FormsForm
         TrySetOptional(() => adv.BitmapPeristence = profile.RdpBitmapCaching ? 1 : 0);
         // NetworkConnectionType requires AdvSettings6+.
         TrySetOptional(() => adv.NetworkConnectionType = (uint)profile.RdpConnectionSpeed);
-        adv.EnableAutoReconnect = profile.RdpAutoReconnect;
-        adv.AuthenticationLevel = (uint)profile.RdpServerAuthentication;
+        TrySetOptional(() => adv.EnableAutoReconnect = profile.RdpAutoReconnect);
+        TrySetOptional(() => adv.AuthenticationLevel = (uint)profile.RdpServerAuthentication);
 
         // --- Gateway ---
         if (profile.RdpGatewayUsageMethod != 0)
