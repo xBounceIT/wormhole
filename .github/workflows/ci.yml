@@ -62,8 +62,16 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Restore Wormhole solution
-        run: dotnet restore Wormhole.sln
+      # Restore each project explicitly: the main csproj is WinUI/x64-only and a plain
+      # `dotnet restore Wormhole.sln` falls back to Any CPU, which leaves the WinUI x64
+      # package assets unresolved and causes `dotnet format`'s in-memory compilation to
+      # cascade-fail with CS0246 against types from Microsoft.WindowsAppSDK / Serilog /
+      # Dapper / etc.
+      - name: Restore Wormhole (x64)
+        run: dotnet restore Wormhole.csproj -p:Platform=x64
+
+      - name: Restore tests
+        run: dotnet restore Wormhole.Tests/Wormhole.Tests.csproj
 
       - name: Verify formatting
         run: dotnet format Wormhole.sln --verify-no-changes --severity warn --no-restore
