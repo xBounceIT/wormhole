@@ -9,7 +9,11 @@
           HorizontalAlignment="Stretch"
           VerticalAlignment="Stretch"
           MinHeight="240">
+        <!-- DefaultBackgroundColor matches the Grid + terminal.html (#0c0c0c) so the
+             WebView2 doesn't flash its default white during the brief window between
+             control creation and xterm.js painting. -->
         <controls:WebView2 x:Name="TerminalView"
+                           DefaultBackgroundColor="#0c0c0c"
                            HorizontalAlignment="Stretch"
                            VerticalAlignment="Stretch"
                            MinHeight="240" />
