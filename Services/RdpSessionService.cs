@@ -118,12 +118,17 @@ public sealed class RdpSessionService : IRdpSessionService
             _form.Disconnected += code =>
             {
                 _loggedOn = false;
-                var desc = _form.GetDisconnectDescription(code, 0);
+                // Per the IMsTscAxEvents::OnDisconnected guidance, GetErrorDescription needs
+                // BOTH the disconnect code and the OCX's ExtendedDisconnectReason — passing 0
+                // for the extended slot drops actionable context (especially when discReason
+                // == disconnectReasonNoInfo, which is the catch-all bucket).
+                var extended = _form.GetExtendedDisconnectReason();
+                var desc = _form.GetDisconnectDescription(code, extended);
                 // Reason codes 0-3 are clean (user-initiated, server-initiated, idle, etc.)
                 // per the IMsTscAxEvents.OnDisconnected reference table. Everything else is
                 // a fault that should surface the failure overlay.
                 var clean = code is >= 0 and <= 3;
-                Disconnected?.Invoke(this, new RdpDisconnectInfo(code, 0, desc, clean));
+                Disconnected?.Invoke(this, new RdpDisconnectInfo(code, extended, desc, clean));
             };
             _form.FatalError += code => FatalError?.Invoke(this, code);
             _form.LogonError += code => LogonError?.Invoke(this, code);

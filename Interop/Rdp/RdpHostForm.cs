@@ -260,6 +260,24 @@ internal sealed class RdpHostForm : FormsForm
         }
     }
 
+    /// <summary>Read <c>IMsRdpClient.ExtendedDisconnectReason</c> after the OCX raised
+    /// OnDisconnected. Returns 0 if the OCX is gone or doesn't expose the property; per the
+    /// MSDN guidance for IMsTscAxEvents::OnDisconnected this value should be passed alongside
+    /// the disconnect reason to GetErrorDescription to surface real server-side context.</summary>
+    public int GetExtendedDisconnectReason()
+    {
+        if (TryGetOcx() is not { } ocxObj) return 0;
+        try
+        {
+            dynamic ocx = ocxObj;
+            return (int)ocx.ExtendedDisconnectReason;
+        }
+        catch (Exception ex) when (ex is COMException or RuntimeBinderException)
+        {
+            return 0;
+        }
+    }
+
     private void AttachEventsSink()
     {
         if (_connectionPoint is not null) return;
