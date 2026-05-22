@@ -12,6 +12,7 @@
             </ResourceDictionary.MergedDictionaries>
             <conv:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter" />
             <conv:InverseBoolConverter x:Key="InverseBoolConverter" />
+            <conv:StringEqualsConverter x:Key="StringEqualsConverter" />
             <conv:StringPresentVisibilityConverter x:Key="StringPresentVisibilityConverter" />
             <conv:ToUpperConverter x:Key="ToUpperConverter" />
 

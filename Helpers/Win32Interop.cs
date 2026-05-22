@@ -17,5 +17,24 @@ internal static class Win32Interop
     [DllImport("user32.dll")]
     public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
     public const uint WM_SIZE = 0x0005;
+    public const uint WM_DPICHANGED = 0x02E0;
+
+    public const int SW_HIDE = 0;
+    public const int SW_SHOW = 5;
+    public const int SW_SHOWNA = 8; // Show without activating
+
+    public const int GWL_STYLE = -16;
+    public const int WS_CHILD = 0x40000000;
+    public const int WS_POPUP = unchecked((int)0x80000000);
 }

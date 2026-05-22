@@ -5,7 +5,6 @@ using Wormhole.Services;
 
 namespace Wormhole.Tests.Fakes;
 
-/// <summary>
 /// Shared in-memory <see cref="ICredentialService"/> for tests. Replaces three near-identical
 /// copies that lived inline in test files. Each backing dictionary is exposed so tests can
 /// pre-populate or assert against it.

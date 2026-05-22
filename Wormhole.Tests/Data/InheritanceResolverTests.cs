@@ -227,4 +227,124 @@ public class InheritanceResolverTests
         var nodes = new Dictionary<Guid, ConnectionNode> { [folder.Id] = folder };
         Assert.Throws<InvalidOperationException>(() => new InheritanceResolver().Resolve(folder, nodes));
     }
+
+    [Fact]
+    public void Resolve_RdpColorDepth_InheritsFromParentFolder()
+    {
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "rdp-folder",
+            Kind = NodeKind.Folder,
+            Protocol = ProtocolType.Rdp,
+            RdpColorDepth = 24,
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "vm",
+            Kind = NodeKind.Connection,
+            Host = "vm.example.com",
+        };
+        var nodes = new Dictionary<Guid, ConnectionNode> { [folder.Id] = folder, [node.Id] = node };
+
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.Equal(24, profile.RdpColorDepth);
+    }
+
+    [Fact]
+    public void Resolve_RdpDefaults_AppliedWhenNothingSetInChain()
+    {
+        // A bare RDP node with no RDP-specific fields set should still produce a usable
+        // profile with mstsc-style defaults: 32-bit color, clipboard on, auto-reconnect on,
+        // connection speed = auto-detect, gateway disabled, NLA = warn.
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "bare-rdp",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Rdp,
+            Host = "host",
+        };
+        var nodes = new Dictionary<Guid, ConnectionNode> { [node.Id] = node };
+
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.Equal(32, profile.RdpColorDepth);
+        Assert.True(profile.RdpRedirectClipboard);
+        Assert.True(profile.RdpAutoReconnect);
+        Assert.Equal(7, profile.RdpConnectionSpeed);
+        Assert.Equal(0, profile.RdpGatewayUsageMethod);
+        Assert.Equal(0, profile.RdpServerAuthentication);
+        Assert.Equal(2, profile.RdpKeyboardHookMode); // full-screen-only
+        Assert.True(profile.RdpDesktopBackground);
+        Assert.True(profile.RdpVisualStyles);
+        Assert.True(profile.RdpBitmapCaching);
+        Assert.True(profile.RdpGatewayBypassLocal);
+        Assert.Equal(string.Empty, profile.RdpRedirectDrives);
+        Assert.False(profile.RdpUseExternalClient); // embedded ActiveX is the default; opt-in routes through mstsc.exe.
+    }
+
+    [Fact]
+    public void Resolve_RdpRedirectClipboardFalseOnChild_OverridesParentTrue()
+    {
+        // ??= walks ancestors child → root, so a child's explicit `false` for a bool? must
+        // win over a parent's `true`. This regression-checks the null-coalesce semantics
+        // for bool? (not `if (!current) current = ancestor` which would skip falses).
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "rdp-folder",
+            Kind = NodeKind.Folder,
+            Protocol = ProtocolType.Rdp,
+            RdpRedirectClipboard = true,
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "no-clipboard",
+            Kind = NodeKind.Connection,
+            Host = "host",
+            RdpRedirectClipboard = false,
+        };
+        var nodes = new Dictionary<Guid, ConnectionNode> { [folder.Id] = folder, [node.Id] = node };
+
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.False(profile.RdpRedirectClipboard);
+    }
+
+    [Fact]
+    public void Resolve_RdpGatewayCredentialId_InheritsFromAncestor()
+    {
+        var credId = Guid.NewGuid();
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "behind-gw",
+            Kind = NodeKind.Folder,
+            Protocol = ProtocolType.Rdp,
+            RdpGatewayUsageMethod = 1,
+            RdpGatewayHostname = "gw.example.com",
+            RdpGatewayCredentialId = credId,
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "behind-gw-vm",
+            Kind = NodeKind.Connection,
+            Host = "vm",
+        };
+        var nodes = new Dictionary<Guid, ConnectionNode> { [folder.Id] = folder, [node.Id] = node };
+
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.Equal(1, profile.RdpGatewayUsageMethod);
+        Assert.Equal("gw.example.com", profile.RdpGatewayHostname);
+        Assert.Equal(credId, profile.RdpGatewayCredentialId);
+    }
 }
