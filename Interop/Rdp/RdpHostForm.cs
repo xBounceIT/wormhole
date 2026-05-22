@@ -269,6 +269,7 @@ internal sealed class RdpHostForm : FormsForm
             _logger?.LogDebug(ex, "RDP Disconnect threw during teardown (suppressed).");
         }
     }
+#pragma warning restore CA1822
 
     /// <summary>Read the OCX's <c>ExtendedDisconnectReason</c> and translate the pair into
     /// a human-readable string in one pass. Per the IMsTscAxEvents::OnDisconnected guidance

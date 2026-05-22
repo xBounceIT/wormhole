@@ -110,7 +110,7 @@ public sealed class DialogService : IDialogService
     public Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null) =>
         ShowFormDialogAsync(new TunnelDialog(), initial, "VPN tunnel");
 
-    private async Task<TDraft?> ShowFormDialogAsync<TForm, TDraft>(TForm form, TDraft? initial, string entityName)
+    private static async Task<TDraft?> ShowFormDialogAsync<TForm, TDraft>(TForm form, TDraft? initial, string entityName)
         where TForm : UserControl, IDraftForm<TDraft>
         where TDraft : class
     {

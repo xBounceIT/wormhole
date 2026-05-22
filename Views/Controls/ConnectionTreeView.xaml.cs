@@ -80,6 +80,7 @@ public sealed partial class ConnectionTreeView : UserControl
         }
     }
 
+#pragma warning disable CA1822 // XAML-wired event handler (ItemInvoked="OnTreeItemInvoked")
     private void OnTreeItemInvoked(TreeView sender, TreeViewItemInvokedEventArgs args)
     {
         // Single-click on a folder toggles expansion so the entire row is a hit target.
@@ -90,6 +91,7 @@ public sealed partial class ConnectionTreeView : UserControl
             args.Handled = true;
         }
     }
+#pragma warning restore CA1822
 
     // Per-node MenuFlyout items dispatch via Click because ElementName bindings
     // can't reach Root from inside a Popup nested in a DataTemplate.

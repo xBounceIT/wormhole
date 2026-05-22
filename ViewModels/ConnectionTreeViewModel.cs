@@ -262,10 +262,14 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     // Walks the tree, rewriting ParentId/SortOrder on any node whose position changed
     // and collecting those mutated entities for the caller to persist.
+    // CA1859 nudges ObservableCollection<T> here, but Collection<T>.this[int] and Count
+    // are virtual — no devirtualization win, and the interface is less coupling.
+#pragma warning disable CA1859
     private static void ApplyAndCollectChangedNodes(
         IList<TreeNodeViewModel> level,
         Guid? parentId,
         List<ConnectionNode> updates)
+#pragma warning restore CA1859
     {
         for (var i = 0; i < level.Count; i++)
         {

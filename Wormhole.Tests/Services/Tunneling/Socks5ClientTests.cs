@@ -138,7 +138,7 @@ public class Socks5ClientTests
         private readonly CancellationTokenSource _cts = new();
 
         public IPEndPoint LocalEndpoint => (IPEndPoint)_listener.LocalEndpoint;
-        public byte ReplyCode { get; set; } = 0x00;
+        public byte ReplyCode { get; set; }
         public byte LastAtyp { get; private set; }
         public string? LastRequestedHost { get; private set; }
         public int LastRequestedPort { get; private set; }

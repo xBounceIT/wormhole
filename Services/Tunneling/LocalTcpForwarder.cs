@@ -39,7 +39,7 @@ public sealed class LocalTcpForwarder : IAsyncDisposable
 
     public static LocalTcpForwarder Start(ITunnelInstance tunnel, string targetHost, int targetPort, ILogger logger)
     {
-        if (tunnel is null) throw new ArgumentNullException(nameof(tunnel));
+        ArgumentNullException.ThrowIfNull(tunnel);
         if (string.IsNullOrWhiteSpace(targetHost)) throw new ArgumentException("target host required", nameof(targetHost));
         if (targetPort is < 1 or > 65535) throw new ArgumentOutOfRangeException(nameof(targetPort));
 

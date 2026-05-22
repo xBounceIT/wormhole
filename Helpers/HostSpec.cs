@@ -11,7 +11,7 @@ public static class HostSpecParser
     /// </summary>
     public static HostSpec Parse(string input)
     {
-        if (input is null) throw new ArgumentNullException(nameof(input));
+        ArgumentNullException.ThrowIfNull(input);
         var s = input.Trim();
 
         string? user = null;
