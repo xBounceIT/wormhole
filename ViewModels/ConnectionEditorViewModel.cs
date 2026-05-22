@@ -22,6 +22,11 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private readonly List<CredentialProfile> _allCredentials = new();
     private bool _suppressPresetSync;
     private bool _suppressAadAutoFlag;
+    // True when the editor (not the user, not the persisted DB value) set RdpUseExternalClient
+    // to true via the AAD auto-flag handlers. Tracks ownership so we can auto-untick when the
+    // last AAD signal is cleared — otherwise the user is left with a ticked-and-editable
+    // checkbox they never asked for after correcting a typo'd "AzureAD" Domain value.
+    private bool _autoFlagAppliedByAad;
 
     public ConnectionEditorViewModel(ICredentialRepository credentialRepository)
     {
@@ -410,14 +415,9 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     // Pull a stale (protocol-mismatched) credential into AvailableCredentials when LoadFrom
     // assigns one — without this, the ComboBox round-trips to its placeholder on edit and the
-    // user loses sight of the saved binding. Also auto-flag RdpUseExternalClient when the
-    // user picks an Azure-AD-joined credential: the embedded mstscax host crashes on AAD
-    // auth in our unpackaged build (SEH 0xC06D007F), so routing to external mstsc.exe is the
-    // only stable path. The auto-flag is suppressed during LoadFrom — without that guard, a
-    // user who explicitly unchecked the box for an AAD profile would see it tick back on
-    // every editor re-open because line 415 fires this handler before line 469 restores the
-    // persisted value. _suppressAadAutoFlag makes the suppression explicit instead of
-    // relying on assignment-order coincidence.
+    // user loses sight of the saved binding. Also drive the AAD auto-flag for credential
+    // changes via the shared ApplyAadAutoFlag helper so credential-side and node-side signals
+    // (Username, RdpDomain) all use the same auto-tick/auto-untick logic.
     partial void OnCredentialIdChanged(Guid? value)
     {
         if (value is { } id && !AvailableCredentials.Any(c => c.Id == id))
@@ -426,11 +426,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
             OnPropertyChanged(nameof(SelectedCredential));
         }
 
-        if (_suppressAadAutoFlag) return;
-        if (!RdpUseExternalClient && IsAzureAdCredential)
-        {
-            RdpUseExternalClient = true;
-        }
+        ApplyAadAutoFlag();
     }
 
     partial void OnRdpGatewayCredentialIdChanged(Guid? value)
@@ -442,36 +438,54 @@ public partial class ConnectionEditorViewModel : ObservableObject
         }
     }
 
-    // The username + domain auto-flag handlers mirror OnCredentialIdChanged: when the user
-    // types "AzureAD" into the Domain box or "AzureAD\..." into Username (typical for the
-    // "Prompt every time" workflow that has no saved credential), tick the external-client
-    // box so the editor reflects the routing decision the runtime will enforce anyway.
-    // Suppressed during LoadFrom for the same reason as the credential handler — otherwise
-    // a re-opened profile would re-tick the box even if the persisted value was false.
-    partial void OnUsernameChanged(string value)
-    {
-        if (_suppressAadAutoFlag) return;
-        if (!RdpUseExternalClient && AzureAdCredentialDetector.HasAzureAdPrefix(value))
-        {
-            RdpUseExternalClient = true;
-        }
-    }
+    // Username/Domain handlers funnel into the same ApplyAadAutoFlag helper as
+    // OnCredentialIdChanged so every editable AAD input drives auto-tick AND auto-untick
+    // consistently. Without auto-untick, a user who typed "AzureAD" by mistake and corrected
+    // it would be left with a ticked-and-editable checkbox they never asked for.
+    partial void OnUsernameChanged(string value) => ApplyAadAutoFlag();
 
-    partial void OnRdpDomainChanged(string value)
+    partial void OnRdpDomainChanged(string value) => ApplyAadAutoFlag();
+
+    /// <summary>
+    /// Reconcile <see cref="RdpUseExternalClient"/> with the current AAD signals. When a
+    /// signal is detected and the flag is currently false, set it to true and remember that
+    /// the editor (not the user) did so via <see cref="_autoFlagAppliedByAad"/>. When all
+    /// signals are gone AND the flag is currently true ONLY because we set it ourselves,
+    /// roll it back. Pre-existing user/persisted true values are left alone — we only undo
+    /// our own writes. Suppressed during <see cref="LoadFrom"/> so a re-opened profile
+    /// doesn't observe transient toggling between assignments.
+    /// </summary>
+    private void ApplyAadAutoFlag()
     {
         if (_suppressAadAutoFlag) return;
-        if (!RdpUseExternalClient && AzureAdCredentialDetector.HasAzureAdDomain(value))
+
+        if (IsAzureAdCredential)
         {
-            RdpUseExternalClient = true;
+            if (!RdpUseExternalClient)
+            {
+                RdpUseExternalClient = true;
+                _autoFlagAppliedByAad = true;
+            }
+        }
+        else if (_autoFlagAppliedByAad)
+        {
+            // Last AAD signal cleared and we own the current true value — untick.
+            RdpUseExternalClient = false;
+            _autoFlagAppliedByAad = false;
         }
     }
 
     public void LoadFrom(ConnectionNode node)
     {
-        // Suppress AAD auto-flag side effect during bulk load — line 469 below restores the
-        // persisted RdpUseExternalClient value, so the user's explicit choice survives a
-        // re-open even when the linked credential still matches AAD heuristics.
+        // Save-and-restore the suppress flag instead of forcing it to false in finally. The
+        // current call-graph never re-enters LoadFrom, but a future protocol-change side
+        // effect that triggers a reload would silently leak suppression off for the outer
+        // load if we hard-reset here. Treat any persisted RdpUseExternalClient=true value
+        // as user-set (we have no audit field that records "auto-flagged by editor"), so
+        // _autoFlagAppliedByAad starts at false — the user can still untick manually.
+        var previousSuppress = _suppressAadAutoFlag;
         _suppressAadAutoFlag = true;
+        _autoFlagAppliedByAad = false;
         try
         {
             Name = node.Name;
@@ -538,7 +552,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
         }
         finally
         {
-            _suppressAadAutoFlag = false;
+            _suppressAadAutoFlag = previousSuppress;
         }
     }
 

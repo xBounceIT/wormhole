@@ -33,12 +33,17 @@ public interface IRdpCrashSentinelService
     Task ClearAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Read-and-delete the sentinel at app startup. Returns null when no orphan is present
-    /// (the previous run terminated cleanly) or when the file exists but is malformed
-    /// (the latter is logged + deleted defensively). Use the returned record to auto-flag
-    /// the offending profile so the user doesn't repeat the crash.
+    /// Read the sentinel at app startup WITHOUT deleting it. Returns null when no orphan is
+    /// present (the previous run terminated cleanly). Malformed payloads ARE deleted
+    /// defensively (we can't act on them and they'd otherwise re-fire every launch) and
+    /// produce a null return. Callers MUST call <see cref="ClearAsync"/> once they've
+    /// successfully acted on the record — only then is the sentinel removed. This
+    /// read/clear separation exists so that a DB failure during recovery doesn't lose the
+    /// crash signal: if the auto-flag write fails, the sentinel remains, the next launch
+    /// retries the auto-flag. Without this contract the user would face an
+    /// auto-flag-then-crash-then-no-recovery loop.
     /// </summary>
-    Task<RdpCrashRecord?> TryClaimOrphanAsync(CancellationToken cancellationToken = default);
+    Task<RdpCrashRecord?> TryReadOrphanAsync(CancellationToken cancellationToken = default);
 }
 
 /// <summary>Sentinel payload. Keep this DTO compatible across versions — older payloads must

@@ -589,6 +589,70 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task ClearingAzureAdSignal_AutoUnticksWhenWeOwnTheFlag()
+    {
+        // Regression: pre-fix, typing AzureAD ticked the box and erasing AzureAD only
+        // re-enabled the checkbox — the box stayed ticked. User had to manually untick.
+        // Now we track auto-flag ownership and roll back our own writes when the signal
+        // is cleared.
+        var vm = await NewEditorAsync();
+        vm.Protocol = ProtocolType.Rdp;
+        Assert.False(vm.RdpUseExternalClient);
+
+        vm.RdpDomain = "AzureAD";
+        Assert.True(vm.RdpUseExternalClient);
+
+        vm.RdpDomain = "CORP";
+
+        Assert.False(vm.RdpUseExternalClient); // auto-flag rolled back
+        Assert.True(vm.IsRdpUseExternalClientEditable);
+    }
+
+    [Fact]
+    public async Task ClearingAzureAdSignal_LeavesUserTickAlone()
+    {
+        // If the user ticked the box themselves BEFORE typing AzureAD, the auto-flag
+        // doesn't take ownership — we never set the true value, so we don't roll it back
+        // when the AAD signal clears. The user's manual opt-in survives.
+        var vm = await NewEditorAsync();
+        vm.Protocol = ProtocolType.Rdp;
+        vm.RdpUseExternalClient = true; // user opted in manually
+
+        vm.RdpDomain = "AzureAD"; // signal detected but no-op (flag already true)
+        Assert.True(vm.RdpUseExternalClient);
+
+        vm.RdpDomain = "CORP";
+
+        Assert.True(vm.RdpUseExternalClient); // user's tick survives
+    }
+
+    [Fact]
+    public async Task LoadFrom_PersistedTrue_IsNotRolledBackOnSignalClear()
+    {
+        // A profile loaded with RdpUseExternalClient=true (persisted user choice) must
+        // not be treated as auto-flagged: _autoFlagAppliedByAad starts at false on every
+        // LoadFrom, so subsequent signal clears don't roll back the persisted value.
+        var vm = await NewEditorAsync();
+
+        var node = new ConnectionNode
+        {
+            Kind = NodeKind.Connection,
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Rdp,
+            RdpDomain = "AzureAD",
+            RdpUseExternalClient = true,
+        };
+        vm.LoadFrom(node);
+        Assert.True(vm.RdpUseExternalClient);
+        Assert.True(vm.IsAzureAdCredential);
+
+        vm.RdpDomain = "CORP";
+
+        Assert.True(vm.RdpUseExternalClient);
+    }
+
+    [Fact]
     public async Task LoadFrom_AzureAdNodeFields_DoesNotAutoFlipUserDisabledState()
     {
         // Same suppress-during-load semantics for the node-side handlers as for the

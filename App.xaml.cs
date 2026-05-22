@@ -5,6 +5,7 @@ using Serilog;
 using Wormhole.Data;
 using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
+using Wormhole.Models;
 using Wormhole.Services;
 using Wormhole.Services.Rdp;
 using Wormhole.Services.Ssh;
@@ -57,17 +58,21 @@ public partial class App : Application
     /// so, auto-flag the offending profile to route through mstsc.exe. The motivating case
     /// is Azure-AD-joined targets whose WAM delay-load fault (SEH 0xC06D007F) the CLR can't
     /// translate to a catchable exception — without the sentinel-driven recovery the user
-    /// reopens the same profile and crashes again, in a death loop. Runs once at startup,
-    /// before the first window is activated, so a banner / refresh later in startup sees the
-    /// updated DB state.
+    /// reopens the same profile and crashes again, in a death loop.
+    ///
+    /// Recovery contract: read the sentinel first (does NOT delete), apply the DB update,
+    /// then clear the sentinel on success. If the DB update fails, the sentinel persists
+    /// and the next launch retries — losing the crash signal to a transient DB error would
+    /// resurrect the crash loop. Runs once at startup, before the first window is activated.
     /// </summary>
     private async Task RecoverFromRdpCrashSentinelAsync()
     {
         var logger = Services.GetRequiredService<ILoggerFactory>().CreateLogger("RdpCrashRecovery");
+        IRdpCrashSentinelService? sentinel = null;
         try
         {
-            var sentinel = Services.GetRequiredService<IRdpCrashSentinelService>();
-            var orphan = await sentinel.TryClaimOrphanAsync().ConfigureAwait(true);
+            sentinel = Services.GetRequiredService<IRdpCrashSentinelService>();
+            var orphan = await sentinel.TryReadOrphanAsync().ConfigureAwait(true);
             if (orphan is null) return;
 
             logger.LogWarning(
@@ -78,24 +83,40 @@ public partial class App : Application
             var node = await repo.GetByIdAsync(orphan.NodeId).ConfigureAwait(true);
             if (node is null)
             {
-                logger.LogWarning("Orphan sentinel referenced a node ({NodeId}) that no longer exists — skipping auto-flag.", orphan.NodeId);
+                logger.LogWarning("Orphan sentinel referenced a node ({NodeId}) that no longer exists — clearing sentinel.", orphan.NodeId);
+                await sentinel.ClearAsync().ConfigureAwait(true);
+                return;
+            }
+            // Guard against retypes / kind changes since the sentinel was written. Mirror the
+            // Kind=1 AND Protocol=1 filter from migration 0005 so we never write
+            // RdpUseExternalClient=true on a non-RDP node or a folder.
+            if (node.Kind != NodeKind.Connection || node.Protocol != ProtocolType.Rdp)
+            {
+                logger.LogWarning(
+                    "Orphan sentinel node {NodeId} is no longer an RDP connection (Kind={Kind}, Protocol={Protocol}) — clearing sentinel without auto-flag.",
+                    orphan.NodeId, node.Kind, node.Protocol);
+                await sentinel.ClearAsync().ConfigureAwait(true);
                 return;
             }
             if (node.RdpUseExternalClient == true)
             {
-                logger.LogInformation("Orphan node {NodeId} already routed via mstsc.exe — sentinel cleared without further action.", orphan.NodeId);
+                logger.LogInformation("Orphan node {NodeId} already routed via mstsc.exe — clearing sentinel.", orphan.NodeId);
+                await sentinel.ClearAsync().ConfigureAwait(true);
                 return;
             }
             node.RdpUseExternalClient = true;
             await repo.UpdateAsync(node).ConfigureAwait(true);
+            // Clear ONLY after the DB write succeeds. If UpdateAsync throws, the outer catch
+            // logs and the sentinel persists — next launch retries the auto-flag instead of
+            // losing the crash signal to a transient DB error.
+            await sentinel.ClearAsync().ConfigureAwait(true);
             logger.LogInformation("Auto-flagged node {NodeId} ({Host}) for external mstsc.exe routing.", orphan.NodeId, orphan.Host);
         }
         catch (Exception ex)
         {
-            // Recovery must never block startup. Worst case, the user hits the same crash
-            // again — but at least the rest of the app comes up so they can fix things
-            // manually via the editor.
-            logger.LogError(ex, "RDP crash sentinel recovery failed; continuing startup.");
+            // Recovery must never block startup. Worst case, the sentinel persists and we
+            // retry on the next launch.
+            logger.LogError(ex, "RDP crash sentinel recovery failed; sentinel left in place for retry on next launch.");
         }
     }
 

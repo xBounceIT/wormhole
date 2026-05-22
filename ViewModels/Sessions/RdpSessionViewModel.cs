@@ -206,148 +206,164 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         var profile = Profile;
         if (profile is null) return;
 
-        // External-client routing: opt-in flag OR auto-detected Azure-AD credential. The
-        // embedded mstscax delay-loads WAM broker DLLs during AAD auth, which our unpackaged
-        // WinUI process can't satisfy — the failure surfaces as SEH 0xC06D007F deep below
-        // any managed frame and kills the process unrecoverably. mstsc.exe is a packaged-
-        // trusted system binary that handles AAD cleanly. For AAD credentials this branch
-        // fires UNCONDITIONALLY (the editor checkbox is informational in that case) so a
-        // user who clears the flag can't accidentally take down the app. The flag still
-        // honours opt-in for non-AAD targets (e.g. broken embedded session, custom client).
-        // We don't grab _connectInFlight for this path because there's no async handshake
-        // to guard and Process.Start completes synchronously.
-        if (await ShouldUseExternalClientAsync(profile).ConfigureAwait(true))
-        {
-            LaunchExternalProcess(profile);
-            return;
-        }
-
+        // Grab the in-flight gate FIRST so a Disconnect click during the routing decision
+        // can't race past us. FullTeardown sets Status=Disconnected but doesn't touch
+        // _connectInFlight; without acquiring this before the await on ShouldUseExternalClientAsync
+        // (which may hit the DB to inspect the credential), the disconnect would be silently
+        // ignored — ConnectAsync would resume and continue with a connect the user just
+        // cancelled. The outer try/finally guarantees the gate is released on every exit
+        // path including external-client early-return and any throw from Mark/LaunchExternalProcess.
         if (Interlocked.CompareExchange(ref _connectInFlight, 1, 0) != 0) return;
-
-        // Write the crash sentinel BEFORE flipping Status — the PropertyChanged hook above
-        // clears the sentinel on any non-Connecting transition, so we'd race-clear the very
-        // sentinel we just wrote if we ordered this the other way. The mark must be in place
-        // before the OCX touches mstscax (where the native WAM crash originates) so that a
-        // process death in that window leaves the sentinel behind for the next launch to
-        // claim. Mark+Connecting+Connect must run as a single logical step from the caller's
-        // perspective — any code between here and ConfigureAndStart() that throws would
-        // leave Status=Connecting with no clear, but that path also surfaces a managed
-        // exception that the catch-block below transitions to Failed (which clears).
-        //
-        // _ownsCrashSentinel pairs the mark with the clear so that a Status transition on a
-        // sibling VM (e.g. an external-client tab whose mstsc.exe exited) can't accidentally
-        // clear THIS VM's sentinel.
-        _ownsCrashSentinel = true;
-        await _crashSentinel.MarkConnectInFlightAsync(profile.NodeId, profile.Host).ConfigureAwait(true);
-
-        Status = SessionStatus.Connecting;
-        ErrorMessage = null;
-        FailedDueToCredentials = false;
-        ReconnectAttempt = 0;
-
-        // The CTS exists from the start so FullTeardown / Disconnect can cancel an in-flight
-        // connect, but the ConnectTimeout itself only kicks in once we've actually started
-        // the network handshake. Counting credential-entry time against the 30s budget would
-        // make a slow typist's correct password expire before the OCX ever sees it.
-        var previousCts = _cts;
-        var cts = new CancellationTokenSource();
-        _cts = cts;
-        previousCts?.Dispose();
-        var token = cts.Token;
-        var timedOut = false;
-
         try
         {
-            var password = await ResolvePasswordAsync(profile, forcePromptForPassword, token).ConfigureAwait(true);
-            if (token.IsCancellationRequested)
+            // External-client routing: opt-in flag OR auto-detected Azure-AD signal (saved
+            // credential, node Username, node RdpDomain). The embedded mstscax delay-loads
+            // WAM broker DLLs during AAD auth, which our unpackaged WinUI process can't
+            // satisfy — the failure surfaces as SEH 0xC06D007F deep below any managed frame
+            // and kills the process unrecoverably. mstsc.exe is a packaged-trusted system
+            // binary that handles AAD cleanly. For AAD signals this branch fires
+            // UNCONDITIONALLY so a user who clears the editor flag can't accidentally take
+            // down the app.
+            if (await ShouldUseExternalClientAsync(profile).ConfigureAwait(true))
             {
-                Status = SessionStatus.Disconnected;
+                LaunchExternalProcess(profile);
                 return;
             }
 
-            // ResolvePasswordAsync returns null only when the user cancelled the prompt —
-            // silent return to Disconnected, not Failed (no error message to show). Covers
-            // both "no saved credential" and "credential Id pointed at a deleted Credential
-            // Manager entry, fell through to a prompt, user cancelled". Either way, no.
-            if (password is null)
+            // Write the crash sentinel BEFORE flipping Status — the PropertyChanged hook
+            // clears the sentinel on any non-Connecting transition when _ownsCrashSentinel
+            // is true. Both the file write and the ownership flag must be in place before
+            // the OCX touches mstscax (where the native WAM crash originates) so a process
+            // death in that window leaves the sentinel behind for the next launch to read.
+            // Inner try/catch keeps a Mark failure (file lock, disk full, ACL denial) from
+            // poisoning the connect path: we log and proceed without the recovery breadcrumb
+            // for this attempt. Without this, an IOException from Task.Run inside Mark would
+            // escape, the outer finally would release _connectInFlight, but
+            // _ownsCrashSentinel would stay true — the next legitimate Mark would then
+            // race-clear a successful sentinel on the first Status transition.
+            try
             {
-                Status = SessionStatus.Disconnected;
-                return;
+                await _crashSentinel.MarkConnectInFlightAsync(profile.NodeId, profile.Host).ConfigureAwait(true);
+                _ownsCrashSentinel = true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to write RDP crash sentinel — proceeding without recovery breadcrumb for this attempt.");
+                // _ownsCrashSentinel stays false. No file on disk means there's nothing for
+                // the hook to clear; subsequent attempts behave normally.
             }
 
-            // ConnectAsync returns immediately after kicking off the asynchronous OCX
-            // handshake, so without a real watchdog there's no way to surface a "server
-            // never answered" timeout. The Register callback drives both legs: it flips
-            // the captured timedOut flag so the inline OCE catch can distinguish a
-            // watchdog-cancel from a user-cancel (FullTeardown), and it posts to the UI
-            // thread to fail the VM if the await already returned and the OCX is sitting
-            // mid-handshake. The registration's lifetime is the CTS's lifetime — the
-            // previousCts?.Dispose() above and FullTeardown's Dispose release it.
-            cts.CancelAfter(ConnectTimeout);
-            cts.Token.Register(() =>
+            Status = SessionStatus.Connecting;
+            ErrorMessage = null;
+            FailedDueToCredentials = false;
+            ReconnectAttempt = 0;
+
+            // The CTS exists from the start so FullTeardown / Disconnect can cancel an in-flight
+            // connect, but the ConnectTimeout itself only kicks in once we've actually started
+            // the network handshake. Counting credential-entry time against the 30s budget would
+            // make a slow typist's correct password expire before the OCX ever sees it.
+            var previousCts = _cts;
+            var cts = new CancellationTokenSource();
+            _cts = cts;
+            previousCts?.Dispose();
+            var token = cts.Token;
+            var timedOut = false;
+
+            try
             {
-                // User-initiated cancels (FullTeardown) null _cts BEFORE calling Cancel,
-                // so this guard distinguishes timer-fire from user-fire.
-                if (!ReferenceEquals(_cts, cts)) return;
-                timedOut = true;
-                MarshalToUi(() =>
+                var password = await ResolvePasswordAsync(profile, forcePromptForPassword, token).ConfigureAwait(true);
+                if (token.IsCancellationRequested)
                 {
+                    Status = SessionStatus.Disconnected;
+                    return;
+                }
+
+                // ResolvePasswordAsync returns null only when the user cancelled the prompt —
+                // silent return to Disconnected, not Failed (no error message to show). Covers
+                // both "no saved credential" and "credential Id pointed at a deleted Credential
+                // Manager entry, fell through to a prompt, user cancelled". Either way, no.
+                if (password is null)
+                {
+                    Status = SessionStatus.Disconnected;
+                    return;
+                }
+
+                // ConnectAsync returns immediately after kicking off the asynchronous OCX
+                // handshake, so without a real watchdog there's no way to surface a "server
+                // never answered" timeout. The Register callback drives both legs: it flips
+                // the captured timedOut flag so the inline OCE catch can distinguish a
+                // watchdog-cancel from a user-cancel (FullTeardown), and it posts to the UI
+                // thread to fail the VM if the await already returned and the OCX is sitting
+                // mid-handshake. The registration's lifetime is the CTS's lifetime — the
+                // previousCts?.Dispose() above and FullTeardown's Dispose release it.
+                cts.CancelAfter(ConnectTimeout);
+                cts.Token.Register(() =>
+                {
+                    // User-initiated cancels (FullTeardown) null _cts BEFORE calling Cancel,
+                    // so this guard distinguishes timer-fire from user-fire.
                     if (!ReferenceEquals(_cts, cts)) return;
-                    if (Status != SessionStatus.Connecting) return;
-                    DisposeAndTransition(TimeoutMessage, dueToCredentials: false);
+                    timedOut = true;
+                    MarshalToUi(() =>
+                    {
+                        if (!ReferenceEquals(_cts, cts)) return;
+                        if (Status != SessionStatus.Connecting) return;
+                        DisposeAndTransition(TimeoutMessage, dueToCredentials: false);
+                    });
                 });
-            });
 
-            var (gwUser, gwPassword) = await ResolveGatewayCredentialsAsync(profile, token).ConfigureAwait(true);
-            // Subscribe via the onSessionReady hook (not after the await) so the VM is ready
-            // to receive an immediate OnLogonError / OnDisconnected that the OCX may fire
-            // synchronously during the Connect() inside form.Start(). Subscribing after the
-            // returned Task completes would drop those events and strand us in Connecting.
-            var session = await _rdpService.ConnectAsync(
-                profile, password, ownerHwnd, gwUser, gwPassword,
-                onSessionReady: s =>
-                {
-                    s.Connected += OnSessionConnected;
-                    s.Disconnected += OnSessionDisconnected;
-                    s.FatalError += OnSessionFatalError;
-                    s.LogonError += OnSessionLogonError;
-                    s.AutoReconnecting += OnSessionAutoReconnecting;
-                    s.AutoReconnected += OnSessionAutoReconnected;
-                },
-                token).ConfigureAwait(true);
-            _session = session;
+                var (gwUser, gwPassword) = await ResolveGatewayCredentialsAsync(profile, token).ConfigureAwait(true);
+                // Subscribe via the onSessionReady hook (not after the await) so the VM is ready
+                // to receive an immediate OnLogonError / OnDisconnected that the OCX may fire
+                // synchronously during the Connect() inside form.Start(). Subscribing after the
+                // returned Task completes would drop those events and strand us in Connecting.
+                var session = await _rdpService.ConnectAsync(
+                    profile, password, ownerHwnd, gwUser, gwPassword,
+                    onSessionReady: s =>
+                    {
+                        s.Connected += OnSessionConnected;
+                        s.Disconnected += OnSessionDisconnected;
+                        s.FatalError += OnSessionFatalError;
+                        s.LogonError += OnSessionLogonError;
+                        s.AutoReconnecting += OnSessionAutoReconnecting;
+                        s.AutoReconnected += OnSessionAutoReconnected;
+                    },
+                    token).ConfigureAwait(true);
+                _session = session;
 
-            _session.SetBounds(initialBounds.IsDegenerate(minDim: 1) ? HostBounds.Seed : initialBounds);
-            _session.Show();
-        }
-        catch (OperationCanceledException) when (timedOut)
-        {
-            DisposeSessionSilently();
-            ReportFailure(TimeoutMessage, dueToCredentials: false);
-        }
-        catch (OperationCanceledException)
-        {
-            DisposeSessionSilently();
-            Status = SessionStatus.Disconnected;
-        }
-        catch (System.Runtime.InteropServices.COMException ex) when ((uint)ex.HResult == 0x80040154)
-        {
-            // REGDB_E_CLASSNOTREG — mstscax not registered (Server Core, N edition).
-            DisposeSessionSilently();
-            ReportFailure(
-                "Microsoft Remote Desktop ActiveX (mstscax.dll) is not registered on this system. " +
-                "Install the Remote Desktop Connection client.",
-                dueToCredentials: false);
-            _logger.LogError(ex, "RDP ActiveX not registered.");
-        }
-        catch (Exception ex)
-        {
-            DisposeSessionSilently();
-            ReportFailure(ex.Message, dueToCredentials: false);
-            _logger.LogError(ex, "RDP connect failed for {Host}:{Port}.", profile.Host, profile.Port);
+                _session.SetBounds(initialBounds.IsDegenerate(minDim: 1) ? HostBounds.Seed : initialBounds);
+                _session.Show();
+            }
+            catch (OperationCanceledException) when (timedOut)
+            {
+                DisposeSessionSilently();
+                ReportFailure(TimeoutMessage, dueToCredentials: false);
+            }
+            catch (OperationCanceledException)
+            {
+                DisposeSessionSilently();
+                Status = SessionStatus.Disconnected;
+            }
+            catch (System.Runtime.InteropServices.COMException ex) when ((uint)ex.HResult == 0x80040154)
+            {
+                // REGDB_E_CLASSNOTREG — mstscax not registered (Server Core, N edition).
+                DisposeSessionSilently();
+                ReportFailure(
+                    "Microsoft Remote Desktop ActiveX (mstscax.dll) is not registered on this system. " +
+                    "Install the Remote Desktop Connection client.",
+                    dueToCredentials: false);
+                _logger.LogError(ex, "RDP ActiveX not registered.");
+            }
+            catch (Exception ex)
+            {
+                DisposeSessionSilently();
+                ReportFailure(ex.Message, dueToCredentials: false);
+                _logger.LogError(ex, "RDP connect failed for {Host}:{Port}.", profile.Host, profile.Port);
+            }
         }
         finally
         {
+            // Single point of release for _connectInFlight, regardless of whether we took the
+            // external-client early-return, the embedded path, or threw out of either.
             Interlocked.Exchange(ref _connectInFlight, 0);
         }
     }

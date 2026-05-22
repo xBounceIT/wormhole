@@ -98,7 +98,7 @@ public sealed class RdpCrashSentinelService : IRdpCrashSentinelService
         }, cancellationToken);
     }
 
-    public Task<RdpCrashRecord?> TryClaimOrphanAsync(CancellationToken cancellationToken = default)
+    public Task<RdpCrashRecord?> TryReadOrphanAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         return Task.Run<RdpCrashRecord?>(() =>
@@ -106,23 +106,23 @@ public sealed class RdpCrashSentinelService : IRdpCrashSentinelService
             lock (_writeLock)
             {
                 if (!File.Exists(_sentinelPath)) return null;
-                RdpCrashRecord? record = null;
                 try
                 {
                     var bytes = File.ReadAllBytes(_sentinelPath);
-                    record = JsonSerializer.Deserialize<RdpCrashRecord>(bytes, JsonOptions);
+                    var record = JsonSerializer.Deserialize<RdpCrashRecord>(bytes, JsonOptions);
+                    return record;
                 }
                 catch (Exception ex) when (ex is JsonException or IOException)
                 {
-                    _logger.LogWarning(ex, "RDP crash sentinel is malformed — discarding without acting on it.");
+                    // Malformed payload: we can't act on it. Delete defensively so we don't
+                    // log the same warning every launch, then return null. Healthy sentinels
+                    // stay on disk until the caller explicitly calls ClearAsync after a
+                    // successful recovery action.
+                    _logger.LogWarning(ex, "RDP crash sentinel is malformed — deleting without acting on it.");
+                    try { File.Delete(_sentinelPath); }
+                    catch (IOException deleteEx) { _logger.LogWarning(deleteEx, "Failed to delete malformed RDP crash sentinel."); }
+                    return null;
                 }
-
-                // Always delete on read: even a malformed sentinel must not stick around to
-                // re-trigger on every launch. The act of reading is the act of claiming.
-                try { File.Delete(_sentinelPath); }
-                catch (IOException ex) { _logger.LogWarning(ex, "Failed to delete RDP crash sentinel after read."); }
-
-                return record;
             }
         }, cancellationToken);
     }

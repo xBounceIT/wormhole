@@ -56,7 +56,7 @@ public sealed class RdpCrashSentinelServiceTests : IDisposable
         await svc.MarkConnectInFlightAsync(first, "host-a");
         await svc.MarkConnectInFlightAsync(second, "host-b");
 
-        var orphan = await svc.TryClaimOrphanAsync();
+        var orphan = await svc.TryReadOrphanAsync();
         Assert.NotNull(orphan);
         Assert.Equal(second, orphan!.NodeId);
         Assert.Equal("host-b", orphan.Host);
@@ -85,38 +85,61 @@ public sealed class RdpCrashSentinelServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task TryClaimOrphan_NoFile_ReturnsNull()
+    public async Task TryReadOrphan_NoFile_ReturnsNull()
     {
         var svc = CreateService();
-        var orphan = await svc.TryClaimOrphanAsync();
+        var orphan = await svc.TryReadOrphanAsync();
         Assert.Null(orphan);
     }
 
     [Fact]
-    public async Task TryClaimOrphan_ReturnsRecordAndDeletesFile()
+    public async Task TryReadOrphan_ReturnsRecordWithoutDeletingFile()
     {
+        // Read must NOT delete: the recovery caller is responsible for calling ClearAsync
+        // once the auto-flag DB write succeeds. If we deleted on read and UpdateAsync then
+        // threw, the crash signal would be lost forever.
         var svc = CreateService();
         var nodeId = Guid.NewGuid();
         await svc.MarkConnectInFlightAsync(nodeId, "host");
 
-        var orphan = await svc.TryClaimOrphanAsync();
+        var orphan = await svc.TryReadOrphanAsync();
 
         Assert.NotNull(orphan);
         Assert.Equal(nodeId, orphan!.NodeId);
         Assert.Equal("host", orphan.Host);
-        Assert.False(File.Exists(_sentinelPath));
+        Assert.True(File.Exists(_sentinelPath));
     }
 
     [Fact]
-    public async Task TryClaimOrphan_MalformedJson_DeletesFileAndReturnsNull()
+    public async Task TryReadOrphan_TwoReadsReturnSameRecord_UntilExplicitClear()
     {
-        // A corrupt sentinel must not loop the recovery indefinitely. The act of reading
-        // is the act of claiming — even on parse failure the file goes away.
+        // Direct consequence of read-not-claim: callers who fail mid-recovery (e.g. DB locked)
+        // get to retry on next launch because the sentinel stays put.
+        var svc = CreateService();
+        var nodeId = Guid.NewGuid();
+        await svc.MarkConnectInFlightAsync(nodeId, "host");
+
+        var first = await svc.TryReadOrphanAsync();
+        var second = await svc.TryReadOrphanAsync();
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.Equal(first!.NodeId, second!.NodeId);
+
+        await svc.ClearAsync();
+        Assert.Null(await svc.TryReadOrphanAsync());
+    }
+
+    [Fact]
+    public async Task TryReadOrphan_MalformedJson_DeletesFileAndReturnsNull()
+    {
+        // Malformed payloads are the one case where the read DOES delete: we can't act on
+        // the record so leaving it would re-fire the warning every launch.
         Directory.CreateDirectory(_tempDir);
         await File.WriteAllTextAsync(_sentinelPath, "{ this is not valid json");
         var svc = CreateService();
 
-        var orphan = await svc.TryClaimOrphanAsync();
+        var orphan = await svc.TryReadOrphanAsync();
 
         Assert.Null(orphan);
         Assert.False(File.Exists(_sentinelPath));
@@ -152,7 +175,7 @@ public sealed class RdpCrashSentinelServiceTests : IDisposable
         await Task.WhenAll(tasks);
 
         // Whatever the final file state is, TryClaimOrphan must not throw.
-        var orphan = await svc.TryClaimOrphanAsync();
+        var orphan = await svc.TryReadOrphanAsync();
         // Either a record or null — both are valid; the contract is no exceptions and no
         // partial writes.
         if (orphan is not null)
