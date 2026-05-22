@@ -158,7 +158,14 @@ internal sealed class RdpHostForm : FormsForm
         // NetworkConnectionType requires AdvSettings6+.
         TrySetOptional(() => adv.NetworkConnectionType = (uint)profile.RdpConnectionSpeed);
         TrySetOptional(() => adv.EnableAutoReconnect = profile.RdpAutoReconnect);
-        TrySetOptional(() => adv.AuthenticationLevel = (uint)profile.RdpServerAuthentication);
+        // AuthenticationLevel stays loud (not TrySetOptional) — it controls server-cert
+        // validation enforcement (0=Warn / 1=Require / 2=DoNotConnect) and the OCX default
+        // is the *weakest* value (0). Silently swallowing this setter when the OCX doesn't
+        // expose it would downgrade a user who picked Require/DoNotConnect to a vulnerable
+        // posture without their knowledge. The property is on IMsRdpClientAdvancedSettings5
+        // (RDP 5.1+) and effectively universal; if it ever does fail, the user should see
+        // the error and update their Remote Desktop client rather than connect insecurely.
+        adv.AuthenticationLevel = (uint)profile.RdpServerAuthentication;
 
         // --- Gateway ---
         if (profile.RdpGatewayUsageMethod != 0)
