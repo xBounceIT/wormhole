@@ -75,6 +75,7 @@
     <Compile Include="..\ViewModels\Sessions\SftpSessionViewModel.cs" Link="ViewModels\Sessions\SftpSessionViewModel.cs" />
     <Compile Include="..\Services\IRdpSessionService.cs" Link="Services\IRdpSessionService.cs" />
     <Compile Include="..\Interop\Terminal\TerminalBridge.cs" Link="Interop\Terminal\TerminalBridge.cs" />
+    <Compile Include="..\Interop\Terminal\TerminalReplayBuffer.cs" Link="Interop\Terminal\TerminalReplayBuffer.cs" />
   </ItemGroup>
 
 </Project>
