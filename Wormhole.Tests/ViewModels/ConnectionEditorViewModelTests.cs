@@ -280,6 +280,61 @@ public class ConnectionEditorViewModelTests
         Assert.True(vm.IsValid);
     }
 
+    [Fact]
+    public async Task WriteTo_BlankUsernameWithSelectedCredential_FallsBackToCredentialUsername()
+    {
+        // Regression for the credential-backed connect path: if the user picks a saved
+        // credential but doesn't type into the free-text Username field, the persisted
+        // node.Username must still resolve to a non-null login — otherwise the SSH and RDP
+        // services reject the profile with "no username supplied".
+        var credential = new CredentialProfile
+        {
+            Name = "prod-svc",
+            Username = "svcacct",
+            Protocol = ProtocolType.Ssh,
+        };
+        var repo = new SingleCredentialRepository(credential);
+        var vm = new ConnectionEditorViewModel(repo);
+        await vm.LoadCredentialsAsync();
+
+        vm.Name = "n";
+        vm.Host = "h";
+        vm.SelectedCredential = credential;
+        vm.Username = string.Empty;
+
+        var node = new ConnectionNode();
+        vm.WriteTo(node);
+
+        Assert.Equal("svcacct", node.Username);
+        Assert.Equal(credential.Id, node.CredentialId);
+    }
+
+    [Fact]
+    public async Task WriteTo_ExplicitUsernameOverridesCredentialUsername()
+    {
+        // The free-text Username field is shown alongside the credential picker so users can
+        // override the credential's stored username on a per-connection basis.
+        var credential = new CredentialProfile
+        {
+            Name = "prod-svc",
+            Username = "svcacct",
+            Protocol = ProtocolType.Ssh,
+        };
+        var repo = new SingleCredentialRepository(credential);
+        var vm = new ConnectionEditorViewModel(repo);
+        await vm.LoadCredentialsAsync();
+
+        vm.Name = "n";
+        vm.Host = "h";
+        vm.SelectedCredential = credential;
+        vm.Username = "alice";
+
+        var node = new ConnectionNode();
+        vm.WriteTo(node);
+
+        Assert.Equal("alice", node.Username);
+    }
+
     private static async Task<ConnectionEditorViewModel> NewEditorAsync()
     {
         var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository());
@@ -293,6 +348,19 @@ public class ConnectionEditorViewModelTests
             => Task.FromResult<IReadOnlyList<CredentialProfile>>(Array.Empty<CredentialProfile>());
         public Task<CredentialProfile?> GetByIdAsync(Guid id, CancellationToken ct = default)
             => Task.FromResult<CredentialProfile?>(null);
+        public Task AddAsync(CredentialProfile profile, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task UpdateAsync(CredentialProfile profile, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task DeleteAsync(Guid id, CancellationToken ct = default) => throw new NotImplementedException();
+    }
+
+    private sealed class SingleCredentialRepository : ICredentialRepository
+    {
+        private readonly CredentialProfile _credential;
+        public SingleCredentialRepository(CredentialProfile credential) => _credential = credential;
+        public Task<IReadOnlyList<CredentialProfile>> GetAllAsync(CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<CredentialProfile>>(new[] { _credential });
+        public Task<CredentialProfile?> GetByIdAsync(Guid id, CancellationToken ct = default)
+            => Task.FromResult<CredentialProfile?>(id == _credential.Id ? _credential : null);
         public Task AddAsync(CredentialProfile profile, CancellationToken ct = default) => throw new NotImplementedException();
         public Task UpdateAsync(CredentialProfile profile, CancellationToken ct = default) => throw new NotImplementedException();
         public Task DeleteAsync(Guid id, CancellationToken ct = default) => throw new NotImplementedException();

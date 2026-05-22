@@ -366,7 +366,23 @@ public partial class ConnectionEditorViewModel : ObservableObject
         node.Protocol = Protocol;
         node.Host = Host.Trim();
         node.Port = Port;
-        node.Username = string.IsNullOrWhiteSpace(Username) ? null : Username.Trim();
+        // The free-text Username field is shown alongside the credential picker so users can
+        // override the credential's stored username on a per-connection basis. When the field
+        // is blank, fall back to the selected credential's username — without this fallback,
+        // a credential-backed SSH connection with a blank Username field would persist a
+        // null username and SshSessionService would reject the connect.
+        if (!string.IsNullOrWhiteSpace(Username))
+        {
+            node.Username = Username.Trim();
+        }
+        else if (SelectedCredential is { Username: var credUser } && !string.IsNullOrWhiteSpace(credUser))
+        {
+            node.Username = credUser;
+        }
+        else
+        {
+            node.Username = null;
+        }
         node.CredentialId = CredentialId;
 
         if (IsRdp)
