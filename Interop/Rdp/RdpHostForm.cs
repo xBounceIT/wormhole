@@ -118,7 +118,7 @@ internal sealed class RdpHostForm : FormsForm
         // RedirectDevices is the AdvSettings8 PnP toggle; older OCX builds may not expose it.
         TrySetOptional(() => adv.RedirectDevices = profile.RdpRedirectDevices);
 
-        ApplyDriveRedirection(adv, profile.RdpRedirectDrives);
+        ApplyDriveRedirection(ocx, adv, profile.RdpRedirectDrives);
 
         adv.AudioRedirectionMode = profile.RdpAudioMode;
         // AudioCaptureRedirectionMode requires AdvSettings7+.
@@ -409,18 +409,20 @@ internal sealed class RdpHostForm : FormsForm
         return flags;
     }
 
-    private static void ApplyDriveRedirection(dynamic adv, string raw)
+    private static void ApplyDriveRedirection(dynamic ocx, dynamic adv, string raw)
     {
-        // mstsc has two ways: "redirect all fixed drives" (bool) or per-letter via the
-        // DriveCollection. RdpDriveList.ParseLetters returns null for the "all" sentinel,
-        // empty set for "", or a populated set for an explicit letter list.
+        // mstsc has two ways: "redirect all fixed drives" (the AdvancedSettings.RedirectDrives
+        // bool) or per-letter via DriveCollection, which lives on the OCX's non-scriptable
+        // client interface (IMsRdpClientNonScriptable3.DriveCollection — accessed off the OCX
+        // root, NOT off AdvancedSettings). RdpDriveList.ParseLetters returns null for the
+        // "all" sentinel, empty set for "", or a populated set for an explicit letter list.
         var letters = RdpDriveList.ParseLetters(raw);
         if (letters is null) { adv.RedirectDrives = true; return; }
         if (letters.Count == 0) { adv.RedirectDrives = false; return; }
 
         try
         {
-            dynamic drives = adv.DriveCollection;
+            dynamic drives = ocx.DriveCollection;
             uint count = (uint)drives.DriveCount;
             for (uint i = 0; i < count; i++)
             {

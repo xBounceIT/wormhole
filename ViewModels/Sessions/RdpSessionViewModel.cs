@@ -177,7 +177,23 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             }
 
             // Credentials are in hand — now bound the actual network handshake by the timeout.
+            // The CTS firing is observed two ways:
+            //   1. Anything still inside the `await _rdpService.ConnectAsync(...)` below picks
+            //      it up via OperationCanceledException (only useful if Configure / SetParent
+            //      stages somehow hang, since Start itself is synchronous).
+            //   2. The Register callback below is the real watchdog: ConnectAsync returns
+            //      immediately after kicking off the asynchronous OCX handshake, so without
+            //      this we'd have no way to surface a "server never answered" timeout. When
+            //      the token elapses while Status is still Connecting, we tear the session
+            //      down ourselves and fail the VM with a timeout message.
             cts.CancelAfter(ConnectTimeout);
+            cts.Token.Register(() => MarshalToUi(() =>
+            {
+                if (Status == SessionStatus.Connecting)
+                {
+                    DisposeAndTransition("RDP server didn't respond within 30 seconds.", dueToCredentials: false);
+                }
+            }));
 
             var (gwUser, gwPassword) = await ResolveGatewayCredentialsAsync(profile, token).ConfigureAwait(true);
             // Subscribe via the onSessionReady hook (not after the await) so the VM is ready
