@@ -126,6 +126,11 @@ internal sealed class RdpHostForm : FormsForm
         adv.KeyboardHookMode = profile.RdpKeyboardHookMode;
 
         adv.PerformanceFlags = BuildPerformanceFlags(profile);
+        // Persistent bitmap cache. The property name landed on IMsRdpClientAdvancedSettings5
+        // as BitmapCachePersistEnable; older OCX builds expose a typo-laden BitmapPeristence
+        // (with a single 'r') as a fallback. Try the modern name first, then the legacy.
+        TrySetOptional(() => adv.BitmapCachePersistEnable = profile.RdpBitmapCaching);
+        TrySetOptional(() => adv.BitmapPeristence = profile.RdpBitmapCaching ? 1 : 0);
         // NetworkConnectionType requires AdvSettings6+.
         TrySetOptional(() => adv.NetworkConnectionType = (uint)profile.RdpConnectionSpeed);
         adv.EnableAutoReconnect = profile.RdpAutoReconnect;
@@ -137,18 +142,18 @@ internal sealed class RdpHostForm : FormsForm
             try
             {
                 dynamic transport = ocx.TransportSettings2;
-                // "Bypass RD Gateway server for local addresses" maps mstsc's mode 3
-                // (TSC_PROXY_MODE_DEFAULT — use default profile) → 4 (TSC_PROXY_MODE_NONE_DETECT
-                // — use default profile but detect direct connection first). The other modes
-                // encode bypass intrinsically: 0 = no gateway (irrelevant), 1 = always use (no
-                // bypass), 2 = detect (already bypasses for direct-reachable). So we only
-                // promote when the user chose "Use default" *and* checked bypass.
-                var usageMethod = (uint)profile.RdpGatewayUsageMethod;
-                if (profile.RdpGatewayUsageMethod == 3 && profile.RdpGatewayBypassLocal)
-                {
-                    usageMethod = 4;
-                }
-                transport.GatewayUsageMethod = usageMethod;
+                // Pass the user-picked GatewayUsageMethod through verbatim. An earlier
+                // revision promoted (mode 3 + bypass-local) to mode 4, but per the OCX docs
+                // for IMsRdpClientTransportSettings::GatewayUsageMethod, value 4
+                // (TSC_PROXY_MODE_NONE_DETECT) actually means "Do not use an RD Gateway
+                // server, but detect server settings" — i.e. it disables the gateway
+                // entirely. That mapping silently lost gateway routing for users who picked
+                // "Use default" with bypass-local. The "Bypass RD Gateway for local
+                // addresses" toggle has no direct OCX equivalent (it's a .rdp file format
+                // hint that mstsc interprets via mode selection at write time); we persist
+                // the field for round-trip with future .rdp import/export but it does not
+                // affect the COM-surface connection today.
+                transport.GatewayUsageMethod = (uint)profile.RdpGatewayUsageMethod;
                 if (!string.IsNullOrEmpty(profile.RdpGatewayHostname))
                     transport.GatewayHostname = profile.RdpGatewayHostname;
                 // GatewayCredSharing: when set, the OCX reuses the main connection
