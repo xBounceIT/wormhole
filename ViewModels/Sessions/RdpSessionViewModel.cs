@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Input;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
@@ -53,6 +54,14 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     }
 
     public override ProtocolType Protocol => ProtocolType.Rdp;
+
+    /// <summary>
+    /// Surface <see cref="RetryCommand"/> to the SessionsPage tab context menu's Reconnect
+    /// entry — which gates its visibility on <see cref="SessionTabViewModel.CanReconnect"/>
+    /// (defaults to false when the base ReconnectCommand is null). Without this override,
+    /// RDP tabs would lose the standard reconnect path that SSH tabs have.
+    /// </summary>
+    public override ICommand? ReconnectCommand => RetryCommand;
 
     [ObservableProperty]
     private string? errorMessage;

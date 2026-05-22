@@ -318,14 +318,17 @@ public class ConnectionEditorViewModelTests
         var vm = new ConnectionEditorViewModel(repo);
         await vm.LoadCredentialsAsync();
 
-        // Default protocol is SSH — only the SSH credential is offered.
-        Assert.Single(vm.AvailableCredentials);
-        Assert.Equal("ssh", vm.AvailableCredentials[0].Name);
+        // AvailableCredentials always leads with the "(None)" sentinel for "prompt every
+        // time"; the next slot is the protocol-filtered repository entry.
+        Assert.Equal(2, vm.AvailableCredentials.Count);
+        Assert.Equal(Guid.Empty, vm.AvailableCredentials[0].Id);
+        Assert.Equal("ssh", vm.AvailableCredentials[1].Name);
 
         vm.Protocol = ProtocolType.Rdp;
 
-        Assert.Single(vm.AvailableCredentials);
-        Assert.Equal("rdp", vm.AvailableCredentials[0].Name);
+        Assert.Equal(2, vm.AvailableCredentials.Count);
+        Assert.Equal(Guid.Empty, vm.AvailableCredentials[0].Id);
+        Assert.Equal("rdp", vm.AvailableCredentials[1].Name);
     }
 
     [Fact]
@@ -340,8 +343,33 @@ public class ConnectionEditorViewModelTests
         vm.Protocol = ProtocolType.Rdp;
         await vm.LoadCredentialsAsync();
 
-        Assert.Single(vm.AvailableCredentials);
-        Assert.Equal("rdp-pwd", vm.AvailableCredentials[0].Name);
+        // Sentinel + the one password-kind credential, key-kind filtered out.
+        Assert.Equal(2, vm.AvailableCredentials.Count);
+        Assert.Equal(Guid.Empty, vm.AvailableCredentials[0].Id);
+        Assert.Equal("rdp-pwd", vm.AvailableCredentials[1].Name);
+    }
+
+    [Fact]
+    public async Task NoneSentinel_ClearsCredentialBindingBackToPromptEveryTime()
+    {
+        // Pre-fix the ComboBox couldn't clear a saved credential — placeholder text isn't a
+        // selectable item. The sentinel entry lets users round-trip back to "no credential".
+        var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var repo = new MultiCredentialRepository(cred);
+        var vm = new ConnectionEditorViewModel(repo);
+        await vm.LoadCredentialsAsync();
+
+        vm.SelectedCredential = cred;
+        Assert.Equal(cred.Id, vm.CredentialId);
+
+        var none = vm.AvailableCredentials[0];
+        Assert.Equal(Guid.Empty, none.Id);
+        vm.SelectedCredential = none;
+
+        Assert.Null(vm.CredentialId);
+        // Selecting "None" again returns the sentinel from the getter, not raw null — the
+        // ComboBox needs an in-collection item to display.
+        Assert.Equal(Guid.Empty, vm.SelectedCredential!.Id);
     }
 
     [Fact]
@@ -361,7 +389,9 @@ public class ConnectionEditorViewModelTests
         vm.Protocol = ProtocolType.Rdp;
 
         Assert.Null(vm.CredentialId);
-        Assert.Null(vm.SelectedCredential);
+        // Selected falls back to the None sentinel (Guid.Empty) rather than raw null — the
+        // picker needs an in-collection item to display the cleared state.
+        Assert.Equal(Guid.Empty, vm.SelectedCredential!.Id);
     }
 
     [Fact]

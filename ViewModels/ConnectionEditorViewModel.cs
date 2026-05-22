@@ -63,10 +63,24 @@ public partial class ConnectionEditorViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(SelectedCredential))]
     private Guid? credentialId;
 
+    /// <summary>
+    /// Sentinel item the credential picker shows for "no credential — prompt every time".
+    /// ComboBox.PlaceholderText is display-only and not selectable, so without a real item
+    /// at the top of the list, users couldn't unpick a previously-bound credential.
+    /// Identified by <see cref="Guid.Empty"/>; both <see cref="SelectedCredential"/> and
+    /// <see cref="SelectedGatewayCredential"/> map this sentinel to a null
+    /// <see cref="CredentialId"/> / <see cref="RdpGatewayCredentialId"/>.
+    /// </summary>
+    internal static readonly CredentialProfile NoneCredential = new()
+    {
+        Id = Guid.Empty,
+        Name = "(None — prompt every time)",
+    };
+
     public CredentialProfile? SelectedCredential
     {
-        get => GetCredentialById(CredentialId);
-        set => CredentialId = value?.Id;
+        get => CredentialId is null ? NoneCredential : GetCredentialById(CredentialId);
+        set => CredentialId = (value is null || value.Id == Guid.Empty) ? null : value.Id;
     }
 
     public bool IsRdp => Protocol == ProtocolType.Rdp;
@@ -208,8 +222,8 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     public CredentialProfile? SelectedGatewayCredential
     {
-        get => GetCredentialById(RdpGatewayCredentialId);
-        set => RdpGatewayCredentialId = value?.Id;
+        get => RdpGatewayCredentialId is null ? NoneCredential : GetCredentialById(RdpGatewayCredentialId);
+        set => RdpGatewayCredentialId = (value is null || value.Id == Guid.Empty) ? null : value.Id;
     }
 
     private CredentialProfile? GetCredentialById(Guid? id) =>
@@ -313,6 +327,9 @@ public partial class ConnectionEditorViewModel : ObservableObject
         var connectionIsRdp = Protocol == ProtocolType.Rdp;
 
         AvailableCredentials.Clear();
+        // First entry is the "(None)" sentinel so the user can clear a previously-bound
+        // credential back to "prompt every time" — ComboBox.PlaceholderText is not selectable.
+        AvailableCredentials.Add(NoneCredential);
         foreach (var c in _allCredentials)
         {
             if (c.Protocol != credentialProtocol) continue;
