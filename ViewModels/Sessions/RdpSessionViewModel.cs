@@ -306,9 +306,22 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
     private void OnSessionLogonError(object? sender, int code)
     {
+        // Per the IMsTscAxEvents.OnLogonError docs, the documented codes are nuanced:
+        //   -2 = the user cancelled the credentials dialog → not a failure, treat as cancel
+        //   -3 = pre-authentication failed → credential issue, prompt for re-entry on retry
+        //   -5 = an information dialog was displayed → not really an error
+        // Unknown / other codes fall through to a generic credential-failure overlay so the
+        // user still gets a recoverable retry path.
+        if (code == -2)
+        {
+            // User dismissed the credentials prompt — silent disconnect, no failure UI.
+            MarshalToUi(() => DisposeAndTransition(failureMessage: null, dueToCredentials: false));
+            return;
+        }
+        var dueToCredentials = code != -5;
         MarshalToUi(() => DisposeAndTransition(
             failureMessage: RdpLogonErrors.Describe(code),
-            dueToCredentials: true));
+            dueToCredentials: dueToCredentials));
     }
 
     private void OnSessionFatalError(object? sender, int code)
@@ -423,19 +436,20 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     }
 
     /// <summary>
-    /// Documented mappings for the OnLogonError codes the ActiveX may raise. Negative numbers
-    /// are the documented values from the IMsTscAxEvents reference; unknown codes fall through
-    /// to a generic message so users still get something actionable in the failure overlay.
+    /// Mappings for the OnLogonError codes the ActiveX may raise, taken from the
+    /// IMsTscAxEvents.OnLogonError reference at
+    /// learn.microsoft.com/windows/win32/termserv/imstscaxevents-onlogonerror. The published
+    /// table only documents three values; an earlier revision had additional made-up mappings
+    /// (account disabled / locked / expired) that misclassified errors. Unknown codes fall
+    /// through to a generic message so the user still has something actionable.
     /// </summary>
     private static class RdpLogonErrors
     {
         private static readonly IReadOnlyDictionary<int, string> Descriptions = new Dictionary<int, string>
         {
-            [-2] = "Bad username or password.",
-            [-3] = "The account is disabled.",
-            [-4] = "The account is locked out.",
-            [-5] = "Password has expired and must be changed.",
-            [-6] = "The user account has expired.",
+            [-2] = "The credentials dialog was cancelled.",
+            [-3] = "Pre-authentication failed.",
+            [-5] = "An information dialog was displayed (e.g. Lock Workstation Failed).",
         };
 
         public static string Describe(int code) =>

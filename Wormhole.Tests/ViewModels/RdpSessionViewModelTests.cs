@@ -80,8 +80,28 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
-    public void LogonError_BadPassword_SetsCredentialsFailureFlag()
+    public void LogonError_PreAuthFailed_SetsCredentialsFailureFlag()
     {
+        // Per IMsTscAxEvents.OnLogonError docs, -3 = pre-authentication failed → the user
+        // should be prompted to re-enter credentials on retry.
+        var (vm, _, _, _) = CreateVm();
+        vm.Initialize(MakeProfile());
+        var fake = new FakeRdpSession();
+        vm.AttachConnectedSessionForTesting(fake);
+
+        fake.RaiseLogonError(-3);
+
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.True(vm.FailedDueToCredentials);
+        Assert.Contains("Pre-authentication failed", vm.ErrorMessage);
+    }
+
+    [Fact]
+    public void LogonError_UserCancelledCredentialsDialog_SilentDisconnect()
+    {
+        // -2 = user dismissed the OCX's credentials dialog. That's a user action, not an
+        // auth failure — the VM should transition to Disconnected without surfacing the
+        // failure overlay.
         var (vm, _, _, _) = CreateVm();
         vm.Initialize(MakeProfile());
         var fake = new FakeRdpSession();
@@ -89,9 +109,26 @@ public class RdpSessionViewModelTests
 
         fake.RaiseLogonError(-2);
 
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.False(vm.FailedDueToCredentials);
+        Assert.Null(vm.ErrorMessage);
+    }
+
+    [Fact]
+    public void LogonError_InformationDialog_DoesNotMarkCredentialFailure()
+    {
+        // -5 = informational dialog displayed (e.g. "Lock Workstation Failed"). Not an auth
+        // problem; surface the message but don't prompt for credentials on retry.
+        var (vm, _, _, _) = CreateVm();
+        vm.Initialize(MakeProfile());
+        var fake = new FakeRdpSession();
+        vm.AttachConnectedSessionForTesting(fake);
+
+        fake.RaiseLogonError(-5);
+
         Assert.Equal(SessionStatus.Failed, vm.Status);
-        Assert.True(vm.FailedDueToCredentials);
-        Assert.Contains("Bad username or password", vm.ErrorMessage);
+        Assert.False(vm.FailedDueToCredentials);
+        Assert.Contains("information dialog", vm.ErrorMessage);
     }
 
     [Fact]
