@@ -89,9 +89,6 @@
                                   ItemsSource="{x:Bind ViewModel.ScreenSizeChoices}"
                                   SelectedItem="{x:Bind ViewModel.RdpScreenSize, Mode=TwoWay}" />
 
-                        <CheckBox Content="Open in full screen on connect"
-                                  IsChecked="{x:Bind ViewModel.RdpFullScreen, Mode=TwoWay}" />
-
                         <ComboBox Header="Color depth"
                                   HorizontalAlignment="Stretch"
                                   ItemsSource="{x:Bind ViewModel.ColorDepthChoices}"

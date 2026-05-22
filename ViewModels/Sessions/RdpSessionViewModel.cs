@@ -57,13 +57,6 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     [ObservableProperty]
     private string? errorMessage;
 
-    /// <summary>
-    /// True when the user has toggled in-tab maximize. The surface host binds its grid layout
-    /// to this so the RDP region stretches across the entire SessionsPage content area.
-    /// </summary>
-    [ObservableProperty]
-    private bool isMaximized;
-
     /// <summary>Surface for the "Reconnecting…" status banner while ActiveX auto-reconnect is in flight.</summary>
     [ObservableProperty]
     private int reconnectAttempt;
@@ -79,11 +72,8 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     public bool IsConnected => Status == SessionStatus.Connected;
     public bool IsFailed => Status == SessionStatus.Failed;
 
-    public override void Initialize(ConnectionProfile profile)
-    {
-        base.Initialize(profile);
-        IsMaximized = profile.RdpFullScreen;
-    }
+    // Initialize inherits the base implementation: protocol-specific bootstrapping is done
+    // lazily on AttachAsync once the surface host has the owner HWND.
 
     /// <summary>
     /// Called by RdpSurfaceHost on Loaded. If no session exists yet, resolves the credential and
@@ -140,9 +130,6 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         // session attaches; seed with a 1x1 so the form is valid until that arrives.
         await ConnectAsync(_ownerHwnd, HostBounds.Seed, forcePromptForPassword: forcePrompt).ConfigureAwait(true);
     }
-
-    [RelayCommand]
-    public void ToggleMaximize() => IsMaximized = !IsMaximized;
 
     public override ValueTask CloseAsync()
     {

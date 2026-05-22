@@ -26,15 +26,6 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
-    public void Initialize_FromProfileWithRdpFullScreen_SeedsIsMaximized()
-    {
-        var (vm, _, _, _) = CreateVm();
-        vm.Initialize(MakeProfile(fullScreen: true));
-
-        Assert.True(vm.IsMaximized);
-    }
-
-    [Fact]
     public void AttachConnectedSessionForTesting_FakeRaisesConnected_StatusFlipsToConnected()
     {
         var (vm, _, _, _) = CreateVm();
@@ -185,20 +176,6 @@ public class RdpSessionViewModelTests
 
         Assert.Equal(SessionStatus.Disconnected, vm.Status);
         Assert.True(fake.Disposed);
-    }
-
-    [Fact]
-    public void ToggleMaximize_FlipsIsMaximized()
-    {
-        var (vm, _, _, _) = CreateVm();
-        vm.Initialize(MakeProfile(fullScreen: false));
-        Assert.False(vm.IsMaximized);
-
-        vm.ToggleMaximizeCommand.Execute(null);
-        Assert.True(vm.IsMaximized);
-
-        vm.ToggleMaximizeCommand.Execute(null);
-        Assert.False(vm.IsMaximized);
     }
 
     private static ConnectionProfile MakeProfile(bool fullScreen = false)

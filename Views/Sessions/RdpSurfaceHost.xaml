@@ -21,13 +21,6 @@
                         <FontIcon Glyph="&#xE72C;" />
                     </MenuFlyoutItem.Icon>
                 </MenuFlyoutItem>
-                <MenuFlyoutSeparator />
-                <!-- IsChecked TwoWay already round-trips the toggle into ViewModel.IsMaximized,
-                     so a Command binding would double-toggle (binding sets the new value, then
-                     the command sets it back) and the click would appear to do nothing. The
-                     command is still exposed on the VM for tests + future keyboard binding. -->
-                <ToggleMenuFlyoutItem Text="Maximize within tab"
-                                      IsChecked="{x:Bind ViewModel.IsMaximized, Mode=TwoWay}" />
             </MenuFlyout>
         </Grid.ContextFlyout>
 
