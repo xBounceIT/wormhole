@@ -23,6 +23,7 @@ public sealed class RdpSessionService : IRdpSessionService
         IntPtr ownerHwnd,
         string? gatewayUsername = null,
         string? gatewayPassword = null,
+        Action<IRdpSession>? onSessionReady = null,
         CancellationToken cancellationToken = default)
     {
         // Must run on the WinUI UI thread (STA). The form constructor enforces this.
@@ -68,12 +69,13 @@ public sealed class RdpSessionService : IRdpSessionService
             }
             cancellationToken.ThrowIfCancellationRequested();
 
-            // Construct the adapter BEFORE Start() so its event subscriptions are in place
-            // when the OCX begins the handshake. Otherwise an early failure (immediate auth
-            // reject, transport error right after Connect) would fire on the form's events
-            // with no subscribers, and the VM would stay stuck in Connecting with no
-            // terminal transition.
+            // Construct the adapter BEFORE Start() and let the caller subscribe via
+            // onSessionReady — both legs together close the early-event race. Adapter-then-VM
+            // subscriptions are fully wired by the time ocx.Connect() runs synchronously
+            // inside form.Start(); an immediate auth reject or transport failure right after
+            // Connect therefore reaches the VM and produces a terminal transition.
             var adapter = new RdpSessionAdapter(form, _logger);
+            onSessionReady?.Invoke(adapter);
             form.Start();
 
             _logger.LogInformation("RDP session opened to {Host}:{Port}.", profile.Host, profile.Port);

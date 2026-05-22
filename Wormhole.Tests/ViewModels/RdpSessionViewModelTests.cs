@@ -209,9 +209,12 @@ public class RdpSessionViewModelTests
             IntPtr ownerHwnd,
             string? gatewayUsername = null,
             string? gatewayPassword = null,
+            Action<IRdpSession>? onSessionReady = null,
             CancellationToken cancellationToken = default)
         {
             if (NextSession is null) throw new InvalidOperationException("FakeRdpSessionService.NextSession not assigned.");
+            // Mirror the real service: subscribe-via-callback runs before the handshake starts.
+            onSessionReady?.Invoke(NextSession);
             return Task.FromResult(NextSession);
         }
     }

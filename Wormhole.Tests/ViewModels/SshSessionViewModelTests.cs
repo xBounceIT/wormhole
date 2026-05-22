@@ -115,6 +115,7 @@ public sealed class SshSessionViewModelTests
         public Task<IRdpSession> ConnectAsync(
             ConnectionProfile profile, string? password, IntPtr ownerHwnd,
             string? gatewayUsername = null, string? gatewayPassword = null,
+            Action<IRdpSession>? onSessionReady = null,
             CancellationToken cancellationToken = default)
             => throw new NotImplementedException();
     }

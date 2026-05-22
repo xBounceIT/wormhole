@@ -4,12 +4,25 @@ namespace Wormhole.Services;
 
 public interface IRdpSessionService
 {
+    /// <summary>
+    /// Open an RDP session. The optional <paramref name="onSessionReady"/> callback runs
+    /// after the underlying session is constructed and its event surface is fully wired,
+    /// but BEFORE the ActiveX handshake actually starts — callers MUST subscribe to
+    /// <see cref="IRdpSession.Connected"/> / <see cref="IRdpSession.Disconnected"/> /
+    /// <see cref="IRdpSession.LogonError"/> / <see cref="IRdpSession.FatalError"/> /
+    /// <see cref="IRdpSession.AutoReconnecting"/> there if they care about early events.
+    /// Subscribing only after the returned Task completes is racy: an immediate
+    /// authentication reject during the synchronous Connect() inside Start() would fire
+    /// the events with no subscribers and the caller would never see the terminal
+    /// transition.
+    /// </summary>
     Task<IRdpSession> ConnectAsync(
         ConnectionProfile profile,
         string? password,
         IntPtr ownerHwnd,
         string? gatewayUsername = null,
         string? gatewayPassword = null,
+        Action<IRdpSession>? onSessionReady = null,
         CancellationToken cancellationToken = default);
 }
 

@@ -180,13 +180,22 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             cts.CancelAfter(ConnectTimeout);
 
             var (gwUser, gwPassword) = await ResolveGatewayCredentialsAsync(profile, token).ConfigureAwait(true);
-            _session = await _rdpService.ConnectAsync(
-                profile, password, ownerHwnd, gwUser, gwPassword, token).ConfigureAwait(true);
-            _session.Connected += OnSessionConnected;
-            _session.Disconnected += OnSessionDisconnected;
-            _session.FatalError += OnSessionFatalError;
-            _session.LogonError += OnSessionLogonError;
-            _session.AutoReconnecting += OnSessionAutoReconnecting;
+            // Subscribe via the onSessionReady hook (not after the await) so the VM is ready
+            // to receive an immediate OnLogonError / OnDisconnected that the OCX may fire
+            // synchronously during the Connect() inside form.Start(). Subscribing after the
+            // returned Task completes would drop those events and strand us in Connecting.
+            var session = await _rdpService.ConnectAsync(
+                profile, password, ownerHwnd, gwUser, gwPassword,
+                onSessionReady: s =>
+                {
+                    s.Connected += OnSessionConnected;
+                    s.Disconnected += OnSessionDisconnected;
+                    s.FatalError += OnSessionFatalError;
+                    s.LogonError += OnSessionLogonError;
+                    s.AutoReconnecting += OnSessionAutoReconnecting;
+                },
+                token).ConfigureAwait(true);
+            _session = session;
 
             _session.SetBounds(initialBounds.IsDegenerate(minDim: 1) ? HostBounds.Seed : initialBounds);
             _session.Show();
