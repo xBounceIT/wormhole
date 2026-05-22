@@ -130,9 +130,10 @@ func run(mock bool) error {
 
 	port := ln.Addr().(*net.TCPAddr).Port
 	fmt.Fprintf(os.Stdout, "READY %d\n", port)
-	if f, ok := os.Stdout.(interface{ Sync() error }); ok {
-		_ = f.Sync()
-	}
+	// os.Stdout is *os.File, not an interface — calling Sync directly. Best-effort: when
+	// stdout is a pipe (the parent's redirected stream) Sync returns an error that's safe
+	// to ignore; the Fprintf above has already buffered the line into the OS pipe.
+	_ = os.Stdout.Sync()
 	logf("socks5 listening on 127.0.0.1:%d", port)
 
 	go func() {
