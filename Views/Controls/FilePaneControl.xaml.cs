@@ -79,40 +79,83 @@ public sealed partial class FilePaneControl : UserControl
         if (!string.IsNullOrEmpty(name)) await ViewModel.CreateFileAsync(name).ConfigureAwait(true);
     }
 
+    // Inline confirm/prompt overlays — see FilePaneControl.xaml for the visual layer.
+    // The pane lives inside a ContentDialog (FileTransferDialog), and WinUI 3 forbids
+    // nested ContentDialogs, so these prompts must not open a new ContentDialog.
+    private TaskCompletionSource<bool>? _confirmTcs;
+    private TaskCompletionSource<string?>? _promptTcs;
+
     private async void OnDeleteClick(object sender, RoutedEventArgs e)
     {
         if (ViewModel is null || ViewModel.SelectedEntries.Count == 0) return;
         var count = ViewModel.SelectedEntries.Count;
-        var dialog = new ContentDialog
-        {
-            Title = "Delete",
-            Content = $"Delete {count} item{(count == 1 ? string.Empty : "s")}?",
-            PrimaryButtonText = "Delete",
-            CloseButtonText = "Cancel",
-            DefaultButton = ContentDialogButton.Close,
-            XamlRoot = this.XamlRoot,
-        };
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        var confirmed = await ShowConfirmAsync(
+            title: "Delete",
+            message: $"Delete {count} item{(count == 1 ? string.Empty : "s")}?",
+            yesLabel: "Delete").ConfigureAwait(true);
+        if (!confirmed) return;
         await ViewModel.DeleteSelectedAsync().ConfigureAwait(true);
     }
 
-    private async Task<string?> PromptForNameAsync(string title, string label, string placeholder)
+    private Task<bool> ShowConfirmAsync(string title, string message, string yesLabel)
     {
-        var box = new TextBox { Header = label, PlaceholderText = placeholder, MinWidth = 280 };
-        var dialog = new ContentDialog
+        ConfirmTitle.Text = title;
+        ConfirmMessage.Text = message;
+        ConfirmYesButton.Content = yesLabel;
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _confirmTcs = tcs;
+        ConfirmOverlay.Visibility = Visibility.Visible;
+        return CompleteOverlayAsync(tcs.Task, () => ConfirmOverlay.Visibility = Visibility.Collapsed, () => _confirmTcs = null);
+    }
+
+    private void OnConfirmYes(object sender, RoutedEventArgs e) => _confirmTcs?.TrySetResult(true);
+    private void OnConfirmNo(object sender, RoutedEventArgs e) => _confirmTcs?.TrySetResult(false);
+
+    private Task<string?> PromptForNameAsync(string title, string label, string placeholder)
+    {
+        PromptTitle.Text = title;
+        PromptInput.Header = label;
+        PromptInput.PlaceholderText = placeholder;
+        PromptInput.Text = string.Empty;
+        PromptOkButton.IsEnabled = false;
+        var tcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _promptTcs = tcs;
+        PromptOverlay.Visibility = Visibility.Visible;
+        // Focus the input after the overlay's container materializes. FocusState.Pointer
+        // mirrors the in-row rename pattern at OnRenameTextBoxLoaded — programmatic focus
+        // can be intercepted by ancestor LosingFocus handlers, Pointer is treated as
+        // user-driven and sails through.
+        _ = DispatcherQueue.TryEnqueue(() => PromptInput.Focus(FocusState.Pointer));
+        return CompleteOverlayAsync(tcs.Task, () => PromptOverlay.Visibility = Visibility.Collapsed, () => _promptTcs = null);
+    }
+
+    private void OnPromptInputTextChanged(object sender, TextChangedEventArgs e) =>
+        PromptOkButton.IsEnabled = !string.IsNullOrWhiteSpace(PromptInput.Text);
+
+    private void OnPromptInputKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == VirtualKey.Enter && PromptOkButton.IsEnabled)
         {
-            Title = title,
-            Content = box,
-            PrimaryButtonText = "Create",
-            CloseButtonText = "Cancel",
-            DefaultButton = ContentDialogButton.Primary,
-            IsPrimaryButtonEnabled = false,
-            XamlRoot = this.XamlRoot,
-        };
-        box.TextChanged += (_, _) => dialog.IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(box.Text);
-        dialog.Opened += (_, _) => box.Focus(FocusState.Programmatic);
-        var result = await dialog.ShowAsync();
-        return result == ContentDialogResult.Primary ? box.Text.Trim() : null;
+            e.Handled = true;
+            OnPromptOk(sender, e);
+        }
+        else if (e.Key == VirtualKey.Escape)
+        {
+            e.Handled = true;
+            OnPromptCancel(sender, e);
+        }
+    }
+
+    private void OnPromptOk(object sender, RoutedEventArgs e) =>
+        _promptTcs?.TrySetResult(string.IsNullOrWhiteSpace(PromptInput.Text) ? null : PromptInput.Text.Trim());
+
+    private void OnPromptCancel(object sender, RoutedEventArgs e) =>
+        _promptTcs?.TrySetResult(null);
+
+    private static async Task<T> CompleteOverlayAsync<T>(Task<T> task, Action hide, Action clear)
+    {
+        try { return await task.ConfigureAwait(true); }
+        finally { hide(); clear(); }
     }
 
     // === context menu =========================================================
@@ -352,6 +395,11 @@ public sealed partial class FilePaneControl : UserControl
                         return;
                     }
                     await OnTransferRequested(new TransferRequest(direction, ViewModel.CurrentPath, items)).ConfigureAwait(true);
+                    // The destination pane is the one that received the drop (this pane);
+                    // its listing is stale until refreshed. Without this the transferred
+                    // file lives on disk / the server but the user has no way to see it
+                    // without clicking the Refresh button manually.
+                    await ViewModel.RefreshAsync().ConfigureAwait(true);
                 }
                 return;
             }
@@ -376,6 +424,7 @@ public sealed partial class FilePaneControl : UserControl
                     return;
                 }
                 await OnTransferRequested(new TransferRequest(direction, ViewModel.CurrentPath, items)).ConfigureAwait(true);
+                await ViewModel.RefreshAsync().ConfigureAwait(true);
             }
         }
         finally

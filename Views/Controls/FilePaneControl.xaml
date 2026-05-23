@@ -149,5 +149,62 @@
                        Margin="0,4,0,0"
                        TextWrapping="Wrap" />
         </Grid>
+
+        <!-- Inline overlays. The host FileTransferDialog is itself a ContentDialog;
+             WinUI 3 forbids two ContentDialogs open simultaneously, so per-pane
+             confirm/prompt UI lives inline here and uses a TaskCompletionSource
+             to await the user's choice. -->
+        <Grid x:Name="ConfirmOverlay"
+              Grid.RowSpan="4"
+              Visibility="Collapsed"
+              Background="#80000000">
+            <Border MaxWidth="420"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                    BorderBrush="{ThemeResource ControlElevationBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="20">
+                <StackPanel Spacing="12" MinWidth="300">
+                    <TextBlock x:Name="ConfirmTitle" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock x:Name="ConfirmMessage" TextWrapping="Wrap" />
+                    <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                        <Button x:Name="ConfirmYesButton" MinWidth="100" Click="OnConfirmYes" />
+                        <Button Content="Cancel" MinWidth="100" Click="OnConfirmNo" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
+
+        <Grid x:Name="PromptOverlay"
+              Grid.RowSpan="4"
+              Visibility="Collapsed"
+              Background="#80000000">
+            <Border MaxWidth="420"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                    BorderBrush="{ThemeResource ControlElevationBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="20">
+                <StackPanel Spacing="12" MinWidth="300">
+                    <TextBlock x:Name="PromptTitle" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBox x:Name="PromptInput"
+                             KeyDown="OnPromptInputKeyDown"
+                             TextChanged="OnPromptInputTextChanged" />
+                    <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                        <Button x:Name="PromptOkButton"
+                                Content="Create"
+                                MinWidth="100"
+                                IsEnabled="False"
+                                Style="{StaticResource AccentButtonStyle}"
+                                Click="OnPromptOk" />
+                        <Button Content="Cancel" MinWidth="100" Click="OnPromptCancel" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
     </Grid>
 </UserControl>
