@@ -6,4 +6,5 @@ public sealed record MRemoteNgFileInfo(
     string BlockCipherMode,
     string Protected,
     bool FullFileEncryption,
-    int KdfIterations);
+    int KdfIterations,
+    bool HasPasswordPayloads);

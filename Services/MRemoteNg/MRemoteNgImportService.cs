@@ -7,9 +7,9 @@ using Wormhole.Models;
 
 namespace Wormhole.Services.MRemoteNg;
 
-// Orchestrates the four phases of an mRemoteNG import: Inspect (root attributes only),
-// VerifyPassword (decrypt the "Protected" verifier), Plan (pure transform of the XML into
-// the Wormhole shape — node tree + dedup'd credentials + clear-text passwords), and Commit
+// Orchestrates the four phases of an mRemoteNG import: Inspect (metadata + password-payload
+// presence), VerifyPassword (decrypt the "Protected" verifier), Plan (pure transform of
+// the XML into the Wormhole shape — node tree + dedup'd credentials + clear-text passwords), and Commit
 // (single SQLite transaction + Credential Manager writes with compensating rollback).
 public sealed class MRemoteNgImportService : IMRemoteNgImportService
 {
@@ -49,7 +49,7 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
         cancellationToken.ThrowIfCancellationRequested();
         // Off the dispatcher: even an attribute-only XmlReader scan does sync file I/O, and
         // we don't want a multi-MB export blocking the UI just to discover its KdfIterations.
-        return Task.Run(() => InspectCore(path, cancellationToken), cancellationToken);
+        return Task.Run(() => InspectCore(path, scanPasswordPayloads: true, cancellationToken), cancellationToken);
     }
 
     public Task<bool> VerifyPasswordAsync(string path, string password, CancellationToken cancellationToken = default)
@@ -59,21 +59,24 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
         // freeze the UI per password retry. Push the whole verify off the dispatcher.
         return Task.Run(() =>
         {
-            var info = InspectCore(path, cancellationToken);
-            EnsureSupportedEncryption(info);
+            var info = InspectCore(path, scanPasswordPayloads: false, cancellationToken);
+            EnsureSupportedEncryption(info, requirePasswordDecryption: true);
             if (string.IsNullOrEmpty(info.Protected)) return false;
             return MRemoteNgCrypto.TryDecryptUtf8(info.Protected, password, info.KdfIterations, out var plain)
                 && plain == ProtectedVerifier;
         }, cancellationToken);
     }
 
-    // Lightweight root-attribute reader: walks ONLY the first element of the document via
+    // Lightweight metadata reader: captures root attributes and scans Node attributes via
     // XmlReader, never materializing the full node tree. Previously InspectAsync used the
     // same MRemoteNgXmlReader.Parse path as PlanAsync, which forced a full XDocument.Load
     // even when we only needed five attributes — and VerifyPasswordAsync called InspectAsync
     // INTERNALLY, so each password retry did two full parses. This path is ~100x faster on
     // a 300 KB export.
-    private static MRemoteNgFileInfo InspectCore(string path, CancellationToken cancellationToken)
+    private static MRemoteNgFileInfo InspectCore(
+        string path,
+        bool scanPasswordPayloads,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Path is required.", nameof(path));
         if (!File.Exists(path)) throw new FileNotFoundException("File not found.", path);
@@ -115,10 +118,39 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
             xr.GetAttribute("FullFileEncryption"), "true", StringComparison.OrdinalIgnoreCase);
         var kdfIterationsRaw = xr.GetAttribute("KdfIterations");
         var kdfIterations = int.TryParse(kdfIterationsRaw, out var n) && n > 0 ? n : 1000;
+        var hasPasswordPayloads = false;
+
+        if (scanPasswordPayloads)
+        {
+            try
+            {
+                while (xr.Read())
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (xr.NodeType != System.Xml.XmlNodeType.Element ||
+                        !string.Equals(xr.LocalName, "Node", StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    if (PasswordFieldRequiresDecryption(
+                            xr.GetAttribute("Password"),
+                            AttributeTrue(xr.GetAttribute("InheritPassword"))))
+                    {
+                        hasPasswordPayloads = true;
+                        break;
+                    }
+                }
+            }
+            catch (System.Xml.XmlException ex)
+            {
+                throw new InvalidDataException("File is not valid XML.", ex);
+            }
+        }
 
         return new MRemoteNgFileInfo(
             confVersion, encryptionEngine, blockCipherMode, @protected,
-            fullFileEncryption, kdfIterations);
+            fullFileEncryption, kdfIterations, hasPasswordPayloads);
     }
 
     public async Task<MRemoteNgImportPlan> PlanAsync(
@@ -147,9 +179,11 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
         CancellationToken cancellationToken)
     {
         var (root, rawRoots) = await ReadXmlAsync(path, cancellationToken);
+        var hasPasswordPayloads = rawRoots.Any(NodeHasPasswordPayload);
         EnsureSupportedEncryption(new MRemoteNgFileInfo(
             root.ConfVersion, root.EncryptionEngine, root.BlockCipherMode,
-            root.Protected, root.FullFileEncryption, root.KdfIterations));
+            root.Protected, root.FullFileEncryption, root.KdfIterations,
+            hasPasswordPayloads), requirePasswordDecryption: hasPasswordPayloads);
 
         progress?.Report(new MRemoteNgImportProgress(15, "Decrypting passwords..."));
         cancellationToken.ThrowIfCancellationRequested();
@@ -257,7 +291,9 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
             var domain = raw.InheritDomain ? null : NullIfEmpty(raw.Domain);
             var host = raw.InheritHostname ? null : NullIfEmpty(raw.Hostname);
             var port = raw.InheritPort ? null : ParseIntOrNull(raw.Port);
-            var passwordCipher = raw.InheritPassword ? string.Empty : raw.PasswordCipher;
+            var passwordCipher = PasswordFieldRequiresDecryption(raw.PasswordCipher, raw.InheritPassword)
+                ? raw.PasswordCipher
+                : string.Empty;
             var resolution = raw.InheritResolution ? null : NullIfEmpty(raw.Resolution);
             if (raw.InheritProtocol) protocol = null;
 
@@ -564,13 +600,17 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
         return (root, roots);
     }
 
-    private static void EnsureSupportedEncryption(MRemoteNgFileInfo info)
+    private static void EnsureSupportedEncryption(MRemoteNgFileInfo info, bool requirePasswordDecryption)
     {
         if (info.FullFileEncryption)
         {
             throw new NotSupportedException(
                 "This mRemoteNG export uses full-file encryption, which Wormhole's importer doesn't handle yet. " +
                 "Re-export with 'Encrypt Connections File' unchecked.");
+        }
+        if (!requirePasswordDecryption)
+        {
+            return;
         }
         if (!string.Equals(info.EncryptionEngine, "AES", StringComparison.OrdinalIgnoreCase))
         {
@@ -590,6 +630,16 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
                 "Re-export with a recent mRemoteNG version.");
         }
     }
+
+    private static bool NodeHasPasswordPayload(MRemoteNgRawNode raw) =>
+        PasswordFieldRequiresDecryption(raw.PasswordCipher, raw.InheritPassword) ||
+        raw.Children.Any(NodeHasPasswordPayload);
+
+    private static bool PasswordFieldRequiresDecryption(string? passwordCipher, bool inheritPassword) =>
+        !inheritPassword && !string.IsNullOrWhiteSpace(passwordCipher);
+
+    private static bool AttributeTrue(string? raw) =>
+        string.Equals(raw, "true", StringComparison.OrdinalIgnoreCase);
 
     private static bool TryMapProtocol(string raw, out ProtocolType protocol)
     {

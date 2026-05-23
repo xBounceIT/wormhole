@@ -180,6 +180,63 @@ public class MRemoteNgImportServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task PlanAndCommit_NoPasswordPayloads_WithCustomProtectedVerifier_ImportsConnectionsWithoutCredentials()
+    {
+        var verifier = MRemoteNgCryptoTests.Encrypt(
+            MRemoteNgImportService.ProtectedVerifier, "custom-master", DefaultIterations);
+        var xml = $$"""
+            <?xml version="1.0" encoding="utf-8"?>
+            <mrng:Connections xmlns:mrng="http://mremoteng.org" EncryptionEngine="AES"
+                BlockCipherMode="GCM" KdfIterations="{{DefaultIterations}}"
+                FullFileEncryption="false" Protected="{{verifier}}" ConfVersion="2.7">
+                <Node Name="Top" Type="Container" Protocol="SSH2" Password="   ">
+                    <Node Name="leaf-a" Type="Connection" Protocol="SSH2" Hostname="h-a"
+                          Username="alice" Password="" />
+                    <Node Name="leaf-b" Type="Connection" Protocol="SSH2" Hostname="h-b"
+                          Username="bob" Password="ignored-inherited-value" InheritPassword="true" />
+                </Node>
+            </mrng:Connections>
+            """;
+        var path = WriteFixture(xml);
+
+        var info = await _service.InspectAsync(path);
+        Assert.False(info.HasPasswordPayloads);
+        Assert.False(await _service.VerifyPasswordAsync(path, DefaultPassword));
+
+        var result = await _service.CommitAsync(await _service.PlanAsync(path, DefaultPassword));
+
+        Assert.Equal(1, result.FoldersCreated);
+        Assert.Equal(2, result.ConnectionsCreated);
+        Assert.Equal(0, result.CredentialsCreated);
+        Assert.Empty(await _credentialRepo.GetAllAsync());
+        Assert.Empty(_credentialService.Passwords);
+    }
+
+    [Fact]
+    public async Task PlanAndCommit_NoPasswordPayloads_AllowsMissingProtectedVerifier()
+    {
+        var xml = $$"""
+            <?xml version="1.0" encoding="utf-8"?>
+            <mrng:Connections xmlns:mrng="http://mremoteng.org" EncryptionEngine=""
+                BlockCipherMode="" KdfIterations="{{DefaultIterations}}"
+                FullFileEncryption="false" Protected="" ConfVersion="2.7">
+                <Node Name="leaf" Type="Connection" Protocol="SSH2" Hostname="h"
+                      Username="alice" Password="" />
+            </mrng:Connections>
+            """;
+        var path = WriteFixture(xml);
+
+        var info = await _service.InspectAsync(path);
+        Assert.False(info.HasPasswordPayloads);
+
+        var result = await _service.CommitAsync(await _service.PlanAsync(path, DefaultPassword));
+
+        Assert.Equal(1, result.ConnectionsCreated);
+        Assert.Equal(0, result.CredentialsCreated);
+        Assert.Empty(_credentialService.Passwords);
+    }
+
+    [Fact]
     public async Task VerifyPasswordAsync_WrongPassword_ReturnsFalse()
     {
         var path = WriteFixture(BuildFixtureXml());

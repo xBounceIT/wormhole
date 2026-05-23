@@ -167,7 +167,14 @@ public sealed partial class MRemoteNgImportDialogViewModel : ObservableObject, I
 
         try
         {
-            await _importService.InspectAsync(SelectedPath, token);
+            var fileInfo = await _importService.InspectAsync(SelectedPath, token);
+            if (!fileInfo.HasPasswordPayloads)
+            {
+                NeedsPassword = false;
+                PasswordError = null;
+                await PlanAndCommitAsync(DefaultPassword, token);
+                return;
+            }
 
             // Try each candidate in order. For the silent default path this is ("mR3m", "")
             // — covering both the well-known default and "no password" exports. For the
