@@ -36,8 +36,8 @@
         </ComboBox>
 
         <!-- WireGuard fields: shown only when KindBox.SelectedItem == TunnelKind.WireGuard.
-             Future kinds add sibling panels with their own Visibility binding so each tunnel
-             type owns its own form section. -->
+             Each tunnel kind owns its own panel with its own Visibility binding so the
+             form section follows the selected Kind. -->
         <StackPanel x:Name="WireGuardPanel" Spacing="10">
             <TextBlock Text="Interface" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
             <TextBox x:Name="InterfacePrivateKeyBox"
@@ -72,6 +72,33 @@
                      Header="Persistent keepalive seconds (optional)"
                      Width="160"
                      HorizontalAlignment="Left" />
+        </StackPanel>
+
+        <!-- OpenVPN fields: paste the full .ovpn profile, plus optional auth-user-pass
+             credentials kept out of the profile so they can be edited / rotated independently
+             and stored alongside (DPAPI-encrypted) instead of inlined in the profile blob. -->
+        <StackPanel x:Name="OpenVpnPanel" Spacing="10" Visibility="Collapsed">
+            <TextBlock Text="Profile" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+            <TextBox x:Name="ProfileOvpnBox"
+                     Header="OpenVPN profile (.ovpn contents)"
+                     PlaceholderText="client&#x0a;proto udp&#x0a;remote vpn.example.com 1194&#x0a;..."
+                     AcceptsReturn="True"
+                     TextWrapping="NoWrap"
+                     FontFamily="Consolas"
+                     MinHeight="220"
+                     MaxHeight="320"
+                     ScrollViewer.VerticalScrollBarVisibility="Auto"
+                     ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                     TextChanged="OnFieldChanged" />
+
+            <TextBlock Text="Authentication (optional)" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+            <TextBox x:Name="OpenVpnUsernameBox"
+                     Header="Username"
+                     PlaceholderText="leave blank if the profile authenticates via certificate only"
+                     TextChanged="OnFieldChanged" />
+            <PasswordBox x:Name="OpenVpnPasswordBox"
+                         Header="Password"
+                         PasswordChanged="OnPasswordFieldChanged" />
         </StackPanel>
     </StackPanel>
     </ScrollViewer>

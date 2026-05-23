@@ -147,7 +147,8 @@ public class TunnelConfigsViewModelTests
                 InterfaceAddress = "10.0.0.2/32",
                 PeerPublicKey = "k2",
                 PeerEndpoint = "",
-            });
+            },
+            OpenVpn: null);
 
         await vm.AddTunnelCommand.ExecuteAsync(null);
 
@@ -171,7 +172,8 @@ public class TunnelConfigsViewModelTests
                 InterfaceAddress = "10.0.0.2/32",
                 PeerPublicKey = "k2",
                 PeerEndpoint = "host:51820",
-            });
+            },
+            OpenVpn: null);
 
         await vm.AddTunnelCommand.ExecuteAsync(null);
 
@@ -221,7 +223,8 @@ public class TunnelConfigsViewModelTests
                 InterfaceAddress = "10.0.0.2/32",
                 PeerPublicKey = "k2",
                 PeerEndpoint = "host2:51820",
-            });
+            },
+            OpenVpn: null);
 
         await vm.EditTunnelCommand.ExecuteAsync(vm.Configs[0]);
 
@@ -346,6 +349,170 @@ public class TunnelConfigsViewModelTests
         Assert.Empty(vm.Configs);
     }
 
+    [Fact]
+    public async Task AddTunnel_OpenVpn_CommitsRowAndSecret()
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        dialog.TunnelPromptResult = NewOpenVpnDraft("corp-ovpn", user: "alice", pass: "s3cret");
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        Assert.Single(repo.Configs.Values);
+        var stored = repo.Configs.Values.Single();
+        Assert.Equal("corp-ovpn", stored.Name);
+        Assert.Equal(TunnelKind.OpenVpn, stored.Kind);
+        Assert.True(creds.TunnelConfigs.ContainsKey(stored.Id));
+        var ovpn = JsonSerializer.Deserialize<OpenVpnSettings>(creds.TunnelConfigs[stored.Id])!;
+        Assert.Contains("remote vpn.example.com", ovpn.ProfileOvpn);
+        Assert.Equal("alice", ovpn.Username);
+        Assert.Equal("s3cret", ovpn.Password);
+    }
+
+    [Fact]
+    public async Task AddTunnel_OpenVpn_MissingProfile_RejectsBeforePersist()
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        // Empty profile — programmatic-caller path; ValidateOpenVpn is the defense-in-depth.
+        dialog.TunnelPromptResult = new TunnelDraft(
+            "corp-ovpn",
+            TunnelKind.OpenVpn,
+            WireGuard: null,
+            new OpenVpnSettings { ProfileOvpn = "" });
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        Assert.Empty(repo.Configs);
+        Assert.Empty(creds.TunnelConfigs);
+        Assert.Contains(dialog.Messages, m => m.title == "Tunnel settings incomplete");
+    }
+
+    [Fact]
+    public async Task AddTunnel_OpenVpn_NullSettings_RejectsViaValidation()
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        // OpenVpn kind without an OpenVpnSettings payload — should never happen from the
+        // dialog, but ValidateDraft must catch programmatic misuse before SerializeSecret
+        // is asked to serialize null.
+        dialog.TunnelPromptResult = new TunnelDraft(
+            "corp-ovpn",
+            TunnelKind.OpenVpn,
+            WireGuard: null,
+            OpenVpn: null);
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        Assert.Empty(repo.Configs);
+        Assert.Empty(creds.TunnelConfigs);
+        Assert.Contains(dialog.Messages, m => m.title == "Tunnel settings incomplete");
+    }
+
+    [Fact]
+    public async Task EditTunnel_OpenVpn_RoundTripsProfileAndCredentials()
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        var id = Guid.NewGuid();
+        repo.Configs[id] = new TunnelConfig { Id = id, Name = "corp-ovpn", Kind = TunnelKind.OpenVpn };
+        creds.TunnelConfigs[id] = JsonSerializer.SerializeToUtf8Bytes(new OpenVpnSettings
+        {
+            ProfileOvpn = "client\nremote old.example.com 1194\n",
+            Username = "alice",
+            Password = "old-pass",
+        });
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        dialog.TunnelPromptResult = NewOpenVpnDraft(
+            "corp-ovpn",
+            profile: "client\nremote new.example.com 1194\n",
+            user: "alice",
+            pass: "new-pass");
+
+        await vm.EditTunnelCommand.ExecuteAsync(vm.Configs[0]);
+
+        var stored = JsonSerializer.Deserialize<OpenVpnSettings>(creds.TunnelConfigs[id])!;
+        Assert.Contains("new.example.com", stored.ProfileOvpn);
+        Assert.Equal("new-pass", stored.Password);
+    }
+
+    [Fact]
+    public async Task EditTunnel_OpenVpn_MissingBlob_WarnsThenLoadsEmptyDraftWithoutThrowing()
+    {
+        // Defense-in-depth: a missing/corrupt secret on disk should surface as a blank-form
+        // repair path, not an unhandled exception in the dialog flow. The warning dialog
+        // before the form opens prevents a casual Save from durably overwriting the (possibly
+        // recoverable) bytes with empty defaults.
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        var id = Guid.NewGuid();
+        repo.Configs[id] = new TunnelConfig { Id = id, Name = "corp-ovpn", Kind = TunnelKind.OpenVpn };
+        // intentionally no entry in creds.TunnelConfigs
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        dialog.TunnelPromptResult = null; // user cancels the dialog after seeing the blank form
+
+        await vm.EditTunnelCommand.ExecuteAsync(vm.Configs[0]);
+
+        // No throw; row unchanged. The user should have seen a load-failure warning BEFORE
+        // the dialog opened so a casual Save wouldn't durably overwrite recoverable bytes.
+        Assert.Equal("corp-ovpn", repo.Configs[id].Name);
+        Assert.DoesNotContain(dialog.Messages, m => m.title == "Couldn't update tunnel");
+        Assert.Contains(dialog.Messages, m => m.title == "Tunnel settings couldn't be loaded");
+    }
+
+    [Fact]
+    public async Task EditTunnel_OpenVpn_CorruptBlob_WarnsBeforeOpeningDialog()
+    {
+        // A blob that exists but fails JSON.Deserialize must surface a "couldn't be loaded"
+        // warning BEFORE the dialog opens, distinct from the missing-blob path. Without this,
+        // a casual Save would overwrite the partially-recoverable bytes with empty defaults.
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        var id = Guid.NewGuid();
+        repo.Configs[id] = new TunnelConfig { Id = id, Name = "corp-ovpn", Kind = TunnelKind.OpenVpn };
+        creds.TunnelConfigs[id] = new byte[] { 0xFF, 0xFE, 0xFD, 0xFC }; // not valid JSON
+        await vm.LoadCommand.ExecuteAsync(null);
+        dialog.TunnelPromptResult = null; // user cancels after seeing the warning
+
+        await vm.EditTunnelCommand.ExecuteAsync(vm.Configs[0]);
+
+        Assert.Contains(dialog.Messages, m => m.title == "Tunnel settings couldn't be loaded");
+        // Corrupt blob is preserved on disk because the user cancelled — no write happened.
+        Assert.Equal(new byte[] { 0xFF, 0xFE, 0xFD, 0xFC }, creds.TunnelConfigs[id]);
+    }
+
+    [Fact]
+    public async Task EditTunnel_OpenVpn_HealthyBlob_DoesNotWarn()
+    {
+        // The corruption warning is a defense-in-depth path; a healthy round-trip must not
+        // surface it (would scare users and dilute the signal when it really fires).
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        var id = Guid.NewGuid();
+        repo.Configs[id] = new TunnelConfig { Id = id, Name = "corp-ovpn", Kind = TunnelKind.OpenVpn };
+        creds.TunnelConfigs[id] = JsonSerializer.SerializeToUtf8Bytes(new OpenVpnSettings
+        {
+            ProfileOvpn = "client\n",
+        });
+        await vm.LoadCommand.ExecuteAsync(null);
+        dialog.TunnelPromptResult = null; // user cancels — we're only asserting the absence of the warning
+
+        await vm.EditTunnelCommand.ExecuteAsync(vm.Configs[0]);
+
+        Assert.DoesNotContain(dialog.Messages, m => m.title == "Tunnel settings couldn't be loaded");
+    }
+
+    [Fact]
+    public async Task Filter_NarrowsByKindString_OpenVpn()
+    {
+        // The filter already searches Kind.ToString() — exercise it for the new value so a
+        // refactor of FilteredConfigs doesn't quietly stop matching "OpenVpn".
+        var (vm, repo, _, _, _) = CreateVm();
+        repo.Configs[Guid.NewGuid()] = new TunnelConfig { Id = Guid.NewGuid(), Name = "corp", Kind = TunnelKind.WireGuard };
+        repo.Configs[Guid.NewGuid()] = new TunnelConfig { Id = Guid.NewGuid(), Name = "home", Kind = TunnelKind.OpenVpn };
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        vm.SearchText = "openv";
+
+        Assert.Single(vm.FilteredConfigs);
+        Assert.Equal("home", vm.FilteredConfigs[0].Name);
+    }
+
     private static TunnelDraft NewWireGuardDraft(string name) =>
         new(name, TunnelKind.WireGuard, new WireGuardSettings
         {
@@ -353,6 +520,14 @@ public class TunnelConfigsViewModelTests
             InterfaceAddress = "10.0.0.2/32",
             PeerPublicKey = "k2",
             PeerEndpoint = "host:51820",
+        }, OpenVpn: null);
+
+    private static TunnelDraft NewOpenVpnDraft(string name, string profile = "client\nproto udp\nremote vpn.example.com 1194\n", string? user = null, string? pass = null) =>
+        new(name, TunnelKind.OpenVpn, WireGuard: null, new OpenVpnSettings
+        {
+            ProfileOvpn = profile,
+            Username = user,
+            Password = pass,
         });
 
     private static (
@@ -426,5 +601,8 @@ public class TunnelConfigsViewModelTests
 
         public Task<string?> PromptPasswordAsync(string title, string message) =>
             Task.FromResult<string?>(null);
+
+        public Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync() =>
+            Task.FromResult<MRemoteNgImportResult?>(null);
     }
 }

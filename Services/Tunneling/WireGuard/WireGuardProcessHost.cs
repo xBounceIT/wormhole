@@ -72,19 +72,34 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
         var host = new WireGuardProcessHost(process, logger);
         try
         {
+            // Single timeout CTS covers BOTH the stdin write AND the stdout READY read. If the
+            // sidecar process accepts spawn but stalls reading stdin (cold-start AV scan, slow
+            // disk), the JSON write blocks at the OS-pipe layer once the small kernel buffer
+            // fills. Without a timeout on the write the caller would see "operation cancelled"
+            // (their own cancel) instead of "sidecar didn't become ready". Hoist timeoutCts
+            // above the write so the budget applies to the whole handshake.
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(ReadyTimeout);
+
             // Serialize straight to the stdin pipe instead of materializing the JSON as a
             // string first — saves one full allocation of the (~400 byte) payload on the SSH
             // connect hot path. The trailing newline is cosmetic for the sidecar's
             // json.NewDecoder (which terminates on the closing brace) but kept so the line is
             // visually separated when running the sidecar interactively for debugging.
             var stdin = process.StandardInput.BaseStream;
-            await JsonSerializer.SerializeAsync(stdin, config, cancellationToken: cancellationToken).ConfigureAwait(false);
-            await stdin.WriteAsync(s_newline, cancellationToken).ConfigureAwait(false);
-            await stdin.FlushAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                await JsonSerializer.SerializeAsync(stdin, config, cancellationToken: timeoutCts.Token).ConfigureAwait(false);
+                await stdin.WriteAsync(s_newline, timeoutCts.Token).ConfigureAwait(false);
+                await stdin.FlushAsync(timeoutCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException(
+                    $"WireGuard sidecar did not accept its configuration on stdin within {ReadyTimeout.TotalSeconds:F0}s.");
+            }
             // Do NOT close stdin: the sidecar treats EOF as a shutdown signal.
 
-            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeoutCts.CancelAfter(ReadyTimeout);
             string? line;
             try
             {

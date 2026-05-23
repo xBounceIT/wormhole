@@ -27,6 +27,14 @@
                 <Setter Property="BorderBrush" Value="Transparent" />
                 <Setter Property="Padding" Value="6" />
             </Style>
+
+            <!-- Same look as IconButtonStyle but for DropDownButton — Style.TargetType is
+                 type-checked at parse time, so the two cannot share an instance. -->
+            <Style x:Key="IconDropDownButtonStyle" TargetType="DropDownButton">
+                <Setter Property="Background" Value="Transparent" />
+                <Setter Property="BorderBrush" Value="Transparent" />
+                <Setter Property="Padding" Value="6" />
+            </Style>
         </ResourceDictionary>
     </Application.Resources>
 </Application>

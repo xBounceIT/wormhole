@@ -7,9 +7,11 @@ using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Services.MRemoteNg;
 using Wormhole.Services.Rdp;
 using Wormhole.Services.Ssh;
 using Wormhole.Services.Tunneling;
+using Wormhole.Services.Tunneling.OpenVpn;
 using Wormhole.Services.Tunneling.WireGuard;
 using Wormhole.ViewModels;
 using Wormhole.ViewModels.Sessions;
@@ -154,6 +156,7 @@ public partial class App : Application
         services.AddSingleton<InheritanceResolver>();
 
         services.AddSingleton<ITunnelProvider, WireGuardTunnelProvider>();
+        services.AddSingleton<ITunnelProvider, OpenVpnTunnelProvider>();
         services.AddSingleton<TunnelManager>();
         services.AddSingleton<INavigationService, NavigationService>();
         services.AddSingleton<IDialogService, DialogService>();
@@ -165,6 +168,7 @@ public partial class App : Application
         services.AddSingleton<IRdpCrashSentinelService, RdpCrashSentinelService>();
         services.AddSingleton<ISftpService, SftpService>();
         services.AddSingleton<IFileTransferDialogService, FileTransferDialogService>();
+        services.AddSingleton<IMRemoteNgImportService, MRemoteNgImportService>();
 
         var assemblyVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "0.0.0";
         services.AddHttpClient(UpdateService.HttpClientName, client =>
@@ -197,6 +201,7 @@ public partial class App : Application
         services.AddTransient<RdpSessionViewModel>();
         services.AddTransient<SftpSessionViewModel>();
         services.AddTransient<TunnelConfigsViewModel>();
+        services.AddTransient<MRemoteNgImportDialogViewModel>();
 
         services.AddSingleton<MainWindow>();
 
