@@ -119,6 +119,7 @@ public class MRemoteNgImportServiceTests : IDisposable
         SqliteConnection.ClearPool(new SqliteConnection(_connectionString));
         if (File.Exists(_dbPath)) File.Delete(_dbPath);
         if (Directory.Exists(_scratchDir)) Directory.Delete(_scratchDir, recursive: true);
+        GC.SuppressFinalize(this);
     }
 
     [Fact]

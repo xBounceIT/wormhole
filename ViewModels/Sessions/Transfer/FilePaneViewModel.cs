@@ -178,14 +178,14 @@ public abstract partial class FilePaneViewModel : ObservableObject
         }
     }
 
-    public void CancelRename(FileEntryViewModel entry)
+    public static void CancelRename(FileEntryViewModel entry)
     {
         if (entry is null) return;
         entry.EditingName = entry.Name;
         entry.IsEditing = false;
     }
 
-    public void BeginRename(FileEntryViewModel entry)
+    public static void BeginRename(FileEntryViewModel entry)
     {
         if (entry is null) return;
         entry.EditingName = entry.Name;

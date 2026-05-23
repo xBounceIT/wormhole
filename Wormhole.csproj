@@ -60,8 +60,6 @@
     <PackageReference Include="Serilog.Extensions.Logging" Version="9.0.2" />
     <PackageReference Include="SSH.NET" Version="2025.1.0" />
     <PackageReference Include="Meziantou.Framework.Win32.CredentialManager" Version="2.0.0" />
-    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.0" />
-    <PackageReference Include="System.Security.Cryptography.Xml" Version="10.0.8" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
     <PackageReference Include="Dapper" Version="2.1.66" />
     <!-- BouncyCastle is required for the mRemoteNG XML importer: mRemoteNG uses a 16-byte

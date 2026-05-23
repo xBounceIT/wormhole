@@ -93,7 +93,7 @@ internal sealed class SftpSession : ISftpSession
             // SSH.NET catches subscriber exceptions but treats them as transfer errors.
             Action<ulong>? cb = progress is null ? null : total =>
             {
-                if (cancellationToken.IsCancellationRequested) throw new OperationCanceledException(cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
                 progress.Report((long)total);
             };
             // canOverride: true so an existing file is replaced atomically by SSH.NET's
@@ -111,7 +111,7 @@ internal sealed class SftpSession : ISftpSession
         {
             Action<ulong>? cb = progress is null ? null : total =>
             {
-                if (cancellationToken.IsCancellationRequested) throw new OperationCanceledException(cancellationToken);
+                cancellationToken.ThrowIfCancellationRequested();
                 progress.Report((long)total);
             };
             if (cb is null) _client.DownloadFile(remotePath, destination);
@@ -187,13 +187,13 @@ internal sealed class SftpSession : ISftpSession
     // the others) but the gate is reliably released only after the worker is done.
     private async Task RunAsync(Action action, CancellationToken cancellationToken)
     {
-        if (IsDisposed) throw new ObjectDisposedException(nameof(SftpSession));
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         await Task.Run(action, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<T> RunAsync<T>(Func<T> action, CancellationToken cancellationToken)
     {
-        if (IsDisposed) throw new ObjectDisposedException(nameof(SftpSession));
+        ObjectDisposedException.ThrowIf(IsDisposed, this);
         return await Task.Run(action, cancellationToken).ConfigureAwait(false);
     }
 

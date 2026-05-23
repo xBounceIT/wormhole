@@ -32,10 +32,9 @@ public class MRemoteNgXmlReaderTests
     [Fact]
     public void Parse_ReadsRootAttributes()
     {
-        var reader = new MRemoteNgXmlReader();
         using var stream = ToStream(EmptyConnections);
 
-        var root = reader.Parse(stream, out var roots);
+        var root = MRemoteNgXmlReader.Parse(stream, out var roots);
 
         Assert.Equal("2.7", root.ConfVersion);
         Assert.Equal("AES", root.EncryptionEngine);
@@ -49,10 +48,9 @@ public class MRemoteNgXmlReaderTests
     [Fact]
     public void Parse_BuildsNestedTreeInDocumentOrder()
     {
-        var reader = new MRemoteNgXmlReader();
         using var stream = ToStream(NestedTree);
 
-        reader.Parse(stream, out var roots);
+        MRemoteNgXmlReader.Parse(stream, out var roots);
 
         // Top level: Folder1 (Container) and Leaf-VNC (Connection).
         Assert.Equal(2, roots.Count);
@@ -81,10 +79,9 @@ public class MRemoteNgXmlReaderTests
     [Fact]
     public void Parse_PreservesUnknownProtocolForCallerToSkip()
     {
-        var reader = new MRemoteNgXmlReader();
         using var stream = ToStream(NestedTree);
 
-        reader.Parse(stream, out var roots);
+        MRemoteNgXmlReader.Parse(stream, out var roots);
 
         // VNC leaf is preserved verbatim — the caller (import service) decides to skip it.
         Assert.Equal("VNC", roots[1].Protocol);
@@ -93,19 +90,17 @@ public class MRemoteNgXmlReaderTests
     [Fact]
     public void Parse_RejectsNonMRemoteNgRoot()
     {
-        var reader = new MRemoteNgXmlReader();
         using var stream = ToStream("<?xml version=\"1.0\"?><Wrong/>");
 
-        Assert.Throws<InvalidDataException>(() => reader.Parse(stream, out _));
+        Assert.Throws<InvalidDataException>(() => MRemoteNgXmlReader.Parse(stream, out _));
     }
 
     [Fact]
     public void Parse_RejectsMalformedXml()
     {
-        var reader = new MRemoteNgXmlReader();
         using var stream = ToStream("<not <valid xml");
 
-        Assert.Throws<InvalidDataException>(() => reader.Parse(stream, out _));
+        Assert.Throws<InvalidDataException>(() => MRemoteNgXmlReader.Parse(stream, out _));
     }
 
     [Fact]
@@ -116,10 +111,9 @@ public class MRemoteNgXmlReaderTests
             <mrng:Connections xmlns:mrng="http://mremoteng.org" EncryptionEngine="AES"
                 BlockCipherMode="GCM" Protected="X" ConfVersion="2.6"></mrng:Connections>
             """;
-        var reader = new MRemoteNgXmlReader();
         using var stream = ToStream(noKdf);
 
-        var root = reader.Parse(stream, out _);
+        var root = MRemoteNgXmlReader.Parse(stream, out _);
 
         // 1000 was the historical mRemoteNG default before KdfIterations was added.
         Assert.Equal(1000, root.KdfIterations);
@@ -136,10 +130,9 @@ public class MRemoteNgXmlReaderTests
                     InheritUsername="true" InheritDomain="false" InheritPassword="true" />
             </mrng:Connections>
             """;
-        var reader = new MRemoteNgXmlReader();
         using var stream = ToStream(inheritXml);
 
-        reader.Parse(stream, out var roots);
+        MRemoteNgXmlReader.Parse(stream, out var roots);
         var leaf = Assert.Single(roots);
 
         Assert.True(leaf.InheritUsername);

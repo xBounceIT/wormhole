@@ -30,7 +30,7 @@ public sealed class FakeSftpSession : ISftpSession
     public string WorkingDirectory { get; }
     public string? HostFingerprint { get; init; } = "SHA256:fake";
 
-    private IDisposable Enter()
+    private Token Enter()
     {
         var n = Interlocked.Increment(ref _concurrency);
         if (n > MaxConcurrency) MaxConcurrency = n;

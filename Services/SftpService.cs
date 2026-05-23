@@ -77,7 +77,15 @@ public sealed class SftpService : ISftpService
 
         try
         {
-            await Task.Run(client.Connect).WaitAsync(cancellationToken).ConfigureAwait(false);
+            // Pass CancellationToken.None to Task.Run on purpose: cancellation is handled by the
+            // outer WaitAsync(cancellationToken) + the catch's SafeDispose(client), which tears
+            // down the socket and terminates the inner blocking Connect. Forwarding the token to
+            // Task.Run would only add a redundant pre-scheduling cancel check — and the SSH.NET
+            // client cannot honor a token mid-Connect anyway. See Services/Ssh/SftpSession.cs
+            // lines 175-187 for the team's analysis of the Task.Run(action, ct).WaitAsync(ct)
+            // anti-pattern; this site is the documented exception because SafeDispose reliably
+            // kills the orphaned worker.
+            await Task.Run(client.Connect, CancellationToken.None).WaitAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {

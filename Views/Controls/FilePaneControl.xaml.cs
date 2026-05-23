@@ -194,7 +194,7 @@ public sealed partial class FilePaneControl : UserControl
         if (ViewModel is null) return;
         if (_contextTarget is { } entry)
         {
-            ViewModel.BeginRename(entry);
+            FilePaneViewModel.BeginRename(entry);
         }
     }
 
@@ -229,7 +229,7 @@ public sealed partial class FilePaneControl : UserControl
         else if (e.Key == VirtualKey.Escape)
         {
             e.Handled = true;
-            ViewModel.CancelRename(entry);
+            FilePaneViewModel.CancelRename(entry);
         }
     }
 
