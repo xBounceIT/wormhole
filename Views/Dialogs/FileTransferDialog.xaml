@@ -48,5 +48,42 @@
                 HorizontalAlignment="Right"
                 Click="OnCloseClick"
                 Style="{StaticResource AccentButtonStyle}" />
+
+        <!-- Inline conflict overlay. WinUI 3 only permits one ContentDialog open at a
+             time, and this UserControl is itself hosted inside a ContentDialog (see
+             FileTransferDialogService.ShowAsync). A nested ContentDialog.ShowAsync
+             throws COMException "Only a single ContentDialog can be open at any time."
+             So overwrite prompts are surfaced as an in-content modal instead. -->
+        <Grid x:Name="ConflictOverlay"
+              Grid.RowSpan="4"
+              Visibility="Collapsed"
+              Background="#80000000">
+            <Border MaxWidth="520"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                    BorderBrush="{ThemeResource ControlElevationBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="20">
+                <StackPanel Spacing="12" MinWidth="380">
+                    <TextBlock Text="File exists" Style="{StaticResource SubtitleTextBlockStyle}" />
+                    <TextBlock x:Name="ConflictMessage" TextWrapping="Wrap" />
+                    <TextBlock x:Name="ConflictSizes"
+                               Opacity="0.7"
+                               FontSize="12"
+                               Visibility="Collapsed" />
+                    <CheckBox x:Name="ConflictApplyAll" Content="Apply to remaining conflicts" />
+                    <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+                        <Button Content="Overwrite" MinWidth="100" Click="OnConflictOverwrite" />
+                        <Button Content="Skip"
+                                MinWidth="100"
+                                Click="OnConflictSkip"
+                                Style="{StaticResource AccentButtonStyle}" />
+                        <Button Content="Cancel" MinWidth="100" Click="OnConflictCancel" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </Grid>
     </Grid>
 </UserControl>
