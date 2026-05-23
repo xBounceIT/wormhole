@@ -14,9 +14,10 @@
              row is impossible. Per-container wiring solves that AND restricts the
              menu to rows (no menu on empty list background). -->
         <MenuFlyout x:Key="EntryContextFlyout">
-            <!-- Open: directory → navigate into it; file → launch with default OS
-                 handler. Only makes sense for the local pane (the remote pane has no
-                 OS to launch into), so its Visibility is toggled in SetViewModel. -->
+            <!-- Open: directory → navigate into it; local file → launch with default
+                 OS handler. Visibility is decided per-context in
+                 UpdateOpenMenuVisibility (hidden only for remote files, where there's
+                 no local handler to launch the bytes into). -->
             <MenuFlyoutItem x:Name="OpenMenuItem" Text="Open" Click="OnContextOpenClick">
                 <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8A7;" /></MenuFlyoutItem.Icon>
             </MenuFlyoutItem>
