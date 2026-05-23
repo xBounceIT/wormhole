@@ -246,6 +246,148 @@ public class CredentialsViewModelTests
     }
 
     [Fact]
+    public async Task DeleteCredentialAsync_also_removes_profile_from_selection()
+    {
+        // Regression test: Codex caught that a successful single-delete was leaving the
+        // deleted profile in SelectedCredentials, stranding HasSelection/SelectedCount.
+        var profile = MakeProfile("doomed", ProtocolType.Ssh);
+        var repo = new FakeCredentialRepository(profile);
+        var dialog = new FakeDialogService { ConfirmResult = true };
+        var vm = NewVm(repo, dialog: dialog);
+        await vm.LoadCommand.ExecuteAsync(null);
+        vm.SelectedCredentials.Add(profile);
+
+        await vm.DeleteCredentialCommand.ExecuteAsync(profile);
+
+        Assert.Empty(vm.SelectedCredentials);
+        Assert.False(vm.HasSelection);
+        Assert.Equal(0, vm.SelectedCount);
+    }
+
+    [Fact]
+    public async Task LoadAsync_clears_selection_so_singleton_VM_drops_stale_references()
+    {
+        var profile = MakeProfile("ghost", ProtocolType.Ssh);
+        var repo = new FakeCredentialRepository(profile);
+        var vm = NewVm(repo);
+        await vm.LoadCommand.ExecuteAsync(null);
+        vm.SelectedCredentials.Add(vm.Credentials.Single());
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Empty(vm.SelectedCredentials);
+    }
+
+    [Fact]
+    public async Task DeleteSelectedAsync_does_nothing_when_selection_empty()
+    {
+        var profile = MakeProfile("untouched", ProtocolType.Ssh);
+        var repo = new FakeCredentialRepository(profile);
+        var dialog = new FakeDialogService { ConfirmResult = true };
+        var vm = NewVm(repo, dialog: dialog);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        await vm.DeleteSelectedCommand.ExecuteAsync(null);
+
+        Assert.Single(repo.Profiles);
+        Assert.Empty(dialog.Messages); // no confirmation prompt counted as a Message, but also nothing surfaced
+    }
+
+    [Fact]
+    public async Task DeleteSelectedAsync_does_nothing_when_user_declines()
+    {
+        var a = MakeProfile("a", ProtocolType.Ssh);
+        var b = MakeProfile("b", ProtocolType.Ssh);
+        var repo = new FakeCredentialRepository(a, b);
+        var dialog = new FakeDialogService { ConfirmResult = false };
+        var vm = NewVm(repo, dialog: dialog);
+        await vm.LoadCommand.ExecuteAsync(null);
+        foreach (var p in vm.Credentials) vm.SelectedCredentials.Add(p);
+
+        await vm.DeleteSelectedCommand.ExecuteAsync(null);
+
+        Assert.Equal(2, repo.Profiles.Count);
+        Assert.Equal(2, vm.SelectedCredentials.Count); // selection preserved on cancel
+    }
+
+    [Fact]
+    public async Task DeleteSelectedAsync_deletes_all_selected_and_clears_selection()
+    {
+        var keep = MakeProfile("keep", ProtocolType.Ssh);
+        var doomedA = MakeProfile("doomedA", ProtocolType.Rdp);
+        var doomedB = MakeProfile("doomedB", ProtocolType.Ssh);
+        var repo = new FakeCredentialRepository(keep, doomedA, doomedB);
+        var credService = new FakeCredentialService();
+        credService.Passwords[doomedA.Id] = "pwA";
+        credService.Passwords[doomedB.Id] = "pwB";
+        credService.Passwords[keep.Id] = "pwKeep";
+        var dialog = new FakeDialogService { ConfirmResult = true };
+        var vm = NewVm(repo, credService, dialog);
+        await vm.LoadCommand.ExecuteAsync(null);
+        vm.SelectedCredentials.Add(vm.Credentials.Single(p => p.Id == doomedA.Id));
+        vm.SelectedCredentials.Add(vm.Credentials.Single(p => p.Id == doomedB.Id));
+
+        await vm.DeleteSelectedCommand.ExecuteAsync(null);
+
+        Assert.Single(repo.Profiles); // only `keep` survives
+        Assert.Equal(keep.Id, repo.Profiles[0].Id);
+        Assert.False(credService.Passwords.ContainsKey(doomedA.Id));
+        Assert.False(credService.Passwords.ContainsKey(doomedB.Id));
+        Assert.True(credService.Passwords.ContainsKey(keep.Id));
+        Assert.Empty(vm.SelectedCredentials);
+        Assert.Single(vm.Credentials);
+    }
+
+    [Fact]
+    public async Task DeleteSelectedAsync_continues_after_per_item_failure_and_surfaces_summary()
+    {
+        var ok = MakeProfile("ok", ProtocolType.Ssh);
+        var bad = MakeProfile("bad", ProtocolType.Ssh);
+        var repo = new FakeCredentialRepository(ok, bad);
+        repo.DeleteShouldThrowForIds.Add(bad.Id);
+        var dialog = new FakeDialogService { ConfirmResult = true };
+        var vm = NewVm(repo, dialog: dialog);
+        await vm.LoadCommand.ExecuteAsync(null);
+        foreach (var p in vm.Credentials) vm.SelectedCredentials.Add(p);
+
+        await vm.DeleteSelectedCommand.ExecuteAsync(null);
+
+        Assert.Single(repo.Profiles); // only `bad` remains — `ok` succeeded
+        Assert.Equal(bad.Id, repo.Profiles[0].Id);
+        Assert.Single(vm.Credentials); // mirror
+        Assert.Contains(dialog.Messages, m => m.title == "Couldn't delete some credentials");
+        Assert.Contains(dialog.Messages, m => m.message.Contains("'bad'"));
+        Assert.Empty(vm.SelectedCredentials); // selection drained even with partial failure
+    }
+
+    [Fact]
+    public async Task SelectionStatus_and_HasSelection_track_selection_changes()
+    {
+        var a = MakeProfile("a", ProtocolType.Ssh);
+        var b = MakeProfile("b", ProtocolType.Ssh);
+        var repo = new FakeCredentialRepository(a, b);
+        var vm = NewVm(repo);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.False(vm.HasSelection);
+        Assert.Equal(0, vm.SelectedCount);
+        Assert.Equal("0 selected", vm.SelectionStatus);
+
+        vm.SelectedCredentials.Add(vm.Credentials.First());
+        Assert.True(vm.HasSelection);
+        Assert.Equal(1, vm.SelectedCount);
+        Assert.Equal("1 selected", vm.SelectionStatus);
+
+        vm.SelectedCredentials.Add(vm.Credentials.Last());
+        Assert.Equal(2, vm.SelectedCount);
+        Assert.Equal("2 selected", vm.SelectionStatus);
+
+        vm.SelectedCredentials.Clear();
+        Assert.False(vm.HasSelection);
+        Assert.Equal("0 selected", vm.SelectionStatus);
+    }
+
+    [Fact]
     public async Task HasNoMatches_is_true_when_search_filters_everything_out()
     {
         var repo = new FakeCredentialRepository(MakeProfile("alpha", ProtocolType.Ssh));
@@ -353,8 +495,12 @@ public class CredentialsViewModelTests
             return Task.CompletedTask;
         }
 
+        public HashSet<Guid> DeleteShouldThrowForIds { get; } = new();
+
         public Task DeleteAsync(Guid id, CancellationToken ct = default)
         {
+            if (DeleteShouldThrowForIds.Contains(id))
+                throw new InvalidOperationException($"simulated delete failure for {id}");
             Profiles.RemoveAll(p => p.Id == id);
             return Task.CompletedTask;
         }

@@ -17,11 +17,24 @@ public partial class CredentialsViewModel : ObservableObject
 
     public ObservableCollection<CredentialProfile> Credentials { get; } = new();
 
+    /// <summary>
+    /// Mirrors GridView.SelectedItems via the page code-behind. Bulk commands read this directly.
+    /// </summary>
+    public ObservableCollection<CredentialProfile> SelectedCredentials { get; } = new();
+
     public bool IsEmpty => Credentials.Count == 0;
 
     public bool HasMatches => FilteredCredentials.Count > 0;
 
     public bool HasNoMatches => !IsEmpty && !HasMatches;
+
+    public bool HasSelection => SelectedCredentials.Count > 0;
+
+    public int SelectedCount => SelectedCredentials.Count;
+
+    // Derived string so the XAML binds a plain TextBlock.Text instead of `<Run Text="{x:Bind ...}">`,
+    // which has had spotty INotifyPropertyChanged support across WinUI 3 versions.
+    public string SelectionStatus => $"{SelectedCount} selected";
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(FilteredCredentials))]
@@ -65,6 +78,13 @@ public partial class CredentialsViewModel : ObservableObject
             OnPropertyChanged(nameof(HasMatches));
             OnPropertyChanged(nameof(HasNoMatches));
         };
+        SelectedCredentials.CollectionChanged += (_, _) =>
+        {
+            OnPropertyChanged(nameof(HasSelection));
+            OnPropertyChanged(nameof(SelectedCount));
+            OnPropertyChanged(nameof(SelectionStatus));
+            DeleteSelectedCommand.NotifyCanExecuteChanged();
+        };
     }
 
     [RelayCommand]
@@ -73,6 +93,9 @@ public partial class CredentialsViewModel : ObservableObject
         try
         {
             var rows = await _repository.GetAllAsync();
+            // Drop selection before swapping the collection — Singleton VM means stale
+            // CredentialProfile references would otherwise survive across reloads/navigations.
+            SelectedCredentials.Clear();
             Credentials.Clear();
             foreach (var row in rows)
             {
@@ -202,14 +225,69 @@ public partial class CredentialsViewModel : ObservableObject
         try
         {
             await _repository.DeleteAsync(profile.Id);
+            // Repository delete is the source of truth — once it succeeds the row is gone.
+            // Drop from the UI list before secret cleanup so a later failure can't leave a ghost card.
+            Credentials.Remove(profile);
+            // Also drop from the selection set so the action strip's count doesn't get
+            // stranded when the deleted card was checked.
+            SelectedCredentials.Remove(profile);
             await _credentialService.DeletePasswordAsync(profile.Id);
             await _credentialService.DeletePrivateKeyAsync(profile.Id);
-            Credentials.Remove(profile);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to delete credential '{Name}'", profile.Name);
             await _dialog.ShowMessageAsync("Couldn't delete credential", ex.Message);
+        }
+    }
+
+    private bool CanDeleteSelected() => SelectedCredentials.Count > 0;
+
+    [RelayCommand(CanExecute = nameof(CanDeleteSelected))]
+    private async Task DeleteSelectedAsync()
+    {
+        // Snapshot first: SelectedCredentials is rebuilt by the GridView when the
+        // underlying collection mutates, so iterating live would skip every other item.
+        var snapshot = SelectedCredentials.ToArray();
+        if (snapshot.Length == 0) return;
+
+        var message = snapshot.Length == 1
+            ? $"Delete '{snapshot[0].Name}'? This cannot be undone."
+            : $"Delete {snapshot.Length} credentials? This cannot be undone.";
+
+        var confirmed = await _dialog.ConfirmAsync(
+            "Delete credentials",
+            message,
+            primaryText: "Delete",
+            closeText: "Cancel");
+        if (!confirmed) return;
+
+        var failures = new List<string>();
+        foreach (var profile in snapshot)
+        {
+            try
+            {
+                await _repository.DeleteAsync(profile.Id);
+                // Same ordering rule as DeleteCredentialAsync: drop the card the moment the
+                // DB row is gone, so a later secret-cleanup throw doesn't leave a ghost entry.
+                Credentials.Remove(profile);
+                await _credentialService.DeletePasswordAsync(profile.Id);
+                await _credentialService.DeletePrivateKeyAsync(profile.Id);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to delete credential '{Name}'", profile.Name);
+                failures.Add($"'{profile.Name}': {ex.Message}");
+            }
+        }
+
+        SelectedCredentials.Clear();
+
+        if (failures.Count > 0)
+        {
+            await _dialog.ShowMessageAsync(
+                "Couldn't delete some credentials",
+                string.Join(Environment.NewLine, failures));
         }
     }
 
