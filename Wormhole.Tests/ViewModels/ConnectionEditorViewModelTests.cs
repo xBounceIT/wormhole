@@ -294,7 +294,7 @@ public class ConnectionEditorViewModelTests
             Protocol = ProtocolType.Ssh,
         };
         var repo = new SingleCredentialRepository(credential);
-        var vm = new ConnectionEditorViewModel(repo);
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
         await vm.LoadCredentialsAsync();
 
         vm.Name = "n";
@@ -315,7 +315,7 @@ public class ConnectionEditorViewModelTests
         var sshCred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
         var repo = new MultiCredentialRepository(sshCred, rdpCred);
-        var vm = new ConnectionEditorViewModel(repo);
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
         await vm.LoadCredentialsAsync();
 
         // AvailableCredentials always leads with the "(None)" sentinel for "prompt every
@@ -339,7 +339,7 @@ public class ConnectionEditorViewModelTests
         var rdpPwd = new CredentialProfile { Name = "rdp-pwd", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
         var rdpKey = new CredentialProfile { Name = "rdp-key", Protocol = ProtocolType.Rdp, Kind = CredentialKind.SshKey };
         var repo = new MultiCredentialRepository(rdpPwd, rdpKey);
-        var vm = new ConnectionEditorViewModel(repo);
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
         vm.Protocol = ProtocolType.Rdp;
         await vm.LoadCredentialsAsync();
 
@@ -354,7 +354,7 @@ public class ConnectionEditorViewModelTests
     {
         var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var repo = new MultiCredentialRepository(cred);
-        var vm = new ConnectionEditorViewModel(repo);
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
         await vm.LoadCredentialsAsync();
 
         vm.SelectedCredential = cred;
@@ -376,7 +376,7 @@ public class ConnectionEditorViewModelTests
         var sshCred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
         var repo = new MultiCredentialRepository(sshCred, rdpCred);
-        var vm = new ConnectionEditorViewModel(repo);
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
         await vm.LoadCredentialsAsync();
 
         vm.SelectedCredential = sshCred;
@@ -399,7 +399,7 @@ public class ConnectionEditorViewModelTests
         // the existing CredentialId on save.
         var staleCred = new CredentialProfile { Name = "old-ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var repo = new MultiCredentialRepository(staleCred);
-        var vm = new ConnectionEditorViewModel(repo);
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
         await vm.LoadCredentialsAsync();
 
         var node = new ConnectionNode
@@ -428,7 +428,7 @@ public class ConnectionEditorViewModelTests
             Protocol = ProtocolType.Ssh,
         };
         var repo = new SingleCredentialRepository(credential);
-        var vm = new ConnectionEditorViewModel(repo);
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
         await vm.LoadCredentialsAsync();
 
         vm.Name = "n";
@@ -456,7 +456,7 @@ public class ConnectionEditorViewModelTests
             Protocol = ProtocolType.Rdp,
             Kind = CredentialKind.Password,
         };
-        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(aad));
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(aad), EmptyTunnelRepo());
         vm.Protocol = ProtocolType.Rdp;
         await vm.LoadCredentialsAsync();
 
@@ -482,7 +482,7 @@ public class ConnectionEditorViewModelTests
             Protocol = ProtocolType.Rdp,
             Kind = CredentialKind.Password,
         };
-        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(nonAad));
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(nonAad), EmptyTunnelRepo());
         vm.Protocol = ProtocolType.Rdp;
         await vm.LoadCredentialsAsync();
 
@@ -506,7 +506,7 @@ public class ConnectionEditorViewModelTests
             Protocol = ProtocolType.Rdp,
             Kind = CredentialKind.Password,
         };
-        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(aad));
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(aad), EmptyTunnelRepo());
         await vm.LoadCredentialsAsync();
 
         var node = new ConnectionNode
@@ -695,7 +695,7 @@ public class ConnectionEditorViewModelTests
             Protocol = ProtocolType.Rdp,
             Kind = CredentialKind.Password,
         };
-        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(aad));
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(aad), EmptyTunnelRepo());
         vm.Protocol = ProtocolType.Rdp;
         await vm.LoadCredentialsAsync();
 
@@ -712,12 +712,255 @@ public class ConnectionEditorViewModelTests
         Assert.False(sink.RdpUseExternalClient);
     }
 
+    [Fact]
+    public async Task Tunnel_InheritSentinel_PersistsAsNullEnabledAndNullId()
+    {
+        // The default state for a new connection — let the inheritance resolver supply the
+        // tunnel from the parent folder. Both backing fields must remain null on save.
+        var vm = await NewEditorAsync();
+        await vm.LoadTunnelConfigsAsync();
+
+        vm.SelectedTunnel = ConnectionEditorViewModel.InheritTunnel;
+
+        Assert.Same(ConnectionEditorViewModel.InheritTunnel, vm.SelectedTunnel);
+
+        var sink = new ConnectionNode();
+        vm.WriteTo(sink);
+
+        Assert.Null(sink.TunnelEnabled);
+        Assert.Null(sink.TunnelConfigId);
+    }
+
+    [Fact]
+    public async Task Tunnel_NoTunnelSentinel_PersistsAsFalseEnabledAndNullId()
+    {
+        // Explicit "no tunnel" — overrides any folder-inherited tunnel by setting Enabled=false.
+        var vm = await NewEditorAsync();
+        await vm.LoadTunnelConfigsAsync();
+
+        vm.SelectedTunnel = ConnectionEditorViewModel.NoTunnel;
+
+        Assert.Same(ConnectionEditorViewModel.NoTunnel, vm.SelectedTunnel);
+
+        var sink = new ConnectionNode();
+        vm.WriteTo(sink);
+
+        Assert.False(sink.TunnelEnabled);
+        Assert.Null(sink.TunnelConfigId);
+    }
+
+    [Fact]
+    public async Task Tunnel_PickingNamedTunnel_PersistsAsTrueEnabledAndConfigId()
+    {
+        var wg = new TunnelConfig { Id = Guid.NewGuid(), Name = "office-wg", Kind = TunnelKind.WireGuard };
+        var vm = new ConnectionEditorViewModel(
+            new EmptyCredentialRepository(),
+            new MultiTunnelConfigRepository(wg));
+        await vm.LoadTunnelConfigsAsync();
+
+        vm.SelectedTunnel = wg;
+
+        Assert.Same(wg, vm.SelectedTunnel);
+
+        var sink = new ConnectionNode();
+        vm.WriteTo(sink);
+
+        Assert.True(sink.TunnelEnabled);
+        Assert.Equal(wg.Id, sink.TunnelConfigId);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData(false)]
+    public async Task LoadFrom_TunnelSentinelStates_RoundTrip(bool? enabled)
+    {
+        var vm = await NewEditorAsync();
+        await vm.LoadTunnelConfigsAsync();
+
+        var node = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Ssh,
+            TunnelEnabled = enabled,
+            TunnelConfigId = null,
+        };
+        vm.LoadFrom(node);
+
+        var sink = new ConnectionNode();
+        vm.WriteTo(sink);
+
+        Assert.Equal(enabled, sink.TunnelEnabled);
+        Assert.Null(sink.TunnelConfigId);
+    }
+
+    [Fact]
+    public async Task LoadFrom_EnabledTunnelWithId_RoundTrip()
+    {
+        var wg = new TunnelConfig { Id = Guid.NewGuid(), Name = "office-wg", Kind = TunnelKind.WireGuard };
+        var vm = new ConnectionEditorViewModel(
+            new EmptyCredentialRepository(),
+            new MultiTunnelConfigRepository(wg));
+        await vm.LoadTunnelConfigsAsync();
+
+        var node = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Ssh,
+            TunnelEnabled = true,
+            TunnelConfigId = wg.Id,
+        };
+        vm.LoadFrom(node);
+
+        // Selection round-trips to the real TunnelConfig instance, not a sentinel.
+        Assert.Same(wg, vm.SelectedTunnel);
+
+        var sink = new ConnectionNode();
+        vm.WriteTo(sink);
+
+        Assert.True(sink.TunnelEnabled);
+        Assert.Equal(wg.Id, sink.TunnelConfigId);
+    }
+
+    [Fact]
+    public async Task LoadFrom_StaleTunnelId_StillVisibleInPicker()
+    {
+        // A connection was bound to a TunnelConfig that has since been deleted (or the user
+        // hasn't loaded the page yet). Reopening the editor must keep the binding visible so
+        // saving doesn't silently drop the TunnelConfigId.
+        var deletedId = Guid.NewGuid();
+        var vm = await NewEditorAsync();
+        await vm.LoadTunnelConfigsAsync();
+
+        var node = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Ssh,
+            TunnelEnabled = true,
+            TunnelConfigId = deletedId,
+        };
+        vm.LoadFrom(node);
+
+        Assert.Contains(vm.AvailableTunnelConfigs, t => t.Id == deletedId);
+
+        var sink = new ConnectionNode();
+        vm.WriteTo(sink);
+
+        Assert.True(sink.TunnelEnabled);
+        Assert.Equal(deletedId, sink.TunnelConfigId);
+    }
+
+    [Fact]
+    public async Task LoadFrom_NullEnableWithOverrideConfigId_ShowsOverrideNotInherit()
+    {
+        // Regression for codex review feedback: a node persisted with TunnelEnabled=null
+        // (inherit enable from ancestor folder) AND TunnelConfigId=<override.Id> (pin a
+        // specific config) is a legitimate state produced by the inheritance resolver
+        // (see Resolve_ChildOverridesAncestorTunnelConfigId in InheritanceResolverTunnelTests).
+        // The picker must surface the override config — not silently mask it as
+        // "(Inherit from folder)" while WriteTo still persists the id.
+        var wg = new TunnelConfig { Id = Guid.NewGuid(), Name = "child-override", Kind = TunnelKind.WireGuard };
+        var vm = new ConnectionEditorViewModel(
+            new EmptyCredentialRepository(),
+            new MultiTunnelConfigRepository(wg));
+        await vm.LoadTunnelConfigsAsync();
+
+        var node = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Ssh,
+            TunnelEnabled = null,   // inherit the enable bit from the parent folder
+            TunnelConfigId = wg.Id, // but pin this specific config
+        };
+        vm.LoadFrom(node);
+
+        Assert.Same(wg, vm.SelectedTunnel);
+
+        // Round-trip preserves (null, guid) if the user doesn't touch the dropdown.
+        // (Picking a different item in the combobox collapses to (true, newId) — a known
+        // limitation of the single-combobox UI noted in the PR description.)
+        var sink = new ConnectionNode();
+        vm.WriteTo(sink);
+        Assert.Null(sink.TunnelEnabled);
+        Assert.Equal(wg.Id, sink.TunnelConfigId);
+    }
+
+    [Fact]
+    public async Task LoadFrom_CorruptedNodeWithGuidEmptyTunnelId_ShowsAsStaleNotInherit()
+    {
+        // Regression for the sentinel-collision class of bug: an imported/corrupted node
+        // bound to TunnelConfigId=Guid.Empty must NOT be silently displayed as
+        // "(Inherit from folder)" — the user has to see that something is off so they can
+        // pick a real value or No tunnel. The sentinel uses a distinct non-Empty id so
+        // Guid.Empty falls through to the stale-placeholder path.
+        var vm = await NewEditorAsync();
+        await vm.LoadTunnelConfigsAsync();
+
+        var node = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Ssh,
+            TunnelEnabled = true,
+            TunnelConfigId = Guid.Empty,
+        };
+        vm.LoadFrom(node);
+
+        Assert.Contains(vm.AvailableTunnelConfigs, t => t.Id == Guid.Empty);
+        Assert.NotSame(ConnectionEditorViewModel.InheritTunnel, vm.SelectedTunnel);
+        Assert.Equal(Guid.Empty, vm.SelectedTunnel!.Id);
+
+        var sink = new ConnectionNode();
+        vm.WriteTo(sink);
+        Assert.True(sink.TunnelEnabled);
+        Assert.Equal(Guid.Empty, sink.TunnelConfigId);
+    }
+
+    [Fact]
+    public void SelectedTunnel_UnresolvedEnabledState_ReturnsNullNotInherit()
+    {
+        // Regression: when TunnelEnabled=true but SelectedTunnelConfigId can't resolve to an
+        // entry in AvailableTunnelConfigs, the getter must return null (no selection) so the
+        // UI surfaces the inconsistency. Falling back to InheritTunnel here would silently
+        // mask a real "(true, id)" persisted state behind a misleading "(Inherit)" display.
+        var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository(), EmptyTunnelRepo());
+
+        // Force the invalid intermediate state directly via the SelectedTunnel setter and
+        // then yank the id via the public backing setter — simulating a race where the
+        // collection rebuilt between the two field writes.
+        vm.SelectedTunnel = ConnectionEditorViewModel.InheritTunnel;
+        vm.TunnelEnabled = true;
+        vm.SelectedTunnelConfigId = Guid.NewGuid(); // not in AvailableTunnelConfigs
+
+        Assert.Null(vm.SelectedTunnel);
+    }
+
+    [Fact]
+    public async Task LoadTunnelConfigs_LeadsWithBothSentinels()
+    {
+        var wg = new TunnelConfig { Id = Guid.NewGuid(), Name = "wg-1", Kind = TunnelKind.WireGuard };
+        var vm = new ConnectionEditorViewModel(
+            new EmptyCredentialRepository(),
+            new MultiTunnelConfigRepository(wg));
+        await vm.LoadTunnelConfigsAsync();
+
+        Assert.Equal(3, vm.AvailableTunnelConfigs.Count);
+        Assert.Same(ConnectionEditorViewModel.InheritTunnel, vm.AvailableTunnelConfigs[0]);
+        Assert.Same(ConnectionEditorViewModel.NoTunnel, vm.AvailableTunnelConfigs[1]);
+        Assert.Equal("wg-1", vm.AvailableTunnelConfigs[2].Name);
+    }
+
     private static async Task<ConnectionEditorViewModel> NewEditorAsync()
     {
-        var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository());
+        var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository(), EmptyTunnelRepo());
         await vm.LoadCredentialsAsync();
         return vm;
     }
+
+    private static EmptyTunnelConfigRepository EmptyTunnelRepo() => new();
 
     private sealed class EmptyCredentialRepository : ICredentialRepository
     {
@@ -753,6 +996,30 @@ public class ConnectionEditorViewModelTests
             => Task.FromResult<CredentialProfile?>(Array.Find(_credentials, c => c.Id == id));
         public Task AddAsync(CredentialProfile profile, CancellationToken ct = default) => throw new NotImplementedException();
         public Task UpdateAsync(CredentialProfile profile, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task DeleteAsync(Guid id, CancellationToken ct = default) => throw new NotImplementedException();
+    }
+
+    private sealed class EmptyTunnelConfigRepository : ITunnelConfigRepository
+    {
+        public Task<IReadOnlyList<TunnelConfig>> GetAllAsync(CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<TunnelConfig>>(Array.Empty<TunnelConfig>());
+        public Task<TunnelConfig?> GetByIdAsync(Guid id, CancellationToken ct = default)
+            => Task.FromResult<TunnelConfig?>(null);
+        public Task AddAsync(TunnelConfig config, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task UpdateAsync(TunnelConfig config, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task DeleteAsync(Guid id, CancellationToken ct = default) => throw new NotImplementedException();
+    }
+
+    private sealed class MultiTunnelConfigRepository : ITunnelConfigRepository
+    {
+        private readonly TunnelConfig[] _configs;
+        public MultiTunnelConfigRepository(params TunnelConfig[] configs) => _configs = configs;
+        public Task<IReadOnlyList<TunnelConfig>> GetAllAsync(CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<TunnelConfig>>(_configs);
+        public Task<TunnelConfig?> GetByIdAsync(Guid id, CancellationToken ct = default)
+            => Task.FromResult<TunnelConfig?>(Array.Find(_configs, c => c.Id == id));
+        public Task AddAsync(TunnelConfig config, CancellationToken ct = default) => throw new NotImplementedException();
+        public Task UpdateAsync(TunnelConfig config, CancellationToken ct = default) => throw new NotImplementedException();
         public Task DeleteAsync(Guid id, CancellationToken ct = default) => throw new NotImplementedException();
     }
 }

@@ -44,10 +44,13 @@ public sealed partial class NewConnectionDialog : UserControl
 
     public bool IsValid => ViewModel.IsValid;
 
-    /// <summary>Load credentials and copy field values from <paramref name="initial"/> into the VM.</summary>
+    /// <summary>Load credentials and tunnel configs, then copy field values from
+    /// <paramref name="initial"/> into the VM. Tunnel configs must populate before LoadFrom
+    /// so the SelectedTunnel binding can resolve a saved TunnelConfigId.</summary>
     public async Task LoadAsync(ConnectionNode initial)
     {
         await ViewModel.LoadCredentialsAsync();
+        await ViewModel.LoadTunnelConfigsAsync();
         ViewModel.LoadFrom(initial);
     }
 

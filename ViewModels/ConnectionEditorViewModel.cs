@@ -19,6 +19,7 @@ namespace Wormhole.ViewModels;
 public partial class ConnectionEditorViewModel : ObservableObject
 {
     private readonly ICredentialRepository _credentialRepository;
+    private readonly ITunnelConfigRepository _tunnelConfigRepository;
     private readonly List<CredentialProfile> _allCredentials = new();
     private bool _suppressPresetSync;
     private bool _suppressAadAutoFlag;
@@ -28,9 +29,17 @@ public partial class ConnectionEditorViewModel : ObservableObject
     // checkbox they never asked for after correcting a typo'd "AzureAD" Domain value.
     private bool _autoFlagAppliedByAad;
 
-    public ConnectionEditorViewModel(ICredentialRepository credentialRepository)
+    public ConnectionEditorViewModel(
+        ICredentialRepository credentialRepository,
+        ITunnelConfigRepository tunnelConfigRepository)
     {
         _credentialRepository = credentialRepository;
+        _tunnelConfigRepository = tunnelConfigRepository;
+        // Seed the tunnel picker with its two sentinels up-front so a SelectedTunnel
+        // getter call before LoadTunnelConfigsAsync still has the inherit/no-tunnel
+        // options to return.
+        AvailableTunnelConfigs.Add(InheritTunnel);
+        AvailableTunnelConfigs.Add(NoTunnel);
     }
 
     /// <summary>
@@ -549,6 +558,23 @@ public partial class ConnectionEditorViewModel : ObservableObject
             RdpGatewayBypassLocal = node.RdpGatewayBypassLocal ?? true;
             RdpGatewayUseSameCreds = node.RdpGatewayUseSameCreds ?? false;
             RdpUseExternalClient = node.RdpUseExternalClient ?? false;
+
+            // Tunnel fields are protocol-agnostic — every connection type can pre-start a VPN.
+            // Append the stale placeholder (if any) FIRST so the SelectedTunnel getter can
+            // resolve the bound id when notifications fire. Then write the backing fields
+            // DIRECTLY (bypassing the generated setters) and raise PropertyChanged once at the
+            // end — avoiding a transient window where TunnelEnabled is updated but
+            // SelectedTunnelConfigId hasn't been yet (or vice versa), during which the
+            // SelectedTunnel getter would return null and a TwoWay ComboBox binding could
+            // write that null back, clobbering the load.
+            AppendStaleTunnelSelection(node.TunnelConfigId);
+#pragma warning disable MVVMTK0034 // intentional field-bypass to keep the two-field write atomic
+            tunnelEnabled = node.TunnelEnabled;
+            selectedTunnelConfigId = node.TunnelConfigId;
+#pragma warning restore MVVMTK0034
+            OnPropertyChanged(nameof(TunnelEnabled));
+            OnPropertyChanged(nameof(SelectedTunnelConfigId));
+            OnPropertyChanged(nameof(SelectedTunnel));
         }
         finally
         {
@@ -622,6 +648,10 @@ public partial class ConnectionEditorViewModel : ObservableObject
             node.RdpGatewayUseSameCreds = RdpGatewayUseSameCreds;
             node.RdpUseExternalClient = RdpUseExternalClient;
         }
+
+        // Tunnel fields apply to every protocol — write them outside the RDP block.
+        node.TunnelEnabled = TunnelEnabled;
+        node.TunnelConfigId = SelectedTunnelConfigId;
     }
 
     /// <summary>
@@ -688,17 +718,121 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// <summary>Convenience pass-through so tests don't need to know about <see cref="RdpDriveList"/>.</summary>
     public static string NormaliseDriveList(string raw) => RdpDriveList.Normalise(raw);
 
-    #region Tunneling (from main)
+    #region Tunneling
+
+    // Sentinel ids are fixed non-default Guids so a real TunnelConfig — whose Id is
+    // assigned via Guid.NewGuid() — can never collide. Avoid Guid.Empty: that's the
+    // default value of an uninitialized Guid, so picking it as a sentinel risks aliasing
+    // imported / corrupted data (e.g. a malformed migration row).
+    private static readonly Guid InheritTunnelId = new("00000000-0000-0000-0000-000000000001");
+    private static readonly Guid NoTunnelId = new("ffffffff-ffff-ffff-ffff-ffffffffffff");
+
+    /// <summary>Sentinel for the "inherit from folder" tunnel state. <see cref="TunnelEnabled"/>
+    /// stays null and <see cref="SelectedTunnelConfigId"/> stays null — the resolver walks up.</summary>
+    internal static readonly TunnelConfig InheritTunnel = new()
+    {
+        Id = InheritTunnelId,
+        Name = "(Inherit from folder)",
+    };
+
+    /// <summary>Sentinel for "explicitly no tunnel" — overrides any inherited tunnel.
+    /// <see cref="TunnelEnabled"/> = false, <see cref="SelectedTunnelConfigId"/> = null.</summary>
+    internal static readonly TunnelConfig NoTunnel = new()
+    {
+        Id = NoTunnelId,
+        Name = "(No tunnel)",
+    };
 
     // Tri-state: null = inherit from ancestor folder, false = explicitly off, true = explicitly on.
     // Matches the existing RdpFullScreen shape so the UI control can bind directly.
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SelectedTunnel))]
     private bool? tunnelEnabled;
 
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SelectedTunnel))]
     private Guid? selectedTunnelConfigId;
 
     public ObservableCollection<TunnelConfig> AvailableTunnelConfigs { get; } = new();
+
+    /// <summary>
+    /// Single combobox binding that encodes the tri-state via two sentinels and the
+    /// available tunnel list. Mirrors the credential picker shape (<see cref="SelectedCredential"/>)
+    /// so the XAML can use plain SelectedItem two-way binding.
+    /// </summary>
+    public TunnelConfig? SelectedTunnel
+    {
+        get
+        {
+            // Enable=false explicitly trumps any persisted ConfigId (the resolver ignores
+            // it once Enabled lands false). Show "(No tunnel)" so the user isn't misled by
+            // a vestigial id from a previous selection.
+            if (TunnelEnabled == false) return NoTunnel;
+            // If a concrete ConfigId is bound, surface that selection — independently of
+            // TunnelEnabled. This covers the legitimate (TunnelEnabled=null, ConfigId=guid)
+            // "inherit enable, override config" state produced by the inheritance resolver
+            // (see Resolve_ChildOverridesAncestorTunnelConfigId). Falling back to
+            // InheritTunnel here would silently mask the override while WriteTo still
+            // persisted the id — a contradiction the user can't see.
+            if (SelectedTunnelConfigId is { } id)
+            {
+                return AvailableTunnelConfigs.FirstOrDefault(t => t.Id == id);
+            }
+            // No bound ConfigId: pure inherit (null enable) or pure force-on (true enable).
+            // The latter ("force on, inherit ConfigId from ancestor") has no sentinel in
+            // this single-combobox UI; surface it as "no selection" rather than masking it.
+            if (TunnelEnabled is null) return InheritTunnel;
+            return null;
+        }
+        set
+        {
+            if (value is null || ReferenceEquals(value, InheritTunnel))
+            {
+                TunnelEnabled = null;
+                SelectedTunnelConfigId = null;
+            }
+            else if (ReferenceEquals(value, NoTunnel))
+            {
+                TunnelEnabled = false;
+                SelectedTunnelConfigId = null;
+            }
+            else
+            {
+                TunnelEnabled = true;
+                SelectedTunnelConfigId = value.Id;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Rebuild <see cref="AvailableTunnelConfigs"/> from the repository, leading with the
+    /// two sentinels so the picker always offers inherit/off.
+    /// </summary>
+    public async Task LoadTunnelConfigsAsync()
+    {
+        var configs = await _tunnelConfigRepository.GetAllAsync().ConfigureAwait(true);
+        AvailableTunnelConfigs.Clear();
+        AvailableTunnelConfigs.Add(InheritTunnel);
+        AvailableTunnelConfigs.Add(NoTunnel);
+        foreach (var c in configs) AvailableTunnelConfigs.Add(c);
+
+        // Preserve a currently-bound selection that points at a tunnel no longer in the list
+        // (e.g. deleted in another window). Same pattern as AppendStaleSelection for credentials.
+        AppendStaleTunnelSelection(SelectedTunnelConfigId);
+        OnPropertyChanged(nameof(SelectedTunnel));
+    }
+
+    private void AppendStaleTunnelSelection(Guid? id)
+    {
+        if (id is not { } guid) return;
+        if (guid == InheritTunnel.Id || guid == NoTunnel.Id) return;
+        if (AvailableTunnelConfigs.Any(t => t.Id == guid)) return;
+        AvailableTunnelConfigs.Add(new TunnelConfig
+        {
+            Id = guid,
+            Name = $"(missing tunnel {guid:N})",
+        });
+    }
 
     #endregion
 }
