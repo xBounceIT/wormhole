@@ -42,7 +42,14 @@
 #include <thread>
 #include <vector>
 
-#if __has_include(<openvpn/client/ovpncli.hpp>)
+// ovpncli.hpp lives at openvpn3/client/ovpncli.hpp (NOT under openvpn3/openvpn/
+// — that's a sibling subtree). The CMakeLists adds `${OPENVPN3_DIR}/client` to
+// the include path, so the canonical reference is <client/ovpncli.hpp>. The
+// earlier `<openvpn/client/ovpncli.hpp>` form pointed at a non-existent path,
+// so __has_include returned false, fell into the else branch, and set
+// HAVE_OPENVPN3=0 — which silently disabled the entire real-mode code path
+// and made ovpn_new() return nullptr at runtime.
+#if __has_include(<client/ovpncli.hpp>)
   #define HAVE_OPENVPN3 1
   // Platform/threading defines required before the OpenVPN3 header set.
   // OPENVPN_EXTERNAL_TUN_FACTORY enables the ExternalTun::Factory base class on
@@ -51,7 +58,7 @@
   #define OPENVPN_EXTERNAL_TUN_FACTORY 1
   #endif
   #include <openvpn/log/logbase.hpp>
-  #include <openvpn/client/ovpncli.hpp>
+  #include <client/ovpncli.hpp>
   #include <openvpn/tun/extern/config.hpp>
   #include <openvpn/tun/extern/fw.hpp>
   #include <openvpn/tun/client/tunbase.hpp>
