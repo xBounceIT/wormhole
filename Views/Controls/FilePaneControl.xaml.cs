@@ -53,9 +53,38 @@ public sealed partial class FilePaneControl : UserControl
     private async void OnEntryDoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
     {
         if (ViewModel is null) return;
-        if (EntriesList.SelectedItem is FileEntryViewModel entry && entry.IsDirectory)
+        if (EntriesList.SelectedItem is FileEntryViewModel entry)
         {
-            await ViewModel.OpenAsync(entry);
+            await OpenEntryAsync(entry);
+        }
+    }
+
+    /// <summary>
+    /// Shared open behavior for both double-click and the context-menu Open item.
+    /// Directories navigate in place. Files on the local pane launch with the default
+    /// OS handler (Explorer double-click semantics); files on the remote pane do
+    /// nothing — there is no local handler to launch a remote file into.
+    /// </summary>
+    private async Task OpenEntryAsync(FileEntryViewModel entry)
+    {
+        if (ViewModel is null) return;
+        if (entry.IsDirectory)
+        {
+            await ViewModel.OpenAsync(entry).ConfigureAwait(true);
+            return;
+        }
+        if (!ViewModel.IsLocal) return;
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = entry.FullPath,
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            ViewModel.ErrorMessage = ex.Message;
         }
     }
 
@@ -282,28 +311,7 @@ public sealed partial class FilePaneControl : UserControl
     private async void OnContextOpenClick(object sender, RoutedEventArgs e)
     {
         if (ViewModel is null || _contextTarget is not { } entry) return;
-        if (entry.IsDirectory)
-        {
-            // Directory: navigate into it, matching double-click behavior.
-            await ViewModel.OpenAsync(entry);
-            return;
-        }
-        // File: launch with the OS's default handler. The Open menu item is only
-        // visible on the local pane (see SetViewModel), so entry.FullPath is always
-        // a real Win32 path here. UseShellExecute=true is what File Explorer's
-        // double-click does — picks the registered handler for the file's extension.
-        try
-        {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = entry.FullPath,
-                UseShellExecute = true,
-            });
-        }
-        catch (Exception ex)
-        {
-            ViewModel.ErrorMessage = ex.Message;
-        }
+        await OpenEntryAsync(entry);
     }
 
     private void OnContextRenameClick(object sender, RoutedEventArgs e)
