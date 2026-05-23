@@ -81,6 +81,8 @@ if(EXISTS "${OPENVPN3_DIR}/client/ovpncli.hpp" AND EXISTS "${MBEDTLS_DIR}/includ
     # (see shim.cc — the documented embedder hook for userspace bidirectional TUN).
     # This is the KEY flag for our use case; everything else is delegated to
     # add_core_dependencies above.
+    # (HAVE_OPENVPN3 is set by shim.cc itself via __has_include — the include
+    # paths above make that check pass.)
     target_compile_definitions(ovpn_shim PUBLIC OPENVPN_EXTERNAL_TUN_FACTORY=1)
 
     # OpenVPN3's ovpncli.cpp is the entry point class implementation. It isn't built

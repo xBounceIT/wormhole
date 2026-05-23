@@ -72,3 +72,157 @@ jobs:
 
       - name: Verify formatting
         run: dotnet format Wormhole.sln --verify-no-changes --severity warn --no-restore
+
+  vpn-integration:
+    # End-to-end VPN tunnel test: builds the Go sidecars on Linux, stands up real
+    # WireGuard and OpenVPN servers in docker-compose, then runs xUnit tests that
+    # drive the sidecars and verify a 4-byte SOCKS5 echo round-trip through each
+    # tunnel. Catches regressions in:
+    #   - the Go sidecar source (wormhole-{wg,ovpn}proxy)
+    #   - the stdin JSON / READY <port> wire protocol
+    #   - the .NET ProcessHost handshake
+    #   - the .NET Socks5Client
+    # Independent of the Windows `build` and `format` jobs — a failure here does
+    # NOT block a green build matrix, since the Windows-only WinUI path is
+    # untouched.
+    name: VPN tunnel integration (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Required for the -tags ovpn3 OpenVPN sidecar build — the shim links
+          # against tools/wormhole-ovpnproxy/third_party/{openvpn3,mbedtls}.
+          submodules: recursive
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/wormhole-wgproxy/go.mod
+          cache: false
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install Linux build prerequisites
+        # Native deps for the OpenVPN shim (apt is dramatically faster than vcpkg
+        # from scratch). wireguard-tools is for bootstrap.sh's wg/wg pubkey calls;
+        # socat would be needed if we wanted to drive the echo target from the
+        # host but the docker socat container handles that already.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential g++ cmake pkg-config \
+            libasio-dev libjsoncpp-dev liblz4-dev libxxhash-dev \
+            wireguard-tools
+
+      - name: Build wormhole-wgproxy
+        run: |
+          mkdir -p bin
+          ( cd tools/wormhole-wgproxy && go build -trimpath -ldflags "-s -w" -o "$GITHUB_WORKSPACE/bin/wormhole-wgproxy" . )
+          ls -la bin/wormhole-wgproxy
+
+      - name: Build wormhole-ovpnproxy (ovpn3-linked, best-effort)
+        # The ovpn_shim CMakeLists targets Windows / MinGW today (tap-windows,
+        # _WIN32_WINNT, big-obj). The OpenVPN3 core itself is cross-platform, so
+        # this MAY build on Linux out of the box; if it doesn't, the OpenVPN
+        # integration test skips with a clear "configure WORMHOLE_OVPNPROXY_PATH"
+        # message and the WireGuard half of the job still runs. Worth attempting
+        # rather than defaulting to mock-only — a Linux shim build is the right
+        # north star.
+        #
+        # A separate step below emits a ::warning:: when this fails so the
+        # OpenVPN-not-exercised state surfaces on the run summary rather than
+        # silently skipping forever.
+        id: build_ovpn
+        continue-on-error: true
+        run: |
+          set -e
+          SHIM_DIR=tools/wormhole-ovpnproxy/ovpn_shim
+          cmake -B "$SHIM_DIR/build" -S "$SHIM_DIR" -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$SHIM_DIR/build" --config Release -j
+          export CGO_ENABLED=1
+          export CGO_CFLAGS="-I$GITHUB_WORKSPACE/$SHIM_DIR"
+          # libovpn_shim.a has unresolved external references to JsonCpp / lz4 /
+          # xxhash (pulled in via OpenVPN3's add_core_dependencies + add_json_library
+          # macros). asio is header-only so doesn't need linking. -ldl is required
+          # by mbedTLS's dynamic loader path. -lstdc++ -lpthread cover the C++
+          # runtime + threading used by the shim itself.
+          export CGO_LDFLAGS="-L$GITHUB_WORKSPACE/$SHIM_DIR/build -lovpn_shim -ljsoncpp -llz4 -lxxhash -ldl -lstdc++ -lpthread"
+          ( cd tools/wormhole-ovpnproxy && go build -trimpath -tags ovpn3 -ldflags "-s -w" -o "$GITHUB_WORKSPACE/bin/wormhole-ovpnproxy" . )
+          ls -la bin/wormhole-ovpnproxy
+
+      - name: Warn if ovpn3 build failed
+        # Surfaces a yellow ::warning:: on the run summary so a silently-skipped
+        # OpenVPN test doesn't masquerade as green coverage forever. Pairs with
+        # the continue-on-error: true above.
+        if: steps.build_ovpn.outcome != 'success'
+        run: |
+          echo "::warning::wormhole-ovpnproxy (-tags ovpn3) build failed — OpenVPN integration test will skip. Check the 'Build wormhole-ovpnproxy' step log."
+
+      - name: Bootstrap VPN fixtures
+        run: |
+          chmod +x tests/vpn-fixtures/bootstrap.sh
+          tests/vpn-fixtures/bootstrap.sh
+
+      - name: Bring up VPN servers (docker compose)
+        # `up -d --wait` is the canonical "block until every service is healthy
+        # OR running (no healthcheck)" gate; --wait-timeout 90 accommodates
+        # linuxserver/wireguard's first-run config-permissions pass and the
+        # OpenVPN server's TLS init. A non-zero exit here fails the job loudly
+        # before the test step gets a chance to produce a misleading tunnel
+        # regression against dead infra.
+        #
+        # NOTE: `docker compose wait` is NOT the right primitive here — it
+        # blocks until containers EXIT, not until they reach the healthy state.
+        #
+        # HOST_UID/HOST_GID feed PUID/PGID in the wireguard service so the
+        # s6 init's chown of /config stays on the runner's invoker uid rather
+        # than the image default (1000), keeping bootstrap re-runs unblocked.
+        run: |
+          export HOST_UID=$(id -u)
+          export HOST_GID=$(id -g)
+          docker compose -f tests/vpn-fixtures/docker-compose.yml up -d --wait --wait-timeout 90
+          docker compose -f tests/vpn-fixtures/docker-compose.yml ps
+
+      - name: Run VPN integration tests
+        env:
+          WORMHOLE_WGPROXY_PATH: ${{ github.workspace }}/bin/wormhole-wgproxy
+          WORMHOLE_WG_CLIENT_CONFIG: ${{ github.workspace }}/tests/vpn-fixtures/.out/wireguard/client.json
+          WORMHOLE_OPENVPN_CLIENT_PROFILE: ${{ github.workspace }}/tests/vpn-fixtures/.out/openvpn/client.ovpn
+          # OvpnProxyPath is set only when the ovpn3-linked build succeeded; the
+          # test SkippableFact short-circuits cleanly when it's missing.
+          WORMHOLE_OVPNPROXY_PATH: ${{ steps.build_ovpn.outcome == 'success' && format('{0}/bin/wormhole-ovpnproxy', github.workspace) || '' }}
+        run: |
+          dotnet test Wormhole.Tests.Integration/Wormhole.Tests.Integration.csproj \
+            -c Debug \
+            --logger "trx;LogFileName=test-results.trx" \
+            --logger "console;verbosity=detailed"
+
+      - name: Collect docker compose logs (on failure)
+        if: failure()
+        run: |
+          mkdir -p artifacts
+          docker compose -f tests/vpn-fixtures/docker-compose.yml logs --no-color > artifacts/compose.log || true
+          docker compose -f tests/vpn-fixtures/docker-compose.yml ps > artifacts/compose-ps.log || true
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vpn-integration-results
+          path: |
+            Wormhole.Tests.Integration/TestResults/*.trx
+            artifacts/*.log
+          if-no-files-found: ignore
+
+      - name: Tear down VPN servers
+        if: always()
+        # Export HOST_UID/HOST_GID so compose doesn't emit
+        # `WARN[0000] The "HOST_UID" variable is not set` lines during
+        # teardown — pure log hygiene, no functional impact.
+        run: |
+          export HOST_UID=$(id -u)
+          export HOST_GID=$(id -g)
+          docker compose -f tests/vpn-fixtures/docker-compose.yml down --volumes --remove-orphans
