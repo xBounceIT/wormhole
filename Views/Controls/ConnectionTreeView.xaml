@@ -34,18 +34,9 @@
                        VerticalAlignment="Center" />
 
             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2">
-                <Button Style="{StaticResource IconButtonStyle}"
-                        Command="{x:Bind ViewModel.AddFolderCommand}"
-                        ToolTipService.ToolTip="New folder (Ctrl+Shift+N)"
-                        AutomationProperties.Name="New folder">
-                    <FontIcon FontSize="14" Glyph="&#xE8F4;" />
-                </Button>
-                <!-- Import menu sits between "New folder" and "New connection" so it reads as
-                     a peer header action. Single entry today; designed to accept future
-                     formats (PuTTY, OpenSSH config, etc.) without a layout change. -->
                 <DropDownButton Style="{StaticResource IconDropDownButtonStyle}"
-                                ToolTipService.ToolTip="Import..."
-                                AutomationProperties.Name="Import">
+                                ToolTipService.ToolTip="Import connections from third parties"
+                                AutomationProperties.Name="Import connections from third parties">
                     <FontIcon FontSize="14" Glyph="&#xE8B5;" />
                     <DropDownButton.Flyout>
                         <MenuFlyout Placement="Bottom">
@@ -58,6 +49,12 @@
                         </MenuFlyout>
                     </DropDownButton.Flyout>
                 </DropDownButton>
+                <Button Style="{StaticResource IconButtonStyle}"
+                        Command="{x:Bind ViewModel.AddFolderCommand}"
+                        ToolTipService.ToolTip="New folder (Ctrl+Shift+N)"
+                        AutomationProperties.Name="New folder">
+                    <FontIcon FontSize="14" Glyph="&#xE8F4;" />
+                </Button>
                 <Button Style="{StaticResource IconButtonStyle}"
                         Command="{x:Bind ViewModel.AddConnectionCommand}"
                         ToolTipService.ToolTip="New connection (Ctrl+N)"
