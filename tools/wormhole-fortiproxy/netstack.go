@@ -179,62 +179,87 @@ func resolveViaVPN(ctx context.Context, s *stack.Stack, servers []netip.Addr, ho
 	const (
 		perServerTimeout = 2 * time.Second
 		overallTimeout   = 5 * time.Second
+		maxCNAMEHops     = 8
 	)
 
 	ctx, cancel := context.WithTimeout(ctx, overallTimeout)
 	defer cancel()
 
-	// Build a fully-qualified DNS name. If the caller already passed an FQDN with the
-	// trailing dot (e.g. "host.example.com."), don't double it — dnsmessage.NewName
-	// rejects "host.example.com.." with an invalid-name error. Otherwise append the dot
-	// so the resolver sends an absolute query.
-	fqdn := host
-	if !strings.HasSuffix(fqdn, ".") {
-		fqdn += "."
-	}
-	qname, err := dnsmessage.NewName(fqdn)
-	if err != nil {
-		return netip.Addr{}, fmt.Errorf("DNS name %q: %w", host, err)
-	}
-	var lastErr error
-	for _, srv := range servers {
-		// Respect the caller's (or our overall) deadline before each attempt.
-		if ctx.Err() != nil {
-			if lastErr != nil {
-				return netip.Addr{}, lastErr
-			}
-			return netip.Addr{}, ctx.Err()
+	current := host
+	for hop := 0; hop <= maxCNAMEHops; hop++ {
+		// Build a fully-qualified DNS name. If the caller (or the previous CNAME hop)
+		// already passed an FQDN with the trailing dot (e.g. "host.example.com."),
+		// don't double it — dnsmessage.NewName rejects "host.example.com.." with an
+		// invalid-name error.
+		fqdn := current
+		if !strings.HasSuffix(fqdn, ".") {
+			fqdn += "."
 		}
-		addr, err := queryAOne(ctx, s, srv, qname, perServerTimeout)
-		if err == nil {
+		qname, err := dnsmessage.NewName(fqdn)
+		if err != nil {
+			return netip.Addr{}, fmt.Errorf("DNS name %q: %w", current, err)
+		}
+
+		var lastErr error
+		var addr netip.Addr
+		var cname string
+		gotAnswer := false
+		for _, srv := range servers {
+			if ctx.Err() != nil {
+				if lastErr != nil {
+					return netip.Addr{}, lastErr
+				}
+				return netip.Addr{}, ctx.Err()
+			}
+			a, cn, err := queryAOne(ctx, s, srv, qname, perServerTimeout)
+			if err == nil {
+				addr, cname = a, cn
+				gotAnswer = true
+				break
+			}
+			lastErr = fmt.Errorf("%s: %w", srv, err)
+			logf("netstack: DNS A query for %q via %s failed (%v); trying next server", current, srv, err)
+		}
+		if !gotAnswer {
+			if lastErr == nil {
+				lastErr = errors.New("no DNS servers configured")
+			}
+			return netip.Addr{}, lastErr
+		}
+		if addr.IsValid() {
 			return addr, nil
 		}
-		lastErr = fmt.Errorf("%s: %w", srv, err)
-		logf("netstack: DNS A query for %q via %s failed (%v); trying next server", host, srv, err)
+		// No A but a CNAME — follow it. Some recursive resolvers return CNAME-only
+		// responses (or CNAME chains whose final A isn't included in the same packet)
+		// instead of inlining the resolved A record; without this loop those names
+		// would fail to resolve here even though `dig`/the OS resolver finds them.
+		if cname == "" {
+			return netip.Addr{}, fmt.Errorf("DNS: no A or CNAME records returned for %q", current)
+		}
+		current = cname
 	}
-	if lastErr == nil {
-		lastErr = errors.New("no DNS servers configured")
-	}
-	return netip.Addr{}, lastErr
+	return netip.Addr{}, fmt.Errorf("DNS: CNAME chain exceeded %d hops starting from %q", maxCNAMEHops, host)
 }
 
-// queryAOne sends a single DNS A-record query to one server over UDP via the netstack and
-// returns the first A record from the answer section. Bounded by perServerTimeout regardless
-// of the caller's ctx deadline (which is the OVERALL budget). The transaction ID is randomly
+// queryAOne sends a single DNS A-record query to one server over UDP via the netstack.
+// Returns (addr, "", nil) if an A record is found, (zero, cname, nil) if the answer section
+// contains only CNAMEs (caller follows the chain via resolveViaVPN's outer loop), or an
+// error on transport/parse failure. Bounded by perServerTimeout regardless of the caller's
+// ctx deadline (which is the OVERALL lookup budget). The transaction ID is randomly
 // generated per query so responses can't be cross-contaminated between concurrent lookups.
-func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dnsmessage.Name, timeout time.Duration) (netip.Addr, error) {
+func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dnsmessage.Name, timeout time.Duration) (netip.Addr, string, error) {
 	if !server.Is4() {
-		return netip.Addr{}, fmt.Errorf("DNS server %v is not IPv4", server)
+		return netip.Addr{}, "", fmt.Errorf("DNS server %v is not IPv4", server)
 	}
 	var txid [2]byte
 	if _, err := rand.Read(txid[:]); err != nil {
-		return netip.Addr{}, fmt.Errorf("DNS txid: %w", err)
+		return netip.Addr{}, "", fmt.Errorf("DNS txid: %w", err)
 	}
 	msg := dnsmessage.Message{
 		Header: dnsmessage.Header{
-			ID:                 binary.BigEndian.Uint16(txid[:]),
-			RecursionDesired:   true,
-			OpCode:             0, // standard query
+			ID:               binary.BigEndian.Uint16(txid[:]),
+			RecursionDesired: true,
+			OpCode:           0, // standard query
 		},
 		Questions: []dnsmessage.Question{{
 			Name:  qname,
@@ -244,7 +269,7 @@ func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dns
 	}
 	wire, err := msg.Pack()
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("DNS pack: %w", err)
+		return netip.Addr{}, "", fmt.Errorf("DNS pack: %w", err)
 	}
 
 	fa := tcpip.FullAddress{
@@ -254,7 +279,7 @@ func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dns
 	}
 	conn, err := gonet.DialUDP(s, nil, &fa, ipv4.ProtocolNumber)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("DNS dial: %w", err)
+		return netip.Addr{}, "", fmt.Errorf("DNS dial: %w", err)
 	}
 	defer conn.Close()
 
@@ -266,11 +291,11 @@ func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dns
 		deadline = d
 	}
 	if err := conn.SetDeadline(deadline); err != nil {
-		return netip.Addr{}, fmt.Errorf("DNS deadline: %w", err)
+		return netip.Addr{}, "", fmt.Errorf("DNS deadline: %w", err)
 	}
 
 	if _, err := conn.Write(wire); err != nil {
-		return netip.Addr{}, fmt.Errorf("DNS write: %w", err)
+		return netip.Addr{}, "", fmt.Errorf("DNS write: %w", err)
 	}
 
 	// Allocate generously — DNS responses without EDNS are capped at 512 bytes, but EDNS-
@@ -279,9 +304,9 @@ func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dns
 	n, err := conn.Read(buf)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			return netip.Addr{}, errors.New("DNS connection closed")
+			return netip.Addr{}, "", errors.New("DNS connection closed")
 		}
-		return netip.Addr{}, fmt.Errorf("DNS read: %w", err)
+		return netip.Addr{}, "", fmt.Errorf("DNS read: %w", err)
 	}
 
 	// Peek at the TC (truncation) flag at bit 9 of the 16-bit flags word (byte 2 high bits)
@@ -292,46 +317,73 @@ func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dns
 		return queryAOneTCP(ctx, s, server, wire, msg.Header.ID, timeout)
 	}
 
+	return parseDNSResponse(buf[:n], msg.Header.ID)
+}
+
+// parseDNSResponse decodes a DNS response packet (UDP or post-TCP-length-strip) and returns
+// either the first A record, a CNAME target to follow, or an error. Shared by the UDP and
+// TCP code paths so they have identical answer-section handling.
+func parseDNSResponse(packet []byte, wantID uint16) (netip.Addr, string, error) {
 	var parser dnsmessage.Parser
-	hdr, err := parser.Start(buf[:n])
+	hdr, err := parser.Start(packet)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("DNS parse: %w", err)
+		return netip.Addr{}, "", fmt.Errorf("DNS parse: %w", err)
 	}
-	if hdr.ID != msg.Header.ID {
-		return netip.Addr{}, fmt.Errorf("DNS txid mismatch: want %#x got %#x", msg.Header.ID, hdr.ID)
+	if hdr.ID != wantID {
+		return netip.Addr{}, "", fmt.Errorf("DNS txid mismatch: want %#x got %#x", wantID, hdr.ID)
 	}
 	if hdr.RCode != dnsmessage.RCodeSuccess {
-		return netip.Addr{}, fmt.Errorf("DNS rcode %v", hdr.RCode)
+		return netip.Addr{}, "", fmt.Errorf("DNS rcode %v", hdr.RCode)
 	}
 	if err := parser.SkipAllQuestions(); err != nil {
-		return netip.Addr{}, fmt.Errorf("DNS skip questions: %w", err)
+		return netip.Addr{}, "", fmt.Errorf("DNS skip questions: %w", err)
 	}
+	// Walk the entire answer section, preferring the first A record but tracking the
+	// first CNAME as a fallback so resolveViaVPN can follow the chain when the resolver
+	// returns CNAME-only.
+	var cname string
 	for {
-		hdr, err := parser.AnswerHeader()
+		ah, err := parser.AnswerHeader()
 		if errors.Is(err, dnsmessage.ErrSectionDone) {
 			break
 		}
 		if err != nil {
-			return netip.Addr{}, fmt.Errorf("DNS answer header: %w", err)
+			return netip.Addr{}, "", fmt.Errorf("DNS answer header: %w", err)
 		}
-		if hdr.Type != dnsmessage.TypeA {
-			if err := parser.SkipAnswer(); err != nil {
-				return netip.Addr{}, fmt.Errorf("DNS skip answer: %w", err)
+		switch ah.Type {
+		case dnsmessage.TypeA:
+			a, err := parser.AResource()
+			if err != nil {
+				return netip.Addr{}, "", fmt.Errorf("DNS A resource: %w", err)
 			}
-			continue
+			return netip.AddrFrom4(a.A), "", nil
+		case dnsmessage.TypeCNAME:
+			cn, err := parser.CNAMEResource()
+			if err != nil {
+				return netip.Addr{}, "", fmt.Errorf("DNS CNAME resource: %w", err)
+			}
+			if cname == "" {
+				cname = cn.CNAME.String()
+			}
+		default:
+			if err := parser.SkipAnswer(); err != nil {
+				return netip.Addr{}, "", fmt.Errorf("DNS skip answer: %w", err)
+			}
 		}
-		a, err := parser.AResource()
-		if err != nil {
-			return netip.Addr{}, fmt.Errorf("DNS A resource: %w", err)
-		}
-		return netip.AddrFrom4(a.A), nil
 	}
-	return netip.Addr{}, fmt.Errorf("DNS: no A records returned")
+	if cname != "" {
+		return netip.Addr{}, cname, nil
+	}
+	return netip.Addr{}, "", fmt.Errorf("DNS: no A or CNAME records returned")
 }
 
 // queryAOneTCP retries a DNS A query over TCP after a UDP response had the TC bit set.
-// TCP DNS prefixes each message with a 2-byte length header (RFC 1035 §4.2.2).
-func queryAOneTCP(ctx context.Context, s *stack.Stack, server netip.Addr, query []byte, txid uint16, timeout time.Duration) (netip.Addr, error) {
+// TCP DNS prefixes each message with a 2-byte length header (RFC 1035 §4.2.2). Returns the
+// same (addr, cname, error) triple as queryAOne so resolveViaVPN's CNAME-following loop
+// works identically whether the answer arrived over UDP or TCP — the bug we'd reintroduce
+// otherwise is "name resolves with `dig` but fails through the tunnel only for big answers
+// that TC-fall-back to TCP."
+func queryAOneTCP(ctx context.Context, s *stack.Stack, server netip.Addr, query []byte, txid uint16, timeout time.Duration) (netip.Addr, string, error) {
 	fa := tcpip.FullAddress{
 		NIC:  1,
 		Addr: tcpip.AddrFromSlice(server.AsSlice()),
@@ -341,7 +393,7 @@ func queryAOneTCP(ctx context.Context, s *stack.Stack, server netip.Addr, query 
 	defer cancel()
 	conn, err := gonet.DialContextTCP(dialCtx, s, fa, ipv4.ProtocolNumber)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("DNS-TCP dial: %w", err)
+		return netip.Addr{}, "", fmt.Errorf("DNS-TCP dial: %w", err)
 	}
 	defer conn.Close()
 
@@ -350,7 +402,7 @@ func queryAOneTCP(ctx context.Context, s *stack.Stack, server netip.Addr, query 
 		deadline = d
 	}
 	if err := conn.SetDeadline(deadline); err != nil {
-		return netip.Addr{}, fmt.Errorf("DNS-TCP deadline: %w", err)
+		return netip.Addr{}, "", fmt.Errorf("DNS-TCP deadline: %w", err)
 	}
 
 	// Write length-prefixed query.
@@ -358,58 +410,24 @@ func queryAOneTCP(ctx context.Context, s *stack.Stack, server netip.Addr, query 
 	binary.BigEndian.PutUint16(framed[0:2], uint16(len(query)))
 	copy(framed[2:], query)
 	if _, err := conn.Write(framed); err != nil {
-		return netip.Addr{}, fmt.Errorf("DNS-TCP write: %w", err)
+		return netip.Addr{}, "", fmt.Errorf("DNS-TCP write: %w", err)
 	}
 
 	// Read the 2-byte length prefix, then the message.
 	var lenBuf [2]byte
 	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
-		return netip.Addr{}, fmt.Errorf("DNS-TCP read length: %w", err)
+		return netip.Addr{}, "", fmt.Errorf("DNS-TCP read length: %w", err)
 	}
 	respLen := int(binary.BigEndian.Uint16(lenBuf[:]))
 	// Per RFC 1035 the response can be up to 65535 bytes; cap defensively at 64 KB minus
 	// the header (anything larger is broken or hostile).
 	if respLen < 12 || respLen > 0xFFFF {
-		return netip.Addr{}, fmt.Errorf("DNS-TCP nonsense length %d", respLen)
+		return netip.Addr{}, "", fmt.Errorf("DNS-TCP nonsense length %d", respLen)
 	}
 	respBuf := make([]byte, respLen)
 	if _, err := io.ReadFull(conn, respBuf); err != nil {
-		return netip.Addr{}, fmt.Errorf("DNS-TCP read body: %w", err)
+		return netip.Addr{}, "", fmt.Errorf("DNS-TCP read body: %w", err)
 	}
 
-	var parser dnsmessage.Parser
-	hdr, err := parser.Start(respBuf)
-	if err != nil {
-		return netip.Addr{}, fmt.Errorf("DNS-TCP parse: %w", err)
-	}
-	if hdr.ID != txid {
-		return netip.Addr{}, fmt.Errorf("DNS-TCP txid mismatch: want %#x got %#x", txid, hdr.ID)
-	}
-	if hdr.RCode != dnsmessage.RCodeSuccess {
-		return netip.Addr{}, fmt.Errorf("DNS-TCP rcode %v", hdr.RCode)
-	}
-	if err := parser.SkipAllQuestions(); err != nil {
-		return netip.Addr{}, fmt.Errorf("DNS-TCP skip questions: %w", err)
-	}
-	for {
-		ah, err := parser.AnswerHeader()
-		if errors.Is(err, dnsmessage.ErrSectionDone) {
-			break
-		}
-		if err != nil {
-			return netip.Addr{}, fmt.Errorf("DNS-TCP answer header: %w", err)
-		}
-		if ah.Type != dnsmessage.TypeA {
-			if err := parser.SkipAnswer(); err != nil {
-				return netip.Addr{}, fmt.Errorf("DNS-TCP skip answer: %w", err)
-			}
-			continue
-		}
-		a, err := parser.AResource()
-		if err != nil {
-			return netip.Addr{}, fmt.Errorf("DNS-TCP A resource: %w", err)
-		}
-		return netip.AddrFrom4(a.A), nil
-	}
-	return netip.Addr{}, fmt.Errorf("DNS-TCP: no A records returned")
+	return parseDNSResponse(respBuf, txid)
 }
