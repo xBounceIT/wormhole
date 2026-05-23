@@ -304,8 +304,9 @@ class WormholeClient final : public OpenVPNClient {
   }
 
   int wait_connected(char* out_buf, int out_len, int timeout_ms) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     std::unique_lock<std::mutex> lk(state_m_);
-    state_cv_.wait_for(lk, std::chrono::milliseconds(timeout_ms), [this] {
+    state_cv_.wait_until(lk, deadline, [this] {
       return connected_ || terminated_;
     });
     // Order matters: check terminated_ FIRST. A CONNECTED-then-DISCONNECTED race
@@ -314,16 +315,28 @@ class WormholeClient final : public OpenVPNClient {
     if (terminated_) return 1;
     if (!connected_) return 2; // timeout
 
-    // Pull the assigned address from the active TunClient. There's a small
-    // window between CONNECTED and the TunClient being plumbed up; if it's
-    // empty here, retry briefly.
-    auto* tc = current_tun_.load(std::memory_order_acquire);
-    std::string cidr;
-    if (tc) cidr = tc->assigned_cidr();
-    if (cidr.empty()) return 3;
-    std::strncpy(out_buf, cidr.c_str(), out_len - 1);
-    out_buf[out_len - 1] = '\0';
-    return 0;
+    // Pull the assigned address from the active TunClient. CONNECTED signaling
+    // and TunClient address population are separate OpenVPN3 callbacks, so under
+    // load the TunClient can briefly be empty here even though the session is
+    // healthy. Retry against the remaining wait_connected budget so callback
+    // ordering doesn't surface as a spurious handshake failure. Release the lock
+    // around the sleeps so other state transitions (notably DISCONNECTED) can
+    // still acquire it.
+    while (true) {
+      auto* tc = current_tun_.load(std::memory_order_acquire);
+      std::string cidr;
+      if (tc) cidr = tc->assigned_cidr();
+      if (!cidr.empty()) {
+        std::strncpy(out_buf, cidr.c_str(), out_len - 1);
+        out_buf[out_len - 1] = '\0';
+        return 0;
+      }
+      if (terminated_) return 1;
+      if (std::chrono::steady_clock::now() >= deadline) return 3;
+      lk.unlock();
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      lk.lock();
+    }
   }
 
   int tun_recv(char* buf, int buf_len, int timeout_ms) {
