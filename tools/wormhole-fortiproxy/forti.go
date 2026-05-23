@@ -14,6 +14,7 @@ import (
 	"net/http/cookiejar"
 	"net/netip"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -309,8 +310,32 @@ type challenge struct {
 	form url.Values
 }
 
+// challengeFields are the form fields the gateway expects the client to echo back in the
+// challenge POST. Shared by both the comma-format and HTML-form parsers.
+var challengeFields = []string{"reqid", "polid", "grp", "portal", "magic", "peer"}
+
+// hiddenInputRE matches FortiGate's HTML hidden-input pattern. Variants seen in firmware:
+//
+//	<input type="hidden" name="magic" value="abc">
+//	<input type='hidden' name='magic' value='abc'>
+//	<input name="magic" value="abc" type="hidden">
+//
+// The regex tolerates attribute reordering AND quote-style swap. It's deliberately
+// permissive on whitespace between attributes; case-insensitive via the (?i) flag.
+var hiddenInputRE = regexp.MustCompile(`(?is)<input\b[^>]*?>`)
+var attrRE = regexp.MustCompile(`(?is)(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)'|(\S+))`)
+
 func parseChallenge(body string) *challenge {
-	// FortiGate returns plaintext like: ret=2,reqid=1234,polid=1,grp=somegrp,portal=Portal,magic=abc,tokeninfo=
+	// First try FortiGate's ajax/plaintext form: ret=2,reqid=1234,polid=1,...
+	if c := parseChallengeText(body); c != nil {
+		return c
+	}
+	// Fall back to the HTML form some firmwares return (typically when AJAX challenge
+	// is disabled or for the SAML / FortiToken Mobile push flows).
+	return parseChallengeHTML(body)
+}
+
+func parseChallengeText(body string) *challenge {
 	if !strings.Contains(body, "ret=") {
 		return nil
 	}
@@ -325,7 +350,54 @@ func parseChallenge(body string) *challenge {
 		return nil
 	}
 	form := url.Values{}
-	for _, k := range []string{"reqid", "polid", "grp", "portal", "magic", "peer"} {
+	for _, k := range challengeFields {
+		if v, ok := fields[k]; ok {
+			form.Set(k, v)
+		}
+	}
+	return &challenge{form: form}
+}
+
+// parseChallengeHTML scans an HTML body for a 2FA challenge form. We don't bring in a full
+// HTML parser (golang.org/x/net/html); a regex walk over <input ...> tags is sufficient for
+// the FortiGate template, which is server-generated and stable. We require at least the
+// `magic` field (the canonical FortiGate session token for the challenge round-trip) to
+// classify the body as a real challenge — without it we'd false-positive on the standard
+// login page that also contains hidden inputs.
+func parseChallengeHTML(body string) *challenge {
+	if !strings.Contains(strings.ToLower(body), "<input") {
+		return nil
+	}
+	fields := map[string]string{}
+	for _, tag := range hiddenInputRE.FindAllString(body, -1) {
+		if !strings.Contains(strings.ToLower(tag), `type="hidden"`) &&
+			!strings.Contains(strings.ToLower(tag), `type='hidden'`) &&
+			!strings.Contains(strings.ToLower(tag), `type=hidden`) {
+			continue
+		}
+		var name, value string
+		for _, m := range attrRE.FindAllStringSubmatch(tag, -1) {
+			// m[1]=attr, m[2]=double-quoted, m[3]=single-quoted, m[4]=unquoted
+			val := m[2] + m[3] + m[4]
+			switch strings.ToLower(m[1]) {
+			case "name":
+				name = val
+			case "value":
+				value = val
+			}
+		}
+		if name != "" {
+			fields[name] = value
+		}
+	}
+	// Magic is the load-bearing field — refuse to treat anything without it as a challenge,
+	// or we'd POST a meaningless second logincheck for any login page that happens to have
+	// hidden inputs.
+	if _, ok := fields["magic"]; !ok {
+		return nil
+	}
+	form := url.Values{}
+	for _, k := range challengeFields {
 		if v, ok := fields[k]; ok {
 			form.Set(k, v)
 		}

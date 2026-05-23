@@ -74,6 +74,81 @@ func TestParseTunnelConfigXML_MissingAddress(t *testing.T) {
 	}
 }
 
+func TestParseChallenge_TextForm(t *testing.T) {
+	body := `ret=2,reqid=1234,polid=5,grp=Engineering,portal=Main,magic=abc123,tokeninfo=`
+	c := parseChallenge(body)
+	if c == nil {
+		t.Fatal("expected non-nil challenge for text form")
+	}
+	if c.form.Get("magic") != "abc123" {
+		t.Errorf("magic: got %q want abc123", c.form.Get("magic"))
+	}
+	if c.form.Get("reqid") != "1234" {
+		t.Errorf("reqid: got %q", c.form.Get("reqid"))
+	}
+	if c.form.Get("polid") != "5" {
+		t.Errorf("polid: got %q", c.form.Get("polid"))
+	}
+}
+
+func TestParseChallenge_HTMLForm(t *testing.T) {
+	// Realistic FortiGate HTML 2FA prompt — attributes in various orders, double + single
+	// quotes mixed, extra whitespace.
+	body := `<html><body>
+<form method="post" action="/remote/logincheck">
+<input type="hidden" name="reqid" value="1234"/>
+<input  type='hidden'  name='polid'  value='5' />
+<input name="grp"     value="Engineering" type="hidden">
+<input type="hidden" name="portal" value="Main"/>
+<input type="hidden" name="magic" value="abc123"/>
+<input type="text" name="code" placeholder="Code"/>
+<input type="submit" value="Verify"/>
+</form>
+</body></html>`
+	c := parseChallenge(body)
+	if c == nil {
+		t.Fatal("expected non-nil challenge for HTML form")
+	}
+	if c.form.Get("magic") != "abc123" {
+		t.Errorf("magic: got %q want abc123", c.form.Get("magic"))
+	}
+	if c.form.Get("reqid") != "1234" {
+		t.Errorf("reqid: got %q want 1234", c.form.Get("reqid"))
+	}
+	if c.form.Get("polid") != "5" {
+		t.Errorf("polid: got %q want 5", c.form.Get("polid"))
+	}
+	if c.form.Get("grp") != "Engineering" {
+		t.Errorf("grp: got %q want Engineering", c.form.Get("grp"))
+	}
+}
+
+func TestParseChallenge_HTMLWithoutMagic_NotAChallenge(t *testing.T) {
+	// Plain login page with hidden inputs but no `magic` — should NOT be treated as a
+	// challenge response, because that would cause us to POST a meaningless second
+	// logincheck for every login page in the wild.
+	body := `<html><body>
+<form><input type="hidden" name="csrf_token" value="xyz"/></form>
+</body></html>`
+	c := parseChallenge(body)
+	if c != nil {
+		t.Errorf("expected nil (no magic field), got %v", c.form)
+	}
+}
+
+func TestParseChallenge_NeitherFormat(t *testing.T) {
+	// SVPNCOOKIE-success body has neither ret= nor hidden inputs.
+	if parseChallenge(`<html><body>Welcome</body></html>`) != nil {
+		t.Error("expected nil for non-challenge HTML")
+	}
+	if parseChallenge(`ret=1,error=bad-creds`) != nil {
+		t.Error("expected nil for ret=1 (not a challenge)")
+	}
+	if parseChallenge(``) != nil {
+		t.Error("expected nil for empty body")
+	}
+}
+
 func TestStripHostBrackets(t *testing.T) {
 	cases := []struct {
 		in   string
