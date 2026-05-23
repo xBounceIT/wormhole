@@ -9,8 +9,8 @@ mRemoteNG. This file orients agents touching the codebase.
 - Build: `dotnet build Wormhole.csproj -c Debug -p:Platform=x64`
 - Run tests: `dotnet test Wormhole.Tests/Wormhole.Tests.csproj`
 - Run the app: build, then launch the produced `Wormhole.exe` from `bin\x64\Debug\net10.0-windows10.0.19041.0\`.
-- Releases (later): `scripts/Build-Installer.ps1` produces an Inno Setup `.exe`.
-- VPN integration tests (Linux/WSL2 + Docker): `tests/vpn-fixtures/bootstrap.sh` → `docker compose -f tests/vpn-fixtures/docker-compose.yml up -d` → `dotnet test Wormhole.Tests.Integration/`. See [tests/vpn-fixtures/README.md](tests/vpn-fixtures/README.md). CI runs this on `ubuntu-latest`; locally the tests skip if env vars / sidecar binaries aren't set up.
+- Installer: `scripts/Build-Installer.ps1 -Configuration Release -Architecture x64` publishes the app and builds the Inno Setup `.exe` (requires Inno Setup 6). Use `-DryRun` only to inspect paths.
+- VPN integration tests (Linux/WSL2 + Docker): `tests/vpn-fixtures/bootstrap.sh` -> `docker compose -f tests/vpn-fixtures/docker-compose.yml up -d` -> `dotnet test Wormhole.Tests.Integration/Wormhole.Tests.Integration.csproj`. See [tests/vpn-fixtures/README.md](tests/vpn-fixtures/README.md). CI runs this on `ubuntu-latest`; locally the tests skip if env vars / sidecar binaries aren't set up.
 
 ## Conventions
 
@@ -22,6 +22,7 @@ mRemoteNG. This file orients agents touching the codebase.
 - Secrets:
   - **Passwords** → Windows Credential Manager via `Meziantou.Framework.Win32.CredentialManager` (key = `Wormhole:<credId>`). 2560-byte limit.
   - **Private keys** → DPAPI-encrypted files under `%LOCALAPPDATA%\Wormhole\keys\` (Credential Manager is too small).
+  - **Tunnel payloads** → DPAPI-encrypted files under `%LOCALAPPDATA%\Wormhole\tunnels\`; SQLite stores only the tunnel row metadata.
   - **Never** log credentials. Add a redaction enricher before adding new logging around auth.
 
 ## Architecture pillars (the parts to handle with care)
@@ -29,16 +30,19 @@ mRemoteNG. This file orients agents touching the codebase.
 - **Folder-level inheritance** (`Data/InheritanceResolver.cs`) is the load-bearing domain concept. It is the single thing that makes Wormhole feel like mRemoteNG. Always run its tests before touching it.
 - **RDP host** must be on STA. The ActiveX `MsRdpClient9NotSafeForScripting` lives in a WinForms `Form` (see [Interop/Rdp/RdpHostForm.cs](Interop/Rdp/RdpHostForm.cs)) reparented into the WinUI 3 main window via Win32 `SetParent`, then positioned by [Views/Sessions/RdpSurfaceHost.xaml.cs](Views/Sessions/RdpSurfaceHost.xaml.cs) on every layout tick. COM interop is hand-rolled in [Interop/Rdp/AxMsRdpClient9.cs](Interop/Rdp/AxMsRdpClient9.cs) and [Interop/Rdp/MsTscAxEventsSink.cs](Interop/Rdp/MsTscAxEventsSink.cs) — no AxImp-generated wrappers; property access is dynamic via `GetOcx()`, events go through `IConnectionPointContainer.Advise` with a managed `IMsTscAxEvents` sink.
 - **SSH terminal** is xterm.js inside a `WebView2` bridged to SSH.NET `ShellStream` by [Interop/Terminal/TerminalBridge.cs](Interop/Terminal/TerminalBridge.cs). xterm.js bundle lives under `Assets/web/`.
+- **Per-connection VPN** is resolved through the same folder-inheritance path as credentials. `TunnelEnabled` is tri-state (`null` = inherit, `false` = override off, `true` = on) and `TunnelConfigId` points at [Models/TunnelConfig.cs](Models/TunnelConfig.cs). [Services/Tunneling/TunnelManager.cs](Services/Tunneling/TunnelManager.cs) loads the row + DPAPI secret and dispatches to the WireGuard, OpenVPN, or Fortinet provider.
+- **VPN runtime routing** currently applies to SSH terminal sessions and SFTP file-transfer dialogs via the sidecars' loopback SOCKS5 endpoints. `ITunnelInstance.BindLocalForwarderAsync` exists for protocols like RDP that cannot speak SOCKS5 directly, but RDP has not been wired through it yet.
 - **Threading**: UI thread is STA. Use `Task.Run` for SSH/SFTP I/O, marshal back via `DispatcherQueue.TryEnqueue`.
+- **mRemoteNG import** is implemented in [Services/MRemoteNg/](Services/MRemoteNg) and exposed through the tree context menu. mRemoteNG's AES-GCM shape needs BouncyCastle; do not replace it with `System.Security.Cryptography.AesGcm` without verifying nonce compatibility.
 
 ## Packaging
 
 - Unpackaged (`WindowsPackageType=None`). Do not switch to MSIX without auditing the ActiveX host path — packaged identity changes ActiveX behavior and may require `runFullTrust`.
 - x64 and arm64 only. No x86.
+- MSBuild fetch targets stage xterm.js assets and the VPN sidecars. Missing Go/C++ toolchains warn rather than fail so the app still builds; using a missing tunnel kind surfaces a runtime error.
 
-## What this scaffold does NOT do yet
+## Current gaps
 
-- SFTP browser (`SftpService` throws `NotImplementedException`).
-- Installer (`scripts/Build-Installer.ps1` is a `-DryRun`-only scaffold).
-
-Each item above is a follow-up feature PR.
+- The standalone SFTP session tab still renders the protocol placeholder; SFTP file transfer is available from connected SSH tabs.
+- RDP does not yet route through per-connection VPN tunnels.
+- [Views/Pages/ConnectionEditorPage.xaml](Views/Pages/ConnectionEditorPage.xaml) is a legacy placeholder page; the real editor is [Views/Dialogs/NewConnectionDialog.xaml](Views/Dialogs/NewConnectionDialog.xaml).
