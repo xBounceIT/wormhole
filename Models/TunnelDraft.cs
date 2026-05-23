@@ -10,4 +10,5 @@ public sealed record TunnelDraft(
     string Name,
     TunnelKind Kind,
     WireGuardSettings? WireGuard,
-    OpenVpnSettings? OpenVpn);
+    OpenVpnSettings? OpenVpn,
+    FortinetSettings? Fortinet);

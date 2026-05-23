@@ -100,6 +100,49 @@
                          Header="Password"
                          PasswordChanged="OnPasswordFieldChanged" />
         </StackPanel>
+
+        <StackPanel x:Name="FortinetPanel" Spacing="10" Visibility="Collapsed">
+            <TextBlock Text="Gateway" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+            <TextBox x:Name="FortinetHostBox"
+                     Header="Host"
+                     PlaceholderText="vpn.example.com"
+                     TextChanged="OnFieldChanged" />
+            <TextBox x:Name="FortinetPortBox"
+                     Header="Port"
+                     Text="443"
+                     Width="120"
+                     HorizontalAlignment="Left"
+                     TextChanged="OnFieldChanged" />
+
+            <TextBlock Text="Credentials" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+            <TextBox x:Name="FortinetUsernameBox"
+                     Header="Username"
+                     TextChanged="OnFieldChanged" />
+            <PasswordBox x:Name="FortinetPasswordBox"
+                         Header="Password"
+                         PasswordChanged="OnPasswordFieldChanged" />
+            <TextBox x:Name="FortinetRealmBox"
+                     Header="Realm (optional)" />
+
+            <Expander Header="Advanced" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                <StackPanel Spacing="10">
+                    <!-- A TOTP shared secret is a long-lived bearer credential equivalent to a
+                         password: anyone who reads it can generate valid 2FA codes and bypass
+                         MFA. Mask it with PasswordBox just like the password field above so it
+                         doesn't appear in screen-shares, screenshots, or UI Automation readers. -->
+                    <PasswordBox x:Name="FortinetTotpSecretBox"
+                                 Header="TOTP shared secret (Base32, optional)"
+                                 FontFamily="Consolas"
+                                 PlaceholderText="leave blank if the gateway prompts interactively (unsupported in v1)"
+                                 PasswordChanged="OnPasswordFieldChanged" />
+                    <CheckBox x:Name="FortinetTrustCertCheck"
+                              Content="Trust server certificate (skip verification)" />
+                    <TextBox x:Name="FortinetCertPinBox"
+                             Header="Server certificate SHA-256 pin (hex, optional)"
+                             FontFamily="Consolas" />
+                </StackPanel>
+            </Expander>
+        </StackPanel>
     </StackPanel>
     </ScrollViewer>
 </UserControl>

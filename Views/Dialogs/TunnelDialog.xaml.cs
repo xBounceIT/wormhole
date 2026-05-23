@@ -34,8 +34,19 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
                 !string.IsNullOrWhiteSpace(PeerEndpointBox.Text),
             TunnelKind.OpenVpn =>
                 !string.IsNullOrWhiteSpace(ProfileOvpnBox.Text),
+            TunnelKind.Fortinet =>
+                !string.IsNullOrWhiteSpace(FortinetHostBox.Text) &&
+                IsValidPort(FortinetPortBox.Text) &&
+                !string.IsNullOrWhiteSpace(FortinetUsernameBox.Text) &&
+                // IsNullOrWhiteSpace mirrors the server-side ValidateFortinet check; an
+                // all-whitespace password would otherwise pass the dialog gate and fail at the
+                // gateway with a generic 'invalid credentials' message.
+                !string.IsNullOrWhiteSpace(FortinetPasswordBox.Password),
             _ => false,
         };
+
+    private static bool IsValidPort(string text) =>
+        int.TryParse(text, out var p) && p is >= 1 and <= 65535;
 
     public void LoadDraft(TunnelDraft initial)
     {
@@ -58,6 +69,18 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         OpenVpnUsernameBox.Text = ovpn.Username ?? string.Empty;
         OpenVpnPasswordBox.Password = ovpn.Password ?? string.Empty;
 
+        var fg = initial.Fortinet ?? new FortinetSettings();
+        FortinetHostBox.Text = fg.Host;
+        // fg.Port can be 0 when the persisted blob was hand-edited or pre-dates a default —
+        // prefer the XAML default of 443 over showing a value the user must wipe before saving.
+        FortinetPortBox.Text = (fg.Port is >= 1 and <= 65535 ? fg.Port : 443).ToString();
+        FortinetUsernameBox.Text = fg.Username;
+        FortinetPasswordBox.Password = fg.Password;
+        FortinetRealmBox.Text = fg.Realm ?? string.Empty;
+        FortinetTotpSecretBox.Password = fg.TotpSecret ?? string.Empty;
+        FortinetTrustCertCheck.IsChecked = fg.TrustServerCertificate;
+        FortinetCertPinBox.Text = fg.ServerCertSha256Pin ?? string.Empty;
+
         UpdateKindPanels();
     }
 
@@ -67,9 +90,10 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         var kind = SelectedKind;
         return kind switch
         {
-            TunnelKind.WireGuard => new TunnelDraft(name, kind, BuildWireGuard(), OpenVpn: null),
-            TunnelKind.OpenVpn => new TunnelDraft(name, kind, WireGuard: null, BuildOpenVpn()),
-            _ => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null),
+            TunnelKind.WireGuard => new TunnelDraft(name, kind, BuildWireGuard(), OpenVpn: null, Fortinet: null),
+            TunnelKind.OpenVpn => new TunnelDraft(name, kind, WireGuard: null, BuildOpenVpn(), Fortinet: null),
+            TunnelKind.Fortinet => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, BuildFortinet()),
+            _ => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, Fortinet: null),
         };
     }
 
@@ -96,6 +120,36 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         Username = string.IsNullOrWhiteSpace(OpenVpnUsernameBox.Text) ? null : OpenVpnUsernameBox.Text.Trim(),
         Password = string.IsNullOrEmpty(OpenVpnPasswordBox.Password) ? null : OpenVpnPasswordBox.Password,
     };
+
+    private FortinetSettings BuildFortinet()
+    {
+        // TOTP shared secrets are conventionally displayed in Base32 with embedded spaces
+        // every 4 characters (e.g. "ABCD EFGH IJKL MNOP"). Trim() only strips ends, so a
+        // paste from a 2FA enrollment screen with internal spaces would persist verbatim
+        // and the sidecar would later fail Base32 decode with a cryptic 'illegal base32'
+        // error. Strip ALL whitespace instead so the secret is normalized regardless of
+        // how the user copied it. Same treatment for the cert pin which often arrives with
+        // ':' separators that the sidecar already strips, but extra whitespace would still
+        // break hex parsing.
+        var totp = StripWhitespace(FortinetTotpSecretBox.Password);
+        return new FortinetSettings
+        {
+            Host = FortinetHostBox.Text.Trim(),
+            Port = TryParseInt(FortinetPortBox.Text) ?? 443,
+            Username = FortinetUsernameBox.Text.Trim(),
+            // Strip ONLY trailing \r/\n. Passwords can legitimately contain leading,
+            // embedded, OR trailing whitespace (spaces and tabs are valid password chars),
+            // so a blanket TrimEnd() would silently corrupt those. CR/LF however are paste
+            // artifacts — `pass` CLI and many browser password managers append them when
+            // copying — that the user can't see in the masked PasswordBox and that
+            // FortiGate would otherwise reject as part of an "invalid credentials" message.
+            Password = FortinetPasswordBox.Password?.TrimEnd('\r', '\n') ?? string.Empty,
+            Realm = string.IsNullOrWhiteSpace(FortinetRealmBox.Text) ? null : FortinetRealmBox.Text.Trim(),
+            TotpSecret = string.IsNullOrEmpty(totp) ? null : totp,
+            TrustServerCertificate = FortinetTrustCertCheck.IsChecked == true,
+            ServerCertSha256Pin = string.IsNullOrWhiteSpace(FortinetCertPinBox.Text) ? null : StripWhitespace(FortinetCertPinBox.Text),
+        };
+    }
 
     public void FocusNameField()
     {
@@ -132,6 +186,9 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         OpenVpnPanel.Visibility = SelectedKind == TunnelKind.OpenVpn
             ? Visibility.Visible
             : Visibility.Collapsed;
+        FortinetPanel.Visibility = SelectedKind == TunnelKind.Fortinet
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     }
 
     private static List<string> SplitCsv(string s) =>
@@ -139,4 +196,15 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
 
     private static int? TryParseInt(string s) =>
         int.TryParse(s, out var n) ? n : (int?)null;
+
+    private static string StripWhitespace(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return string.Empty;
+        var sb = new System.Text.StringBuilder(s.Length);
+        foreach (var c in s)
+        {
+            if (!char.IsWhiteSpace(c)) sb.Append(c);
+        }
+        return sb.ToString();
+    }
 }

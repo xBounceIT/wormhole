@@ -123,6 +123,27 @@
     </ItemGroup>
   </Target>
 
+  <!-- Fortinet SSL VPN userspace sidecar. Same resolution policy as FetchWgProxy: pinned
+       release -> source build -> non-fatal warning. Both Fetch* targets attach to
+       BeforeBuild and run serially in declaration order (MSBuild BeforeTargets are not
+       parallelized within a project); a slow `go mod download` in one will block the next. -->
+  <Target Name="FetchFortiProxy" BeforeTargets="BeforeBuild">
+    <PropertyGroup>
+      <_FortiProxyArch Condition="'$(PlatformTarget)' == 'ARM64' Or '$(PlatformTarget)' == 'arm64'">arm64</_FortiProxyArch>
+      <_FortiProxyArch Condition="'$(_FortiProxyArch)' == ''">x64</_FortiProxyArch>
+    </PropertyGroup>
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\scripts\Fetch-FortiProxy.ps1&quot; -Arch $(_FortiProxyArch) -Quiet" />
+    <ItemGroup>
+      <None Include="$(MSBuildProjectDirectory)\obj\fortiproxy\$(_FortiProxyArch)\wormhole-fortiproxy.exe"
+            Condition="Exists('$(MSBuildProjectDirectory)\obj\fortiproxy\$(_FortiProxyArch)\wormhole-fortiproxy.exe')">
+        <Link>wormhole-fortiproxy.exe</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        <Visible>false</Visible>
+      </None>
+    </ItemGroup>
+  </Target>
+
   <!-- OpenVPN userspace sidecar. Mirrors FetchWgProxy above. The script either downloads a
        pinned release, builds from tools\wormhole-ovpnproxy\ with the full toolchain (Go +
        CMake + C++ + populated submodules) for a real OpenVPN3-linked binary, or falls back

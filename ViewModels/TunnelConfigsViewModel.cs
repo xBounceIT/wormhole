@@ -202,6 +202,21 @@ public partial class TunnelConfigsViewModel : ObservableObject
             return;
         }
 
+        // Kind-change confirmation: changing Kind discards the previous kind's secret blob
+        // (SerializeSecret routes on draft.Kind, so the unused side is lost on Save). The DPAPI
+        // file is overwritten in place and there's no backup — without this prompt the user
+        // could destroy a populated password / TOTP secret / preshared key by accidentally
+        // toggling the Kind ComboBox before save.
+        if (draft.Kind != config.Kind)
+        {
+            var confirmed = await _dialog.ConfirmAsync(
+                "Change tunnel type?",
+                $"Saving will switch this tunnel from {config.Kind} to {draft.Kind} and discard the {config.Kind} credentials currently stored. This cannot be undone.",
+                primaryText: "Change type",
+                closeText: "Cancel");
+            if (!confirmed) return;
+        }
+
         // Persist row before the secret blob so a failing UpdateAsync doesn't leave the on-disk
         // secret pointing at the new payload while the row still shows the old Name/Kind.
         // Compensate-on-failure: roll the row back to its old Name/Kind if the secret write
@@ -350,13 +365,21 @@ public partial class TunnelConfigsViewModel : ObservableObject
                 config.Name,
                 config.Kind,
                 WireGuard: DeserializeOrEmpty<WireGuardSettings>(secret, config, ref loadFailure),
-                OpenVpn: null),
+                OpenVpn: null,
+                Fortinet: null),
             TunnelKind.OpenVpn => new TunnelDraft(
                 config.Name,
                 config.Kind,
                 WireGuard: null,
-                OpenVpn: DeserializeOrEmpty<OpenVpnSettings>(secret, config, ref loadFailure)),
-            _ => new TunnelDraft(config.Name, config.Kind, WireGuard: null, OpenVpn: null),
+                OpenVpn: DeserializeOrEmpty<OpenVpnSettings>(secret, config, ref loadFailure),
+                Fortinet: null),
+            TunnelKind.Fortinet => new TunnelDraft(
+                config.Name,
+                config.Kind,
+                WireGuard: null,
+                OpenVpn: null,
+                Fortinet: DeserializeOrEmpty<FortinetSettings>(secret, config, ref loadFailure)),
+            _ => new TunnelDraft(config.Name, config.Kind, WireGuard: null, OpenVpn: null, Fortinet: null),
         };
         return (draft, loadFailure);
     }
@@ -388,6 +411,8 @@ public partial class TunnelConfigsViewModel : ObservableObject
             draft.WireGuard ?? throw new InvalidOperationException("WireGuard settings are missing for a WireGuard draft.")),
         TunnelKind.OpenVpn => JsonSerializer.SerializeToUtf8Bytes(
             draft.OpenVpn ?? throw new InvalidOperationException("OpenVPN settings are missing for an OpenVPN draft.")),
+        TunnelKind.Fortinet => JsonSerializer.SerializeToUtf8Bytes(
+            draft.Fortinet ?? throw new InvalidOperationException("Fortinet settings are missing for a Fortinet draft.")),
         _ => throw new InvalidOperationException($"Unsupported tunnel kind '{draft.Kind}'."),
     };
 
@@ -407,6 +432,9 @@ public partial class TunnelConfigsViewModel : ObservableObject
                 return;
             case TunnelKind.OpenVpn:
                 ValidateOpenVpn(draft.OpenVpn);
+                return;
+            case TunnelKind.Fortinet:
+                ValidateFortinet(draft.Fortinet);
                 return;
             default:
                 throw new InvalidOperationException($"Unsupported tunnel kind '{draft.Kind}'.");
@@ -431,6 +459,21 @@ public partial class TunnelConfigsViewModel : ObservableObject
             throw new InvalidOperationException("OpenVPN settings are required for an OpenVPN tunnel.");
         if (string.IsNullOrWhiteSpace(ovpn.ProfileOvpn))
             throw new InvalidOperationException("OpenVPN profile (.ovpn contents) is required.");
+    }
+
+    private static void ValidateFortinet(FortinetSettings? fg)
+    {
+        if (fg is null)
+            throw new InvalidOperationException("Fortinet settings are required for a Fortinet tunnel.");
+        var sb = new StringBuilder();
+        if (string.IsNullOrWhiteSpace(fg.Host)) sb.AppendLine("Gateway host is required.");
+        if (fg.Port is < 1 or > 65535) sb.AppendLine("Port must be between 1 and 65535.");
+        if (string.IsNullOrWhiteSpace(fg.Username)) sb.AppendLine("Username is required.");
+        // IsNullOrWhiteSpace mirrors every other required field (and ValidateWireGuard) — a
+        // single space passed as a password would otherwise reach the gateway as %20 and bounce
+        // back as a cryptic 'invalid credentials' instead of a clean client-side rejection.
+        if (string.IsNullOrWhiteSpace(fg.Password)) sb.AppendLine("Password is required.");
+        if (sb.Length > 0) throw new InvalidOperationException(sb.ToString().TrimEnd());
     }
 
     // Best-effort compensate when a DPAPI secret write fails after the SQLite row has already

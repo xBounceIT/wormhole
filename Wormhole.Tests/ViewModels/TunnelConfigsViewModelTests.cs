@@ -148,7 +148,8 @@ public class TunnelConfigsViewModelTests
                 PeerPublicKey = "k2",
                 PeerEndpoint = "",
             },
-            OpenVpn: null);
+            OpenVpn: null,
+            Fortinet: null);
 
         await vm.AddTunnelCommand.ExecuteAsync(null);
 
@@ -173,7 +174,8 @@ public class TunnelConfigsViewModelTests
                 PeerPublicKey = "k2",
                 PeerEndpoint = "host:51820",
             },
-            OpenVpn: null);
+            OpenVpn: null,
+            Fortinet: null);
 
         await vm.AddTunnelCommand.ExecuteAsync(null);
 
@@ -224,7 +226,8 @@ public class TunnelConfigsViewModelTests
                 PeerPublicKey = "k2",
                 PeerEndpoint = "host2:51820",
             },
-            OpenVpn: null);
+            OpenVpn: null,
+            Fortinet: null);
 
         await vm.EditTunnelCommand.ExecuteAsync(vm.Configs[0]);
 
@@ -377,7 +380,44 @@ public class TunnelConfigsViewModelTests
             "corp-ovpn",
             TunnelKind.OpenVpn,
             WireGuard: null,
-            new OpenVpnSettings { ProfileOvpn = "" });
+            new OpenVpnSettings { ProfileOvpn = "" },
+            Fortinet: null);
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        Assert.Empty(repo.Configs);
+        Assert.Empty(creds.TunnelConfigs);
+        Assert.Contains(dialog.Messages, m => m.title == "Tunnel settings incomplete");
+    }
+
+    [Fact]
+    public async Task AddTunnel_FortinetKind_CommitsRowAndSecret()
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        dialog.TunnelPromptResult = NewFortinetDraft("corp-forti");
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        var stored = Assert.Single(repo.Configs.Values);
+        Assert.Equal(TunnelKind.Fortinet, stored.Kind);
+        Assert.True(creds.TunnelConfigs.ContainsKey(stored.Id));
+        var roundTrip = JsonSerializer.Deserialize<FortinetSettings>(creds.TunnelConfigs[stored.Id])!;
+        Assert.Equal("vpn.example.com", roundTrip.Host);
+        Assert.Equal(443, roundTrip.Port);
+        Assert.Equal("alice", roundTrip.Username);
+        Assert.Equal("s3cret", roundTrip.Password);
+    }
+
+    [Fact]
+    public async Task AddTunnel_FortinetKind_MissingHost_RejectsBeforePersist()
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        dialog.TunnelPromptResult = new TunnelDraft(
+            "corp-forti",
+            TunnelKind.Fortinet,
+            WireGuard: null,
+            OpenVpn: null,
+            new FortinetSettings { Host = "", Port = 443, Username = "u", Password = "p" });
 
         await vm.AddTunnelCommand.ExecuteAsync(null);
 
@@ -397,13 +437,50 @@ public class TunnelConfigsViewModelTests
             "corp-ovpn",
             TunnelKind.OpenVpn,
             WireGuard: null,
-            OpenVpn: null);
+            OpenVpn: null,
+            Fortinet: null);
 
         await vm.AddTunnelCommand.ExecuteAsync(null);
 
         Assert.Empty(repo.Configs);
         Assert.Empty(creds.TunnelConfigs);
         Assert.Contains(dialog.Messages, m => m.title == "Tunnel settings incomplete");
+    }
+
+    [Fact]
+    public async Task EditTunnel_FortinetKind_RoundTripsSecret()
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        var id = Guid.NewGuid();
+        repo.Configs[id] = new TunnelConfig { Id = id, Name = "corp-forti", Kind = TunnelKind.Fortinet };
+        creds.TunnelConfigs[id] = JsonSerializer.SerializeToUtf8Bytes(new FortinetSettings
+        {
+            Host = "vpn.old.com",
+            Port = 443,
+            Username = "alice",
+            Password = "old",
+        });
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        dialog.TunnelPromptResult = new TunnelDraft(
+            "corp-forti",
+            TunnelKind.Fortinet,
+            WireGuard: null,
+            OpenVpn: null,
+            new FortinetSettings
+            {
+                Host = "vpn.new.com",
+                Port = 10443,
+                Username = "alice",
+                Password = "new",
+            });
+
+        await vm.EditTunnelCommand.ExecuteAsync(vm.Configs[0]);
+
+        var stored = JsonSerializer.Deserialize<FortinetSettings>(creds.TunnelConfigs[id])!;
+        Assert.Equal("vpn.new.com", stored.Host);
+        Assert.Equal(10443, stored.Port);
+        Assert.Equal("new", stored.Password);
     }
 
     [Fact]
@@ -520,7 +597,7 @@ public class TunnelConfigsViewModelTests
             InterfaceAddress = "10.0.0.2/32",
             PeerPublicKey = "k2",
             PeerEndpoint = "host:51820",
-        }, OpenVpn: null);
+        }, OpenVpn: null, Fortinet: null);
 
     private static TunnelDraft NewOpenVpnDraft(string name, string profile = "client\nproto udp\nremote vpn.example.com 1194\n", string? user = null, string? pass = null) =>
         new(name, TunnelKind.OpenVpn, WireGuard: null, new OpenVpnSettings
@@ -528,6 +605,15 @@ public class TunnelConfigsViewModelTests
             ProfileOvpn = profile,
             Username = user,
             Password = pass,
+        }, Fortinet: null);
+
+    private static TunnelDraft NewFortinetDraft(string name) =>
+        new(name, TunnelKind.Fortinet, WireGuard: null, OpenVpn: null, new FortinetSettings
+        {
+            Host = "vpn.example.com",
+            Port = 443,
+            Username = "alice",
+            Password = "s3cret",
         });
 
     private static (

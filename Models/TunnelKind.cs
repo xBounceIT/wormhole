@@ -4,4 +4,5 @@ public enum TunnelKind
 {
     WireGuard = 0,
     OpenVpn = 1,
+    Fortinet = 2,
 }

@@ -11,6 +11,7 @@ using Wormhole.Services.MRemoteNg;
 using Wormhole.Services.Rdp;
 using Wormhole.Services.Ssh;
 using Wormhole.Services.Tunneling;
+using Wormhole.Services.Tunneling.Fortinet;
 using Wormhole.Services.Tunneling.OpenVpn;
 using Wormhole.Services.Tunneling.WireGuard;
 using Wormhole.ViewModels;
@@ -157,6 +158,7 @@ public partial class App : Application
 
         services.AddSingleton<ITunnelProvider, WireGuardTunnelProvider>();
         services.AddSingleton<ITunnelProvider, OpenVpnTunnelProvider>();
+        services.AddSingleton<ITunnelProvider, FortinetTunnelProvider>();
         services.AddSingleton<TunnelManager>();
         services.AddSingleton<INavigationService, NavigationService>();
         services.AddSingleton<IDialogService, DialogService>();
