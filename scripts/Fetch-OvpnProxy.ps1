@@ -237,25 +237,17 @@ Push-Location $sourceDir
 $prevPref = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 try {
-    # `go mod download all` populates the (uncommitted) go.sum from go.mod, fetching the
-    # entire build list (including transitive deps). Unlike `go mod tidy`, this does NOT
-    # rewrite go.mod -- important because dev/CI environments could otherwise drift go.mod
-    # against each other (different toolchain views of indirect deps). Mirrors the same
-    # change in Fetch-WgProxy.ps1.
-    & go mod download all 2>&1 | ForEach-Object { Write-Info $_.ToString() }
-    if ($LASTEXITCODE -ne 0) {
-        $failureDetail = "go mod download all exited with code $LASTEXITCODE"
+    # go.sum is committed for this tool so plain `go build` works without a preflight.
+    # Regenerate it via `GOOS=windows go mod tidy` when bumping deps -- the windows-only
+    # indirect `golang.zx2c4.com/wintun` is otherwise stripped on Linux/macOS tidy passes.
+    $tagArgs = @()
+    if ($buildTag) { $tagArgs = @("-tags", $buildTag) }
+    & go build -trimpath -ldflags "-s -w" @tagArgs -o $binaryPath . 2>&1 | ForEach-Object { Write-Info $_.ToString() }
+    if ($LASTEXITCODE -eq 0) {
+        $buildOk = $true
     }
     else {
-        $tagArgs = @()
-        if ($buildTag) { $tagArgs = @("-tags", $buildTag) }
-        & go build -trimpath -ldflags "-s -w" @tagArgs -o $binaryPath . 2>&1 | ForEach-Object { Write-Info $_.ToString() }
-        if ($LASTEXITCODE -eq 0) {
-            $buildOk = $true
-        }
-        else {
-            $failureDetail = "go build exited with code $LASTEXITCODE"
-        }
+        $failureDetail = "go build exited with code $LASTEXITCODE"
     }
 }
 catch {

@@ -122,10 +122,10 @@ if ($release) {
 # WireGuardTunnelProvider surfaces a clean runtime error if the binary is missing. We
 # therefore catch every go-related failure here and downgrade it to a warning.
 #
-# Note for dep bumps: tools\wormhole-wgproxy\go.sum must be regenerated with GOOS=windows so
-# the windows-only indirect `golang.zx2c4.com/wintun` is retained. If you run
-# `go mod tidy` on Linux/macOS the wintun entry may be stripped and the next cross-compile
-# from Windows will fail with "missing go.sum entry for golang.zx2c4.com/wintun".
+# Note for dep bumps: regenerate tools\wormhole-wgproxy\go.sum with GOOS=windows when
+# bumping deps -- the windows-only indirect `golang.zx2c4.com/wintun` is otherwise stripped
+# on Linux/macOS tidy passes and the next cross-compile from Windows fails with
+# "missing go.sum entry for golang.zx2c4.com/wintun".
 $go = Get-Command go -ErrorAction SilentlyContinue
 if ($go) {
     Write-Info "BUILD wormhole-wgproxy.exe ($Arch) from source"
@@ -140,9 +140,8 @@ if ($go) {
     $failureDetail = $null
     $pushed = $false
     # Track which stage failed so the catch can report an accurate cause (missing source
-    # tree vs. go mod download vs. an actual go compile failure) instead of a generic
-    # "go build" message that would mislead a developer staring at a sparse checkout into
-    # debugging the toolchain.
+    # tree vs. an actual go compile failure) instead of always saying "go build" -- which
+    # would mislead a developer staring at a sparse checkout into debugging the toolchain.
     $stage = "pre-build"
     try {
         # Push-Location is inside the try so a missing $sourceDir (sparse checkout, stale
@@ -151,67 +150,42 @@ if ($go) {
         # error" contract above.
         Push-Location $sourceDir
         $pushed = $true
-        # Relax $ErrorActionPreference around native commands. With Stop, piping stderr-as-
-        # stdout through `2>&1 | ForEach-Object` rewraps each stderr line as an ErrorRecord
-        # and the strict preference throws on the first one even when the command itself
-        # succeeded ($LASTEXITCODE = 0). Real failures still surface via $LASTEXITCODE.
+        $stage = "build"
+        # Tee stdout+stderr into a list as it streams so the failure detail can include
+        # the real go error even under -Quiet (Write-Info is a no-op there). The local EAP
+        # override is required because `2>&1` of native stderr emits ErrorRecord objects
+        # into the pipeline, and the script-wide $ErrorActionPreference = "Stop" would
+        # otherwise throw on the first stderr line -- losing the line/column of the actual
+        # compile error in favor of the (less useful) package-header line.
+        #
+        # go.sum is committed for this tool so plain `go build` works without a preflight.
+        $buildLines = [System.Collections.Generic.List[string]]::new()
         $prevEAP = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'
         try {
-            # `go mod download all` populates the (uncommitted) go.sum from go.mod, fetching
-            # the entire build list (including transitive deps) so subsequent `go build`
-            # doesn't fail with "missing go.sum entry for module ...". Unlike `go mod tidy`,
-            # this command does NOT rewrite go.mod -- it only writes go.sum and the module
-            # cache. That's important because the dev/CI environments running this script
-            # could otherwise drift go.mod against each other (different toolchain views of
-            # indirect deps), turning go.mod into a moving target.
-            #
-            # go.sum is intentionally not committed for this tool: the .NET build is the
-            # source of truth and committing go.sum would force regeneration on every
-            # dependency bump. `go mod download` (no args) is a no-op on a cold cache because
-            # it only fetches what is already pinned in go.sum; passing `all` is what makes
-            # it bootstrap from go.mod.
-            $stage = "go mod download"
-            $downloadLines = [System.Collections.Generic.List[string]]::new()
-            & go mod download all 2>&1 | ForEach-Object {
+            & go build -trimpath -ldflags "-s -w" -o $binaryPath . 2>&1 | ForEach-Object {
                 $text = "$_"
-                $downloadLines.Add($text)
+                $buildLines.Add($text)
                 Write-Info $text
             }
-            $downloadExit = $LASTEXITCODE
-            if ($downloadExit -ne 0) {
-                $tail = ($downloadLines | Select-Object -Last 5) -join [Environment]::NewLine
-                $failureDetail = "go mod download all exited with code ${downloadExit}: ${tail}"
-            }
-            else {
-                # Tee stdout+stderr into a list as it streams so the failure detail can include
-                # the real go error even under -Quiet (Write-Info is a no-op there).
-                $stage = "build"
-                $buildLines = [System.Collections.Generic.List[string]]::new()
-                & go build -trimpath -ldflags "-s -w" -o $binaryPath . 2>&1 | ForEach-Object {
-                    $text = "$_"
-                    $buildLines.Add($text)
-                    Write-Info $text
-                }
-                $buildExit = $LASTEXITCODE
-                if ($buildExit -eq 0) {
-                    $buildOk = $true
-                }
-                else {
-                    $tail = ($buildLines | Select-Object -Last 5) -join [Environment]::NewLine
-                    $failureDetail = "go build exited with code ${buildExit}: ${tail}"
-                }
-            }
+            $buildExit = $LASTEXITCODE
         }
         finally {
             $ErrorActionPreference = $prevEAP
         }
+        if ($buildExit -eq 0) {
+            $buildOk = $true
+        }
+        else {
+            $tail = ($buildLines | Select-Object -Last 5) -join [Environment]::NewLine
+            $failureDetail = "go build exited with code ${buildExit}: ${tail}"
+        }
     }
     catch {
-        $failureDetail = switch ($stage) {
-            "pre-build"       { "could not enter source directory '$sourceDir': $_" }
-            "go mod download" { "unexpected error during go mod download: $_" }
-            default           { "unexpected error during go build: $_" }
+        $failureDetail = if ($stage -eq "pre-build") {
+            "could not enter source directory '$sourceDir': $_"
+        } else {
+            "unexpected error during go build: $_"
         }
     }
     finally {
