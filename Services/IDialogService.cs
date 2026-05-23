@@ -11,4 +11,5 @@ public interface IDialogService
     Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null);
     Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null);
     Task<string?> PromptPasswordAsync(string title, string message);
+    Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync();
 }

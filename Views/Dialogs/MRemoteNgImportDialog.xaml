@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Wormhole.Views.Dialogs.MRemoteNgImportDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:Wormhole.ViewModels">
+
+    <!-- Same ScrollViewer pattern as TunnelDialog: ContentDialog won't internally scroll its
+         hosted UserControl, so the bottom sections (progress / result InfoBar) would otherwise
+         be clipped on narrower viewports. -->
+    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                  VerticalScrollMode="Enabled"
+                  HorizontalScrollMode="Disabled"
+                  HorizontalScrollBarVisibility="Disabled"
+                  MaxHeight="560"
+                  MinWidth="480">
+        <StackPanel Spacing="12" Padding="0,0,12,0">
+
+            <!-- Section 1: instructions for exporting from mRemoteNG. -->
+            <TextBlock Text="Exporting from mRemoteNG"
+                       Style="{StaticResource BodyStrongTextBlockStyle}" />
+            <TextBlock TextWrapping="Wrap">
+                <Run Text="1. In mRemoteNG, right-click the root 'Connections' node in the tree." />
+                <LineBreak/>
+                <Run Text="2. Choose 'Export Connections...'." />
+                <LineBreak/>
+                <Run Text="3. Pick a destination .xml file." />
+                <LineBreak/>
+                <Run Text="4. In the export dialog, set Format to 'mRemoteNG XML' and tick every checkbox under 'Properties to export' (Username, Domain, Password, Inheritance, …)." />
+                <LineBreak/>
+                <Run Text="5. Leave the encryption password at its default unless you customized it — Wormhole will try the default first and prompt only if it doesn't work." />
+                <LineBreak/>
+                <Run Text="6. Click OK to write the file, then come back here." />
+            </TextBlock>
+
+            <!-- Section 2: file picker + start button, side by side. -->
+            <TextBlock Text="Import"
+                       Style="{StaticResource BodyStrongTextBlockStyle}"
+                       Margin="0,8,0,0" />
+            <Grid ColumnSpacing="8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBox Grid.Column="0"
+                         IsReadOnly="True"
+                         PlaceholderText="No file selected"
+                         Header="Export file (.xml)"
+                         Text="{x:Bind ViewModel.SelectedPath, Mode=OneWay}" />
+                <!-- IsEnabled gated on CanPickFile (= !IsBusy) so a mid-import re-pick can't
+                     swap SelectedPath out from under the in-flight import. -->
+                <Button Grid.Column="1"
+                        VerticalAlignment="Bottom"
+                        Content="Select a file..."
+                        IsEnabled="{x:Bind ViewModel.CanPickFile, Mode=OneWay}"
+                        Click="OnPickFile" />
+                <Button Grid.Column="2"
+                        VerticalAlignment="Bottom"
+                        Content="Start import"
+                        Style="{StaticResource AccentButtonStyle}"
+                        Command="{x:Bind ViewModel.StartImportCommand}" />
+            </Grid>
+
+            <!-- Section 3: password prompt, only when the default mR3m fails. -->
+            <InfoBar x:Name="PasswordBar"
+                     IsOpen="{x:Bind ViewModel.NeedsPassword, Mode=OneWay}"
+                     IsClosable="False"
+                     Severity="Warning"
+                     Title="Password required"
+                     Message="{x:Bind ViewModel.Status, Mode=OneWay}">
+                <InfoBar.Content>
+                    <StackPanel Spacing="8" Padding="0,8,0,8">
+                        <!-- KeyDown wired so Enter submits via SubmitPasswordCommand; without
+                             it, ContentDialog routes Enter to its DefaultButton (here "Close")
+                             and the dialog dismisses instead of submitting. Matches the
+                             PromptPasswordAsync precedent in DialogService. -->
+                        <PasswordBox x:Name="PasswordInput"
+                                     Header="mRemoteNG export password"
+                                     PasswordChanged="OnPasswordChanged"
+                                     KeyDown="OnPasswordKeyDown"
+                                     PlaceholderText="Enter password" />
+                        <TextBlock Text="{x:Bind ViewModel.PasswordError, Mode=OneWay}"
+                                   Visibility="{x:Bind ViewModel.PasswordError, Mode=OneWay, Converter={StaticResource StringPresentVisibilityConverter}}"
+                                   Foreground="{ThemeResource SystemFillColorCriticalBrush}"
+                                   TextWrapping="Wrap" />
+                        <Button Content="Continue"
+                                Style="{StaticResource AccentButtonStyle}"
+                                Command="{x:Bind ViewModel.SubmitPasswordCommand}"
+                                HorizontalAlignment="Left" />
+                    </StackPanel>
+                </InfoBar.Content>
+            </InfoBar>
+
+            <!-- Section 4: progress bar + status text + Cancel; visible while IsBusy. -->
+            <StackPanel Spacing="8"
+                        Visibility="{x:Bind ViewModel.IsBusy, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+                <ProgressBar Value="{x:Bind ViewModel.Percent, Mode=OneWay}"
+                             Minimum="0"
+                             Maximum="100" />
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0"
+                               Text="{x:Bind ViewModel.Status, Mode=OneWay}"
+                               TextWrapping="Wrap"
+                               VerticalAlignment="Center" />
+                    <Button Grid.Column="1"
+                            Content="Cancel"
+                            Command="{x:Bind ViewModel.CancelCommand}" />
+                </Grid>
+            </StackPanel>
+
+            <!-- Section 5: final result banner — success after a clean run. -->
+            <InfoBar IsOpen="{x:Bind ViewModel.HasResult, Mode=OneWay}"
+                     IsClosable="False"
+                     Severity="Success"
+                     Title="Import complete"
+                     Message="{x:Bind ViewModel.Status, Mode=OneWay}" />
+
+            <!-- Always-visible Status TextBlock for the "neither busy nor finished" states:
+                 mid-import cancellation, exception path, password-prompt-failed. Without
+                 this, Status messages set on the VM during those states render nowhere
+                 because Sections 3/4/5 are all collapsed. The StringPresentVisibilityConverter
+                 hides the TextBlock when Status is empty so it doesn't add visual noise
+                 during the initial pick-a-file state. -->
+            <TextBlock x:Name="OutOfBandStatus"
+                       Text="{x:Bind ViewModel.Status, Mode=OneWay}"
+                       TextWrapping="Wrap"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       Visibility="{x:Bind ShouldShowOutOfBandStatus(ViewModel.Status, ViewModel.IsBusy, ViewModel.NeedsPassword, ViewModel.HasResult), Mode=OneWay}" />
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

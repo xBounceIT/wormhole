@@ -209,6 +209,8 @@ public class SshCredentialResolverTests
             PromptCount++;
             return Task.FromResult(_response);
         }
+        public Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync()
+            => Task.FromResult<MRemoteNgImportResult?>(null);
     }
 
     private sealed class FakeCredentialRepository : ICredentialRepository

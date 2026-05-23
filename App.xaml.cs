@@ -6,6 +6,7 @@ using Wormhole.Data;
 using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Services;
+using Wormhole.Services.MRemoteNg;
 using Wormhole.Services.Ssh;
 using Wormhole.Services.Tunneling;
 using Wormhole.Services.Tunneling.WireGuard;
@@ -84,6 +85,7 @@ public partial class App : Application
         services.AddSingleton<ISessionTabFactory, SessionTabFactory>();
         services.AddSingleton<IRdpSessionService, RdpSessionService>();
         services.AddSingleton<ISftpService, SftpService>();
+        services.AddSingleton<IMRemoteNgImportService, MRemoteNgImportService>();
 
         var assemblyVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "0.0.0";
         services.AddHttpClient(UpdateService.HttpClientName, client =>
@@ -116,6 +118,7 @@ public partial class App : Application
         services.AddTransient<RdpSessionViewModel>();
         services.AddTransient<SftpSessionViewModel>();
         services.AddTransient<TunnelConfigsViewModel>();
+        services.AddTransient<MRemoteNgImportDialogViewModel>();
 
         services.AddSingleton<MainWindow>();
 

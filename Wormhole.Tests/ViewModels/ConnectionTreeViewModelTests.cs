@@ -97,6 +97,41 @@ public class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task ImportFromMRemoteNg_NoResult_DoesNotRefresh()
+    {
+        // Pre-populate the DB out-of-band so we can assert the tree was NOT reloaded.
+        await _repo.AddAsync(new ConnectionNode { Name = "Existing", Kind = NodeKind.Folder });
+        var dialog = new FakeDialogService { MRemoteNgImportResult = null };
+        var vm = CreateVm(dialog);
+
+        await vm.ImportFromMRemoteNgCommand.ExecuteAsync(null);
+
+        Assert.Equal(1, dialog.MRemoteNgImportPromptCount);
+        // Tree never refreshed because the dialog returned null (user closed without committing),
+        // so the seeded node isn't visible in Roots.
+        Assert.Empty(vm.Roots);
+    }
+
+    [Fact]
+    public async Task ImportFromMRemoteNg_WithResult_TriggersRefresh()
+    {
+        // Pre-populate again — the difference here is that the dialog returns a non-null
+        // result, so the command should call RefreshAsync and the seeded node appears.
+        await _repo.AddAsync(new ConnectionNode { Name = "Imported", Kind = NodeKind.Folder });
+        var dialog = new FakeDialogService
+        {
+            MRemoteNgImportResult = new MRemoteNgImportResult(1, 0, 0, 0, Array.Empty<string>()),
+        };
+        var vm = CreateVm(dialog);
+
+        await vm.ImportFromMRemoteNgCommand.ExecuteAsync(null);
+
+        Assert.Equal(1, dialog.MRemoteNgImportPromptCount);
+        Assert.Single(vm.Roots);
+        Assert.Equal("Imported", vm.Roots[0].Name);
+    }
+
+    [Fact]
     public async Task AddFolder_RightClickedOnFolder_NestsUnderIt()
     {
         var dialog = new FakeDialogService();
@@ -945,6 +980,8 @@ public class ConnectionTreeViewModelTests : IDisposable
         public NewConnectionDraft? ConnectionPromptResult { get; set; }
         public NewConnectionDraft? LastConnectionPromptInitial { get; private set; }
         public bool ConfirmResult { get; set; } = true;
+        public MRemoteNgImportResult? MRemoteNgImportResult { get; set; }
+        public int MRemoteNgImportPromptCount { get; private set; }
 
         public Task ShowMessageAsync(string title, string message) => Task.CompletedTask;
         public Task<bool> ConfirmAsync(string title, string message, string primaryText = "Yes", string closeText = "No")
@@ -962,5 +999,10 @@ public class ConnectionTreeViewModelTests : IDisposable
             => Task.FromResult<TunnelDraft?>(null);
         public Task<string?> PromptPasswordAsync(string title, string message)
             => Task.FromResult<string?>(null);
+        public Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync()
+        {
+            MRemoteNgImportPromptCount++;
+            return Task.FromResult(MRemoteNgImportResult);
+        }
     }
 }

@@ -426,5 +426,8 @@ public class TunnelConfigsViewModelTests
 
         public Task<string?> PromptPasswordAsync(string title, string message) =>
             Task.FromResult<string?>(null);
+
+        public Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync() =>
+            Task.FromResult<MRemoteNgImportResult?>(null);
     }
 }

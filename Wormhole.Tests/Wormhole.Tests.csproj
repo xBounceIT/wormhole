@@ -22,6 +22,7 @@
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
     <PackageReference Include="Dapper" Version="2.1.66" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.0" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
@@ -49,6 +50,10 @@
     <Compile Include="..\Models\TunnelState.cs" Link="Models\TunnelState.cs" />
     <Compile Include="..\Models\TunnelDraft.cs" Link="Models\TunnelDraft.cs" />
     <Compile Include="..\Models\WireGuardSettings.cs" Link="Models\WireGuardSettings.cs" />
+    <Compile Include="..\Models\MRemoteNgFileInfo.cs" Link="Models\MRemoteNgFileInfo.cs" />
+    <Compile Include="..\Models\MRemoteNgImportPlan.cs" Link="Models\MRemoteNgImportPlan.cs" />
+    <Compile Include="..\Models\MRemoteNgImportProgress.cs" Link="Models\MRemoteNgImportProgress.cs" />
+    <Compile Include="..\Models\MRemoteNgImportResult.cs" Link="Models\MRemoteNgImportResult.cs" />
     <Compile Include="..\Services\Tunneling\ITunnelProvider.cs" Link="Services\Tunneling\ITunnelProvider.cs" />
     <Compile Include="..\Services\Tunneling\ITunnelInstance.cs" Link="Services\Tunneling\ITunnelInstance.cs" />
     <Compile Include="..\Services\Tunneling\TunnelManager.cs" Link="Services\Tunneling\TunnelManager.cs" />
@@ -74,6 +79,12 @@
     <Compile Include="..\Data\Repositories\ICredentialRepository.cs" Link="Data\Repositories\ICredentialRepository.cs" />
     <Compile Include="..\Data\Repositories\IConnectionRepository.cs" Link="Data\Repositories\IConnectionRepository.cs" />
     <Compile Include="..\Data\Repositories\ConnectionRepository.cs" Link="Data\Repositories\ConnectionRepository.cs" />
+    <Compile Include="..\Data\Repositories\CredentialRepository.cs" Link="Data\Repositories\CredentialRepository.cs" />
+    <Compile Include="..\Services\MRemoteNg\IMRemoteNgImportService.cs" Link="Services\MRemoteNg\IMRemoteNgImportService.cs" />
+    <Compile Include="..\Services\MRemoteNg\MRemoteNgImportService.cs" Link="Services\MRemoteNg\MRemoteNgImportService.cs" />
+    <Compile Include="..\Services\MRemoteNg\MRemoteNgXmlReader.cs" Link="Services\MRemoteNg\MRemoteNgXmlReader.cs" />
+    <Compile Include="..\Services\MRemoteNg\MRemoteNgCrypto.cs" Link="Services\MRemoteNg\MRemoteNgCrypto.cs" />
+    <Compile Include="..\ViewModels\MRemoteNgImportDialogViewModel.cs" Link="ViewModels\MRemoteNgImportDialogViewModel.cs" />
     <Compile Include="..\Data\SqliteConnectionFactory.cs" Link="Data\SqliteConnectionFactory.cs" />
     <Compile Include="..\Data\SqliteTypeHandlers.cs" Link="Data\SqliteTypeHandlers.cs" />
     <Compile Include="..\Data\MigrationRunner.cs" Link="Data\MigrationRunner.cs" />
