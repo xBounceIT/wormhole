@@ -146,6 +146,40 @@ func TestParseChallenge_HTMLForm_SpacedAttributes(t *testing.T) {
 	}
 }
 
+func TestChallengeRespond_TextUsesCodeField(t *testing.T) {
+	body := `ret=2,reqid=1,magic=m`
+	c := parseChallenge(body)
+	if c == nil {
+		t.Fatal("expected non-nil challenge")
+	}
+	cfg := config{Username: "alice"}
+	c.respond("123456", cfg)
+	if c.form.Get("code") != "123456" {
+		t.Errorf("text form should write OTP to 'code'; got code=%q credential=%q",
+			c.form.Get("code"), c.form.Get("credential"))
+	}
+	if c.form.Get("credential") != "" {
+		t.Errorf("text form should NOT set credential; got %q", c.form.Get("credential"))
+	}
+}
+
+func TestChallengeRespond_HTMLUsesCredentialField(t *testing.T) {
+	body := `<form><input type="hidden" name="magic" value="m"/></form>`
+	c := parseChallenge(body)
+	if c == nil {
+		t.Fatal("expected non-nil challenge")
+	}
+	cfg := config{Username: "alice"}
+	c.respond("123456", cfg)
+	if c.form.Get("credential") != "123456" {
+		t.Errorf("HTML form should write OTP to 'credential'; got credential=%q code=%q",
+			c.form.Get("credential"), c.form.Get("code"))
+	}
+	if c.form.Get("code") != "" {
+		t.Errorf("HTML form should NOT set code; got %q", c.form.Get("code"))
+	}
+}
+
 func TestParseChallenge_HTMLForm_ForwardsGrpid(t *testing.T) {
 	// FortiGate HTML challenge typically uses `grpid` rather than `grp` — must be echoed
 	// back or the challenge POST is rejected.

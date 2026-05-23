@@ -308,6 +308,11 @@ func hasSvpnCookie(jar *cookiejar.Jar, u *url.URL) bool {
 // the user-entered code.
 type challenge struct {
 	form url.Values
+	// tokenField is the form-field name where the OTP must be written on the second
+	// /remote/logincheck POST. FortiGate's ajax/text challenge expects `code`; the HTML
+	// form expects `credential` (the same field name as the initial password). Wrong
+	// field name silently fails auth even with a valid TOTP secret.
+	tokenField string
 }
 
 // challengeFields are the form fields the gateway expects the client to echo back in the
@@ -358,7 +363,7 @@ func parseChallengeText(body string) *challenge {
 			form.Set(k, v)
 		}
 	}
-	return &challenge{form: form}
+	return &challenge{form: form, tokenField: "code"}
 }
 
 // parseChallengeHTML scans an HTML body for a 2FA challenge form. We don't bring in a full
@@ -408,12 +413,16 @@ func parseChallengeHTML(body string) *challenge {
 			form.Set(k, v)
 		}
 	}
-	return &challenge{form: form}
+	return &challenge{form: form, tokenField: "credential"}
 }
 
 func (c *challenge) respond(code string, cfg config) {
 	c.form.Set("username", cfg.Username)
-	c.form.Set("code", code)
+	field := c.tokenField
+	if field == "" {
+		field = "code" // safety default for any future callers that forget to set it
+	}
+	c.form.Set(field, code)
 	c.form.Set("ajax", "1")
 }
 
