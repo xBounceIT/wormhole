@@ -7,16 +7,19 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 
-namespace Wormhole.Services.Tunneling.WireGuard;
+namespace Wormhole.Services.Tunneling.OpenVpn;
 
 /// <summary>
-/// Owns the lifetime of <c>wormhole-wgproxy.exe</c>: writes the JSON config to its stdin,
+/// Owns the lifetime of <c>wormhole-ovpnproxy.exe</c>: writes the JSON config to its stdin,
 /// reads <c>READY &lt;port&gt;</c> from stdout, and surfaces stderr through ILogger. Killing
-/// the host kills the sidecar process. The process exits on stdin close (parent died) or SIGTERM.
+/// the host kills the sidecar process. The process exits on stdin close (parent died) or
+/// SIGTERM. The ready timeout is longer than the WireGuard sidecar's because OpenVPN's TLS
+/// handshake + push-reply exchange can run several seconds on a healthy server and longer
+/// when a firewall is misbehaving.
 /// </summary>
-public sealed class WireGuardProcessHost : IAsyncDisposable
+public sealed class OpenVpnProcessHost : IAsyncDisposable
 {
-    private static readonly TimeSpan ReadyTimeout = TimeSpan.FromSeconds(15);
+    private static readonly TimeSpan ReadyTimeout = TimeSpan.FromSeconds(30);
     private static readonly byte[] s_newline = new byte[] { (byte)'\n' };
 
     private readonly ILogger _logger;
@@ -25,7 +28,7 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
     private int _disposedFlag;
     private int _socksPort;
 
-    private WireGuardProcessHost(Process process, ILogger logger)
+    private OpenVpnProcessHost(Process process, ILogger logger)
     {
         _process = process;
         _logger = logger;
@@ -34,9 +37,9 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
 
     public IPEndPoint SocksEndpoint => new(IPAddress.Loopback, _socksPort);
 
-    public static async Task<WireGuardProcessHost> StartAsync(
+    public static async Task<OpenVpnProcessHost> StartAsync(
         string sidecarPath,
-        WireGuardSidecarConfig config,
+        OpenVpnSidecarConfig config,
         ILogger logger,
         CancellationToken cancellationToken)
     {
@@ -62,30 +65,30 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
         {
             // ERROR_FILE_NOT_FOUND (2) or ERROR_PATH_NOT_FOUND (3) — the latter fires when
             // the parent directory of the sidecar binary doesn't exist (half-installed or
-            // dev build that hasn't run Fetch-WgProxy yet). Rewrap so the operator sees
+            // dev build that hasn't run Fetch-OvpnProxy yet). Rewrap so the operator sees
             // the path that was attempted and the build-step that's supposed to populate it.
             throw new FileNotFoundException(
-                $"WireGuard sidecar binary not found at '{sidecarPath}'. The Fetch-WgProxy build step should have produced it.",
+                $"OpenVPN sidecar binary not found at '{sidecarPath}'. The Fetch-OvpnProxy build step should have produced it.",
                 sidecarPath, ex);
         }
 
-        var host = new WireGuardProcessHost(process, logger);
+        var host = new OpenVpnProcessHost(process, logger);
         try
         {
             // Single timeout CTS covers BOTH the stdin write AND the stdout READY read. If the
-            // sidecar process accepts spawn but stalls reading stdin (cold-start AV scan, slow
-            // disk), the JSON write blocks at the OS-pipe layer once the small kernel buffer
-            // fills. Without a timeout on the write the caller would see "operation cancelled"
-            // (their own cancel) instead of "sidecar didn't become ready". Hoist timeoutCts
-            // above the write so the budget applies to the whole handshake.
+            // sidecar process accepts spawn but stalls reading stdin (cold-start AV scan,
+            // debugger attach, slow disk), the JSON write blocks at the OS-pipe layer once the
+            // small kernel buffer fills — and without a timeout on the write itself the caller
+            // would see "operation cancelled" (their own cancel) instead of an actionable
+            // "sidecar didn't become ready". Hoisting timeoutCts above the write closes that
+            // gap. ReadyTimeout is the budget for the whole startup handshake.
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutCts.CancelAfter(ReadyTimeout);
 
-            // Serialize straight to the stdin pipe instead of materializing the JSON as a
-            // string first — saves one full allocation of the (~400 byte) payload on the SSH
-            // connect hot path. The trailing newline is cosmetic for the sidecar's
-            // json.NewDecoder (which terminates on the closing brace) but kept so the line is
-            // visually separated when running the sidecar interactively for debugging.
+            // Serialize straight to the stdin pipe — same pattern as the WireGuard sidecar.
+            // The trailing newline is cosmetic for the sidecar's json.NewDecoder but useful
+            // when running interactively for debugging. Do NOT close stdin afterward: the
+            // sidecar treats EOF as a shutdown signal and exits.
             var stdin = process.StandardInput.BaseStream;
             try
             {
@@ -96,9 +99,8 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 throw new TimeoutException(
-                    $"WireGuard sidecar did not accept its configuration on stdin within {ReadyTimeout.TotalSeconds:F0}s.");
+                    $"OpenVPN sidecar did not accept its configuration on stdin within {ReadyTimeout.TotalSeconds:F0}s.");
             }
-            // Do NOT close stdin: the sidecar treats EOF as a shutdown signal.
 
             string? line;
             try
@@ -107,24 +109,22 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
             }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
-                // Timeout fired (not the caller cancelling) — raise a concrete TimeoutException
-                // so SshSessionViewModel.ConnectAsync's generic catch surfaces an actionable
-                // "tunnel sidecar didn't become ready" message instead of swallowing this as
-                // the user-cancel path that quietly transitions to Disconnected.
+                // Timeout fired (not the caller cancelling). Raise a concrete TimeoutException
+                // so the session connect path surfaces an actionable "tunnel sidecar didn't
+                // become ready" message instead of swallowing this as the user-cancel path.
                 throw new TimeoutException(
-                    $"WireGuard sidecar did not produce a READY line within {ReadyTimeout.TotalSeconds:F0}s.");
+                    $"OpenVPN sidecar did not produce a READY line within {ReadyTimeout.TotalSeconds:F0}s.");
             }
-            if (line is null) throw new IOException("WireGuard sidecar exited before becoming ready.");
+            if (line is null) throw new IOException("OpenVPN sidecar exited before becoming ready.");
 
-            // Expected: "READY <port>"
             if (!line.StartsWith("READY ", StringComparison.Ordinal) ||
                 !int.TryParse(line.AsSpan(6), out var port) ||
                 port is < 1 or > 65535)
             {
-                throw new IOException($"WireGuard sidecar produced unexpected handshake line: '{line}'.");
+                throw new IOException($"OpenVPN sidecar produced unexpected handshake line: '{line}'.");
             }
             host._socksPort = port;
-            logger.LogInformation("WireGuard sidecar ready on 127.0.0.1:{Port} (pid {Pid}).", port, process.Id);
+            logger.LogInformation("OpenVPN sidecar ready on 127.0.0.1:{Port} (pid {Pid}).", port, process.Id);
             return host;
         }
         catch
@@ -142,20 +142,19 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
             while ((line = await _process.StandardError.ReadLineAsync().ConfigureAwait(false)) is not null)
             {
                 if (line.Length == 0) continue;
-                _logger.LogInformation("[wgproxy] {Line}", line);
+                _logger.LogInformation("[ovpnproxy] {Line}", line);
             }
         }
         catch (Exception ex)
         {
-            _logger.LogDebug(ex, "Stderr pump for WireGuard sidecar ended.");
+            _logger.LogDebug(ex, "Stderr pump for OpenVPN sidecar ended.");
         }
     }
 
     public async ValueTask DisposeAsync()
     {
-        // Interlocked guard so concurrent dispose calls (the SocksTunnelInstance onDispose
-        // hook plus, e.g., a direct teardown on the same path) don't double-kill the
-        // process or race the stderr pump.
+        // Interlocked guard so concurrent dispose calls don't double-kill the process or
+        // race the stderr pump.
         if (Interlocked.Exchange(ref _disposedFlag, 1) != 0) return;
 
         try
@@ -163,9 +162,6 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
             // Closing stdin signals graceful shutdown to the sidecar.
             try { _process.StandardInput.Close(); } catch { /* best effort */ }
 
-            // Async wait — DisposeAsync runs on session-teardown continuations, so blocking
-            // the calling thread for up to 2s with the synchronous overload would stall the
-            // dispatcher behind it.
             using var waitCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
             try
             {
@@ -182,7 +178,7 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
         }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "Error while shutting down WireGuard sidecar.");
+            _logger.LogWarning(ex, "Error while shutting down OpenVPN sidecar.");
         }
 
         try { await _stderrPump.ConfigureAwait(false); } catch { /* logged inside */ }

@@ -82,6 +82,32 @@ public class TunnelManagerTests
         Assert.Equal(1, provider.LastInstance!.DisposeCount);
     }
 
+    [Fact]
+    public async Task Establish_DispatchesByKind_OpenVpn()
+    {
+        // With both providers registered, a config of Kind = OpenVpn must route to the OpenVPN
+        // provider and not the WireGuard one. This regression-locks the per-Kind dispatch in
+        // TunnelManager.EstablishAsync.
+        var wg = new FakeProvider(TunnelKind.WireGuard);
+        var ovpn = new FakeProvider(TunnelKind.OpenVpn);
+        var mgr = BuildManager(out var repo, out var creds, providers: new ITunnelProvider[] { wg, ovpn });
+
+        var configId = Guid.NewGuid();
+        repo.Configs[configId] = new TunnelConfig { Id = configId, Name = "corp-ovpn", Kind = TunnelKind.OpenVpn };
+        creds.TunnelConfigs[configId] = new byte[] { 9, 9, 9 };
+
+        var profile = Profile(tunnelEnabled: true, tunnelConfigId: configId);
+
+        var instance = await mgr.EstablishAsync(profile, CancellationToken.None);
+
+        Assert.NotNull(instance);
+        Assert.Equal(0, wg.EstablishCount);
+        Assert.Equal(1, ovpn.EstablishCount);
+        Assert.Equal(new byte[] { 9, 9, 9 }, ovpn.LastSecret);
+
+        await instance!.DisposeAsync();
+    }
+
     private static TunnelManager BuildManager(
         out FakeTunnelConfigRepository repo,
         out FakeCredentialService credentials,
@@ -113,7 +139,11 @@ public class TunnelManagerTests
         public int EstablishCount;
         public byte[]? LastSecret;
         public FakeInstance? LastInstance;
-        public TunnelKind Kind => TunnelKind.WireGuard;
+        public TunnelKind Kind { get; }
+
+        public FakeProvider() : this(TunnelKind.WireGuard) { }
+        public FakeProvider(TunnelKind kind) { Kind = kind; }
+
         public Task<ITunnelInstance> EstablishAsync(TunnelConfig config, byte[] secretBlob, CancellationToken cancellationToken)
         {
             EstablishCount++;

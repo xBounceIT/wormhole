@@ -70,4 +70,19 @@ See [AGENTS.md](AGENTS.md) for architecture notes and conventions.
 
 ## License
 
-TBD.
+Wormhole is licensed under the **GNU Affero General Public License v3.0 or later**
+(AGPL-3.0-or-later). See [LICENSE](LICENSE) for the full text.
+
+Why AGPL: Wormhole vendors OpenVPN3-core (AGPL-3.0) to provide userspace OpenVPN
+tunnel support without touching the OS network stack. AGPL is the lowest-friction
+license compatible with that dependency. Practical implications:
+
+- You can use, modify, distribute, and run Wormhole freely.
+- Derivative works (forks, modifications) must also be AGPL-3.0-or-later.
+- If you run a modified Wormhole as a network service, you must offer the
+  modified source to your users (the AGPL §13 "network use" clause). For a
+  desktop SSH/RDP/SFTP client this rarely applies in practice.
+- Commercial use is permitted; making proprietary forks is not.
+
+Third-party dependencies and their licenses are documented in
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

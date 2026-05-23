@@ -30,6 +30,8 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
                 !string.IsNullOrWhiteSpace(InterfaceAddressBox.Text) &&
                 !string.IsNullOrWhiteSpace(PeerPublicKeyBox.Text) &&
                 !string.IsNullOrWhiteSpace(PeerEndpointBox.Text),
+            TunnelKind.OpenVpn =>
+                !string.IsNullOrWhiteSpace(ProfileOvpnBox.Text),
             _ => false,
         };
 
@@ -38,7 +40,7 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         NameBox.Text = initial.Name;
         KindBox.SelectedItem = initial.Kind;
 
-        var wg = initial.WireGuard;
+        var wg = initial.WireGuard ?? new WireGuardSettings();
         InterfacePrivateKeyBox.Text = wg.InterfacePrivateKey;
         InterfaceAddressBox.Text = wg.InterfaceAddress;
         MtuBox.Text = wg.Mtu?.ToString() ?? string.Empty;
@@ -49,25 +51,49 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         AllowedIpsBox.Text = wg.AllowedIps is null ? string.Empty : string.Join(", ", wg.AllowedIps);
         PersistentKeepaliveBox.Text = wg.PersistentKeepaliveSeconds?.ToString() ?? string.Empty;
 
+        var ovpn = initial.OpenVpn ?? new OpenVpnSettings();
+        ProfileOvpnBox.Text = ovpn.ProfileOvpn;
+        OpenVpnUsernameBox.Text = ovpn.Username ?? string.Empty;
+        OpenVpnPasswordBox.Password = ovpn.Password ?? string.Empty;
+
         UpdateKindPanels();
     }
 
     public TunnelDraft BuildDraft()
     {
-        var wg = new WireGuardSettings
+        var name = NameBox.Text.Trim();
+        var kind = SelectedKind;
+        return kind switch
         {
-            InterfacePrivateKey = InterfacePrivateKeyBox.Text.Trim(),
-            InterfaceAddress = InterfaceAddressBox.Text.Trim(),
-            Mtu = TryParseInt(MtuBox.Text),
-            Dns = SplitCsv(DnsBox.Text),
-            PeerPublicKey = PeerPublicKeyBox.Text.Trim(),
-            PeerPresharedKey = string.IsNullOrWhiteSpace(PeerPresharedKeyBox.Text) ? null : PeerPresharedKeyBox.Text.Trim(),
-            PeerEndpoint = PeerEndpointBox.Text.Trim(),
-            AllowedIps = SplitCsv(AllowedIpsBox.Text),
-            PersistentKeepaliveSeconds = TryParseInt(PersistentKeepaliveBox.Text),
+            TunnelKind.WireGuard => new TunnelDraft(name, kind, BuildWireGuard(), OpenVpn: null),
+            TunnelKind.OpenVpn => new TunnelDraft(name, kind, WireGuard: null, BuildOpenVpn()),
+            _ => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null),
         };
-        return new TunnelDraft(NameBox.Text.Trim(), SelectedKind, wg);
     }
+
+    private WireGuardSettings BuildWireGuard() => new()
+    {
+        InterfacePrivateKey = InterfacePrivateKeyBox.Text.Trim(),
+        InterfaceAddress = InterfaceAddressBox.Text.Trim(),
+        Mtu = TryParseInt(MtuBox.Text),
+        Dns = SplitCsv(DnsBox.Text),
+        PeerPublicKey = PeerPublicKeyBox.Text.Trim(),
+        PeerPresharedKey = string.IsNullOrWhiteSpace(PeerPresharedKeyBox.Text) ? null : PeerPresharedKeyBox.Text.Trim(),
+        PeerEndpoint = PeerEndpointBox.Text.Trim(),
+        AllowedIps = SplitCsv(AllowedIpsBox.Text),
+        PersistentKeepaliveSeconds = TryParseInt(PersistentKeepaliveBox.Text),
+    };
+
+    private OpenVpnSettings BuildOpenVpn() => new()
+    {
+        // Do NOT trim the profile blob — leading/trailing whitespace is fine, but inline
+        // <ca>/<cert>/<key> blocks rely on internal newlines that String.Trim() never touches.
+        // The username gets a Trim because OpenVPN servers commonly reject leading whitespace
+        // in usernames; the password stays verbatim (whitespace can be a legitimate character).
+        ProfileOvpn = ProfileOvpnBox.Text,
+        Username = string.IsNullOrWhiteSpace(OpenVpnUsernameBox.Text) ? null : OpenVpnUsernameBox.Text.Trim(),
+        Password = string.IsNullOrEmpty(OpenVpnPasswordBox.Password) ? null : OpenVpnPasswordBox.Password,
+    };
 
     public void FocusNameField()
     {
@@ -76,6 +102,16 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
     }
 
     private void OnFieldChanged(object sender, TextChangedEventArgs e)
+    {
+        ValidityChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    // PasswordBox.PasswordChanged delivers RoutedEventArgs, not TextChangedEventArgs — separate
+    // handler so the XAML compiler doesn't reject the type mismatch. Behavior is identical:
+    // re-fire ValidityChanged so any future IsValid rule that depends on the password field
+    // (e.g. "username requires password") reflects edits live instead of going stale until the
+    // user touches a TextBox.
+    private void OnPasswordFieldChanged(object sender, RoutedEventArgs e)
     {
         ValidityChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -89,6 +125,9 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
     private void UpdateKindPanels()
     {
         WireGuardPanel.Visibility = SelectedKind == TunnelKind.WireGuard
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        OpenVpnPanel.Visibility = SelectedKind == TunnelKind.OpenVpn
             ? Visibility.Visible
             : Visibility.Collapsed;
     }

@@ -1,4 +1,4 @@
-module github.com/xBounceIT/wormhole/tools/wormhole-wgproxy
+module github.com/xBounceIT/wormhole/tools/wormhole-ovpnproxy
 
 go 1.22
 
@@ -17,7 +17,6 @@ require (
 	gvisor.dev/gvisor v0.0.0-20231202080848-1f7806d17489 // indirect
 )
 
-// Local replace: the SOCKS5 surface is co-developed with the sidecars and lives next to
-// them in this monorepo. The replace directive resolves the import to the sibling
-// directory at build time so neither module needs a public release.
+// Local replace: share the SOCKS5 surface with wormhole-wgproxy so the two sidecars don't
+// drift on protocol handling. See ../wormhole-wgproxy/go.mod for the matching directive.
 replace github.com/xBounceIT/wormhole/tools/internal/sockstun => ../internal/sockstun

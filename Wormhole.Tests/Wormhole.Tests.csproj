@@ -49,6 +49,7 @@
     <Compile Include="..\Models\TunnelState.cs" Link="Models\TunnelState.cs" />
     <Compile Include="..\Models\TunnelDraft.cs" Link="Models\TunnelDraft.cs" />
     <Compile Include="..\Models\WireGuardSettings.cs" Link="Models\WireGuardSettings.cs" />
+    <Compile Include="..\Models\OpenVpnSettings.cs" Link="Models\OpenVpnSettings.cs" />
     <Compile Include="..\Services\Tunneling\ITunnelProvider.cs" Link="Services\Tunneling\ITunnelProvider.cs" />
     <Compile Include="..\Services\Tunneling\ITunnelInstance.cs" Link="Services\Tunneling\ITunnelInstance.cs" />
     <Compile Include="..\Services\Tunneling\TunnelManager.cs" Link="Services\Tunneling\TunnelManager.cs" />

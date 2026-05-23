@@ -8,6 +8,18 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# Merge registry PATH entries into the process PATH so this script finds `go`
+# even when MSBuild's Exec spawns a child PowerShell with the env block its
+# parent inherited at start time (which never re-reads the registry after a
+# fresh choco/scoop install of Go). See Fetch-OvpnProxy.ps1 for the
+# longer-form explanation of this trick.
+$pathParts = $env:PATH -split ';' | Where-Object { $_ }
+$registryPath = (([Environment]::GetEnvironmentVariable("PATH", "Machine"), [Environment]::GetEnvironmentVariable("PATH", "User")) -join ';')
+foreach ($p in ($registryPath -split ';' | Where-Object { $_ })) {
+    if ($pathParts -notcontains $p) { $pathParts += $p }
+}
+$env:PATH = $pathParts -join ';'
+
 # Fetches (or builds) the wormhole-wgproxy.exe userspace WireGuard sidecar and writes it
 # to obj\wgproxy\<arch>\ so the project file can pick it up as a None item and copy to the
 # output directory. Mirrors the pattern in Fetch-WebAssets.ps1.
@@ -117,17 +129,31 @@ if ($go) {
     $buildOk = $false
     $failureDetail = $null
     Push-Location $sourceDir
+    # Relax $ErrorActionPreference around native commands. With Stop, piping stderr-as-
+    # stdout through `2>&1 | ForEach-Object` rewraps each stderr line as an ErrorRecord
+    # and the strict preference throws on the first one even when the command itself
+    # succeeded ($LASTEXITCODE = 0). Real failures still surface via $LASTEXITCODE.
+    $prevPref = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
     try {
-        # `go mod download` populates go.sum on first run. Without this step, a fresh checkout
-        # (no committed go.sum -- intentional for this tool, since the .NET build is the source
-        # of truth and go.sum would otherwise need to be regenerated on every dependency bump)
-        # fails strict-mode `go build` with "missing go.sum entry for module ...".
-        & go mod download 2>&1 | ForEach-Object { Write-Info $_ }
+        # `go mod download all` populates the (uncommitted) go.sum from go.mod, fetching the
+        # entire build list (including transitive deps) so subsequent `go build` doesn't fail
+        # with "missing go.sum entry for module ...". Unlike `go mod tidy`, this command does
+        # NOT rewrite go.mod -- it only writes go.sum and the module cache. That's important
+        # because the dev/CI environments running this script could otherwise drift go.mod
+        # against each other (different toolchain views of indirect deps), turning go.mod
+        # into a moving target.
+        #
+        # go.sum is intentionally not committed for this tool: the .NET build is the source
+        # of truth and committing go.sum would force regeneration on every dependency bump.
+        # `go mod download` (no args) is a no-op on a cold cache because it only fetches what
+        # is already pinned in go.sum; passing `all` is what makes it bootstrap from go.mod.
+        & go mod download all 2>&1 | ForEach-Object { Write-Info $_.ToString() }
         if ($LASTEXITCODE -ne 0) {
-            $failureDetail = "go mod download exited with code $LASTEXITCODE"
+            $failureDetail = "go mod download all exited with code $LASTEXITCODE"
         }
         else {
-            & go build -trimpath -ldflags "-s -w" -o $binaryPath . 2>&1 | ForEach-Object { Write-Info $_ }
+            & go build -trimpath -ldflags "-s -w" -o $binaryPath . 2>&1 | ForEach-Object { Write-Info $_.ToString() }
             if ($LASTEXITCODE -eq 0) {
                 $buildOk = $true
             }
@@ -140,6 +166,7 @@ if ($go) {
         $failureDetail = "unexpected error during go build: $_"
     }
     finally {
+        $ErrorActionPreference = $prevPref
         Pop-Location
         Remove-Item Env:\GOOS -ErrorAction SilentlyContinue
         Remove-Item Env:\GOARCH -ErrorAction SilentlyContinue
