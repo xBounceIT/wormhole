@@ -11,11 +11,11 @@
          can't fit it (DialogService applies Math.Min against XamlRoot.Size).
          The ScrollViewer intentionally has NO MinWidth so it shrinks with the dialog's
          inner content area (which is ~712 px after the default ~24 px chrome padding on a
-         760 px dialog). HorizontalScrollMode=Disabled because we want the columns to
-         narrow / wrap, not scroll. MaxHeight is sized to the tallest panel (OpenVPN's
-         320 px profile + auth + headers); the inner ScrollViewer compensates for the
-         ContentDialog ScrollViewer not engaging when the UserControl reports its full
-         natural height. Padding="0,0,12,0" reserves space for the scrollbar. -->
+         760 px dialog). HorizontalScrollMode=Disabled because TextBoxes don't wrap and the
+         columns shrink with the Grid's `*` widths — narrowing is preferable to a horizontal
+         scrollbar that hides input chrome. MaxHeight ≈ the tallest panel (OpenVPN's profile
+         320 + auth row + headers, ~518 px); VerticalScrollMode=Enabled absorbs any future
+         growth instead of clipping. Padding="0,0,12,0" reserves space for the scrollbar. -->
     <ScrollViewer VerticalScrollBarVisibility="Auto"
                   VerticalScrollMode="Enabled"
                   HorizontalScrollMode="Disabled"
@@ -54,7 +54,7 @@
              Each tunnel kind owns its own panel with its own Visibility binding so the
              form section follows the selected Kind. Interface fields sit in the left
              column, Peer fields in the right column. -->
-        <Grid x:Name="WireGuardPanel" ColumnSpacing="16">
+        <Grid x:Name="WireGuardPanel" ColumnSpacing="16" Visibility="Visible">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="*" />
@@ -122,7 +122,7 @@
                 <TextBox Grid.Column="0"
                          x:Name="OpenVpnUsernameBox"
                          Header="Username"
-                         PlaceholderText="leave blank if the profile authenticates via certificate only"
+                         PlaceholderText="leave blank for certificate-only auth"
                          TextChanged="OnFieldChanged" />
                 <PasswordBox Grid.Column="1"
                              x:Name="OpenVpnPasswordBox"
