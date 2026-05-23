@@ -159,6 +159,26 @@ public partial class ConnectionTreeViewModel : ObservableObject
     }
 
     [RelayCommand]
+    private async Task ImportFromMRemoteNg()
+    {
+        try
+        {
+            var result = await _dialog.PromptForMRemoteNgImportAsync();
+            if (result is not null)
+            {
+                // Result is non-null only when CommitAsync succeeded; refresh the tree so the
+                // newly persisted folders/connections appear without requiring a restart.
+                await RefreshAsync();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to open mRemoteNG import dialog");
+            await _dialog.ShowMessageAsync("Couldn't import", ex.Message);
+        }
+    }
+
+    [RelayCommand]
     private async Task Delete(TreeNodeViewModel? clicked)
     {
         if (clicked is null) return;

@@ -64,6 +64,9 @@
     <PackageReference Include="System.Security.Cryptography.Xml" Version="10.0.8" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.0" />
     <PackageReference Include="Dapper" Version="2.1.66" />
+    <!-- BouncyCastle is required for the mRemoteNG XML importer: mRemoteNG uses a 16-byte
+         GCM nonce, while System.Security.Cryptography.AesGcm only accepts 12-byte nonces. -->
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
   </ItemGroup>
 
   <ItemGroup>

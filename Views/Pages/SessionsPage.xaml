@@ -58,6 +58,7 @@
         <TabView x:Name="SessionTabs"
                  TabItemsSource="{x:Bind ViewModel.Tabs, Mode=OneWay}"
                  SelectedItem="{x:Bind ViewModel.SelectedTab, Mode=TwoWay}"
+                 TabWidthMode="SizeToContent"
                  IsAddTabButtonVisible="False"
                  CanReorderTabs="True"
                  CanDragTabs="True"
