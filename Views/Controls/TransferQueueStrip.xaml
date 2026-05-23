@@ -31,6 +31,7 @@
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="180" />
                                 <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
                             </Grid.ColumnDefinitions>
                             <TextBlock Grid.Column="0"
                                        Text="{x:Bind DisplayName, Mode=OneWay}"
@@ -40,7 +41,19 @@
                                          Value="{x:Bind ProgressFraction, Mode=OneWay, Converter={StaticResource ProgressFractionConverter}}"
                                          Maximum="100"
                                          VerticalAlignment="Center" />
-                            <Button Grid.Column="2"
+                            <!-- Terminal-state status glyph: a fully-filled progress bar is
+                                 visually indistinguishable from a 99%-filled one, so without
+                                 this icon the user can't tell whether a transfer is in flight
+                                 or just sitting at 100%. Visible only for terminal states; the
+                                 glyph + Foreground brush together signal success/failure at a
+                                 glance. -->
+                            <FontIcon Grid.Column="2"
+                                      FontSize="14"
+                                      VerticalAlignment="Center"
+                                      Glyph="{x:Bind State, Mode=OneWay, Converter={StaticResource TransferStateGlyphConverter}}"
+                                      Visibility="{x:Bind State, Mode=OneWay, Converter={StaticResource TransferStateTerminalVisibilityConverter}}"
+                                      Foreground="{x:Bind State, Mode=OneWay, Converter={StaticResource TransferStateBrushConverter}}" />
+                            <Button Grid.Column="3"
                                     Command="{x:Bind CancelCommand}"
                                     ToolTipService.ToolTip="Cancel or remove"
                                     Style="{StaticResource IconButtonStyle}">
