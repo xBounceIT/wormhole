@@ -37,6 +37,10 @@ public sealed partial class FilePaneControl : UserControl
     {
         ViewModel = vm;
         Bindings.Update();
+        // "Open" on a remote entry has no defined meaning — there's no local handler
+        // to launch the remote file into, and double-click already navigates folders.
+        // Hide the menu item entirely on the remote pane.
+        OpenMenuItem.Visibility = vm.IsLocal ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void OnPathBoxKeyDown(object sender, KeyRoutedEventArgs e)
@@ -277,10 +281,28 @@ public sealed partial class FilePaneControl : UserControl
 
     private async void OnContextOpenClick(object sender, RoutedEventArgs e)
     {
-        if (ViewModel is null) return;
-        if (_contextTarget is { IsDirectory: true } entry)
+        if (ViewModel is null || _contextTarget is not { } entry) return;
+        if (entry.IsDirectory)
         {
+            // Directory: navigate into it, matching double-click behavior.
             await ViewModel.OpenAsync(entry);
+            return;
+        }
+        // File: launch with the OS's default handler. The Open menu item is only
+        // visible on the local pane (see SetViewModel), so entry.FullPath is always
+        // a real Win32 path here. UseShellExecute=true is what File Explorer's
+        // double-click does — picks the registered handler for the file's extension.
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = entry.FullPath,
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            ViewModel.ErrorMessage = ex.Message;
         }
     }
 
