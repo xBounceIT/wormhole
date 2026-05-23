@@ -83,6 +83,13 @@ if(EXISTS "${OPENVPN3_DIR}/client/ovpncli.hpp" AND EXISTS "${MBEDTLS_DIR}/includ
     # add_core_dependencies above.
     target_compile_definitions(ovpn_shim PUBLIC OPENVPN_EXTERNAL_TUN_FACTORY=1)
 
+    # HAVE_OPENVPN3 gates the real-path code blocks in shim.cc. The else branch
+    # below describes building with "HAVE_OPENVPN3=0 stubs", but the macro was
+    # never actually defined here — making `ovpn_new()` silently return nullptr
+    # at runtime ("ovpn_new returned null" from ovpn_cgo.go) regardless of
+    # platform or submodule state. Define it explicitly in the real path.
+    target_compile_definitions(ovpn_shim PUBLIC HAVE_OPENVPN3=1)
+
     # OpenVPN3's ovpncli.cpp is the entry point class implementation. It isn't built
     # into a library by upstream — clients are expected to compile it into their own
     # binary. Add it as a source so the linker resolves OpenVPNClient's methods.
