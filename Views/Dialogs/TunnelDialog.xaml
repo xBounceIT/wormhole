@@ -5,78 +5,100 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:models="using:Wormhole.Models">
 
-    <!-- ContentDialog's internal ScrollViewer doesn't kick in when the hosted UserControl reports
-         its full natural height — the inner ScrollViewer here forces a scroll boundary at MaxHeight
-         so the Endpoint / AllowedIps / PersistentKeepalive fields below the fold remain reachable.
-         Padding="0,0,12,0" reserves space for the scrollbar so it doesn't overlap input chrome. -->
+    <!-- Horizontal 2-column layout: Name + VPN type share the top row, and each kind panel
+         splits into two side-by-side sections. ContentDialog hosts this at ~760 px (see
+         PreferredDialogMinWidth in the code-behind) and clamps narrower if the host window
+         can't fit it (DialogService applies Math.Min against XamlRoot.Size).
+         The ScrollViewer intentionally has NO MinWidth so it shrinks with the dialog's
+         inner content area (which is ~712 px after the default ~24 px chrome padding on a
+         760 px dialog). HorizontalScrollMode=Disabled because TextBoxes don't wrap and the
+         columns shrink with the Grid's `*` widths — narrowing is preferable to a horizontal
+         scrollbar that hides input chrome. MaxHeight ≈ the tallest panel (OpenVPN's profile
+         320 + auth row + headers, ~518 px); VerticalScrollMode=Enabled absorbs any future
+         growth instead of clipping. Padding="0,0,12,0" reserves space for the scrollbar. -->
     <ScrollViewer VerticalScrollBarVisibility="Auto"
                   VerticalScrollMode="Enabled"
                   HorizontalScrollMode="Disabled"
                   HorizontalScrollBarVisibility="Disabled"
-                  MaxHeight="520"
-                  MinWidth="360"
-                  MaxWidth="440">
-    <StackPanel Spacing="12" Padding="0,0,12,0">
-        <TextBox x:Name="NameBox"
-                 Header="Name"
-                 PlaceholderText="corp-vpn"
-                 TextChanged="OnFieldChanged" />
+                  MaxHeight="520">
+    <StackPanel Spacing="14" Padding="0,0,12,0">
+        <!-- Top row: Name and VPN type on a single horizontal line. -->
+        <Grid ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
 
-        <ComboBox x:Name="KindBox"
-                  Header="VPN type"
-                  ItemsSource="{x:Bind Kinds}"
-                  SelectedIndex="0"
-                  SelectionChanged="OnKindChanged"
-                  HorizontalAlignment="Stretch">
-            <ComboBox.ItemTemplate>
-                <DataTemplate x:DataType="models:TunnelKind">
-                    <TextBlock Text="{x:Bind}" />
-                </DataTemplate>
-            </ComboBox.ItemTemplate>
-        </ComboBox>
+            <TextBox Grid.Column="0"
+                     x:Name="NameBox"
+                     Header="Name"
+                     PlaceholderText="corp-vpn"
+                     TextChanged="OnFieldChanged" />
+
+            <ComboBox Grid.Column="1"
+                      x:Name="KindBox"
+                      Header="VPN type"
+                      ItemsSource="{x:Bind Kinds}"
+                      SelectedIndex="0"
+                      SelectionChanged="OnKindChanged"
+                      HorizontalAlignment="Stretch">
+                <ComboBox.ItemTemplate>
+                    <DataTemplate x:DataType="models:TunnelKind">
+                        <TextBlock Text="{x:Bind}" />
+                    </DataTemplate>
+                </ComboBox.ItemTemplate>
+            </ComboBox>
+        </Grid>
 
         <!-- WireGuard fields: shown only when KindBox.SelectedItem == TunnelKind.WireGuard.
              Each tunnel kind owns its own panel with its own Visibility binding so the
-             form section follows the selected Kind. -->
-        <StackPanel x:Name="WireGuardPanel" Spacing="10">
-            <TextBlock Text="Interface" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
-            <TextBox x:Name="InterfacePrivateKeyBox"
-                     Header="Private key (base64)"
-                     FontFamily="Consolas"
-                     TextChanged="OnFieldChanged" />
-            <TextBox x:Name="InterfaceAddressBox"
-                     Header="Address (e.g. 10.0.0.2/32)"
-                     TextChanged="OnFieldChanged" />
-            <TextBox x:Name="MtuBox"
-                     Header="MTU (optional)"
-                     Width="120"
-                     HorizontalAlignment="Left" />
-            <TextBox x:Name="DnsBox"
-                     Header="DNS (comma-separated, optional)" />
+             form section follows the selected Kind. Interface fields sit in the left
+             column, Peer fields in the right column. -->
+        <Grid x:Name="WireGuardPanel" ColumnSpacing="16" Visibility="Visible">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
 
-            <TextBlock Text="Peer" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
-            <TextBox x:Name="PeerPublicKeyBox"
-                     Header="Public key (base64)"
-                     FontFamily="Consolas"
-                     TextChanged="OnFieldChanged" />
-            <TextBox x:Name="PeerPresharedKeyBox"
-                     Header="Preshared key (base64, optional)"
-                     FontFamily="Consolas" />
-            <TextBox x:Name="PeerEndpointBox"
-                     Header="Endpoint (host:port)"
-                     TextChanged="OnFieldChanged" />
-            <TextBox x:Name="AllowedIpsBox"
-                     Header="Allowed IPs (comma-separated)"
-                     PlaceholderText="leave blank to route all traffic (0.0.0.0/0, ::/0)" />
-            <TextBox x:Name="PersistentKeepaliveBox"
-                     Header="Persistent keepalive seconds (optional)"
-                     Width="160"
-                     HorizontalAlignment="Left" />
-        </StackPanel>
+            <StackPanel Grid.Column="0" Spacing="10">
+                <TextBlock Text="Interface" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+                <TextBox x:Name="InterfacePrivateKeyBox"
+                         Header="Private key (base64)"
+                         FontFamily="Consolas"
+                         TextChanged="OnFieldChanged" />
+                <TextBox x:Name="InterfaceAddressBox"
+                         Header="Address (e.g. 10.0.0.2/32)"
+                         TextChanged="OnFieldChanged" />
+                <TextBox x:Name="MtuBox"
+                         Header="MTU (optional)" />
+                <TextBox x:Name="DnsBox"
+                         Header="DNS (comma-separated, optional)" />
+            </StackPanel>
 
-        <!-- OpenVPN fields: paste the full .ovpn profile, plus optional auth-user-pass
-             credentials kept out of the profile so they can be edited / rotated independently
-             and stored alongside (DPAPI-encrypted) instead of inlined in the profile blob. -->
+            <StackPanel Grid.Column="1" Spacing="10">
+                <TextBlock Text="Peer" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+                <TextBox x:Name="PeerPublicKeyBox"
+                         Header="Public key (base64)"
+                         FontFamily="Consolas"
+                         TextChanged="OnFieldChanged" />
+                <TextBox x:Name="PeerPresharedKeyBox"
+                         Header="Preshared key (base64, optional)"
+                         FontFamily="Consolas" />
+                <TextBox x:Name="PeerEndpointBox"
+                         Header="Endpoint (host:port)"
+                         TextChanged="OnFieldChanged" />
+                <TextBox x:Name="AllowedIpsBox"
+                         Header="Allowed IPs (comma-separated)"
+                         PlaceholderText="leave blank to route all traffic (0.0.0.0/0, ::/0)" />
+                <TextBox x:Name="PersistentKeepaliveBox"
+                         Header="Persistent keepalive seconds (optional)" />
+            </StackPanel>
+        </Grid>
+
+        <!-- OpenVPN fields: paste the full .ovpn profile (kept full-width because long lines
+             read better unwrapped), plus optional auth-user-pass credentials kept out of
+             the profile so they can be edited / rotated independently and stored alongside
+             (DPAPI-encrypted) instead of inlined in the profile blob. -->
         <StackPanel x:Name="OpenVpnPanel" Spacing="10" Visibility="Collapsed">
             <TextBlock Text="Profile" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
             <TextBox x:Name="ProfileOvpnBox"
@@ -92,37 +114,56 @@
                      TextChanged="OnFieldChanged" />
 
             <TextBlock Text="Authentication (optional)" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
-            <TextBox x:Name="OpenVpnUsernameBox"
-                     Header="Username"
-                     PlaceholderText="leave blank if the profile authenticates via certificate only"
-                     TextChanged="OnFieldChanged" />
-            <PasswordBox x:Name="OpenVpnPasswordBox"
-                         Header="Password"
-                         PasswordChanged="OnPasswordFieldChanged" />
+            <Grid ColumnSpacing="16">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <TextBox Grid.Column="0"
+                         x:Name="OpenVpnUsernameBox"
+                         Header="Username"
+                         PlaceholderText="leave blank for certificate-only auth"
+                         TextChanged="OnFieldChanged" />
+                <PasswordBox Grid.Column="1"
+                             x:Name="OpenVpnPasswordBox"
+                             Header="Password"
+                             PasswordChanged="OnPasswordFieldChanged" />
+            </Grid>
         </StackPanel>
 
+        <!-- Fortinet fields: Gateway and Credentials sit side-by-side; the Advanced
+             expander spans the full width below so the TOTP/cert-pin block has room. -->
         <StackPanel x:Name="FortinetPanel" Spacing="10" Visibility="Collapsed">
-            <TextBlock Text="Gateway" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
-            <TextBox x:Name="FortinetHostBox"
-                     Header="Host"
-                     PlaceholderText="vpn.example.com"
-                     TextChanged="OnFieldChanged" />
-            <TextBox x:Name="FortinetPortBox"
-                     Header="Port"
-                     Text="443"
-                     Width="120"
-                     HorizontalAlignment="Left"
-                     TextChanged="OnFieldChanged" />
+            <Grid ColumnSpacing="16">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
 
-            <TextBlock Text="Credentials" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
-            <TextBox x:Name="FortinetUsernameBox"
-                     Header="Username"
-                     TextChanged="OnFieldChanged" />
-            <PasswordBox x:Name="FortinetPasswordBox"
-                         Header="Password"
-                         PasswordChanged="OnPasswordFieldChanged" />
-            <TextBox x:Name="FortinetRealmBox"
-                     Header="Realm (optional)" />
+                <StackPanel Grid.Column="0" Spacing="10">
+                    <TextBlock Text="Gateway" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+                    <TextBox x:Name="FortinetHostBox"
+                             Header="Host"
+                             PlaceholderText="vpn.example.com"
+                             TextChanged="OnFieldChanged" />
+                    <TextBox x:Name="FortinetPortBox"
+                             Header="Port"
+                             Text="443"
+                             TextChanged="OnFieldChanged" />
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Spacing="10">
+                    <TextBlock Text="Credentials" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+                    <TextBox x:Name="FortinetUsernameBox"
+                             Header="Username"
+                             TextChanged="OnFieldChanged" />
+                    <PasswordBox x:Name="FortinetPasswordBox"
+                                 Header="Password"
+                                 PasswordChanged="OnPasswordFieldChanged" />
+                    <TextBox x:Name="FortinetRealmBox"
+                             Header="Realm (optional)" />
+                </StackPanel>
+            </Grid>
 
             <Expander Header="Advanced" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
                 <StackPanel Spacing="10">
