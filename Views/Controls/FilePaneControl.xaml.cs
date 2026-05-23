@@ -37,10 +37,21 @@ public sealed partial class FilePaneControl : UserControl
     {
         ViewModel = vm;
         Bindings.Update();
-        // "Open" on a remote entry has no defined meaning — there's no local handler
-        // to launch the remote file into, and double-click already navigates folders.
-        // Hide the menu item entirely on the remote pane.
-        OpenMenuItem.Visibility = vm.IsLocal ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>
+    /// "Open" makes sense in three cases: any local entry (folder navigates, file
+    /// launches via OS handler), and remote folders (navigate into them). Remote files
+    /// have no defined Open action — there's no local handler to launch them into — so
+    /// we hide the menu item for that case only. Called when _contextTarget is set,
+    /// just before the MenuFlyout opens.
+    /// </summary>
+    private void UpdateOpenMenuVisibility()
+    {
+        var vm = ViewModel;
+        var target = _contextTarget;
+        bool visible = vm is not null && target is not null && (vm.IsLocal || target.IsDirectory);
+        OpenMenuItem.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void OnPathBoxKeyDown(object sender, KeyRoutedEventArgs e)
@@ -287,6 +298,7 @@ public sealed partial class FilePaneControl : UserControl
         if (sender is ListViewItem lvi && lvi.Content is FileEntryViewModel entry)
         {
             _contextTarget = entry;
+            UpdateOpenMenuVisibility();
             // Explorer behaviour: right-click selects the row if it wasn't already
             // selected, so the visual selection matches the menu's target. Leaves
             // existing multi-selection intact when the right-clicked row is in it.
@@ -305,6 +317,7 @@ public sealed partial class FilePaneControl : UserControl
         if (sender is ListViewItem lvi && lvi.Content is FileEntryViewModel entry)
         {
             _contextTarget = entry;
+            UpdateOpenMenuVisibility();
         }
     }
 
