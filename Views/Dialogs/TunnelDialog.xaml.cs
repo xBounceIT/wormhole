@@ -103,7 +103,11 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
             Host = FortinetHostBox.Text.Trim(),
             Port = TryParseInt(FortinetPortBox.Text) ?? 443,
             Username = FortinetUsernameBox.Text.Trim(),
-            Password = FortinetPasswordBox.Password,
+            // TrimEnd only — passwords can legitimately contain leading or embedded
+            // whitespace (rare but real), but pasting from a password manager that adds a
+            // trailing newline would otherwise persist invisible whitespace that FortiGate
+            // rejects as "invalid credentials" with no actionable feedback to the user.
+            Password = FortinetPasswordBox.Password?.TrimEnd() ?? string.Empty,
             Realm = string.IsNullOrWhiteSpace(FortinetRealmBox.Text) ? null : FortinetRealmBox.Text.Trim(),
             TotpSecret = string.IsNullOrEmpty(totp) ? null : totp,
             TrustServerCertificate = FortinetTrustCertCheck.IsChecked == true,

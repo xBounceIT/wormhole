@@ -408,21 +408,26 @@ func (s *pppState) handleIPCP(payload []byte) {
 	switch code {
 	case lcpConfigureRequest:
 		if announced, ok := extractIPCPAddress(body); ok && announced.IsValid() && announced != s.assignedIP {
+			// Log the mismatch BEFORE attempting to build the Nak, so operators see the
+			// peer/netstack disagreement context regardless of whether the build path
+			// errors. (Previously this log only fired on the success path, so a defensive
+			// fallback would have hidden the cause.)
+			logf("ppp IPCP peer announced IP-Address=%s but netstack is bound to %s (XML)",
+				announced, s.assignedIP)
 			// Build a Nak body containing the IP-Address option with OUR address. Per RFC 1332
 			// §3.3 a Nak preserves option order; we only carry the one option we disagree on.
 			nak, err := buildIPCPAddressOption(s.assignedIP)
 			if err != nil {
-				// Defensive: should be unreachable because parseTunnelConfigXML rejects
-				// non-v4 addresses. If it ever isn't, Ack'ing into a half-connected state is
-				// no worse than emitting a 0.0.0.0 Nak; log and fall through.
-				logf("ppp IPCP cannot build Nak for assignedIP=%s (%v); Ack'ing as last resort",
+				// Should be unreachable because parseTunnelConfigXML rejects non-v4 addresses,
+				// but if it ever IS reached, Ack'ing into a known-broken state (gateway thinks
+				// we accepted its IP; our netstack stays bound to ours; outbound source IP
+				// wrong; replies silently dropped) is worse than tearing down. Hard-fail.
+				logf("ppp IPCP cannot build Nak for assignedIP=%s (%v); tearing down rather than Ack'ing into a broken state",
 					s.assignedIP, err)
-				s.sendIPCP(lcpConfigureAck, id, body)
+				s.cancel()
 				return
 			}
-			logf("ppp IPCP peer announced IP-Address=%s but netstack is bound to %s (XML); "+
-				"replying Configure-Nak with our address",
-				announced, s.assignedIP)
+			logf("ppp IPCP replying Configure-Nak with our address")
 			s.sendIPCP(lcpConfigureNak, id, nak)
 			return
 		}
@@ -532,22 +537,21 @@ func (s *pppState) peerEchoedOurMagic(body []byte) bool {
 }
 
 // extractIPCPAddress walks an IPCP option list looking for the IP-Address option (type=3,
-// len=6) and returns its 4-byte value as a netip.Addr. Malformed options advance one byte
-// rather than aborting the scan, matching peerEchoedOurMagic's fail-closed posture.
+// len=6) and returns its 4-byte value as a netip.Addr.
+//
+// Like peerEchoedOurMagic this uses a sliding-window byte scan for the 6-byte signature
+// {0x03, 0x06, b0, b1, b2, b3} rather than an option-walk with attacker-supplied length
+// fields. A malformed-length prefix would otherwise let the parser's i += l step hop OVER
+// the real IP-Address option, suppressing the mismatch detection in handleIPCP and letting
+// a hostile gateway tell us "I accept your IP" while routing its return traffic to a
+// different address — silent dead tunnel with no log line.
 func extractIPCPAddress(body []byte) (netip.Addr, bool) {
-	for i := 0; i+2 <= len(body); {
-		t := body[i]
-		l := int(body[i+1])
-		if l < 2 || i+l > len(body) {
-			i++
-			continue
-		}
-		if t == ipcpOptIPAddress && l == 6 {
+	for i := 0; i+6 <= len(body); i++ {
+		if body[i] == ipcpOptIPAddress && body[i+1] == 6 {
 			var buf [4]byte
 			copy(buf[:], body[i+2:i+6])
 			return netip.AddrFrom4(buf), true
 		}
-		i += l
 	}
 	return netip.Addr{}, false
 }

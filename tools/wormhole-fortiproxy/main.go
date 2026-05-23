@@ -219,65 +219,77 @@ func startFortinet(ctx context.Context, outerCancel context.CancelFunc, cfg conf
 
 	pppCtx, pppCancel := context.WithCancel(ctx)
 	pppDone := make(chan struct{})
+	ready := make(chan struct{})
+
+	// readyClosed/closeReadyOnce — idempotent close from a single goroutine; the production
+	// flow calls arm() then defer cleanup() from run(), so there's no real race, but the
+	// guard also covers the defer-based rollback below.
+	var readyClosed bool
+	closeReadyOnce := func() {
+		if readyClosed {
+			return
+		}
+		readyClosed = true
+		close(ready)
+	}
+
+	// Defensive rollback: if any error path between here and the final successful return
+	// adds itself in a future refactor, this ensures runPPP, the watcher goroutine, and
+	// the stack don't leak. Today there are no error paths after this point — but the
+	// invariant ("startFortinet either returns success or has already torn down") is
+	// self-enforcing this way.
+	started := false
+	defer func() {
+		if started {
+			return
+		}
+		closeReadyOnce() // unblock the watcher so it can exit cleanly
+		pppCancel()
+		_ = session.Conn.Close()
+		<-pppDone
+		stack.Close()
+	}()
+
 	go func() {
 		defer close(pppDone)
 		runPPP(pppCtx, session, channel)
 	}()
+
 	// Propagate gateway-initiated teardown back to the OUTER ctx. Without this, a gateway
 	// Terminate-Request would leave the PPP loops exited but the SOCKS5 accept loop in run()
 	// still running — new client dials would hang on first byte because no PPP path can
-	// drain the netstack. Cancelling pppCtx alone wouldn't reach run()'s ctx (child cancel
-	// doesn't propagate up), so we invoke outerCancel directly when pppDone closes.
+	// drain the netstack.
 	//
-	// The watcher must NOT fire outerCancel before startFortinet has returned and the
-	// caller has had a chance to publish READY and start the SOCKS5 accept loop. Otherwise,
-	// if runPPP exits very early (e.g., the gateway RSTs the TLS conn the moment after
-	// login), the watcher would cancel ctx while we're still on the stack, run() would
-	// print READY, and the listener would be torn down before the parent's first dial — a
-	// phantom-READY race with no useful error surfaced. Gate the watcher on a "ready"
-	// channel that the caller closes once it considers startup complete.
-	ready := make(chan struct{})
+	// The watcher blocks unconditionally on `ready` BEFORE checking pppDone. `ready` is
+	// closed by either arm() (caller signals "startup complete") or cleanup() (caller is
+	// tearing down) or the defer-rollback above (startFortinet errored). After `ready`
+	// closes, the watcher waits on pppDone and fires outerCancel. This gating avoids the
+	// original phantom-READY race (watcher firing outerCancel before run() prints READY)
+	// AND avoids the race the previous default-return gate introduced: a fast PPP exit
+	// between startFortinet return and arm() call would have been silently dropped, leaving
+	// outerCancel unfired forever. Now arm() always happens before the accept loop runs,
+	// ready always closes, and the watcher always fires once pppDone signals.
 	go func() {
+		<-ready
 		<-pppDone
-		// If startFortinet returned an error, the caller never closed `ready`; in that
-		// case there is no outer accept loop to cancel and runPPP returned because we
-		// closed the conn during cleanup anyway. Bail without invoking outerCancel.
-		select {
-		case <-ready:
-		default:
-			return
-		}
 		logf("ppp loop exited; cancelling outer ctx so run() can shut down")
 		outerCancel()
 	}()
 
 	cleanup := func() {
-		// Cancel and close the TLS conn so the PPP read loop unblocks. Then wait for the
-		// runPPP goroutine to exit BEFORE tearing down the gVisor stack — gVisor's stack
-		// methods aren't documented as safe against concurrent InjectInbound/ReadContext
-		// from a goroutine that hasn't observed the close yet, and process-exit-while-active
-		// would leak into background panics on Windows.
-		// First mark the watcher as live so a late pppDone close still propagates to the
-		// outer ctx even if cleanup races with gateway teardown.
-		select {
-		case <-ready:
-		default:
-			close(ready)
-		}
+		// Mark ready first so the watcher progresses to its pppDone wait even if cleanup
+		// races with the caller's arm() (in practice it doesn't — but the defensive close
+		// makes this safe regardless).
+		closeReadyOnce()
 		pppCancel()
 		_ = session.Conn.Close()
 		<-pppDone
 		stack.Close()
 	}
-	// Caller signals "ready" once the SOCKS5 listener is published. The arming separates
-	// "PPP died before READY (silent failure, surface via the returned cleanup)" from
-	// "PPP died after READY (loud teardown, cancel outer ctx so the parent sees us exit)."
-	arm := func() {
-		select {
-		case <-ready:
-		default:
-			close(ready)
-		}
-	}
+	// Caller signals "ready" once the SOCKS5 listener is published so the watcher can
+	// transition from "blocking on startup" to "blocking on shutdown."
+	arm := closeReadyOnce
+
+	started = true
 	return newNetstackDialer(stack, session.AssignedIP, session.DNS), arm, cleanup, nil
 }
