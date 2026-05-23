@@ -73,3 +73,26 @@ func TestParseTunnelConfigXML_MissingAddress(t *testing.T) {
 		t.Fatal("expected error for missing assigned IP, got nil")
 	}
 }
+
+func TestStripHostBrackets(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"vpn.example.com", "vpn.example.com"}, // hostname unchanged
+		{"10.0.0.1", "10.0.0.1"},               // IPv4 unchanged
+		{"[2001:db8::1]", "2001:db8::1"},       // bracketed v6 stripped
+		{"[::1]", "::1"},                       // shortest bracketed v6
+		{"2001:db8::1", "2001:db8::1"},         // bare v6 unchanged (works with JoinHostPort)
+		{"  [::1]  ", "::1"},                   // surrounding whitespace
+		{"", ""},                               // empty
+		{"[", "["},                             // unmatched bracket: pass-through
+		{"]", "]"},
+	}
+	for _, tc := range cases {
+		got := stripHostBrackets(tc.in)
+		if got != tc.want {
+			t.Errorf("stripHostBrackets(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

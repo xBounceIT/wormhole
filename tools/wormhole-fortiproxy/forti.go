@@ -41,6 +41,13 @@ func fortiLogin(ctx context.Context, cfg config) (*session, error) {
 		return nil, fmt.Errorf("tls config: %w", err)
 	}
 
+	// Normalize cfg.Host: net.JoinHostPort assumes a bare host string and wraps IPv6
+	// literals in brackets itself, so a user-pasted "[2001:db8::1]" would become
+	// "[[2001:db8::1]]:443" — Go's net package rejects that as "missing port in address"
+	// and every connection attempt fails before authentication. Strip a single pair of
+	// surrounding brackets if present so both pasted forms work.
+	cfg.Host = stripHostBrackets(cfg.Host)
+
 	// Auth phase gets a 20s budget; tunnel upgrade gets a separate 15s. Sharing a single
 	// deadline meant a slow MFA challenge could leave the TLS handshake starved.
 	authCtx, authCancel := context.WithTimeout(ctx, 20*time.Second)
@@ -416,4 +423,16 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// stripHostBrackets removes a single pair of surrounding `[ ]` from a host string.
+// Users often paste IPv6 literals in their canonical bracketed URL form (`[2001:db8::1]`);
+// net.JoinHostPort would then re-wrap them producing `[[...]]:port`, which Go's net stack
+// rejects. Hostnames and IPv4 literals pass through unchanged.
+func stripHostBrackets(host string) string {
+	h := strings.TrimSpace(host)
+	if len(h) >= 2 && h[0] == '[' && h[len(h)-1] == ']' {
+		return h[1 : len(h)-1]
+	}
+	return h
 }
