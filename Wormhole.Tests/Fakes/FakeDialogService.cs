@@ -23,8 +23,13 @@ public class FakeDialogService : IDialogService
     /// </summary>
     public ConnectionNode? EditConnectionResult { get; set; }
 
+    /// <summary>Drives <see cref="PromptForMRemoteNgImportAsync"/>; null = user closed
+    /// the dialog without committing.</summary>
+    public MRemoteNgImportResult? MRemoteNgImportResult { get; set; }
+
     public int PasswordPromptCount { get; private set; }
     public int TextPromptCount { get; private set; }
+    public int MRemoteNgImportPromptCount { get; private set; }
 
     public virtual Task ShowMessageAsync(string title, string message) => Task.CompletedTask;
 
@@ -99,5 +104,11 @@ public class FakeDialogService : IDialogService
     {
         PasswordPromptCount++;
         return Task.FromResult(PasswordPromptResult);
+    }
+
+    public virtual Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync()
+    {
+        MRemoteNgImportPromptCount++;
+        return Task.FromResult(MRemoteNgImportResult);
     }
 }
