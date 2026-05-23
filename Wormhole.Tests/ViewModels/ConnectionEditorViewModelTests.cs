@@ -853,6 +853,42 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task LoadFrom_NullEnableWithOverrideConfigId_ShowsOverrideNotInherit()
+    {
+        // Regression for codex review feedback: a node persisted with TunnelEnabled=null
+        // (inherit enable from ancestor folder) AND TunnelConfigId=<override.Id> (pin a
+        // specific config) is a legitimate state produced by the inheritance resolver
+        // (see Resolve_ChildOverridesAncestorTunnelConfigId in InheritanceResolverTunnelTests).
+        // The picker must surface the override config — not silently mask it as
+        // "(Inherit from folder)" while WriteTo still persists the id.
+        var wg = new TunnelConfig { Id = Guid.NewGuid(), Name = "child-override", Kind = TunnelKind.WireGuard };
+        var vm = new ConnectionEditorViewModel(
+            new EmptyCredentialRepository(),
+            new MultiTunnelConfigRepository(wg));
+        await vm.LoadTunnelConfigsAsync();
+
+        var node = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Ssh,
+            TunnelEnabled = null,   // inherit the enable bit from the parent folder
+            TunnelConfigId = wg.Id, // but pin this specific config
+        };
+        vm.LoadFrom(node);
+
+        Assert.Same(wg, vm.SelectedTunnel);
+
+        // Round-trip preserves (null, guid) if the user doesn't touch the dropdown.
+        // (Picking a different item in the combobox collapses to (true, newId) — a known
+        // limitation of the single-combobox UI noted in the PR description.)
+        var sink = new ConnectionNode();
+        vm.WriteTo(sink);
+        Assert.Null(sink.TunnelEnabled);
+        Assert.Equal(wg.Id, sink.TunnelConfigId);
+    }
+
+    [Fact]
     public async Task LoadFrom_CorruptedNodeWithGuidEmptyTunnelId_ShowsAsStaleNotInherit()
     {
         // Regression for the sentinel-collision class of bug: an imported/corrupted node

@@ -764,16 +764,25 @@ public partial class ConnectionEditorViewModel : ObservableObject
     {
         get
         {
-            if (TunnelEnabled is null) return InheritTunnel;
+            // Enable=false explicitly trumps any persisted ConfigId (the resolver ignores
+            // it once Enabled lands false). Show "(No tunnel)" so the user isn't misled by
+            // a vestigial id from a previous selection.
             if (TunnelEnabled == false) return NoTunnel;
-            // TunnelEnabled == true: the bound id must resolve to a real (or stale-placeholder)
-            // entry in AvailableTunnelConfigs. Falling back to InheritTunnel here would silently
-            // mis-render a saved (true, id) state as "(Inherit from folder)" while WriteTo
-            // would still persist the original id — a contradiction the user can't see.
-            // Returning null surfaces the unresolved state as "no selection" in the picker.
-            return SelectedTunnelConfigId is { } id
-                ? AvailableTunnelConfigs.FirstOrDefault(t => t.Id == id)
-                : null;
+            // If a concrete ConfigId is bound, surface that selection — independently of
+            // TunnelEnabled. This covers the legitimate (TunnelEnabled=null, ConfigId=guid)
+            // "inherit enable, override config" state produced by the inheritance resolver
+            // (see Resolve_ChildOverridesAncestorTunnelConfigId). Falling back to
+            // InheritTunnel here would silently mask the override while WriteTo still
+            // persisted the id — a contradiction the user can't see.
+            if (SelectedTunnelConfigId is { } id)
+            {
+                return AvailableTunnelConfigs.FirstOrDefault(t => t.Id == id);
+            }
+            // No bound ConfigId: pure inherit (null enable) or pure force-on (true enable).
+            // The latter ("force on, inherit ConfigId from ancestor") has no sentinel in
+            // this single-combobox UI; surface it as "no selection" rather than masking it.
+            if (TunnelEnabled is null) return InheritTunnel;
+            return null;
         }
         set
         {
