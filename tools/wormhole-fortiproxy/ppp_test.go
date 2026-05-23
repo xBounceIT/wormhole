@@ -63,3 +63,56 @@ func TestBuildEncapFrame_MaxBoundary(t *testing.T) {
 		t.Fatal("max+1 should fail; got nil")
 	}
 }
+
+func TestExtractIPCPAddress_LegitimateOption(t *testing.T) {
+	// Simple IPCP body with just the IP-Address option (type=3, len=6).
+	body := []byte{0x03, 0x06, 10, 0, 0, 5}
+	addr, ok := extractIPCPAddress(body)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if addr.String() != "10.0.0.5" {
+		t.Errorf("got %v want 10.0.0.5", addr)
+	}
+}
+
+func TestExtractIPCPAddress_AfterOtherOption(t *testing.T) {
+	// RFC 1877 Primary-DNS option (type=129, len=6) followed by IP-Address (type=3, len=6).
+	body := []byte{
+		0x81, 0x06, 8, 8, 8, 8, // Primary-DNS = 8.8.8.8
+		0x03, 0x06, 10, 0, 0, 5, // IP-Address = 10.0.0.5
+	}
+	addr, ok := extractIPCPAddress(body)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if addr.String() != "10.0.0.5" {
+		t.Errorf("got %v want 10.0.0.5", addr)
+	}
+}
+
+func TestExtractIPCPAddress_IgnoresFalsePositiveInOtherOptionValue(t *testing.T) {
+	// W14: an unrelated option (type=0x81 Primary-DNS, len=6) whose payload happens to
+	// contain the byte sequence 0x03, 0x06, 0x01, 0x01 would have been picked up by a
+	// sliding-window scan as a fake IP-Address option. Proper option-walking skips past
+	// the whole DNS option and never sees its value bytes as a new (type, len) pair, so
+	// we correctly return ok=false (no real IP-Address option in this body).
+	body := []byte{
+		0x81, 0x06, 0x03, 0x06, 0x01, 0x01,
+	}
+	addr, ok := extractIPCPAddress(body)
+	if ok {
+		t.Fatalf("expected ok=false (no real IP-Address option); got addr=%v", addr)
+	}
+}
+
+func TestExtractIPCPAddress_AbortsOnMalformedLength(t *testing.T) {
+	// l=1 < 2 is malformed; we abort rather than blindly skipping one byte (which would
+	// shift the parser onto value bytes and resurface the same false-positive problem
+	// the sliding-window approach had).
+	body := []byte{0x01, 0x01, 0x03, 0x06, 10, 0, 0, 5}
+	_, ok := extractIPCPAddress(body)
+	if ok {
+		t.Fatal("expected ok=false on malformed-length prefix")
+	}
+}

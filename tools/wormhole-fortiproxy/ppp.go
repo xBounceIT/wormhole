@@ -567,22 +567,42 @@ func (s *pppState) peerEchoedOurMagic(body []byte) bool {
 	return false
 }
 
-// extractIPCPAddress walks an IPCP option list looking for the IP-Address option (type=3,
-// len=6) and returns its 4-byte value as a netip.Addr.
+// extractIPCPAddress walks an IPCP option list (RFC 1332) and returns the IP-Address
+// option (type=3, len=6) value as a netip.Addr.
 //
-// Like peerEchoedOurMagic this uses a sliding-window byte scan for the 6-byte signature
-// {0x03, 0x06, b0, b1, b2, b3} rather than an option-walk with attacker-supplied length
-// fields. A malformed-length prefix would otherwise let the parser's i += l step hop OVER
-// the real IP-Address option, suppressing the mismatch detection in handleIPCP and letting
-// a hostile gateway tell us "I accept your IP" while routing its return traffic to a
-// different address — silent dead tunnel with no log line.
+// Uses proper (type, length) structural parsing — NOT the sliding-window approach that
+// peerEchoedOurMagic uses, because the threat models differ:
+//
+//   - peerEchoedOurMagic must guarantee detection of a real mirror even past a crafted
+//     malformed-length prefix (security defense; sliding-window is fail-safe even if it
+//     can false-positive on coincidental bytes, because a false-positive just tears down
+//     the link).
+//   - extractIPCPAddress must NOT false-positive on innocent option values. Other IPCP
+//     options (RFC 1877 Primary-DNS-Address type=129 len=6, etc.) have 6-byte payloads
+//     whose data bytes can legitimately contain {0x03, 0x06, ...}; a sliding-window
+//     scan would extract a fake address and we'd Nak with the wrong value, triggering
+//     negotiation loops or bring-up failure on legitimate gateways.
+//
+// On malformed length we abort the scan and return ok=false, which causes handleIPCP to
+// Ack the request unchanged. That's no worse than the pre-R10 behavior (link might come
+// up with a mismatched netstack-bound IP) and a well-behaved gateway will re-Configure
+// with a clean option list.
 func extractIPCPAddress(body []byte) (netip.Addr, bool) {
-	for i := 0; i+6 <= len(body); i++ {
-		if body[i] == ipcpOptIPAddress && body[i+1] == 6 {
+	for i := 0; i+2 <= len(body); {
+		t := body[i]
+		l := int(body[i+1])
+		if l < 2 || i+l > len(body) {
+			// Malformed option; abort scan rather than blindly skipping bytes (which
+			// could shift the parser onto value bytes and resurface the same false-
+			// positive problem the sliding-window approach had).
+			return netip.Addr{}, false
+		}
+		if t == ipcpOptIPAddress && l == 6 {
 			var buf [4]byte
 			copy(buf[:], body[i+2:i+6])
 			return netip.AddrFrom4(buf), true
 		}
+		i += l
 	}
 	return netip.Addr{}, false
 }
