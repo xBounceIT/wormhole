@@ -16,6 +16,20 @@ func handleSocks5(ctx context.Context, c net.Conn, dial dialer) {
 	if err := c.SetDeadline(time.Now().Add(20 * time.Second)); err != nil {
 		return
 	}
+	// SetDeadline triggers a read-time error after the absolute time fires, but the
+	// io.ReadFull calls during the SOCKS5 handshake don't observe ctx — a half-open client
+	// that connected but never sent the SOCKS greeting would hold this goroutine for the
+	// full 20s after process shutdown. Force the deadline to fire immediately on
+	// cancellation so wg.Wait() in run() completes promptly during graceful shutdown.
+	cancelOnCtx := make(chan struct{})
+	defer close(cancelOnCtx)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = c.SetDeadline(time.Unix(1, 0))
+		case <-cancelOnCtx:
+		}
+	}()
 
 	hdr := make([]byte, 2)
 	if _, err := io.ReadFull(c, hdr); err != nil {

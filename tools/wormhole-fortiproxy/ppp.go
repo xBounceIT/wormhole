@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
@@ -145,6 +146,11 @@ func (s *pppState) allocID() byte {
 	return byte(s.nextID.Add(1) & 0xff)
 }
 
+// readLoop reads encap-framed PPP frames off s.conn synchronously. INVARIANT: this loop
+// only unblocks when s.conn is closed (or returns a read error). Context cancellation alone
+// does NOT interrupt io.ReadFull — writerLoop's defer must close s.conn on exit so the
+// teardown chain (handleLCP Terminate-Request, gateway RST, cleanup) can actually unblock
+// this goroutine. cleanup() in main.go also closes s.conn explicitly as a belt-and-braces.
 func (s *pppState) readLoop(ctx context.Context) {
 	defer s.cancel()
 	var hdr [fortinetEncapHeaderSz]byte
@@ -255,13 +261,28 @@ func (s *pppState) writerLoop(ctx context.Context) {
 			continue
 		}
 		// Control plane is empty — block on either a new control frame (which preempts
-		// data), a data frame, or cancellation.
+		// data), a data frame, or cancellation. NOTE: Go's select picks pseudo-randomly
+		// when multiple cases are simultaneously ready, so if a control frame arrives in
+		// the same scheduling tick as a data frame, the data case can win the coin flip
+		// despite our "strict priority" comment. The data case below re-checks
+		// controlFrame non-blockingly before writing so we never leak that priority
+		// inversion onto the wire — an Echo-Reply or Terminate-Ack queued at the same
+		// moment as a bulk IPv4 frame is still flushed first.
 		select {
 		case frame := <-s.controlFrame:
 			if err := s.writeFrame(ctx, frame); err != nil {
 				return
 			}
 		case frame := <-s.dataFrame:
+			// Re-check control non-blockingly. If we just lost the random tiebreak
+			// against a concurrently-ready control frame, write it before the data.
+			select {
+			case cframe := <-s.controlFrame:
+				if err := s.writeFrame(ctx, cframe); err != nil {
+					return
+				}
+			default:
+			}
 			if err := s.writeFrame(ctx, frame); err != nil {
 				return
 			}
@@ -285,13 +306,28 @@ func (s *pppState) writeFrame(ctx context.Context, frame []byte) error {
 }
 
 func (s *pppState) injectIPv4(packet []byte) {
-	if len(packet) == 0 {
+	// Sanity-check the IPv4 header before handing to gVisor. The Fortinet encap validator
+	// already bounds the frame length, but the inner IPv4 fields are still gateway-supplied
+	// — pre-filtering here matches the defense-in-depth posture established for the encap
+	// header and avoids forcing gVisor to alloc/parse/drop garbage at line rate.
+	const minIPv4Header = 20
+	if len(packet) < minIPv4Header {
+		return
+	}
+	// IP version must be 4 (top nibble of byte 0).
+	if packet[0]>>4 != 4 {
+		return
+	}
+	// Total length field (bytes 2-3) must equal what we have, per RFC 791. We don't try to
+	// handle IP fragmentation reassembly here — gVisor does that downstream.
+	totalLen := int(binary.BigEndian.Uint16(packet[2:4]))
+	if totalLen < minIPv4Header || totalLen > len(packet) {
 		return
 	}
 	// Hand the raw IPv4 packet to netstack. The channel endpoint's stack will route it to
 	// the appropriate transport listener (e.g. the dialer-side TCP socket).
 	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
-		Payload: buffer.MakeWithData(packet),
+		Payload: buffer.MakeWithData(packet[:totalLen]),
 	})
 	s.ch.InjectInbound(ipv4.ProtocolNumber, pkt)
 	pkt.DecRef()
@@ -372,12 +408,22 @@ func (s *pppState) handleIPCP(payload []byte) {
 	switch code {
 	case lcpConfigureRequest:
 		if announced, ok := extractIPCPAddress(body); ok && announced.IsValid() && announced != s.assignedIP {
+			// Build a Nak body containing the IP-Address option with OUR address. Per RFC 1332
+			// §3.3 a Nak preserves option order; we only carry the one option we disagree on.
+			nak, err := buildIPCPAddressOption(s.assignedIP)
+			if err != nil {
+				// Defensive: should be unreachable because parseTunnelConfigXML rejects
+				// non-v4 addresses. If it ever isn't, Ack'ing into a half-connected state is
+				// no worse than emitting a 0.0.0.0 Nak; log and fall through.
+				logf("ppp IPCP cannot build Nak for assignedIP=%s (%v); Ack'ing as last resort",
+					s.assignedIP, err)
+				s.sendIPCP(lcpConfigureAck, id, body)
+				return
+			}
 			logf("ppp IPCP peer announced IP-Address=%s but netstack is bound to %s (XML); "+
 				"replying Configure-Nak with our address",
 				announced, s.assignedIP)
-			// Build a Nak body containing the IP-Address option with OUR address. Per RFC 1332
-			// §3.3 a Nak preserves option order; we only carry the one option we disagree on.
-			s.sendIPCP(lcpConfigureNak, id, buildIPCPAddressOption(s.assignedIP))
+			s.sendIPCP(lcpConfigureNak, id, nak)
 			return
 		}
 		s.sendIPCP(lcpConfigureAck, id, body)
@@ -387,16 +433,15 @@ func (s *pppState) handleIPCP(payload []byte) {
 }
 
 // buildIPCPAddressOption returns the bytes of an IPCP IP-Address option (type=3, len=6,
-// value=4 bytes of IPv4). Used in Configure-Nak replies to insist on our assigned address.
-func buildIPCPAddressOption(addr netip.Addr) []byte {
-	out := make([]byte, 6)
-	out[0] = ipcpOptIPAddress
-	out[1] = 6
-	if addr.Is4() {
-		v := addr.As4()
-		copy(out[2:], v[:])
+// value=4 bytes of IPv4). Returns an error for non-v4 addresses rather than silently
+// emitting a 0.0.0.0 option, which the gateway would reject in a confusing way.
+func buildIPCPAddressOption(addr netip.Addr) ([]byte, error) {
+	if !addr.Is4() {
+		return nil, fmt.Errorf("expected IPv4 address, got %v", addr)
 	}
-	return out
+	v := addr.As4()
+	out := []byte{ipcpOptIPAddress, 6, v[0], v[1], v[2], v[3]}
+	return out, nil
 }
 
 func (s *pppState) sendLCP(code byte, id byte, body []byte) {
@@ -453,33 +498,35 @@ func buildLCPInitialOptions(magic [4]byte, mtu int) []byte {
 	return out
 }
 
-// peerEchoedOurMagic walks an LCP option list looking for a MagicNumber option (type=5,
-// len=6) whose 4-byte value matches our ourMagic. Per RFC 1661 §6.4, that mirror is the
-// loopback-detection signal. Malformed options (l<2 or l overruns the body) advance one
-// byte rather than aborting the scan — the latter would let an attacker prefix a malformed
-// option to suppress loopback detection while still mirroring our magic later in the list.
+// peerEchoedOurMagic looks for an LCP MagicNumber option (type=5, len=6) whose 4-byte
+// value matches ourMagic anywhere in the body. Per RFC 1661 §6.4, that mirror is the
+// loopback-detection signal.
+//
+// We deliberately scan byte-by-byte for the 6-byte signature {0x05, 0x06, magic[0..3]}
+// rather than walking the option list with its attacker-supplied length fields. An option-
+// walk can be mis-aligned by a single malformed prefix (e.g., {0x01,0x01,0x05,0x06,M...})
+// such that the parser's "i += l" step hops OVER the real mirror — a fail-open hole no
+// matter whether we abort or skip-one-byte on malformed entries. A sliding-window pattern
+// match is the only correct posture for this defense.
 func (s *pppState) peerEchoedOurMagic(body []byte) bool {
 	ourMagic := s.ourMagic.Load()
+	// ourMagic is initialized in runPPP from crypto/rand with a non-zero fallback, so a
+	// zero value here means runPPP was bypassed (a test, a future refactor). Treat it as
+	// "loopback detection unavailable" — return false rather than emitting our magic on the
+	// wire as zero (which RFC 1661 says means "no magic" and disables peer detection too).
 	if ourMagic == 0 {
 		return false
 	}
-	for i := 0; i+2 <= len(body); {
-		t := body[i]
-		l := int(body[i+1])
-		if l < 2 || i+l > len(body) {
-			// Malformed option — skip one byte and keep scanning. Stopping here would create
-			// a "fail-open" hole: a peer could prepend a malformed option to hide a real
-			// MagicNumber mirror further down the list.
-			i++
-			continue
+	var want [6]byte
+	want[0] = lcpOptMagicNumber
+	want[1] = 6
+	binary.BigEndian.PutUint32(want[2:6], ourMagic)
+	for i := 0; i+6 <= len(body); i++ {
+		if body[i] == want[0] && body[i+1] == want[1] &&
+			body[i+2] == want[2] && body[i+3] == want[3] &&
+			body[i+4] == want[4] && body[i+5] == want[5] {
+			return true
 		}
-		if t == lcpOptMagicNumber && l == 6 {
-			peer := binary.BigEndian.Uint32(body[i+2 : i+6])
-			if peer == ourMagic {
-				return true
-			}
-		}
-		i += l
 	}
 	return false
 }

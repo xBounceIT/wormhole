@@ -41,6 +41,11 @@ func fortiLogin(ctx context.Context, cfg config) (*session, error) {
 		return nil, fmt.Errorf("tls config: %w", err)
 	}
 
+	// Auth phase gets a 20s budget; tunnel upgrade gets a separate 15s. Sharing a single
+	// deadline meant a slow MFA challenge could leave the TLS handshake starved.
+	authCtx, authCancel := context.WithTimeout(ctx, 20*time.Second)
+	defer authCancel()
+
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	transport := &http.Transport{
 		TLSClientConfig: tlsCfg,
@@ -62,12 +67,10 @@ func fortiLogin(ctx context.Context, cfg config) (*session, error) {
 		Timeout:   15 * time.Second,
 	}
 
-	// Path = "/" so jar.Cookies(baseURL) returns cookies whose stored Path is "/" or
-	// implicitly "/" — without this, a leading-slash-less URL gets canonicalized to "/" by
-	// some Go versions but not others, and a cookie set with the default Path of "/remote"
-	// (RFC 6265 §5.1.4 default-path of the /remote/logincheck request URI) would silently
-	// fail to match. Setting Path="/" explicitly keeps the lookup deterministic regardless of
-	// the firmware's Set-Cookie format.
+	// Path="/" keeps baseURL canonical regardless of Go-version quirks; the cookie lookups
+	// that actually matter for SVPNCOOKIE (writeTunnelUpgrade, hasSvpnCookie) use the
+	// derived tunnelURL below (Path=/remote/sslvpn-tunnel) so cookies stored under the
+	// default-path /remote of /remote/logincheck still match.
 	baseURL := &url.URL{Scheme: "https", Host: net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)), Path: "/"}
 
 	// Step 1: POST /remote/logincheck with credentials.
@@ -79,7 +82,7 @@ func fortiLogin(ctx context.Context, cfg config) (*session, error) {
 	if cfg.Realm != nil && *cfg.Realm != "" {
 		form.Set("realm", *cfg.Realm)
 	}
-	body, err := postForm(ctx, client, baseURL.JoinPath("remote", "logincheck").String(), form)
+	body, err := postForm(authCtx, client, baseURL.JoinPath("remote", "logincheck").String(), form)
 	if err != nil {
 		return nil, fmt.Errorf("logincheck POST: %w", err)
 	}
@@ -94,7 +97,7 @@ func fortiLogin(ctx context.Context, cfg config) (*session, error) {
 			return nil, fmt.Errorf("generate TOTP code: %w", err)
 		}
 		challenge.respond(code, cfg)
-		body, err = postForm(ctx, client, baseURL.JoinPath("remote", "logincheck").String(), challenge.form)
+		body, err = postForm(authCtx, client, baseURL.JoinPath("remote", "logincheck").String(), challenge.form)
 		if err != nil {
 			return nil, fmt.Errorf("logincheck challenge POST: %w", err)
 		}
@@ -111,7 +114,7 @@ func fortiLogin(ctx context.Context, cfg config) (*session, error) {
 	}
 
 	// Step 3: fetch the tunnel config XML (assigned IP, DNS, MTU).
-	xmlBytes, err := httpGet(ctx, client, baseURL.JoinPath("remote", "fortisslvpn_xml").String())
+	xmlBytes, err := httpGet(authCtx, client, baseURL.JoinPath("remote", "fortisslvpn_xml").String())
 	if err != nil {
 		return nil, fmt.Errorf("config XML: %w", err)
 	}
@@ -124,12 +127,19 @@ func fortiLogin(ctx context.Context, cfg config) (*session, error) {
 	// the HTTP response — FortiGate flips the stream to PPP frames immediately on success.
 	// net/http would buffer until it sees \r\n\r\n and then close the body reader, which
 	// loses the first PPP frame bytes that arrive in the same TCP segment.
-	rawConn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)))
+	//
+	// Give the tunnel phase its OWN 15s deadline rooted at the caller's ctx rather than
+	// reusing the loginCtx that may have already burned 10-15s on auth+challenge. Sharing
+	// loginCtx's 20s budget meant a slow auth could leave the TLS handshake with only ~5s,
+	// surfacing as a misleading 'tunnel TLS handshake: context deadline exceeded'.
+	tunnelCtx, tunnelCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer tunnelCancel()
+	rawConn, err := dialer.DialContext(tunnelCtx, "tcp", net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)))
 	if err != nil {
 		return nil, fmt.Errorf("tunnel dial: %w", err)
 	}
 	tlsConn := tls.Client(rawConn, tlsCfg)
-	if err := tlsConn.HandshakeContext(ctx); err != nil {
+	if err := tlsConn.HandshakeContext(tunnelCtx); err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("tunnel TLS handshake: %w", err)
 	}

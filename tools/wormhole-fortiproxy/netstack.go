@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -21,12 +22,20 @@ import (
 // netstackDialer dials TCP through a gVisor stack that owns the client-side of the Fortinet
 // PPP link. Outbound IPv4 packets are written into the channel endpoint; inbound packets
 // from the gateway are injected by the PPP read loop in ppp.go.
+//
+// Hostname targets received over SOCKS5 are resolved using the VPN-provided DNS servers
+// (carried by `resolver`, built in newNetstackDialer); the host OS resolver is used only as
+// a fallback when the gateway did not push any DNS configuration. This prevents both DNS
+// leaks (queries for `*.corp.local` going to the host's resolver) and resolution failures
+// for internal names that don't resolve outside the tunnel.
 type netstackDialer struct {
 	stack      *stack.Stack
 	assignedIP netip.Addr
+	dnsServers []netip.Addr // populated from session.DNS; empty means fall back to OS resolver
+	resolver   *net.Resolver
 }
 
-func newNetstack(assignedIP netip.Addr, dns []netip.Addr, mtu int) (*stack.Stack, *channel.Endpoint, error) {
+func newNetstack(assignedIP netip.Addr, mtu int) (*stack.Stack, *channel.Endpoint, error) {
 	if !assignedIP.Is4() {
 		return nil, nil, fmt.Errorf("netstack: only IPv4 is supported; got %v", assignedIP)
 	}
@@ -72,13 +81,65 @@ func newNetstack(assignedIP netip.Addr, dns []netip.Addr, mtu int) (*stack.Stack
 		NIC:         nicID,
 	}})
 
-	// Best-effort: stash the DNS list on the stack for callers that want it. We don't
-	// implement a resolver here — the dialer below uses the host resolver for hostnames,
-	// then dials the resulting IP through netstack. Hostname-only targets that *must*
-	// resolve through the VPN's DNS will be a follow-up PR.
-	_ = dns
-
 	return s, ch, nil
+}
+
+// newNetstackDialer wraps a configured stack with a Dial-friendly facade and an in-stack
+// DNS resolver. When dns is non-empty the resolver answers every name lookup via
+// gonet.DialUDP to the gateway-pushed DNS servers — never the host OS resolver — so
+// internal hostnames work and queries don't leak. When dns is empty (gateway didn't push
+// any DNS), the resolver field stays nil and DialContext falls back to net.DefaultResolver
+// for backward-compat with public-host targets.
+func newNetstackDialer(s *stack.Stack, assignedIP netip.Addr, dns []netip.Addr) netstackDialer {
+	d := netstackDialer{stack: s, assignedIP: assignedIP, dnsServers: dns}
+	if len(dns) == 0 {
+		logf("netstack: gateway did not push DNS servers; name lookups will use the host OS resolver")
+		return d
+	}
+	// Filter to IPv4 servers (our stack is IPv4-only). The first server is preferred; the
+	// rest are retry candidates handled inside dialDNSServer below.
+	v4 := make([]netip.Addr, 0, len(dns))
+	for _, a := range dns {
+		if a.Is4() {
+			v4 = append(v4, a)
+		}
+	}
+	if len(v4) == 0 {
+		logf("netstack: gateway DNS servers %v contain no IPv4 entries; falling back to OS resolver", dns)
+		return d
+	}
+	d.dnsServers = v4
+	d.resolver = &net.Resolver{
+		// PreferGo forces Go's pure-Go resolver, which honors the Dial hook. Without it,
+		// Windows would route the lookup through getaddrinfo (cgo) and our Dial would
+		// never be called — defeating the whole point of this code.
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			// Go's resolver passes the system-configured DNS server in `address`. Ignore
+			// it and use the gateway-pushed servers in order; this also forces UDP (TCP-
+			// over-DNS retry on EDNS truncation is a follow-up).
+			_ = network
+			_ = address
+			var lastErr error
+			for _, srv := range v4 {
+				fa := tcpip.FullAddress{
+					NIC:  1,
+					Addr: tcpip.AddrFromSlice(srv.AsSlice()),
+					Port: 53,
+				}
+				conn, err := gonet.DialUDP(s, nil, &fa, ipv4.ProtocolNumber)
+				if err == nil {
+					return conn, nil
+				}
+				lastErr = err
+			}
+			if lastErr == nil {
+				lastErr = errors.New("no DNS servers available")
+			}
+			return nil, lastErr
+		},
+	}
+	return d
 }
 
 func (d netstackDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -96,7 +157,7 @@ func (d netstackDialer) DialContext(ctx context.Context, network, address string
 		return nil, fmt.Errorf("port %q: %w", port, err)
 	}
 
-	ip, err := resolveHostV4(ctx, host)
+	ip, err := d.resolveHostV4(ctx, host)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %q: %w", host, err)
 	}
@@ -109,19 +170,24 @@ func (d netstackDialer) DialContext(ctx context.Context, network, address string
 	return gonet.DialContextTCP(ctx, d.stack, fa, ipv4.ProtocolNumber)
 }
 
-// resolveHostV4 turns a hostname into an IPv4 address using the OS resolver. Looking up the
-// peer DNS through the tunnel would require an in-stack DNS client; that's a follow-up.
-// IPv4 literals short-circuit without a lookup.
-func resolveHostV4(ctx context.Context, host string) (netip.Addr, error) {
+// resolveHostV4 turns a hostname into an IPv4 address. Uses the in-stack VPN DNS resolver
+// when configured (gateway pushed DNS servers), falling back to the host OS resolver only
+// when the gateway didn't push any DNS — preserves DNS confidentiality for the common case
+// and avoids breaking SOCKS for hosts on networks without a VPN-attached DNS.
+func (d netstackDialer) resolveHostV4(ctx context.Context, host string) (netip.Addr, error) {
 	if a, err := netip.ParseAddr(host); err == nil {
 		if a.Is4() {
 			return a, nil
 		}
 		return netip.Addr{}, fmt.Errorf("only IPv4 supported; got %v", a)
 	}
+	resolver := d.resolver
+	if resolver == nil {
+		resolver = net.DefaultResolver
+	}
 	lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	addrs, err := net.DefaultResolver.LookupNetIP(lookupCtx, "ip4", host)
+	addrs, err := resolver.LookupNetIP(lookupCtx, "ip4", host)
 	if err != nil {
 		return netip.Addr{}, err
 	}

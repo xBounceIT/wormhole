@@ -89,7 +89,15 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
             AllowedIps = SplitCsv(AllowedIpsBox.Text),
             PersistentKeepaliveSeconds = TryParseInt(PersistentKeepaliveBox.Text),
         };
-        var totp = FortinetTotpSecretBox.Password;
+        // TOTP shared secrets are conventionally displayed in Base32 with embedded spaces
+        // every 4 characters (e.g. "ABCD EFGH IJKL MNOP"). Trim() only strips ends, so a
+        // paste from a 2FA enrollment screen with internal spaces would persist verbatim
+        // and the sidecar would later fail Base32 decode with a cryptic 'illegal base32'
+        // error. Strip ALL whitespace instead so the secret is normalized regardless of
+        // how the user copied it. Same treatment for the cert pin which often arrives with
+        // ':' separators that the sidecar already strips, but extra whitespace would still
+        // break hex parsing.
+        var totp = StripWhitespace(FortinetTotpSecretBox.Password);
         var fg = new FortinetSettings
         {
             Host = FortinetHostBox.Text.Trim(),
@@ -97,9 +105,9 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
             Username = FortinetUsernameBox.Text.Trim(),
             Password = FortinetPasswordBox.Password,
             Realm = string.IsNullOrWhiteSpace(FortinetRealmBox.Text) ? null : FortinetRealmBox.Text.Trim(),
-            TotpSecret = string.IsNullOrWhiteSpace(totp) ? null : totp.Trim(),
+            TotpSecret = string.IsNullOrEmpty(totp) ? null : totp,
             TrustServerCertificate = FortinetTrustCertCheck.IsChecked == true,
-            ServerCertSha256Pin = string.IsNullOrWhiteSpace(FortinetCertPinBox.Text) ? null : FortinetCertPinBox.Text.Trim(),
+            ServerCertSha256Pin = string.IsNullOrWhiteSpace(FortinetCertPinBox.Text) ? null : StripWhitespace(FortinetCertPinBox.Text),
         };
         return new TunnelDraft(NameBox.Text.Trim(), SelectedKind, wg, fg);
     }
@@ -143,4 +151,15 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
 
     private static int? TryParseInt(string s) =>
         int.TryParse(s, out var n) ? n : (int?)null;
+
+    private static string StripWhitespace(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return string.Empty;
+        var sb = new System.Text.StringBuilder(s.Length);
+        foreach (var c in s)
+        {
+            if (!char.IsWhiteSpace(c)) sb.Append(c);
+        }
+        return sb.ToString();
+    }
 }
