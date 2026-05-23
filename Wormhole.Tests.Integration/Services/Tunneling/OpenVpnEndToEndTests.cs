@@ -3,11 +3,11 @@ using System.IO;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Services.Tunneling;
 using Wormhole.Services.Tunneling.OpenVpn;
 using Wormhole.Tests.Integration.Fixtures;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace Wormhole.Tests.Integration.Services.Tunneling;
 
@@ -17,6 +17,10 @@ public sealed class OpenVpnEndToEndTests
     // server (the sidecar's own ready budget is 45s). Bump the test timeout above that so
     // we attribute failures to the tunnel layer, not to an externally-clipped read.
     private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(90);
+
+    private readonly ITestOutputHelper _output;
+
+    public OpenVpnEndToEndTests(ITestOutputHelper output) => _output = output;
 
     [SkippableFact]
     public async Task RoutesTrafficThroughTunnel()
@@ -36,7 +40,7 @@ public sealed class OpenVpnEndToEndTests
         await using var host = await OpenVpnProcessHost.StartAsync(
             IntegrationEnvironment.OvpnProxyPath!,
             config,
-            NullLogger.Instance,
+            new TestOutputLogger(_output),
             cts.Token);
 
         Assert.NotEqual(0, host.SocksEndpoint.Port);

@@ -4,11 +4,11 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Services.Tunneling;
 using Wormhole.Services.Tunneling.WireGuard;
 using Wormhole.Tests.Integration.Fixtures;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace Wormhole.Tests.Integration.Services.Tunneling;
 
@@ -18,6 +18,10 @@ public sealed class WireGuardEndToEndTests
     // cold CI runner. The sidecar's own READY budget is 15s, so anything above ~30s here is
     // headroom for runner-scheduling jitter rather than tunnel latency.
     private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(60);
+
+    private readonly ITestOutputHelper _output;
+
+    public WireGuardEndToEndTests(ITestOutputHelper output) => _output = output;
 
     [SkippableFact]
     public async Task RoutesTrafficThroughTunnel()
@@ -35,7 +39,7 @@ public sealed class WireGuardEndToEndTests
         await using var host = await WireGuardProcessHost.StartAsync(
             IntegrationEnvironment.WgProxyPath!,
             config,
-            NullLogger.Instance,
+            new TestOutputLogger(_output),
             cts.Token);
 
         Assert.NotEqual(0, host.SocksEndpoint.Port);
