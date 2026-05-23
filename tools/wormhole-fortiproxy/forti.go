@@ -36,17 +36,17 @@ type session struct {
 const fortinetUserAgent = "Mozilla/5.0 SV1"
 
 func fortiLogin(ctx context.Context, cfg config) (*session, error) {
+	// Normalize cfg.Host BEFORE buildTLSConfig — tls.Config.ServerName is set from
+	// cfg.Host and a bracketed IPv6 literal (e.g. "[2001:db8::1]") would otherwise
+	// propagate into SNI as a bracketed string, which the TLS stack rejects. Doing the
+	// strip here covers both buildTLSConfig and the later net.JoinHostPort calls in one
+	// place. (Hostnames and IPv4 literals pass through unchanged.)
+	cfg.Host = stripHostBrackets(cfg.Host)
+
 	tlsCfg, err := buildTLSConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("tls config: %w", err)
 	}
-
-	// Normalize cfg.Host: net.JoinHostPort assumes a bare host string and wraps IPv6
-	// literals in brackets itself, so a user-pasted "[2001:db8::1]" would become
-	// "[[2001:db8::1]]:443" — Go's net package rejects that as "missing port in address"
-	// and every connection attempt fails before authentication. Strip a single pair of
-	// surrounding brackets if present so both pasted forms work.
-	cfg.Host = stripHostBrackets(cfg.Host)
 
 	// Auth phase gets a 20s budget; tunnel upgrade gets a separate 15s. Sharing a single
 	// deadline meant a slow MFA challenge could leave the TLS handshake starved.
