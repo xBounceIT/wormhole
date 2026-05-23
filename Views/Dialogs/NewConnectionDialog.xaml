@@ -13,6 +13,9 @@
         <DataTemplate x:Key="CredentialItemTemplate" x:DataType="models:CredentialProfile">
             <TextBlock Text="{x:Bind Name}" />
         </DataTemplate>
+        <DataTemplate x:Key="TunnelItemTemplate" x:DataType="models:TunnelConfig">
+            <TextBlock Text="{x:Bind Name, Mode=OneWay}" />
+        </DataTemplate>
     </UserControl.Resources>
 
     <TabView x:Name="EditorTabs"
@@ -73,6 +76,19 @@
                                       ItemsSource="{x:Bind ViewModel.AvailableCredentials}"
                                       ItemTemplate="{StaticResource CredentialItemTemplate}"
                                       SelectedItem="{x:Bind ViewModel.SelectedCredential, Mode=TwoWay}" />
+                        </StackPanel>
+
+                        <StackPanel Spacing="4">
+                            <TextBlock Text="VPN tunnel"
+                                       Style="{StaticResource CaptionTextBlockStyle}" />
+                            <ComboBox HorizontalAlignment="Stretch"
+                                      ItemsSource="{x:Bind ViewModel.AvailableTunnelConfigs}"
+                                      ItemTemplate="{StaticResource TunnelItemTemplate}"
+                                      SelectedItem="{x:Bind ViewModel.SelectedTunnel, Mode=TwoWay}" />
+                            <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                                       Opacity="0.7"
+                                       TextWrapping="Wrap"
+                                       Text="Started before the target connection. &quot;Inherit from folder&quot; follows the parent folder's tunnel setting; &quot;No tunnel&quot; overrides any inherited tunnel." />
                         </StackPanel>
 
                         <InfoBar Severity="Informational"
