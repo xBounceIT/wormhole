@@ -118,6 +118,7 @@ public sealed class DialogService : IDialogService
     {
         if (initial is not null) form.LoadDraft(initial);
 
+        var xamlRoot = RequireXamlRoot();
         var dialog = new ContentDialog
         {
             Title = initial is null ? $"New {entityName}" : $"Edit {entityName}",
@@ -125,9 +126,24 @@ public sealed class DialogService : IDialogService
             PrimaryButtonText = initial is null ? "Create" : "Save",
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Primary,
-            XamlRoot = RequireXamlRoot(),
+            XamlRoot = xamlRoot,
             IsPrimaryButtonEnabled = form.IsValid,
         };
+
+        // ContentDialog's default ContentDialogMaxWidth theme resource is ~548 px and
+        // FullSizeDesired doesn't lift the cap. Forms that need a wider host (e.g. the
+        // 2-column tunnel editor) opt in via PreferredDialogMinWidth; Min == Max locks the
+        // width so it doesn't oscillate as the user types into wide TextBoxes.
+        // Clamp against XamlRoot.Size so the dialog stays inside narrow host windows
+        // (mirrors the pattern in FileTransferDialogService.cs:156-162); the > 0 guard
+        // protects against a future implementer returning 0 / negative.
+        if (form.PreferredDialogMinWidth is { } requestedWidth && requestedWidth > 0)
+        {
+            var hostWidth = xamlRoot.Size.Width;
+            var targetWidth = hostWidth > 0 ? Math.Min(requestedWidth, hostWidth) : requestedWidth;
+            dialog.Resources["ContentDialogMinWidth"] = targetWidth;
+            dialog.Resources["ContentDialogMaxWidth"] = targetWidth;
+        }
 
         form.ValidityChanged += (_, _) => dialog.IsPrimaryButtonEnabled = form.IsValid;
         dialog.Opened += (_, _) => form.FocusNameField();

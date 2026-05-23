@@ -16,9 +16,19 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
     public TunnelDialog()
     {
         this.InitializeComponent();
+        // Sync panel visibility to the default-selected KindBox value. Without this, a
+        // fresh create-flow dialog (where DialogService skips LoadDraft) renders panel
+        // visibility from XAML defaults only — correct today because TunnelKind.WireGuard
+        // is enum value 0, but it would silently desync if the enum is ever reordered.
+        UpdateKindPanels();
     }
 
     public TunnelKind[] Kinds { get; } = Enum.GetValues<TunnelKind>();
+
+    // The horizontal 2-column layout in the XAML needs ~760 px of dialog width to render
+    // without clipping — overrides the ContentDialog ~548 px theme cap. DialogService
+    // clamps this against XamlRoot.Size so the dialog stays inside narrow host windows.
+    public double? PreferredDialogMinWidth => 760;
 
     private TunnelKind SelectedKind =>
         KindBox.SelectedItem is TunnelKind k ? k : TunnelKind.WireGuard;
