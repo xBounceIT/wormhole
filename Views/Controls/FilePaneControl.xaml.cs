@@ -1,3 +1,5 @@
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -26,10 +28,6 @@ public sealed partial class FilePaneControl : UserControl
     /// Drop or DragItemsStarting handlers. Must be set before the control is interacted with.</summary>
     public Func<TransferRequest, Task>? OnTransferRequested { get; set; }
 
-    /// <summary>Stages remote files into a local temp directory for OS-level drag-out.
-    /// Only meaningful for the remote pane; the local pane reuses its paths directly.</summary>
-    public Func<IReadOnlyList<TransferItem>, CancellationToken, Task<IReadOnlyList<string>>>? OnStageForExport { get; set; }
-
     public FilePaneControl()
     {
         this.InitializeComponent();
@@ -39,6 +37,21 @@ public sealed partial class FilePaneControl : UserControl
     {
         ViewModel = vm;
         Bindings.Update();
+    }
+
+    /// <summary>
+    /// "Open" makes sense in three cases: any local entry (folder navigates, file
+    /// launches via OS handler), and remote folders (navigate into them). Remote files
+    /// have no defined Open action — there's no local handler to launch them into — so
+    /// we hide the menu item for that case only. Called when _contextTarget is set,
+    /// just before the MenuFlyout opens.
+    /// </summary>
+    private void UpdateOpenMenuVisibility()
+    {
+        var vm = ViewModel;
+        var target = _contextTarget;
+        bool visible = vm is not null && target is not null && (vm.IsLocal || target.IsDirectory);
+        OpenMenuItem.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void OnPathBoxKeyDown(object sender, KeyRoutedEventArgs e)
@@ -51,9 +64,38 @@ public sealed partial class FilePaneControl : UserControl
     private async void OnEntryDoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
     {
         if (ViewModel is null) return;
-        if (EntriesList.SelectedItem is FileEntryViewModel entry && entry.IsDirectory)
+        if (EntriesList.SelectedItem is FileEntryViewModel entry)
         {
-            await ViewModel.OpenAsync(entry);
+            await OpenEntryAsync(entry);
+        }
+    }
+
+    /// <summary>
+    /// Shared open behavior for both double-click and the context-menu Open item.
+    /// Directories navigate in place. Files on the local pane launch with the default
+    /// OS handler (Explorer double-click semantics); files on the remote pane do
+    /// nothing — there is no local handler to launch a remote file into.
+    /// </summary>
+    private async Task OpenEntryAsync(FileEntryViewModel entry)
+    {
+        if (ViewModel is null) return;
+        if (entry.IsDirectory)
+        {
+            await ViewModel.OpenAsync(entry).ConfigureAwait(true);
+            return;
+        }
+        if (!ViewModel.IsLocal) return;
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = entry.FullPath,
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            ViewModel.ErrorMessage = ex.Message;
         }
     }
 
@@ -83,40 +125,137 @@ public sealed partial class FilePaneControl : UserControl
         if (!string.IsNullOrEmpty(name)) await ViewModel.CreateFileAsync(name).ConfigureAwait(true);
     }
 
+    // Inline confirm/prompt overlays — see FilePaneControl.xaml for the visual layer.
+    // The pane lives inside a ContentDialog (FileTransferDialog), and WinUI 3 forbids
+    // nested ContentDialogs, so these prompts must not open a new ContentDialog.
+    private TaskCompletionSource<bool>? _confirmTcs;
+    private TaskCompletionSource<string?>? _promptTcs;
+
     private async void OnDeleteClick(object sender, RoutedEventArgs e)
     {
         if (ViewModel is null || ViewModel.SelectedEntries.Count == 0) return;
         var count = ViewModel.SelectedEntries.Count;
-        var dialog = new ContentDialog
-        {
-            Title = "Delete",
-            Content = $"Delete {count} item{(count == 1 ? string.Empty : "s")}?",
-            PrimaryButtonText = "Delete",
-            CloseButtonText = "Cancel",
-            DefaultButton = ContentDialogButton.Close,
-            XamlRoot = this.XamlRoot,
-        };
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary) return;
+        var confirmed = await ShowConfirmAsync(
+            title: "Delete",
+            message: $"Delete {count} item{(count == 1 ? string.Empty : "s")}?",
+            yesLabel: "Delete").ConfigureAwait(true);
+        if (!confirmed) return;
         await ViewModel.DeleteSelectedAsync().ConfigureAwait(true);
     }
 
-    private async Task<string?> PromptForNameAsync(string title, string label, string placeholder)
+    private Task<bool> ShowConfirmAsync(string title, string message, string yesLabel)
     {
-        var box = new TextBox { Header = label, PlaceholderText = placeholder, MinWidth = 280 };
-        var dialog = new ContentDialog
+        // Reentrancy guard: a second click on the toolbar (e.g. via keyboard Tab + Space
+        // on an underlying button, or rapid double-click before the first overlay is
+        // visible) would otherwise overwrite _confirmTcs and strand the first awaiter
+        // forever. Cancel the previous prompt with a No result so its async-void frame
+        // unwinds cleanly. Because the TCS uses RunContinuationsAsynchronously, the
+        // previous awaiter's CompleteOverlayAsync.finally runs on a later dispatcher
+        // message — its hide()/clear() lambdas identity-check the captured tcs (see
+        // below) so they don't clobber a freshly-assigned _confirmTcs / Visibility.
+        _confirmTcs?.TrySetResult(false);
+        // Cross-overlay: if a name-prompt is also open (e.g. user Tabbed past it to the
+        // Delete toolbar button), cancel that prompt so only one modal overlay is up
+        // at a time. Otherwise both overlays would be Visible and stack their dim
+        // backgrounds.
+        _promptTcs?.TrySetResult(null);
+        ConfirmTitle.Text = title;
+        ConfirmMessage.Text = message;
+        ConfirmYesButton.Content = yesLabel;
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _confirmTcs = tcs;
+        ConfirmOverlay.Visibility = Visibility.Visible;
+        // Focus the safe (Cancel) button so Enter is a no-op-equivalent for destructive
+        // actions, matching the pre-overlay ContentDialog's DefaultButton=Close.
+        // FocusState.Pointer (not Programmatic) so ancestor LosingFocus handlers don't
+        // intercept — same rationale documented at OnRenameTextBoxLoaded.
+        _ = DispatcherQueue.TryEnqueue(() => ConfirmNoButton.Focus(FocusState.Pointer));
+        return CompleteOverlayAsync(tcs.Task,
+            () => { if (_confirmTcs == tcs) ConfirmOverlay.Visibility = Visibility.Collapsed; },
+            () => { if (_confirmTcs == tcs) _confirmTcs = null; });
+    }
+
+    private void OnConfirmYes(object sender, RoutedEventArgs e) => _confirmTcs?.TrySetResult(true);
+    private void OnConfirmNo(object sender, RoutedEventArgs e) => _confirmTcs?.TrySetResult(false);
+
+    // Enter = the accented Cancel button (safer than Delete as a default — matches the
+    // pre-overlay ContentDialog which had DefaultButton=Close). Escape = Cancel too.
+    private void OnConfirmKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == VirtualKey.Enter || e.Key == VirtualKey.Escape)
         {
-            Title = title,
-            Content = box,
-            PrimaryButtonText = "Create",
-            CloseButtonText = "Cancel",
-            DefaultButton = ContentDialogButton.Primary,
-            IsPrimaryButtonEnabled = false,
-            XamlRoot = this.XamlRoot,
-        };
-        box.TextChanged += (_, _) => dialog.IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(box.Text);
-        dialog.Opened += (_, _) => box.Focus(FocusState.Programmatic);
-        var result = await dialog.ShowAsync();
-        return result == ContentDialogResult.Primary ? box.Text.Trim() : null;
+            e.Handled = true;
+            _confirmTcs?.TrySetResult(false);
+        }
+    }
+
+    private Task<string?> PromptForNameAsync(string title, string label, string placeholder)
+    {
+        // Reentrancy guard — see ShowConfirmAsync for the rationale.
+        _promptTcs?.TrySetResult(null);
+        // Cross-overlay: cancel a pending confirm prompt so only one modal is up.
+        _confirmTcs?.TrySetResult(false);
+        PromptTitle.Text = title;
+        PromptInput.Header = label;
+        PromptInput.PlaceholderText = placeholder;
+        PromptInput.Text = string.Empty;
+        PromptOkButton.IsEnabled = false;
+        var tcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _promptTcs = tcs;
+        PromptOverlay.Visibility = Visibility.Visible;
+        // Focus the input after the overlay's container materializes. FocusState.Pointer
+        // mirrors the in-row rename pattern at OnRenameTextBoxLoaded — programmatic focus
+        // can be intercepted by ancestor LosingFocus handlers, Pointer is treated as
+        // user-driven and sails through.
+        _ = DispatcherQueue.TryEnqueue(() => PromptInput.Focus(FocusState.Pointer));
+        return CompleteOverlayAsync(tcs.Task,
+            () => { if (_promptTcs == tcs) PromptOverlay.Visibility = Visibility.Collapsed; },
+            () => { if (_promptTcs == tcs) _promptTcs = null; });
+    }
+
+    private void OnPromptInputTextChanged(object sender, TextChangedEventArgs e) =>
+        PromptOkButton.IsEnabled = !string.IsNullOrWhiteSpace(PromptInput.Text);
+
+    private void OnPromptInputKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == VirtualKey.Enter && PromptOkButton.IsEnabled)
+        {
+            e.Handled = true;
+            OnPromptOk(sender, e);
+        }
+        else if (e.Key == VirtualKey.Escape)
+        {
+            e.Handled = true;
+            OnPromptCancel(sender, e);
+        }
+    }
+
+    private void OnPromptOk(object sender, RoutedEventArgs e) =>
+        _promptTcs?.TrySetResult(string.IsNullOrWhiteSpace(PromptInput.Text) ? null : PromptInput.Text.Trim());
+
+    private void OnPromptCancel(object sender, RoutedEventArgs e) =>
+        _promptTcs?.TrySetResult(null);
+
+    // Grid-level handler catches Enter/Escape when focus isn't on the TextBox — e.g. the
+    // user has Tabbed onto the Create or Cancel button. Mirrors PromptInput's KeyDown.
+    private void OnPromptKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == VirtualKey.Enter && PromptOkButton.IsEnabled)
+        {
+            e.Handled = true;
+            OnPromptOk(sender, e);
+        }
+        else if (e.Key == VirtualKey.Escape)
+        {
+            e.Handled = true;
+            OnPromptCancel(sender, e);
+        }
+    }
+
+    private static async Task<T> CompleteOverlayAsync<T>(Task<T> task, Action hide, Action clear)
+    {
+        try { return await task.ConfigureAwait(true); }
+        finally { hide(); clear(); }
     }
 
     // === context menu =========================================================
@@ -159,6 +298,7 @@ public sealed partial class FilePaneControl : UserControl
         if (sender is ListViewItem lvi && lvi.Content is FileEntryViewModel entry)
         {
             _contextTarget = entry;
+            UpdateOpenMenuVisibility();
             // Explorer behaviour: right-click selects the row if it wasn't already
             // selected, so the visual selection matches the menu's target. Leaves
             // existing multi-selection intact when the right-clicked row is in it.
@@ -177,16 +317,14 @@ public sealed partial class FilePaneControl : UserControl
         if (sender is ListViewItem lvi && lvi.Content is FileEntryViewModel entry)
         {
             _contextTarget = entry;
+            UpdateOpenMenuVisibility();
         }
     }
 
     private async void OnContextOpenClick(object sender, RoutedEventArgs e)
     {
-        if (ViewModel is null) return;
-        if (_contextTarget is { IsDirectory: true } entry)
-        {
-            await ViewModel.OpenAsync(entry);
-        }
+        if (ViewModel is null || _contextTarget is not { } entry) return;
+        await OpenEntryAsync(entry);
     }
 
     private void OnContextRenameClick(object sender, RoutedEventArgs e)
@@ -315,27 +453,10 @@ public sealed partial class FilePaneControl : UserControl
             }
             if (storage.Count > 0) e.Data.SetStorageItems(storage);
         }
-        else if (OnStageForExport is not null)
-        {
-            // Remote pane drag-out: WinUI 3's DragItemsStartingEventArgs has no deferral
-            // surface (unlike UIElement.DragStarting). Staging files would have to block
-            // the UI thread synchronously, which is unacceptable for multi-MB downloads.
-            // Instead: kick off staging in the background and let the queue strip show
-            // progress. The OS drag has no StorageItems attached, so Explorer drops are
-            // a no-op — but cross-pane drag-and-drop (remote -> local) still works via
-            // the pane sentinel + items below. Users wanting to send files to Explorer
-            // should drop on the local pane first and re-drag from there.
-            //
-            // Wrap in a ContinueWith so a network drop / SshConnectionException during
-            // staging surfaces in logs rather than vanishing as an UnobservedTaskException.
-            _ = OnStageForExport(items, CancellationToken.None).ContinueWith(t =>
-            {
-                if (t.Exception is { } ex)
-                {
-                    System.Diagnostics.Debug.WriteLine("Remote drag-out staging failed: " + ex.Message);
-                }
-            }, TaskScheduler.Default);
-        }
+        // Remote pane: only the in-app sentinel + items above are attached. Cross-pane
+        // drops (remote → local) read those back in OnDrop. OS-level drag-out to Explorer
+        // is intentionally unsupported — WinUI 3 has no DragItemsStarting deferral, so
+        // there is no way to attach StorageItems after a background download completes.
     }
 
     private void OnDragOver(object sender, DragEventArgs e)
@@ -372,7 +493,13 @@ public sealed partial class FilePaneControl : UserControl
                         // common WinSCP workflow; users navigate then rename instead.
                         return;
                     }
-                    await OnTransferRequested(new TransferRequest(direction, ViewModel.CurrentPath, items)).ConfigureAwait(true);
+                    // Fire-and-forget: do NOT await the orchestrator inline. The drag-drop
+                    // deferral must be completed promptly so Explorer's "busy" cursor (or
+                    // the source pane's drag state) clears as soon as the drop is queued —
+                    // not after a multi-MB SFTP transfer has finished bytes. Errors are
+                    // logged inside RunTransferAsync; the destination pane refreshes when
+                    // the transfer completes.
+                    FireAndForgetTransfer(new TransferRequest(direction, ViewModel.CurrentPath, items));
                 }
                 return;
             }
@@ -396,8 +523,18 @@ public sealed partial class FilePaneControl : UserControl
                     await ViewModel.RefreshAsync().ConfigureAwait(true);
                     return;
                 }
-                await OnTransferRequested(new TransferRequest(direction, ViewModel.CurrentPath, items)).ConfigureAwait(true);
+                FireAndForgetTransfer(new TransferRequest(direction, ViewModel.CurrentPath, items));
             }
+        }
+        catch (Exception ex)
+        {
+            // OnDrop is async void; an unhandled exception (e.g. GetStorageItemsAsync
+            // throwing on a vanished source file, File.Copy failing for permissions,
+            // CopyDirectory hitting a denied subtree) would otherwise escape to
+            // AppDomain.UnhandledException. Surface to the pane's ErrorMessage so the
+            // user sees the failure, and log via the standard Serilog sink.
+            App.Current?.Services?.GetService<ILogger<FilePaneControl>>()?.LogWarning(ex, "Drop handler failed.");
+            if (ViewModel is { } vm) vm.ErrorMessage = ex.Message;
         }
         finally
         {
@@ -411,6 +548,42 @@ public sealed partial class FilePaneControl : UserControl
         if (!view.Properties.TryGetValue(PaneSentinelKey, out var raw) || raw is not string tag) return false;
         sourceIsLocal = tag == "Local";
         return true;
+    }
+
+    /// <summary>
+    /// Kick off a transfer + post-transfer pane refresh without awaiting in the caller's
+    /// frame. Used by OnDrop so the drag-drop deferral can complete promptly instead of
+    /// pinning the source application's drag cursor for the entire SFTP batch. Per-row
+    /// errors surface through the transfer queue strip's ErrorMessage tooltip; an
+    /// orchestrator-level fault that escapes EnqueueAsync (or a RefreshAsync that throws
+    /// on a torn-down VM) goes to the standard Serilog sink under
+    /// %LOCALAPPDATA%\Wormhole\logs\ — Debug.WriteLine would be elided in Release.
+    /// </summary>
+    private void FireAndForgetTransfer(TransferRequest request)
+    {
+        var vm = ViewModel;
+        var requested = OnTransferRequested;
+        if (vm is null || requested is null) return;
+        var logger = App.Current.Services.GetService<ILogger<FilePaneControl>>();
+        _ = RunTransferAsync(requested, vm, request, logger);
+    }
+
+    private static async Task RunTransferAsync(Func<TransferRequest, Task> requested, FilePaneViewModel vm, TransferRequest request, ILogger? logger)
+    {
+        try
+        {
+            await requested(request).ConfigureAwait(true);
+            await vm.RefreshAsync().ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            // User closed the dialog mid-transfer or cancelled an individual row — the
+            // orchestrator's _shutdown.Token surfaces here as OCE. Not a failure.
+        }
+        catch (Exception ex)
+        {
+            logger?.LogWarning(ex, "Background transfer failed.");
+        }
     }
 
     private static Task CopyLocalAsync(IReadOnlyList<TransferItem> items, string destDir) =>

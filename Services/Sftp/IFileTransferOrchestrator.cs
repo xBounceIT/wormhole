@@ -38,10 +38,4 @@ public interface IFileTransferOrchestrator : IAsyncDisposable
     Task RunSerializedAsync(Func<Task> action);
 
     Task EnqueueAsync(TransferRequest request, ConflictResolver resolver, CancellationToken cancellationToken = default);
-
-    /// <summary>For drag-out from the remote pane to Windows Explorer: downloads the
-    /// requested remote files into a per-session temp directory and returns their
-    /// local paths. Progress shows in <see cref="Transfers"/> as the download runs.
-    /// The temp directory is deleted when the orchestrator is disposed.</summary>
-    Task<IReadOnlyList<string>> StageForExportAsync(IReadOnlyList<TransferItem> items, CancellationToken cancellationToken = default);
 }

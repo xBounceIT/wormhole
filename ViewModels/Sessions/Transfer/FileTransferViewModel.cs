@@ -49,9 +49,6 @@ public sealed partial class FileTransferViewModel : ObservableObject, IAsyncDisp
     public Task EnqueueAsync(TransferRequest request, ConflictResolver resolver, CancellationToken cancellationToken = default) =>
         _orchestrator.EnqueueAsync(request, resolver, cancellationToken);
 
-    public Task<IReadOnlyList<string>> StageForExportAsync(IReadOnlyList<TransferItem> items, CancellationToken cancellationToken = default) =>
-        _orchestrator.StageForExportAsync(items, cancellationToken);
-
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;

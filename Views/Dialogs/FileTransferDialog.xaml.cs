@@ -31,11 +31,9 @@ public sealed partial class FileTransferDialog : UserControl
         RemotePaneControl.SetViewModel(vm.RemotePane);
 
         // Wire drop-handler callbacks: each pane forwards a TransferRequest to the
-        // orchestrator. The remote pane also exposes drag-out staging so OS drag of
-        // remote files materializes them to a temp dir first.
+        // orchestrator.
         LocalPaneControl.OnTransferRequested = HandleTransferAsync;
         RemotePaneControl.OnTransferRequested = HandleTransferAsync;
-        RemotePaneControl.OnStageForExport = vm.StageForExportAsync;
 
         await vm.LoadInitialAsync().ConfigureAwait(true);
     }
@@ -49,45 +47,87 @@ public sealed partial class FileTransferDialog : UserControl
         return ViewModel.EnqueueAsync(request, PromptConflictAsync, CancellationToken.None);
     }
 
+    // Inline conflict overlay state. The orchestrator's foreach processes one file at a
+    // time, so only one prompt is ever in flight; a single TCS is sufficient.
+    private TaskCompletionSource<(ConflictDecision, bool)>? _conflictTcs;
+
     private async Task<(ConflictDecision Decision, bool ApplyToAll)> PromptConflictAsync(ConflictContext ctx, CancellationToken ct)
     {
-        // Default decision if the dialog is dismissed: Skip. Safer than overwriting on
-        // accidental Escape/click-out.
-        var check = new CheckBox { Content = "Apply to remaining conflicts", IsChecked = false };
-        var panel = new StackPanel { Spacing = 8, MinWidth = 360 };
-        panel.Children.Add(new TextBlock
+        // Inline overlay rather than ContentDialog: this UserControl is hosted inside a
+        // ContentDialog (FileTransferDialogService) and WinUI 3 forbids two ContentDialogs
+        // open simultaneously. Trying to ShowAsync a nested ContentDialog throws
+        // COMException "Only a single ContentDialog can be open at any time."
+        ConflictMessage.Text = $"\"{ctx.ItemName}\" already exists at the destination.";
+        if (ctx.IncomingSize is not null || ctx.ExistingSize is not null)
         {
-            Text = $"\"{ctx.ItemName}\" already exists at the destination.",
-            TextWrapping = TextWrapping.Wrap,
-        });
-        if (ctx.IncomingSize is { } incoming || ctx.ExistingSize is { } existing)
-        {
-            panel.Children.Add(new TextBlock
-            {
-                Text = $"Existing size: {ctx.ExistingSize?.ToString() ?? "?"} bytes — Incoming size: {ctx.IncomingSize?.ToString() ?? "?"} bytes",
-                Opacity = 0.7,
-                FontSize = 12,
-            });
+            ConflictSizes.Text = $"Existing size: {ctx.ExistingSize?.ToString() ?? "?"} bytes — Incoming size: {ctx.IncomingSize?.ToString() ?? "?"} bytes";
+            ConflictSizes.Visibility = Visibility.Visible;
         }
-        panel.Children.Add(check);
+        else
+        {
+            ConflictSizes.Visibility = Visibility.Collapsed;
+        }
+        ConflictApplyAll.IsChecked = false;
 
-        var dialog = new ContentDialog
+        // Reentrancy guard. The orchestrator's foreach processes one conflict at a time
+        // so in normal flow there's never a second invocation while the first is open,
+        // but defend anyway: a stranded TCS would deadlock InvokeResolverOnUiAsync's
+        // await on tcs.Task.
+        _conflictTcs?.TrySetResult((ConflictDecision.Skip, false));
+        var tcs = new TaskCompletionSource<(ConflictDecision, bool)>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _conflictTcs = tcs;
+        ConflictOverlay.Visibility = Visibility.Visible;
+        // Focus the accent Skip button so Enter/Escape KeyDown routes through the
+        // overlay Grid and a stray Enter on a blank focus state still resolves Skip.
+        // FocusState.Pointer (not Programmatic) so ancestor LosingFocus handlers don't
+        // intercept — same rationale documented at OnRenameTextBoxLoaded in FilePaneControl.
+        _ = DispatcherQueue.TryEnqueue(() => ConflictSkipButton.Focus(FocusState.Pointer));
+
+        // Cancellation (dialog closing / shutdown) defaults to Skip so the batch can
+        // unwind cleanly instead of waiting on a TCS that nothing will complete.
+        using var ctReg = ct.Register(() => tcs.TrySetResult((ConflictDecision.Skip, false)));
+        try
         {
-            Title = "File exists",
-            Content = panel,
-            PrimaryButtonText = "Overwrite",
-            SecondaryButtonText = "Skip",
-            CloseButtonText = "Cancel",
-            DefaultButton = ContentDialogButton.Secondary,
-            XamlRoot = this.XamlRoot,
-        };
-        var result = await dialog.ShowAsync();
-        bool applyAll = check.IsChecked == true;
-        return result switch
+            return await tcs.Task.ConfigureAwait(true);
+        }
+        finally
         {
-            ContentDialogResult.Primary => (ConflictDecision.Overwrite, applyAll),
-            ContentDialogResult.Secondary => (ConflictDecision.Skip, applyAll),
-            _ => (ConflictDecision.Skip, applyAll),
-        };
+            // Identity-check: a reentrant PromptConflictAsync may have already replaced
+            // _conflictTcs with a new TCS and made the overlay visible again. Don't
+            // collapse the overlay or null the field unless it still refers to OUR tcs.
+            if (_conflictTcs == tcs)
+            {
+                ConflictOverlay.Visibility = Visibility.Collapsed;
+                _conflictTcs = null;
+            }
+        }
+    }
+
+    private void OnConflictOverwrite(object sender, RoutedEventArgs e) =>
+        _conflictTcs?.TrySetResult((ConflictDecision.Overwrite, ConflictApplyAll.IsChecked == true));
+
+    private void OnConflictSkip(object sender, RoutedEventArgs e) =>
+        _conflictTcs?.TrySetResult((ConflictDecision.Skip, ConflictApplyAll.IsChecked == true));
+
+    // Cancel = "abort this prompt without applying the choice to subsequent conflicts."
+    // Skip-without-apply-all matches what the user expects: this single file is skipped,
+    // and the next conflict still prompts.
+    private void OnConflictCancel(object sender, RoutedEventArgs e) =>
+        _conflictTcs?.TrySetResult((ConflictDecision.Skip, false));
+
+    // Enter = Skip (the safer default, matching the pre-overlay ContentDialog's
+    // DefaultButton=Secondary). Escape = Cancel (Skip without apply-all).
+    private void OnConflictKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        if (e.Key == Windows.System.VirtualKey.Enter)
+        {
+            e.Handled = true;
+            _conflictTcs?.TrySetResult((ConflictDecision.Skip, ConflictApplyAll.IsChecked == true));
+        }
+        else if (e.Key == Windows.System.VirtualKey.Escape)
+        {
+            e.Handled = true;
+            _conflictTcs?.TrySetResult((ConflictDecision.Skip, false));
+        }
     }
 }
