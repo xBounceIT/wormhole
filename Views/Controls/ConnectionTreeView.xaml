@@ -40,6 +40,24 @@
                         AutomationProperties.Name="New folder">
                     <FontIcon FontSize="14" Glyph="&#xE8F4;" />
                 </Button>
+                <!-- Import menu sits between "New folder" and "New connection" so it reads as
+                     a peer header action. Single entry today; designed to accept future
+                     formats (PuTTY, OpenSSH config, etc.) without a layout change. -->
+                <DropDownButton Style="{StaticResource IconDropDownButtonStyle}"
+                                ToolTipService.ToolTip="Import..."
+                                AutomationProperties.Name="Import">
+                    <FontIcon FontSize="14" Glyph="&#xE8B5;" />
+                    <DropDownButton.Flyout>
+                        <MenuFlyout Placement="Bottom">
+                            <MenuFlyoutItem Text="Import from mRemoteNG"
+                                            Command="{x:Bind ViewModel.ImportFromMRemoteNgCommand}">
+                                <MenuFlyoutItem.Icon>
+                                    <FontIcon Glyph="&#xE8E5;" />
+                                </MenuFlyoutItem.Icon>
+                            </MenuFlyoutItem>
+                        </MenuFlyout>
+                    </DropDownButton.Flyout>
+                </DropDownButton>
                 <Button Style="{StaticResource IconButtonStyle}"
                         Command="{x:Bind ViewModel.AddConnectionCommand}"
                         ToolTipService.ToolTip="New connection (Ctrl+N)"

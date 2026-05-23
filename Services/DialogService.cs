@@ -1,7 +1,9 @@
+using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
+using Wormhole.ViewModels;
 using Wormhole.Views.Dialogs;
 
 namespace Wormhole.Services;
@@ -75,12 +77,33 @@ public sealed class DialogService : IDialogService
         return result == ContentDialogResult.Primary ? textBox.Text.Trim() : null;
     }
 
-    public async Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null)
+    public async Task<ConnectionNode?> EditConnectionAsync(ConnectionNode initial, bool isNew)
     {
-        var dialog = new NewConnectionDialog();
-        var credentials = await _credentialRepository.GetAllAsync();
-        dialog.SetAvailableCredentials(credentials);
-        return await ShowFormDialogAsync(dialog, initial, "connection");
+        var form = new NewConnectionDialog();
+        await form.LoadAsync(initial);
+
+        var dialog = new ContentDialog
+        {
+            Title = isNew ? "New connection" : "Edit connection",
+            Content = form,
+            PrimaryButtonText = isNew ? "Create" : "Save",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = RequireXamlRoot(),
+            IsPrimaryButtonEnabled = form.IsValid,
+        };
+
+        form.ValidityChanged += (_, _) => dialog.IsPrimaryButtonEnabled = form.IsValid;
+        dialog.Opened += (_, _) => form.FocusNameField();
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary) return null;
+
+        // Produce a fresh node mirroring `initial`'s identity/parent so the caller can update
+        // storage without mutating the input. WriteTo only touches editable fields.
+        var output = ConnectionNode.CloneIdentityFrom(initial);
+        form.WriteTo(output);
+        return output;
     }
 
     public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null) =>
@@ -89,7 +112,7 @@ public sealed class DialogService : IDialogService
     public Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null) =>
         ShowFormDialogAsync(new TunnelDialog(), initial, "VPN tunnel");
 
-    private async Task<TDraft?> ShowFormDialogAsync<TForm, TDraft>(TForm form, TDraft? initial, string entityName)
+    private static async Task<TDraft?> ShowFormDialogAsync<TForm, TDraft>(TForm form, TDraft? initial, string entityName)
         where TForm : UserControl, IDraftForm<TDraft>
         where TDraft : class
     {
@@ -153,6 +176,86 @@ public sealed class DialogService : IDialogService
         var result = await dialog.ShowAsync();
         var accepted = result == ContentDialogResult.Primary || submittedViaEnter;
         return accepted ? passwordBox.Password : null;
+    }
+
+    public async Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync()
+    {
+        var control = new MRemoteNgImportDialog();
+        var vm = control.ViewModel;
+
+        var dialog = new ContentDialog
+        {
+            Title = "Import from mRemoteNG",
+            Content = control,
+            // Single close button; the dialog body owns its own Cancel-during-import button
+            // via the VM's CancelCommand.
+            PrimaryButtonText = "Close",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = RequireXamlRoot(),
+            IsPrimaryButtonEnabled = vm.CanClose,
+        };
+
+        void OnVmPropChanged(object? _, PropertyChangedEventArgs args)
+        {
+            if (args.PropertyName == nameof(vm.CanClose))
+            {
+                dialog.IsPrimaryButtonEnabled = vm.CanClose;
+            }
+        }
+
+        // ContentDialog.Closing is the only hook that lets us defer Esc / Close mid-import.
+        // We must NOT let the dialog tear down while CommitAsync is still running, because:
+        //   (a) the VM's `Result = result;` assignment happens AFTER the tx commits, and
+        //       returning before it fires would surface a `null` result to the caller despite
+        //       the data being persisted — the tree would never refresh.
+        //   (b) the in-flight task would mutate VM properties post-teardown, leading to no-op
+        //       UI updates and possibly orphaned background work touching the DB.
+        // So: on the first Closing while busy, cancel the import and DEFER the close. When
+        // RunImportAsync's finally block flips IsBusy=false and signals the run-completed TCS,
+        // we re-invoke Hide() to let the dialog actually close.
+        void OnClosing(ContentDialog sender, ContentDialogClosingEventArgs args)
+        {
+            if (!vm.IsBusy) return;
+
+            // Defer this Close attempt.
+            args.Cancel = true;
+            vm.RequestCancelForClose();
+
+            // When the in-flight import unwinds, re-request Hide on the UI thread. Using
+            // ContinueWith with the captured dispatcher avoids a deadlock if WaitForImportEnd
+            // resolves on a thread-pool thread.
+            _ = vm.WaitForImportEnd().ContinueWith(_ =>
+            {
+                if (sender.XamlRoot?.Content?.DispatcherQueue is { } queue)
+                {
+                    queue.TryEnqueue(() => sender.Hide());
+                }
+                else
+                {
+                    sender.Hide();
+                }
+            }, TaskScheduler.Default);
+        }
+
+        vm.PropertyChanged += OnVmPropChanged;
+        dialog.Closing += OnClosing;
+        try
+        {
+            await dialog.ShowAsync();
+        }
+        finally
+        {
+            vm.PropertyChanged -= OnVmPropChanged;
+            dialog.Closing -= OnClosing;
+            // Even though ShowAsync awaits the actual close (Closing handlers may have deferred
+            // it), guard against a never-completed import (defensive — should never trip).
+            await vm.WaitForImportEnd();
+            // Transient VM is tracked by the DI root provider; without this Dispose call its
+            // CancellationTokenSource leaks until app exit.
+            vm.Dispose();
+        }
+
+        return vm.Result;
     }
 
     private static XamlRoot RequireXamlRoot() =>

@@ -9,6 +9,13 @@
 .husky/* text eol=lf
 *.sh     text eol=lf
 
+# Go sources and module files: LF only. `go mod tidy` / `gofmt` always write LF;
+# without this override the * eol=crlf rule above would create perpetual diff
+# churn every time someone bumps a dep in tools/wormhole-wgproxy/.
+*.go     text eol=lf
+*.mod    text eol=lf
+*.sum    text eol=lf
+
 # Binary file types this project may track
 *.png binary
 *.ico binary

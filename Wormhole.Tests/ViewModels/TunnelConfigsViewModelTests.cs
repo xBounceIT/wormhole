@@ -497,8 +497,8 @@ public class TunnelConfigsViewModelTests
         public Task<string?> PromptForTextAsync(string title, string label, string defaultValue = "") =>
             Task.FromResult<string?>(null);
 
-        public Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null) =>
-            Task.FromResult<NewConnectionDraft?>(null);
+        public Task<ConnectionNode?> EditConnectionAsync(ConnectionNode initial, bool isNew) =>
+            Task.FromResult<ConnectionNode?>(null);
 
         public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null) =>
             Task.FromResult<CredentialDraft?>(null);
@@ -508,5 +508,8 @@ public class TunnelConfigsViewModelTests
 
         public Task<string?> PromptPasswordAsync(string title, string message) =>
             Task.FromResult<string?>(null);
+
+        public Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync() =>
+            Task.FromResult<MRemoteNgImportResult?>(null);
     }
 }
