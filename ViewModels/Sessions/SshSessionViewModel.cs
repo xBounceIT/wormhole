@@ -31,6 +31,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private readonly IConnectionRepository _connectionRepo;
     private readonly IAppSettingsService _settingsService;
     private readonly TunnelManager _tunnels;
+    private readonly ISftpService _sftpService;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<SshSessionViewModel> _logger;
 
@@ -51,6 +52,22 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private ITunnelInstance? _tunnel;
     private bool _reconnectRequestedWhileDetached;
 
+    // SFTP pre-warm: as soon as the shell session reaches Connected we open an SFTP
+    // session in the background using the *same* creds the shell successfully used. The
+    // file-transfer dialog hands off this cached session in TryConsumePrewarmedSftp,
+    // turning the previously ~800 ms click into an instant open. SSH.NET 2025.1.0 has no
+    // public API to share a transport between SshClient and SftpClient (see plan doc), so
+    // this is a second SSH connection — paid in the background, invisible to the user.
+    //
+    // All mutable state is guarded by _prewarmLock. Disposal is fire-and-forget on the
+    // status-leaves-Connected path; we don't await it during DetachAsync so the UI tear-
+    // down isn't blocked on a remote socket close.
+    private readonly object _prewarmLock = new();
+    private SshCredentials? _capturedCredentials;
+    private CancellationTokenSource? _prewarmCts;
+    private ISftpSession? _prewarmedSftpSession;
+    private ITunnelInstance? _prewarmedSftpTunnel;
+
     // The VM outlives the view: when SshTerminalView is unloaded and a fresh one is
     // created (Sessions ↔ Settings navigation), the new xterm.js has no scrollback,
     // and an idle prompt sends nothing new. AttachAsync's rebind path replays this
@@ -63,6 +80,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         IConnectionRepository connectionRepo,
         IAppSettingsService settingsService,
         TunnelManager tunnels,
+        ISftpService sftpService,
         ILoggerFactory loggerFactory)
     {
         _sshService = sshService;
@@ -70,6 +88,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         _connectionRepo = connectionRepo;
         _settingsService = settingsService;
         _tunnels = tunnels;
+        _sftpService = sftpService;
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<SshSessionViewModel>();
         PropertyChanged += (_, args) =>
@@ -81,6 +100,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
                 OnPropertyChanged(nameof(IsFailed));
                 OnPropertyChanged(nameof(CanOpenFileTransfer));
                 RetryCommand.NotifyCanExecuteChanged();
+                HandlePrewarmStatusTransition();
             }
         };
     }
@@ -316,6 +336,11 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
                 ReportFailure("No credentials provided.");
                 return;
             }
+            // Cache the successfully-resolved credentials so the SFTP pre-warm (kicked off
+            // when Status flips to Connected below) and the on-demand file-transfer path
+            // can both skip a re-resolve — which would otherwise re-prompt for a key
+            // passphrase or password and break the "instant click" UX.
+            _capturedCredentials = creds;
 
             _tunnel = await _tunnels.EstablishAsync(profile, token).ConfigureAwait(true);
             _session = await _sshService.ConnectAsync(profile, creds, _initialSize, _tunnel, token).ConfigureAwait(true);
@@ -513,6 +538,225 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         // across the detach window is the whole point. Session teardown clears it so
         // a same-VM reconnect doesn't bleed the old session's output into the new one.
         _replayBuffer.Clear();
+
+        // Drop the cached creds: a future reconnect will re-resolve via ConnectAsync so
+        // a rotated password / removed key / revoked credential doesn't get silently
+        // reused by a prewarm kicked off after the next Connected transition.
+        _capturedCredentials = null;
+    }
+
+    // === SFTP pre-warm =====================================================
+    //
+    // Called from the Status PropertyChanged handler. Status==Connected starts a
+    // background prewarm; any other Status cancels in-flight prewarm and disposes any
+    // cached pair. Idempotent: repeat calls in the same Status are no-ops.
+    private void HandlePrewarmStatusTransition()
+    {
+        if (Status == SessionStatus.Connected)
+        {
+            StartPrewarm();
+        }
+        else
+        {
+            CancelAndDisposePrewarm();
+        }
+    }
+
+    private void StartPrewarm()
+    {
+        var profile = Profile;
+        var creds = _capturedCredentials;
+        // No captured creds means we reached Connected via a code path that didn't run
+        // ConnectAsync (test harness AttachConnectedSessionForTesting). Silent no-op —
+        // tests that want to exercise prewarm prime creds via the testing helper.
+        if (profile is null || creds is null) return;
+
+        CancellationTokenSource cts;
+        lock (_prewarmLock)
+        {
+            if (_prewarmCts is not null) return;             // already in-flight
+            if (_prewarmedSftpSession is not null) return;   // cache already warm
+            cts = new CancellationTokenSource();
+            _prewarmCts = cts;
+        }
+
+        // Fire-and-forget. PrewarmAsync owns its own error handling — failure logs a
+        // Warning and leaves the cache empty so the next click falls back to the
+        // on-demand path with no observable change to the user. Capture profile + creds
+        // by value so a later disconnect's clear of _capturedCredentials doesn't race.
+        // Pass `cts` (not its Token, which is a struct) so the worker can detect a
+        // CancelAndDisposePrewarm-driven swap via reference identity on the CTS itself.
+        _ = PrewarmAsync(profile, creds, cts);
+    }
+
+    private async Task PrewarmAsync(ConnectionProfile profile, SshCredentials creds, CancellationTokenSource cts)
+    {
+        var ct = cts.Token;
+        ITunnelInstance? tunnel = null;
+        ISftpSession? session = null;
+        try
+        {
+            tunnel = await _tunnels.EstablishAsync(profile, ct).ConfigureAwait(false);
+            session = await _sftpService.ConnectAsync(profile, creds, tunnel, ct).ConfigureAwait(false);
+
+            bool stash;
+            lock (_prewarmLock)
+            {
+                // Lost the race to a disconnect / re-warm cancellation: another path
+                // cleared _prewarmCts under the lock or swapped in a different CTS. Don't
+                // stash — the caller is in the middle of tear-down and we'd leak this
+                // session. Compare CTS references (CancellationToken is a struct, so
+                // identity comparisons on tokens are unreliable due to boxing).
+                stash = !ct.IsCancellationRequested && ReferenceEquals(_prewarmCts, cts);
+                if (stash)
+                {
+                    _prewarmedSftpSession = session;
+                    _prewarmedSftpTunnel = tunnel;
+                    // Successful prewarm clears the in-flight slot so a subsequent
+                    // TryConsumePrewarmedSftp can start a fresh prewarm without waiting.
+                    _prewarmCts = null;
+                }
+            }
+
+            if (!stash)
+            {
+                await DisposePairAsync(session, tunnel).ConfigureAwait(false);
+                cts.Dispose();
+                return;
+            }
+
+            cts.Dispose();
+            _logger.LogDebug("SFTP prewarm ready for {Host}.", profile.Host);
+        }
+        catch (OperationCanceledException)
+        {
+            await DisposePairAsync(session, tunnel).ConfigureAwait(false);
+            ClearOwnCtsIfCurrent(cts);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "SFTP prewarm failed for {Host}; on-demand path will be used.", profile.Host);
+            await DisposePairAsync(session, tunnel).ConfigureAwait(false);
+            ClearOwnCtsIfCurrent(cts);
+        }
+    }
+
+    private void ClearOwnCtsIfCurrent(CancellationTokenSource cts)
+    {
+        bool owned;
+        lock (_prewarmLock)
+        {
+            owned = ReferenceEquals(_prewarmCts, cts);
+            if (owned) _prewarmCts = null;
+        }
+        // Dispose outside the lock to keep critical sections minimal. The CTS hasn't been
+        // disposed if the cancel-path was reached via our own .Cancel() in CancelAndDisposePrewarm
+        // (that path already disposes it and nulls the field, so `owned` is false here).
+        if (owned) cts.Dispose();
+    }
+
+    /// <summary>
+    /// Returns the credentials successfully used by the live shell connection, so the
+    /// on-demand file-transfer fallback can reuse them instead of re-resolving (which
+    /// would re-prompt for a key passphrase the user already entered). Null when the
+    /// shell is not currently connected.
+    /// </summary>
+    internal SshCredentials? GetCapturedCredentialsForSftp() => _capturedCredentials;
+
+    /// <summary>
+    /// Atomically transfers ownership of any cached SFTP pre-warm pair to the caller and
+    /// schedules a fresh prewarm so a subsequent file-transfer open is also instant.
+    /// Returns <c>null</c> when no prewarm has succeeded yet (still in flight or failed),
+    /// in which case the caller must fall back to its on-demand connect path.
+    /// </summary>
+    internal (ISftpSession Session, ITunnelInstance? Tunnel)? TryConsumePrewarmedSftp()
+    {
+        ISftpSession? session;
+        ITunnelInstance? tunnel;
+        lock (_prewarmLock)
+        {
+            session = _prewarmedSftpSession;
+            tunnel = _prewarmedSftpTunnel;
+            _prewarmedSftpSession = null;
+            _prewarmedSftpTunnel = null;
+        }
+        if (session is null) return null;
+
+        // Liveness gate: a session can be stashed for hours; idle TCP eviction or sshd
+        // ClientAliveCountMax-exceed can leave it disconnected without us ever observing
+        // it (no read pump on the SFTP side). Hand back null + dispose the corpse, so
+        // the caller falls back to the on-demand path and opens a fresh session rather
+        // than crashing on its first ListDirectoryAsync.
+        if (!session.IsConnected)
+        {
+            _logger.LogDebug("Discarding stale prewarmed SFTP session for {Host}; will reconnect on demand.", Profile?.Host);
+            _ = DisposePairAsync(session, tunnel);
+            if (Status == SessionStatus.Connected) StartPrewarm();
+            return null;
+        }
+
+        // Re-warm only while the shell is still Connected — pulling a session out at the
+        // same moment a disconnect lands would otherwise spawn a doomed prewarm against
+        // an about-to-be-cleared profile.
+        if (Status == SessionStatus.Connected) StartPrewarm();
+        return (session, tunnel);
+    }
+
+    private void CancelAndDisposePrewarm()
+    {
+        CancellationTokenSource? cts;
+        ISftpSession? session;
+        ITunnelInstance? tunnel;
+        lock (_prewarmLock)
+        {
+            cts = _prewarmCts;
+            _prewarmCts = null;
+            session = _prewarmedSftpSession;
+            tunnel = _prewarmedSftpTunnel;
+            _prewarmedSftpSession = null;
+            _prewarmedSftpTunnel = null;
+        }
+        if (cts is not null)
+        {
+            try { cts.Cancel(); } catch (ObjectDisposedException) { /* raced */ }
+            cts.Dispose();
+        }
+        // Fire-and-forget: UI teardown must not block on a remote-socket close.
+        _ = DisposePairAsync(session, tunnel);
+    }
+
+    private async Task DisposePairAsync(ISftpSession? session, ITunnelInstance? tunnel)
+    {
+        if (session is not null)
+        {
+            try { await session.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Error disposing prewarmed SFTP session."); }
+        }
+        if (tunnel is not null)
+        {
+            try { await tunnel.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Error disposing prewarmed SFTP tunnel."); }
+        }
+    }
+
+    /// <summary>
+    /// Test hook — primes <c>_capturedCredentials</c> so a subsequent
+    /// <see cref="AttachConnectedSessionForTesting"/> triggers the prewarm code path
+    /// without going through the real <c>ConnectAsync</c> flow.
+    /// </summary>
+    internal void PrimeCredentialsForTesting(SshCredentials credentials)
+    {
+        _capturedCredentials = credentials;
+    }
+
+    internal bool HasPrewarmedSftpForTesting()
+    {
+        lock (_prewarmLock) return _prewarmedSftpSession is not null;
+    }
+
+    internal bool HasInFlightPrewarmForTesting()
+    {
+        lock (_prewarmLock) return _prewarmCts is not null;
     }
 
     internal byte[] PeekReplayBufferForTesting() => _replayBuffer.Snapshot();

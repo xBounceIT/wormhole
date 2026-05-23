@@ -24,6 +24,21 @@ internal sealed class SftpSession : ISftpSession
     public string WorkingDirectory { get; }
     public string? HostFingerprint { get; }
 
+    // SftpClient.IsConnected reads a private session.IsConnected bool; safe to call any
+    // time. Returns false after a remote-side disconnect that hasn't been observed yet
+    // only IF SSH.NET has noticed the EOF — which it has at least by the next read pump
+    // iteration. Good enough for the prewarm-staleness gate (we only need to catch the
+    // common idle-eviction case, not race the very last microsecond).
+    public bool IsConnected
+    {
+        get
+        {
+            if (IsDisposed) return false;
+            try { return _client.IsConnected; }
+            catch { return false; }
+        }
+    }
+
     private bool IsDisposed => Volatile.Read(ref _disposed) != 0;
 
     public Task<IReadOnlyList<SftpEntry>> ListDirectoryAsync(string path, CancellationToken cancellationToken = default) =>
