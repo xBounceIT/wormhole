@@ -722,6 +722,8 @@ public class ConnectionEditorViewModelTests
 
         vm.SelectedTunnel = ConnectionEditorViewModel.InheritTunnel;
 
+        Assert.Same(ConnectionEditorViewModel.InheritTunnel, vm.SelectedTunnel);
+
         var sink = new ConnectionNode();
         vm.WriteTo(sink);
 
@@ -737,6 +739,8 @@ public class ConnectionEditorViewModelTests
         await vm.LoadTunnelConfigsAsync();
 
         vm.SelectedTunnel = ConnectionEditorViewModel.NoTunnel;
+
+        Assert.Same(ConnectionEditorViewModel.NoTunnel, vm.SelectedTunnel);
 
         var sink = new ConnectionNode();
         vm.WriteTo(sink);
@@ -755,6 +759,8 @@ public class ConnectionEditorViewModelTests
         await vm.LoadTunnelConfigsAsync();
 
         vm.SelectedTunnel = wg;
+
+        Assert.Same(wg, vm.SelectedTunnel);
 
         var sink = new ConnectionNode();
         vm.WriteTo(sink);
