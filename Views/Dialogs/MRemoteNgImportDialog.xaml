@@ -26,11 +26,9 @@
                 <LineBreak/>
                 <Run Text="3. Pick a destination .xml file." />
                 <LineBreak/>
-                <Run Text="4. In the export dialog, set Format to 'mRemoteNG XML' and tick every checkbox under 'Properties to export' (Username, Domain, Password, Inheritance, …)." />
+                <Run Text="4. In the export dialog, set Format to 'mRemoteNG XML' and tick every checkbox under 'Export Properties' (Username, Password, Domain, Inheritance)." />
                 <LineBreak/>
-                <Run Text="5. Leave the encryption password at its default unless you customized it — Wormhole will try the default first and prompt only if it doesn't work." />
-                <LineBreak/>
-                <Run Text="6. Click OK to write the file, then come back here." />
+                <Run Text="5. Click OK to write the file, then come back here. The export dialog has no password field — the file is encrypted with whatever's configured in mRemoteNG's Tools → Options → Security. Wormhole tries the default automatically and only prompts if you've set a custom one." />
             </TextBlock>
 
             <!-- Section 2: file picker + start button, side by side. -->
@@ -76,7 +74,7 @@
                              and the dialog dismisses instead of submitting. Matches the
                              PromptPasswordAsync precedent in DialogService. -->
                         <PasswordBox x:Name="PasswordInput"
-                                     Header="mRemoteNG export password"
+                                     Header="mRemoteNG encryption password (Tools → Options → Security)"
                                      PasswordChanged="OnPasswordChanged"
                                      KeyDown="OnPasswordKeyDown"
                                      PlaceholderText="Enter password" />
@@ -84,10 +82,19 @@
                                    Visibility="{x:Bind ViewModel.PasswordError, Mode=OneWay, Converter={StaticResource StringPresentVisibilityConverter}}"
                                    Foreground="{ThemeResource SystemFillColorCriticalBrush}"
                                    TextWrapping="Wrap" />
-                        <Button Content="Continue"
-                                Style="{StaticResource AccentButtonStyle}"
-                                Command="{x:Bind ViewModel.SubmitPasswordCommand}"
-                                HorizontalAlignment="Left" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Content="Continue"
+                                    Style="{StaticResource AccentButtonStyle}"
+                                    Command="{x:Bind ViewModel.SubmitPasswordCommand}" />
+                            <!-- Escape hatch: if the user can't recover the custom master
+                                 password, let them import the structure (folders, hosts,
+                                 ports, usernames, inheritance) without it. Per-connection
+                                 passwords that don't decrypt with the default key become
+                                 warnings on the result banner; users can re-enter them
+                                 manually afterwards. -->
+                            <Button Content="Import structure without passwords"
+                                    Command="{x:Bind ViewModel.ImportStructureOnlyCommand}" />
+                        </StackPanel>
                     </StackPanel>
                 </InfoBar.Content>
             </InfoBar>

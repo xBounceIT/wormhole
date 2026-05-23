@@ -72,7 +72,8 @@ public sealed partial class MRemoteNgImportDialog : UserControl
     private void OnPasswordChanged(object sender, RoutedEventArgs e)
     {
         // PasswordBox.Password doesn't support two-way binding; copy on every change so the
-        // SubmitPasswordCommand's CanExecute (which gates on EnteredPassword) updates live.
+        // SubmitPasswordCommand's CanExecute (which gates on a non-empty EnteredPassword)
+        // updates live and so the eventual Submit sees the typed value, not a stale one.
         if (sender is PasswordBox box)
         {
             ViewModel.EnteredPassword = box.Password;

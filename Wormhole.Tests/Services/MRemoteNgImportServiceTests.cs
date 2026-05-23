@@ -132,6 +132,53 @@ public class MRemoteNgImportServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task VerifyPasswordAsync_EmptyMasterPassword_ReturnsTrueOnNoPasswordExport()
+    {
+        // mRemoteNG's "no password" export option produces a Protected attribute encrypted
+        // with the empty string. Make sure the crypto path actually verifies empty without
+        // tripping any non-null guard.
+        var verifier = MRemoteNgCryptoTests.Encrypt(
+            MRemoteNgImportService.ProtectedVerifier, string.Empty, DefaultIterations);
+        var xml = $$"""
+            <?xml version="1.0" encoding="utf-8"?>
+            <mrng:Connections xmlns:mrng="http://mremoteng.org" EncryptionEngine="AES"
+                BlockCipherMode="GCM" KdfIterations="{{DefaultIterations}}"
+                FullFileEncryption="false" Protected="{{verifier}}" ConfVersion="2.7" />
+            """;
+        var path = WriteFixture(xml);
+
+        Assert.True(await _service.VerifyPasswordAsync(path, string.Empty));
+        Assert.False(await _service.VerifyPasswordAsync(path, DefaultPassword));
+    }
+
+    [Fact]
+    public async Task PlanAndCommit_NoPasswordExport_ImportsConnectionsAndCredentials()
+    {
+        // End-to-end: a file exported with the empty master password should plan and commit
+        // cleanly, decrypting the per-connection Password fields with the same empty key.
+        var verifier = MRemoteNgCryptoTests.Encrypt(
+            MRemoteNgImportService.ProtectedVerifier, string.Empty, DefaultIterations);
+        var sshPwd = MRemoteNgCryptoTests.Encrypt("plain-secret", string.Empty, DefaultIterations);
+        var xml = $$"""
+            <?xml version="1.0" encoding="utf-8"?>
+            <mrng:Connections xmlns:mrng="http://mremoteng.org" EncryptionEngine="AES"
+                BlockCipherMode="GCM" KdfIterations="{{DefaultIterations}}"
+                FullFileEncryption="false" Protected="{{verifier}}" ConfVersion="2.7">
+                <Node Name="leaf" Type="Connection" Protocol="SSH2" Hostname="h"
+                      Username="alice" Password="{{sshPwd}}" />
+            </mrng:Connections>
+            """;
+        var path = WriteFixture(xml);
+
+        var result = await _service.CommitAsync(await _service.PlanAsync(path, string.Empty));
+
+        Assert.Equal(1, result.ConnectionsCreated);
+        Assert.Equal(1, result.CredentialsCreated);
+        var cred = (await _credentialRepo.GetAllAsync()).Single();
+        Assert.Equal("plain-secret", _credentialService.Passwords[cred.Id]);
+    }
+
+    [Fact]
     public async Task VerifyPasswordAsync_WrongPassword_ReturnsFalse()
     {
         var path = WriteFixture(BuildFixtureXml());

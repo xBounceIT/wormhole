@@ -30,9 +30,15 @@ public sealed class FakeMRemoteNgImportService : IMRemoteNgImportService
         return Task.FromResult(new MRemoteNgFileInfo("2.7", "AES", "GCM", "fake-verifier", false, 10000));
     }
 
+    /// <summary>Invoked synchronously inside VerifyPasswordAsync, after the call is recorded
+    /// but before the result is returned. Tests can use it to fire side effects (e.g.
+    /// cancelling the VM mid-loop) at a deterministic point in the verify pipeline.</summary>
+    public Action? OnVerifyCalled { get; set; }
+
     public Task<bool> VerifyPasswordAsync(string path, string password, CancellationToken cancellationToken = default)
     {
         VerifyCalls.Add(password);
+        OnVerifyCalled?.Invoke();
         return Task.FromResult(VerifyAlwaysTrue || password == ExpectedPassword);
     }
 
