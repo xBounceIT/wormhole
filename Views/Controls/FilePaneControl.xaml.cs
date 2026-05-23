@@ -99,20 +99,42 @@ public sealed partial class FilePaneControl : UserControl
 
     private Task<bool> ShowConfirmAsync(string title, string message, string yesLabel)
     {
+        // Reentrancy guard: a second click on the toolbar (e.g. via keyboard Tab + Space
+        // on an underlying button, or rapid double-click before the first overlay is
+        // visible) would otherwise overwrite _confirmTcs and strand the first awaiter
+        // forever. Cancel the previous prompt with a No result so its async-void frame
+        // unwinds cleanly.
+        _confirmTcs?.TrySetResult(false);
         ConfirmTitle.Text = title;
         ConfirmMessage.Text = message;
         ConfirmYesButton.Content = yesLabel;
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         _confirmTcs = tcs;
         ConfirmOverlay.Visibility = Visibility.Visible;
+        // Focus the safe (Cancel) button so Enter is a no-op-equivalent for destructive
+        // actions, matching the pre-overlay ContentDialog's DefaultButton=Close.
+        _ = DispatcherQueue.TryEnqueue(() => ConfirmNoButton.Focus(FocusState.Programmatic));
         return CompleteOverlayAsync(tcs.Task, () => ConfirmOverlay.Visibility = Visibility.Collapsed, () => _confirmTcs = null);
     }
 
     private void OnConfirmYes(object sender, RoutedEventArgs e) => _confirmTcs?.TrySetResult(true);
     private void OnConfirmNo(object sender, RoutedEventArgs e) => _confirmTcs?.TrySetResult(false);
 
+    // Enter = the accented Cancel button (safer than Delete as a default — matches the
+    // pre-overlay ContentDialog which had DefaultButton=Close). Escape = Cancel too.
+    private void OnConfirmKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == VirtualKey.Enter || e.Key == VirtualKey.Escape)
+        {
+            e.Handled = true;
+            _confirmTcs?.TrySetResult(false);
+        }
+    }
+
     private Task<string?> PromptForNameAsync(string title, string label, string placeholder)
     {
+        // Reentrancy guard — see ShowConfirmAsync for the rationale.
+        _promptTcs?.TrySetResult(null);
         PromptTitle.Text = title;
         PromptInput.Header = label;
         PromptInput.PlaceholderText = placeholder;
@@ -151,6 +173,22 @@ public sealed partial class FilePaneControl : UserControl
 
     private void OnPromptCancel(object sender, RoutedEventArgs e) =>
         _promptTcs?.TrySetResult(null);
+
+    // Grid-level handler catches Enter/Escape when focus isn't on the TextBox — e.g. the
+    // user has Tabbed onto the Create or Cancel button. Mirrors PromptInput's KeyDown.
+    private void OnPromptKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key == VirtualKey.Enter && PromptOkButton.IsEnabled)
+        {
+            e.Handled = true;
+            OnPromptOk(sender, e);
+        }
+        else if (e.Key == VirtualKey.Escape)
+        {
+            e.Handled = true;
+            OnPromptCancel(sender, e);
+        }
+    }
 
     private static async Task<T> CompleteOverlayAsync<T>(Task<T> task, Action hide, Action clear)
     {
@@ -394,12 +432,13 @@ public sealed partial class FilePaneControl : UserControl
                         // common WinSCP workflow; users navigate then rename instead.
                         return;
                     }
-                    await OnTransferRequested(new TransferRequest(direction, ViewModel.CurrentPath, items)).ConfigureAwait(true);
-                    // The destination pane is the one that received the drop (this pane);
-                    // its listing is stale until refreshed. Without this the transferred
-                    // file lives on disk / the server but the user has no way to see it
-                    // without clicking the Refresh button manually.
-                    await ViewModel.RefreshAsync().ConfigureAwait(true);
+                    // Fire-and-forget: do NOT await the orchestrator inline. The drag-drop
+                    // deferral must be completed promptly so Explorer's "busy" cursor (or
+                    // the source pane's drag state) clears as soon as the drop is queued —
+                    // not after a multi-MB SFTP transfer has finished bytes. Errors are
+                    // logged inside RunTransferAsync; the destination pane refreshes when
+                    // the transfer completes.
+                    FireAndForgetTransfer(new TransferRequest(direction, ViewModel.CurrentPath, items));
                 }
                 return;
             }
@@ -423,8 +462,7 @@ public sealed partial class FilePaneControl : UserControl
                     await ViewModel.RefreshAsync().ConfigureAwait(true);
                     return;
                 }
-                await OnTransferRequested(new TransferRequest(direction, ViewModel.CurrentPath, items)).ConfigureAwait(true);
-                await ViewModel.RefreshAsync().ConfigureAwait(true);
+                FireAndForgetTransfer(new TransferRequest(direction, ViewModel.CurrentPath, items));
             }
         }
         finally
@@ -439,6 +477,35 @@ public sealed partial class FilePaneControl : UserControl
         if (!view.Properties.TryGetValue(PaneSentinelKey, out var raw) || raw is not string tag) return false;
         sourceIsLocal = tag == "Local";
         return true;
+    }
+
+    /// <summary>
+    /// Kick off a transfer + post-transfer pane refresh without awaiting in the caller's
+    /// frame. Used by OnDrop so the drag-drop deferral can complete promptly instead of
+    /// pinning the source application's drag cursor for the entire SFTP batch. Exceptions
+    /// are logged via Debug.WriteLine; the orchestrator itself surfaces per-row errors
+    /// through the transfer queue strip's ErrorMessage tooltip, so swallowing here only
+    /// loses the outer task fault — not the per-file diagnostics.
+    /// </summary>
+    private void FireAndForgetTransfer(TransferRequest request)
+    {
+        var vm = ViewModel;
+        var requested = OnTransferRequested;
+        if (vm is null || requested is null) return;
+        _ = RunTransferAsync(requested, vm, request);
+    }
+
+    private static async Task RunTransferAsync(Func<TransferRequest, Task> requested, FilePaneViewModel vm, TransferRequest request)
+    {
+        try
+        {
+            await requested(request).ConfigureAwait(true);
+            await vm.RefreshAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine("Background transfer failed: " + ex);
+        }
     }
 
     private static Task CopyLocalAsync(IReadOnlyList<TransferItem> items, string destDir) =>

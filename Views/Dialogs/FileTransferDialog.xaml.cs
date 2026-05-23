@@ -69,9 +69,17 @@ public sealed partial class FileTransferDialog : UserControl
         }
         ConflictApplyAll.IsChecked = false;
 
+        // Reentrancy guard. The orchestrator's foreach processes one conflict at a time
+        // so in normal flow there's never a second invocation while the first is open,
+        // but defend anyway: a stranded TCS would deadlock InvokeResolverOnUiAsync's
+        // await on tcs.Task.
+        _conflictTcs?.TrySetResult((ConflictDecision.Skip, false));
         var tcs = new TaskCompletionSource<(ConflictDecision, bool)>(TaskCreationOptions.RunContinuationsAsynchronously);
         _conflictTcs = tcs;
         ConflictOverlay.Visibility = Visibility.Visible;
+        // Focus the accent Skip button so Enter/Escape KeyDown routes through the
+        // overlay Grid and a stray Enter on a blank focus state still resolves Skip.
+        _ = DispatcherQueue.TryEnqueue(() => ConflictSkipButton.Focus(FocusState.Programmatic));
 
         // Cancellation (dialog closing / shutdown) defaults to Skip so the batch can
         // unwind cleanly instead of waiting on a TCS that nothing will complete.
@@ -98,4 +106,20 @@ public sealed partial class FileTransferDialog : UserControl
     // and the next conflict still prompts.
     private void OnConflictCancel(object sender, RoutedEventArgs e) =>
         _conflictTcs?.TrySetResult((ConflictDecision.Skip, false));
+
+    // Enter = Skip (the safer default, matching the pre-overlay ContentDialog's
+    // DefaultButton=Secondary). Escape = Cancel (Skip without apply-all).
+    private void OnConflictKeyDown(object sender, Microsoft.UI.Xaml.Input.KeyRoutedEventArgs e)
+    {
+        if (e.Key == Windows.System.VirtualKey.Enter)
+        {
+            e.Handled = true;
+            _conflictTcs?.TrySetResult((ConflictDecision.Skip, ConflictApplyAll.IsChecked == true));
+        }
+        else if (e.Key == Windows.System.VirtualKey.Escape)
+        {
+            e.Handled = true;
+            _conflictTcs?.TrySetResult((ConflictDecision.Skip, false));
+        }
+    }
 }
