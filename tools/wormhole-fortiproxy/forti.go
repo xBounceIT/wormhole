@@ -338,20 +338,41 @@ type tunnelConfigXML struct {
 	DNS        []netip.Addr
 }
 
-// FortiGate XML schema (abridged):
-//   <sslvpn-tunnel mtu="1500" dpd-retry-interval="3" ...>
-//     <ipv4 assigned-addr="10.212.134.205" ...>
-//       <dns ip="10.0.0.1"/>
-//       <dns ip="10.0.0.2"/>
-//     </ipv4>
-//   </sslvpn-tunnel>
+// FortiGate XML schema — two layouts are observed in the wild, both accepted here:
+//
+//   Layout A (older firmwares, attribute form):
+//     <sslvpn-tunnel mtu="1500" dpd-retry-interval="3" ...>
+//       <ipv4 assigned-addr="10.212.134.205" ...>
+//         <dns ip="10.0.0.1"/>
+//       </ipv4>
+//     </sslvpn-tunnel>
+//
+//   Layout B (newer firmwares, nested element form with `ipv4` attribute):
+//     <sslvpn-tunnel mtu="1500" ...>
+//       <ipv4>
+//         <assigned-addr ipv4="10.212.134.205"/>
+//         <dns ip="10.0.0.1"/>
+//       </ipv4>
+//     </sslvpn-tunnel>
+//
+// A parser that handles only one layout silently fails on the other with "no assigned
+// IPv4 address" even when the login succeeded, leaving users stuck with no diagnostic.
 func parseTunnelConfigXML(b []byte) (tunnelConfigXML, error) {
 	type dnsEl struct {
 		IP string `xml:"ip,attr"`
 	}
+	type assignedAddrEl struct {
+		// Layout B uses an `ipv4` attribute on the nested element; some firmwares also
+		// emit `addr` for the same field. Accept either.
+		IPv4 string `xml:"ipv4,attr"`
+		Addr string `xml:"addr,attr"`
+	}
 	type ipv4El struct {
-		AssignedAddr string  `xml:"assigned-addr,attr"`
-		DNS          []dnsEl `xml:"dns"`
+		// Layout A: attribute on the ipv4 element itself.
+		AssignedAddrAttr string `xml:"assigned-addr,attr"`
+		// Layout B: nested <assigned-addr ipv4="..."/> element.
+		AssignedAddrEl assignedAddrEl `xml:"assigned-addr"`
+		DNS            []dnsEl        `xml:"dns"`
 	}
 	type rootEl struct {
 		MTU  int    `xml:"mtu,attr"`
@@ -365,12 +386,21 @@ func parseTunnelConfigXML(b []byte) (tunnelConfigXML, error) {
 	if out.MTU <= 0 {
 		out.MTU = 1500
 	}
-	if root.IPv4.AssignedAddr == "" {
+	// Prefer layout A's attribute; fall back to layout B's nested element. The element
+	// form can carry the IP under either `ipv4` or `addr` depending on firmware.
+	raw := root.IPv4.AssignedAddrAttr
+	if raw == "" {
+		raw = root.IPv4.AssignedAddrEl.IPv4
+	}
+	if raw == "" {
+		raw = root.IPv4.AssignedAddrEl.Addr
+	}
+	if raw == "" {
 		return tunnelConfigXML{}, errors.New("no assigned IPv4 address in tunnel config XML")
 	}
-	addr, err := netip.ParseAddr(root.IPv4.AssignedAddr)
+	addr, err := netip.ParseAddr(raw)
 	if err != nil {
-		return tunnelConfigXML{}, fmt.Errorf("assigned-addr %q: %w", root.IPv4.AssignedAddr, err)
+		return tunnelConfigXML{}, fmt.Errorf("assigned-addr %q: %w", raw, err)
 	}
 	out.AssignedIP = addr
 	for _, d := range root.IPv4.DNS {
