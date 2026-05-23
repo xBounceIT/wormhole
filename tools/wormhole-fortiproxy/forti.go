@@ -373,21 +373,24 @@ func parseChallengeHTML(body string) *challenge {
 	}
 	fields := map[string]string{}
 	for _, tag := range hiddenInputRE.FindAllString(body, -1) {
-		if !strings.Contains(strings.ToLower(tag), `type="hidden"`) &&
-			!strings.Contains(strings.ToLower(tag), `type='hidden'`) &&
-			!strings.Contains(strings.ToLower(tag), `type=hidden`) {
-			continue
-		}
-		var name, value string
+		// Parse attributes once and inspect them; substring-matching `type="hidden"`
+		// missed valid HTML with whitespace around the equals (e.g. `type = "hidden"`)
+		// or attribute reordering with surrounding whitespace. attrRE tolerates both.
+		var typ, name, value string
 		for _, m := range attrRE.FindAllStringSubmatch(tag, -1) {
 			// m[1]=attr, m[2]=double-quoted, m[3]=single-quoted, m[4]=unquoted
 			val := m[2] + m[3] + m[4]
 			switch strings.ToLower(m[1]) {
+			case "type":
+				typ = val
 			case "name":
 				name = val
 			case "value":
 				value = val
 			}
+		}
+		if !strings.EqualFold(typ, "hidden") {
+			continue
 		}
 		if name != "" {
 			fields[name] = value

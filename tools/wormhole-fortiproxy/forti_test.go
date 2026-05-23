@@ -123,6 +123,29 @@ func TestParseChallenge_HTMLForm(t *testing.T) {
 	}
 }
 
+func TestParseChallenge_HTMLForm_SpacedAttributes(t *testing.T) {
+	// Valid HTML: whitespace around `=` is allowed by the HTML spec. Locks W10 against
+	// regression to a substring-based type=hidden check that misses this form.
+	body := `<form>
+<input  type = "hidden"   name = "reqid"   value = "9"  />
+<input  type = 'hidden'   name = 'magic'   value = 'm1' />
+<input  name = "polid"   value = "5"  type = "hidden" >
+</form>`
+	c := parseChallenge(body)
+	if c == nil {
+		t.Fatal("expected non-nil challenge for spaced-attribute HTML")
+	}
+	if c.form.Get("magic") != "m1" {
+		t.Errorf("magic: got %q want m1", c.form.Get("magic"))
+	}
+	if c.form.Get("reqid") != "9" {
+		t.Errorf("reqid: got %q want 9", c.form.Get("reqid"))
+	}
+	if c.form.Get("polid") != "5" {
+		t.Errorf("polid: got %q want 5", c.form.Get("polid"))
+	}
+}
+
 func TestParseChallenge_HTMLForm_ForwardsGrpid(t *testing.T) {
 	// FortiGate HTML challenge typically uses `grpid` rather than `grp` — must be echoed
 	// back or the challenge POST is rejected.
