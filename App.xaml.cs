@@ -12,6 +12,7 @@ using Wormhole.Services.Rdp;
 using Wormhole.Services.Ssh;
 using Wormhole.Services.Tunneling;
 using Wormhole.Services.Tunneling.Fortinet;
+using Wormhole.Services.Tunneling.OpenVpn;
 using Wormhole.Services.Tunneling.WireGuard;
 using Wormhole.ViewModels;
 using Wormhole.ViewModels.Sessions;
@@ -156,6 +157,7 @@ public partial class App : Application
         services.AddSingleton<InheritanceResolver>();
 
         services.AddSingleton<ITunnelProvider, WireGuardTunnelProvider>();
+        services.AddSingleton<ITunnelProvider, OpenVpnTunnelProvider>();
         services.AddSingleton<ITunnelProvider, FortinetTunnelProvider>();
         services.AddSingleton<TunnelManager>();
         services.AddSingleton<INavigationService, NavigationService>();
@@ -167,6 +169,7 @@ public partial class App : Application
         services.AddSingleton<IRdpSessionService, RdpSessionService>();
         services.AddSingleton<IRdpCrashSentinelService, RdpCrashSentinelService>();
         services.AddSingleton<ISftpService, SftpService>();
+        services.AddSingleton<IFileTransferDialogService, FileTransferDialogService>();
         services.AddSingleton<IMRemoteNgImportService, MRemoteNgImportService>();
 
         var assemblyVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "0.0.0";

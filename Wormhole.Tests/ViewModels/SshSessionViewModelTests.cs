@@ -168,6 +168,77 @@ public sealed class SshSessionViewModelTests
         Assert.Null(vm.ReconnectCommand);
     }
 
+    // CanOpenFileTransfer should only be true once the SSH session is Connected — the
+    // SFTP service opens a fresh authenticated channel that piggybacks on the same
+    // credentials, so showing the menu item before auth completes would surface an
+    // immediate "no credentials" error.
+
+    [Fact]
+    public void CanOpenFileTransfer_IsFalse_BeforeConnected()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+
+        Assert.False(vm.CanOpenFileTransfer);
+    }
+
+    [Fact]
+    public void CanOpenFileTransfer_FlipsWithStatus()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+
+        vm.Status = SessionStatus.Connecting;
+        Assert.False(vm.CanOpenFileTransfer);
+
+        vm.Status = SessionStatus.Connected;
+        Assert.True(vm.CanOpenFileTransfer);
+
+        vm.Status = SessionStatus.Failed;
+        Assert.False(vm.CanOpenFileTransfer);
+
+        vm.Status = SessionStatus.Disconnected;
+        Assert.False(vm.CanOpenFileTransfer);
+    }
+
+    [Fact]
+    public void CanOpenFileTransfer_NotifiesOnStatusChange()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        int notifications = 0;
+        vm.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(vm.CanOpenFileTransfer)) notifications++;
+        };
+
+        vm.Status = SessionStatus.Connected;
+        vm.Status = SessionStatus.Failed;
+
+        Assert.Equal(2, notifications);
+    }
+
+    [Fact]
+    public void CanOpenFileTransfer_IsFalse_ForRdpSession()
+    {
+        var vm = new RdpSessionViewModel(
+            new NullRdpSessionService(),
+            new Fakes.FakeCredentialService(),
+            new NullCredentialRepository(),
+            new Fakes.FakeDialogService(),
+            new Fakes.FakeRdpCrashSentinelService(),
+            NullLoggerFactory.Instance);
+
+        Assert.False(vm.CanOpenFileTransfer);
+    }
+
+    [Fact]
+    public void CanOpenFileTransfer_IsFalse_ForSftpSession()
+    {
+        var vm = new SftpSessionViewModel();
+        Assert.False(vm.CanOpenFileTransfer);
+    }
+
     [Fact]
     public void RetryCommand_CanExecute_IsFalse_WhileConnecting()
     {

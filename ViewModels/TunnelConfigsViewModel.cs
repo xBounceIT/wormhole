@@ -125,6 +125,24 @@ public partial class TunnelConfigsViewModel : ObservableObject
             Kind = draft.Kind,
         };
 
+        byte[] secretBytes;
+        try
+        {
+            // Serialize BEFORE committing the row: SerializeSecret can throw on a missing
+            // per-kind settings group or an unsupported Kind. If it threw inside the
+            // SaveSecretWithCompensationAsync argument list below, the row would already be
+            // committed via _repo.AddAsync, but the rollback wouldn't register — leaving an
+            // orphan row whose name is now reserved by the UNIQUE constraint. Hoist the call
+            // so any failure happens before persistence touches the DB.
+            secretBytes = SerializeSecret(draft);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to serialize tunnel secret for '{Name}'", record.Name);
+            await _dialog.ShowMessageAsync("Couldn't save tunnel", ex.Message);
+            return;
+        }
+
         try
         {
             await _repo.AddAsync(record);
@@ -134,7 +152,7 @@ public partial class TunnelConfigsViewModel : ObservableObject
             // the secret write throws so a retry can use the same name.
             await SaveSecretWithCompensationAsync(
                 record.Id,
-                SerializeSecret(draft),
+                secretBytes,
                 rollback: () => _repo.DeleteAsync(record.Id));
             Configs.Add(record);
         }
@@ -150,7 +168,19 @@ public partial class TunnelConfigsViewModel : ObservableObject
     {
         if (config is null) return;
 
-        var existing = await ReadDraftAsync(config);
+        var (existing, loadFailure) = await ReadDraftAsync(config);
+        if (loadFailure is not null)
+        {
+            // Warn the user BEFORE opening the dialog that the existing settings couldn't be
+            // loaded — without this, the form silently appears blank and a casual Save would
+            // overwrite the (potentially recoverable) on-disk blob with empty values. The
+            // dialog still opens after the warning so the user can re-enter values; cancelling
+            // out leaves the original (corrupt-on-disk) blob untouched.
+            await _dialog.ShowMessageAsync(
+                "Tunnel settings couldn't be loaded",
+                $"The saved settings for '{config.Name}' could not be read ({loadFailure}). " +
+                "The form will open empty — re-enter the values and Save to repair, or Cancel to leave the existing data on disk untouched.");
+        }
         var draft = await _dialog.PromptForTunnelAsync(existing);
         if (draft is null) return;
 
@@ -203,12 +233,27 @@ public partial class TunnelConfigsViewModel : ObservableObject
             UpdatedAt = config.UpdatedAt,
         };
 
+        byte[] secretBytes;
+        try
+        {
+            // Serialize BEFORE committing the row update — same reasoning as AddTunnelAsync:
+            // a throw out of SerializeSecret after UpdateAsync would leave the row showing the
+            // new Name/Kind while the secret blob still holds the old values, with no rollback.
+            secretBytes = SerializeSecret(draft);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to serialize tunnel secret for '{Name}'", draft.Name);
+            await _dialog.ShowMessageAsync("Couldn't update tunnel", ex.Message);
+            return;
+        }
+
         try
         {
             await _repo.UpdateAsync(snapshot);
             await SaveSecretWithCompensationAsync(
                 config.Id,
-                SerializeSecret(draft),
+                secretBytes,
                 rollback: () => _repo.UpdateAsync(new TunnelConfig
                 {
                     Id = config.Id,
@@ -284,90 +329,90 @@ public partial class TunnelConfigsViewModel : ObservableObject
         }
     }
 
-    // Always returns a draft: failures degrade to an empty per-kind settings so the user can
+    // Always returns a draft: failures degrade to empty per-kind settings so the user can
     // re-enter values and Save to repair. The dialog's IsValid gating prevents accidentally
-    // saving an empty draft over real data.
-    //
-    // Why default JsonSerializer options (not Disallow): rejecting unknown members would break
-    // forward-compat reads — an older binary opening a blob saved by a newer build with extra
-    // optional fields would throw and silently lose those fields on next Save. Instead we
-    // deserialize permissively, then run a kind-specific "looks plausibly populated" check; if
-    // the blob deserialized to all-default values (the symptom of a kind/blob mismatch where no
-    // property names overlapped), surface that as a warning and keep the empty draft so the
-    // user re-enters values rather than discovering at Save time.
-    private async Task<TunnelDraft> ReadDraftAsync(TunnelConfig config)
+    // saving an empty draft over real data. The string in the returned tuple is null on a
+    // successful read; on any failure path (missing blob, IO error, JSON parse error) it's a
+    // short human-readable reason — EditTunnelAsync surfaces this to the user via a warning
+    // dialog before opening the empty form, so a casual Save doesn't overwrite recoverable
+    // bytes with empty defaults.
+    private async Task<(TunnelDraft Draft, string? LoadFailure)> ReadDraftAsync(TunnelConfig config)
     {
-        var wg = new WireGuardSettings();
-        var fg = new FortinetSettings();
+        byte[]? secret = null;
+        string? loadFailure = null;
         try
         {
-            var secret = await _credentials.ReadTunnelConfigAsync(config.Id);
+            secret = await _credentials.ReadTunnelConfigAsync(config.Id);
             if (secret is null or { Length: 0 })
             {
                 _logger.LogWarning(
                     "Secret blob missing for tunnel {Id} ('{Name}'); user will re-enter values.",
                     config.Id, config.Name);
-            }
-            else
-            {
-                switch (config.Kind)
-                {
-                    case TunnelKind.WireGuard:
-                        wg = JsonSerializer.Deserialize<WireGuardSettings>(secret) ?? new WireGuardSettings();
-                        if (!LooksPopulated(wg))
-                        {
-                            _logger.LogWarning(
-                                "Tunnel {Id} ('{Name}') Kind=WireGuard but secret blob deserialized to defaults; " +
-                                "blob may be corrupted or belong to a different kind. User sees an empty editor.",
-                                config.Id, config.Name);
-                        }
-                        break;
-                    case TunnelKind.Fortinet:
-                        fg = JsonSerializer.Deserialize<FortinetSettings>(secret) ?? new FortinetSettings();
-                        if (!LooksPopulated(fg))
-                        {
-                            _logger.LogWarning(
-                                "Tunnel {Id} ('{Name}') Kind=Fortinet but secret blob deserialized to defaults; " +
-                                "blob may be corrupted or belong to a different kind. User sees an empty editor.",
-                                config.Id, config.Name);
-                        }
-                        break;
-                    default:
-                        // An unknown Kind reached the read path. SerializeSecret/ValidateDraft
-                        // both throw on unknown kinds — keep the read path symmetric by logging
-                        // loudly and returning empty defaults so the user can see the editor
-                        // (rather than silently swallowing the corruption).
-                        _logger.LogError(
-                            "Tunnel {Id} ('{Name}') has unknown Kind={Kind}; user will see an empty editor.",
-                            config.Id, config.Name, config.Kind);
-                        break;
-                }
+                loadFailure = "the encrypted settings file is missing or empty";
+                secret = null;
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to load tunnel secret for '{Name}'", config.Name);
+            loadFailure = $"could not read the encrypted settings file: {ex.Message}";
+            secret = null;
         }
-        return new TunnelDraft(config.Name, config.Kind, wg, fg);
+
+        var draft = config.Kind switch
+        {
+            TunnelKind.WireGuard => new TunnelDraft(
+                config.Name,
+                config.Kind,
+                WireGuard: DeserializeOrEmpty<WireGuardSettings>(secret, config, ref loadFailure),
+                OpenVpn: null,
+                Fortinet: null),
+            TunnelKind.OpenVpn => new TunnelDraft(
+                config.Name,
+                config.Kind,
+                WireGuard: null,
+                OpenVpn: DeserializeOrEmpty<OpenVpnSettings>(secret, config, ref loadFailure),
+                Fortinet: null),
+            TunnelKind.Fortinet => new TunnelDraft(
+                config.Name,
+                config.Kind,
+                WireGuard: null,
+                OpenVpn: null,
+                Fortinet: DeserializeOrEmpty<FortinetSettings>(secret, config, ref loadFailure)),
+            _ => new TunnelDraft(config.Name, config.Kind, WireGuard: null, OpenVpn: null, Fortinet: null),
+        };
+        return (draft, loadFailure);
     }
 
-    // "Looks populated" = at least one of the kind's required fields is non-empty. A blob
-    // that deserialized to all-default values is the symptom of a kind/blob mismatch (no JSON
-    // properties overlapped with the target type) — distinct from "user saved an empty form,"
-    // which is rejected by ValidateDraft before SerializeSecret writes any bytes.
-    private static bool LooksPopulated(WireGuardSettings wg) =>
-        !string.IsNullOrWhiteSpace(wg.InterfacePrivateKey) ||
-        !string.IsNullOrWhiteSpace(wg.PeerPublicKey) ||
-        !string.IsNullOrWhiteSpace(wg.PeerEndpoint);
-
-    private static bool LooksPopulated(FortinetSettings fg) =>
-        !string.IsNullOrWhiteSpace(fg.Host) ||
-        !string.IsNullOrWhiteSpace(fg.Username);
+    // Centralized deserialize-or-empty so a corrupt blob (bad JSON, wrong shape) degrades to a
+    // blank-form repair path the same way a missing blob does — never throws out of
+    // ReadDraftAsync. Updates loadFailure on parse error so EditTunnelAsync can surface the
+    // reason to the user before they re-enter values and overwrite the on-disk bytes.
+    private T DeserializeOrEmpty<T>(byte[]? secret, TunnelConfig config, ref string? loadFailure) where T : new()
+    {
+        if (secret is null) return new T();
+        try
+        {
+            return JsonSerializer.Deserialize<T>(secret) ?? new T();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to parse tunnel secret for '{Name}' as {Type}", config.Name, typeof(T).Name);
+            // Only overwrite loadFailure on parse error if it wasn't already set by the outer
+            // IO/read path — preserving the more specific upstream cause.
+            loadFailure ??= $"the encrypted settings file could not be parsed: {ex.Message}";
+            return new T();
+        }
+    }
 
     private static byte[] SerializeSecret(TunnelDraft draft) => draft.Kind switch
     {
-        TunnelKind.WireGuard => JsonSerializer.SerializeToUtf8Bytes(draft.WireGuard),
-        TunnelKind.Fortinet => JsonSerializer.SerializeToUtf8Bytes(draft.Fortinet),
+        TunnelKind.WireGuard => JsonSerializer.SerializeToUtf8Bytes(
+            draft.WireGuard ?? throw new InvalidOperationException("WireGuard settings are missing for a WireGuard draft.")),
+        TunnelKind.OpenVpn => JsonSerializer.SerializeToUtf8Bytes(
+            draft.OpenVpn ?? throw new InvalidOperationException("OpenVPN settings are missing for an OpenVPN draft.")),
+        TunnelKind.Fortinet => JsonSerializer.SerializeToUtf8Bytes(
+            draft.Fortinet ?? throw new InvalidOperationException("Fortinet settings are missing for a Fortinet draft.")),
         _ => throw new InvalidOperationException($"Unsupported tunnel kind '{draft.Kind}'."),
     };
 
@@ -385,6 +430,9 @@ public partial class TunnelConfigsViewModel : ObservableObject
             case TunnelKind.WireGuard:
                 ValidateWireGuard(draft.WireGuard);
                 return;
+            case TunnelKind.OpenVpn:
+                ValidateOpenVpn(draft.OpenVpn);
+                return;
             case TunnelKind.Fortinet:
                 ValidateFortinet(draft.Fortinet);
                 return;
@@ -393,8 +441,10 @@ public partial class TunnelConfigsViewModel : ObservableObject
         }
     }
 
-    private static void ValidateWireGuard(WireGuardSettings wg)
+    private static void ValidateWireGuard(WireGuardSettings? wg)
     {
+        if (wg is null)
+            throw new InvalidOperationException("WireGuard settings are required for a WireGuard tunnel.");
         var sb = new StringBuilder();
         if (string.IsNullOrWhiteSpace(wg.InterfacePrivateKey)) sb.AppendLine("Interface private key is required.");
         if (string.IsNullOrWhiteSpace(wg.InterfaceAddress)) sb.AppendLine("Interface address is required (e.g. 10.0.0.2/32).");
@@ -403,8 +453,18 @@ public partial class TunnelConfigsViewModel : ObservableObject
         if (sb.Length > 0) throw new InvalidOperationException(sb.ToString().TrimEnd());
     }
 
-    private static void ValidateFortinet(FortinetSettings fg)
+    private static void ValidateOpenVpn(OpenVpnSettings? ovpn)
     {
+        if (ovpn is null)
+            throw new InvalidOperationException("OpenVPN settings are required for an OpenVPN tunnel.");
+        if (string.IsNullOrWhiteSpace(ovpn.ProfileOvpn))
+            throw new InvalidOperationException("OpenVPN profile (.ovpn contents) is required.");
+    }
+
+    private static void ValidateFortinet(FortinetSettings? fg)
+    {
+        if (fg is null)
+            throw new InvalidOperationException("Fortinet settings are required for a Fortinet tunnel.");
         var sb = new StringBuilder();
         if (string.IsNullOrWhiteSpace(fg.Host)) sb.AppendLine("Gateway host is required.");
         if (fg.Port is < 1 or > 65535) sb.AppendLine("Port must be between 1 and 65535.");

@@ -46,9 +46,22 @@ public sealed class WireGuardTunnelProvider : ITunnelProvider
             sidecarPath, sidecar, _loggerFactory.CreateLogger<WireGuardProcessHost>(), cancellationToken)
             .ConfigureAwait(false);
 
-        return new SocksTunnelInstance(
-            host.SocksEndpoint,
-            _loggerFactory.CreateLogger<SocksTunnelInstance>(),
-            onDispose: async () => await host.DisposeAsync().ConfigureAwait(false));
+        // Wrap-after-start: the sidecar process is alive once StartAsync returns. If the
+        // SocksTunnelInstance ctor ever throws (today its args can't trigger one, but a
+        // future ArgumentNullException.ThrowIfNull added inside the ctor would), the host
+        // would be left running with no managed reference to dispose it. Guard against that
+        // by tearing down the host on construction failure.
+        try
+        {
+            return new SocksTunnelInstance(
+                host.SocksEndpoint,
+                _loggerFactory.CreateLogger<SocksTunnelInstance>(),
+                onDispose: async () => await host.DisposeAsync().ConfigureAwait(false));
+        }
+        catch
+        {
+            await host.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 }

@@ -3,5 +3,6 @@ namespace Wormhole.Models;
 public enum TunnelKind
 {
     WireGuard = 0,
-    Fortinet = 1,
+    OpenVpn = 1,
+    Fortinet = 2,
 }

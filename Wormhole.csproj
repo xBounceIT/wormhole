@@ -27,6 +27,11 @@
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <RepositoryUrl>https://github.com/xBounceIT/wormhole</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
+    <Authors>Daniel D'Angeli</Authors>
+    <Copyright>Copyright (c) 2026 Daniel D'Angeli</Copyright>
+    <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/xBounceIT/wormhole</PackageProjectUrl>
+    <Description>Tabbed multi-protocol connection manager for Windows (SSH, RDP, SFTP) with per-connection userspace VPN tunnels.</Description>
     <_WebView2LoaderRid Condition="'$(RuntimeIdentifier)' == 'win-x64'">win-x64</_WebView2LoaderRid>
     <_WebView2LoaderRid Condition="'$(RuntimeIdentifier)' == 'win-arm64'">win-arm64</_WebView2LoaderRid>
     <_WebView2LoaderRid Condition="'$(_WebView2LoaderRid)' == '' And '$(PlatformTarget)' == 'x64'">win-x64</_WebView2LoaderRid>
@@ -132,6 +137,28 @@
       <None Include="$(MSBuildProjectDirectory)\obj\fortiproxy\$(_FortiProxyArch)\wormhole-fortiproxy.exe"
             Condition="Exists('$(MSBuildProjectDirectory)\obj\fortiproxy\$(_FortiProxyArch)\wormhole-fortiproxy.exe')">
         <Link>wormhole-fortiproxy.exe</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        <Visible>false</Visible>
+      </None>
+    </ItemGroup>
+  </Target>
+
+  <!-- OpenVPN userspace sidecar. Mirrors FetchWgProxy above. The script either downloads a
+       pinned release, builds from tools\wormhole-ovpnproxy\ with the full toolchain (Go +
+       CMake + C++ + populated submodules) for a real OpenVPN3-linked binary, or falls back
+       to a mock-only sidecar that still satisfies the wire protocol so the rest of the app
+       keeps working. Missing toolchain warns but does not break the build. -->
+  <Target Name="FetchOvpnProxy" BeforeTargets="BeforeBuild">
+    <PropertyGroup>
+      <_OvpnProxyArch Condition="'$(PlatformTarget)' == 'ARM64' Or '$(PlatformTarget)' == 'arm64'">arm64</_OvpnProxyArch>
+      <_OvpnProxyArch Condition="'$(_OvpnProxyArch)' == ''">x64</_OvpnProxyArch>
+    </PropertyGroup>
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\scripts\Fetch-OvpnProxy.ps1&quot; -Arch $(_OvpnProxyArch) -Quiet" />
+    <ItemGroup>
+      <None Include="$(MSBuildProjectDirectory)\obj\ovpnproxy\$(_OvpnProxyArch)\wormhole-ovpnproxy.exe"
+            Condition="Exists('$(MSBuildProjectDirectory)\obj\ovpnproxy\$(_OvpnProxyArch)\wormhole-ovpnproxy.exe')">
+        <Link>wormhole-ovpnproxy.exe</Link>
         <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
         <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
         <Visible>false</Visible>
