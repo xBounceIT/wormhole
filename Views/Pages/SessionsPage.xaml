@@ -77,16 +77,32 @@
                             <!-- Click handlers (not Command bindings) because ElementName binding
                                  can't escape the DataTemplate's namescope into the MenuFlyout popup. -->
                             <MenuFlyout>
-                                <MenuFlyoutItem Text="Duplicate" Click="OnTabDuplicateClick" />
+                                <MenuFlyoutItem Text="Duplicate" Click="OnTabDuplicateClick">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE8C8;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
                                 <MenuFlyoutItem Text="Reconnect"
                                                 Click="OnTabReconnectClick"
                                                 Command="{x:Bind ReconnectCommand, Mode=OneTime}"
-                                                Visibility="{x:Bind CanReconnect, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                                Visibility="{x:Bind CanReconnect, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE72C;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
                                 <MenuFlyoutItem Text="File transfer"
                                                 Click="OnTabFileTransferClick"
-                                                Visibility="{x:Bind CanOpenFileTransfer, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                                Visibility="{x:Bind CanOpenFileTransfer, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE8B7;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
                                 <MenuFlyoutSeparator />
-                                <MenuFlyoutItem Text="Close" Click="OnTabCloseClick" />
+                                <MenuFlyoutItem Text="Close" Click="OnTabCloseClick">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE894;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
                             </MenuFlyout>
                         </TabViewItem.ContextFlyout>
                         <ContentControl Content="{x:Bind}"
