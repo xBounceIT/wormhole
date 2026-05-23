@@ -252,6 +252,171 @@ public sealed class SshSessionViewModelTests
         Assert.False(vm.CanOpenFileTransfer);
     }
 
+    // === SFTP pre-warm =====================================================
+    // When the shell session reaches Connected, the VM opens an SFTP session in the
+    // background so the file-transfer dialog can hand off a warm session instead of
+    // running an ~800ms SSH/SFTP connect on every click. The tests below cover the
+    // state machine: kicks off, cancels on disconnect, returns null before ready,
+    // consume + re-warm, and silent failure.
+
+    [Fact]
+    public async Task Prewarm_KicksOff_OnConnectedTransition()
+    {
+        var sftp = new FakeSftpService();
+        var vm = CreateViewModel(sftp);
+        vm.Initialize(CreateProfile());
+        var creds = new SshCredentials("pwd", null, null);
+        vm.PrimeCredentialsForTesting(creds);
+
+        vm.AttachConnectedSessionForTesting(new FakeSshSession());
+
+        await WaitForAsync(() => vm.HasPrewarmedSftpForTesting());
+        Assert.Equal(1, sftp.ConnectCallCount);
+        Assert.Same(creds, sftp.LastCredentials);
+    }
+
+    [Fact]
+    public async Task Prewarm_Cancels_OnDisconnect()
+    {
+        var sftp = new FakeSftpService();
+        var cancelObserved = new TaskCompletionSource();
+        sftp.ConnectImpl = async (_, _, _, ct) =>
+        {
+            try { await Task.Delay(Timeout.Infinite, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { cancelObserved.TrySetResult(); throw; }
+            return new FakeSftpSession();
+        };
+        var vm = CreateViewModel(sftp);
+        vm.Initialize(CreateProfile());
+        vm.PrimeCredentialsForTesting(new SshCredentials("pwd", null, null));
+
+        vm.AttachConnectedSessionForTesting(new FakeSshSession());
+        await WaitForAsync(() => vm.HasInFlightPrewarmForTesting());
+
+        await vm.DetachAsync();
+
+        await cancelObserved.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await WaitForAsync(() => !vm.HasInFlightPrewarmForTesting());
+        Assert.False(vm.HasPrewarmedSftpForTesting());
+    }
+
+    [Fact]
+    public async Task TryConsumePrewarmedSftp_ReturnsNull_BeforeReady()
+    {
+        var sftp = new FakeSftpService();
+        // Never completes so the cache stays empty.
+        sftp.ConnectImpl = (_, _, _, _) => new TaskCompletionSource<ISftpSession>().Task;
+        var vm = CreateViewModel(sftp);
+        vm.Initialize(CreateProfile());
+        vm.PrimeCredentialsForTesting(new SshCredentials("pwd", null, null));
+
+        vm.AttachConnectedSessionForTesting(new FakeSshSession());
+        await WaitForAsync(() => vm.HasInFlightPrewarmForTesting());
+
+        Assert.Null(vm.TryConsumePrewarmedSftp());
+    }
+
+    [Fact]
+    public async Task TryConsumePrewarmedSftp_ReturnsSessionOnce_AndReWarms()
+    {
+        // Use gated TCSs so the test can deterministically observe both prewarm
+        // attempts: the first to fill the cache, the second kicked off by the
+        // consume call.
+        var firstGate = new TaskCompletionSource<ISftpSession>();
+        var secondGate = new TaskCompletionSource<ISftpSession>();
+        var sftp = new FakeSftpService();
+        sftp.ConnectImpl = (_, _, _, _) =>
+            sftp.ConnectCallCount == 1 ? firstGate.Task : secondGate.Task;
+
+        var vm = CreateViewModel(sftp);
+        vm.Initialize(CreateProfile());
+        vm.PrimeCredentialsForTesting(new SshCredentials("pwd", null, null));
+
+        vm.AttachConnectedSessionForTesting(new FakeSshSession());
+        await WaitForAsync(() => sftp.ConnectCallCount == 1);
+
+        var fakeFirst = new FakeSftpSession();
+        firstGate.SetResult(fakeFirst);
+        await WaitForAsync(() => vm.HasPrewarmedSftpForTesting());
+
+        var consumed = vm.TryConsumePrewarmedSftp();
+        Assert.NotNull(consumed);
+        Assert.Same(fakeFirst, consumed!.Value.Session);
+
+        // Consuming kicks off a fresh prewarm; while it's in flight the cache
+        // must be empty.
+        await WaitForAsync(() => sftp.ConnectCallCount == 2);
+        Assert.False(vm.HasPrewarmedSftpForTesting());
+        Assert.Null(vm.TryConsumePrewarmedSftp());
+
+        var fakeSecond = new FakeSftpSession();
+        secondGate.SetResult(fakeSecond);
+        await WaitForAsync(() => vm.HasPrewarmedSftpForTesting());
+
+        var second = vm.TryConsumePrewarmedSftp();
+        Assert.NotNull(second);
+        Assert.Same(fakeSecond, second!.Value.Session);
+    }
+
+    [Fact]
+    public async Task Prewarm_Failure_LeavesCacheEmpty()
+    {
+        var sftp = new FakeSftpService();
+        sftp.ConnectImpl = (_, _, _, _) =>
+            Task.FromException<ISftpSession>(new InvalidOperationException("simulated"));
+        var vm = CreateViewModel(sftp);
+        vm.Initialize(CreateProfile());
+        vm.PrimeCredentialsForTesting(new SshCredentials("pwd", null, null));
+
+        vm.AttachConnectedSessionForTesting(new FakeSshSession());
+
+        // Failure path clears _prewarmCts and leaves the cache empty without
+        // bubbling the exception — wait for the in-flight slot to drain.
+        await WaitForAsync(() => !vm.HasInFlightPrewarmForTesting());
+        Assert.False(vm.HasPrewarmedSftpForTesting());
+        Assert.Null(vm.TryConsumePrewarmedSftp());
+        Assert.Equal(1, sftp.ConnectCallCount);
+    }
+
+    [Fact]
+    public async Task TryConsumePrewarmedSftp_DropsStaleSession_AndReturnsNull()
+    {
+        // A cached session whose underlying transport idled out must not be handed to
+        // the dialog — return null so the caller falls back to a fresh on-demand connect.
+        var staleSession = new FakeSftpSession { IsConnected = false };
+        var sftp = new FakeSftpService();
+        sftp.ConnectImpl = (_, _, _, _) => Task.FromResult<ISftpSession>(staleSession);
+        var vm = CreateViewModel(sftp);
+        vm.Initialize(CreateProfile());
+        vm.PrimeCredentialsForTesting(new SshCredentials("pwd", null, null));
+
+        vm.AttachConnectedSessionForTesting(new FakeSshSession());
+        await WaitForAsync(() => vm.HasPrewarmedSftpForTesting());
+
+        var consumed = vm.TryConsumePrewarmedSftp();
+
+        Assert.Null(consumed);
+        // Stale session must be disposed so its socket isn't leaked.
+        await WaitForAsync(() => staleSession.DisposeCount > 0);
+    }
+
+    [Fact]
+    public void Prewarm_DoesNotKickOff_WithoutCapturedCredentials()
+    {
+        // Defense: if a transition to Connected happens via a path that didn't run
+        // ConnectAsync (e.g. the testing helper without PrimeCredentialsForTesting),
+        // we must NOT try to connect with a null credentials object.
+        var sftp = new FakeSftpService();
+        var vm = CreateViewModel(sftp);
+        vm.Initialize(CreateProfile());
+
+        vm.AttachConnectedSessionForTesting(new FakeSshSession());
+
+        Assert.Equal(0, sftp.ConnectCallCount);
+        Assert.False(vm.HasInFlightPrewarmForTesting());
+        Assert.False(vm.HasPrewarmedSftpForTesting());
+    }
+
     [Fact]
     public void RetryCommand_CanExecute_IsFalse_WhileConnecting()
     {
@@ -434,7 +599,7 @@ public sealed class SshSessionViewModelTests
         return (vm, session);
     }
 
-    private static SshSessionViewModel CreateViewModel()
+    private static SshSessionViewModel CreateViewModel(FakeSftpService? sftp = null)
     {
         var credService = new FakeCredentialService();
         var configs = new FakeTunnelConfigRepository();
@@ -449,6 +614,7 @@ public sealed class SshSessionViewModelTests
             new FakeConnectionRepository(),
             new FakeAppSettingsService(),
             tunnels,
+            sftp ?? new FakeSftpService(),
             NullLoggerFactory.Instance);
     }
 
@@ -514,6 +680,36 @@ public sealed class SshSessionViewModelTests
 
         public Task DeleteAsync(Guid id, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
+    }
+
+    private sealed class FakeSftpService : ISftpService
+    {
+        public Func<ConnectionProfile, SshCredentials, ITunnelInstance?, CancellationToken, Task<ISftpSession>>? ConnectImpl { get; set; }
+        public int ConnectCallCount;
+        public SshCredentials? LastCredentials;
+
+        public Task<ISftpSession> ConnectAsync(
+            ConnectionProfile profile,
+            SshCredentials credentials,
+            ITunnelInstance? tunnel = null,
+            CancellationToken cancellationToken = default)
+        {
+            Interlocked.Increment(ref ConnectCallCount);
+            LastCredentials = credentials;
+            if (ConnectImpl is not null) return ConnectImpl(profile, credentials, tunnel, cancellationToken);
+            return Task.FromResult<ISftpSession>(new FakeSftpSession());
+        }
+    }
+
+    private static async Task WaitForAsync(Func<bool> condition, TimeSpan? timeout = null)
+    {
+        var deadline = DateTime.UtcNow + (timeout ?? TimeSpan.FromSeconds(5));
+        while (DateTime.UtcNow < deadline)
+        {
+            if (condition()) return;
+            await Task.Delay(20).ConfigureAwait(false);
+        }
+        throw new TimeoutException("Condition not satisfied within timeout.");
     }
 
     private sealed class FakeSshSession : ISshSession

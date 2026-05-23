@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Wormhole.Services;
@@ -77,9 +78,21 @@ public sealed partial class SessionsPage : Page
 
     private async void OnTabFileTransferClick(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement fe && fe.DataContext is SessionTabViewModel tab)
+        // async void: an exception here reaches App.OnUnhandledException which only
+        // logs and does not set e.Handled, so the runtime terminates the process.
+        // ShowAsync has internal try/catch around the connect path but the dialog-
+        // construction block (XamlRoot lookup, ContentDialog ctor, orchestrator ctor)
+        // is wrapped only in try/finally — any throw there must not be allowed to
+        // escape this handler.
+        if (sender is not FrameworkElement fe || fe.DataContext is not SessionTabViewModel tab) return;
+        try
         {
             await _fileTransferDialog.ShowAsync(tab);
+        }
+        catch (Exception ex)
+        {
+            var logger = App.Current.Services.GetService<ILogger<SessionsPage>>();
+            logger?.LogError(ex, "File-transfer dialog failed to open.");
         }
     }
 }

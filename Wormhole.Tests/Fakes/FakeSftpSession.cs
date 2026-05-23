@@ -29,6 +29,8 @@ public sealed class FakeSftpSession : ISftpSession
 
     public string WorkingDirectory { get; }
     public string? HostFingerprint { get; init; } = "SHA256:fake";
+    // Default to true; tests that want to simulate an idle-killed session flip it false.
+    public bool IsConnected { get; set; } = true;
 
     private Token Enter()
     {

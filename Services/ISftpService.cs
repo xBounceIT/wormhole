@@ -22,6 +22,14 @@ public interface ISftpSession : IAsyncDisposable
     /// <summary>SHA256 fingerprint of the SSH host key, captured at connect.</summary>
     string? HostFingerprint { get; }
 
+    /// <summary>
+    /// Whether the underlying SSH/SFTP transport is still believed to be alive. Used by
+    /// callers that cache a session across time (the SFTP pre-warm) to detect a socket
+    /// idle-eviction / server-side keepalive-exceed and fall back to a fresh connect
+    /// instead of handing a dead session to the dialog. Cheap, non-blocking.
+    /// </summary>
+    bool IsConnected { get; }
+
     Task<IReadOnlyList<SftpEntry>> ListDirectoryAsync(string path, CancellationToken cancellationToken = default);
     Task<SftpEntry?> GetAttributesAsync(string path, CancellationToken cancellationToken = default);
     Task<bool> ExistsAsync(string path, CancellationToken cancellationToken = default);
