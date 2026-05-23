@@ -11,7 +11,7 @@ namespace Wormhole.Services.Sftp;
 /// Owns the SFTP session for one file-transfer dialog. Serializes every SFTP call via
 /// a single <see cref="SemaphoreSlim"/>: SSH.NET's <c>SftpClient</c> is not safe for
 /// concurrent use, and a refresh interleaved with an in-flight upload corrupts the
-/// session state. Also maintains a temp directory for drag-out exports.
+/// session state.
 /// </summary>
 public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
 {
@@ -19,7 +19,6 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly CancellationTokenSource _shutdown = new();
     private readonly DispatcherQueue? _uiDispatcher;
-    private string? _exportTempDir;
     private int _disposed;
 
     public FileTransferOrchestrator(ISftpSession session, ILogger<FileTransferOrchestrator> logger)
@@ -137,7 +136,7 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
             // mkdir'd by a directory entry).
             await EnsureDestinationParentAsync(request.Direction, file.DestinationPath, token).ConfigureAwait(false);
 
-            var row = new TransferItemViewModel(file.RelativeName, request.Direction, file.IncomingSize ?? 0, token);
+            var row = new TransferItemViewModel(file.RelativeName, request.Direction, file.IncomingSize ?? 0, token, RemoveRow);
             if (!AddToTransfers(row))
             {
                 // Row could not be surfaced to the UI (dispatcher refusing during dialog
@@ -176,78 +175,6 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
                 row.DisposeToken();
             }
         }
-    }
-
-    public async Task<IReadOnlyList<string>> StageForExportAsync(IReadOnlyList<TransferItem> items, CancellationToken cancellationToken = default)
-    {
-        ThrowIfDisposed();
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _shutdown.Token);
-        var token = linked.Token;
-
-        _exportTempDir ??= Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "Wormhole-DragOut-" + Guid.NewGuid().ToString("N"))).FullName;
-
-        var staged = new List<string>(items.Count);
-        var flattened = new List<FlattenedItem>();
-        foreach (var item in items)
-        {
-            token.ThrowIfCancellationRequested();
-            await FlattenAsync(TransferDirection.RemoteToLocal, item, _exportTempDir, flattened, token).ConfigureAwait(false);
-        }
-
-        foreach (var file in flattened)
-        {
-            token.ThrowIfCancellationRequested();
-
-            if (file.IsDirectory)
-            {
-                // Drag-out staging path: ensure the empty/structural directory exists in
-                // the temp dir so the OS sees the full tree under the staged root and
-                // a downstream Explorer drop preserves the source's shape.
-                Directory.CreateDirectory(file.DestinationPath);
-                continue;
-            }
-
-            Directory.CreateDirectory(Path.GetDirectoryName(file.DestinationPath)!);
-            var row = new TransferItemViewModel(file.RelativeName, TransferDirection.RemoteToLocal, file.IncomingSize ?? 0, token);
-            if (!AddToTransfers(row))
-            {
-                row.DisposeToken();
-                continue;
-            }
-            try
-            {
-                MutateRowOnUi(row, r => r.State = TransferState.Running);
-                await TransferOneAsync(TransferDirection.RemoteToLocal, file, row, row.Token).ConfigureAwait(false);
-                MutateRowOnUi(row, r =>
-                {
-                    r.State = TransferState.Completed;
-                    r.BytesTransferred = r.ExpectedBytes;
-                });
-            }
-            catch (OperationCanceledException)
-            {
-                MutateRowOnUi(row, r => r.State = TransferState.Cancelled);
-                throw;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Drag-out staging failed for {Path}.", file.SourcePath);
-                MutateRowOnUi(row, r => { r.State = TransferState.Failed; r.ErrorMessage = ex.Message; });
-                throw;
-            }
-            finally
-            {
-                row.DisposeToken();
-            }
-        }
-
-        // Return the top-level paths the OS DataPackage should reference — for a
-        // directory the StorageItem is the root directory in temp, not every flat file.
-        foreach (var item in items)
-        {
-            staged.Add(Path.Combine(_exportTempDir!, item.Name));
-        }
-        return staged;
     }
 
     // === flattening ===========================================================
@@ -530,6 +457,21 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
     }
 
     /// <summary>
+    /// Bound to each row as its remove-callback so clicking the X on the queue strip
+    /// drops it from the UI collection regardless of state. Marshaled through the
+    /// captured dispatcher because <see cref="ObservableCollection{T}.Remove"/> emits
+    /// CollectionChanged synchronously and the bound ListView is UI-affine.
+    /// </summary>
+    private void RemoveRow(TransferItemViewModel row)
+    {
+        if (_uiDispatcher is null || _uiDispatcher.HasThreadAccess) { Transfers.Remove(row); return; }
+        if (!_uiDispatcher.TryEnqueue(() => Transfers.Remove(row)))
+        {
+            _logger.LogDebug("Dispatcher refused row removal during teardown; dropping.");
+        }
+    }
+
+    /// <summary>
     /// Marshal a ConflictResolver invocation back to the UI dispatcher so the resolver
     /// is free to construct WinUI controls (ContentDialog, etc.). If no dispatcher was
     /// captured (test path), call inline.
@@ -637,12 +579,6 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
             if (acquiredGate) { try { _gate.Release(); } catch { /* idempotent */ } }
         }
 
-        if (_exportTempDir is not null)
-        {
-            try { Directory.Delete(_exportTempDir, recursive: true); }
-            catch (Exception ex) { _logger.LogWarning(ex, "Could not clean drag-out temp dir {Dir}.", _exportTempDir); }
-        }
-
         // Intentionally NOT calling _gate.Dispose(): an in-flight RunSerializedAsync
         // caller still needs to Release() the gate in its finally, and Release on a
         // disposed SemaphoreSlim throws ObjectDisposedException into an unobserved
@@ -667,6 +603,13 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
         // cross-thread PropertyChanged that AddToTransfers' fix already avoids. The row
         // is closing-time-only state anyway; nothing watches a Completed/Failed/Cancelled
         // transition during dialog close.
+        //
+        // No "skip if row removed" guard: the orchestrator's snap-to-100% mutation
+        // (BytesTransferred = ExpectedBytes) MUST land or the ProgressBar gets frozen
+        // at the last reported byte count, which is typically a tick or two short of
+        // the file size. A removed row receiving a stray PropertyChanged is harmless
+        // (no live binding listens) — a snapped row that never reaches 100% is the
+        // bug the user actually sees.
         if (!_uiDispatcher.TryEnqueue(() => mutate(row)))
         {
             _logger.LogDebug("Dispatcher refused row mutation during teardown; dropping.");

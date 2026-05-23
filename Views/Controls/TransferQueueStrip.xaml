@@ -25,7 +25,8 @@
                       MaxHeight="160">
                 <ListView.ItemTemplate>
                     <DataTemplate x:DataType="transfer:TransferItemViewModel">
-                        <Grid ColumnSpacing="8" Padding="0,2">
+                        <Grid ColumnSpacing="8" Padding="0,2"
+                              ToolTipService.ToolTip="{x:Bind ErrorMessage, Mode=OneWay}">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
                                 <ColumnDefinition Width="180" />
@@ -41,7 +42,7 @@
                                          VerticalAlignment="Center" />
                             <Button Grid.Column="2"
                                     Command="{x:Bind CancelCommand}"
-                                    ToolTipService.ToolTip="Cancel"
+                                    ToolTipService.ToolTip="Cancel or remove"
                                     Style="{StaticResource IconButtonStyle}">
                                 <FontIcon Glyph="&#xE711;" FontSize="12" />
                             </Button>

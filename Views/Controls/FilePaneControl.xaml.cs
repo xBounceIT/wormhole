@@ -26,10 +26,6 @@ public sealed partial class FilePaneControl : UserControl
     /// Drop or DragItemsStarting handlers. Must be set before the control is interacted with.</summary>
     public Func<TransferRequest, Task>? OnTransferRequested { get; set; }
 
-    /// <summary>Stages remote files into a local temp directory for OS-level drag-out.
-    /// Only meaningful for the remote pane; the local pane reuses its paths directly.</summary>
-    public Func<IReadOnlyList<TransferItem>, CancellationToken, Task<IReadOnlyList<string>>>? OnStageForExport { get; set; }
-
     public FilePaneControl()
     {
         this.InitializeComponent();
@@ -315,27 +311,10 @@ public sealed partial class FilePaneControl : UserControl
             }
             if (storage.Count > 0) e.Data.SetStorageItems(storage);
         }
-        else if (OnStageForExport is not null)
-        {
-            // Remote pane drag-out: WinUI 3's DragItemsStartingEventArgs has no deferral
-            // surface (unlike UIElement.DragStarting). Staging files would have to block
-            // the UI thread synchronously, which is unacceptable for multi-MB downloads.
-            // Instead: kick off staging in the background and let the queue strip show
-            // progress. The OS drag has no StorageItems attached, so Explorer drops are
-            // a no-op — but cross-pane drag-and-drop (remote -> local) still works via
-            // the pane sentinel + items below. Users wanting to send files to Explorer
-            // should drop on the local pane first and re-drag from there.
-            //
-            // Wrap in a ContinueWith so a network drop / SshConnectionException during
-            // staging surfaces in logs rather than vanishing as an UnobservedTaskException.
-            _ = OnStageForExport(items, CancellationToken.None).ContinueWith(t =>
-            {
-                if (t.Exception is { } ex)
-                {
-                    System.Diagnostics.Debug.WriteLine("Remote drag-out staging failed: " + ex.Message);
-                }
-            }, TaskScheduler.Default);
-        }
+        // Remote pane: only the in-app sentinel + items above are attached. Cross-pane
+        // drops (remote → local) read those back in OnDrop. OS-level drag-out to Explorer
+        // is intentionally unsupported — WinUI 3 has no DragItemsStarting deferral, so
+        // there is no way to attach StorageItems after a background download completes.
     }
 
     private void OnDragOver(object sender, DragEventArgs e)

@@ -31,11 +31,9 @@ public sealed partial class FileTransferDialog : UserControl
         RemotePaneControl.SetViewModel(vm.RemotePane);
 
         // Wire drop-handler callbacks: each pane forwards a TransferRequest to the
-        // orchestrator. The remote pane also exposes drag-out staging so OS drag of
-        // remote files materializes them to a temp dir first.
+        // orchestrator.
         LocalPaneControl.OnTransferRequested = HandleTransferAsync;
         RemotePaneControl.OnTransferRequested = HandleTransferAsync;
-        RemotePaneControl.OnStageForExport = vm.StageForExportAsync;
 
         await vm.LoadInitialAsync().ConfigureAwait(true);
     }
