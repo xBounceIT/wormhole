@@ -109,40 +109,86 @@ if ($release) {
 # explicit design, the sidecar is optional and a build miss must NOT fail the .NET build --
 # WireGuardTunnelProvider surfaces a clean runtime error if the binary is missing. We
 # therefore catch every go-related failure here and downgrade it to a warning.
+#
+# Note for dep bumps: tools\wormhole-wgproxy\go.sum must be regenerated with GOOS=windows so
+# the windows-only indirect `golang.zx2c4.com/wintun` is retained. If you run
+# `go mod tidy` on Linux/macOS the wintun entry may be stripped and the next cross-compile
+# from Windows will fail with "missing go.sum entry for golang.zx2c4.com/wintun".
 $go = Get-Command go -ErrorAction SilentlyContinue
 if ($go) {
     Write-Info "BUILD wormhole-wgproxy.exe ($Arch) from source"
+    # Snapshot the caller's GOOS/GOARCH so the finally block restores them instead of
+    # blindly deleting -- this script is sometimes dot-sourced or run directly from a Go
+    # dev's shell that already had these set for another project.
+    $priorGoos   = if (Test-Path Env:\GOOS)   { $env:GOOS }   else { $null }
+    $priorGoarch = if (Test-Path Env:\GOARCH) { $env:GOARCH } else { $null }
     $env:GOOS = "windows"
     $env:GOARCH = if ($Arch -eq "arm64") { "arm64" } else { "amd64" }
     $buildOk = $false
     $failureDetail = $null
-    Push-Location $sourceDir
+    $pushed = $false
+    # Track which stage failed so the catch can report an accurate cause (missing source
+    # tree vs. an actual go compile failure) instead of always saying "go build" -- which
+    # would mislead a developer staring at a sparse checkout into debugging the toolchain.
+    $stage = "pre-build"
     try {
-        # `go mod download` populates go.sum on first run. Without this step, a fresh checkout
-        # (no committed go.sum -- intentional for this tool, since the .NET build is the source
-        # of truth and go.sum would otherwise need to be regenerated on every dependency bump)
-        # fails strict-mode `go build` with "missing go.sum entry for module ...".
-        & go mod download 2>&1 | ForEach-Object { Write-Info $_ }
-        if ($LASTEXITCODE -ne 0) {
-            $failureDetail = "go mod download exited with code $LASTEXITCODE"
+        # Push-Location is inside the try so a missing $sourceDir (sparse checkout, stale
+        # branch) becomes a normal $failureDetail instead of a terminating script error
+        # that would fail the .NET build, violating the "build miss is a warning, not an
+        # error" contract above.
+        Push-Location $sourceDir
+        $pushed = $true
+        $stage = "build"
+        # Tee stdout+stderr into a list as it streams so the failure detail can include
+        # the real go error even under -Quiet (Write-Info is a no-op there). The local EAP
+        # override is required because `2>&1` of native stderr emits ErrorRecord objects
+        # into the pipeline, and the script-wide $ErrorActionPreference = "Stop" would
+        # otherwise throw on the first stderr line -- losing the line/column of the actual
+        # compile error in favor of the (less useful) package-header line.
+        $buildLines = [System.Collections.Generic.List[string]]::new()
+        $prevEAP = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        try {
+            & go build -trimpath -ldflags "-s -w" -o $binaryPath . 2>&1 | ForEach-Object {
+                $text = "$_"
+                $buildLines.Add($text)
+                Write-Info $text
+            }
+            $buildExit = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $prevEAP
+        }
+        if ($buildExit -eq 0) {
+            $buildOk = $true
         }
         else {
-            & go build -trimpath -ldflags "-s -w" -o $binaryPath . 2>&1 | ForEach-Object { Write-Info $_ }
-            if ($LASTEXITCODE -eq 0) {
-                $buildOk = $true
-            }
-            else {
-                $failureDetail = "go build exited with code $LASTEXITCODE"
-            }
+            $tail = ($buildLines | Select-Object -Last 5) -join [Environment]::NewLine
+            $failureDetail = "go build exited with code ${buildExit}: ${tail}"
         }
     }
     catch {
-        $failureDetail = "unexpected error during go build: $_"
+        $failureDetail = if ($stage -eq "pre-build") {
+            "could not enter source directory '$sourceDir': $_"
+        } else {
+            "unexpected error during go build: $_"
+        }
     }
     finally {
-        Pop-Location
-        Remove-Item Env:\GOOS -ErrorAction SilentlyContinue
-        Remove-Item Env:\GOARCH -ErrorAction SilentlyContinue
+        # Wrap cleanup so a Pop-Location or env-restore failure cannot propagate out of the
+        # finally and exit the script non-zero -- which would fail the .NET build, breaking
+        # the "build miss is a warning, not an error" contract. Also ensures env vars are
+        # always restored even if Pop-Location itself throws (e.g., the prior location was
+        # deleted mid-build).
+        if ($pushed) {
+            try { Pop-Location } catch { Write-Info "Pop-Location failed during cleanup: $_" }
+        }
+        try {
+            if ($null -ne $priorGoos)   { $env:GOOS   = $priorGoos }   else { Remove-Item Env:\GOOS   -ErrorAction SilentlyContinue }
+            if ($null -ne $priorGoarch) { $env:GOARCH = $priorGoarch } else { Remove-Item Env:\GOARCH -ErrorAction SilentlyContinue }
+        } catch {
+            Write-Info "Env restore failed during cleanup: $_"
+        }
     }
     if ($buildOk) {
         Write-Info "OK    wormhole-wgproxy.exe ($Arch) (built)"

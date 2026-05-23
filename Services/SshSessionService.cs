@@ -83,7 +83,7 @@ public sealed class SshSessionService : ISshSessionService
             // Task.Run's CT only governs scheduling; SSH.NET's sync Connect ignores CT once
             // started. WaitAsync gives the awaiter an exit path; the catch block disposes
             // the client to interrupt the in-flight socket.
-            await Task.Run(client.Connect).WaitAsync(cancellationToken).ConfigureAwait(false);
+            await Task.Run(client.Connect, cancellationToken).WaitAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {

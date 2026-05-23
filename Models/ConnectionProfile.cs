@@ -14,6 +14,51 @@ public sealed record ConnectionProfile
     public string? RdpScreenSize { get; init; }
     public bool RdpFullScreen { get; init; }
 
+    // Display
+    public int RdpColorDepth { get; init; } = 32;
+    public bool RdpUseAllMonitors { get; init; }
+
+    // Local Resources
+    public int RdpAudioMode { get; init; }                 // 0=PlayHere, 1=DoNotPlay, 2=PlayRemote
+    public int RdpAudioCaptureMode { get; init; }          // 0=DoNotRecord, 1=Record
+    public int RdpKeyboardHookMode { get; init; } = 2;     // 0=Local, 1=Remote, 2=FullScreenOnly
+    public bool RdpRedirectClipboard { get; init; } = true;
+    public bool RdpRedirectPrinters { get; init; }
+    public bool RdpRedirectSmartCards { get; init; }
+    public bool RdpRedirectPorts { get; init; }
+    public bool RdpRedirectDevices { get; init; }
+    public string RdpRedirectDrives { get; init; } = string.Empty; // "" | "all" | "C,D,..."
+
+    // Experience
+    public int RdpConnectionSpeed { get; init; } = 7;       // 7 = auto-detect / LAN per IMsRdpClientAdvancedSettings6
+    public bool RdpDesktopBackground { get; init; } = true;
+    public bool RdpFontSmoothing { get; init; } = true;
+    public bool RdpDesktopComposition { get; init; } = true;
+    public bool RdpWindowDrag { get; init; } = true;
+    public bool RdpMenuAnimation { get; init; } = true;
+    public bool RdpVisualStyles { get; init; } = true;
+    public bool RdpBitmapCaching { get; init; } = true;
+    public bool RdpAutoReconnect { get; init; } = true;
+
+    // Advanced
+    public int RdpServerAuthentication { get; init; }       // 0=Warn, 1=Require, 2=DoNotConnect
+    public int RdpGatewayUsageMethod { get; init; }         // 0=Direct, 1=Always, 2=Detect, 3=DefaultRdg
+    public string? RdpGatewayHostname { get; init; }
+    public Guid? RdpGatewayCredentialId { get; init; }
+    public bool RdpGatewayBypassLocal { get; init; } = true;
+    public bool RdpGatewayUseSameCreds { get; init; }
+
+    /// <summary>
+    /// When true, skip the embedded mstscax ActiveX control and launch the system
+    /// Remote Desktop client (mstsc.exe) in a separate process instead. The motivating
+    /// case is Azure-AD-joined targets: WAM/AAD broker DLLs are delay-loaded by mstscax
+    /// during AAD auth, and our unpackaged WinUI process can't load them — the failure
+    /// surfaces as SEH 0xC06D007F and kills the process. mstsc.exe is a packaged-trusted
+    /// system binary that can load WAM. Users with AAD targets opt in here and lose the
+    /// embedded experience in exchange for a stable connection.
+    /// </summary>
+    public bool RdpUseExternalClient { get; init; }
+
     public string? SshKeyFileName { get; init; }
     public string? SshKnownHostFingerprint { get; init; }
 

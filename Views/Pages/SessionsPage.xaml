@@ -13,6 +13,12 @@
                                           MinHeight="240" />
         </DataTemplate>
 
+        <DataTemplate x:Key="RdpSessionTemplate" x:DataType="sessions:RdpSessionViewModel">
+            <sessionViews:RdpSurfaceHost HorizontalAlignment="Stretch"
+                                         VerticalAlignment="Stretch"
+                                         MinHeight="240" />
+        </DataTemplate>
+
         <DataTemplate x:Key="ProtocolPlaceholderTemplate" x:DataType="sessions:SessionTabViewModel">
             <Grid Padding="16" Background="{ThemeResource LayerFillColorDefaultBrush}">
                 <TextBlock Style="{StaticResource BodyTextBlockStyle}"
@@ -26,7 +32,7 @@
 
         <sessionViews:SessionContentSelector x:Key="SessionContentSelector"
                                              SshTemplate="{StaticResource SshSessionTemplate}"
-                                             RdpTemplate="{StaticResource ProtocolPlaceholderTemplate}"
+                                             RdpTemplate="{StaticResource RdpSessionTemplate}"
                                              SftpTemplate="{StaticResource ProtocolPlaceholderTemplate}"
                                              PlaceholderTemplate="{StaticResource ProtocolPlaceholderTemplate}" />
     </Page.Resources>

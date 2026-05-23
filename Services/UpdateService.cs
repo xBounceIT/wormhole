@@ -21,6 +21,8 @@ public sealed class UpdateService : IUpdateService, IDisposable
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
+    private static readonly char[] ShaSidecarSeparators = { ' ', '\t' };
+
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IAppSettingsService _settingsService;
     private readonly ILogger<UpdateService> _logger;
@@ -291,7 +293,7 @@ public sealed class UpdateService : IUpdateService, IDisposable
         if (string.IsNullOrWhiteSpace(raw)) return null;
         var first = raw.Split('\n', '\r').FirstOrDefault(s => !string.IsNullOrWhiteSpace(s))?.Trim();
         if (string.IsNullOrEmpty(first)) return null;
-        var token = first.Split(new[] { ' ', '\t' }, 2, StringSplitOptions.RemoveEmptyEntries)[0];
+        var token = first.Split(ShaSidecarSeparators, 2, StringSplitOptions.RemoveEmptyEntries)[0];
         return token.Length == 64 && token.All(IsHexChar) ? token.ToLowerInvariant() : null;
     }
 

@@ -16,7 +16,7 @@ namespace Wormhole.Services.Tunneling;
 /// </summary>
 public sealed class TunnelManager
 {
-    private readonly IReadOnlyDictionary<TunnelKind, ITunnelProvider> _providers;
+    private readonly Dictionary<TunnelKind, ITunnelProvider> _providers;
     private readonly ITunnelConfigRepository _configs;
     private readonly ICredentialService _credentials;
     private readonly ILogger<TunnelManager> _logger;
@@ -53,7 +53,7 @@ public sealed class TunnelManager
     /// </summary>
     public async Task<ITunnelInstance?> EstablishAsync(ConnectionProfile profile, CancellationToken cancellationToken)
     {
-        if (profile is null) throw new ArgumentNullException(nameof(profile));
+        ArgumentNullException.ThrowIfNull(profile);
         if (!profile.TunnelEnabled) return null;
         if (profile.TunnelConfigId is null)
         {

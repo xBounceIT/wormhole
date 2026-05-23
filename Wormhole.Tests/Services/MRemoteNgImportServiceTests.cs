@@ -12,9 +12,11 @@ namespace Wormhole.Tests.Services;
 
 public class MRemoteNgImportServiceTests : IDisposable
 {
-    // Mirrors the production migrations (0001 + 0002 + 0003) so the test sees the same column
-    // shape as a real first-run install. Kept inline because the test project links source
-    // files; embedded migration .sql resources from the main assembly aren't reachable here.
+    // Mirrors the production migrations 0001-0006 so the test sees the same column shape as
+    // a real first-run install. Kept inline because the test project links source files;
+    // embedded migration .sql resources from the main assembly aren't reachable here. The
+    // RDP* columns must stay in lockstep with ConnectionTreeViewModelTests.SchemaSql or
+    // Dapper's SELECT-* in ConnectionRepository.GetAllAsync throws "no such column".
     private const string SchemaSql = @"
         CREATE TABLE Nodes (
             Id                       TEXT     PRIMARY KEY NOT NULL,
@@ -30,6 +32,33 @@ public class MRemoteNgImportServiceTests : IDisposable
             RdpDomain                TEXT     NULL,
             RdpScreenSize            TEXT     NULL,
             RdpFullScreen            INTEGER  NULL,
+            RdpColorDepth            INTEGER  NULL,
+            RdpUseAllMonitors        INTEGER  NULL,
+            RdpAudioMode             INTEGER  NULL,
+            RdpAudioCaptureMode      INTEGER  NULL,
+            RdpKeyboardHookMode      INTEGER  NULL,
+            RdpRedirectClipboard     INTEGER  NULL,
+            RdpRedirectPrinters      INTEGER  NULL,
+            RdpRedirectSmartCards    INTEGER  NULL,
+            RdpRedirectPorts         INTEGER  NULL,
+            RdpRedirectDevices       INTEGER  NULL,
+            RdpRedirectDrives        TEXT     NULL,
+            RdpConnectionSpeed       INTEGER  NULL,
+            RdpDesktopBackground     INTEGER  NULL,
+            RdpFontSmoothing         INTEGER  NULL,
+            RdpDesktopComposition    INTEGER  NULL,
+            RdpWindowDrag            INTEGER  NULL,
+            RdpMenuAnimation         INTEGER  NULL,
+            RdpVisualStyles          INTEGER  NULL,
+            RdpBitmapCaching         INTEGER  NULL,
+            RdpAutoReconnect         INTEGER  NULL,
+            RdpServerAuthentication  INTEGER  NULL,
+            RdpGatewayUsageMethod    INTEGER  NULL,
+            RdpGatewayHostname       TEXT     NULL,
+            RdpGatewayCredentialId   TEXT     NULL,
+            RdpGatewayBypassLocal    INTEGER  NULL,
+            RdpGatewayUseSameCreds   INTEGER  NULL,
+            RdpUseExternalClient     INTEGER  NULL,
             SshKeyFileName           TEXT     NULL,
             SshKnownHostFingerprint  TEXT     NULL,
             TunnelEnabled            INTEGER  NULL,

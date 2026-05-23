@@ -77,12 +77,33 @@ public sealed class DialogService : IDialogService
         return result == ContentDialogResult.Primary ? textBox.Text.Trim() : null;
     }
 
-    public async Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null)
+    public async Task<ConnectionNode?> EditConnectionAsync(ConnectionNode initial, bool isNew)
     {
-        var dialog = new NewConnectionDialog();
-        var credentials = await _credentialRepository.GetAllAsync();
-        dialog.SetAvailableCredentials(credentials);
-        return await ShowFormDialogAsync(dialog, initial, "connection");
+        var form = new NewConnectionDialog();
+        await form.LoadAsync(initial);
+
+        var dialog = new ContentDialog
+        {
+            Title = isNew ? "New connection" : "Edit connection",
+            Content = form,
+            PrimaryButtonText = isNew ? "Create" : "Save",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = RequireXamlRoot(),
+            IsPrimaryButtonEnabled = form.IsValid,
+        };
+
+        form.ValidityChanged += (_, _) => dialog.IsPrimaryButtonEnabled = form.IsValid;
+        dialog.Opened += (_, _) => form.FocusNameField();
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary) return null;
+
+        // Produce a fresh node mirroring `initial`'s identity/parent so the caller can update
+        // storage without mutating the input. WriteTo only touches editable fields.
+        var output = ConnectionNode.CloneIdentityFrom(initial);
+        form.WriteTo(output);
+        return output;
     }
 
     public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null) =>
@@ -91,7 +112,7 @@ public sealed class DialogService : IDialogService
     public Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null) =>
         ShowFormDialogAsync(new TunnelDialog(), initial, "VPN tunnel");
 
-    private async Task<TDraft?> ShowFormDialogAsync<TForm, TDraft>(TForm form, TDraft? initial, string entityName)
+    private static async Task<TDraft?> ShowFormDialogAsync<TForm, TDraft>(TForm form, TDraft? initial, string entityName)
         where TForm : UserControl, IDraftForm<TDraft>
         where TDraft : class
     {

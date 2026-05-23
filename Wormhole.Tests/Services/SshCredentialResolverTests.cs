@@ -12,20 +12,20 @@ public class SshCredentialResolverTests
     [Fact]
     public async Task Resolve_NoCredentialId_PromptsForPassword()
     {
-        var dialogs = new FakeDialogService("prompted-pwd");
+        var dialogs = new FakeDialogService { PasswordPromptResult = "prompted-pwd" };
         var resolver = NewResolver(dialogs);
 
         var creds = await resolver.ResolveAsync(MakeProfile(credentialId: null));
 
         Assert.Equal("prompted-pwd", creds.Password);
         Assert.Null(creds.PrivateKey);
-        Assert.Equal(1, dialogs.PromptCount);
+        Assert.Equal(1, dialogs.PasswordPromptCount);
     }
 
     [Fact]
     public async Task Resolve_NoCredentialId_PromptCancelled_ReturnsEmpty()
     {
-        var resolver = NewResolver(new FakeDialogService(null));
+        var resolver = NewResolver(new FakeDialogService());
 
         var creds = await resolver.ResolveAsync(MakeProfile(credentialId: null));
 
@@ -36,7 +36,7 @@ public class SshCredentialResolverTests
     public async Task Resolve_PasswordCredential_Stored_NoPrompt()
     {
         var credId = Guid.NewGuid();
-        var dialogs = new FakeDialogService(null);
+        var dialogs = new FakeDialogService();
         var resolver = NewResolver(
             dialogs,
             repo: new FakeCredentialRepository(new CredentialProfile { Id = credId, Kind = CredentialKind.Password }),
@@ -46,14 +46,14 @@ public class SshCredentialResolverTests
 
         Assert.Equal("stored-pwd", creds.Password);
         Assert.Null(creds.PrivateKey);
-        Assert.Equal(0, dialogs.PromptCount);
+        Assert.Equal(0, dialogs.PasswordPromptCount);
     }
 
     [Fact]
     public async Task Resolve_PasswordCredential_NotStored_Prompts()
     {
         var credId = Guid.NewGuid();
-        var dialogs = new FakeDialogService("typed-pwd");
+        var dialogs = new FakeDialogService { PasswordPromptResult = "typed-pwd" };
         var resolver = NewResolver(
             dialogs,
             repo: new FakeCredentialRepository(new CredentialProfile { Id = credId, Kind = CredentialKind.Password }));
@@ -61,7 +61,7 @@ public class SshCredentialResolverTests
         var creds = await resolver.ResolveAsync(MakeProfile(credentialId: credId));
 
         Assert.Equal("typed-pwd", creds.Password);
-        Assert.Equal(1, dialogs.PromptCount);
+        Assert.Equal(1, dialogs.PasswordPromptCount);
     }
 
     [Fact]
@@ -69,7 +69,7 @@ public class SshCredentialResolverTests
     {
         var credId = Guid.NewGuid();
         var keyBytes = new byte[] { 1, 2, 3 };
-        var dialogs = new FakeDialogService(null);
+        var dialogs = new FakeDialogService();
         var resolver = NewResolver(
             dialogs,
             repo: new FakeCredentialRepository(new CredentialProfile { Id = credId, Kind = CredentialKind.SshKey }),
@@ -81,7 +81,7 @@ public class SshCredentialResolverTests
         Assert.Equal(keyBytes, creds.PrivateKey);
         Assert.Null(creds.Password);
         Assert.Null(creds.KeyPassphrase);
-        Assert.Equal(0, dialogs.PromptCount);
+        Assert.Equal(0, dialogs.PasswordPromptCount);
     }
 
     // Regression: previously the passphrase landed in Password, so a failed key auth would
@@ -90,7 +90,7 @@ public class SshCredentialResolverTests
     public async Task Resolve_KeyCredential_WithStoredPassphrase_PassesPassphraseAsKeyPassphraseOnly()
     {
         var credId = Guid.NewGuid();
-        var dialogs = new FakeDialogService(null);
+        var dialogs = new FakeDialogService();
         var resolver = NewResolver(
             dialogs,
             repo: new FakeCredentialRepository(new CredentialProfile { Id = credId, Kind = CredentialKind.SshKey }),
@@ -112,7 +112,7 @@ public class SshCredentialResolverTests
     public async Task Resolve_KeyCredential_EncryptedKeyNoPassphrase_PromptsAndUsesResult()
     {
         var credId = Guid.NewGuid();
-        var dialogs = new FakeDialogService("typed-passphrase");
+        var dialogs = new FakeDialogService { PasswordPromptResult = "typed-passphrase" };
         var resolver = NewResolver(
             dialogs,
             repo: new FakeCredentialRepository(new CredentialProfile { Id = credId, Kind = CredentialKind.SshKey }),
@@ -124,14 +124,14 @@ public class SshCredentialResolverTests
         Assert.Null(creds.Password);
         Assert.Equal("typed-passphrase", creds.KeyPassphrase);
         Assert.NotNull(creds.PrivateKey);
-        Assert.Equal(1, dialogs.PromptCount);
+        Assert.Equal(1, dialogs.PasswordPromptCount);
     }
 
     [Fact]
     public async Task Resolve_KeyCredential_EncryptedKey_PassphrasePromptCancelled_ReturnsEmpty()
     {
         var credId = Guid.NewGuid();
-        var dialogs = new FakeDialogService(null);
+        var dialogs = new FakeDialogService();
         var resolver = NewResolver(
             dialogs,
             repo: new FakeCredentialRepository(new CredentialProfile { Id = credId, Kind = CredentialKind.SshKey }),
@@ -147,7 +147,7 @@ public class SshCredentialResolverTests
     public async Task Resolve_KeyCredential_KeyMissing_FallsBackToPasswordPrompt()
     {
         var credId = Guid.NewGuid();
-        var dialogs = new FakeDialogService("fallback-pwd");
+        var dialogs = new FakeDialogService { PasswordPromptResult = "fallback-pwd" };
         var resolver = NewResolver(
             dialogs,
             repo: new FakeCredentialRepository(new CredentialProfile { Id = credId, Kind = CredentialKind.SshKey }));
@@ -161,7 +161,7 @@ public class SshCredentialResolverTests
     [Fact]
     public async Task Resolve_CredentialIdSet_ButNotInRepo_Prompts()
     {
-        var resolver = NewResolver(new FakeDialogService("guessed-pwd"));
+        var resolver = NewResolver(new FakeDialogService { PasswordPromptResult = "guessed-pwd" });
 
         var creds = await resolver.ResolveAsync(MakeProfile(credentialId: Guid.NewGuid()));
 
@@ -190,28 +190,6 @@ public class SshCredentialResolverTests
             Username = "alice",
             CredentialId = credentialId,
         };
-
-    private sealed class FakeDialogService : IDialogService
-    {
-        private readonly string? _response;
-        public int PromptCount { get; private set; }
-
-        public FakeDialogService(string? response) { _response = response; }
-
-        public Task ShowMessageAsync(string title, string message) => Task.CompletedTask;
-        public Task<bool> ConfirmAsync(string title, string message, string primaryText = "Yes", string closeText = "No") => Task.FromResult(false);
-        public Task<string?> PromptForTextAsync(string title, string label, string defaultValue = "") => Task.FromResult<string?>(null);
-        public Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null) => Task.FromResult<NewConnectionDraft?>(null);
-        public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null) => Task.FromResult<CredentialDraft?>(null);
-        public Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null) => Task.FromResult<TunnelDraft?>(null);
-        public Task<string?> PromptPasswordAsync(string title, string message)
-        {
-            PromptCount++;
-            return Task.FromResult(_response);
-        }
-        public Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync()
-            => Task.FromResult<MRemoteNgImportResult?>(null);
-    }
 
     private sealed class FakeCredentialRepository : ICredentialRepository
     {

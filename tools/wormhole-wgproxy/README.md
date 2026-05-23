@@ -37,5 +37,6 @@ ships a 10 MB binary instead, with proven crypto and netstack.
 
 ## Mock mode
 
-`{"mock": true}` skips WireGuard entirely and dials targets via the OS resolver/sockets. Used
-by Wormhole's integration tests so CI doesn't need a real WG peer.
+Pass `-mock` on the command line to skip WireGuard entirely and dial targets via the OS
+resolver/sockets. Developer-only switch for ad-hoc CLI testing without a real WireGuard peer;
+the .NET parent never sets it.

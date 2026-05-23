@@ -13,7 +13,7 @@ public static class SshHostKeyValidator
 {
     public static string ComputeFingerprint(byte[] hostKey)
     {
-        if (hostKey is null) throw new ArgumentNullException(nameof(hostKey));
+        ArgumentNullException.ThrowIfNull(hostKey);
         var digest = SHA256.HashData(hostKey);
         return "SHA256:" + Convert.ToBase64String(digest).TrimEnd('=');
     }

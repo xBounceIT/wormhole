@@ -108,7 +108,11 @@ public class TunnelManagerTests
         TunnelConfigId = tunnelConfigId,
     };
 
+    // CA1001: LastInstance is IAsyncDisposable; tests dispose it directly when they care.
+    // FakeProvider itself has no DI-managed lifecycle and is never wrapped in `using`.
+#pragma warning disable CA1001
     private sealed class FakeProvider : ITunnelProvider
+#pragma warning restore CA1001
     {
         public int EstablishCount;
         public byte[]? LastSecret;

@@ -12,10 +12,11 @@
             </ResourceDictionary.MergedDictionaries>
             <conv:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter" />
             <conv:InverseBoolConverter x:Key="InverseBoolConverter" />
+            <conv:StringEqualsConverter x:Key="StringEqualsConverter" />
             <conv:StringPresentVisibilityConverter x:Key="StringPresentVisibilityConverter" />
             <conv:ToUpperConverter x:Key="ToUpperConverter" />
 
-            <Style x:Key="IconButtonStyle" TargetType="Button">
+            <Style x:Key="IconButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
                 <Setter Property="Background" Value="Transparent" />
                 <Setter Property="BorderBrush" Value="Transparent" />
                 <Setter Property="Padding" Value="6" />

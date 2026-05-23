@@ -38,7 +38,6 @@
     <Compile Include="..\Models\ConnectionNode.cs" Link="Models\ConnectionNode.cs" />
     <Compile Include="..\Models\ConnectionProfile.cs" Link="Models\ConnectionProfile.cs" />
     <Compile Include="..\Models\CredentialProfile.cs" Link="Models\CredentialProfile.cs" />
-    <Compile Include="..\Models\NewConnectionDraft.cs" Link="Models\NewConnectionDraft.cs" />
     <Compile Include="..\Models\CredentialDraft.cs" Link="Models\CredentialDraft.cs" />
     <Compile Include="..\Models\NodeKind.cs" Link="Models\NodeKind.cs" />
     <Compile Include="..\Models\ProtocolType.cs" Link="Models\ProtocolType.cs" />
@@ -62,8 +61,11 @@
     <Compile Include="..\Services\Tunneling\LocalTcpForwarder.cs" Link="Services\Tunneling\LocalTcpForwarder.cs" />
     <Compile Include="..\Data\Repositories\ITunnelConfigRepository.cs" Link="Data\Repositories\ITunnelConfigRepository.cs" />
     <Compile Include="..\Helpers\AppPaths.cs" Link="Helpers\AppPaths.cs" />
+    <Compile Include="..\Helpers\AzureAdCredentialDetector.cs" Link="Helpers\AzureAdCredentialDetector.cs" />
     <Compile Include="..\Helpers\Glyphs.cs" Link="Helpers\Glyphs.cs" />
     <Compile Include="..\Helpers\HostSpec.cs" Link="Helpers\HostSpec.cs" />
+    <Compile Include="..\Helpers\RdpDriveList.cs" Link="Helpers\RdpDriveList.cs" />
+    <Compile Include="..\Helpers\RdpScreenSizes.cs" Link="Helpers\RdpScreenSizes.cs" />
     <Compile Include="..\Services\IAppSettingsService.cs" Link="Services\IAppSettingsService.cs" />
     <Compile Include="..\Services\IUpdateService.cs" Link="Services\IUpdateService.cs" />
     <Compile Include="..\Services\UpdateService.cs" Link="Services\UpdateService.cs" />
@@ -88,6 +90,7 @@
     <Compile Include="..\Data\SqliteConnectionFactory.cs" Link="Data\SqliteConnectionFactory.cs" />
     <Compile Include="..\Data\SqliteTypeHandlers.cs" Link="Data\SqliteTypeHandlers.cs" />
     <Compile Include="..\Data\MigrationRunner.cs" Link="Data\MigrationRunner.cs" />
+    <Compile Include="..\ViewModels\ConnectionEditorViewModel.cs" Link="ViewModels\ConnectionEditorViewModel.cs" />
     <Compile Include="..\ViewModels\ConnectionTreeViewModel.cs" Link="ViewModels\ConnectionTreeViewModel.cs" />
     <Compile Include="..\ViewModels\CredentialsViewModel.cs" Link="ViewModels\CredentialsViewModel.cs" />
     <Compile Include="..\ViewModels\TunnelConfigsViewModel.cs" Link="ViewModels\TunnelConfigsViewModel.cs" />
@@ -95,6 +98,9 @@
     <Compile Include="..\ViewModels\Sessions\SshSessionViewModel.cs" Link="ViewModels\Sessions\SshSessionViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\RdpSessionViewModel.cs" Link="ViewModels\Sessions\RdpSessionViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\SftpSessionViewModel.cs" Link="ViewModels\Sessions\SftpSessionViewModel.cs" />
+    <Compile Include="..\Services\IRdpSessionService.cs" Link="Services\IRdpSessionService.cs" />
+    <Compile Include="..\Services\Rdp\IRdpCrashSentinelService.cs" Link="Services\Rdp\IRdpCrashSentinelService.cs" />
+    <Compile Include="..\Services\Rdp\RdpCrashSentinelService.cs" Link="Services\Rdp\RdpCrashSentinelService.cs" />
     <Compile Include="..\Interop\Terminal\TerminalBridge.cs" Link="Interop\Terminal\TerminalBridge.cs" />
     <Compile Include="..\Interop\Terminal\TerminalReplayBuffer.cs" Link="Interop\Terminal\TerminalReplayBuffer.cs" />
   </ItemGroup>
