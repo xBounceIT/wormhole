@@ -87,6 +87,25 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
         {
             token.ThrowIfCancellationRequested();
 
+            if (file.IsDirectory)
+            {
+                // Directory entry: mkdir at destination so empty (or to-be-populated)
+                // folders survive the trip. No conflict prompt (overwriting a directory
+                // doesn't make sense in this UI) and no queue row (mkdir is too cheap to
+                // surface). Non-directory descendants will see the dir already present
+                // by the time their EnsureDestinationParentAsync runs.
+                try
+                {
+                    await EnsureDestinationDirectoryAsync(request.Direction, file.DestinationPath, token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to create destination directory {Path}.", file.DestinationPath);
+                }
+                continue;
+            }
+
             // Conflict check: peek the destination before creating the row so a "skip"
             // doesn't leave a ghost row in the queue.
             var exists = await DestinationExistsAsync(request.Direction, file.DestinationPath, token).ConfigureAwait(false);
@@ -178,6 +197,16 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
         foreach (var file in flattened)
         {
             token.ThrowIfCancellationRequested();
+
+            if (file.IsDirectory)
+            {
+                // Drag-out staging path: ensure the empty/structural directory exists in
+                // the temp dir so the OS sees the full tree under the staged root and
+                // a downstream Explorer drop preserves the source's shape.
+                Directory.CreateDirectory(file.DestinationPath);
+                continue;
+            }
+
             Directory.CreateDirectory(Path.GetDirectoryName(file.DestinationPath)!);
             var row = new TransferItemViewModel(file.RelativeName, TransferDirection.RemoteToLocal, file.IncomingSize ?? 0, token);
             if (!AddToTransfers(row))
@@ -228,7 +257,8 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
         string DestinationPath,
         string RelativeName,
         long? IncomingSize,
-        bool SourceIsLocal);
+        bool SourceIsLocal,
+        bool IsDirectory);
 
     private async Task FlattenAsync(TransferDirection direction, TransferItem item, string destDir, List<FlattenedItem> acc, CancellationToken token)
     {
@@ -242,13 +272,37 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
             var dest = sourceIsLocal
                 ? Services.Sftp.RemotePath.Join(destDir, item.Name)
                 : Path.Combine(destDir, item.Name);
-            acc.Add(new FlattenedItem(item.SourcePath, dest, item.Name, size, sourceIsLocal));
+            acc.Add(new FlattenedItem(item.SourcePath, dest, item.Name, size, sourceIsLocal, IsDirectory: false));
             return;
         }
 
-        // Directory: walk it and append every leaf with its relative-from-root name.
+        // Directory: walk it and emit every directory + file, each with its
+        // relative-from-root name. Emitting the directories explicitly (not just files)
+        // is what preserves empty subtrees: without their own entry, an empty folder
+        // would never appear in the plan and silently vanish at the destination.
+        // EnsureDestinationParentAsync would only create ancestors of files it sees.
         if (sourceIsLocal)
         {
+            // Root directory of this drag — emit before children so it exists before
+            // anything inside it lands. mkdir is idempotent in both EnsureDestinationDirectoryAsync
+            // and System.IO.Directory.CreateDirectory, so duplicate emissions for the
+            // same dir are safe.
+            var rootDest = direction == TransferDirection.LocalToRemote
+                ? Services.Sftp.RemotePath.Join(destDir, item.Name)
+                : Path.Combine(destDir, item.Name);
+            acc.Add(new FlattenedItem(item.SourcePath, rootDest, item.Name, IncomingSize: null, SourceIsLocal: true, IsDirectory: true));
+
+            foreach (var di in new DirectoryInfo(item.SourcePath).EnumerateDirectories("*", SearchOption.AllDirectories))
+            {
+                token.ThrowIfCancellationRequested();
+                var rel = Path.GetRelativePath(item.SourcePath, di.FullName);
+                var destRel = item.Name + "/" + rel.Replace(Path.DirectorySeparatorChar, '/');
+                var dest = direction == TransferDirection.LocalToRemote
+                    ? Services.Sftp.RemotePath.Join(destDir, destRel)
+                    : Path.Combine(destDir, destRel.Replace('/', Path.DirectorySeparatorChar));
+                acc.Add(new FlattenedItem(di.FullName, dest, destRel, IncomingSize: null, SourceIsLocal: true, IsDirectory: true));
+            }
+
             foreach (var fi in new DirectoryInfo(item.SourcePath).EnumerateFiles("*", SearchOption.AllDirectories))
             {
                 token.ThrowIfCancellationRequested();
@@ -257,7 +311,7 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
                 var dest = direction == TransferDirection.LocalToRemote
                     ? Services.Sftp.RemotePath.Join(destDir, destRel)
                     : Path.Combine(destDir, destRel.Replace('/', Path.DirectorySeparatorChar));
-                acc.Add(new FlattenedItem(fi.FullName, dest, destRel, fi.Length, SourceIsLocal: true));
+                acc.Add(new FlattenedItem(fi.FullName, dest, destRel, fi.Length, SourceIsLocal: true, IsDirectory: false));
             }
         }
         else
@@ -268,6 +322,16 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
 
     private async Task WalkRemoteAsync(string remoteRoot, string relRoot, string destDir, TransferDirection direction, List<FlattenedItem> acc, CancellationToken token)
     {
+        // Emit this directory itself before listing its children, so empty remote
+        // subtrees (no files in their descendants) are still represented in the plan
+        // and the destination tree shape is preserved. Recursive calls below emit
+        // their own directory entries the same way; the result is one entry per dir
+        // in pre-order.
+        var rootDest = direction == TransferDirection.RemoteToLocal
+            ? Path.Combine(destDir, relRoot.Replace('/', Path.DirectorySeparatorChar))
+            : Services.Sftp.RemotePath.Join(destDir, relRoot);
+        acc.Add(new FlattenedItem(remoteRoot, rootDest, relRoot, IncomingSize: null, SourceIsLocal: false, IsDirectory: true));
+
         // ONE ListDirectory call per level holds the gate; recursion happens OUTSIDE
         // the lock. The original code wrapped the entire foreach (including recursive
         // WalkRemoteAsync calls) in a single RunSerializedAsync, which deadlocked on
@@ -300,7 +364,7 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
                 var dest = direction == TransferDirection.RemoteToLocal
                     ? Path.Combine(destDir, childRel.Replace('/', Path.DirectorySeparatorChar))
                     : Services.Sftp.RemotePath.Join(destDir, childRel);
-                acc.Add(new FlattenedItem(e.FullPath, dest, childRel, e.Size, SourceIsLocal: false));
+                acc.Add(new FlattenedItem(e.FullPath, dest, childRel, e.Size, SourceIsLocal: false, IsDirectory: false));
             }
         }
     }
@@ -381,26 +445,7 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
         {
             var parent = Services.Sftp.RemotePath.Parent(destination);
             if (string.IsNullOrEmpty(parent) || parent == "/") return;
-            await RunSerializedAsync(async () =>
-            {
-                if (!await Session.ExistsAsync(parent, token).ConfigureAwait(false))
-                {
-                    // Recursive mkdir: walk up to find the deepest existing ancestor,
-                    // then create down. Servers vary on whether mkdir -p is supported
-                    // via SFTP — we do it ourselves.
-                    var stack = new Stack<string>();
-                    var p = parent;
-                    while (!string.IsNullOrEmpty(p) && p != "/" && !await Session.ExistsAsync(p, token).ConfigureAwait(false))
-                    {
-                        stack.Push(p);
-                        p = Services.Sftp.RemotePath.Parent(p);
-                    }
-                    while (stack.Count > 0)
-                    {
-                        await Session.CreateDirectoryAsync(stack.Pop(), token).ConfigureAwait(false);
-                    }
-                }
-            }).ConfigureAwait(false);
+            await EnsureRemoteDirectoryAsync(parent, token).ConfigureAwait(false);
         }
         else
         {
@@ -408,6 +453,46 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
             if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
         }
     }
+
+    /// <summary>
+    /// Ensure a directory (not its parent) exists at the destination. Used by the
+    /// directory-entry branch in the transfer loop so empty subtrees survive the
+    /// copy. Idempotent on both sides: a path that already exists is a no-op.
+    /// </summary>
+    private async Task EnsureDestinationDirectoryAsync(TransferDirection direction, string destination, CancellationToken token)
+    {
+        if (direction == TransferDirection.LocalToRemote)
+        {
+            if (string.IsNullOrEmpty(destination) || destination == "/") return;
+            await EnsureRemoteDirectoryAsync(destination, token).ConfigureAwait(false);
+        }
+        else
+        {
+            Directory.CreateDirectory(destination);
+        }
+    }
+
+    /// <summary>
+    /// Recursive mkdir on the remote side: walks up to find the deepest existing
+    /// ancestor, then creates downward. Servers vary on whether SFTP exposes a
+    /// native mkdir -p, so we do it ourselves under the session gate.
+    /// </summary>
+    private Task EnsureRemoteDirectoryAsync(string remotePath, CancellationToken token) =>
+        RunSerializedAsync(async () =>
+        {
+            if (await Session.ExistsAsync(remotePath, token).ConfigureAwait(false)) return;
+            var stack = new Stack<string>();
+            var p = remotePath;
+            while (!string.IsNullOrEmpty(p) && p != "/" && !await Session.ExistsAsync(p, token).ConfigureAwait(false))
+            {
+                stack.Push(p);
+                p = Services.Sftp.RemotePath.Parent(p);
+            }
+            while (stack.Count > 0)
+            {
+                await Session.CreateDirectoryAsync(stack.Pop(), token).ConfigureAwait(false);
+            }
+        });
 
     // === helpers ==============================================================
 

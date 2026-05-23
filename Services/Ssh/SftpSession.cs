@@ -98,9 +98,12 @@ internal sealed class SftpSession : ISftpSession
             };
             // canOverride: true so an existing file is replaced atomically by SSH.NET's
             // SFTP layer. The orchestrator already prompted for overwrite confirmation
-            // before this point — re-checking here would race anyway.
-            if (cb is null) _client.UploadFile(source, remotePath);
-            else _client.UploadFile(source, remotePath, cb);
+            // before this point — re-checking here would race anyway. The two-/three-arg
+            // UploadFile overloads default canOverride to false, which raises
+            // SftpPermissionDeniedException on any path that already exists — confirmed
+            // overwrites would otherwise be marked Failed in the queue.
+            if (cb is null) _client.UploadFile(source, remotePath, canOverride: true);
+            else _client.UploadFile(source, remotePath, canOverride: true, uploadCallback: cb);
         }, cancellationToken);
 
     public Task DownloadAsync(string remotePath, Stream destination, IProgress<long>? progress, CancellationToken cancellationToken = default) =>

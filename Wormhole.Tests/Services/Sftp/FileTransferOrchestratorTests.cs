@@ -228,6 +228,52 @@ public sealed class FileTransferOrchestratorTests : IDisposable
         Assert.False(File.Exists(Path.Combine(Path.GetDirectoryName(_localRoot)!, "evil.txt")));
     }
 
+    // === regression: empty subtrees must survive directory transfers ==========
+    //
+    // Pre-fix, FlattenAsync only emitted files (EnumerateFiles / WalkRemoteAsync
+    // file branch), so a directory containing zero files anywhere in its subtree
+    // produced an empty plan and the destination ended up missing the folder.
+
+    [Fact]
+    public async Task EnqueueAsync_LocalToRemote_PreservesEmptyDirectories()
+    {
+        var sourceDir = Path.Combine(_localRoot, "payload");
+        Directory.CreateDirectory(Path.Combine(sourceDir, "empty_dir"));
+
+        var sftp = new FakeSftpSession();
+        sftp.Directories["/home/user"] = true;
+        await using var orch = NewOrchestrator(sftp);
+
+        var request = new TransferRequest(
+            TransferDirection.LocalToRemote,
+            "/home/user",
+            new[] { new TransferItem(sourceDir, "payload", true) });
+        await orch.EnqueueAsync(request, NeverPrompted, CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(sftp.Directories.ContainsKey("/home/user/payload"));
+        Assert.True(sftp.Directories.ContainsKey("/home/user/payload/empty_dir"));
+    }
+
+    [Fact]
+    public async Task EnqueueAsync_RemoteToLocal_PreservesEmptyDirectories()
+    {
+        var sftp = new FakeSftpSession();
+        sftp.Directories["/home/user/payload"] = true;
+        sftp.Directories["/home/user/payload/empty_dir"] = true;
+        await using var orch = NewOrchestrator(sftp);
+
+        var request = new TransferRequest(
+            TransferDirection.RemoteToLocal,
+            _localRoot,
+            new[] { new TransferItem("/home/user/payload", "payload", true) });
+        await orch.EnqueueAsync(request, NeverPrompted, CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(Directory.Exists(Path.Combine(_localRoot, "payload")));
+        Assert.True(Directory.Exists(Path.Combine(_localRoot, "payload", "empty_dir")));
+    }
+
     private static FileTransferOrchestrator NewOrchestrator(FakeSftpSession sftp) =>
         new(sftp, NullLogger<FileTransferOrchestrator>.Instance);
 
