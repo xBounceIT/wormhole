@@ -79,7 +79,9 @@ public sealed partial class FileTransferDialog : UserControl
         ConflictOverlay.Visibility = Visibility.Visible;
         // Focus the accent Skip button so Enter/Escape KeyDown routes through the
         // overlay Grid and a stray Enter on a blank focus state still resolves Skip.
-        _ = DispatcherQueue.TryEnqueue(() => ConflictSkipButton.Focus(FocusState.Programmatic));
+        // FocusState.Pointer (not Programmatic) so ancestor LosingFocus handlers don't
+        // intercept — same rationale documented at OnRenameTextBoxLoaded in FilePaneControl.
+        _ = DispatcherQueue.TryEnqueue(() => ConflictSkipButton.Focus(FocusState.Pointer));
 
         // Cancellation (dialog closing / shutdown) defaults to Skip so the batch can
         // unwind cleanly instead of waiting on a TCS that nothing will complete.

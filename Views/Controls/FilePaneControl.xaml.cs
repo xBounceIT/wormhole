@@ -110,6 +110,11 @@ public sealed partial class FilePaneControl : UserControl
         // message — its hide()/clear() lambdas identity-check the captured tcs (see
         // below) so they don't clobber a freshly-assigned _confirmTcs / Visibility.
         _confirmTcs?.TrySetResult(false);
+        // Cross-overlay: if a name-prompt is also open (e.g. user Tabbed past it to the
+        // Delete toolbar button), cancel that prompt so only one modal overlay is up
+        // at a time. Otherwise both overlays would be Visible and stack their dim
+        // backgrounds.
+        _promptTcs?.TrySetResult(null);
         ConfirmTitle.Text = title;
         ConfirmMessage.Text = message;
         ConfirmYesButton.Content = yesLabel;
@@ -118,7 +123,9 @@ public sealed partial class FilePaneControl : UserControl
         ConfirmOverlay.Visibility = Visibility.Visible;
         // Focus the safe (Cancel) button so Enter is a no-op-equivalent for destructive
         // actions, matching the pre-overlay ContentDialog's DefaultButton=Close.
-        _ = DispatcherQueue.TryEnqueue(() => ConfirmNoButton.Focus(FocusState.Programmatic));
+        // FocusState.Pointer (not Programmatic) so ancestor LosingFocus handlers don't
+        // intercept — same rationale documented at OnRenameTextBoxLoaded.
+        _ = DispatcherQueue.TryEnqueue(() => ConfirmNoButton.Focus(FocusState.Pointer));
         return CompleteOverlayAsync(tcs.Task,
             () => { if (_confirmTcs == tcs) ConfirmOverlay.Visibility = Visibility.Collapsed; },
             () => { if (_confirmTcs == tcs) _confirmTcs = null; });
@@ -142,6 +149,8 @@ public sealed partial class FilePaneControl : UserControl
     {
         // Reentrancy guard — see ShowConfirmAsync for the rationale.
         _promptTcs?.TrySetResult(null);
+        // Cross-overlay: cancel a pending confirm prompt so only one modal is up.
+        _confirmTcs?.TrySetResult(false);
         PromptTitle.Text = title;
         PromptInput.Header = label;
         PromptInput.PlaceholderText = placeholder;
@@ -473,6 +482,16 @@ public sealed partial class FilePaneControl : UserControl
                 }
                 FireAndForgetTransfer(new TransferRequest(direction, ViewModel.CurrentPath, items));
             }
+        }
+        catch (Exception ex)
+        {
+            // OnDrop is async void; an unhandled exception (e.g. GetStorageItemsAsync
+            // throwing on a vanished source file, File.Copy failing for permissions,
+            // CopyDirectory hitting a denied subtree) would otherwise escape to
+            // AppDomain.UnhandledException. Surface to the pane's ErrorMessage so the
+            // user sees the failure, and log via the standard Serilog sink.
+            App.Current?.Services?.GetService<ILogger<FilePaneControl>>()?.LogWarning(ex, "Drop handler failed.");
+            if (ViewModel is { } vm) vm.ErrorMessage = ex.Message;
         }
         finally
         {
