@@ -225,23 +225,20 @@ func (s *pppState) dataLoop(ctx context.Context) {
 	}
 }
 
-// writerLoop is the sole writer of s.conn. It STRICTLY prefers control-plane frames: each
-// iteration drains every pending control frame before falling through to data. Returns when
-// ctx is cancelled or a write fails. On exit it also closes the conn so readLoop's
-// synchronous io.ReadFull unblocks even when the failure path was a write error (the close
-// is idempotent with cleanup's session.Conn.Close).
+// writerLoop is the sole writer of s.conn. It STRICTLY prefers control-plane frames: every
+// iteration first drains every pending control frame, and even on cancellation it performs
+// one last drain so a Terminate-Ack queued immediately before s.cancel() (handleLCP's
+// shutdown handshake) reaches the wire before we close the conn. Returns only after the
+// final drain — the close-conn defer then unblocks readLoop's synchronous io.ReadFull.
 func (s *pppState) writerLoop(ctx context.Context) {
 	defer s.cancel()
 	defer func() { _ = s.conn.Close() }()
 	for {
-		// First check cancellation — sustained traffic on either channel must not be allowed
-		// to starve cancellation observation.
-		if ctx.Err() != nil {
-			return
-		}
-		// Drain ALL pending control frames in a tight non-blocking loop before touching the
-		// data plane. This is the strict-priority semantics dataLoop relies on: LCP
-		// Echo-Reply and Terminate-Ack never sit behind a bulk IPv4 write.
+		// Always drain pending control frames first — BEFORE checking ctx — so a control
+		// frame enqueued immediately before cancellation (the canonical case: handleLCP's
+		// Terminate-Ack → s.cancel() sequence) still reaches the wire. Previously this
+		// check was at the top of the iteration alongside ctx.Err(), opening a window
+		// where a just-enqueued Ack could be skipped if cancellation was observed first.
 		drainedControl := false
 		for {
 			select {
@@ -255,19 +252,16 @@ func (s *pppState) writerLoop(ctx context.Context) {
 			}
 			break
 		}
-		// If we just drained, loop back to re-check cancellation and pick up any control
-		// frame that arrived while we were writing.
 		if drainedControl {
+			// Loop back; the next iteration's drain will pick up anything that arrived
+			// while we were writing, and the bottom-select will exit cleanly if ctx is done.
 			continue
 		}
-		// Control plane is empty — block on either a new control frame (which preempts
-		// data), a data frame, or cancellation. NOTE: Go's select picks pseudo-randomly
-		// when multiple cases are simultaneously ready, so if a control frame arrives in
-		// the same scheduling tick as a data frame, the data case can win the coin flip
-		// despite our "strict priority" comment. The data case below re-checks
-		// controlFrame non-blockingly before writing so we never leak that priority
-		// inversion onto the wire — an Echo-Reply or Terminate-Ack queued at the same
-		// moment as a bulk IPv4 frame is still flushed first.
+		// Control plane is empty — block on a new control frame (which preempts data), a
+		// data frame, or cancellation. NOTE: Go's select picks pseudo-randomly when
+		// multiple cases are ready; the data arm re-checks controlFrame before writing,
+		// and the ctx.Done arm performs ONE FINAL drain so any control frame that landed
+		// in the same scheduling tick as cancellation still reaches the wire.
 		select {
 		case frame := <-s.controlFrame:
 			if err := s.writeFrame(ctx, frame); err != nil {
@@ -287,7 +281,27 @@ func (s *pppState) writerLoop(ctx context.Context) {
 				return
 			}
 		case <-ctx.Done():
-			return
+			// Final drain: the canonical shutdown path is handleLCP → sendLCP(TermAck)
+			// (enqueue) → s.cancel() (ctx fires). If the two events land in the same
+			// scheduling tick, Go's select may pick ctx.Done() first; without this drain
+			// the queued Terminate-Ack would be dropped on the floor and the gateway
+			// would see an abrupt close instead of a graceful shutdown. Bounded by
+			// controlQueueDepth, so it can't loop forever.
+			for {
+				select {
+				case frame := <-s.controlFrame:
+					// Pass a fresh background context to writeFrame so it doesn't suppress
+					// the log on a real write error during the drain; the write itself is
+					// still bounded by s.conn's own write deadline (none today, but a TLS
+					// conn under sustained back-pressure would surface here).
+					if _, werr := s.conn.Write(frame); werr != nil {
+						// Conn likely closed by the other side; nothing more to flush.
+						return
+					}
+				default:
+					return
+				}
+			}
 		}
 	}
 }
