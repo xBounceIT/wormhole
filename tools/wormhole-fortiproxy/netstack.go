@@ -170,8 +170,18 @@ func (d netstackDialer) resolveHostV4(ctx context.Context, host string) (netip.A
 // Unlike Go's net.Resolver with a custom Dial, this loop actually advances on read-timeout
 // (broken-but-reachable DNS server) instead of being stuck on the first server because
 // gonet.DialUDP doesn't probe reachability.
+//
+// The whole lookup is bounded by an OVERALL 5s deadline matching the OS-resolver fallback
+// path, so a pathological configuration of many slow servers (N × 2s) can't drag a single
+// hostname resolution past the SLO the SOCKS5 client expects.
 func resolveViaVPN(ctx context.Context, s *stack.Stack, servers []netip.Addr, host string) (netip.Addr, error) {
-	const perServerTimeout = 2 * time.Second
+	const (
+		perServerTimeout = 2 * time.Second
+		overallTimeout   = 5 * time.Second
+	)
+
+	ctx, cancel := context.WithTimeout(ctx, overallTimeout)
+	defer cancel()
 
 	qname, err := dnsmessage.NewName(host + ".")
 	if err != nil {
@@ -179,8 +189,11 @@ func resolveViaVPN(ctx context.Context, s *stack.Stack, servers []netip.Addr, ho
 	}
 	var lastErr error
 	for _, srv := range servers {
-		// Respect the caller's deadline on each iteration.
+		// Respect the caller's (or our overall) deadline before each attempt.
 		if ctx.Err() != nil {
+			if lastErr != nil {
+				return netip.Addr{}, lastErr
+			}
 			return netip.Addr{}, ctx.Err()
 		}
 		addr, err := queryAOne(ctx, s, srv, qname, perServerTimeout)
@@ -252,8 +265,7 @@ func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dns
 	}
 
 	// Allocate generously — DNS responses without EDNS are capped at 512 bytes, but EDNS-
-	// extended responses can be up to ~4 KB. Truncation handling (TC flag → retry over TCP)
-	// is a follow-up; today we just take whatever fits in 4 KB.
+	// extended responses can be up to ~4 KB.
 	buf := make([]byte, 4096)
 	n, err := conn.Read(buf)
 	if err != nil {
@@ -261,6 +273,14 @@ func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dns
 			return netip.Addr{}, errors.New("DNS connection closed")
 		}
 		return netip.Addr{}, fmt.Errorf("DNS read: %w", err)
+	}
+
+	// Peek at the TC (truncation) flag at bit 9 of the 16-bit flags word (byte 2 high bits)
+	// and retry over TCP if set. Without this, large internal records (many A's, big TXT)
+	// silently get truncated answers — the parser would return whatever fit in 4 KB without
+	// signalling truncation.
+	if n >= 3 && buf[2]&0x02 != 0 {
+		return queryAOneTCP(ctx, s, server, wire, msg.Header.ID, timeout)
 	}
 
 	var parser dnsmessage.Parser
@@ -298,4 +318,89 @@ func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dns
 		return netip.AddrFrom4(a.A), nil
 	}
 	return netip.Addr{}, fmt.Errorf("DNS: no A records returned")
+}
+
+// queryAOneTCP retries a DNS A query over TCP after a UDP response had the TC bit set.
+// TCP DNS prefixes each message with a 2-byte length header (RFC 1035 §4.2.2).
+func queryAOneTCP(ctx context.Context, s *stack.Stack, server netip.Addr, query []byte, txid uint16, timeout time.Duration) (netip.Addr, error) {
+	fa := tcpip.FullAddress{
+		NIC:  1,
+		Addr: tcpip.AddrFromSlice(server.AsSlice()),
+		Port: 53,
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	conn, err := gonet.DialContextTCP(dialCtx, s, fa, ipv4.ProtocolNumber)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("DNS-TCP dial: %w", err)
+	}
+	defer conn.Close()
+
+	deadline := time.Now().Add(timeout)
+	if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
+		deadline = d
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		return netip.Addr{}, fmt.Errorf("DNS-TCP deadline: %w", err)
+	}
+
+	// Write length-prefixed query.
+	framed := make([]byte, 2+len(query))
+	binary.BigEndian.PutUint16(framed[0:2], uint16(len(query)))
+	copy(framed[2:], query)
+	if _, err := conn.Write(framed); err != nil {
+		return netip.Addr{}, fmt.Errorf("DNS-TCP write: %w", err)
+	}
+
+	// Read the 2-byte length prefix, then the message.
+	var lenBuf [2]byte
+	if _, err := io.ReadFull(conn, lenBuf[:]); err != nil {
+		return netip.Addr{}, fmt.Errorf("DNS-TCP read length: %w", err)
+	}
+	respLen := int(binary.BigEndian.Uint16(lenBuf[:]))
+	// Per RFC 1035 the response can be up to 65535 bytes; cap defensively at 64 KB minus
+	// the header (anything larger is broken or hostile).
+	if respLen < 12 || respLen > 0xFFFF {
+		return netip.Addr{}, fmt.Errorf("DNS-TCP nonsense length %d", respLen)
+	}
+	respBuf := make([]byte, respLen)
+	if _, err := io.ReadFull(conn, respBuf); err != nil {
+		return netip.Addr{}, fmt.Errorf("DNS-TCP read body: %w", err)
+	}
+
+	var parser dnsmessage.Parser
+	hdr, err := parser.Start(respBuf)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("DNS-TCP parse: %w", err)
+	}
+	if hdr.ID != txid {
+		return netip.Addr{}, fmt.Errorf("DNS-TCP txid mismatch: want %#x got %#x", txid, hdr.ID)
+	}
+	if hdr.RCode != dnsmessage.RCodeSuccess {
+		return netip.Addr{}, fmt.Errorf("DNS-TCP rcode %v", hdr.RCode)
+	}
+	if err := parser.SkipAllQuestions(); err != nil {
+		return netip.Addr{}, fmt.Errorf("DNS-TCP skip questions: %w", err)
+	}
+	for {
+		ah, err := parser.AnswerHeader()
+		if errors.Is(err, dnsmessage.ErrSectionDone) {
+			break
+		}
+		if err != nil {
+			return netip.Addr{}, fmt.Errorf("DNS-TCP answer header: %w", err)
+		}
+		if ah.Type != dnsmessage.TypeA {
+			if err := parser.SkipAnswer(); err != nil {
+				return netip.Addr{}, fmt.Errorf("DNS-TCP skip answer: %w", err)
+			}
+			continue
+		}
+		a, err := parser.AResource()
+		if err != nil {
+			return netip.Addr{}, fmt.Errorf("DNS-TCP A resource: %w", err)
+		}
+		return netip.AddrFrom4(a.A), nil
+	}
+	return netip.Addr{}, fmt.Errorf("DNS-TCP: no A records returned")
 }
