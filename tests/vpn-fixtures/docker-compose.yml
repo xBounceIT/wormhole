@@ -64,6 +64,13 @@ services:
 
   openvpn:
     image: kylemanna/openvpn:latest
+    # Run as the host invoker's uid:gid so status/log files written into the
+    # bind mount (openvpn-status.log, ipp.txt) stay owned by the runner user.
+    # Asymmetric with bootstrap.sh's helper containers — they already use
+    # --user, so the runtime container was the only writer that could leave
+    # root-owned files on the host. ovpn_run supports running as non-root
+    # because the PKI was generated readable by the same uid.
+    user: "${HOST_UID:-0}:${HOST_GID:-0}"
     cap_add:
       - NET_ADMIN
     devices:
@@ -84,12 +91,14 @@ services:
     # See wireguard service for rationale — fail fast on misconfig.
     restart: "no"
     healthcheck:
-      # /proc/1/comm matches as soon as ovpn_run exec's openvpn — well before
-      # TLS init has bound the UDP socket. We also check /proc/net/udp for the
-      # bound listener: column 2 is `<addr>:<port>` in hex, and 1194 = 0x4AA.
-      # /proc/net/udp is universally available (no dependency on ss/netstat,
-      # neither of which ship in kylemanna/openvpn's Alpine base).
-      test: ["CMD-SHELL", "grep -q '^openvpn$' /proc/1/comm && grep -q ':04AA ' /proc/net/udp"]
+      # Two readiness signals AND'd together: an `openvpn` process exists
+      # somewhere in the container (busybox's pgrep finds it regardless of PID
+      # — robust if upstream Alpine ever adopts an init wrapper at PID 1 that
+      # doesn't exec into openvpn), AND port 1194/udp is bound. Column 2 of
+      # /proc/net/udp is `<addr>:<port>` in hex; 1194 = 0x4AA. /proc/net/udp
+      # is universally available (no dependency on ss/netstat, neither of
+      # which ship in kylemanna/openvpn's Alpine base).
+      test: ["CMD-SHELL", "pgrep openvpn >/dev/null && grep -q ':04AA ' /proc/net/udp"]
       interval: 2s
       timeout: 2s
       retries: 30

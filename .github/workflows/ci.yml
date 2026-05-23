@@ -131,6 +131,10 @@ jobs:
         # message and the WireGuard half of the job still runs. Worth attempting
         # rather than defaulting to mock-only — a Linux shim build is the right
         # north star.
+        #
+        # A separate step below emits a ::warning:: when this fails so the
+        # OpenVPN-not-exercised state surfaces on the run summary rather than
+        # silently skipping forever.
         id: build_ovpn
         continue-on-error: true
         run: |
@@ -148,6 +152,14 @@ jobs:
           export CGO_LDFLAGS="-L$GITHUB_WORKSPACE/$SHIM_DIR/build -lovpn_shim -ljsoncpp -llz4 -lxxhash -ldl -lstdc++ -lpthread"
           ( cd tools/wormhole-ovpnproxy && go build -trimpath -tags ovpn3 -ldflags "-s -w" -o "$GITHUB_WORKSPACE/bin/wormhole-ovpnproxy" . )
           ls -la bin/wormhole-ovpnproxy
+
+      - name: Warn if ovpn3 build failed
+        # Surfaces a yellow ::warning:: on the run summary so a silently-skipped
+        # OpenVPN test doesn't masquerade as green coverage forever. Pairs with
+        # the continue-on-error: true above.
+        if: steps.build_ovpn.outcome != 'success'
+        run: |
+          echo "::warning::wormhole-ovpnproxy (-tags ovpn3) build failed — OpenVPN integration test will skip. Check the 'Build wormhole-ovpnproxy' step log."
 
       - name: Bootstrap VPN fixtures
         run: |
@@ -207,4 +219,10 @@ jobs:
 
       - name: Tear down VPN servers
         if: always()
-        run: docker compose -f tests/vpn-fixtures/docker-compose.yml down --volumes --remove-orphans
+        # Export HOST_UID/HOST_GID so compose doesn't emit
+        # `WARN[0000] The "HOST_UID" variable is not set` lines during
+        # teardown — pure log hygiene, no functional impact.
+        run: |
+          export HOST_UID=$(id -u)
+          export HOST_GID=$(id -g)
+          docker compose -f tests/vpn-fixtures/docker-compose.yml down --volumes --remove-orphans
