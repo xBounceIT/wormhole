@@ -216,7 +216,11 @@ func (s *pppState) dataLoop(ctx context.Context) {
 		buf := pkt.ToBuffer()
 		pkt.DecRef()
 		raw := buf.Flatten()
-		frame := buildEncapFrame(pppProtoIPv4, raw)
+		frame, err := buildEncapFrame(pppProtoIPv4, raw)
+		if err != nil {
+			logf("ppp dataLoop: dropping oversized IPv4 packet: %v", err)
+			continue
+		}
 		select {
 		case s.dataFrame <- frame:
 		case <-ctx.Done():
@@ -348,7 +352,11 @@ func (s *pppState) injectIPv4(packet []byte) {
 }
 
 func (s *pppState) sendPPP(proto uint16, payload []byte, control bool) {
-	frame := buildEncapFrame(proto, payload)
+	frame, err := buildEncapFrame(proto, payload)
+	if err != nil {
+		logf("ppp sendPPP: dropping oversized frame (proto=%#x control=%v): %v", proto, control, err)
+		return
+	}
 	ch := s.dataFrame
 	if control {
 		ch = s.controlFrame
@@ -363,15 +371,24 @@ func (s *pppState) sendPPP(proto uint16, payload []byte, control bool) {
 }
 
 // buildEncapFrame produces a single Fortinet-encapsulated PPP frame for the given protocol
-// and payload. Pure function — no IO, no state.
-func buildEncapFrame(proto uint16, payload []byte) []byte {
-	frame := make([]byte, fortinetEncapHeaderSz+2+len(payload))
-	binary.BigEndian.PutUint16(frame[0:2], uint16(fortinetEncapHeaderSz+2+len(payload)))
+// and payload. Pure function — no IO, no state. Returns an error if the payload would
+// overflow the 16-bit length field; callers must log+drop. The netstack MTU is already
+// clamped to fortinetMaxPayloadLen-2 so this should be unreachable for IPv4 outbound today,
+// but a future MTU-clamp regression or an oversized internally-constructed control frame
+// would otherwise silently corrupt framing on the wire instead of failing fast.
+func buildEncapFrame(proto uint16, payload []byte) ([]byte, error) {
+	total := fortinetEncapHeaderSz + 2 + len(payload)
+	if total > 0xFFFF {
+		return nil, fmt.Errorf("ppp frame too large for uint16 encap header: payload=%d (max=%d)",
+			len(payload), 0xFFFF-fortinetEncapHeaderSz-2)
+	}
+	frame := make([]byte, total)
+	binary.BigEndian.PutUint16(frame[0:2], uint16(total))
 	binary.BigEndian.PutUint16(frame[2:4], fortinetEncapMagic)
 	binary.BigEndian.PutUint16(frame[4:6], uint16(2+len(payload)))
 	binary.BigEndian.PutUint16(frame[6:8], proto)
 	copy(frame[8:], payload)
-	return frame
+	return frame, nil
 }
 
 // handleLCP implements just enough of the LCP state machine to bring the link up and respond
