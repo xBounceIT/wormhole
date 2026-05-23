@@ -75,12 +75,17 @@ echo "==> Writing WireGuard server config ($WG_OUT/wg0.conf)"
 # PostUp enables NAT so packets arriving on wg0 from the client (10.13.13.2) can
 # reach the docker bridge (10.20.0.0/24) where the echo-target lives. PostDown
 # tears down those rules cleanly on container stop / rotation.
+#
+# IP forwarding is enabled via the compose service's `sysctls:` block — wg-quick
+# runs PostUp under `set -e`, and a sysctl -w from inside the container fails
+# with EACCES even with NET_ADMIN ("permission denied on key
+# net.ipv4.ip_forward"), which aborts wg-quick and tears down the interface.
 cat > "$WG_OUT/wg0.conf" <<EOF
 [Interface]
 Address = 10.13.13.1/24
 ListenPort = 51820
 PrivateKey = $SERVER_PRIV
-PostUp = sysctl -w net.ipv4.ip_forward=1; iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -s 10.13.13.0/24 -o eth0 -j MASQUERADE
+PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -s 10.13.13.0/24 -o eth0 -j MASQUERADE
 PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -s 10.13.13.0/24 -o eth0 -j MASQUERADE
 
 [Peer]

@@ -64,13 +64,14 @@ services:
 
   openvpn:
     image: kylemanna/openvpn:latest
-    # Run as the host invoker's uid:gid so status/log files written into the
-    # bind mount (openvpn-status.log, ipp.txt) stay owned by the runner user.
-    # Asymmetric with bootstrap.sh's helper containers — they already use
-    # --user, so the runtime container was the only writer that could leave
-    # root-owned files on the host. ovpn_run supports running as non-root
-    # because the PKI was generated readable by the same uid.
-    user: "${HOST_UID:-0}:${HOST_GID:-0}"
+    # Intentionally runs as root inside the container. kylemanna's default
+    # config drops privileges to `user nobody; group nogroup` AFTER setup, but
+    # it needs to start as root to write iptables NAT rules and open
+    # /run/xtables.lock. Setting `user:` here caused
+    # `Fatal: can't open lock file /run/xtables.lock: Permission denied` at
+    # init time. Any status/log files openvpn writes into the bind mount end
+    # up root-owned on the host — acceptable for ephemeral CI runners; local
+    # devs may need sudo to `rm -rf .out/` between runs.
     cap_add:
       - NET_ADMIN
     devices:
