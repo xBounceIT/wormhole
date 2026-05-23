@@ -228,6 +228,9 @@ public partial class CredentialsViewModel : ObservableObject
             // Repository delete is the source of truth — once it succeeds the row is gone.
             // Drop from the UI list before secret cleanup so a later failure can't leave a ghost card.
             Credentials.Remove(profile);
+            // Also drop from the selection set so the action strip's count doesn't get
+            // stranded when the deleted card was checked.
+            SelectedCredentials.Remove(profile);
             await _credentialService.DeletePasswordAsync(profile.Id);
             await _credentialService.DeletePrivateKeyAsync(profile.Id);
         }
