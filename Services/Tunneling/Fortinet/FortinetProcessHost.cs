@@ -71,14 +71,27 @@ public sealed class FortinetProcessHost : IAsyncDisposable
         var host = new FortinetProcessHost(process, logger);
         try
         {
-            var stdin = process.StandardInput.BaseStream;
-            await JsonSerializer.SerializeAsync(stdin, config, cancellationToken: cancellationToken).ConfigureAwait(false);
-            await stdin.WriteAsync(s_newline, cancellationToken).ConfigureAwait(false);
-            await stdin.FlushAsync(cancellationToken).ConfigureAwait(false);
-            // Do NOT close stdin: the sidecar treats EOF as a shutdown signal.
-
+            // Single timeout CTS covers BOTH the stdin write AND the stdout READY read, matching
+            // the WireGuard/OpenVPN hosts. Without this, a spawned sidecar that stalls before
+            // reading stdin can leave the managed caller blocked in the pipe write until the
+            // user cancels, instead of surfacing a concrete startup timeout.
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             timeoutCts.CancelAfter(ReadyTimeout);
+
+            var stdin = process.StandardInput.BaseStream;
+            try
+            {
+                await JsonSerializer.SerializeAsync(stdin, config, cancellationToken: timeoutCts.Token).ConfigureAwait(false);
+                await stdin.WriteAsync(s_newline, timeoutCts.Token).ConfigureAwait(false);
+                await stdin.FlushAsync(timeoutCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new TimeoutException(
+                    $"Fortinet sidecar did not accept its configuration on stdin within {ReadyTimeout.TotalSeconds:F0}s.");
+            }
+            // Do NOT close stdin: the sidecar treats EOF as a shutdown signal.
+
             string? line;
             try
             {

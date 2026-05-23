@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Input;
@@ -12,6 +13,7 @@ using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Services;
 using Wormhole.Services.Rdp;
+using Wormhole.Services.Tunneling;
 
 namespace Wormhole.ViewModels.Sessions;
 
@@ -20,15 +22,23 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(30);
     private static readonly string TimeoutMessage =
         $"RDP server didn't respond within {ConnectTimeout.TotalSeconds:0} seconds.";
+    private const string TunnelExternalClientUnsupportedMessage =
+        "The external Remote Desktop client cannot be used with a per-connection VPN tunnel because mstsc.exe would connect from the host network. Use embedded RDP without Azure AD/external-client routing, or disable the tunnel.";
+    private const string TunnelGatewayUnsupportedMessage =
+        "RD Gateway cannot be used with a per-connection VPN tunnel yet because the ActiveX control would open gateway traffic from the host network. Disable RD Gateway for this connection, or disable the tunnel.";
+    private const string TunnelStrictServerAuthUnsupportedMessage =
+        "Strict RDP server authentication cannot be used with the current per-connection VPN tunnel because the embedded ActiveX control validates the loopback forwarder name instead of the original server name. Set server authentication to Warn, or disable the tunnel.";
 
     private readonly IRdpSessionService _rdpService;
     private readonly ICredentialService _credentialService;
     private readonly ICredentialRepository _credentialRepository;
+    private readonly TunnelManager _tunnels;
     private readonly IDialogService _dialog;
     private readonly IRdpCrashSentinelService _crashSentinel;
     private readonly ILogger<RdpSessionViewModel> _logger;
 
     private IRdpSession? _session;
+    private ITunnelInstance? _tunnel;
     private CancellationTokenSource? _cts;
     private int _connectInFlight;
     private IntPtr _ownerHwnd;
@@ -47,6 +57,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         IRdpSessionService rdpService,
         ICredentialService credentialService,
         ICredentialRepository credentialRepository,
+        TunnelManager tunnels,
         IDialogService dialog,
         IRdpCrashSentinelService crashSentinel,
         ILoggerFactory loggerFactory)
@@ -54,6 +65,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         _rdpService = rdpService;
         _credentialService = credentialService;
         _credentialRepository = credentialRepository;
+        _tunnels = tunnels;
         _dialog = dialog;
         _crashSentinel = crashSentinel;
         _logger = loggerFactory.CreateLogger<RdpSessionViewModel>();
@@ -105,9 +117,17 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     public bool IsConnecting => Status == SessionStatus.Connecting;
     public bool IsConnected => Status == SessionStatus.Connected;
     public bool IsFailed => Status == SessionStatus.Failed;
+    public bool CanUseExternalClient => Profile?.TunnelEnabled != true;
 
-    // Initialize inherits the base implementation: protocol-specific bootstrapping is done
-    // lazily on AttachAsync once the surface host has the owner HWND.
+    public override void Initialize(ConnectionProfile profile)
+    {
+        base.Initialize(profile);
+        OnPropertyChanged(nameof(CanUseExternalClient));
+        UseExternalClientCommand.NotifyCanExecuteChanged();
+    }
+
+    // Protocol-specific bootstrapping is still done lazily on AttachAsync once the surface
+    // host has the owner HWND; Initialize only refreshes command state derived from Profile.
 
     /// <summary>
     /// Called by RdpSurfaceHost on Loaded. If no session exists yet, resolves the credential and
@@ -155,10 +175,9 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     }
 
     [RelayCommand]
-    public Task DisconnectAsync()
+    public async Task DisconnectAsync()
     {
-        FullTeardown();
-        return Task.CompletedTask;
+        await FullTeardownAsync().ConfigureAwait(true);
     }
 
     /// <summary>
@@ -168,12 +187,20 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     /// spawned mstsc.exe lives independently and survives a Wormhole Disconnect / tab close
     /// (we just stop tracking it — see FullTeardown).
     /// </summary>
-    [RelayCommand]
-    public void UseExternalClient()
+    [RelayCommand(CanExecute = nameof(CanUseExternalClient))]
+    public async Task UseExternalClient()
     {
         var profile = Profile;
         if (profile is null) return;
-        FullTeardown();
+        if (profile.TunnelEnabled)
+        {
+            if (Status is not SessionStatus.Connected and not SessionStatus.Connecting)
+            {
+                ReportFailure(TunnelExternalClientUnsupportedMessage, dueToCredentials: false);
+            }
+            return;
+        }
+        await FullTeardownAsync().ConfigureAwait(true);
         LaunchExternalProcess(profile);
     }
 
@@ -183,7 +210,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         if (Profile is null || _ownerHwnd == IntPtr.Zero) return;
 
         var forcePrompt = FailedDueToCredentials;
-        FullTeardown();
+        await FullTeardownAsync().ConfigureAwait(true);
 
         // Geometry will be re-supplied by the surface host's first SetBounds after the new
         // session attaches; seed with a 1x1 so the form is valid until that arrives.
@@ -195,10 +222,9 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     // command keeps the tab context menu / failure overlay in sync with the actual state.
     private bool CanRetry() => Status != SessionStatus.Connecting;
 
-    public override ValueTask CloseAsync()
+    public override async ValueTask CloseAsync()
     {
-        FullTeardown();
-        return ValueTask.CompletedTask;
+        await FullTeardownAsync().ConfigureAwait(true);
     }
 
     private async Task ConnectAsync(IntPtr ownerHwnd, HostBounds initialBounds, bool forcePromptForPassword)
@@ -226,7 +252,23 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             // down the app.
             if (await ShouldUseExternalClientAsync(profile).ConfigureAwait(true))
             {
+                if (profile.TunnelEnabled)
+                {
+                    ReportFailure(TunnelExternalClientUnsupportedMessage, dueToCredentials: false);
+                    return;
+                }
                 LaunchExternalProcess(profile);
+                return;
+            }
+
+            if (profile.TunnelEnabled && profile.RdpGatewayUsageMethod != 0)
+            {
+                ReportFailure(TunnelGatewayUnsupportedMessage, dueToCredentials: false);
+                return;
+            }
+            if (profile.TunnelEnabled && profile.RdpServerAuthentication != 0)
+            {
+                ReportFailure(TunnelStrictServerAuthUnsupportedMessage, dueToCredentials: false);
                 return;
             }
 
@@ -288,36 +330,37 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                     return;
                 }
 
+                var (gwUser, gwPassword) = await ResolveGatewayCredentialsAsync(profile, token).ConfigureAwait(true);
+                var connectProfile = await PrepareConnectProfileAsync(profile, token).ConfigureAwait(true);
+                token.ThrowIfCancellationRequested();
+
                 // ConnectAsync returns immediately after kicking off the asynchronous OCX
                 // handshake, so without a real watchdog there's no way to surface a "server
-                // never answered" timeout. The Register callback drives both legs: it flips
-                // the captured timedOut flag so the inline OCE catch can distinguish a
-                // watchdog-cancel from a user-cancel (FullTeardown), and it posts to the UI
-                // thread to fail the VM if the await already returned and the OCX is sitting
-                // mid-handshake. The registration's lifetime is the CTS's lifetime — the
-                // previousCts?.Dispose() above and FullTeardown's Dispose release it.
-                cts.CancelAfter(ConnectTimeout);
+                // never answered" timeout. Start that watchdog only after gateway credential
+                // lookup and tunnel startup: those have their own failure/cancel behavior, and
+                // counting a slow VPN handshake against the RDP server response budget would
+                // incorrectly report "RDP server didn't respond" before the ActiveX ever tried.
                 cts.Token.Register(() =>
                 {
                     // User-initiated cancels (FullTeardown) null _cts BEFORE calling Cancel,
                     // so this guard distinguishes timer-fire from user-fire.
                     if (!ReferenceEquals(_cts, cts)) return;
                     timedOut = true;
-                    MarshalToUi(() =>
+                    MarshalToUi(async () =>
                     {
                         if (!ReferenceEquals(_cts, cts)) return;
                         if (Status != SessionStatus.Connecting) return;
-                        DisposeAndTransition(TimeoutMessage, dueToCredentials: false);
+                        await DisposeAndTransitionAsync(TimeoutMessage, dueToCredentials: false).ConfigureAwait(true);
                     });
                 });
+                cts.CancelAfter(ConnectTimeout);
 
-                var (gwUser, gwPassword) = await ResolveGatewayCredentialsAsync(profile, token).ConfigureAwait(true);
                 // Subscribe via the onSessionReady hook (not after the await) so the VM is ready
                 // to receive an immediate OnLogonError / OnDisconnected that the OCX may fire
                 // synchronously during the Connect() inside form.Start(). Subscribing after the
                 // returned Task completes would drop those events and strand us in Connecting.
                 var session = await _rdpService.ConnectAsync(
-                    profile, password, ownerHwnd, gwUser, gwPassword,
+                    connectProfile, password, ownerHwnd, gwUser, gwPassword,
                     onSessionReady: s =>
                     {
                         s.Connected += OnSessionConnected;
@@ -329,6 +372,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                     },
                     token).ConfigureAwait(true);
                 _session = session;
+                token.ThrowIfCancellationRequested();
 
                 _session.SetBounds(initialBounds.IsDegenerate(minDim: 1) ? HostBounds.Seed : initialBounds);
                 _session.Show();
@@ -336,17 +380,26 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             catch (OperationCanceledException) when (timedOut)
             {
                 DisposeSessionSilently();
+                await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
                 ReportFailure(TimeoutMessage, dueToCredentials: false);
             }
             catch (OperationCanceledException)
             {
                 DisposeSessionSilently();
+                await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
+                Status = SessionStatus.Disconnected;
+            }
+            catch (Exception) when (token.IsCancellationRequested)
+            {
+                DisposeSessionSilently();
+                await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
                 Status = SessionStatus.Disconnected;
             }
             catch (System.Runtime.InteropServices.COMException ex) when ((uint)ex.HResult == 0x80040154)
             {
                 // REGDB_E_CLASSNOTREG — mstscax not registered (Server Core, N edition).
                 DisposeSessionSilently();
+                await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
                 ReportFailure(
                     "Microsoft Remote Desktop ActiveX (mstscax.dll) is not registered on this system. " +
                     "Install the Remote Desktop Connection client.",
@@ -356,6 +409,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             catch (Exception ex)
             {
                 DisposeSessionSilently();
+                await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
                 ReportFailure(ex.Message, dueToCredentials: false);
                 _logger.LogError(ex, "RDP connect failed for {Host}:{Port}.", profile.Host, profile.Port);
             }
@@ -365,6 +419,42 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             // Single point of release for _connectInFlight, regardless of whether we took the
             // external-client early-return, the embedded path, or threw out of either.
             Interlocked.Exchange(ref _connectInFlight, 0);
+        }
+    }
+
+    private async Task<ConnectionProfile> PrepareConnectProfileAsync(ConnectionProfile profile, CancellationToken token)
+    {
+        var tunnel = await _tunnels.EstablishAsync(profile, token).ConfigureAwait(true);
+        if (tunnel is null) return profile;
+        if (token.IsCancellationRequested)
+        {
+            await DisposeTunnelInstanceSilentlyAsync(tunnel).ConfigureAwait(true);
+            token.ThrowIfCancellationRequested();
+        }
+
+        var previousTunnel = Interlocked.Exchange(ref _tunnel, tunnel);
+        if (previousTunnel is not null)
+        {
+            await DisposeTunnelInstanceSilentlyAsync(previousTunnel).ConfigureAwait(true);
+        }
+
+        try
+        {
+            var localPort = await tunnel.BindLocalForwarderAsync(profile.Host, profile.Port, token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            return profile with
+            {
+                Host = IPAddress.Loopback.ToString(),
+                Port = localPort,
+            };
+        }
+        catch
+        {
+            if (ReferenceEquals(Interlocked.CompareExchange(ref _tunnel, null, tunnel), tunnel))
+            {
+                await DisposeTunnelInstanceSilentlyAsync(tunnel).ConfigureAwait(true);
+            }
+            throw;
         }
     }
 
@@ -442,7 +532,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
     private void OnSessionDisconnected(object? sender, RdpDisconnectInfo info)
     {
-        MarshalToUi(() => DisposeAndTransition(
+        MarshalToUi(() => DisposeAndTransitionAsync(
             failureMessage: info.IsClean ? null : info.Description,
             dueToCredentials: false));
     }
@@ -458,18 +548,18 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         if (code == -2)
         {
             // User dismissed the credentials prompt — silent disconnect, no failure UI.
-            MarshalToUi(() => DisposeAndTransition(failureMessage: null, dueToCredentials: false));
+            MarshalToUi(() => DisposeAndTransitionAsync(failureMessage: null, dueToCredentials: false));
             return;
         }
         var dueToCredentials = code != -5;
-        MarshalToUi(() => DisposeAndTransition(
+        MarshalToUi(() => DisposeAndTransitionAsync(
             failureMessage: RdpLogonErrors.Describe(code),
             dueToCredentials: dueToCredentials));
     }
 
     private void OnSessionFatalError(object? sender, int code)
     {
-        MarshalToUi(() => DisposeAndTransition(
+        MarshalToUi(() => DisposeAndTransitionAsync(
             failureMessage: $"RDP fatal error (code {code}).",
             dueToCredentials: false));
     }
@@ -527,7 +617,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     /// User-initiated teardown (Disconnect / Retry / tab close): cancel any in-flight
     /// connect, dispose the session, return to a clean Disconnected state.
     /// </summary>
-    private void FullTeardown()
+    private async Task FullTeardownAsync()
     {
         var cts = _cts;
         _cts = null;
@@ -537,6 +627,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         cts?.Dispose();
 
         DisposeSessionSilently();
+        await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
         DetachExternalProcess();
         Status = SessionStatus.Disconnected;
         ErrorMessage = null;
@@ -678,9 +769,10 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     /// (clean shutdown) or surface the failure overlay. Called from OnSessionDisconnected /
     /// OnSessionLogonError / OnSessionFatalError so the shape stays consistent.
     /// </summary>
-    private void DisposeAndTransition(string? failureMessage, bool dueToCredentials)
+    private async Task DisposeAndTransitionAsync(string? failureMessage, bool dueToCredentials)
     {
         DisposeSessionSilently();
+        await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
         if (failureMessage is null)
         {
             Status = SessionStatus.Disconnected;
@@ -691,6 +783,20 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         {
             ReportFailure(failureMessage, dueToCredentials);
         }
+    }
+
+    private async Task DisposeTunnelSilentlyAsync()
+    {
+        var tunnel = Interlocked.Exchange(ref _tunnel, null);
+        if (tunnel is null) return;
+
+        await DisposeTunnelInstanceSilentlyAsync(tunnel).ConfigureAwait(false);
+    }
+
+    private async Task DisposeTunnelInstanceSilentlyAsync(ITunnelInstance tunnel)
+    {
+        try { await tunnel.DisposeAsync().ConfigureAwait(false); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Tunnel dispose threw during RDP teardown."); }
     }
 
     private void DisposeSessionSilently()

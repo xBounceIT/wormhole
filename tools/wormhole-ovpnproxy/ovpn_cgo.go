@@ -96,8 +96,8 @@ func startOpenVpn(ctx context.Context, cfg config) (sockstun.Dialer, func(), err
 		return nil, nil, fmt.Errorf("shim returned invalid interface CIDR %q: %w", cidr, err)
 	}
 
-	// 4. Spin up a netstack TUN at the pushed address. nil DNS = use the OS resolver
-	//    inside netstackDialer.DialContext; pushed DNS support is a v2 feature.
+	// 4. Spin up a netstack TUN at the pushed address. nil DNS means hostname targets
+	//    fail closed inside netstack.DialContext; pushed DNS support is a v2 feature.
 	tunDev, tnet, err := netstack.CreateNetTUN([]netip.Addr{pfx.Addr()}, nil, 1500)
 	if err != nil {
 		C.ovpn_stop(client)
@@ -226,12 +226,13 @@ func pumpOutbound(ctx context.Context, client *C.ovpn_client_t, dev tun.Device) 
 //
 // Resolution policy (v1): hostnames go straight to tnet.LookupContextHost (i.e. through
 // the tunnel via netstack), NOT through the OS resolver. This matters because:
-//   (a) The OS resolver would leak the hostname to the local network in plaintext DNS
-//       before the tunnel is engaged — same threat model "VPN" is supposed to defeat.
-//   (b) wgproxy already routes resolution through the tunnel (it passes the address
-//       string straight to tnet.DialContext, which does internal resolution against the
-//       DNS servers configured at CreateNetTUN); ovpnproxy must match for behavioral
-//       parity across sidecars.
+//
+//	(a) The OS resolver would leak the hostname to the local network in plaintext DNS
+//	    before the tunnel is engaged — same threat model "VPN" is supposed to defeat.
+//	(b) wgproxy already routes resolution through the tunnel (it passes the address
+//	    string straight to tnet.DialContext, which does internal resolution against the
+//	    DNS servers configured at CreateNetTUN); ovpnproxy must match for behavioral
+//	    parity across sidecars.
 //
 // Pushed DNS support: CreateNetTUN was called with `nil` DNS servers (the shim doesn't
 // surface pushed dhcp-option DNS yet). With no DNS configured, tnet.LookupContextHost

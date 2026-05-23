@@ -58,9 +58,19 @@ public sealed class FortinetTunnelProvider : ITunnelProvider
             sidecarPath, sidecar, _loggerFactory.CreateLogger<FortinetProcessHost>(), cancellationToken)
             .ConfigureAwait(false);
 
-        return new SocksTunnelInstance(
-            host.SocksEndpoint,
-            _loggerFactory.CreateLogger<SocksTunnelInstance>(),
-            onDispose: async () => await host.DisposeAsync().ConfigureAwait(false));
+        // Keep lifecycle parity with WireGuard/OpenVPN: once StartAsync returns the sidecar is
+        // alive, so a construction-time failure must tear it down immediately.
+        try
+        {
+            return new SocksTunnelInstance(
+                host.SocksEndpoint,
+                _loggerFactory.CreateLogger<SocksTunnelInstance>(),
+                onDispose: async () => await host.DisposeAsync().ConfigureAwait(false));
+        }
+        catch
+        {
+            await host.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 }

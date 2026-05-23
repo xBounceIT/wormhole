@@ -110,6 +110,7 @@ public sealed class SshSessionViewModelTests
             new NullRdpSessionService(),
             new Fakes.FakeCredentialService(),
             new NullCredentialRepository(),
+            CreateTunnelManager(),
             new Fakes.FakeDialogService(),
             new Fakes.FakeRdpCrashSentinelService(),
             NullLoggerFactory.Instance);
@@ -125,6 +126,7 @@ public sealed class SshSessionViewModelTests
             new NullRdpSessionService(),
             new Fakes.FakeCredentialService(),
             new NullCredentialRepository(),
+            CreateTunnelManager(),
             new Fakes.FakeDialogService(),
             new Fakes.FakeRdpCrashSentinelService(),
             NullLoggerFactory.Instance);
@@ -157,6 +159,16 @@ public sealed class SshSessionViewModelTests
         public Task AddAsync(CredentialProfile profile, CancellationToken ct = default) => Task.CompletedTask;
         public Task UpdateAsync(CredentialProfile profile, CancellationToken ct = default) => Task.CompletedTask;
         public Task DeleteAsync(Guid id, CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    private static TunnelManager CreateTunnelManager()
+    {
+        var credentials = new Fakes.FakeCredentialService();
+        return new TunnelManager(
+            Array.Empty<ITunnelProvider>(),
+            new FakeTunnelConfigRepository(),
+            credentials,
+            NullLoggerFactory.Instance.CreateLogger<TunnelManager>());
     }
 
     [Fact]
@@ -225,6 +237,7 @@ public sealed class SshSessionViewModelTests
             new NullRdpSessionService(),
             new Fakes.FakeCredentialService(),
             new NullCredentialRepository(),
+            CreateTunnelManager(),
             new Fakes.FakeDialogService(),
             new Fakes.FakeRdpCrashSentinelService(),
             NullLoggerFactory.Instance);
