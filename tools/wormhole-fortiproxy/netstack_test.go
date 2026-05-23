@@ -1,12 +1,45 @@
 package main
 
 import (
+	"context"
 	"net/netip"
 	"strings"
 	"testing"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
+
+func TestResolveHostV4_NoDnsFailsClosedForHostnames(t *testing.T) {
+	d := netstackDialer{}
+
+	addr, err := d.resolveHostV4(context.Background(), "10.0.0.42")
+	if err != nil {
+		t.Fatalf("IP literal should not need DNS: %v", err)
+	}
+	if addr != netip.AddrFrom4([4]byte{10, 0, 0, 42}) {
+		t.Fatalf("addr: got %v want 10.0.0.42", addr)
+	}
+
+	_, err = d.resolveHostV4(context.Background(), "internal.example")
+	if err == nil {
+		t.Fatal("expected hostname lookup to fail closed when VPN DNS is absent")
+	}
+	if !strings.Contains(err.Error(), "refusing to use host OS resolver") {
+		t.Fatalf("error did not explain fail-closed DNS behavior: %v", err)
+	}
+}
+
+func TestNewNetstackDialer_IPv6OnlyDnsFailsClosedForHostnames(t *testing.T) {
+	d := newNetstackDialer(nil, netip.Addr{}, []netip.Addr{netip.MustParseAddr("fd00::53")})
+
+	_, err := d.resolveHostV4(context.Background(), "internal.example")
+	if err == nil {
+		t.Fatal("expected hostname lookup to fail closed when VPN DNS has no IPv4 servers")
+	}
+	if !strings.Contains(err.Error(), "refusing to use host OS resolver") {
+		t.Fatalf("error did not explain fail-closed DNS behavior: %v", err)
+	}
+}
 
 // Locks W4 — confirm the FQDN-construction logic produces a valid dnsmessage.Name for both
 // "host.example.com" (bare) and "host.example.com." (already-qualified). Pre-fix, the

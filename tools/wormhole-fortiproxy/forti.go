@@ -118,7 +118,7 @@ func fortiLogin(ctx context.Context, cfg config) (*session, error) {
 	// the cookie for, so check it there.
 	tunnelURL := baseURL.JoinPath("remote", "sslvpn-tunnel")
 	if !hasSvpnCookie(jar, tunnelURL) {
-		return nil, fmt.Errorf("login did not yield an SVPNCOOKIE (server body: %s)", truncate(string(body), 200))
+		return nil, fmt.Errorf("login did not yield an SVPNCOOKIE (server returned %d bytes without a recognized challenge)", len(body))
 	}
 
 	// Step 3: fetch the tunnel config XML (assigned IP, DNS, MTU).
@@ -434,20 +434,20 @@ type tunnelConfigXML struct {
 
 // FortiGate XML schema — two layouts are observed in the wild, both accepted here:
 //
-//   Layout A (older firmwares, attribute form):
-//     <sslvpn-tunnel mtu="1500" dpd-retry-interval="3" ...>
-//       <ipv4 assigned-addr="10.212.134.205" ...>
-//         <dns ip="10.0.0.1"/>
-//       </ipv4>
-//     </sslvpn-tunnel>
+//	Layout A (older firmwares, attribute form):
+//	  <sslvpn-tunnel mtu="1500" dpd-retry-interval="3" ...>
+//	    <ipv4 assigned-addr="10.212.134.205" ...>
+//	      <dns ip="10.0.0.1"/>
+//	    </ipv4>
+//	  </sslvpn-tunnel>
 //
-//   Layout B (newer firmwares, nested element form with `ipv4` attribute):
-//     <sslvpn-tunnel mtu="1500" ...>
-//       <ipv4>
-//         <assigned-addr ipv4="10.212.134.205"/>
-//         <dns ip="10.0.0.1"/>
-//       </ipv4>
-//     </sslvpn-tunnel>
+//	Layout B (newer firmwares, nested element form with `ipv4` attribute):
+//	  <sslvpn-tunnel mtu="1500" ...>
+//	    <ipv4>
+//	      <assigned-addr ipv4="10.212.134.205"/>
+//	      <dns ip="10.0.0.1"/>
+//	    </ipv4>
+//	  </sslvpn-tunnel>
 //
 // A parser that handles only one layout silently fails on the other with "no assigned
 // IPv4 address" even when the login succeeded, leaving users stuck with no diagnostic.
@@ -503,13 +503,6 @@ func parseTunnelConfigXML(b []byte) (tunnelConfigXML, error) {
 		}
 	}
 	return out, nil
-}
-
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n] + "..."
 }
 
 // stripHostBrackets removes a single pair of surrounding `[ ]` from a host string.

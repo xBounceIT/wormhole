@@ -185,13 +185,15 @@ public sealed class LocalFilePaneViewModelTests : IDisposable
         // Race regression: without the Interlocked guard both LoadAsync calls would
         // pass the IsBusy check, race on Entries.Clear/Add, and produce duplicates.
         // The original count-only assertion is weak (count==5 holds whether both ran
-        // serially or only one ran); a counting subclass with an artificial delay in
-        // ListAsync forces the race window so the test fails if the guard is removed.
+        // serially or only one ran); a counting subclass with an explicit gate keeps the
+        // first load in-flight until the second caller has attempted entry.
         for (int i = 0; i < 5; i++) File.WriteAllText(Path.Combine(_root, $"f{i}.txt"), "x");
         var pane = new CountingLocalPane(_root);
 
         var t1 = pane.LoadAsync(_root);
+        await pane.ListStarted;
         var t2 = pane.LoadAsync(_root);
+        pane.ReleaseList();
         await Task.WhenAll(t1, t2);
 
         // Exactly one ListAsync invocation; the other caller hit the Interlocked guard
@@ -201,21 +203,27 @@ public sealed class LocalFilePaneViewModelTests : IDisposable
     }
 
     /// <summary>
-    /// Subclass that counts ListAsync invocations and yields once before doing the
-    /// work, opening the race window for a second caller to attempt entry. If the
-    /// Interlocked guard is removed, both callers list and ListCallCount == 2.
+    /// Subclass that counts ListAsync invocations and holds the first call open before
+    /// doing the work, opening a deterministic race window for a second caller to
+    /// attempt entry. If the Interlocked guard is removed, both callers list and
+    /// ListCallCount == 2.
     /// </summary>
     private sealed class CountingLocalPane : LocalFilePaneViewModel
     {
+        private readonly TaskCompletionSource<object?> _listStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<object?> _releaseList = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public int ListCallCount { get; private set; }
+        public Task ListStarted => _listStarted.Task;
         private readonly string _root;
         public CountingLocalPane(string root) { _root = root; }
+
+        public void ReleaseList() => _releaseList.TrySetResult(null);
 
         protected override async Task<IReadOnlyList<FileEntryViewModel>> ListAsync(string path, CancellationToken cancellationToken)
         {
             ListCallCount++;
-            // Yield to let any racing concurrent caller hit the Interlocked guard.
-            await Task.Yield();
+            _listStarted.TrySetResult(null);
+            await _releaseList.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
             return await base.ListAsync(path, cancellationToken).ConfigureAwait(false);
         }
     }

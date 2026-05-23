@@ -29,14 +29,12 @@ import (
 // from the gateway are injected by the PPP read loop in ppp.go.
 //
 // Hostname targets received over SOCKS5 are resolved using the VPN-provided DNS servers
-// (carried by `dnsServers`); the host OS resolver is used only as a fallback when the
-// gateway didn't push any DNS configuration. This prevents both DNS leaks (queries for
-// `*.corp.local` going to the host's resolver) and resolution failures for internal names
-// that don't resolve outside the tunnel.
+// (carried by `dnsServers`). When the gateway does not push usable IPv4 DNS servers,
+// hostname targets fail closed; IP literals still dial normally.
 type netstackDialer struct {
 	stack      *stack.Stack
 	assignedIP netip.Addr
-	dnsServers []netip.Addr // populated from session.DNS; empty means fall back to OS resolver
+	dnsServers []netip.Addr // populated from session.DNS; empty means hostname lookup fails closed
 }
 
 func newNetstack(assignedIP netip.Addr, mtu int) (*stack.Stack, *channel.Endpoint, error) {
@@ -89,14 +87,14 @@ func newNetstack(assignedIP netip.Addr, mtu int) (*stack.Stack, *channel.Endpoin
 }
 
 // newNetstackDialer wraps a configured stack with a Dial-friendly facade plus the list of
-// VPN-pushed DNS servers (filtered to IPv4). When dns is non-empty, name resolution goes
-// through resolveViaVPN (real DNS A queries via gonet.DialUDP with per-server retry on
-// timeout); when empty, we fall back to the OS resolver and log a warning so the user can
-// see the DNS-leak risk in the logs.
+// VPN-pushed DNS servers (filtered to IPv4). Name resolution goes through resolveViaVPN
+// (real DNS A queries via gonet.DialUDP with per-server retry on timeout). When no usable
+// VPN DNS servers are present, hostname targets fail closed rather than leaking queries to
+// the host OS resolver.
 func newNetstackDialer(s *stack.Stack, assignedIP netip.Addr, dns []netip.Addr) netstackDialer {
 	d := netstackDialer{stack: s, assignedIP: assignedIP}
 	if len(dns) == 0 {
-		logf("netstack: gateway did not push DNS servers; name lookups will use the host OS resolver (queries may leak)")
+		logf("netstack: gateway did not push DNS servers; hostname lookups are disabled to avoid host DNS leaks")
 		return d
 	}
 	v4 := make([]netip.Addr, 0, len(dns))
@@ -106,7 +104,7 @@ func newNetstackDialer(s *stack.Stack, assignedIP netip.Addr, dns []netip.Addr) 
 		}
 	}
 	if len(v4) == 0 {
-		logf("netstack: gateway DNS servers %v contain no IPv4 entries; falling back to OS resolver", dns)
+		logf("netstack: gateway DNS servers %v contain no IPv4 entries; hostname lookups are disabled to avoid host DNS leaks", dns)
 		return d
 	}
 	d.dnsServers = v4
@@ -141,9 +139,8 @@ func (d netstackDialer) DialContext(ctx context.Context, network, address string
 	return gonet.DialContextTCP(ctx, d.stack, fa, ipv4.ProtocolNumber)
 }
 
-// resolveHostV4 turns a hostname into an IPv4 address. Uses resolveViaVPN when the gateway
-// pushed DNS servers (the common case); falls back to the host OS resolver only when no
-// gateway DNS was advertised.
+// resolveHostV4 turns a hostname into an IPv4 address. It never uses the host resolver:
+// without VPN-pushed DNS, hostnames fail closed and IP literals remain supported.
 func (d netstackDialer) resolveHostV4(ctx context.Context, host string) (netip.Addr, error) {
 	if a, err := netip.ParseAddr(host); err == nil {
 		if a.Is4() {
@@ -152,16 +149,7 @@ func (d netstackDialer) resolveHostV4(ctx context.Context, host string) (netip.A
 		return netip.Addr{}, fmt.Errorf("only IPv4 supported; got %v", a)
 	}
 	if len(d.dnsServers) == 0 {
-		lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		defer cancel()
-		addrs, err := net.DefaultResolver.LookupNetIP(lookupCtx, "ip4", host)
-		if err != nil {
-			return netip.Addr{}, err
-		}
-		if len(addrs) == 0 {
-			return netip.Addr{}, fmt.Errorf("no IPv4 addresses for %q", host)
-		}
-		return addrs[0].Unmap(), nil
+		return netip.Addr{}, errors.New("no VPN DNS servers configured; refusing to use host OS resolver")
 	}
 	return resolveViaVPN(ctx, d.stack, d.dnsServers, host)
 }

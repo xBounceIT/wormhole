@@ -23,7 +23,8 @@
                 </MenuFlyoutItem>
                 <MenuFlyoutSeparator />
                 <MenuFlyoutItem Text="Open in System Remote Desktop"
-                                Command="{Binding UseExternalClientCommand}">
+                                Command="{Binding UseExternalClientCommand}"
+                                IsEnabled="{Binding CanUseExternalClient}">
                     <MenuFlyoutItem.Icon>
                         <FontIcon Glyph="&#xE8A7;" />
                     </MenuFlyoutItem.Icon>
@@ -86,7 +87,8 @@
                             Command="{Binding RetryCommand}"
                             Style="{StaticResource AccentButtonStyle}" />
                     <Button Content="Open in System Remote Desktop"
-                            Command="{Binding UseExternalClientCommand}" />
+                            Command="{Binding UseExternalClientCommand}"
+                            IsEnabled="{Binding CanUseExternalClient}" />
                 </StackPanel>
             </StackPanel>
         </Grid>

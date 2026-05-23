@@ -1,11 +1,16 @@
 using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
 using Wormhole.Services.Rdp;
+using Wormhole.Services.Tunneling;
 using Wormhole.Tests.Fakes;
 using Wormhole.ViewModels.Sessions;
 using Xunit;
@@ -325,6 +330,203 @@ public class RdpSessionViewModelTests
         Assert.True(await vm.ShouldUseExternalClientAsync(profile));
     }
 
+    [Fact]
+    public void CanUseExternalClient_IsFalseForTunneledProfiles()
+    {
+        var (vm, _, _, _, _) = CreateVm();
+
+        vm.Initialize(MakeProfile() with { TunnelEnabled = true, TunnelConfigId = Guid.NewGuid() });
+
+        Assert.False(vm.CanUseExternalClient);
+        Assert.False(vm.UseExternalClientCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public async Task UseExternalClient_TunnelEnabled_DoesNotTearDownConnectedSession()
+    {
+        var (vm, _, _, _, _) = CreateVm();
+        vm.Initialize(MakeProfile() with { TunnelEnabled = true, TunnelConfigId = Guid.NewGuid() });
+        var fake = new FakeRdpSession();
+        vm.AttachConnectedSessionForTesting(fake);
+
+        await vm.UseExternalClient();
+
+        Assert.Equal(SessionStatus.Connected, vm.Status);
+        Assert.False(fake.Disposed);
+    }
+
+    // --- Per-connection VPN routing -------------------------------------------------------
+
+    [Fact]
+    public async Task AttachAsync_TunnelEnabled_RoutesEmbeddedRdpThroughLoopbackForwarder()
+    {
+        var configId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        var provider = new FakeTunnelProvider();
+        tunnelRepo.Configs[configId] = new TunnelConfig { Id = configId, Name = "corp", Kind = TunnelKind.WireGuard };
+
+        var (vm, svc, creds, dlg, _) = CreateVm(
+            tunnelRepo: tunnelRepo,
+            tunnelProviders: new ITunnelProvider[] { provider });
+        creds.TunnelConfigs[configId] = new byte[] { 1, 2, 3 };
+        dlg.PasswordPromptResult = "password";
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with { TunnelEnabled = true, TunnelConfigId = configId });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(1, provider.EstablishCount);
+        Assert.NotNull(provider.LastInstance);
+        Assert.Equal("host", provider.LastInstance!.LastForwardHost);
+        Assert.Equal(3389, provider.LastInstance.LastForwardPort);
+        Assert.Equal(IPAddress.Loopback.ToString(), svc.LastProfile?.Host);
+        Assert.Equal(provider.LastInstance.BoundPort, svc.LastProfile?.Port);
+
+        await vm.DisconnectAsync();
+        Assert.Equal(1, provider.LastInstance.DisposeCount);
+    }
+
+    [Fact]
+    public async Task AttachAsync_TunnelEnabled_ExternalClientFailsClosed()
+    {
+        var provider = new FakeTunnelProvider();
+        var (vm, svc, _, _, _) = CreateVm(tunnelProviders: new ITunnelProvider[] { provider });
+        vm.Initialize(MakeProfile() with
+        {
+            TunnelEnabled = true,
+            TunnelConfigId = Guid.NewGuid(),
+            RdpUseExternalClient = true,
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.Contains("host network", vm.ErrorMessage);
+        Assert.Equal(0, svc.ConnectCount);
+        Assert.Equal(0, provider.EstablishCount);
+    }
+
+    [Fact]
+    public async Task AttachAsync_TunnelEnabled_RdGatewayFailsClosed()
+    {
+        var provider = new FakeTunnelProvider();
+        var (vm, svc, _, _, _) = CreateVm(tunnelProviders: new ITunnelProvider[] { provider });
+        vm.Initialize(MakeProfile() with
+        {
+            TunnelEnabled = true,
+            TunnelConfigId = Guid.NewGuid(),
+            RdpGatewayUsageMethod = 1,
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.Contains("RD Gateway", vm.ErrorMessage);
+        Assert.Equal(0, svc.ConnectCount);
+        Assert.Equal(0, provider.EstablishCount);
+    }
+
+    [Fact]
+    public async Task AttachAsync_TunnelEnabled_StrictServerAuthenticationFailsClosed()
+    {
+        var provider = new FakeTunnelProvider();
+        var (vm, svc, _, _, _) = CreateVm(tunnelProviders: new ITunnelProvider[] { provider });
+        vm.Initialize(MakeProfile() with
+        {
+            TunnelEnabled = true,
+            TunnelConfigId = Guid.NewGuid(),
+            RdpServerAuthentication = 1,
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.Contains("server authentication", vm.ErrorMessage);
+        Assert.Equal(0, svc.ConnectCount);
+        Assert.Equal(0, provider.EstablishCount);
+    }
+
+    [Fact]
+    public async Task DisconnectAsync_DuringTunnelEstablish_DisposesLateTunnelAndStaysDisconnected()
+    {
+        var configId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        var provider = new BlockingTunnelProvider();
+        tunnelRepo.Configs[configId] = new TunnelConfig { Id = configId, Name = "corp", Kind = TunnelKind.WireGuard };
+
+        var (vm, svc, creds, dlg, _) = CreateVm(
+            tunnelRepo: tunnelRepo,
+            tunnelProviders: new ITunnelProvider[] { provider });
+        creds.TunnelConfigs[configId] = new byte[] { 1, 2, 3 };
+        dlg.PasswordPromptResult = "password";
+        svc.NextSession = new FakeRdpSession();
+        vm.Initialize(MakeProfile() with { TunnelEnabled = true, TunnelConfigId = configId });
+
+        var attachTask = vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+        await provider.EstablishStarted.Task;
+
+        await vm.DisconnectAsync();
+        provider.ReleaseEstablish.SetResult(null);
+        await attachTask;
+
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.Equal(0, svc.ConnectCount);
+        Assert.NotNull(provider.LastInstance);
+        Assert.Equal(1, provider.LastInstance!.DisposeCount);
+    }
+
+    [Fact]
+    public async Task DisconnectAsync_DuringTunnelForwarderBind_DisposesTunnelAndStaysDisconnected()
+    {
+        var configId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        var instance = new FakeTunnelInstance();
+        var provider = new FakeTunnelProvider(instance);
+        tunnelRepo.Configs[configId] = new TunnelConfig { Id = configId, Name = "corp", Kind = TunnelKind.WireGuard };
+
+        var (vm, svc, creds, dlg, _) = CreateVm(
+            tunnelRepo: tunnelRepo,
+            tunnelProviders: new ITunnelProvider[] { provider });
+        creds.TunnelConfigs[configId] = new byte[] { 1, 2, 3 };
+        dlg.PasswordPromptResult = "password";
+        svc.NextSession = new FakeRdpSession();
+        instance.ReleaseBind = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        vm.Initialize(MakeProfile() with { TunnelEnabled = true, TunnelConfigId = configId });
+
+        var attachTask = vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+        await instance.BindStarted.Task;
+
+        await vm.DisconnectAsync();
+        instance.ReleaseBind.SetResult(null);
+        await attachTask;
+
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.Equal(0, svc.ConnectCount);
+        Assert.Equal(1, instance.DisposeCount);
+    }
+
+    [Fact]
+    public async Task DisconnectAsync_DuringRdpServiceConnect_DisposesLateSessionAndStaysDisconnected()
+    {
+        var (vm, svc, _, dlg, _) = CreateVm();
+        dlg.PasswordPromptResult = "password";
+        var session = new FakeRdpSession();
+        svc.NextSession = session;
+        svc.ReleaseConnect = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        vm.Initialize(MakeProfile());
+
+        var attachTask = vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+        await svc.ConnectStarted.Task;
+
+        await vm.DisconnectAsync();
+        svc.ReleaseConnect.SetResult(null);
+        await attachTask;
+
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.True(session.Disposed);
+    }
+
     // --- Crash sentinel + Status hook ownership -------------------------------------------
 
     [Fact]
@@ -357,14 +559,27 @@ public class RdpSessionViewModelTests
             RdpFullScreen = fullScreen,
         };
 
-    private static (RdpSessionViewModel vm, FakeRdpSessionService svc, FakeCredentialService creds, FakeDialogService dlg, FakeRdpCrashSentinelService sentinel) CreateVm()
+    private static (RdpSessionViewModel vm, FakeRdpSessionService svc, FakeCredentialService creds, FakeDialogService dlg, FakeRdpCrashSentinelService sentinel) CreateVm(
+        ICredentialRepository? credentialRepository = null,
+        FakeCredentialService? creds = null,
+        FakeDialogService? dlg = null,
+        FakeRdpCrashSentinelService? sentinel = null,
+        FakeTunnelConfigRepository? tunnelRepo = null,
+        IEnumerable<ITunnelProvider>? tunnelProviders = null)
     {
         var svc = new FakeRdpSessionService();
-        var creds = new FakeCredentialService();
-        var dlg = new FakeDialogService();
-        var repo = new EmptyCredentialRepository();
-        var sentinel = new FakeRdpCrashSentinelService();
-        var vm = new RdpSessionViewModel(svc, creds, repo, dlg, sentinel, NullLoggerFactory.Instance);
+        creds ??= new FakeCredentialService();
+        dlg ??= new FakeDialogService();
+        var repo = credentialRepository ?? new EmptyCredentialRepository();
+        sentinel ??= new FakeRdpCrashSentinelService();
+        var vm = new RdpSessionViewModel(
+            svc,
+            creds,
+            repo,
+            BuildTunnelManager(creds, tunnelRepo, tunnelProviders),
+            dlg,
+            sentinel,
+            NullLoggerFactory.Instance);
         return (vm, svc, creds, dlg, sentinel);
     }
 
@@ -372,20 +587,36 @@ public class RdpSessionViewModelTests
         ICredentialRepository credentialRepository,
         IRdpCrashSentinelService? sentinel = null)
     {
+        var creds = new FakeCredentialService();
         return new RdpSessionViewModel(
             new FakeRdpSessionService(),
-            new FakeCredentialService(),
+            creds,
             credentialRepository,
+            BuildTunnelManager(creds),
             new FakeDialogService(),
             sentinel ?? new FakeRdpCrashSentinelService(),
             NullLoggerFactory.Instance);
     }
 
+    private static TunnelManager BuildTunnelManager(
+        FakeCredentialService credentials,
+        FakeTunnelConfigRepository? repo = null,
+        IEnumerable<ITunnelProvider>? providers = null)
+        => new(
+            providers ?? Array.Empty<ITunnelProvider>(),
+            repo ?? new FakeTunnelConfigRepository(),
+            credentials,
+            NullLoggerFactory.Instance.CreateLogger<TunnelManager>());
+
     private sealed class FakeRdpSessionService : IRdpSessionService
     {
         public IRdpSession? NextSession { get; set; }
+        public ConnectionProfile? LastProfile { get; private set; }
+        public int ConnectCount { get; private set; }
+        public TaskCompletionSource<object?> ConnectStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<object?>? ReleaseConnect { get; set; }
 
-        public Task<IRdpSession> ConnectAsync(
+        public async Task<IRdpSession> ConnectAsync(
             ConnectionProfile profile,
             string? password,
             IntPtr ownerHwnd,
@@ -394,10 +625,89 @@ public class RdpSessionViewModelTests
             Action<IRdpSession>? onSessionReady = null,
             CancellationToken cancellationToken = default)
         {
+            ConnectCount++;
+            LastProfile = profile;
             if (NextSession is null) throw new InvalidOperationException("FakeRdpSessionService.NextSession not assigned.");
             // Mirror the real service: subscribe-via-callback runs before the handshake starts.
             onSessionReady?.Invoke(NextSession);
-            return Task.FromResult(NextSession);
+            ConnectStarted.TrySetResult(null);
+            if (ReleaseConnect is not null)
+            {
+                await ReleaseConnect.Task.ConfigureAwait(false);
+            }
+            return NextSession;
+        }
+    }
+
+    private sealed class FakeTunnelProvider : ITunnelProvider
+    {
+        public int EstablishCount { get; private set; }
+        public FakeTunnelInstance? LastInstance { get; private set; }
+        public TunnelKind Kind => TunnelKind.WireGuard;
+        private readonly FakeTunnelInstance? _instance;
+
+        public FakeTunnelProvider(FakeTunnelInstance? instance = null)
+        {
+            _instance = instance;
+        }
+
+        public Task<ITunnelInstance> EstablishAsync(TunnelConfig config, byte[] secretBlob, CancellationToken cancellationToken)
+        {
+            EstablishCount++;
+            LastInstance = _instance ?? new FakeTunnelInstance();
+            return Task.FromResult<ITunnelInstance>(LastInstance);
+        }
+    }
+
+    private sealed class BlockingTunnelProvider : ITunnelProvider
+    {
+        public TaskCompletionSource<object?> EstablishStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<object?> ReleaseEstablish { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public FakeTunnelInstance? LastInstance { get; private set; }
+        public TunnelKind Kind => TunnelKind.WireGuard;
+
+        public async Task<ITunnelInstance> EstablishAsync(TunnelConfig config, byte[] secretBlob, CancellationToken cancellationToken)
+        {
+            EstablishStarted.TrySetResult(null);
+            await ReleaseEstablish.Task.ConfigureAwait(false);
+            LastInstance = new FakeTunnelInstance();
+            return LastInstance;
+        }
+    }
+
+    private sealed class FakeTunnelInstance : ITunnelInstance
+    {
+        public int BoundPort { get; } = 49152;
+        public string? LastForwardHost { get; private set; }
+        public int? LastForwardPort { get; private set; }
+        public int DisposeCount { get; private set; }
+        public TaskCompletionSource<object?> BindStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<object?>? ReleaseBind { get; set; }
+        public TunnelState State { get; private set; } = TunnelState.Up;
+        public event EventHandler<TunnelStateChangedEventArgs>? StateChanged;
+        public IPEndPoint? Socks5Endpoint => null;
+
+        public Task<Stream> DialAsync(string host, int port, CancellationToken cancellationToken) =>
+            throw new NotSupportedException();
+
+        public async Task<int> BindLocalForwarderAsync(string host, int port, CancellationToken cancellationToken)
+        {
+            BindStarted.TrySetResult(null);
+            if (ReleaseBind is not null)
+            {
+                await ReleaseBind.Task.ConfigureAwait(false);
+            }
+            LastForwardHost = host;
+            LastForwardPort = port;
+            return BoundPort;
+        }
+
+        public ValueTask DisposeAsync()
+        {
+            DisposeCount++;
+            State = TunnelState.Closed;
+            StateChanged?.Invoke(this, new TunnelStateChangedEventArgs(TunnelState.Closed));
+            return ValueTask.CompletedTask;
         }
     }
 
