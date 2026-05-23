@@ -311,8 +311,11 @@ type challenge struct {
 }
 
 // challengeFields are the form fields the gateway expects the client to echo back in the
-// challenge POST. Shared by both the comma-format and HTML-form parsers.
-var challengeFields = []string{"reqid", "polid", "grp", "portal", "magic", "peer"}
+// challenge POST. Shared by both the comma-format and HTML-form parsers. Both `grp` and
+// `grpid` appear in the wild — the comma form typically uses `grp`, the HTML form uses
+// `grpid`, and some firmwares include both. Forwarding whatever the server gave us avoids
+// the "second logincheck rejected" failure mode where a missing token makes auth bounce.
+var challengeFields = []string{"reqid", "polid", "grp", "grpid", "portal", "magic", "peer"}
 
 // hiddenInputRE matches FortiGate's HTML hidden-input pattern. Variants seen in firmware:
 //

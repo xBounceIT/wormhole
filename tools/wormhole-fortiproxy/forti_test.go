@@ -123,6 +123,21 @@ func TestParseChallenge_HTMLForm(t *testing.T) {
 	}
 }
 
+func TestParseChallenge_HTMLForm_ForwardsGrpid(t *testing.T) {
+	// FortiGate HTML challenge typically uses `grpid` rather than `grp` — must be echoed
+	// back or the challenge POST is rejected.
+	body := `<form><input type="hidden" name="reqid" value="9"/>` +
+		`<input type="hidden" name="grpid" value="7"/>` +
+		`<input type="hidden" name="magic" value="m1"/></form>`
+	c := parseChallenge(body)
+	if c == nil {
+		t.Fatal("expected non-nil challenge")
+	}
+	if c.form.Get("grpid") != "7" {
+		t.Errorf("grpid: got %q want 7", c.form.Get("grpid"))
+	}
+}
+
 func TestParseChallenge_HTMLWithoutMagic_NotAChallenge(t *testing.T) {
 	// Plain login page with hidden inputs but no `magic` — should NOT be treated as a
 	// challenge response, because that would cause us to POST a meaningless second
