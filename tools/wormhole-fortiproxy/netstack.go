@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
@@ -183,7 +184,15 @@ func resolveViaVPN(ctx context.Context, s *stack.Stack, servers []netip.Addr, ho
 	ctx, cancel := context.WithTimeout(ctx, overallTimeout)
 	defer cancel()
 
-	qname, err := dnsmessage.NewName(host + ".")
+	// Build a fully-qualified DNS name. If the caller already passed an FQDN with the
+	// trailing dot (e.g. "host.example.com."), don't double it — dnsmessage.NewName
+	// rejects "host.example.com.." with an invalid-name error. Otherwise append the dot
+	// so the resolver sends an absolute query.
+	fqdn := host
+	if !strings.HasSuffix(fqdn, ".") {
+		fqdn += "."
+	}
+	qname, err := dnsmessage.NewName(fqdn)
 	if err != nil {
 		return netip.Addr{}, fmt.Errorf("DNS name %q: %w", host, err)
 	}

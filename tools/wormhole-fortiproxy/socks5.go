@@ -89,11 +89,16 @@ func handleSocks5(ctx context.Context, c net.Conn, dial dialer) {
 		}
 		host = string(buf)
 	case 0x04: // IPv6
-		buf := make([]byte, 16)
-		if _, err := io.ReadFull(c, buf); err != nil {
-			return
-		}
-		host = net.IP(buf).String()
+		// Consume the 16 destination bytes + the 2 port bytes the client just sent so we
+		// don't leave them stuck in the SOCKS5 stream framing, then refuse explicitly.
+		// The sidecar's dial path is IPv4-only (resolveHostV4 errors on any non-v4 literal),
+		// so silently accepting and failing on dial would surface as a confusing 0x04
+		// host-unreachable AFTER a successful handshake. Returning 0x08 (address-type-not-
+		// supported) up front lets clients fall back to a v4 endpoint immediately.
+		junk := make([]byte, 16+2)
+		_, _ = io.ReadFull(c, junk)
+		writeReply(c, 0x08)
+		return
 	default:
 		writeReply(c, 0x08)
 		return
