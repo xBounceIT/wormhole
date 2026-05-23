@@ -1,0 +1,60 @@
+using System;
+using System.IO;
+using System.Text;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using Microsoft.Extensions.Logging.Abstractions;
+using Wormhole.Services.Tunneling;
+using Wormhole.Services.Tunneling.WireGuard;
+using Wormhole.Tests.Integration.Fixtures;
+using Xunit;
+
+namespace Wormhole.Tests.Integration.Services.Tunneling;
+
+public sealed class WireGuardEndToEndTests
+{
+    // 60s covers wgproxy cold start + handshake + SOCKS5 negotiate + echo round-trip on a
+    // cold CI runner. The sidecar's own READY budget is 15s, so anything above ~30s here is
+    // headroom for runner-scheduling jitter rather than tunnel latency.
+    private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(60);
+
+    [SkippableFact]
+    public async Task RoutesTrafficThroughTunnel()
+    {
+        Skip.IfNot(
+            IntegrationEnvironment.WireGuardConfigured,
+            "Set WORMHOLE_WGPROXY_PATH and WORMHOLE_WG_CLIENT_CONFIG (and run tests/vpn-fixtures/bootstrap.sh + docker compose up) to enable.");
+
+        var configJson = await File.ReadAllTextAsync(IntegrationEnvironment.WgClientConfigPath!);
+        var config = JsonSerializer.Deserialize<WireGuardSidecarConfig>(configJson)
+            ?? throw new InvalidOperationException("Client config JSON deserialized to null.");
+
+        using var cts = new CancellationTokenSource(TestTimeout);
+
+        await using var host = await WireGuardProcessHost.StartAsync(
+            IntegrationEnvironment.WgProxyPath!,
+            config,
+            NullLogger.Instance,
+            cts.Token);
+
+        Assert.NotEqual(0, host.SocksEndpoint.Port);
+
+        // Round-trip through the SOCKS5 endpoint to an echo server that is only reachable
+        // through the WireGuard tunnel (its IP lives inside the peer's AllowedIPs / server
+        // routing). If the sidecar SOCKS5 surface or the tunnel data plane regressed, this
+        // either times out (no route to host) or returns the wrong bytes (SOCKS5 wire bug).
+        await using var stream = await Socks5Client.ConnectAsync(
+            host.SocksEndpoint,
+            IntegrationEnvironment.WgEchoTarget,
+            IntegrationEnvironment.WgEchoPort,
+            cts.Token);
+
+        var ping = Encoding.ASCII.GetBytes("ping");
+        await stream.WriteAsync(ping, cts.Token);
+
+        var buf = new byte[4];
+        await stream.ReadExactlyAsync(buf, cts.Token);
+        Assert.Equal("ping", Encoding.ASCII.GetString(buf));
+    }
+}

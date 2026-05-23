@@ -1,0 +1,123 @@
+# Brings up the supporting infra for Wormhole.Tests.Integration: a WireGuard server,
+# an OpenVPN server, and a single TCP echo target reachable only through either tunnel.
+# Run `bootstrap.sh` first — it generates the keys / PKI / server + client configs into
+# the .out/ subdirectory, which this compose mounts.
+#
+# Address plan (everything on the vpn-test-net docker bridge):
+#   10.20.0.2   wireguard server (eth0)        — wg0 = 10.13.13.1/24
+#   10.20.0.3   openvpn server   (eth0)        — tun0 = 10.8.0.1/24
+#   10.20.0.10  echo-target (socat TCP echo)   — port 7777
+#
+# Both VPNs route 10.20.0.0/24 through the tunnel, so the client (wormhole-{wg,ovpn}proxy
+# on the test runner) can reach 10.20.0.10:7777 once a tunnel handshake succeeds.
+
+services:
+  wireguard:
+    image: linuxserver/wireguard:latest
+    # No `container_name:` — letting Compose project-prefix the name (e.g.
+    # `vpn-fixtures-wireguard-1`) keeps retries on the same runner from
+    # colliding on a fixed name. The CI workflow tears down explicitly anyway,
+    # but a previous failed run that didn't reach teardown would otherwise
+    # leak a name conflict into the next attempt.
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    environment:
+      # PUID/PGID match the host invoker so files the image chowns under
+      # /config don't get stuck as uid 1000 (locking the host user out of
+      # subsequent bootstrap re-runs). bootstrap.sh exports HOST_UID/HOST_GID,
+      # and these default to 1000 if compose is invoked directly without it.
+      - PUID=${HOST_UID:-1000}
+      - PGID=${HOST_GID:-1000}
+    volumes:
+      # linuxserver/wireguard reads /config/wg_confs/wg*.conf at startup. The
+      # mount is intentionally read-write: the image's s6-overlay init pass
+      # touches files under /config on first boot (chowns, lockfiles), and a
+      # `:ro` mount makes that fail with EROFS — the wg0 interface then never
+      # comes up and the test sees a permanently-unhealthy server.
+      - ./.out/wireguard:/config/wg_confs
+    ports:
+      - "51820:51820/udp"
+    networks:
+      vpn-test-net:
+        ipv4_address: 10.20.0.2
+    # `restart: no` so a misconfigured fixture (missing module, bad iptables,
+    # malformed wg0.conf) fails fast under `up --wait` instead of restart-looping
+    # for the full --wait-timeout budget and burying the root cause.
+    restart: "no"
+    healthcheck:
+      # PATH-independent existence check: s6-overlay strips env for non-service
+      # execs, so `wg show wg0` could surface 'wg: not found' even after the
+      # interface is up. The /sys/class/net entry is created by ip-link in
+      # wg-quick BEFORE PostUp runs, so we ALSO require the bootstrap's
+      # subnet-specific MASQUERADE rule to be installed before declaring ready.
+      # Matching `10.13.13.0/24 .* MASQUERADE` rather than any MASQUERADE
+      # avoids passing prematurely if the image's s6 init adds a default rule.
+      test: ["CMD-SHELL", "[ -e /sys/class/net/wg0 ] && iptables -t nat -S POSTROUTING 2>/dev/null | grep -q '10.13.13.0/24.*MASQUERADE'"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+
+  openvpn:
+    image: kylemanna/openvpn:latest
+    cap_add:
+      - NET_ADMIN
+    devices:
+      # ovpn_run creates the tun interface via /dev/net/tun; without this device
+      # mapping the openvpn process exits with errno=2 ('Cannot open TUN/TAP
+      # dev') during init and the container restart-loops or dies.
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      # bootstrap.sh runs `ovpn_genconfig` + `ovpn_initpki` + `easyrsa build-client-full`
+      # against this directory (mounted at /etc/openvpn inside the helper containers and
+      # the runtime container). The runtime CMD is `ovpn_run` by default.
+      - ./.out/openvpn:/etc/openvpn
+    ports:
+      - "1194:1194/udp"
+    networks:
+      vpn-test-net:
+        ipv4_address: 10.20.0.3
+    # See wireguard service for rationale — fail fast on misconfig.
+    restart: "no"
+    healthcheck:
+      # /proc/1/comm matches as soon as ovpn_run exec's openvpn — well before
+      # TLS init has bound the UDP socket. We also check /proc/net/udp for the
+      # bound listener: column 2 is `<addr>:<port>` in hex, and 1194 = 0x4AA.
+      # /proc/net/udp is universally available (no dependency on ss/netstat,
+      # neither of which ship in kylemanna/openvpn's Alpine base).
+      test: ["CMD-SHELL", "grep -q '^openvpn$' /proc/1/comm && grep -q ':04AA ' /proc/net/udp"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+
+  echo-target:
+    image: alpine/socat:latest
+    # alpine/socat's ENTRYPOINT is `socat`. List form makes argv tokenization
+    # explicit (vs. compose's whitespace-split on string form). TCP-LISTEN forks
+    # a child per accept, each cat'ing stdin back to stdout — the load-bearing
+    # assertion in the .NET tests is a 4-byte echo round-trip through this.
+    command: ["-d", "TCP-LISTEN:7777,fork,reuseaddr", "EXEC:/bin/cat"]
+    networks:
+      vpn-test-net:
+        ipv4_address: 10.20.0.10
+    restart: unless-stopped
+    # alpine/socat doesn't ship nc or pgrep; same /proc/1/comm trick.
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q '^socat$' /proc/1/comm || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
+
+networks:
+  vpn-test-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.20.0.0/24
+          gateway: 10.20.0.1

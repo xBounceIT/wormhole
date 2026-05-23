@@ -10,6 +10,7 @@ mRemoteNG. This file orients agents touching the codebase.
 - Run tests: `dotnet test Wormhole.Tests/Wormhole.Tests.csproj`
 - Run the app: build, then launch the produced `Wormhole.exe` from `bin\x64\Debug\net10.0-windows10.0.19041.0\`.
 - Releases (later): `scripts/Build-Installer.ps1` produces an Inno Setup `.exe`.
+- VPN integration tests (Linux/WSL2 + Docker): `tests/vpn-fixtures/bootstrap.sh` → `docker compose -f tests/vpn-fixtures/docker-compose.yml up -d` → `dotnet test Wormhole.Tests.Integration/`. See [tests/vpn-fixtures/README.md](tests/vpn-fixtures/README.md). CI runs this on `ubuntu-latest`; locally the tests skip if env vars / sidecar binaries aren't set up.
 
 ## Conventions
 
