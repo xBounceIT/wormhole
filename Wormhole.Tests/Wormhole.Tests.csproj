@@ -104,6 +104,20 @@
     <Compile Include="..\Services\Rdp\RdpCrashSentinelService.cs" Link="Services\Rdp\RdpCrashSentinelService.cs" />
     <Compile Include="..\Interop\Terminal\TerminalBridge.cs" Link="Interop\Terminal\TerminalBridge.cs" />
     <Compile Include="..\Interop\Terminal\TerminalReplayBuffer.cs" Link="Interop\Terminal\TerminalReplayBuffer.cs" />
+
+    <Compile Include="..\Models\TransferDirection.cs" Link="Models\TransferDirection.cs" />
+    <Compile Include="..\Models\TransferRequest.cs" Link="Models\TransferRequest.cs" />
+    <Compile Include="..\Services\ISftpService.cs" Link="Services\ISftpService.cs" />
+    <Compile Include="..\Services\Ssh\SshAuthMethodsBuilder.cs" Link="Services\Ssh\SshAuthMethodsBuilder.cs" />
+    <Compile Include="..\Services\Sftp\RemotePath.cs" Link="Services\Sftp\RemotePath.cs" />
+    <Compile Include="..\Services\Sftp\IFileTransferOrchestrator.cs" Link="Services\Sftp\IFileTransferOrchestrator.cs" />
+    <Compile Include="..\Services\Sftp\FileTransferOrchestrator.cs" Link="Services\Sftp\FileTransferOrchestrator.cs" />
+    <Compile Include="..\ViewModels\Sessions\Transfer\FileEntryViewModel.cs" Link="ViewModels\Sessions\Transfer\FileEntryViewModel.cs" />
+    <Compile Include="..\ViewModels\Sessions\Transfer\TransferItemViewModel.cs" Link="ViewModels\Sessions\Transfer\TransferItemViewModel.cs" />
+    <Compile Include="..\ViewModels\Sessions\Transfer\FilePaneViewModel.cs" Link="ViewModels\Sessions\Transfer\FilePaneViewModel.cs" />
+    <Compile Include="..\ViewModels\Sessions\Transfer\LocalFilePaneViewModel.cs" Link="ViewModels\Sessions\Transfer\LocalFilePaneViewModel.cs" />
+    <Compile Include="..\ViewModels\Sessions\Transfer\RemoteFilePaneViewModel.cs" Link="ViewModels\Sessions\Transfer\RemoteFilePaneViewModel.cs" />
+    <Compile Include="..\ViewModels\Sessions\Transfer\FileTransferViewModel.cs" Link="ViewModels\Sessions\Transfer\FileTransferViewModel.cs" />
   </ItemGroup>
 
 </Project>

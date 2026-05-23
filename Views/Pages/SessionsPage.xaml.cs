@@ -10,6 +10,7 @@ namespace Wormhole.Views.Pages;
 public sealed partial class SessionsPage : Page
 {
     private readonly ISessionTabFactory _sessionTabFactory;
+    private readonly IFileTransferDialogService _fileTransferDialog;
 
     public ShellViewModel ViewModel { get; }
 
@@ -17,6 +18,7 @@ public sealed partial class SessionsPage : Page
     {
         ViewModel = App.Current.Services.GetRequiredService<ShellViewModel>();
         _sessionTabFactory = App.Current.Services.GetRequiredService<ISessionTabFactory>();
+        _fileTransferDialog = App.Current.Services.GetRequiredService<IFileTransferDialogService>();
         this.InitializeComponent();
     }
 
@@ -70,6 +72,14 @@ public sealed partial class SessionsPage : Page
         if (sender is FrameworkElement fe && fe.DataContext is SessionTabViewModel tab)
         {
             await CloseTabAsync(tab);
+        }
+    }
+
+    private async void OnTabFileTransferClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.DataContext is SessionTabViewModel tab)
+        {
+            await _fileTransferDialog.ShowAsync(tab);
         }
     }
 }

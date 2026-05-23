@@ -167,6 +167,7 @@ public partial class App : Application
         services.AddSingleton<IRdpSessionService, RdpSessionService>();
         services.AddSingleton<IRdpCrashSentinelService, RdpCrashSentinelService>();
         services.AddSingleton<ISftpService, SftpService>();
+        services.AddSingleton<IFileTransferDialogService, FileTransferDialogService>();
         services.AddSingleton<IMRemoteNgImportService, MRemoteNgImportService>();
 
         var assemblyVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "0.0.0";
