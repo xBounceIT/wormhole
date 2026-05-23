@@ -69,6 +69,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
                 OnPropertyChanged(nameof(IsConnecting));
                 OnPropertyChanged(nameof(IsConnected));
                 OnPropertyChanged(nameof(IsFailed));
+                OnPropertyChanged(nameof(CanOpenFileTransfer));
                 RetryCommand.NotifyCanExecuteChanged();
             }
         };
@@ -77,6 +78,12 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     public override ProtocolType Protocol => ProtocolType.Ssh;
 
     public override ICommand? ReconnectCommand => RetryCommand;
+
+    // Gating for the "File transfer" tab context menu entry. The SFTP service opens a
+    // fresh SSH/SFTP channel separate from this VM's shell session, but it reuses the
+    // same credentials and host-key pin — only meaningful once we've successfully
+    // authenticated, so the entry stays hidden until Status flips to Connected.
+    public override bool CanOpenFileTransfer => Status == SessionStatus.Connected;
 
     [ObservableProperty]
     private string? errorMessage;

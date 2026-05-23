@@ -84,6 +84,7 @@ public partial class App : Application
         services.AddSingleton<ISessionTabFactory, SessionTabFactory>();
         services.AddSingleton<IRdpSessionService, RdpSessionService>();
         services.AddSingleton<ISftpService, SftpService>();
+        services.AddSingleton<IFileTransferDialogService, FileTransferDialogService>();
 
         var assemblyVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "0.0.0";
         services.AddHttpClient(UpdateService.HttpClientName, client =>

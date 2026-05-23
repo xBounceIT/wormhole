@@ -30,7 +30,7 @@ public sealed class SshSessionService : ISshSessionService
             throw new InvalidOperationException(
                 $"Connection '{profile.Name}' has no username; provide one before connecting.");
 
-        var authMethods = BuildAuthMethods(profile.Username!, credentials);
+        var authMethods = SshAuthMethodsBuilder.Build(profile.Username!, credentials);
         if (authMethods.Count == 0)
         {
             throw new InvalidOperationException(
@@ -121,26 +121,6 @@ public sealed class SshSessionService : ISshSessionService
             profile.Host, profile.Port, profile.Username, capturedFingerprint);
 
         return new SshSession(client, stream, capturedFingerprint!, _loggerFactory.CreateLogger<SshSession>());
-    }
-
-    private static List<AuthenticationMethod> BuildAuthMethods(string username, SshCredentials credentials)
-    {
-        var methods = new List<AuthenticationMethod>();
-        if (credentials.PrivateKey is { Length: > 0 })
-        {
-            // KeyPassphrase is consumed locally to decrypt the key — never sent as a login
-            // password. SSH.NET throws SshPassPhraseNullOrEmptyException at parse time if the
-            // key is encrypted and we passed no passphrase; the VM catches and re-prompts.
-            var keyFile = string.IsNullOrEmpty(credentials.KeyPassphrase)
-                ? new PrivateKeyFile(new MemoryStream(credentials.PrivateKey))
-                : new PrivateKeyFile(new MemoryStream(credentials.PrivateKey), credentials.KeyPassphrase);
-            methods.Add(new PrivateKeyAuthenticationMethod(username, keyFile));
-        }
-        if (!string.IsNullOrEmpty(credentials.Password))
-        {
-            methods.Add(new PasswordAuthenticationMethod(username, credentials.Password));
-        }
-        return methods;
     }
 
     private static void SafeDispose(SshClient client)
