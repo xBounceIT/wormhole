@@ -44,7 +44,7 @@ public static class AzureAdCredentialDetector
     /// </summary>
     public static bool IsAzureAd(ConnectionProfile profile, CredentialProfile? credential)
     {
-        if (profile is null) throw new ArgumentNullException(nameof(profile));
+        ArgumentNullException.ThrowIfNull(profile);
         if (IsAzureAd(credential)) return true;
         if (HasAzureAdDomain(profile.RdpDomain)) return true;
         if (HasAzureAdPrefix(profile.Username)) return true;

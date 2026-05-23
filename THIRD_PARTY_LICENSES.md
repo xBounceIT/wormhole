@@ -45,7 +45,6 @@ Used by `Wormhole.csproj`.
 | [Serilog](https://github.com/serilog/serilog), Serilog.Sinks.File, Serilog.Extensions.Logging | Apache-2.0 |
 | [SSH.NET](https://github.com/sshnet/SSH.NET) | MIT |
 | [Meziantou.Framework.Win32.CredentialManager](https://github.com/meziantou/Meziantou.Framework) | MIT |
-| System.Security.Cryptography.ProtectedData, System.Security.Cryptography.Xml | MIT (.NET Foundation) |
 | [Microsoft.Data.Sqlite](https://learn.microsoft.com/dotnet/standard/data/sqlite/) | MIT (bundles the [SQLite library](https://www.sqlite.org/copyright.html), public domain) |
 | [Dapper](https://github.com/DapperLib/Dapper) | Apache-2.0 |
 | [xunit](https://github.com/xunit/xunit) (test-only) | Apache-2.0 |

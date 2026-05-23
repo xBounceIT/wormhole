@@ -5,13 +5,13 @@ namespace Wormhole.Services.MRemoteNg;
 // Parses an mRemoteNG `<mrng:Connections>` XML document into a raw, string-attribute
 // tree. Pure transform — no decryption, no persistence. The importer service decides
 // what to do with each node afterwards.
-internal sealed class MRemoteNgXmlReader
+internal static class MRemoteNgXmlReader
 {
     private static readonly XNamespace Mrng = "http://mremoteng.org";
 
-    public MRemoteNgRoot Parse(Stream xml, out IReadOnlyList<MRemoteNgRawNode> roots)
+    public static MRemoteNgRoot Parse(Stream xml, out IReadOnlyList<MRemoteNgRawNode> roots)
     {
-        if (xml is null) throw new ArgumentNullException(nameof(xml));
+        ArgumentNullException.ThrowIfNull(xml);
 
         XDocument doc;
         try { doc = XDocument.Load(xml); }

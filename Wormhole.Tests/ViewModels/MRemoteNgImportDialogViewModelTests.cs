@@ -8,6 +8,8 @@ namespace Wormhole.Tests.ViewModels;
 
 public class MRemoteNgImportDialogViewModelTests
 {
+    private static readonly string[] LeafXDecryptWarning = { "Could not decrypt password for 'leaf-x'" };
+
     [Fact]
     public async Task StartImport_WithDefaultPassword_ProducesResultAndNoPrompt()
     {
@@ -403,7 +405,7 @@ public class MRemoteNgImportDialogViewModelTests
                 ConnectionsCreated: 2,
                 CredentialsCreated: 1,
                 SkippedUnsupportedProtocols: 0,
-                Warnings: new[] { "Could not decrypt password for 'leaf-x'" }),
+                Warnings: LeafXDecryptWarning),
         };
         var vm = CreateVm(svc);
         vm.SelectedPath = @"X:\fake.xml";

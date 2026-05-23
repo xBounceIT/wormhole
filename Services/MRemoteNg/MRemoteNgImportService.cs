@@ -395,7 +395,7 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        if (plan is null) throw new ArgumentNullException(nameof(plan));
+        ArgumentNullException.ThrowIfNull(plan);
 
         // Carry the plan's parse-time warnings through to the result so the dialog can show
         // them. Mutable copy in case CommitAsync ever needs to append (it doesn't today).
@@ -548,7 +548,7 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
         return existing.Select(c => c.Name).ToList();
     }
 
-    private async Task<(MRemoteNgRoot Root, IReadOnlyList<MRemoteNgRawNode> Roots)> ReadXmlAsync(
+    private static async Task<(MRemoteNgRoot Root, IReadOnlyList<MRemoteNgRawNode> Roots)> ReadXmlAsync(
         string path, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Path is required.", nameof(path));
@@ -560,8 +560,7 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
         // XDocument.Load is synchronous. Callers (PlanCoreAsync, InspectAsync) are responsible
         // for pushing us onto a worker thread before invoking — PlanAsync wraps PlanCoreAsync
         // in Task.Run for that reason, and InspectAsync is short enough to tolerate.
-        var reader = new MRemoteNgXmlReader();
-        var root = reader.Parse(stream, out var roots);
+        var root = MRemoteNgXmlReader.Parse(stream, out var roots);
         return (root, roots);
     }
 

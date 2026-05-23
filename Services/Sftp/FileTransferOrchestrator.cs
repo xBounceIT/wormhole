@@ -599,7 +599,7 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
 
     private void ThrowIfDisposed()
     {
-        if (Volatile.Read(ref _disposed) != 0) throw new ObjectDisposedException(nameof(FileTransferOrchestrator));
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
     }
 
     public async ValueTask DisposeAsync()

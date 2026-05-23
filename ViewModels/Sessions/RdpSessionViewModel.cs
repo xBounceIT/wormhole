@@ -737,7 +737,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     /// </summary>
     private static class RdpLogonErrors
     {
-        private static readonly IReadOnlyDictionary<int, string> Descriptions = new Dictionary<int, string>
+        private static readonly Dictionary<int, string> Descriptions = new Dictionary<int, string>
         {
             [-2] = "The credentials dialog was cancelled.",
             [-3] = "Pre-authentication failed.",

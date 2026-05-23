@@ -23,7 +23,7 @@ public sealed partial class MRemoteNgImportDialog : UserControl
     /// surfaces (password InfoBar, progress panel, result InfoBar) is already rendering it.
     /// Without this the cancel/error messages would be invisible because all three conditional
     /// sections collapse on cancel.</summary>
-    public Visibility ShouldShowOutOfBandStatus(string status, bool isBusy, bool needsPassword, bool hasResult)
+    public static Visibility ShouldShowOutOfBandStatus(string status, bool isBusy, bool needsPassword, bool hasResult)
     {
         if (string.IsNullOrWhiteSpace(status)) return Visibility.Collapsed;
         if (isBusy || needsPassword || hasResult) return Visibility.Collapsed;

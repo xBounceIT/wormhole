@@ -48,7 +48,7 @@ public sealed class RdpSessionService : IRdpSessionService
             var childStyle = (style & ~Win32Interop.WS_POPUP) | Win32Interop.WS_CHILD;
             if (childStyle != style)
             {
-                Win32Interop.SetWindowLong(form.Hwnd, Win32Interop.GWL_STYLE, childStyle);
+                _ = Win32Interop.SetWindowLong(form.Hwnd, Win32Interop.GWL_STYLE, childStyle);
             }
 
             // SetParent returns the previous parent on success, NULL on failure — but it can

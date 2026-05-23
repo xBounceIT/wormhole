@@ -131,7 +131,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     public IReadOnlyList<int> ColorDepthChoices { get; } = new[] { 15, 16, 24, 32 };
 
-    public IReadOnlyList<string> ScreenSizeChoices => RdpScreenSizes.Presets;
+    public IReadOnlyList<string> ScreenSizeChoices { get; } = RdpScreenSizes.Presets;
 
     #endregion
 
