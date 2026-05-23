@@ -32,11 +32,14 @@ public sealed partial class SessionsPage : Page
 
     private async Task CloseTabAsync(SessionTabViewModel tab)
     {
-        if (tab is SshSessionViewModel ssh)
+        try
         {
-            await ssh.DetachAsync();
+            await tab.CloseAsync();
         }
-        ViewModel.Tabs.Remove(tab);
+        finally
+        {
+            ViewModel.Tabs.Remove(tab);
+        }
     }
 
     private void OnTabDuplicateClick(object sender, RoutedEventArgs e)

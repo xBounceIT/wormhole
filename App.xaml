@@ -13,6 +13,7 @@
             <conv:BoolToVisibilityConverter x:Key="BoolToVisibilityConverter" />
             <conv:InverseBoolConverter x:Key="InverseBoolConverter" />
             <conv:InverseBoolToVisibilityConverter x:Key="InverseBoolToVisibilityConverter" />
+            <conv:StringEqualsConverter x:Key="StringEqualsConverter" />
             <conv:StringPresentVisibilityConverter x:Key="StringPresentVisibilityConverter" />
             <conv:ToUpperConverter x:Key="ToUpperConverter" />
             <conv:DirectoryGlyphConverter x:Key="DirectoryGlyphConverter" />
@@ -21,7 +22,7 @@
             <conv:ProgressFractionConverter x:Key="ProgressFractionConverter" />
             <conv:CountToVisibilityConverter x:Key="CountToVisibilityConverter" />
 
-            <Style x:Key="IconButtonStyle" TargetType="Button">
+            <Style x:Key="IconButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
                 <Setter Property="Background" Value="Transparent" />
                 <Setter Property="BorderBrush" Value="Transparent" />
                 <Setter Property="Padding" Value="6" />

@@ -17,7 +17,7 @@ internal sealed class TerminalReplayBuffer
 
     public TerminalReplayBuffer(int capacity)
     {
-        if (capacity <= 0) throw new ArgumentOutOfRangeException(nameof(capacity));
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacity);
         _buffer = new byte[capacity];
     }
 
