@@ -124,6 +124,7 @@ dotnet_diagnostic.CA1305.severity = suggestion # specify IFormatProvider
 dotnet_diagnostic.CA1707.severity = none       # underscores in identifiers (xUnit theory data)
 dotnet_diagnostic.CA1812.severity = none       # internal class never instantiated (DI surfaces this constantly)
 dotnet_diagnostic.CA1848.severity = none       # use LoggerMessage delegates (overkill for a desktop app of this size)
+dotnet_diagnostic.CA1873.severity = none       # LogX expensive arg eval (paired with CA1848 — same motivation)
 dotnet_diagnostic.CA2007.severity = none       # ConfigureAwait - WinUI 3 single-threaded UI doesn't need this
 
 #####################################

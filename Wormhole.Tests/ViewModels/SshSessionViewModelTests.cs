@@ -102,12 +102,61 @@ public sealed class SshSessionViewModelTests
     }
 
     [Fact]
-    public void CanReconnect_IsFalse_ForRdpSession()
+    public void CanReconnect_IsTrue_ForRdpSession()
     {
-        var vm = new RdpSessionViewModel();
+        // RDP surfaces RetryCommand on the ReconnectCommand override so the tab context
+        // menu's Reconnect entry shows up — the assertion the SSH counterpart already makes.
+        var vm = new RdpSessionViewModel(
+            new NullRdpSessionService(),
+            new Fakes.FakeCredentialService(),
+            new NullCredentialRepository(),
+            new Fakes.FakeDialogService(),
+            new Fakes.FakeRdpCrashSentinelService(),
+            NullLoggerFactory.Instance);
 
-        Assert.False(vm.CanReconnect);
-        Assert.Null(vm.ReconnectCommand);
+        Assert.True(vm.CanReconnect);
+        Assert.NotNull(vm.ReconnectCommand);
+    }
+
+    [Fact]
+    public void RdpRetryCommand_CanExecute_TracksStatusTransitions()
+    {
+        var vm = new RdpSessionViewModel(
+            new NullRdpSessionService(),
+            new Fakes.FakeCredentialService(),
+            new NullCredentialRepository(),
+            new Fakes.FakeDialogService(),
+            new Fakes.FakeRdpCrashSentinelService(),
+            NullLoggerFactory.Instance);
+
+        vm.Status = SessionStatus.Failed;
+        Assert.True(vm.RetryCommand.CanExecute(null));
+
+        vm.Status = SessionStatus.Connecting;
+        Assert.False(vm.RetryCommand.CanExecute(null));
+
+        vm.Status = SessionStatus.Connected;
+        Assert.True(vm.RetryCommand.CanExecute(null));
+    }
+
+    private sealed class NullRdpSessionService : IRdpSessionService
+    {
+        public Task<IRdpSession> ConnectAsync(
+            ConnectionProfile profile, string? password, IntPtr ownerHwnd,
+            string? gatewayUsername = null, string? gatewayPassword = null,
+            Action<IRdpSession>? onSessionReady = null,
+            CancellationToken cancellationToken = default)
+            => throw new NotImplementedException();
+    }
+
+    private sealed class NullCredentialRepository : ICredentialRepository
+    {
+        public Task<IReadOnlyList<CredentialProfile>> GetAllAsync(CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyList<CredentialProfile>>(Array.Empty<CredentialProfile>());
+        public Task<CredentialProfile?> GetByIdAsync(Guid id, CancellationToken ct = default) => Task.FromResult<CredentialProfile?>(null);
+        public Task AddAsync(CredentialProfile profile, CancellationToken ct = default) => Task.CompletedTask;
+        public Task UpdateAsync(CredentialProfile profile, CancellationToken ct = default) => Task.CompletedTask;
+        public Task DeleteAsync(Guid id, CancellationToken ct = default) => Task.CompletedTask;
     }
 
     [Fact]

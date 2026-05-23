@@ -9,6 +9,8 @@ namespace Wormhole.Views.Dialogs;
 
 public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
 {
+    private static readonly char[] CsvSeparators = { ',', ';' };
+
     public event EventHandler? ValidityChanged;
 
     public TunnelDialog()
@@ -133,7 +135,7 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
     }
 
     private static List<string> SplitCsv(string s) =>
-        s.Split(new[] { ',', ';' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+        s.Split(CsvSeparators, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
     private static int? TryParseInt(string s) =>
         int.TryParse(s, out var n) ? n : (int?)null;

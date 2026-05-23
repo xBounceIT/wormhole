@@ -88,6 +88,6 @@ public sealed class SocksTunnelInstance : ITunnelInstance
 
     private void ThrowIfDisposed()
     {
-        if (Volatile.Read(ref _disposedFlag) != 0) throw new ObjectDisposedException(nameof(SocksTunnelInstance));
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposedFlag) != 0, this);
     }
 }

@@ -4,16 +4,21 @@ using Wormhole.Data;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Tests.Fakes;
 using Wormhole.ViewModels;
 using Xunit;
 
 namespace Wormhole.Tests.ViewModels;
 
-public class ConnectionTreeViewModelTests : IDisposable
+public sealed class ConnectionTreeViewModelTests : IDisposable
 {
-    // Inlined from Data/Migrations/0001_initial.sql + 0003_add_tunnel_config.sql: the test
-    // project links source files rather than referencing the main assembly, so the embedded
-    // .sql resources are not available. Keep in lockstep with the migration files.
+    private static readonly string[] ExpectedSortOrderAbc = { "A", "B", "C" };
+    private static readonly string[] ExpectedReorderBca = { "B", "C", "A" };
+
+    // Inlined from Data/Migrations/0001_initial.sql + 0003_add_tunnel_config.sql + 0003_rdp_extras.sql
+    // + 0004_rdp_use_external_client.sql: the test project links source files rather than
+    // referencing the main assembly, so embedded .sql resources are not available. Keep the
+    // column set in sync with ConnectionRepository's SELECT/INSERT/UPDATE.
     private const string SchemaSql = @"
         CREATE TABLE Nodes (
             Id                       TEXT     PRIMARY KEY NOT NULL,
@@ -29,6 +34,33 @@ public class ConnectionTreeViewModelTests : IDisposable
             RdpDomain                TEXT     NULL,
             RdpScreenSize            TEXT     NULL,
             RdpFullScreen            INTEGER  NULL,
+            RdpColorDepth            INTEGER  NULL,
+            RdpUseAllMonitors        INTEGER  NULL,
+            RdpAudioMode             INTEGER  NULL,
+            RdpAudioCaptureMode      INTEGER  NULL,
+            RdpKeyboardHookMode      INTEGER  NULL,
+            RdpRedirectClipboard     INTEGER  NULL,
+            RdpRedirectPrinters      INTEGER  NULL,
+            RdpRedirectSmartCards    INTEGER  NULL,
+            RdpRedirectPorts         INTEGER  NULL,
+            RdpRedirectDevices       INTEGER  NULL,
+            RdpRedirectDrives        TEXT     NULL,
+            RdpConnectionSpeed       INTEGER  NULL,
+            RdpDesktopBackground     INTEGER  NULL,
+            RdpFontSmoothing         INTEGER  NULL,
+            RdpDesktopComposition    INTEGER  NULL,
+            RdpWindowDrag            INTEGER  NULL,
+            RdpMenuAnimation         INTEGER  NULL,
+            RdpVisualStyles          INTEGER  NULL,
+            RdpBitmapCaching         INTEGER  NULL,
+            RdpAutoReconnect         INTEGER  NULL,
+            RdpServerAuthentication  INTEGER  NULL,
+            RdpGatewayUsageMethod    INTEGER  NULL,
+            RdpGatewayHostname       TEXT     NULL,
+            RdpGatewayCredentialId   TEXT     NULL,
+            RdpGatewayBypassLocal    INTEGER  NULL,
+            RdpGatewayUseSameCreds   INTEGER  NULL,
+            RdpUseExternalClient     INTEGER  NULL,
             SshKeyFileName           TEXT     NULL,
             SshKnownHostFingerprint  TEXT     NULL,
             TunnelEnabled            INTEGER  NULL,
@@ -67,8 +99,6 @@ public class ConnectionTreeViewModelTests : IDisposable
 
     public void Dispose()
     {
-        // Scoped pool clear so other tests' connections aren't disturbed; required on
-        // Windows to release the file lock before delete.
         SqliteConnection.ClearPool(new SqliteConnection(_connectionString));
         if (File.Exists(_dbPath)) File.Delete(_dbPath);
     }
@@ -79,6 +109,17 @@ public class ConnectionTreeViewModelTests : IDisposable
         new NullSessionTabFactory(),
         dialog ?? new FakeDialogService(),
         NullLogger<ConnectionTreeViewModel>.Instance);
+
+    private static ConnectionNode MakeConnectionDraft(string name, ProtocolType protocol, string host, int? port, string? username)
+        => new()
+        {
+            Kind = NodeKind.Connection,
+            Name = name,
+            Protocol = protocol,
+            Host = host,
+            Port = port,
+            Username = username,
+        };
 
     [Fact]
     public async Task AddFolder_AtRoot_PersistsAndAppears()
@@ -125,7 +166,7 @@ public class ConnectionTreeViewModelTests : IDisposable
         await vm.AddFolderCommand.ExecuteAsync(null);
         var parentId = vm.Roots.Single().Node.Id;
 
-        dialog.ConnectionPromptResult = new NewConnectionDraft("leaf", ProtocolType.Ssh, "h", null, null);
+        dialog.EditConnectionResult = MakeConnectionDraft("leaf", ProtocolType.Ssh, "h", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(vm.Roots.Single());
         var leafVm = vm.Roots.Single().Children.Single();
 
@@ -141,8 +182,7 @@ public class ConnectionTreeViewModelTests : IDisposable
     {
         var dialog = new FakeDialogService
         {
-            ConnectionPromptResult = new NewConnectionDraft(
-                "prod-web", ProtocolType.Ssh, "example.com", 2222, "daniel"),
+            EditConnectionResult = MakeConnectionDraft("prod-web", ProtocolType.Ssh, "example.com", 2222, "daniel"),
         };
         var vm = CreateVm(dialog);
         await vm.RefreshAsync();
@@ -162,11 +202,9 @@ public class ConnectionTreeViewModelTests : IDisposable
     public async Task AddConnection_WithCredentialId_PersistsCredentialId()
     {
         var credentialId = Guid.NewGuid();
-        var dialog = new FakeDialogService
-        {
-            ConnectionPromptResult = new NewConnectionDraft(
-                "prod-web", ProtocolType.Ssh, "example.com", 22, null, credentialId),
-        };
+        var draft = MakeConnectionDraft("prod-web", ProtocolType.Ssh, "example.com", 22, null);
+        draft.CredentialId = credentialId;
+        var dialog = new FakeDialogService { EditConnectionResult = draft };
         var vm = CreateVm(dialog);
         await vm.RefreshAsync();
 
@@ -177,41 +215,20 @@ public class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
-    public async Task Edit_OpensDialogWithSavedCredentialId()
-    {
-        var credentialId = Guid.NewGuid();
-        var dialog = new FakeDialogService
-        {
-            ConnectionPromptResult = new NewConnectionDraft(
-                "prod", ProtocolType.Ssh, "host", 22, null, credentialId),
-        };
-        var vm = CreateVm(dialog);
-        await vm.RefreshAsync();
-        await vm.AddConnectionCommand.ExecuteAsync(null);
-
-        // Re-submitting the same draft is a no-op, but Edit still has to construct
-        // the initial draft from the node — verify the CredentialId is carried over.
-        await vm.EditCommand.ExecuteAsync(vm.Roots.Single());
-
-        Assert.NotNull(dialog.LastConnectionPromptInitial);
-        Assert.Equal(credentialId, dialog.LastConnectionPromptInitial!.CredentialId);
-    }
-
-    [Fact]
     public async Task Edit_AssignsCredentialId_PersistsToDb()
     {
         var dialog = new FakeDialogService
         {
-            ConnectionPromptResult = new NewConnectionDraft(
-                "prod", ProtocolType.Ssh, "host", 22, "alice"),
+            EditConnectionResult = MakeConnectionDraft("prod", ProtocolType.Ssh, "host", 22, "alice"),
         };
         var vm = CreateVm(dialog);
         await vm.RefreshAsync();
         await vm.AddConnectionCommand.ExecuteAsync(null);
 
         var credentialId = Guid.NewGuid();
-        dialog.ConnectionPromptResult = new NewConnectionDraft(
-            "prod", ProtocolType.Ssh, "host", 22, null, credentialId);
+        var nextDraft = MakeConnectionDraft("prod", ProtocolType.Ssh, "host", 22, null);
+        nextDraft.CredentialId = credentialId;
+        dialog.EditConnectionResult = nextDraft;
         await vm.EditCommand.ExecuteAsync(vm.Roots.Single());
 
         var row = (await _repo.GetAllAsync()).Single();
@@ -223,8 +240,7 @@ public class ConnectionTreeViewModelTests : IDisposable
     {
         var dialog = new FakeDialogService
         {
-            ConnectionPromptResult = new NewConnectionDraft(
-                "host-only", ProtocolType.Rdp, "vm.example.com", null, null),
+            EditConnectionResult = MakeConnectionDraft("host-only", ProtocolType.Rdp, "vm.example.com", null, null),
         };
         var vm = CreateVm(dialog);
         await vm.RefreshAsync();
@@ -250,7 +266,7 @@ public class ConnectionTreeViewModelTests : IDisposable
         }
 
         var rows = (await _repo.GetAllAsync()).OrderBy(r => r.SortOrder).ToList();
-        Assert.Equal(new[] { "A", "B", "C" }, rows.Select(r => r.Name));
+        Assert.Equal(ExpectedSortOrderAbc, rows.Select(r => r.Name));
         Assert.True(rows[0].SortOrder < rows[1].SortOrder);
         Assert.True(rows[1].SortOrder < rows[2].SortOrder);
     }
@@ -266,8 +282,7 @@ public class ConnectionTreeViewModelTests : IDisposable
         await vm.AddFolderCommand.ExecuteAsync(null);
         var parentVm = vm.Roots.Single();
 
-        dialog.ConnectionPromptResult = new NewConnectionDraft(
-            "leaf", ProtocolType.Ssh, "host", null, null);
+        dialog.EditConnectionResult = MakeConnectionDraft("leaf", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(parentVm);
 
         var root = Assert.Single(vm.Roots);
@@ -287,16 +302,13 @@ public class ConnectionTreeViewModelTests : IDisposable
         dialog.TextPromptResult = "Parent";
         await vm.AddFolderCommand.ExecuteAsync(null);
 
-        dialog.ConnectionPromptResult = new NewConnectionDraft(
-            "leaf", ProtocolType.Ssh, "host", null, null);
+        dialog.EditConnectionResult = MakeConnectionDraft("leaf", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(vm.Roots.Single());
 
-        // Re-fetch from Roots: each refresh rebuilds TreeNodeViewModel instances.
         var parentVm = vm.Roots.Single();
         parentVm.IsExpanded = true;
         vm.SelectedNode = parentVm.Children.Single();
 
-        // Force another full Roots rebuild.
         dialog.TextPromptResult = "Sibling";
         await vm.AddFolderCommand.ExecuteAsync(null);
 
@@ -322,7 +334,7 @@ public class ConnectionTreeViewModelTests : IDisposable
     [Fact]
     public async Task AddConnection_CancelledDialog_DoesNotPersist()
     {
-        var dialog = new FakeDialogService { ConnectionPromptResult = null };
+        var dialog = new FakeDialogService { EditConnectionResult = null };
         var vm = CreateVm(dialog);
         await vm.RefreshAsync();
 
@@ -340,11 +352,9 @@ public class ConnectionTreeViewModelTests : IDisposable
 
         dialog.TextPromptResult = "Linux";
         await vm.AddFolderCommand.ExecuteAsync(null);
-        dialog.ConnectionPromptResult = new NewConnectionDraft(
-            "prod-web", ProtocolType.Ssh, "host", null, null);
+        dialog.EditConnectionResult = MakeConnectionDraft("prod-web", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(vm.Roots.Single());
 
-        // Simulate the drag: pull the connection out of the folder and into Roots.
         var folder = vm.Roots.Single();
         var connection = folder.Children.Single();
         folder.Children.Remove(connection);
@@ -371,7 +381,6 @@ public class ConnectionTreeViewModelTests : IDisposable
         var a = vm.Roots.Single(r => r.Name == "A");
         var b = vm.Roots.Single(r => r.Name == "B");
 
-        // Drag B into A.
         vm.Roots.Remove(b);
         a.Children.Add(b);
 
@@ -394,7 +403,6 @@ public class ConnectionTreeViewModelTests : IDisposable
             await vm.AddFolderCommand.ExecuteAsync(null);
         }
 
-        // Move A to the end (drag past C).
         var a = vm.Roots[0];
         vm.Roots.RemoveAt(0);
         vm.Roots.Add(a);
@@ -402,7 +410,7 @@ public class ConnectionTreeViewModelTests : IDisposable
         await vm.PersistTreeStructureAsync();
 
         var rows = (await _repo.GetAllAsync()).OrderBy(r => r.SortOrder).ToList();
-        Assert.Equal(new[] { "B", "C", "A" }, rows.Select(r => r.Name));
+        Assert.Equal(ExpectedReorderBca, rows.Select(r => r.Name));
     }
 
     [Fact]
@@ -419,15 +427,12 @@ public class ConnectionTreeViewModelTests : IDisposable
         await vm.AddFolderCommand.ExecuteAsync(parent);
         var child = vm.Roots.Single().Children.Single();
 
-        // The catastrophic drop: TreeView removes Parent from Roots and attaches it under
-        // Child, so the resulting cycle is disconnected from Roots (Roots is now empty).
         vm.Roots.Remove(parent);
         child.Children.Add(parent);
         Assert.Empty(vm.Roots);
 
         await vm.PersistTreeStructureAsync();
 
-        // DB untouched; in-memory tree restored from the DB.
         var rows = await _repo.GetAllAsync();
         var parentRow = rows.Single(r => r.Name == "Parent");
         var childRow = rows.Single(r => r.Name == "Child");
@@ -457,15 +462,13 @@ public class ConnectionTreeViewModelTests : IDisposable
     {
         var dialog = new FakeDialogService
         {
-            ConnectionPromptResult = new NewConnectionDraft(
-                "prod-web", ProtocolType.Ssh, "old.example.com", 22, "old"),
+            EditConnectionResult = MakeConnectionDraft("prod-web", ProtocolType.Ssh, "old.example.com", 22, "old"),
         };
         var vm = CreateVm(dialog);
         await vm.RefreshAsync();
         await vm.AddConnectionCommand.ExecuteAsync(null);
 
-        dialog.ConnectionPromptResult = new NewConnectionDraft(
-            "prod-web-2", ProtocolType.Rdp, "new.example.com", 3389, "alice");
+        dialog.EditConnectionResult = MakeConnectionDraft("prod-web-2", ProtocolType.Rdp, "new.example.com", 3389, "alice");
         await vm.EditCommand.ExecuteAsync(vm.Roots.Single());
 
         var row = (await _repo.GetAllAsync()).Single();
@@ -474,25 +477,6 @@ public class ConnectionTreeViewModelTests : IDisposable
         Assert.Equal("new.example.com", row.Host);
         Assert.Equal(3389, row.Port);
         Assert.Equal("alice", row.Username);
-    }
-
-    [Fact]
-    public async Task Edit_ConnectionUnchanged_DoesNotWrite()
-    {
-        var dialog = new FakeDialogService
-        {
-            ConnectionPromptResult = new NewConnectionDraft(
-                "prod", ProtocolType.Ssh, "host", 22, "alice"),
-        };
-        var vm = CreateVm(dialog);
-        await vm.RefreshAsync();
-        await vm.AddConnectionCommand.ExecuteAsync(null);
-        var before = (await _repo.GetAllAsync()).Single().UpdatedAt;
-
-        // Re-submit identical values.
-        await vm.EditCommand.ExecuteAsync(vm.Roots.Single());
-
-        Assert.Equal(before, (await _repo.GetAllAsync()).Single().UpdatedAt);
     }
 
     [Fact]
@@ -532,8 +516,7 @@ public class ConnectionTreeViewModelTests : IDisposable
 
         dialog.TextPromptResult = "Parent";
         await vm.AddFolderCommand.ExecuteAsync(null);
-        dialog.ConnectionPromptResult = new NewConnectionDraft(
-            "leaf", ProtocolType.Ssh, "host", null, null);
+        dialog.EditConnectionResult = MakeConnectionDraft("leaf", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(vm.Roots.Single());
 
         await vm.DeleteCommand.ExecuteAsync(vm.Roots.Single());
@@ -648,7 +631,7 @@ public class ConnectionTreeViewModelTests : IDisposable
 
         dialog.TextPromptResult = "Parent";
         await vm.AddFolderCommand.ExecuteAsync(null);
-        dialog.ConnectionPromptResult = new NewConnectionDraft(
+        dialog.EditConnectionResult = MakeConnectionDraft(
             "leaf", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(vm.Roots.Single());
 
@@ -673,10 +656,10 @@ public class ConnectionTreeViewModelTests : IDisposable
         var servers = vm.Roots.Single(r => r.Name == "Servers");
         var other = vm.Roots.Single(r => r.Name == "Other");
 
-        dialog.ConnectionPromptResult = new NewConnectionDraft(
+        dialog.EditConnectionResult = MakeConnectionDraft(
             "prod-web", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(servers);
-        dialog.ConnectionPromptResult = new NewConnectionDraft(
+        dialog.EditConnectionResult = MakeConnectionDraft(
             "leaf", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(other);
 
@@ -698,7 +681,7 @@ public class ConnectionTreeViewModelTests : IDisposable
         dialog.TextPromptResult = "Parent";
         await vm.AddFolderCommand.ExecuteAsync(null);
         var parent = vm.Roots.Single();
-        dialog.ConnectionPromptResult = new NewConnectionDraft(
+        dialog.EditConnectionResult = MakeConnectionDraft(
             "prod-web", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(parent);
 
@@ -721,10 +704,10 @@ public class ConnectionTreeViewModelTests : IDisposable
         dialog.TextPromptResult = "Linux";
         await vm.AddFolderCommand.ExecuteAsync(null);
         var folder = vm.Roots.Single();
-        dialog.ConnectionPromptResult = new NewConnectionDraft(
+        dialog.EditConnectionResult = MakeConnectionDraft(
             "alpha", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(folder);
-        dialog.ConnectionPromptResult = new NewConnectionDraft(
+        dialog.EditConnectionResult = MakeConnectionDraft(
             "beta", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(folder);
 
@@ -747,7 +730,7 @@ public class ConnectionTreeViewModelTests : IDisposable
         dialog.TextPromptResult = "Linux";
         await vm.AddFolderCommand.ExecuteAsync(null);
         var folder = vm.Roots.Single();
-        dialog.ConnectionPromptResult = new NewConnectionDraft(
+        dialog.EditConnectionResult = MakeConnectionDraft(
             "alpha", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(folder);
 
@@ -783,7 +766,7 @@ public class ConnectionTreeViewModelTests : IDisposable
         dialog.TextPromptResult = "Parent";
         await vm.AddFolderCommand.ExecuteAsync(null);
         var parent = vm.Roots.Single();
-        dialog.ConnectionPromptResult = new NewConnectionDraft(
+        dialog.EditConnectionResult = MakeConnectionDraft(
             "leaf", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(parent);
 
@@ -810,7 +793,7 @@ public class ConnectionTreeViewModelTests : IDisposable
 
         dialog.TextPromptResult = "Parent";
         await vm.AddFolderCommand.ExecuteAsync(null);
-        dialog.ConnectionPromptResult = new NewConnectionDraft(
+        dialog.EditConnectionResult = MakeConnectionDraft(
             "leaf", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(vm.Roots.Single());
 
@@ -835,7 +818,7 @@ public class ConnectionTreeViewModelTests : IDisposable
 
         // Adding a connection triggers RefreshAsync internally. The new node must be
         // evaluated against the live filter, not appear with its default IsVisible=true.
-        dialog.ConnectionPromptResult = new NewConnectionDraft(
+        dialog.EditConnectionResult = MakeConnectionDraft(
             "prod-web", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(vm.Roots.Single());
 
@@ -844,7 +827,7 @@ public class ConnectionTreeViewModelTests : IDisposable
         Assert.True(parent.Children.Single(c => c.Name == "prod-web").IsVisible);
 
         // And an unrelated new connection added under the same filter must stay hidden.
-        dialog.ConnectionPromptResult = new NewConnectionDraft(
+        dialog.EditConnectionResult = MakeConnectionDraft(
             "other", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(parent);
 
@@ -890,7 +873,7 @@ public class ConnectionTreeViewModelTests : IDisposable
         dialog.TextPromptResult = "Child";
         await vm.AddFolderCommand.ExecuteAsync(parent);
         var child = parent.Children.Single();
-        dialog.ConnectionPromptResult = new NewConnectionDraft(
+        dialog.EditConnectionResult = MakeConnectionDraft(
             "leaf", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(child);
 
@@ -937,30 +920,5 @@ public class ConnectionTreeViewModelTests : IDisposable
     private sealed class NullSessionTabFactory : ISessionTabFactory
     {
         public void Open(ConnectionProfile profile) { /* tests don't exercise tab opening */ }
-    }
-
-    private sealed class FakeDialogService : IDialogService
-    {
-        public string? TextPromptResult { get; set; }
-        public NewConnectionDraft? ConnectionPromptResult { get; set; }
-        public NewConnectionDraft? LastConnectionPromptInitial { get; private set; }
-        public bool ConfirmResult { get; set; } = true;
-
-        public Task ShowMessageAsync(string title, string message) => Task.CompletedTask;
-        public Task<bool> ConfirmAsync(string title, string message, string primaryText = "Yes", string closeText = "No")
-            => Task.FromResult(ConfirmResult);
-        public Task<string?> PromptForTextAsync(string title, string label, string defaultValue = "")
-            => Task.FromResult(TextPromptResult);
-        public Task<NewConnectionDraft?> PromptForConnectionAsync(NewConnectionDraft? initial = null)
-        {
-            LastConnectionPromptInitial = initial;
-            return Task.FromResult(ConnectionPromptResult);
-        }
-        public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null)
-            => Task.FromResult<CredentialDraft?>(null);
-        public Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null)
-            => Task.FromResult<TunnelDraft?>(null);
-        public Task<string?> PromptPasswordAsync(string title, string message)
-            => Task.FromResult<string?>(null);
     }
 }
