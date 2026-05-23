@@ -1,3 +1,5 @@
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -103,7 +105,10 @@ public sealed partial class FilePaneControl : UserControl
         // on an underlying button, or rapid double-click before the first overlay is
         // visible) would otherwise overwrite _confirmTcs and strand the first awaiter
         // forever. Cancel the previous prompt with a No result so its async-void frame
-        // unwinds cleanly.
+        // unwinds cleanly. Because the TCS uses RunContinuationsAsynchronously, the
+        // previous awaiter's CompleteOverlayAsync.finally runs on a later dispatcher
+        // message — its hide()/clear() lambdas identity-check the captured tcs (see
+        // below) so they don't clobber a freshly-assigned _confirmTcs / Visibility.
         _confirmTcs?.TrySetResult(false);
         ConfirmTitle.Text = title;
         ConfirmMessage.Text = message;
@@ -114,7 +119,9 @@ public sealed partial class FilePaneControl : UserControl
         // Focus the safe (Cancel) button so Enter is a no-op-equivalent for destructive
         // actions, matching the pre-overlay ContentDialog's DefaultButton=Close.
         _ = DispatcherQueue.TryEnqueue(() => ConfirmNoButton.Focus(FocusState.Programmatic));
-        return CompleteOverlayAsync(tcs.Task, () => ConfirmOverlay.Visibility = Visibility.Collapsed, () => _confirmTcs = null);
+        return CompleteOverlayAsync(tcs.Task,
+            () => { if (_confirmTcs == tcs) ConfirmOverlay.Visibility = Visibility.Collapsed; },
+            () => { if (_confirmTcs == tcs) _confirmTcs = null; });
     }
 
     private void OnConfirmYes(object sender, RoutedEventArgs e) => _confirmTcs?.TrySetResult(true);
@@ -148,7 +155,9 @@ public sealed partial class FilePaneControl : UserControl
         // can be intercepted by ancestor LosingFocus handlers, Pointer is treated as
         // user-driven and sails through.
         _ = DispatcherQueue.TryEnqueue(() => PromptInput.Focus(FocusState.Pointer));
-        return CompleteOverlayAsync(tcs.Task, () => PromptOverlay.Visibility = Visibility.Collapsed, () => _promptTcs = null);
+        return CompleteOverlayAsync(tcs.Task,
+            () => { if (_promptTcs == tcs) PromptOverlay.Visibility = Visibility.Collapsed; },
+            () => { if (_promptTcs == tcs) _promptTcs = null; });
     }
 
     private void OnPromptInputTextChanged(object sender, TextChangedEventArgs e) =>
@@ -482,29 +491,36 @@ public sealed partial class FilePaneControl : UserControl
     /// <summary>
     /// Kick off a transfer + post-transfer pane refresh without awaiting in the caller's
     /// frame. Used by OnDrop so the drag-drop deferral can complete promptly instead of
-    /// pinning the source application's drag cursor for the entire SFTP batch. Exceptions
-    /// are logged via Debug.WriteLine; the orchestrator itself surfaces per-row errors
-    /// through the transfer queue strip's ErrorMessage tooltip, so swallowing here only
-    /// loses the outer task fault — not the per-file diagnostics.
+    /// pinning the source application's drag cursor for the entire SFTP batch. Per-row
+    /// errors surface through the transfer queue strip's ErrorMessage tooltip; an
+    /// orchestrator-level fault that escapes EnqueueAsync (or a RefreshAsync that throws
+    /// on a torn-down VM) goes to the standard Serilog sink under
+    /// %LOCALAPPDATA%\Wormhole\logs\ — Debug.WriteLine would be elided in Release.
     /// </summary>
     private void FireAndForgetTransfer(TransferRequest request)
     {
         var vm = ViewModel;
         var requested = OnTransferRequested;
         if (vm is null || requested is null) return;
-        _ = RunTransferAsync(requested, vm, request);
+        var logger = App.Current.Services.GetService<ILogger<FilePaneControl>>();
+        _ = RunTransferAsync(requested, vm, request, logger);
     }
 
-    private static async Task RunTransferAsync(Func<TransferRequest, Task> requested, FilePaneViewModel vm, TransferRequest request)
+    private static async Task RunTransferAsync(Func<TransferRequest, Task> requested, FilePaneViewModel vm, TransferRequest request, ILogger? logger)
     {
         try
         {
             await requested(request).ConfigureAwait(true);
             await vm.RefreshAsync().ConfigureAwait(true);
         }
+        catch (OperationCanceledException)
+        {
+            // User closed the dialog mid-transfer or cancelled an individual row — the
+            // orchestrator's _shutdown.Token surfaces here as OCE. Not a failure.
+        }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine("Background transfer failed: " + ex);
+            logger?.LogWarning(ex, "Background transfer failed.");
         }
     }
 

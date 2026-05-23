@@ -90,8 +90,14 @@ public sealed partial class FileTransferDialog : UserControl
         }
         finally
         {
-            ConflictOverlay.Visibility = Visibility.Collapsed;
-            _conflictTcs = null;
+            // Identity-check: a reentrant PromptConflictAsync may have already replaced
+            // _conflictTcs with a new TCS and made the overlay visible again. Don't
+            // collapse the overlay or null the field unless it still refers to OUR tcs.
+            if (_conflictTcs == tcs)
+            {
+                ConflictOverlay.Visibility = Visibility.Collapsed;
+                _conflictTcs = null;
+            }
         }
     }
 
