@@ -8,6 +8,18 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# Merge registry PATH entries into the process PATH so this script finds `go`
+# even when MSBuild's Exec spawns a child PowerShell with the env block its
+# parent inherited at start time (which never re-reads the registry after a
+# fresh choco/scoop install of Go). See Fetch-OvpnProxy.ps1 for the
+# longer-form explanation of this trick.
+$pathParts = $env:PATH -split ';' | Where-Object { $_ }
+$registryPath = (([Environment]::GetEnvironmentVariable("PATH", "Machine"), [Environment]::GetEnvironmentVariable("PATH", "User")) -join ';')
+foreach ($p in ($registryPath -split ';' | Where-Object { $_ })) {
+    if ($pathParts -notcontains $p) { $pathParts += $p }
+}
+$env:PATH = $pathParts -join ';'
+
 # Fetches (or builds) the wormhole-wgproxy.exe userspace WireGuard sidecar and writes it
 # to obj\wgproxy\<arch>\ so the project file can pick it up as a None item and copy to the
 # output directory. Mirrors the pattern in Fetch-WebAssets.ps1.
@@ -110,10 +122,10 @@ if ($release) {
 # WireGuardTunnelProvider surfaces a clean runtime error if the binary is missing. We
 # therefore catch every go-related failure here and downgrade it to a warning.
 #
-# Note for dep bumps: tools\wormhole-wgproxy\go.sum must be regenerated with GOOS=windows so
-# the windows-only indirect `golang.zx2c4.com/wintun` is retained. If you run
-# `go mod tidy` on Linux/macOS the wintun entry may be stripped and the next cross-compile
-# from Windows will fail with "missing go.sum entry for golang.zx2c4.com/wintun".
+# Note for dep bumps: regenerate tools\wormhole-wgproxy\go.sum with GOOS=windows when
+# bumping deps -- the windows-only indirect `golang.zx2c4.com/wintun` is otherwise stripped
+# on Linux/macOS tidy passes and the next cross-compile from Windows fails with
+# "missing go.sum entry for golang.zx2c4.com/wintun".
 $go = Get-Command go -ErrorAction SilentlyContinue
 if ($go) {
     Write-Info "BUILD wormhole-wgproxy.exe ($Arch) from source"
@@ -145,6 +157,8 @@ if ($go) {
         # into the pipeline, and the script-wide $ErrorActionPreference = "Stop" would
         # otherwise throw on the first stderr line -- losing the line/column of the actual
         # compile error in favor of the (less useful) package-header line.
+        #
+        # go.sum is committed for this tool so plain `go build` works without a preflight.
         $buildLines = [System.Collections.Generic.List[string]]::new()
         $prevEAP = $ErrorActionPreference
         $ErrorActionPreference = 'Continue'

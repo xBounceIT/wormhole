@@ -1,0 +1,6 @@
+[submodule "tools/wormhole-ovpnproxy/third_party/openvpn3"]
+	path = tools/wormhole-ovpnproxy/third_party/openvpn3
+	url = https://github.com/OpenVPN/openvpn3
+[submodule "tools/wormhole-ovpnproxy/third_party/mbedtls"]
+	path = tools/wormhole-ovpnproxy/third_party/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls

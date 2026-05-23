@@ -1,0 +1,13 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg/master/scripts/vcpkg.schema.json",
+  "name": "wormhole-ovpn-shim",
+  "version-string": "0.1.0",
+  "description": "Transitive C++ dependencies for the Wormhole OpenVPN sidecar shim. mbedtls is vendored as a submodule (see ../third_party/mbedtls) so it isn't listed here. tap-windows6 is included for its <tap-windows.h> HEADER ONLY — OpenVPN3's cliopt.hpp / tunutil.hpp include the header unconditionally on Windows, but our runtime path uses ExternalTun::Factory so the TAP driver is never installed or loaded.",
+  "dependencies": [
+    "asio",
+    "jsoncpp",
+    "lz4",
+    "tap-windows6",
+    "xxhash"
+  ]
+}

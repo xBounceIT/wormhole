@@ -29,10 +29,10 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
+	"github.com/xBounceIT/wormhole/tools/internal/sockstun"
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun/netstack"
@@ -51,22 +51,15 @@ type config struct {
 	PersistentKeepaliveSeconds *int     `json:"persistent_keepalive_s"`
 }
 
-// dialer is the abstraction the SOCKS5 server uses to reach the target. In real mode it points
-// into the wireguard-go netstack; in mock mode it points at the OS resolver/socket layer.
-type dialer interface {
-	DialContext(ctx context.Context, network, address string) (net.Conn, error)
-}
-
-type osDialer struct{}
-
-func (osDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
-	var d net.Dialer
-	return d.DialContext(ctx, network, address)
-}
-
 func logf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 }
+
+// stderrLogger adapts logf to the sockstun.Logger interface so the shared SOCKS5 server
+// can emit accept / dial errors through the same stream as the rest of the sidecar.
+type stderrLogger struct{}
+
+func (stderrLogger) Logf(format string, args ...any) { logf(format, args...) }
 
 func main() {
 	mock := flag.Bool("mock", false, "skip WireGuard handshake; dial via OS sockets (CI / tests only)")
@@ -106,12 +99,12 @@ func run(mock bool) error {
 		}
 	}()
 
-	var dial dialer
+	var dial sockstun.Dialer
 	var cleanup func()
 
 	if mock {
 		logf("mock mode: skipping WireGuard, dialing via OS sockets")
-		dial = osDialer{}
+		dial = sockstun.OSDialer{}
 		cleanup = func() {}
 	} else {
 		d, c, err := startWireGuard(ctx, cfg)
@@ -142,26 +135,7 @@ func run(mock bool) error {
 		_ = ln.Close()
 	}()
 
-	var wg sync.WaitGroup
-	for {
-		c, err := ln.Accept()
-		if err != nil {
-			if errors.Is(err, net.ErrClosed) || ctx.Err() != nil {
-				break
-			}
-			logf("accept: %v", err)
-			continue
-		}
-		wg.Add(1)
-		go func(c net.Conn) {
-			defer wg.Done()
-			defer c.Close()
-			handleSocks5(ctx, c, dial)
-		}(c)
-	}
-
-	wg.Wait()
-	return nil
+	return sockstun.Serve(ctx, ln, dial, stderrLogger{})
 }
 
 func readConfig() (config, error) {
@@ -176,7 +150,7 @@ func readConfig() (config, error) {
 // startWireGuard brings up wireguard-go in netstack mode and returns a dialer that routes
 // through the virtual network plus a cleanup function. Address/peer config is provided via
 // the UAPI ipcSet contract.
-func startWireGuard(ctx context.Context, cfg config) (dialer, func(), error) {
+func startWireGuard(ctx context.Context, cfg config) (sockstun.Dialer, func(), error) {
 	if cfg.InterfacePrivateKey == "" {
 		return nil, nil, errors.New("interface_private_key is required")
 	}
@@ -342,143 +316,4 @@ func base64KeyToHex(b64 string) (string, error) {
 		return "", fmt.Errorf("expected 32-byte key, got %d bytes", len(raw))
 	}
 	return hex.EncodeToString(raw), nil
-}
-
-// --- SOCKS5 ---
-
-// handleSocks5 implements the minimum RFC 1928 surface the .NET Socks5Client speaks: no-auth
-// only, CONNECT command, DOMAINNAME / IPv4 / IPv6 address types. Anything else gets a polite
-// error reply.
-func handleSocks5(ctx context.Context, c net.Conn, dial dialer) {
-	if err := c.SetDeadline(time.Now().Add(20 * time.Second)); err != nil {
-		return
-	}
-
-	hdr := make([]byte, 2)
-	if _, err := io.ReadFull(c, hdr); err != nil {
-		return
-	}
-	if hdr[0] != 0x05 {
-		return
-	}
-	n := int(hdr[1])
-	methods := make([]byte, n)
-	if _, err := io.ReadFull(c, methods); err != nil {
-		return
-	}
-	supportsNoAuth := false
-	for _, m := range methods {
-		if m == 0x00 {
-			supportsNoAuth = true
-			break
-		}
-	}
-	if !supportsNoAuth {
-		_, _ = c.Write([]byte{0x05, 0xff})
-		return
-	}
-	if _, err := c.Write([]byte{0x05, 0x00}); err != nil {
-		return
-	}
-
-	reqHead := make([]byte, 4)
-	if _, err := io.ReadFull(c, reqHead); err != nil {
-		return
-	}
-	if reqHead[0] != 0x05 {
-		return
-	}
-	if reqHead[1] != 0x01 {
-		// only CONNECT supported
-		writeReply(c, 0x07)
-		return
-	}
-
-	var host string
-	switch reqHead[3] {
-	case 0x01: // IPv4
-		buf := make([]byte, 4)
-		if _, err := io.ReadFull(c, buf); err != nil {
-			return
-		}
-		host = net.IP(buf).String()
-	case 0x03: // DOMAINNAME
-		lenBuf := make([]byte, 1)
-		if _, err := io.ReadFull(c, lenBuf); err != nil {
-			return
-		}
-		buf := make([]byte, int(lenBuf[0]))
-		if _, err := io.ReadFull(c, buf); err != nil {
-			return
-		}
-		host = string(buf)
-	case 0x04: // IPv6
-		buf := make([]byte, 16)
-		if _, err := io.ReadFull(c, buf); err != nil {
-			return
-		}
-		host = net.IP(buf).String()
-	default:
-		writeReply(c, 0x08)
-		return
-	}
-
-	portBuf := make([]byte, 2)
-	if _, err := io.ReadFull(c, portBuf); err != nil {
-		return
-	}
-	port := int(portBuf[0])<<8 | int(portBuf[1])
-
-	// Clear deadline before long-lived stream.
-	_ = c.SetDeadline(time.Time{})
-
-	dialCtx, cancelDial := context.WithTimeout(ctx, 15*time.Second)
-	upstream, err := dial.DialContext(dialCtx, "tcp", net.JoinHostPort(host, fmt.Sprintf("%d", port)))
-	cancelDial()
-	if err != nil {
-		logf("dial %s:%d failed: %v", host, port, err)
-		// 0x04 host unreachable is a reasonable generic reply
-		writeReply(c, 0x04)
-		return
-	}
-	defer upstream.Close()
-
-	// Success reply with BND.ADDR = 0.0.0.0:0 (we don't expose the bind address).
-	if _, err := c.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
-		return
-	}
-
-	pump(ctx, c, upstream)
-}
-
-// pump bidirectionally copies between client and upstream. When one direction's Copy returns
-// (EOF or error), half-close the corresponding peer write so the other Copy unblocks at EOF —
-// avoids leaking a goroutine until the OS finally tears down a half-open connection. The
-// 2-channel pattern (no WaitGroup, no bridge goroutine) keeps per-connection overhead at
-// 2 goroutines instead of 3 — material under RDP-through-tunnel load with many sub-streams.
-func pump(ctx context.Context, client, upstream net.Conn) {
-	type closeWriter interface{ CloseWrite() error }
-	done := make(chan struct{}, 2)
-	copy1 := func(dst, src net.Conn) {
-		_, _ = io.Copy(dst, src)
-		if cw, ok := dst.(closeWriter); ok {
-			_ = cw.CloseWrite()
-		}
-		done <- struct{}{}
-	}
-	go copy1(upstream, client)
-	go copy1(client, upstream)
-
-	select {
-	case <-done:
-	case <-ctx.Done():
-		_ = client.Close()
-		_ = upstream.Close()
-		<-done
-	}
-	<-done
-}
-
-func writeReply(c net.Conn, code byte) {
-	_, _ = c.Write([]byte{0x05, code, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 }
