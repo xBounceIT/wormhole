@@ -56,6 +56,47 @@ public class MRemoteNgImportDialogViewModelTests
     }
 
     [Fact]
+    public async Task StartImport_NoPasswordPayloads_BypassesVerificationAndImports()
+    {
+        var svc = new FakeMRemoteNgImportService
+        {
+            ExpectedPassword = "never-match",
+            NextResult = new MRemoteNgImportResult(1, 2, 0, 0, Array.Empty<string>()),
+        };
+        svc.NextFileInfo = svc.NextFileInfo with { HasPasswordPayloads = false };
+        var vm = CreateVm(svc);
+        vm.SelectedPath = @"X:\fake.xml";
+
+        await vm.StartImportCommand.ExecuteAsync(null);
+
+        Assert.False(vm.IsBusy);
+        Assert.False(vm.NeedsPassword);
+        Assert.False(vm.ImportStructureOnlyCommand.CanExecute(null));
+        Assert.NotNull(vm.Result);
+        Assert.Empty(svc.VerifyCalls);
+        Assert.Single(svc.PlanCalls);
+        Assert.Equal(MRemoteNgImportDialogViewModel.DefaultPassword, svc.PlanCalls[0]);
+        Assert.Equal(0, vm.Result!.CredentialsCreated);
+    }
+
+    [Fact]
+    public async Task StartImport_WithPasswordPayloads_DefaultsFailStillPrompts()
+    {
+        var svc = new FakeMRemoteNgImportService { ExpectedPassword = "custom-master" };
+        svc.NextFileInfo = svc.NextFileInfo with { HasPasswordPayloads = true };
+        var vm = CreateVm(svc);
+        vm.SelectedPath = @"X:\fake.xml";
+
+        await vm.StartImportCommand.ExecuteAsync(null);
+
+        Assert.True(vm.NeedsPassword);
+        Assert.Null(vm.Result);
+        Assert.Equal(new[] { "mR3m", string.Empty }, svc.VerifyCalls);
+        Assert.Empty(svc.PlanCalls);
+        Assert.True(vm.ImportStructureOnlyCommand.CanExecute(null));
+    }
+
+    [Fact]
     public async Task StartImport_CancelBetweenCandidates_StopsBeforeRunningNextVerify()
     {
         // Regression: the silent-retry foreach iterated over candidates without checking the

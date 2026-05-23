@@ -14,6 +14,8 @@ public sealed class FakeMRemoteNgImportService : IMRemoteNgImportService
     public string ExpectedPassword { get; set; } = "mR3m";
     public bool VerifyAlwaysTrue { get; set; }
     public MRemoteNgImportResult NextResult { get; set; } = new(1, 2, 3, 0, Array.Empty<string>());
+    public MRemoteNgFileInfo NextFileInfo { get; set; } =
+        new("2.7", "AES", "GCM", "fake-verifier", false, 10000, true);
 
     /// <summary>If non-null, CommitAsync awaits this before completing — used to test cancel
     /// behavior with a controlled gating point.</summary>
@@ -27,7 +29,7 @@ public sealed class FakeMRemoteNgImportService : IMRemoteNgImportService
     public Task<MRemoteNgFileInfo> InspectAsync(string path, CancellationToken cancellationToken = default)
     {
         InspectCalls.Add(path);
-        return Task.FromResult(new MRemoteNgFileInfo("2.7", "AES", "GCM", "fake-verifier", false, 10000));
+        return Task.FromResult(NextFileInfo);
     }
 
     /// <summary>Invoked synchronously inside VerifyPasswordAsync, after the call is recorded
