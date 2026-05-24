@@ -39,6 +39,13 @@ Assets/web/vendor/
 # C++ shim build outputs from CMake + vcpkg manifest mode.
 tools/wormhole-ovpnproxy/ovpn_shim/build/
 
+# Sidecar binaries left behind by `go build` invoked from inside a sidecar dir.
+# The canonical build path (MSBuild Fetch-*.ps1 targets) writes to obj/, which is
+# already covered above; this catches the stray copies for developers iterating
+# on the Go code directly.
+tools/wormhole-*/wormhole-*proxy
+tools/wormhole-*/wormhole-*proxy.exe
+
 # OS noise
 Thumbs.db
 desktop.ini

@@ -16,14 +16,14 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.13.0" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.0" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.8" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <!-- SkippableFact gives us conditional skip-with-reason on xUnit 2.x; without it
          a missing env var either fails noisily or silently passes. Lets developers
          run `dotnet test Wormhole.Tests.Integration` locally and see "Skipped: not
          configured" instead of false-green. -->
-    <PackageReference Include="Xunit.SkippableFact" Version="1.4.13" />
+    <PackageReference Include="Xunit.SkippableFact" Version="1.5.61" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
