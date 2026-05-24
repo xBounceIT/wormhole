@@ -1,6 +1,6 @@
 module github.com/xBounceIT/wormhole/tools/wormhole-ovpnproxy
 
-go 1.25.5
+go 1.25.0
 
 require (
 	github.com/xBounceIT/wormhole/tools/internal/sockstun v0.0.0

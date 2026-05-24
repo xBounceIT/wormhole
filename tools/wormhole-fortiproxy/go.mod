@@ -1,6 +1,6 @@
 module github.com/xBounceIT/wormhole/tools/wormhole-fortiproxy
 
-go 1.25.5
+go 1.25.0
 
 require (
 	github.com/pquerna/otp v1.5.0
