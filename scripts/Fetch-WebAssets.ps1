@@ -16,15 +16,15 @@ $integrityPath = Join-Path $repoRoot "obj\web-assets-integrity.json"
 # Delete that file (or pass -Force) to re-pin after a version bump.
 $assets = @(
     [pscustomobject]@{
-        Url      = "https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"
+        Url      = "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js"
         Relative = "xterm\xterm.js"
     },
     [pscustomobject]@{
-        Url      = "https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css"
+        Url      = "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css"
         Relative = "xterm\xterm.css"
     },
     [pscustomobject]@{
-        Url      = "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"
+        Url      = "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.js"
         Relative = "addon-fit\addon-fit.js"
     }
 )
