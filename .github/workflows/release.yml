@@ -18,7 +18,7 @@ jobs:
     name: Build ${{ matrix.platform }}
     runs-on: windows-latest
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         platform: [x64, arm64]
 
@@ -52,6 +52,34 @@ jobs:
           --self-contained true
           -o artifacts/publish/win-${{ matrix.platform }}
 
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build Inno Setup installer
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          $iscc      = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          $publish   = "$PWD\artifacts\publish\win-$env:PLATFORM"
+          $outputDir = "$PWD\installer\output"
+          if (-not (Test-Path $iscc)) {
+            throw "ISCC.exe not found at '$iscc'. Inno Setup 6 install did not land where expected — check the 'Install Inno Setup' step."
+          }
+          New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+          & $iscc `
+            "/DAppArchitecture=$env:PLATFORM" `
+            "/DPublishDir=$publish" `
+            "/DMyAppVersion=$env:VERSION" `
+            "/O$outputDir" `
+            installer\Wormhole.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit $LASTEXITCODE" }
+          # Flatten EXE to workspace root so upload-artifact stores it at the
+          # same depth as the zip — otherwise the artifact preserves
+          # 'installer/output/' and the release job's glob can't find it.
+          Move-Item "$outputDir\Wormhole-*-setup.exe" .
+
       - name: Package zip
         shell: pwsh
         env:
@@ -65,7 +93,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wormhole-win-${{ matrix.platform }}
-          path: Wormhole-*.zip
+          path: |
+            Wormhole-*.zip
+            Wormhole-*-setup.exe
           if-no-files-found: error
 
   release:
@@ -98,4 +128,5 @@ jobs:
           gh release create "$TAG" \
             --title "$TAG" \
             --generate-notes \
-            artifacts/*.zip
+            artifacts/Wormhole-*.zip \
+            artifacts/Wormhole-*-setup.exe
