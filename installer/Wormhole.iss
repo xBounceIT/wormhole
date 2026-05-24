@@ -4,7 +4,7 @@
 #define MyAppName       "Wormhole"
 #define MyAppPublisher  "Wormhole project"
 #define MyAppExeName    "Wormhole.exe"
-#define MyAppVersion    "0.1.0"
+#define MyAppVersion    "0.1.1"
 
 #ifndef AppArchitecture
   #define AppArchitecture "x64"
