@@ -237,7 +237,7 @@ public sealed class BackupServiceTests : IDisposable
     }
 
     [Fact]
-    public async Task ImportAsync_MergeByIdSkipsDuplicates()
+    public async Task ImportAsync_MergeByIdSkipsDuplicatesAndPreservesExistingSecrets()
     {
         var src = await CreateEnvAsync();
         var (folderId, leafId, credId, _, tunnelId) = await SeedSampleDataAsync(src);
@@ -246,8 +246,10 @@ public sealed class BackupServiceTests : IDisposable
         await src.Service.ExportAsync(path, null);
 
         var dst = await CreateEnvAsync();
-        // Pre-seed the destination with one credential and one tunnel that match the
-        // exported IDs. Those should be skipped on import; the rest should land.
+        // Pre-seed the destination with one credential and one tunnel whose IDs match the
+        // exported entries. Pre-seed their secrets too — those secrets must NOT be clobbered
+        // by the import, because the user may have rotated their password since the backup
+        // was taken.
         await dst.Credentials.AddAsync(new CredentialProfile
         {
             Id = credId,
@@ -255,22 +257,102 @@ public sealed class BackupServiceTests : IDisposable
             Kind = CredentialKind.Password,
             Protocol = ProtocolType.Ssh,
         });
+        await dst.Secrets.StorePasswordAsync(credId, "user-rotated-password");
         await dst.Tunnels.AddAsync(new TunnelConfig { Id = tunnelId, Name = "preexisting-tun" });
+        await dst.Secrets.StoreTunnelConfigAsync(tunnelId, new byte[] { 0xAA, 0xBB });
 
         var result = await dst.Service.ImportAsync(path, null);
         Assert.Equal(1, result.CredentialsImported);
         Assert.Equal(1, result.CredentialsSkipped);
         Assert.Equal(0, result.TunnelsImported);
         Assert.Equal(1, result.TunnelsSkipped);
-        // Skipped credentials don't get their passwords restored either.
-        Assert.False(dst.Secrets.Passwords.ContainsKey(credId));
-        // But the tunnel payload for the *skipped* tunnel must not have been written.
-        Assert.False(dst.Secrets.TunnelConfigs.ContainsKey(tunnelId));
+        // Existing secrets must be preserved — no overwrite from the backup.
+        Assert.Equal("user-rotated-password", dst.Secrets.Passwords[credId]);
+        Assert.Equal(new byte[] { 0xAA, 0xBB }, dst.Secrets.TunnelConfigs[tunnelId]);
 
-        // Pre-existing credential name is preserved (no overwrite).
+        // Pre-existing credential metadata is preserved (no overwrite).
         var preserved = await dst.Credentials.GetByIdAsync(credId);
         Assert.NotNull(preserved);
         Assert.Equal("preexisting", preserved!.Name);
+    }
+
+    [Fact]
+    public async Task ImportAsync_RestoresMissingSecretsForExistingRowsOnReimport()
+    {
+        // Simulates a partial-import recovery: a previous import wrote credential and tunnel
+        // rows but failed/cancelled before secrets were stored. Re-running import must
+        // recover by filling in the missing secrets — without this the user is stuck with
+        // useless rows until they manually delete and re-import.
+        var src = await CreateEnvAsync();
+        var (_, _, credId, sshCredId, tunnelId) = await SeedSampleDataAsync(src);
+        var path = Path.Combine(_scratchDir, "recovery.json");
+        await src.Service.ExportAsync(path, null);
+
+        var dst = await CreateEnvAsync();
+        // Pre-seed only the METADATA rows, not the secrets — mirroring the post-crash state.
+        await dst.Credentials.AddAsync(new CredentialProfile
+        {
+            Id = credId,
+            Name = "alice",
+            Kind = CredentialKind.Password,
+            Protocol = ProtocolType.Ssh,
+        });
+        await dst.Credentials.AddAsync(new CredentialProfile
+        {
+            Id = sshCredId,
+            Name = "alice-key",
+            Kind = CredentialKind.SshKey,
+            Protocol = ProtocolType.Ssh,
+            PrivateKeyFileName = "id_ed25519",
+        });
+        await dst.Tunnels.AddAsync(new TunnelConfig { Id = tunnelId, Name = "office-vpn", Kind = TunnelKind.WireGuard });
+        Assert.Empty(dst.Secrets.Passwords);
+        Assert.Empty(dst.Secrets.PrivateKeys);
+        Assert.Empty(dst.Secrets.TunnelConfigs);
+
+        var result = await dst.Service.ImportAsync(path, null);
+        // All three rows are skipped (matched-by-Id) but their missing secrets are recovered.
+        Assert.Equal(2, result.CredentialsSkipped);
+        Assert.Equal(1, result.TunnelsSkipped);
+        Assert.Equal(1, result.PasswordsImported);
+        Assert.Equal(1, result.PrivateKeysImported);
+        Assert.Equal(1, result.TunnelPayloadsImported);
+        Assert.Equal("hunter2", dst.Secrets.Passwords[credId]);
+        Assert.Equal(new byte[] { 1, 2, 3, 4, 5 }, dst.Secrets.PrivateKeys[sshCredId]);
+        Assert.Equal(new byte[] { 9, 8, 7 }, dst.Secrets.TunnelConfigs[tunnelId]);
+    }
+
+    [Fact]
+    public async Task ImportAsync_DoesNotRestoreSecretWhenOrphanCredentialIdHasNoRow()
+    {
+        // A backup secret entry whose CredentialId is neither in the DB nor in the import
+        // payload (e.g., user hand-edited the JSON, or the original credential row was lost)
+        // must NOT be written — there's no row to associate it with.
+        var dst = await CreateEnvAsync();
+        var orphanId = Guid.NewGuid();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "encryption": "none",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "payload": {
+                "nodes": [],
+                "credentials": [],
+                "tunnels": [],
+                "passwords": [
+                  { "credentialId": "{{orphanId}}", "password": "leaked-secret" }
+                ],
+                "privateKeys": [],
+                "tunnelPayloads": []
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "orphan-secret.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var result = await dst.Service.ImportAsync(path, null);
+        Assert.Equal(0, result.PasswordsImported);
+        Assert.False(dst.Secrets.Passwords.ContainsKey(orphanId));
     }
 
     [Fact]
@@ -628,27 +710,31 @@ public sealed class BackupServiceTests : IDisposable
         var src = await CreateEnvAsync();
         await SeedSampleDataAsync(src);
 
-        // Pre-existing backup at the very path we'll attempt to export to — by symlinking
-        // (or in our case, the simpler trick: making the path itself a directory so
-        // File.Create fails, while a sibling file we want to preserve sits elsewhere we can
-        // assert on). Pick a target inside a directory whose parent is itself a file —
-        // File.Create on tmpPath = "C:\...\nope.json\nope.json.tmp" can't succeed because the
-        // parent path component is a regular file. The export fails inside the tmp write.
-        var sentinelPath = Path.Combine(_scratchDir, "real-good-backup.json");
+        // Exercise the real safety contract: a pre-existing valid backup at targetPath must
+        // survive a failed export attempt to the same targetPath. The implementation writes
+        // to targetPath + ".tmp" first and then File.Move's atomically over the target, so a
+        // failure during the .tmp write must NOT touch the original file.
+        var targetPath = Path.Combine(_scratchDir, "atomic-target.json");
         var sentinel = "preexisting good backup content — must not be lost";
-        await File.WriteAllTextAsync(sentinelPath, sentinel);
+        await File.WriteAllTextAsync(targetPath, sentinel);
 
-        // Build a path whose parent doesn't exist as a directory — File.Create throws,
-        // forcing the catch -> TryDelete branch, with the sentinel sitting safely at a
-        // different location. After the failure, both files must be in the expected state.
-        var unwritable = Path.Combine(_scratchDir, "nonexistent-dir", "x.json");
-        await Assert.ThrowsAnyAsync<Exception>(() => src.Service.ExportAsync(unwritable, null));
+        // Force the .tmp write to fail by occupying that exact name with a directory.
+        // File.Create on a path whose name is already a directory throws UnauthorizedAccessException,
+        // which routes through the catch -> TryDelete branch. TryDelete will swallow the failure
+        // to remove the directory entry. Crucially, File.Move never runs, so targetPath is
+        // never touched.
+        var tmpPath = targetPath + ".tmp";
+        Directory.CreateDirectory(tmpPath);
 
-        // Sentinel must be untouched.
-        Assert.True(File.Exists(sentinelPath));
-        Assert.Equal(sentinel, await File.ReadAllTextAsync(sentinelPath));
-        // No .tmp file leaked at the unwritable target's path.
-        Assert.False(File.Exists(unwritable + ".tmp"));
+        await Assert.ThrowsAnyAsync<Exception>(() => src.Service.ExportAsync(targetPath, null));
+
+        // The original target file must be byte-identical to what we wrote before the failed export.
+        Assert.True(File.Exists(targetPath));
+        Assert.Equal(sentinel, await File.ReadAllTextAsync(targetPath));
+        // The .tmp obstacle (directory) is still there — TryDelete only attempts file removal
+        // and silently fails on the directory. The point isn't .tmp cleanup; it's that the
+        // pre-existing targetPath wasn't truncated/replaced.
+        Assert.True(Directory.Exists(tmpPath));
     }
 
     [Fact]

@@ -411,11 +411,23 @@ public sealed class BackupService : IBackupService
             result.NodesImported++;
         }
 
+        // Secret-restoration policy:
+        //   * Just-inserted row (insertedCredentialIds / insertedTunnelIds) → always store.
+        //   * Pre-existing row (in existingCredentialIds but NOT just-inserted) → store ONLY if
+        //     the existing row has no secret yet. This recovers from a prior partial import that
+        //     wrote rows but cancelled/crashed before writing secrets — without it, the user's
+        //     second attempt skips the IDs as duplicates and the missing secrets are never
+        //     recovered. Never overwrite an existing secret: a user who's changed their password
+        //     since the backup was taken must not have it silently rolled back.
+        //   * Orphan secret (ID not in DB at all) → skip silently.
+
         Report(progress, 75, "Restoring passwords...");
         foreach (var entry in payload.Passwords)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!insertedCredentialIds.Contains(entry.CredentialId)) continue;
+            if (!await ShouldRestoreCredentialSecretAsync(
+                    entry.CredentialId, insertedCredentialIds, existingCredentialIds,
+                    _credentialService.ReadPasswordAsync, p => p is null)) continue;
             // Hostile JSON can deserialize Password to null even though the property is
             // declared non-nullable; CredentialManager.WriteCredential would NRE on null.
             // Treat null as empty — the credential row still gets a Credential Manager entry,
@@ -428,7 +440,15 @@ public sealed class BackupService : IBackupService
         foreach (var entry in payload.PrivateKeys)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!insertedCredentialIds.Contains(entry.CredentialId)) continue;
+            if (!await ShouldRestoreCredentialSecretAsync(
+                    entry.CredentialId, insertedCredentialIds, existingCredentialIds,
+                    _credentialService.ReadPrivateKeyAsync,
+                    bytes =>
+                    {
+                        var missing = bytes is null;
+                        if (bytes is not null) CryptographicOperations.ZeroMemory(bytes);
+                        return missing;
+                    })) continue;
             if (!TryDecodeBase64(entry.DataB64, out var keyBytes))
             {
                 result.Warnings.Add($"Private key for credential {entry.CredentialId} was malformed and was skipped.");
@@ -449,7 +469,15 @@ public sealed class BackupService : IBackupService
         foreach (var entry in payload.TunnelPayloads)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!insertedTunnelIds.Contains(entry.TunnelConfigId)) continue;
+            if (!await ShouldRestoreCredentialSecretAsync(
+                    entry.TunnelConfigId, insertedTunnelIds, existingTunnelIds,
+                    _credentialService.ReadTunnelConfigAsync,
+                    bytes =>
+                    {
+                        var missing = bytes is null;
+                        if (bytes is not null) CryptographicOperations.ZeroMemory(bytes);
+                        return missing;
+                    })) continue;
             if (!TryDecodeBase64(entry.DataB64, out var configBytes))
             {
                 result.Warnings.Add($"Tunnel payload for {entry.TunnelConfigId} was malformed and was skipped.");
@@ -709,6 +737,26 @@ public sealed class BackupService : IBackupService
                 $"Node '{node.Name}' references missing tunnel {tunId}; tunnel cleared.");
             node.TunnelConfigId = null;
         }
+    }
+
+    /// <summary>
+    /// Decide whether to write a secret for <paramref name="id"/>. Always restore for
+    /// just-inserted rows. For pre-existing rows, restore only when no secret currently exists
+    /// (recovery from partial import). For unknown ids, skip. The <paramref name="isMissing"/>
+    /// predicate is responsible for inspecting (and, for byte buffers, zeroing) the value
+    /// returned by <paramref name="read"/>.
+    /// </summary>
+    private static async Task<bool> ShouldRestoreCredentialSecretAsync<T>(
+        Guid id,
+        HashSet<Guid> insertedIds,
+        HashSet<Guid> existingIds,
+        Func<Guid, Task<T?>> read,
+        Func<T?, bool> isMissing)
+    {
+        if (insertedIds.Contains(id)) return true;
+        if (!existingIds.Contains(id)) return false;
+        var existing = await read(id);
+        return isMissing(existing);
     }
 
     /// <summary>Strip null entries from a list in place and report how many were removed.
