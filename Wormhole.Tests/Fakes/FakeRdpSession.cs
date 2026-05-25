@@ -14,6 +14,11 @@ public sealed class FakeRdpSession : IRdpSession
     public bool IsLoggedOn { get; private set; }
     public bool Disposed { get; private set; }
 
+    /// <summary>Number of times <see cref="Focus"/> was called. Lets tests verify that the
+    /// VM pushes Win32 focus into the ActiveX HWND when the session reaches Connected
+    /// (and on the re-attach path).</summary>
+    public int FocusCount { get; private set; }
+
     public event EventHandler? Connected;
     public event EventHandler<RdpDisconnectInfo>? Disconnected;
     public event EventHandler<int>? FatalError;
@@ -32,5 +37,6 @@ public sealed class FakeRdpSession : IRdpSession
     public void Show() { }
     public void Hide() { }
     public void Disconnect() { }
+    public void Focus() { FocusCount++; }
     public void Dispose() { Disposed = true; }
 }

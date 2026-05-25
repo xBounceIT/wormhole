@@ -148,6 +148,11 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             // ShellViewModel.Tabs and the ActiveX is still connected.
             _session.SetBounds(bounds);
             _session.Show();
+            // Push Win32 keyboard focus back into the ActiveX HWND so the first keystroke
+            // after navigating back to this tab lands on the remote session rather than
+            // requiring a click. The native HWND retains focus across most WinUI nav
+            // transitions, but SetFocus is idempotent so this is safe to repeat.
+            TryFocusSession();
             return;
         }
 
@@ -527,6 +532,11 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         {
             ReconnectAttempt = 0;
             Status = SessionStatus.Connected;
+            // Push Win32 focus into the embedded ActiveX HWND now that the remote session
+            // is interactive. Without this the user has to click into the RDP surface
+            // before the first keystroke (e.g. into the Windows logon screen) is captured
+            // — the WinUI focus chain doesn't auto-forward into reparented child HWNDs.
+            TryFocusSession();
         });
     }
 
@@ -578,6 +588,13 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         // Without this, OnAutoReconnecting drove Status to Connecting and no event would
         // ever drive it back — the user would see the reconnect banner indefinitely after
         // a transient drop recovered.
+        //
+        // Intentionally NOT calling TryFocusSession here: auto-reconnect is not user-
+        // initiated, and the user may have moved focus elsewhere (different tab, search
+        // box, even another app) during the reconnect banner. Pulling focus back to the
+        // RDP surface mid-typing is worse than the original problem. The OCX retains its
+        // own Win32 focus across most auto-reconnect cycles, so the natural outcome is
+        // "focus stays where the user put it", which is the right default.
         MarshalToUi(() =>
         {
             ReconnectAttempt = 0;
@@ -611,6 +628,21 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         ErrorMessage = message;
         FailedDueToCredentials = dueToCredentials;
         Status = SessionStatus.Failed;
+    }
+
+    /// <summary>
+    /// Best-effort SetFocus into the embedded RDP ActiveX HWND. Wrapped so a teardown
+    /// race (session disposed between status flip and focus push, or any future Win32
+    /// quirk) can't escape into the dispatched continuation that called us and bubble
+    /// up to <see cref="OnDispatchedException"/> as a fake failure overlay.
+    /// </summary>
+    private void TryFocusSession()
+    {
+        try { _session?.Focus(); }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "RDP session focus push suppressed (likely teardown race).");
+        }
     }
 
     /// <summary>

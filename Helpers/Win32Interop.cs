@@ -27,6 +27,13 @@ internal static class Win32Interop
     [DllImport("user32.dll", SetLastError = true)]
     public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
+    // SetLastError = true so a NULL return can be diagnosed via Marshal.GetLastWin32Error.
+    // SetFocus returns the previously-focused HWND (or IntPtr.Zero) and indicates failure
+    // via NULL + nonzero GetLastError (NULL + zero error means the window had no prior
+    // focus, which is a normal post-launch state). The native call itself does NOT throw.
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr SetFocus(IntPtr hWnd);
+
     public const uint WM_SIZE = 0x0005;
     public const uint WM_DPICHANGED = 0x02E0;
 

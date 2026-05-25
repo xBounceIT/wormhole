@@ -30,6 +30,13 @@ public sealed partial class RdpSurfaceHost : UserControl
     private double _lastRasterScale = 1.0;
     private Window? _ownerWindow;
     private XamlRoot? _trackedXamlRoot;
+    // One-shot per view load: ensures WinUI focus is pushed at most once per
+    // RdpSurfaceHost instance, on the first IsConnected=true transition (cold connect).
+    // Resets on Unloaded so a fresh view (Sessions↔Settings nav back, or close+reopen)
+    // can push focus again. Without this, auto-reconnect cycles (Status: Connected →
+    // Connecting → Connected) would re-fire TryFocusHost on every recovery and steal
+    // focus from wherever the user moved it during the reconnect banner.
+    private bool _focusPushed;
 
     public RdpSurfaceHost()
     {
@@ -104,6 +111,11 @@ public sealed partial class RdpSurfaceHost : UserControl
         // Re-check IsLoaded after the await: if the tab was closed while AttachAsync was in
         // flight, OnUnloaded already cleared _attached and we must not flip it back on.
         if (IsLoaded) _attached = true;
+
+        // No WinUI focus push on rebind: AttachAsync's rebind branch already issued Win32
+        // SetFocus on the OCX HWND, and pushing WinUI Focus(Programmatic) on this
+        // UserControl AFTER that can pull keyboard focus off the OCX child. Mirrors the
+        // SSH terminal's rebind path, which also relies on the native focus surface alone.
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
@@ -112,6 +124,10 @@ public sealed partial class RdpSurfaceHost : UserControl
         // risks losing the ActiveX's internal device context.
         ViewModel?.DetachView();
         _attached = false;
+        // Reset so the next OnLoaded → cold-connect cycle (or close+reopen) can push WinUI
+        // focus once again. Without this reset, a same-instance reload (theoretical;
+        // current XAML always creates a new instance per nav) would skip the focus push.
+        _focusPushed = false;
 
         // The session VM survives navigation and is shared across re-mounts of this control.
         // If we leave the PropertyChanged subscription attached, each unload/reload cycle
@@ -214,6 +230,57 @@ public sealed partial class RdpSurfaceHost : UserControl
             e.PropertyName == nameof(RdpSessionViewModel.IsConnecting))
         {
             UpdateReconnectAttemptText();
+        }
+        // _focusPushed gate logic:
+        //
+        // First IsConnected=true transition (cold connect) → push WinUI focus, latch flag.
+        // IsConnected=false with Status in {Disconnected, Failed} → user-initiated teardown,
+        //   clear the flag so a subsequent Retry/Reconnect re-pushes focus on the next
+        //   IsConnected=true. Auto-reconnect's transient Connecting state does NOT match
+        //   this branch (Status==Connecting), so it correctly preserves the latch and the
+        //   recovery doesn't steal focus from wherever the user moved it.
+        //
+        // PropertyChanged fires synchronously from the Status setter (via the VM ctor hook)
+        // BEFORE OnSessionConnected's TryFocusSession runs, so WinUI Focus runs first and
+        // the Win32 SetFocus in the dispatcher closure wins last — landing on the OCX HWND.
+        if (e.PropertyName == nameof(RdpSessionViewModel.IsConnected))
+        {
+            if (ViewModel is { IsConnected: true })
+            {
+                if (!_focusPushed && TryFocusHost())
+                {
+                    _focusPushed = true;
+                }
+            }
+            else if (ViewModel is { Status: SessionStatus.Disconnected or SessionStatus.Failed })
+            {
+                _focusPushed = false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Best-effort WinUI focus push onto this UserControl. Returns <c>true</c> only when
+    /// the underlying <see cref="UIElement.Focus"/> reported success — callers (the
+    /// _focusPushed latch in particular) rely on this to avoid burning the one-shot when
+    /// the focus push couldn't actually run (IsLoaded race, Focus declining the request).
+    /// IsLoaded gate avoids focusing a host whose Unloaded raced ahead; the try/catch
+    /// keeps a teardown-window throw from escaping the PropertyChanged callback. App.Current
+    /// is accessed via <c>?.</c> in case the catch runs during process shutdown when the
+    /// App singleton has already been torn down.
+    /// </summary>
+    private bool TryFocusHost()
+    {
+        if (!IsLoaded) return false;
+        try
+        {
+            return this.Focus(FocusState.Programmatic);
+        }
+        catch (Exception ex)
+        {
+            var logger = App.Current?.Services?.GetService<ILogger<RdpSurfaceHost>>();
+            logger?.LogDebug(ex, "RdpSurfaceHost WinUI focus push suppressed.");
+            return false;
         }
     }
 
