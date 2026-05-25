@@ -121,27 +121,34 @@ internal sealed class SshSession : ISshSession
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
 
+        // PuTTY-style teardown: yank the channel first so the read pump's blocked
+        // ShellStream.ReadAsync surfaces ObjectDisposedException immediately
+        // (caught at the pump's catch block) and exits in microseconds. The CTS
+        // alone takes 100-500 ms to propagate through SSH.NET's internal polling,
+        // which the user perceives as lag on tab-context-menu Reconnect.
         try { _cts.Cancel(); } catch { /* already disposed */ }
+        try { _stream.Close(); } catch { /* socket may already be torn down */ }
+        try { _stream.Dispose(); } catch { /* idempotent */ }
 
         if (_readPump is not null)
         {
             try
             {
-                await _readPump.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+                await _readPump.WaitAsync(TimeSpan.FromMilliseconds(250)).ConfigureAwait(false);
             }
             catch { /* pump might throw on shutdown; ignore */ }
         }
 
-        try { _stream.Close(); } catch { /* socket may already be torn down */ }
-        try { _stream.Dispose(); } catch { /* idempotent */ }
-
-        try
+        // SshClient.Disconnect does a synchronous SSH_MSG_DISCONNECT round-trip and
+        // Dispose can block on socket teardown. Both are pointless to wait for on
+        // the reconnect path — the channel is already dead. Fire-and-forget.
+        var client = _client;
+        var cts = _cts;
+        _ = Task.Run(() =>
         {
-            if (_client.IsConnected) _client.Disconnect();
-        }
-        catch { /* network already gone */ }
-        try { _client.Dispose(); } catch { /* idempotent */ }
-
-        _cts.Dispose();
+            try { if (client.IsConnected) client.Disconnect(); } catch { /* network already gone */ }
+            try { client.Dispose(); } catch { /* idempotent */ }
+            try { cts.Dispose(); } catch { /* idempotent */ }
+        });
     }
 }

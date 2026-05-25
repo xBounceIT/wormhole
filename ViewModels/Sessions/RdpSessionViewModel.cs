@@ -649,7 +649,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     /// User-initiated teardown (Disconnect / Retry / tab close): cancel any in-flight
     /// connect, dispose the session, return to a clean Disconnected state.
     /// </summary>
-    private async Task FullTeardownAsync()
+    private Task FullTeardownAsync()
     {
         var cts = _cts;
         _cts = null;
@@ -659,11 +659,17 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         cts?.Dispose();
 
         DisposeSessionSilently();
-        await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
+        // Fire-and-forget the tunnel teardown: VPN sidecar shutdown can take
+        // 100s of ms and the user has just asked for "kill and reconnect". The
+        // _tunnel field is nulled atomically inside DisposeTunnelSilentlyAsync
+        // (Interlocked.Exchange) before the await, so a fresh ConnectAsync
+        // running concurrently won't see the old reference.
+        _ = DisposeTunnelSilentlyAsync();
         DetachExternalProcess();
         Status = SessionStatus.Disconnected;
         ErrorMessage = null;
         FailedDueToCredentials = false;
+        return Task.CompletedTask;
     }
 
     /// <summary>
@@ -844,9 +850,12 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         session.AutoReconnecting -= OnSessionAutoReconnecting;
         session.AutoReconnected -= OnSessionAutoReconnected;
 
-        try { session.Disconnect(); }
-        catch (Exception ex) { _logger.LogWarning(ex, "Disconnect threw during teardown."); }
-
+        // Skip the polite ocx.Disconnect() round-trip — Dispose tears down the
+        // host form which releases the OCX and yanks the underlying socket,
+        // mirroring PuTTY's "kill the session" model. The polite call would
+        // block the UI/STA thread on MCS termination ack, adding perceptible
+        // lag to the tab-context-menu Reconnect path. Events already unsubscribed
+        // above, so any late OnDisconnected from the OCX is safely dropped.
         try { session.Dispose(); }
         catch (Exception ex) { _logger.LogWarning(ex, "Dispose threw during teardown."); }
     }
