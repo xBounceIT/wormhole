@@ -200,7 +200,12 @@ public sealed partial class BackupImportDialogViewModel : ObservableObject, IDis
         var summary = string.Join(", ", lines) + ".";
         if (r.Warnings.Count > 0)
         {
-            summary += $" Warnings: {r.Warnings.Count} — see logs.";
+            var shown = r.Warnings.Take(3).ToList();
+            summary += $" Warnings ({r.Warnings.Count}): {string.Join(" ", shown)}";
+            if (r.Warnings.Count > shown.Count)
+            {
+                summary += $" (+{r.Warnings.Count - shown.Count} more; see logs.)";
+            }
         }
         return summary;
     }

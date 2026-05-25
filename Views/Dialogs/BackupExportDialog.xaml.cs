@@ -18,11 +18,8 @@ public sealed partial class BackupExportDialog : UserControl
     }
 
     /// <summary>Show the plaintext warning only while the user has no password typed AND the
-    /// export hasn't completed AND we aren't currently busy / showing an error. After a
-    /// failed export the VM's finally clears Password to null (hygiene) and sets Status to
-    /// the error message; without the Status gate the warning would re-appear next to the
-    /// error message, confusingly implying the user is about to write plaintext when in fact
-    /// the previous attempt simply failed.</summary>
+    /// export hasn't completed AND we aren't currently busy / showing an error. The Status
+    /// gate keeps the warning from competing with an error message after a failed attempt.</summary>
     public static Visibility PlaintextWarningVisibility(
         string? password, bool hasResult, bool isBusy, string? status)
     {
