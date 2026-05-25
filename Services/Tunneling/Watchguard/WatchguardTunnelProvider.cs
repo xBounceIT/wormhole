@@ -60,9 +60,16 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
                 "Open the tunnel editor to re-enter settings.");
         }
 
-        // Pre-auth dance: always POST first to discover whether the gateway wants a 2FA code.
-        // The official client does the same on every connect (no checkbox), and the round-trip
-        // is fast (~100ms on a healthy Firebox).
+        // Build the profile BEFORE the pre-auth POST so client-side validation errors
+        // (malformed PEM, control chars in Server / VerifyX509Name, etc.) fail fast and never
+        // consume a one-time code or increment the gateway's failed-auth counter. The synthesized
+        // profile is only used after pre-auth succeeds, but the validation it triggers belongs
+        // before any network IO.
+        var profile = WatchguardProfileBuilder.Build(settings);
+
+        // Pre-auth dance: always POST to discover whether the gateway wants a 2FA code. The
+        // official client does the same on every connect (no checkbox), and the round-trip is
+        // fast (~100ms on a healthy Firebox).
         string effectivePassword;
         // Pass the user-supplied CA to the pre-auth client so self-signed Firebox deployments
         // (where the OS trust store doesn't vouch for the cert) can still complete the HTTPS
@@ -74,7 +81,6 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
                 .ConfigureAwait(false);
         }
 
-        var profile = WatchguardProfileBuilder.Build(settings);
         var sidecar = new OpenVpnSidecarConfig
         {
             ProfileOvpn = profile,
@@ -114,14 +120,9 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
     /// raw HttpRequestException / TaskCanceledException into actionable InvalidOperationException
     /// so the session UI sees a Watchguard-specific error instead of a generic socket error.
     ///
-    /// Thin instance-method shim that forwards to <see cref="RunPreAuthLoopAsync"/> — the
-    /// static helper takes everything as parameters so it's directly unit-testable with a fake
+    /// Static helper takes everything as parameters so it's directly unit-testable with a fake
     /// <see cref="IWatchguardPreAuth"/> + <see cref="IOtpPromptService"/>.
     /// </summary>
-    private Task<string> RunPreAuthAsync(
-        WatchguardPreAuthClient preAuth, TunnelConfig config, WatchguardSettings settings, CancellationToken cancellationToken)
-        => RunPreAuthLoopAsync(preAuth, _otpPrompt, _logger, config.Name, settings, cancellationToken);
-
     internal static async Task<string> RunPreAuthLoopAsync(
         IWatchguardPreAuth preAuth,
         IOtpPromptService otpPrompt,

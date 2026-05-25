@@ -13,6 +13,17 @@ using System.Xml;
 namespace Wormhole.Services.Tunneling.Watchguard;
 
 /// <summary>
+/// Seam for testing <see cref="WatchguardTunnelProvider.RunPreAuthLoopAsync"/> without
+/// spinning up a real Firebox or HTTP listener. Production callers use the real
+/// <see cref="WatchguardPreAuthClient"/>; tests inject a fake that scripts the outcome sequence.
+/// </summary>
+internal interface IWatchguardPreAuth
+{
+    Task<PreAuthOutcome> LogonAsync(string server, int port, string username, string password, string domain, CancellationToken cancellationToken);
+    Task<PreAuthOutcome> RespondToChallengeAsync(string server, int port, string logonId, string otpCode, CancellationToken cancellationToken);
+}
+
+/// <summary>
 /// Thin HttpClient wrapper over the Firebox `/?action=sslvpn_logon` endpoint. The official
 /// WatchGuard client POSTs there with form-urlencoded credentials, parses the XML response,
 /// and either proceeds with the original password (no 2FA) or prompts the user for an OTP
@@ -27,17 +38,6 @@ namespace Wormhole.Services.Tunneling.Watchguard;
 ///   - https://tazj.in/blog/reversing-watchguard-vpn
 ///   - https://github.com/tazjin/watchblob (archived but accurate)
 /// </summary>
-/// <summary>
-/// Seam for testing <see cref="WatchguardTunnelProvider.RunPreAuthLoopAsync"/> without
-/// spinning up a real Firebox or HTTP listener. Production callers use the real
-/// <see cref="WatchguardPreAuthClient"/>; tests inject a fake that scripts the outcome sequence.
-/// </summary>
-internal interface IWatchguardPreAuth
-{
-    Task<PreAuthOutcome> LogonAsync(string server, int port, string username, string password, string domain, CancellationToken cancellationToken);
-    Task<PreAuthOutcome> RespondToChallengeAsync(string server, int port, string logonId, string otpCode, CancellationToken cancellationToken);
-}
-
 internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
 {
     private readonly HttpClient _http;
@@ -96,12 +96,17 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
                 var pinned = caCerts;
                 handler.ServerCertificateCustomValidationCallback = (_, serverCert, _, errors) =>
                 {
-                    // No errors → OS trust store already vouched for the cert; allow.
-                    if (errors == SslPolicyErrors.None) return true;
-                    // Anything other than untrusted-chain is fatal (hostname mismatch, missing cert).
+                    // When the user pinned a CA, the user-supplied CA — NOT the OS trust store —
+                    // is the authoritative trust anchor. Returning true on SslPolicyErrors.None
+                    // would silently accept any cert the OS already trusts (e.g. a WebPKI cert
+                    // for the same hostname), diverging from the OpenVPN sidecar's <ca> bundle:
+                    // pre-auth would succeed while the sidecar later rejects the same cert.
+                    // Always validate against the pinned CA.
+                    //
+                    // Hostname / missing-cert errors still fail outright — the custom chain only
+                    // overrides root trust, not the other policy bits.
                     if ((errors & ~SslPolicyErrors.RemoteCertificateChainErrors) != SslPolicyErrors.None) return false;
                     if (serverCert is null) return false;
-                    // Rebuild the chain with the user-supplied CA as a trust anchor and require it.
                     using var customChain = new X509Chain();
                     customChain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
                     customChain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;

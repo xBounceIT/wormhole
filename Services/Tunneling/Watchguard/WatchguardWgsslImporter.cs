@@ -55,6 +55,17 @@ public static class WatchguardWgsslImporter
         await using var reader = new TarReader(wgsslStream, leaveOpen: true);
         while (await reader.GetNextEntryAsync(copyData: false, cancellationToken).ConfigureAwait(false) is { } entry)
         {
+            // Count EVERY tar header — including directories, symlinks, and zero-length regular
+            // files — so a hostile archive can't bypass the cap by spamming non-RegularFile
+            // entries that the filters below would otherwise skip silently.
+            seenEntryCount++;
+            if (seenEntryCount > MaxEntryCount)
+            {
+                throw new InvalidDataException(
+                    $"The .wgssl bundle contains more than {MaxEntryCount} entries — refusing to load. " +
+                    "A genuine Firebox export has 4 entries.");
+            }
+
             if (entry.EntryType != TarEntryType.RegularFile && entry.EntryType != TarEntryType.V7RegularFile)
                 continue;
 
@@ -64,14 +75,6 @@ public static class WatchguardWgsslImporter
             if (name.StartsWith("./", StringComparison.Ordinal)) name = name[2..];
 
             if (entry.DataStream is null) continue;
-
-            seenEntryCount++;
-            if (seenEntryCount > MaxEntryCount)
-            {
-                throw new InvalidDataException(
-                    $"The .wgssl bundle contains more than {MaxEntryCount} entries — refusing to load. " +
-                    "A genuine Firebox export has 4 entries.");
-            }
 
             // Reject oversized entries before allocating anything large. entry.Length is the
             // declared tar header length; trusting it is fine because we additionally cap the
