@@ -105,9 +105,12 @@ public class FakeDialogService : IDialogService
         //  - TextPromptResult: name-only fallback. Mirrors the original PromptForTextAsync
         //    contract the folder Add/Edit flow used before EditFolderAsync existed, so the
         //    pile of "make a folder called X" tests keeps working without enumeration.
+        // Both branches start from initial.Clone() (not CloneIdentityFrom) — folders can
+        // hold inheritance defaults (Protocol / Host / CredentialId / etc.) for their
+        // descendants, and the editor must round-trip them untouched.
         if (EditFolderResult is not null)
         {
-            var output = ConnectionNode.CloneIdentityFrom(initial);
+            var output = initial.Clone();
             var src = EditFolderResult;
             output.Name = src.Name;
             output.TunnelEnabled = src.TunnelEnabled;
@@ -121,10 +124,8 @@ public class FakeDialogService : IDialogService
             // consumption — otherwise a regression that routes back through the legacy
             // PromptForTextAsync flow could silently pass.
             TextPromptCount++;
-            var output = ConnectionNode.CloneIdentityFrom(initial);
+            var output = initial.Clone();
             output.Name = TextPromptResult;
-            output.TunnelEnabled = initial.TunnelEnabled;
-            output.TunnelConfigId = initial.TunnelConfigId;
             return Task.FromResult<ConnectionNode?>(output);
         }
         return Task.FromResult<ConnectionNode?>(null);

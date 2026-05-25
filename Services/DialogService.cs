@@ -128,7 +128,12 @@ public sealed class DialogService : IDialogService
         var result = await dialog.ShowAsync();
         if (result != ContentDialogResult.Primary) return null;
 
-        var output = ConnectionNode.CloneIdentityFrom(initial);
+        // Full Clone — not CloneIdentityFrom. Folders can carry Protocol / Host / Username /
+        // CredentialId / RdpDomain etc. as inheritance defaults (mRemoteNG import populates
+        // them on container nodes; see MRemoteNgImportService.Walk). The folder editor only
+        // writes Name + tunnel, so anything else MUST round-trip untouched or descendants
+        // that resolve through this folder lose their defaults.
+        var output = initial.Clone();
         form.WriteTo(output);
         return output;
     }

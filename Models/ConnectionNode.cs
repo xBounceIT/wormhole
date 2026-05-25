@@ -64,11 +64,12 @@ public class ConnectionNode
 
     /// <summary>
     /// Return a new node preserving the source's identity (Id, parent linkage, audit
-    /// timestamps, and SSH host-key state) but no editable fields. Used by the editor
-    /// dialog (and its test fake) to materialise the "Save" result without mutating
-    /// the input. Keep in sync with the field list — both the production
-    /// <c>DialogService.EditConnectionAsync</c> and the test <c>FakeDialogService</c>
-    /// rely on this single source of truth.
+    /// timestamps, and SSH host-key state) but no editable fields. Used by the connection
+    /// editor (which writes every editable field back) to materialise the "Save" result
+    /// without mutating the input. Folder edits use <see cref="Clone"/> instead — folders
+    /// can hold any field as an inheritance default (mRemoteNG import populates Protocol /
+    /// Host / Username / CredentialId / RdpDomain on container nodes), and the folder
+    /// editor only touches Name + tunnel fields, so it MUST preserve everything else.
     /// </summary>
     public static ConnectionNode CloneIdentityFrom(ConnectionNode source) => new()
     {
@@ -80,5 +81,61 @@ public class ConnectionNode
         UpdatedAt = source.UpdatedAt,
         SshKeyFileName = source.SshKeyFileName,
         SshKnownHostFingerprint = source.SshKnownHostFingerprint,
+    };
+
+    /// <summary>
+    /// Full shallow copy of every field. Use this when an editor only writes a subset of
+    /// fields and must preserve everything else — primarily the folder editor, which
+    /// exposes Name + tunnel but must not clobber inheritance defaults like Protocol /
+    /// Host / CredentialId that mRemoteNG-imported folders carry for their descendants.
+    /// </summary>
+    public ConnectionNode Clone() => new()
+    {
+        Id = Id,
+        ParentId = ParentId,
+        Name = Name,
+        Kind = Kind,
+        SortOrder = SortOrder,
+        Protocol = Protocol,
+        Host = Host,
+        Port = Port,
+        Username = Username,
+        CredentialId = CredentialId,
+        RdpDomain = RdpDomain,
+        RdpScreenSize = RdpScreenSize,
+        RdpFullScreen = RdpFullScreen,
+        RdpColorDepth = RdpColorDepth,
+        RdpUseAllMonitors = RdpUseAllMonitors,
+        RdpAudioMode = RdpAudioMode,
+        RdpAudioCaptureMode = RdpAudioCaptureMode,
+        RdpKeyboardHookMode = RdpKeyboardHookMode,
+        RdpRedirectClipboard = RdpRedirectClipboard,
+        RdpRedirectPrinters = RdpRedirectPrinters,
+        RdpRedirectSmartCards = RdpRedirectSmartCards,
+        RdpRedirectPorts = RdpRedirectPorts,
+        RdpRedirectDevices = RdpRedirectDevices,
+        RdpRedirectDrives = RdpRedirectDrives,
+        RdpConnectionSpeed = RdpConnectionSpeed,
+        RdpDesktopBackground = RdpDesktopBackground,
+        RdpFontSmoothing = RdpFontSmoothing,
+        RdpDesktopComposition = RdpDesktopComposition,
+        RdpWindowDrag = RdpWindowDrag,
+        RdpMenuAnimation = RdpMenuAnimation,
+        RdpVisualStyles = RdpVisualStyles,
+        RdpBitmapCaching = RdpBitmapCaching,
+        RdpAutoReconnect = RdpAutoReconnect,
+        RdpServerAuthentication = RdpServerAuthentication,
+        RdpGatewayUsageMethod = RdpGatewayUsageMethod,
+        RdpGatewayHostname = RdpGatewayHostname,
+        RdpGatewayCredentialId = RdpGatewayCredentialId,
+        RdpGatewayBypassLocal = RdpGatewayBypassLocal,
+        RdpGatewayUseSameCreds = RdpGatewayUseSameCreds,
+        RdpUseExternalClient = RdpUseExternalClient,
+        SshKeyFileName = SshKeyFileName,
+        SshKnownHostFingerprint = SshKnownHostFingerprint,
+        TunnelEnabled = TunnelEnabled,
+        TunnelConfigId = TunnelConfigId,
+        CreatedAt = CreatedAt,
+        UpdatedAt = UpdatedAt,
     };
 }
