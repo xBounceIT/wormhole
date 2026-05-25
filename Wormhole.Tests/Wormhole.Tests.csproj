@@ -108,6 +108,7 @@
     <Compile Include="..\Services\Rdp\RdpCrashSentinelService.cs" Link="Services\Rdp\RdpCrashSentinelService.cs" />
     <Compile Include="..\Interop\Terminal\TerminalBridge.cs" Link="Interop\Terminal\TerminalBridge.cs" />
     <Compile Include="..\Interop\Terminal\TerminalReplayBuffer.cs" Link="Interop\Terminal\TerminalReplayBuffer.cs" />
+    <Compile Include="..\Interop\Terminal\TerminalOutputCoalescer.cs" Link="Interop\Terminal\TerminalOutputCoalescer.cs" />
 
     <Compile Include="..\Models\TransferDirection.cs" Link="Models\TransferDirection.cs" />
     <Compile Include="..\Models\TransferRequest.cs" Link="Models\TransferRequest.cs" />

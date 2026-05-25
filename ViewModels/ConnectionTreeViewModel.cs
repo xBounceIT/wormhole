@@ -32,16 +32,89 @@ public partial class ConnectionTreeViewModel : ObservableObject
     // to exactly how the user had it expanded before they typed.
     private Dictionary<Guid, bool>? _expandStateBeforeFilter;
 
+    // Coalesces rapid keystrokes — the AutoSuggestBox binds with
+    // UpdateSourceTrigger=PropertyChanged, so without this every character would walk
+    // the entire tree (O(n) with property writes per node). Tests override to zero so
+    // assertions remain synchronous after a SearchText assignment.
+    internal TimeSpan SearchDebounceDelay { get; set; } = TimeSpan.FromMilliseconds(120);
+
+    private CancellationTokenSource? _filterDebounceCts;
+
     partial void OnSearchTextChanged(string? oldValue, string newValue)
     {
         var wasFiltering = !string.IsNullOrWhiteSpace(oldValue);
         var isFiltering = !string.IsNullOrWhiteSpace(newValue);
 
+        // Snapshot on the leading edge — even when the filter walk is deferred — so the
+        // restore-on-clear path captures the pre-filter expansion regardless of how the
+        // user's keystrokes get batched.
         if (!wasFiltering && isFiltering)
         {
             _expandStateBeforeFilter = SnapshotExpandState(Roots);
         }
 
+        // Cancel any in-flight debounce so the latest keystroke supersedes prior ones.
+        var prior = _filterDebounceCts;
+        _filterDebounceCts = null;
+        if (prior is not null)
+        {
+            try { prior.Cancel(); } catch (ObjectDisposedException) { }
+            prior.Dispose();
+        }
+
+        if (SearchDebounceDelay <= TimeSpan.Zero)
+        {
+            ApplyFilterAndMaybeRestore(newValue, wasFiltering, isFiltering);
+            return;
+        }
+
+        var cts = new CancellationTokenSource();
+        _filterDebounceCts = cts;
+        _ = DebouncedApplyFilterAsync(newValue, wasFiltering, isFiltering, cts);
+    }
+
+    private async Task DebouncedApplyFilterAsync(
+        string newValue,
+        bool wasFiltering,
+        bool isFiltering,
+        CancellationTokenSource cts)
+    {
+        try
+        {
+            // ConfigureAwait(true) keeps the continuation on the captured SyncContext —
+            // the WinUI UI thread in production — so ApplyFilter's property writes don't
+            // race the UI thread's tree-render pass.
+            await Task.Delay(SearchDebounceDelay, cts.Token).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        finally
+        {
+            // Only dispose the CTS we own; a follow-on keystroke may have already
+            // replaced _filterDebounceCts with a fresher one.
+            if (ReferenceEquals(_filterDebounceCts, cts))
+            {
+                _filterDebounceCts = null;
+            }
+            cts.Dispose();
+        }
+
+        // Freshness guard: if Task.Delay completed *normally* (cancel-race lost) but a
+        // newer keystroke already replaced _filterDebounceCts between our delay and this
+        // point, our newValue is stale. The finally above nulls _filterDebounceCts only
+        // when we still own the slot — a non-null read here means a fresher task is
+        // pending and will run its own ApplyFilterAndMaybeRestore at its own deadline.
+        // Without this guard, the user briefly sees an older filter over their current
+        // input during fast typing.
+        if (_filterDebounceCts is not null) return;
+
+        ApplyFilterAndMaybeRestore(newValue, wasFiltering, isFiltering);
+    }
+
+    private void ApplyFilterAndMaybeRestore(string newValue, bool wasFiltering, bool isFiltering)
+    {
         ApplyFilter(newValue);
 
         if (wasFiltering && !isFiltering && _expandStateBeforeFilter is not null)

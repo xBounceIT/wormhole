@@ -66,7 +66,10 @@ public partial class App : Application
     /// Recovery contract: read the sentinel first (does NOT delete), apply the DB update,
     /// then clear the sentinel on success. If the DB update fails, the sentinel persists
     /// and the next launch retries — losing the crash signal to a transient DB error would
-    /// resurrect the crash loop. Runs once at startup, before the first window is activated.
+    /// resurrect the crash loop. Runs once at startup, before the first window is activated —
+    /// deferring past Activate would race the user double-clicking the offending profile
+    /// before the auto-flag DB write lands, and the in-memory tree snapshot would still
+    /// hold the pre-recovery row even after the write.
     /// </summary>
     private async Task RecoverFromRdpCrashSentinelAsync()
     {
