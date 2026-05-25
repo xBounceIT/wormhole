@@ -217,6 +217,7 @@ public sealed class BackupService : IBackupService
         await using var stream = File.OpenRead(sourcePath);
         var doc = await JsonSerializer.DeserializeAsync<BackupDocument>(stream, JsonOptions, cancellationToken)
                   ?? throw new InvalidDataException("Backup file is empty or malformed.");
+        ValidateEncryption(doc.Encryption);
         return new BackupInspectResult
         {
             Encrypted = string.Equals(doc.Encryption, BackupEncryption.AesGcm, StringComparison.OrdinalIgnoreCase),
@@ -249,6 +250,7 @@ public sealed class BackupService : IBackupService
         }
 
         BackupPayload payload;
+        ValidateEncryption(doc.Encryption);
         if (string.Equals(doc.Encryption, BackupEncryption.AesGcm, StringComparison.OrdinalIgnoreCase))
         {
             if (string.IsNullOrEmpty(password)) throw new BackupPasswordRequiredException();
@@ -378,8 +380,8 @@ public sealed class BackupService : IBackupService
         }
 
         Report(progress, 55, "Importing connections...");
-        var existingNodeIds = (await _connectionRepo.GetAllAsync(cancellationToken))
-            .Select(n => n.Id).ToHashSet();
+        var existingNodes = await _connectionRepo.GetAllAsync(cancellationToken);
+        var existingNodeIds = existingNodes.Select(n => n.Id).ToHashSet();
         // Topologically sort by ParentId: a node can be inserted once its parent is null or
         // already present. The backup file's order is whatever GetAllAsync returned at export
         // time (sorted by SortOrder, Name), which is NOT guaranteed to be parent-before-child.
@@ -392,6 +394,11 @@ public sealed class BackupService : IBackupService
         // connect time. The schema doesn't enforce these as FKs, so SQLite won't catch it.
         var resolvableCredentialIds = new HashSet<Guid>(existingCredentialIds);
         var resolvableTunnelIds = new HashSet<Guid>(existingTunnelIds);
+        var nodesById = existingNodes.ToDictionary(n => n.Id);
+        foreach (var node in ordered)
+        {
+            nodesById.TryAdd(node.Id, node);
+        }
 
         foreach (var node in ordered)
         {
@@ -401,7 +408,7 @@ public sealed class BackupService : IBackupService
                 result.NodesSkipped++;
                 continue;
             }
-            ScrubDanglingReferences(node, resolvableCredentialIds, resolvableTunnelIds, result);
+            ScrubDanglingReferences(node, resolvableCredentialIds, resolvableTunnelIds, nodesById, result);
             // AddAsync overwrites CreatedAt/UpdatedAt with UtcNow. The merge-skip semantics
             // mean we never overwrite an existing row, so the original timestamps for older
             // entries are preserved; only freshly-imported entries lose the source timestamps,
@@ -448,7 +455,10 @@ public sealed class BackupService : IBackupService
                         var missing = bytes is null;
                         if (bytes is not null) CryptographicOperations.ZeroMemory(bytes);
                         return missing;
-                    })) continue;
+                    },
+                    IsRecoverableSecretReadFailure,
+                    ex => result.Warnings.Add(
+                        $"Existing private key for credential {entry.CredentialId} could not be read ({ex.GetType().Name}); restoring it from backup."))) continue;
             if (!TryDecodeBase64(entry.DataB64, out var keyBytes))
             {
                 result.Warnings.Add($"Private key for credential {entry.CredentialId} was malformed and was skipped.");
@@ -477,7 +487,10 @@ public sealed class BackupService : IBackupService
                         var missing = bytes is null;
                         if (bytes is not null) CryptographicOperations.ZeroMemory(bytes);
                         return missing;
-                    })) continue;
+                    },
+                    IsRecoverableSecretReadFailure,
+                    ex => result.Warnings.Add(
+                        $"Existing tunnel payload for {entry.TunnelConfigId} could not be read ({ex.GetType().Name}); restoring it from backup."))) continue;
             if (!TryDecodeBase64(entry.DataB64, out var configBytes))
             {
                 result.Warnings.Add($"Tunnel payload for {entry.TunnelConfigId} was malformed and was skipped.");
@@ -495,6 +508,10 @@ public sealed class BackupService : IBackupService
         }
 
         Report(progress, 100, "Import complete.");
+        foreach (var warning in result.Warnings)
+        {
+            _logger.LogWarning("Backup import warning for {Path}: {Warning}", sourcePath, warning);
+        }
         _logger.LogInformation(
             "Backup imported from {Path}: nodes={NodesImp}/{NodesSkip} creds={CredsImp}/{CredsSkip} tunnels={TunImp}/{TunSkip}",
             sourcePath,
@@ -626,6 +643,11 @@ public sealed class BackupService : IBackupService
 
     private static byte[] UnsealPayload(BackupEncryptedPayload sealed_, string password)
     {
+        if (!string.Equals(sealed_.Kdf, "pbkdf2-sha256", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException("Encrypted backup uses an unsupported key derivation function.");
+        }
+
         byte[] salt, nonce, ciphertext, tag;
         try
         {
@@ -635,6 +657,10 @@ public sealed class BackupService : IBackupService
             tag = Convert.FromBase64String(sealed_.TagB64);
         }
         catch (FormatException ex)
+        {
+            throw new InvalidDataException("Encrypted backup envelope is malformed.", ex);
+        }
+        catch (ArgumentNullException ex)
         {
             throw new InvalidDataException("Encrypted backup envelope is malformed.", ex);
         }
@@ -717,6 +743,7 @@ public sealed class BackupService : IBackupService
         ConnectionNode node,
         HashSet<Guid> resolvableCredentialIds,
         HashSet<Guid> resolvableTunnelIds,
+        IReadOnlyDictionary<Guid, ConnectionNode> nodesById,
         BackupImportResult result)
     {
         if (node.CredentialId is Guid credId && !resolvableCredentialIds.Contains(credId))
@@ -737,6 +764,54 @@ public sealed class BackupService : IBackupService
                 $"Node '{node.Name}' references missing tunnel {tunId}; tunnel cleared.");
             node.TunnelConfigId = null;
         }
+        if (node.Kind == NodeKind.Connection
+            && IsEffectivelyTunnelEnabled(node, nodesById)
+            && !HasEffectiveResolvableTunnelConfig(node, nodesById, resolvableTunnelIds))
+        {
+            result.Warnings.Add(
+                $"Node '{node.Name}' had tunneling enabled but no resolvable tunnel config; tunneling disabled.");
+            node.TunnelEnabled = false;
+        }
+    }
+
+    private static bool IsEffectivelyTunnelEnabled(
+        ConnectionNode node,
+        IReadOnlyDictionary<Guid, ConnectionNode> nodesById)
+    {
+        foreach (var current in WalkNodeAndAncestors(node, nodesById))
+        {
+            if (current.TunnelEnabled is { } enabled) return enabled;
+        }
+        return false;
+    }
+
+    private static bool HasEffectiveResolvableTunnelConfig(
+        ConnectionNode node,
+        IReadOnlyDictionary<Guid, ConnectionNode> nodesById,
+        HashSet<Guid> resolvableTunnelIds)
+    {
+        foreach (var current in WalkNodeAndAncestors(node, nodesById))
+        {
+            if (current.TunnelConfigId is Guid tunId && resolvableTunnelIds.Contains(tunId))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static IEnumerable<ConnectionNode> WalkNodeAndAncestors(
+        ConnectionNode node,
+        IReadOnlyDictionary<Guid, ConnectionNode> nodesById)
+    {
+        var current = node;
+        var seen = new HashSet<Guid>();
+        while (seen.Add(current.Id))
+        {
+            yield return current;
+            if (current.ParentId is not Guid parentId) yield break;
+            if (!nodesById.TryGetValue(parentId, out current)) yield break;
+        }
     }
 
     /// <summary>
@@ -751,13 +826,26 @@ public sealed class BackupService : IBackupService
         HashSet<Guid> insertedIds,
         HashSet<Guid> existingIds,
         Func<Guid, Task<T?>> read,
-        Func<T?, bool> isMissing)
+        Func<T?, bool> isMissing,
+        Func<Exception, bool>? treatReadFailureAsMissing = null,
+        Action<Exception>? onReadFailureTreatedAsMissing = null)
     {
         if (insertedIds.Contains(id)) return true;
         if (!existingIds.Contains(id)) return false;
-        var existing = await read(id);
+        T? existing;
+        try
+        {
+            existing = await read(id);
+        }
+        catch (Exception ex) when (treatReadFailureAsMissing?.Invoke(ex) == true)
+        {
+            onReadFailureTreatedAsMissing?.Invoke(ex);
+            return true;
+        }
         return isMissing(existing);
     }
+
+    private static bool IsRecoverableSecretReadFailure(Exception ex) => ex is CryptographicException;
 
     /// <summary>Strip null entries from a list in place and report how many were removed.
     /// System.Text.Json admits null array elements into a `List&lt;T&gt;` even when T is a non-
@@ -821,6 +909,20 @@ public sealed class BackupService : IBackupService
                 $"Backup file is {info.Length:N0} bytes; refusing to read anything larger than " +
                 $"{MaxBackupFileBytes:N0} bytes.");
         }
+    }
+
+    private static void ValidateEncryption(string? encryption)
+    {
+        if (string.Equals(encryption, BackupEncryption.None, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(encryption, BackupEncryption.AesGcm, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        throw new InvalidDataException(
+            string.IsNullOrEmpty(encryption)
+                ? "Backup file is missing its encryption marker."
+                : $"Backup file uses unsupported encryption '{encryption}'.");
     }
 
     private static void Report(IProgress<BackupProgress>? progress, int percent, string status)

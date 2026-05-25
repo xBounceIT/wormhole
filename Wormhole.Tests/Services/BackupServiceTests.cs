@@ -323,6 +323,40 @@ public sealed class BackupServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ImportAsync_RepairsCorruptExistingDpapiSecretsOnReimport()
+    {
+        // If a DPAPI file exists but cannot be unprotected, treat it as repairable from the
+        // backup instead of aborting. This mirrors a real-world corrupt key/tunnel blob.
+        var src = await CreateEnvAsync();
+        var (_, _, _, sshCredId, tunnelId) = await SeedSampleDataAsync(src);
+        var path = Path.Combine(_scratchDir, "corrupt-secret-repair.json");
+        await src.Service.ExportAsync(path, null);
+
+        var dst = await CreateEnvAsync();
+        await dst.Credentials.AddAsync(new CredentialProfile
+        {
+            Id = sshCredId,
+            Name = "alice-key",
+            Kind = CredentialKind.SshKey,
+            Protocol = ProtocolType.Ssh,
+            PrivateKeyFileName = "id_ed25519",
+        });
+        await dst.Tunnels.AddAsync(new TunnelConfig { Id = tunnelId, Name = "office-vpn", Kind = TunnelKind.WireGuard });
+        dst.Secrets.PrivateKeys[sshCredId] = new byte[] { 0xFF };
+        dst.Secrets.TunnelConfigs[tunnelId] = new byte[] { 0xEE };
+        dst.Secrets.CorruptPrivateKeyIds.Add(sshCredId);
+        dst.Secrets.CorruptTunnelConfigIds.Add(tunnelId);
+
+        var result = await dst.Service.ImportAsync(path, null);
+
+        Assert.Equal(1, result.PrivateKeysImported);
+        Assert.Equal(1, result.TunnelPayloadsImported);
+        Assert.Equal(new byte[] { 1, 2, 3, 4, 5 }, await dst.Secrets.ReadPrivateKeyAsync(sshCredId));
+        Assert.Equal(new byte[] { 9, 8, 7 }, await dst.Secrets.ReadTunnelConfigAsync(tunnelId));
+        Assert.Contains(result.Warnings, w => w.Contains("could not be read", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public async Task ImportAsync_DoesNotRestoreSecretWhenOrphanCredentialIdHasNoRow()
     {
         // A backup secret entry whose CredentialId is neither in the DB nor in the import
@@ -598,6 +632,93 @@ public sealed class BackupServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ImportAsync_RejectsUnknownEncryptionMarker()
+    {
+        var dst = await CreateEnvAsync();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "app": "Wormhole",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "encryption": "future-aead",
+              "payload": {
+                "nodes": [],
+                "credentials": [],
+                "tunnels": [],
+                "passwords": [],
+                "privateKeys": [],
+                "tunnelPayloads": []
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "unknown-encryption.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var ex = await Assert.ThrowsAsync<InvalidDataException>(
+            () => dst.Service.ImportAsync(path, null));
+        Assert.Contains("unsupported encryption", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("argon2id")]
+    [InlineData(null)]
+    public async Task ImportAsync_RejectsUnsupportedOrNullEncryptedKdf(string? kdf)
+    {
+        var dst = await CreateEnvAsync();
+        var kdfJson = kdf is null ? "null" : $"\"{kdf}\"";
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "app": "Wormhole",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "encryption": "aes-gcm",
+              "encryptedPayload": {
+                "kdf": {{kdfJson}},
+                "iterations": 600000,
+                "saltB64": "AAAAAAAAAAAAAAAAAAAAAA==",
+                "nonceB64": "AAAAAAAAAAAAAAAA",
+                "ciphertextB64": "AA==",
+                "tagB64": "AAAAAAAAAAAAAAAAAAAAAA=="
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, $"bad-kdf-{Guid.NewGuid():N}.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var ex = await Assert.ThrowsAsync<InvalidDataException>(
+            () => dst.Service.ImportAsync(path, "anything"));
+        Assert.Contains("key derivation", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ImportAsync_RejectsNullEncryptedEnvelopeBase64AsMalformed()
+    {
+        var dst = await CreateEnvAsync();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "app": "Wormhole",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "encryption": "aes-gcm",
+              "encryptedPayload": {
+                "kdf": "pbkdf2-sha256",
+                "iterations": 600000,
+                "saltB64": null,
+                "nonceB64": "AAAAAAAAAAAAAAAA",
+                "ciphertextB64": "AA==",
+                "tagB64": "AAAAAAAAAAAAAAAAAAAAAA=="
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "null-envelope-field.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var ex = await Assert.ThrowsAsync<InvalidDataException>(
+            () => dst.Service.ImportAsync(path, "anything"));
+        Assert.Contains("malformed", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task ImportAsync_SkipsCredentialWhoseNameCollidesWithExisting()
     {
         // CredentialProfiles.Name has a UNIQUE index; a backup credential whose Id is new but
@@ -812,6 +933,257 @@ public sealed class BackupServiceTests : IDisposable
         var node = (await dst.Connections.GetAllAsync()).Single();
         Assert.Null(node.CredentialId);
         Assert.Null(node.TunnelConfigId);
+    }
+
+    [Fact]
+    public async Task ImportAsync_DisablesTunnelWhenEnabledNodeLosesMissingTunnelConfig()
+    {
+        var dst = await CreateEnvAsync();
+        var nodeId = Guid.NewGuid();
+        var missingTun = Guid.NewGuid();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "encryption": "none",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "payload": {
+                "nodes": [
+                  {
+                    "id": "{{nodeId}}",
+                    "name": "vpn-leaf",
+                    "kind": 1,
+                    "sortOrder": 0,
+                    "protocol": 0,
+                    "host": "h",
+                    "port": 22,
+                    "tunnelEnabled": true,
+                    "tunnelConfigId": "{{missingTun}}",
+                    "createdAt": "{{DateTime.UtcNow:O}}",
+                    "updatedAt": "{{DateTime.UtcNow:O}}"
+                  }
+                ],
+                "credentials": [], "tunnels": [], "passwords": [], "privateKeys": [], "tunnelPayloads": []
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "missing-enabled-tunnel.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var result = await dst.Service.ImportAsync(path, null);
+
+        Assert.Equal(1, result.NodesImported);
+        Assert.Contains(result.Warnings, w => w.Contains("tunneling disabled", StringComparison.OrdinalIgnoreCase));
+        var node = (await dst.Connections.GetAllAsync()).Single(n => n.Id == nodeId);
+        Assert.Equal(false, node.TunnelEnabled);
+        Assert.Null(node.TunnelConfigId);
+    }
+
+    [Fact]
+    public async Task ImportAsync_KeepsEnabledTunnelWhenAncestorProvidesResolvableConfig()
+    {
+        var dst = await CreateEnvAsync();
+        var folderId = Guid.NewGuid();
+        var childId = Guid.NewGuid();
+        var inheritedTun = Guid.NewGuid();
+        var missingTun = Guid.NewGuid();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "encryption": "none",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "payload": {
+                "nodes": [
+                  {
+                    "id": "{{folderId}}",
+                    "name": "folder",
+                    "kind": 0,
+                    "sortOrder": 0,
+                    "tunnelConfigId": "{{inheritedTun}}",
+                    "createdAt": "{{DateTime.UtcNow:O}}",
+                    "updatedAt": "{{DateTime.UtcNow:O}}"
+                  },
+                  {
+                    "id": "{{childId}}",
+                    "parentId": "{{folderId}}",
+                    "name": "vpn-leaf",
+                    "kind": 1,
+                    "sortOrder": 1,
+                    "protocol": 0,
+                    "host": "h",
+                    "port": 22,
+                    "tunnelEnabled": true,
+                    "tunnelConfigId": "{{missingTun}}",
+                    "createdAt": "{{DateTime.UtcNow:O}}",
+                    "updatedAt": "{{DateTime.UtcNow:O}}"
+                  }
+                ],
+                "credentials": [],
+                "tunnels": [
+                  {
+                    "id": "{{inheritedTun}}",
+                    "name": "parent-vpn",
+                    "kind": 0,
+                    "createdAt": "{{DateTime.UtcNow:O}}",
+                    "updatedAt": "{{DateTime.UtcNow:O}}"
+                  }
+                ],
+                "passwords": [], "privateKeys": [], "tunnelPayloads": []
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "inherited-enabled-tunnel.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var result = await dst.Service.ImportAsync(path, null);
+
+        Assert.Equal(2, result.NodesImported);
+        Assert.Contains(result.Warnings, w => w.Contains("missing tunnel", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(result.Warnings, w => w.Contains("tunneling disabled", StringComparison.OrdinalIgnoreCase));
+        var child = (await dst.Connections.GetAllAsync()).Single(n => n.Id == childId);
+        Assert.Equal(true, child.TunnelEnabled);
+        Assert.Null(child.TunnelConfigId);
+    }
+
+    [Fact]
+    public async Task ImportAsync_DoesNotDisableFolderWhenChildHasOwnResolvableTunnelConfig()
+    {
+        // A folder can carry TunnelEnabled=true while a child inherits that enabled state and
+        // overrides only the TunnelConfigId. If the folder's own config is missing, do not
+        // flip the folder to false: that would disable the child's otherwise-valid override.
+        var dst = await CreateEnvAsync();
+        var folderId = Guid.NewGuid();
+        var childId = Guid.NewGuid();
+        var missingFolderTun = Guid.NewGuid();
+        var childTun = Guid.NewGuid();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "encryption": "none",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "payload": {
+                "nodes": [
+                  {
+                    "id": "{{folderId}}",
+                    "name": "folder",
+                    "kind": 0,
+                    "sortOrder": 0,
+                    "tunnelEnabled": true,
+                    "tunnelConfigId": "{{missingFolderTun}}",
+                    "createdAt": "{{DateTime.UtcNow:O}}",
+                    "updatedAt": "{{DateTime.UtcNow:O}}"
+                  },
+                  {
+                    "id": "{{childId}}",
+                    "parentId": "{{folderId}}",
+                    "name": "vpn-leaf",
+                    "kind": 1,
+                    "sortOrder": 1,
+                    "protocol": 0,
+                    "host": "h",
+                    "port": 22,
+                    "tunnelConfigId": "{{childTun}}",
+                    "createdAt": "{{DateTime.UtcNow:O}}",
+                    "updatedAt": "{{DateTime.UtcNow:O}}"
+                  }
+                ],
+                "credentials": [],
+                "tunnels": [
+                  {
+                    "id": "{{childTun}}",
+                    "name": "child-vpn",
+                    "kind": 0,
+                    "createdAt": "{{DateTime.UtcNow:O}}",
+                    "updatedAt": "{{DateTime.UtcNow:O}}"
+                  }
+                ],
+                "passwords": [], "privateKeys": [], "tunnelPayloads": []
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "folder-missing-child-valid-tunnel.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var result = await dst.Service.ImportAsync(path, null);
+
+        Assert.Equal(2, result.NodesImported);
+        Assert.Contains(result.Warnings, w => w.Contains("missing tunnel", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(result.Warnings, w => w.Contains("tunneling disabled", StringComparison.OrdinalIgnoreCase));
+        var nodes = await dst.Connections.GetAllAsync();
+        var folder = nodes.Single(n => n.Id == folderId);
+        var child = nodes.Single(n => n.Id == childId);
+        Assert.Equal(true, folder.TunnelEnabled);
+        Assert.Null(folder.TunnelConfigId);
+        Assert.Null(child.TunnelEnabled);
+        Assert.Equal(childTun, child.TunnelConfigId);
+
+        var resolved = new InheritanceResolver().Resolve(child, nodes.ToDictionary(n => n.Id));
+        Assert.True(resolved.TunnelEnabled);
+        Assert.Equal(childTun, resolved.TunnelConfigId);
+    }
+
+    [Fact]
+    public async Task ImportAsync_DisablesChildWhenInheritedTunnelEnabledHasNoResolvableConfig()
+    {
+        // If a folder loses its tunnel config and a child inherits only TunnelEnabled=true,
+        // the child would otherwise resolve to "enabled but no config" and fail at runtime.
+        // Disable the connection node itself while leaving the folder's enablement intact for
+        // sibling connections that may provide their own TunnelConfigId override.
+        var dst = await CreateEnvAsync();
+        var folderId = Guid.NewGuid();
+        var childId = Guid.NewGuid();
+        var missingFolderTun = Guid.NewGuid();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "encryption": "none",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "payload": {
+                "nodes": [
+                  {
+                    "id": "{{folderId}}",
+                    "name": "folder",
+                    "kind": 0,
+                    "sortOrder": 0,
+                    "tunnelEnabled": true,
+                    "tunnelConfigId": "{{missingFolderTun}}",
+                    "createdAt": "{{DateTime.UtcNow:O}}",
+                    "updatedAt": "{{DateTime.UtcNow:O}}"
+                  },
+                  {
+                    "id": "{{childId}}",
+                    "parentId": "{{folderId}}",
+                    "name": "vpn-leaf",
+                    "kind": 1,
+                    "sortOrder": 1,
+                    "protocol": 0,
+                    "host": "h",
+                    "port": 22,
+                    "createdAt": "{{DateTime.UtcNow:O}}",
+                    "updatedAt": "{{DateTime.UtcNow:O}}"
+                  }
+                ],
+                "credentials": [], "tunnels": [], "passwords": [], "privateKeys": [], "tunnelPayloads": []
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "folder-missing-child-inherits-enabled.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var result = await dst.Service.ImportAsync(path, null);
+
+        Assert.Equal(2, result.NodesImported);
+        Assert.Contains(result.Warnings, w => w.Contains("missing tunnel", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Warnings, w => w.Contains("tunneling disabled", StringComparison.OrdinalIgnoreCase));
+        var nodes = await dst.Connections.GetAllAsync();
+        var folder = nodes.Single(n => n.Id == folderId);
+        var child = nodes.Single(n => n.Id == childId);
+        Assert.Equal(true, folder.TunnelEnabled);
+        Assert.Null(folder.TunnelConfigId);
+        Assert.Equal(false, child.TunnelEnabled);
+
+        var resolved = new InheritanceResolver().Resolve(child, nodes.ToDictionary(n => n.Id));
+        Assert.False(resolved.TunnelEnabled);
+        Assert.Null(resolved.TunnelConfigId);
     }
 
     [Fact]
