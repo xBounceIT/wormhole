@@ -72,6 +72,20 @@ public sealed class TerminalBridge : IDisposable
     }
 
     /// <summary>
+    /// Tells xterm.js to reset its buffer + scrollback. Used by ConnectAsync before
+    /// the new SSH pump starts feeding bytes so the user doesn't see the old session's
+    /// MOTD stacked under the new one (PuTTY's Restart-Session semantics).
+    /// </summary>
+    public void Reset()
+    {
+        if (_disposed) return;
+        if (!_dispatcher.TryEnqueue(PostResetToWebView))
+        {
+            _logger.LogWarning("Failed to enqueue terminal reset.");
+        }
+    }
+
+    /// <summary>
     /// Posts a captured run of SSH output bytes to xterm.js using the same protocol
     /// as live output. Used to repaint a freshly-recreated xterm.js with prior
     /// scrollback after a view detach/reattach, since an idle shell won't send
@@ -95,6 +109,11 @@ public sealed class TerminalBridge : IDisposable
     private void PostFocusToWebView()
     {
         PostStringToWebView("f:", "requesting terminal focus");
+    }
+
+    private void PostResetToWebView()
+    {
+        PostStringToWebView("x:", "resetting terminal");
     }
 
     private void PostStringToWebView(string message, string operation)

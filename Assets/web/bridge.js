@@ -3,6 +3,7 @@
 // Wire format (must stay in sync with Interop/Terminal/TerminalBridge.cs):
 //   C# -> JS: "d:" + base64(shell-output-bytes)   (arbitrary bytes including ANSI escapes)
 //   C# -> JS: "f:"                                (focus the terminal)
+//   C# -> JS: "x:"                                (reset terminal + clear scrollback; PuTTY-style reconnect)
 //   C# -> JS: "paste:" + base64(utf8(text))       (clipboard text in reply to a "p:" request)
 //   JS -> C#: "d:" + utf8(typed-input)            (user keystrokes; C# does Encoding.UTF8.GetBytes)
 //   JS -> C#: "b:" + base64(raw-input-bytes)      (non-UTF-8 terminal input)
@@ -245,6 +246,17 @@
             term.write(base64ToUint8Array(msg.slice(2)));
           } catch (err) {
             console.error("Failed to decode shell output:", err);
+          }
+          return;
+        }
+        if (msg === "x:" || msg.startsWith("x:")) {
+          // Reset clears the visible buffer + cursor state; clear wipes scrollback.
+          // Together they give the "fresh terminal" feel PuTTY's Restart Session has.
+          try {
+            term.reset();
+            term.clear();
+          } catch (err) {
+            console.error("Failed to reset terminal:", err);
           }
           return;
         }

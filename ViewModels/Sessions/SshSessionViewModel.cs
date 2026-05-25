@@ -360,6 +360,12 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             _session.DataReceived += OnSessionDataReceived;
             _session.Closed += OnSessionClosed;
             _bridge = new TerminalBridge(liveWebView, _session, _loggerFactory.CreateLogger<TerminalBridge>(), _settingsService);
+            // Wipe xterm's buffer + scrollback before the new pump feeds bytes — without this
+            // a Reconnect leaves the previous session's MOTD stacked above the new one (the
+            // old slow teardown happened to mask this; the PuTTY-style fast path makes it
+            // obvious). The reset is enqueued via the dispatcher and posted to WebView2 in
+            // FIFO order, so it lands before the first "d:" payload from _session.Start.
+            _bridge.Reset();
             _session.Start();
 
             // Mirror SshHostKeyValidator.Decide which treats null *and* empty as unpinned —
