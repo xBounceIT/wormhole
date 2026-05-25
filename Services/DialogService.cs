@@ -3,6 +3,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
+using Wormhole.Models.Backup;
 using Wormhole.ViewModels;
 using Wormhole.Views.Dialogs;
 
@@ -271,6 +272,128 @@ public sealed class DialogService : IDialogService
             vm.Dispose();
         }
 
+        return vm.Result;
+    }
+
+    public async Task<BackupExportResult?> PromptForBackupExportAsync()
+    {
+        var control = new BackupExportDialog();
+        var vm = control.ViewModel;
+
+        var dialog = new ContentDialog
+        {
+            Title = "Export backup",
+            Content = control,
+            PrimaryButtonText = "Close",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = RequireXamlRoot(),
+            IsPrimaryButtonEnabled = vm.CanClose,
+        };
+
+        void OnVmPropChanged(object? _, PropertyChangedEventArgs args)
+        {
+            if (args.PropertyName == nameof(vm.CanClose))
+            {
+                dialog.IsPrimaryButtonEnabled = vm.CanClose;
+            }
+        }
+
+        // Capture the dispatcher on the UI thread NOW, before any deferred-close continuation
+        // runs. WaitForRunEnd's continuation fires on the thread pool, and by then
+        // sender.XamlRoot may have already been torn down (e.g. window closing during the
+        // in-flight export), leaving the original null-conditional access falling through to
+        // a bare sender.Hide() called from a worker thread — which throws RPC_E_WRONG_THREAD.
+        var dispatcher = dialog.XamlRoot?.Content?.DispatcherQueue;
+
+        // Mirror the mRemoteNG dialog's Closing-defer: Esc/Close during an in-flight export
+        // cancels first, then re-issues Hide once the run finishes so Result has been set.
+        void OnClosing(ContentDialog sender, ContentDialogClosingEventArgs args)
+        {
+            if (!vm.IsBusy) return;
+            args.Cancel = true;
+            vm.RequestCancelForClose();
+            _ = vm.WaitForRunEnd().ContinueWith(_ =>
+            {
+                if (dispatcher is not null)
+                {
+                    dispatcher.TryEnqueue(() => sender.Hide());
+                }
+                // If we never captured a dispatcher (extremely unlikely; would mean the dialog
+                // was shown without a XamlRoot), there's no safe way to call Hide from this
+                // thread. The dialog is already in the "deferred close" state, so the user's
+                // next Close click will just close it normally.
+            }, TaskScheduler.Default);
+        }
+
+        vm.PropertyChanged += OnVmPropChanged;
+        dialog.Closing += OnClosing;
+        try
+        {
+            await dialog.ShowAsync();
+        }
+        finally
+        {
+            vm.PropertyChanged -= OnVmPropChanged;
+            dialog.Closing -= OnClosing;
+            await vm.WaitForRunEnd();
+            vm.Dispose();
+        }
+        return vm.Result;
+    }
+
+    public async Task<BackupImportResult?> PromptForBackupImportAsync()
+    {
+        var control = new BackupImportDialog();
+        var vm = control.ViewModel;
+
+        var dialog = new ContentDialog
+        {
+            Title = "Import backup",
+            Content = control,
+            PrimaryButtonText = "Close",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = RequireXamlRoot(),
+            IsPrimaryButtonEnabled = vm.CanClose,
+        };
+
+        void OnVmPropChanged(object? _, PropertyChangedEventArgs args)
+        {
+            if (args.PropertyName == nameof(vm.CanClose))
+            {
+                dialog.IsPrimaryButtonEnabled = vm.CanClose;
+            }
+        }
+
+        // See PromptForBackupExportAsync for why we capture the dispatcher up-front.
+        var dispatcher = dialog.XamlRoot?.Content?.DispatcherQueue;
+
+        void OnClosing(ContentDialog sender, ContentDialogClosingEventArgs args)
+        {
+            if (!vm.IsBusy) return;
+            args.Cancel = true;
+            vm.RequestCancelForClose();
+            _ = vm.WaitForRunEnd().ContinueWith(_ =>
+            {
+                if (dispatcher is not null)
+                {
+                    dispatcher.TryEnqueue(() => sender.Hide());
+                }
+            }, TaskScheduler.Default);
+        }
+
+        vm.PropertyChanged += OnVmPropChanged;
+        dialog.Closing += OnClosing;
+        try
+        {
+            await dialog.ShowAsync();
+        }
+        finally
+        {
+            vm.PropertyChanged -= OnVmPropChanged;
+            dialog.Closing -= OnClosing;
+            await vm.WaitForRunEnd();
+            vm.Dispose();
+        }
         return vm.Result;
     }
 

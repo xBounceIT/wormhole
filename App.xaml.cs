@@ -7,6 +7,7 @@ using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Services.Backup;
 using Wormhole.Services.MRemoteNg;
 using Wormhole.Services.Rdp;
 using Wormhole.Services.Ssh;
@@ -174,6 +175,7 @@ public partial class App : Application
         services.AddSingleton<ISftpService, SftpService>();
         services.AddSingleton<IFileTransferDialogService, FileTransferDialogService>();
         services.AddSingleton<IMRemoteNgImportService, MRemoteNgImportService>();
+        services.AddSingleton<IBackupService, BackupService>();
 
         var assemblyVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "0.0.0";
         services.AddHttpClient(UpdateService.HttpClientName, client =>
@@ -207,6 +209,8 @@ public partial class App : Application
         services.AddTransient<SftpSessionViewModel>();
         services.AddTransient<TunnelConfigsViewModel>();
         services.AddTransient<MRemoteNgImportDialogViewModel>();
+        services.AddTransient<BackupExportDialogViewModel>();
+        services.AddTransient<BackupImportDialogViewModel>();
 
         services.AddSingleton<MainWindow>();
 

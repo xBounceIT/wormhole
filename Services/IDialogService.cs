@@ -1,4 +1,5 @@
 using Wormhole.Models;
+using Wormhole.Models.Backup;
 
 namespace Wormhole.Services;
 
@@ -22,4 +23,12 @@ public interface IDialogService
     Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null);
     Task<string?> PromptPasswordAsync(string title, string message);
     Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync();
+
+    /// <summary>Show the export-backup dialog. Returns the result on success, null if the
+    /// user closed the dialog without exporting.</summary>
+    Task<BackupExportResult?> PromptForBackupExportAsync();
+
+    /// <summary>Show the import-backup dialog. Returns the result on success, null if the
+    /// user closed the dialog without importing anything.</summary>
+    Task<BackupImportResult?> PromptForBackupImportAsync();
 }
