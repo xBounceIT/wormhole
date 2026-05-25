@@ -216,6 +216,7 @@ public sealed class UpdateService : IUpdateService, IDisposable
             File.Move(partPath, finalPath, overwrite: true);
 
             StripMarkOfTheWeb(finalPath);
+            RotateInstallerCache(AppPaths.GetUpdateCacheDirectory(), update.InstallerFileName!, _logger);
             return finalPath;
         }
         finally
@@ -337,6 +338,27 @@ public sealed class UpdateService : IUpdateService, IDisposable
         try { File.Delete(path + ":Zone.Identifier"); }
         catch (FileNotFoundException) { }
         catch (Exception ex) { _logger.LogDebug(ex, "Could not strip MOTW from {Path}.", path); }
+    }
+
+    internal static void RotateInstallerCache(string cacheDir, string keepFileName, ILogger? logger = null)
+    {
+        try
+        {
+            if (!Directory.Exists(cacheDir)) return;
+            foreach (var file in Directory.EnumerateFiles(cacheDir, "Wormhole-*-win-*-setup.exe"))
+            {
+                if (string.Equals(
+                        Path.GetFileName(file), keepFileName,
+                        StringComparison.OrdinalIgnoreCase))
+                    continue;
+                try { File.Delete(file); }
+                catch (Exception ex) { logger?.LogDebug(ex, "Failed to rotate stale installer {File}.", file); }
+            }
+        }
+        catch (Exception ex)
+        {
+            logger?.LogDebug(ex, "Installer cache rotation failed.");
+        }
     }
 
     private void TryCleanupPartialDownloads()
