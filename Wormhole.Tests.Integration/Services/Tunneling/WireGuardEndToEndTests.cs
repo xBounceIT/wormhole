@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -53,6 +54,49 @@ public sealed class WireGuardEndToEndTests
             IntegrationEnvironment.WgEchoTarget,
             IntegrationEnvironment.WgEchoPort,
             cts.Token);
+
+        var ping = Encoding.ASCII.GetBytes("ping");
+        await stream.WriteAsync(ping, cts.Token);
+
+        var buf = new byte[4];
+        await stream.ReadExactlyAsync(buf, cts.Token);
+        Assert.Equal("ping", Encoding.ASCII.GetString(buf));
+    }
+
+    [SkippableFact]
+    public async Task LocalForwarderRoutesTrafficThroughTunnel()
+    {
+        Skip.IfNot(
+            IntegrationEnvironment.WireGuardConfigured,
+            "Set WORMHOLE_WGPROXY_PATH and WORMHOLE_WG_CLIENT_CONFIG (and run tests/vpn-fixtures/bootstrap.sh + docker compose up) to enable.");
+
+        var configJson = await File.ReadAllTextAsync(IntegrationEnvironment.WgClientConfigPath!);
+        var config = JsonSerializer.Deserialize<WireGuardSidecarConfig>(configJson)
+            ?? throw new InvalidOperationException("Client config JSON deserialized to null.");
+
+        using var cts = new CancellationTokenSource(TestTimeout);
+
+        await using var host = await WireGuardProcessHost.StartAsync(
+            IntegrationEnvironment.WgProxyPath!,
+            config,
+            new TestOutputLogger(_output),
+            cts.Token);
+
+        // This is the path RDP takes: a SocksTunnelInstance wraps the sidecar's SOCKS5
+        // endpoint, BindLocalForwarderAsync hands back a 127.0.0.1:<port> loopback listener,
+        // and the consumer (ActiveX in prod, TcpClient here) connects to it without ever
+        // speaking SOCKS5. No onDispose hook — sidecar lifetime is owned by `await using host`.
+        await using var tunnel = new SocksTunnelInstance(host.SocksEndpoint, new TestOutputLogger(_output));
+
+        var localPort = await tunnel.BindLocalForwarderAsync(
+            IntegrationEnvironment.WgEchoTarget,
+            IntegrationEnvironment.WgEchoPort,
+            cts.Token);
+        Assert.NotEqual(0, localPort);
+
+        using var client = new TcpClient();
+        await client.ConnectAsync("127.0.0.1", localPort, cts.Token);
+        var stream = client.GetStream();
 
         var ping = Encoding.ASCII.GetBytes("ping");
         await stream.WriteAsync(ping, cts.Token);

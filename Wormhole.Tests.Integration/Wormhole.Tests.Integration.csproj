@@ -36,6 +36,10 @@
        Linux runner. -->
   <ItemGroup>
     <Compile Include="..\Services\Tunneling\Socks5Client.cs" Link="Services\Tunneling\Socks5Client.cs" />
+    <Compile Include="..\Services\Tunneling\ITunnelInstance.cs" Link="Services\Tunneling\ITunnelInstance.cs" />
+    <Compile Include="..\Services\Tunneling\SocksTunnelInstance.cs" Link="Services\Tunneling\SocksTunnelInstance.cs" />
+    <Compile Include="..\Services\Tunneling\LocalTcpForwarder.cs" Link="Services\Tunneling\LocalTcpForwarder.cs" />
+    <Compile Include="..\Models\TunnelState.cs" Link="Models\TunnelState.cs" />
     <Compile Include="..\Services\Tunneling\WireGuard\WireGuardProcessHost.cs" Link="Services\Tunneling\WireGuard\WireGuardProcessHost.cs" />
     <Compile Include="..\Services\Tunneling\WireGuard\WireGuardSidecarConfig.cs" Link="Services\Tunneling\WireGuard\WireGuardSidecarConfig.cs" />
     <Compile Include="..\Services\Tunneling\OpenVpn\OpenVpnProcessHost.cs" Link="Services\Tunneling\OpenVpn\OpenVpnProcessHost.cs" />
