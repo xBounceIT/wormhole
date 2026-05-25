@@ -764,7 +764,8 @@ public sealed class BackupService : IBackupService
                 $"Node '{node.Name}' references missing tunnel {tunId}; tunnel cleared.");
             node.TunnelConfigId = null;
         }
-        if (node.TunnelEnabled == true
+        if (node.Kind == NodeKind.Connection
+            && node.TunnelEnabled == true
             && node.TunnelConfigId is null
             && !HasResolvableAncestorTunnelConfig(node, nodesById, resolvableTunnelIds))
         {
