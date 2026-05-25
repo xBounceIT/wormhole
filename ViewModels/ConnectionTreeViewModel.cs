@@ -159,6 +159,24 @@ public partial class ConnectionTreeViewModel : ObservableObject
     }
 
     [RelayCommand]
+    private void ExpandAll() => SetExpandedRecursive(Roots, true);
+
+    [RelayCommand]
+    private void CollapseAll() => SetExpandedRecursive(Roots, false);
+
+    private static void SetExpandedRecursive(IEnumerable<TreeNodeViewModel> level, bool expanded)
+    {
+        foreach (var node in level)
+        {
+            if (node.Kind == NodeKind.Folder)
+            {
+                node.IsExpanded = expanded;
+            }
+            SetExpandedRecursive(node.Children, expanded);
+        }
+    }
+
+    [RelayCommand]
     private async Task ImportFromMRemoteNg()
     {
         try

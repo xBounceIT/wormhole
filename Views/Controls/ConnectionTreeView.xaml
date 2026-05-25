@@ -34,6 +34,18 @@
                        VerticalAlignment="Center" />
 
             <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="2">
+                <Button Style="{StaticResource IconButtonStyle}"
+                        Command="{x:Bind ViewModel.ExpandAllCommand}"
+                        ToolTipService.ToolTip="Expand all folders"
+                        AutomationProperties.Name="Expand all folders">
+                    <FontIcon FontSize="14" Glyph="&#xE70D;" />
+                </Button>
+                <Button Style="{StaticResource IconButtonStyle}"
+                        Command="{x:Bind ViewModel.CollapseAllCommand}"
+                        ToolTipService.ToolTip="Collapse all folders"
+                        AutomationProperties.Name="Collapse all folders">
+                    <FontIcon FontSize="14" Glyph="&#xE70E;" />
+                </Button>
                 <DropDownButton Style="{StaticResource IconDropDownButtonStyle}"
                                 ToolTipService.ToolTip="Import connections from third parties"
                                 AutomationProperties.Name="Import connections from third parties">
