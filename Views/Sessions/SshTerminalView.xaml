@@ -18,6 +18,17 @@
                            VerticalAlignment="Stretch"
                            MinHeight="240" />
 
+        <!-- Base cover: opaque whenever NOT Connected. Closes the per-overlay
+             binding-update window — the Connecting/Failed bindings can update
+             as separate compositor frames, briefly exposing the WebView2 (and
+             xterm.js's prior content) when transitioning Failed→Connecting or
+             Connected→Failed. This Border is bound to IsConnected (inverted),
+             which doesn't change during those transitions, so it stays Visible
+             across them and never lets phantom text bleed through. -->
+        <Border Background="#0c0c0c"
+                IsHitTestVisible="False"
+                Visibility="{Binding IsConnected, Converter={StaticResource BoolToVisibilityConverter}, ConverterParameter=Invert}" />
+
         <Border Background="#0c0c0c"
                 Visibility="{Binding IsConnecting, Converter={StaticResource BoolToVisibilityConverter}}">
             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12">
