@@ -240,7 +240,7 @@
                              FontFamily="Consolas"
                              PlaceholderText="leave default unless the Firebox uses a custom server cert" />
                     <CheckBox x:Name="WatchguardTrustCertCheck"
-                              Content="Trust server certificate (skip subject pin)" />
+                              Content="Trust server certificate (skip ALL TLS checks — pre-auth credentials and OTP travel unverified)" />
                 </StackPanel>
             </Expander>
         </StackPanel>

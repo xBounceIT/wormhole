@@ -59,11 +59,16 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
         {
             if (trustServerCertificate)
             {
-                // Mirrors the official client's "Always trust this server" toggle. Yes, this drops
-                // certificate validation entirely — the user opted in via the dialog checkbox,
-                // same as in the FortinetSettings.TrustServerCertificate path. The OpenVPN
-                // sidecar's own cert pinning (verify-x509-name / <ca>) is the second line of
-                // defense.
+                // Honors the user's explicit "trust everything" opt-in (the dialog checkbox is
+                // labeled to spell out that this skips ALL TLS checks, not just the OpenVPN
+                // verify-x509-name subject pin). Mirrors the official client's "Always trust
+                // this server" toggle and the FortinetSettings.TrustServerCertificate path.
+                //
+                // Security note: this disables hostname, chain, and revocation checks for the
+                // pre-auth POST. Username / password / OTP would be visible to a MITM on a
+                // hostile network. The downstream OpenVPN sidecar still validates the tunnel
+                // with the inline <ca> block, but that's not a substitute for pre-auth TLS —
+                // credentials leave the client before the sidecar starts.
                 handler.ServerCertificateCustomValidationCallback = (_, _, _, _) => true;
             }
             else if (!string.IsNullOrWhiteSpace(caPem))

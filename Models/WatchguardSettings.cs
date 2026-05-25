@@ -45,7 +45,16 @@ public sealed class WatchguardSettings
     [JsonPropertyName("VerifyX509Name")]
     public string VerifyX509Name { get; set; } = DefaultVerifyX509Name;
 
-    /// <summary>Skip server certificate verification entirely. Matches the Fortinet field for
-    /// parity; mirrors the official client's "Always trust this server" toggle. Off by default.</summary>
+    /// <summary>
+    /// Skip ALL TLS certificate verification on the pre-auth HTTPS POST (the credential /
+    /// OTP exchange) and additionally omit the OpenVPN <c>verify-x509-name</c> subject pin
+    /// in the synthesized .ovpn profile. Off by default.
+    ///
+    /// Security note: enabling this means the pre-auth POST accepts any server certificate,
+    /// including a MITM, so the username / password / OTP can be intercepted in flight on
+    /// hostile or captive networks. Only enable on a fully trusted network when the operator
+    /// has no copy of the Firebox CA. Mirrors the official client's "Always trust this server"
+    /// toggle. The Fortinet provider has an equivalent field for parity.
+    /// </summary>
     [JsonPropertyName("TrustServerCertificate")] public bool TrustServerCertificate { get; set; }
 }
