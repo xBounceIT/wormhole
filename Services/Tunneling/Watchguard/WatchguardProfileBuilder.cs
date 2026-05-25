@@ -88,15 +88,18 @@ public static class WatchguardProfileBuilder
 
     private static void RejectControlCharsOrQuotes(string value, string fieldName)
     {
-        foreach (var ch in value)
+        for (var i = 0; i < value.Length; i++)
         {
+            var ch = value[i];
             // Reject ALL control chars (including NUL, BEL, FF, VT, NEL, etc.) plus both
             // single and double quotes. Real hostnames and X.509 DNs use only printable
             // ASCII / Unicode without quotes or control bytes, so any of these in the field
             // is either malformed or hostile.
             if (char.IsControl(ch) || ch == '"' || ch == '\'')
+            {
                 throw new InvalidOperationException(
-                    $"{fieldName} contains a forbidden character (control char or quote).");
+                    $"{fieldName} contains a forbidden character (U+{(int)ch:X4}) at position {i}.");
+            }
         }
     }
 

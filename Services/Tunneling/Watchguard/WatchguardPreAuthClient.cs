@@ -27,7 +27,18 @@ namespace Wormhole.Services.Tunneling.Watchguard;
 ///   - https://tazj.in/blog/reversing-watchguard-vpn
 ///   - https://github.com/tazjin/watchblob (archived but accurate)
 /// </summary>
-public sealed class WatchguardPreAuthClient : IDisposable
+/// <summary>
+/// Seam for testing <see cref="WatchguardTunnelProvider.RunPreAuthLoopAsync"/> without
+/// spinning up a real Firebox or HTTP listener. Production callers use the real
+/// <see cref="WatchguardPreAuthClient"/>; tests inject a fake that scripts the outcome sequence.
+/// </summary>
+internal interface IWatchguardPreAuth
+{
+    Task<PreAuthOutcome> LogonAsync(string server, int port, string username, string password, string domain, CancellationToken cancellationToken);
+    Task<PreAuthOutcome> RespondToChallengeAsync(string server, int port, string logonId, string otpCode, CancellationToken cancellationToken);
+}
+
+internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
 {
     private readonly HttpClient _http;
     private readonly bool _ownsHttpClient;
@@ -194,7 +205,7 @@ public sealed class WatchguardPreAuthClient : IDisposable
     /// `#`, etc.) and uses UriBuilder so the scheme/host/port/path are assigned positionally
     /// rather than through string interpolation.
     /// </summary>
-    public static Uri BuildLogonUri(string server, int port)
+    internal static Uri BuildLogonUri(string server, int port)
     {
         if (string.IsNullOrWhiteSpace(server))
             throw new InvalidOperationException("Server is required.");
@@ -220,7 +231,7 @@ public sealed class WatchguardPreAuthClient : IDisposable
         return builder.Uri;
     }
 
-    public static PreAuthOutcome ParseLogonResponse(string xmlBody)
+    internal static PreAuthOutcome ParseLogonResponse(string xmlBody)
     {
         if (string.IsNullOrWhiteSpace(xmlBody))
             return new PreAuthOutcome.Failure("Firebox returned an empty response body.");
@@ -290,7 +301,7 @@ public sealed class WatchguardPreAuthClient : IDisposable
 }
 
 /// <summary>Outcome of a Firebox logon POST. Discriminated via type test.</summary>
-public abstract record PreAuthOutcome
+internal abstract record PreAuthOutcome
 {
     public sealed record Ok : PreAuthOutcome;
     public sealed record Challenge(string LogonId, string ChallengeText) : PreAuthOutcome;

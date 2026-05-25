@@ -63,14 +63,14 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
         // Pre-auth dance: always POST first to discover whether the gateway wants a 2FA code.
         // The official client does the same on every connect (no checkbox), and the round-trip
         // is fast (~100ms on a healthy Firebox).
-        var effectivePassword = settings.Password;
+        string effectivePassword;
         // Pass the user-supplied CA to the pre-auth client so self-signed Firebox deployments
         // (where the OS trust store doesn't vouch for the cert) can still complete the HTTPS
         // pre-flight without TrustServerCertificate. The OpenVPN sidecar's downstream <ca>
         // block validates the SAME chain, so this just brings the pre-auth path to parity.
         using (var preAuth = new WatchguardPreAuthClient(settings.TrustServerCertificate, settings.CaPem))
         {
-            effectivePassword = await RunPreAuthAsync(preAuth, config, settings, cancellationToken)
+            effectivePassword = await RunPreAuthLoopAsync(preAuth, _otpPrompt, _logger, config.Name, settings, cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -113,11 +113,27 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
     /// the user's stored password (no 2FA) or the OTP code accepted by the gateway. Wraps
     /// raw HttpRequestException / TaskCanceledException into actionable InvalidOperationException
     /// so the session UI sees a Watchguard-specific error instead of a generic socket error.
+    ///
+    /// Thin instance-method shim that forwards to <see cref="RunPreAuthLoopAsync"/> — the
+    /// static helper takes everything as parameters so it's directly unit-testable with a fake
+    /// <see cref="IWatchguardPreAuth"/> + <see cref="IOtpPromptService"/>.
     /// </summary>
-    private async Task<string> RunPreAuthAsync(
+    private Task<string> RunPreAuthAsync(
         WatchguardPreAuthClient preAuth, TunnelConfig config, WatchguardSettings settings, CancellationToken cancellationToken)
+        => RunPreAuthLoopAsync(preAuth, _otpPrompt, _logger, config.Name, settings, cancellationToken);
+
+    internal static async Task<string> RunPreAuthLoopAsync(
+        IWatchguardPreAuth preAuth,
+        IOtpPromptService otpPrompt,
+        ILogger logger,
+        string configName,
+        WatchguardSettings settings,
+        CancellationToken cancellationToken)
     {
         PreAuthOutcome outcome;
+        logger.LogDebug(
+            "Watchguard pre-auth POST to {Server}:{Port} (domain {Domain}) for '{Name}'.",
+            settings.Server, settings.Port, settings.Domain, configName);
         try
         {
             outcome = await preAuth.LogonAsync(
@@ -157,7 +173,7 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
                 case PreAuthOutcome.Ok:
                     if (challengesPrompted == 0)
                     {
-                        _logger.LogDebug("Watchguard pre-auth accepted password without 2FA for '{Name}'.", config.Name);
+                        logger.LogDebug("Watchguard pre-auth accepted password without 2FA for '{Name}'.", configName);
                         return settings.Password;
                     }
                     return lastOtp ?? settings.Password;
@@ -173,14 +189,14 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
                             $"Watchguard 2FA exceeded {MaxChallengeRounds} challenge rounds — the gateway may be misconfigured.");
                     }
                     challengesPrompted++;
-                    _logger.LogInformation(
+                    logger.LogInformation(
                         "Watchguard gateway requested 2FA challenge round {Round} for '{Name}'.",
-                        challengesPrompted, config.Name);
+                        challengesPrompted, configName);
                     var promptText = string.IsNullOrWhiteSpace(challenge.ChallengeText)
                         ? "Enter the one-time code from your authenticator."
                         : challenge.ChallengeText;
-                    var otp = await _otpPrompt.PromptAsync(
-                        $"Watchguard 2FA — {config.Name}", promptText, cancellationToken).ConfigureAwait(false);
+                    var otp = await otpPrompt.PromptAsync(
+                        $"Watchguard 2FA — {configName}", promptText, cancellationToken).ConfigureAwait(false);
                     if (otp is null)
                     {
                         // User clicked Cancel. Convention from IOtpPromptService: returning null is
