@@ -18,6 +18,12 @@ public sealed partial class SshTerminalView : UserControl
     // a stuck WebView all show up as "no handshake."
     private static readonly TimeSpan HandshakeTimeout = TimeSpan.FromSeconds(10);
 
+    // EnsureCoreWebView2Async throws if the WebView2 control is re-bound to a different
+    // CoreWebView2Environment instance — so Retry (and multi-tab opens) must reuse the
+    // same one. Cache it process-wide on first successful creation; concurrent first
+    // callers race via CompareExchange and the loser drops its instance.
+    private static CoreWebView2Environment? s_sharedEnvironment;
+
     private SshSessionViewModel? _viewModel;
     private bool _handshakeReceived;
     private bool _terminalInitializationFailed;
@@ -79,9 +85,22 @@ public sealed partial class SshTerminalView : UserControl
 
         var vm = _viewModel;
         if (vm is null) { _initInProgress = 0; return; }
+        // Pin WebView2's user-data folder under %LOCALAPPDATA%. The default location
+        // is `{exe_dir}\{exe_name}.WebView2\`, which is unwritable when the app is
+        // installed under Program Files — initialization then silently leaves
+        // CoreWebView2 null and the next access throws NullReferenceException.
+        var userDataFolder = AppPaths.GetWebView2UserDataDirectory();
         try
         {
-            await TerminalView.EnsureCoreWebView2Async();
+            var environment = await GetOrCreateSharedEnvironmentAsync(userDataFolder);
+            await TerminalView.EnsureCoreWebView2Async(environment);
+
+            if (TerminalView.CoreWebView2 is null)
+            {
+                throw new InvalidOperationException(
+                    "WebView2 initialization completed without a CoreWebView2 instance. " +
+                    "UserDataFolder=" + userDataFolder);
+            }
 
             TerminalView.CoreWebView2.SetVirtualHostNameToFolderMapping(
                 "terminal.wormhole",
@@ -104,7 +123,7 @@ public sealed partial class SshTerminalView : UserControl
         catch (Exception ex)
         {
             _terminalInitializationFailed = true;
-            LogWebViewInitializationFailure(ex);
+            LogWebViewInitializationFailure(ex, userDataFolder);
             // _handshakeReceived stays false so a Retry click re-runs init.
             vm.ReportFailure("Failed to initialize WebView2: " + ex.Message);
         }
@@ -112,6 +131,26 @@ public sealed partial class SshTerminalView : UserControl
         {
             _initInProgress = 0;
         }
+    }
+
+    private static async Task<CoreWebView2Environment> GetOrCreateSharedEnvironmentAsync(string userDataFolder)
+    {
+        var existing = Volatile.Read(ref s_sharedEnvironment);
+        if (existing is not null) return existing;
+
+        Directory.CreateDirectory(userDataFolder);
+        // null browserExecutableFolder = use the installed Evergreen Runtime (the documented
+        // sentinel). string.Empty works in this SDK but is not the contract.
+        var created = await CoreWebView2Environment.CreateWithOptionsAsync(
+            null,
+            userDataFolder,
+            new CoreWebView2EnvironmentOptions());
+
+        // First writer wins. A concurrent call (e.g. two tabs opening at once) may have
+        // created an env in parallel; per WebView2 docs, options-equivalent envs share the
+        // same browser host process, so the loser can be dropped harmlessly.
+        var winner = Interlocked.CompareExchange(ref s_sharedEnvironment, created, null);
+        return winner ?? created;
     }
 
     private async Task ScheduleHandshakeTimeoutAsync(SshSessionViewModel vm, int handshakeGeneration)
@@ -197,7 +236,7 @@ public sealed partial class SshTerminalView : UserControl
         logger?.LogError("Terminal page reported initialization failure: {Detail}", detail);
     }
 
-    private static void LogWebViewInitializationFailure(Exception ex)
+    private static void LogWebViewInitializationFailure(Exception ex, string userDataFolder)
     {
         var logger = App.Current.Services.GetService<ILogger<SshTerminalView>>();
         if (logger is null) return;
@@ -206,12 +245,14 @@ public sealed partial class SshTerminalView : UserControl
         var loaderPath = Path.Combine(baseDirectory, "WebView2Loader.dll");
         logger.LogError(
             ex,
-            "Failed to initialize WebView2. BaseDirectory={BaseDirectory}; ExceptionType={ExceptionType}; HResult=0x{HResult:X8}; WebView2LoaderPath={WebView2LoaderPath}; WebView2LoaderExists={WebView2LoaderExists}",
+            "Failed to initialize WebView2. BaseDirectory={BaseDirectory}; ExceptionType={ExceptionType}; HResult=0x{HResult:X8}; WebView2LoaderPath={WebView2LoaderPath}; WebView2LoaderExists={WebView2LoaderExists}; UserDataFolder={UserDataFolder}; UserDataFolderExists={UserDataFolderExists}",
             baseDirectory,
             ex.GetType().FullName,
             ex.HResult,
             loaderPath,
-            File.Exists(loaderPath));
+            File.Exists(loaderPath),
+            userDataFolder,
+            Directory.Exists(userDataFolder));
     }
 
     // The VM outlives the view (it lives in ShellViewModel.Tabs across navigations),

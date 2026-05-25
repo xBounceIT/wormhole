@@ -39,6 +39,14 @@ internal static class AppPaths
         return Path.Combine(GetAppDataDirectory(), "cache", "updates");
     }
 
+    // WebView2's default user-data folder is `{exe_dir}\{exe_name}.WebView2\`,
+    // which the app cannot create when installed under Program Files without
+    // elevation. Pin it under %LOCALAPPDATA%\Wormhole\ to match sibling state.
+    public static string GetWebView2UserDataDirectory()
+    {
+        return Path.Combine(GetAppDataDirectory(), "webview2");
+    }
+
     public static string GetWebAssetsDirectory()
     {
         return Path.Combine(AppContext.BaseDirectory, "Assets", "web");
