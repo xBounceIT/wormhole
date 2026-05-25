@@ -199,6 +199,7 @@ public partial class App : Application
         services.AddSingleton<CredentialsViewModel>();
         services.AddSingleton<UpdateViewModel>();
         services.AddTransient<ConnectionEditorViewModel>();
+        services.AddTransient<FolderEditorViewModel>();
         services.AddTransient<SshSessionViewModel>();
         services.AddTransient<RdpSessionViewModel>();
         services.AddTransient<SftpSessionViewModel>();

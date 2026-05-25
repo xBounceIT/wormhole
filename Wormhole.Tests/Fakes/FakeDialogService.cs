@@ -23,6 +23,13 @@ public class FakeDialogService : IDialogService
     /// </summary>
     public ConnectionNode? EditConnectionResult { get; set; }
 
+    /// <summary>
+    /// When non-null, drives <see cref="EditFolderAsync"/>. The fake mirrors the real dialog:
+    /// identity is preserved from <c>initial</c>; Name and the two tunnel fields are copied
+    /// from this seed (folders don't carry any other editable state today).
+    /// </summary>
+    public ConnectionNode? EditFolderResult { get; set; }
+
     /// <summary>Drives <see cref="PromptForMRemoteNgImportAsync"/>; null = user closed
     /// the dialog without committing.</summary>
     public MRemoteNgImportResult? MRemoteNgImportResult { get; set; }
@@ -89,6 +96,38 @@ public class FakeDialogService : IDialogService
         output.TunnelEnabled = src.TunnelEnabled;
         output.TunnelConfigId = src.TunnelConfigId;
         return Task.FromResult<ConnectionNode?>(output);
+    }
+
+    public virtual Task<ConnectionNode?> EditFolderAsync(ConnectionNode initial, bool isNew)
+    {
+        // Two ways tests can drive this:
+        //  - EditFolderResult: precise control over Name and tunnel fields.
+        //  - TextPromptResult: name-only fallback. Mirrors the original PromptForTextAsync
+        //    contract the folder Add/Edit flow used before EditFolderAsync existed, so the
+        //    pile of "make a folder called X" tests keeps working without enumeration.
+        if (EditFolderResult is not null)
+        {
+            var output = ConnectionNode.CloneIdentityFrom(initial);
+            var src = EditFolderResult;
+            output.Name = src.Name;
+            output.TunnelEnabled = src.TunnelEnabled;
+            output.TunnelConfigId = src.TunnelConfigId;
+            return Task.FromResult<ConnectionNode?>(output);
+        }
+        if (TextPromptResult is not null)
+        {
+            // Mirror PromptForTextAsync's invocation tracking so tests using TextPromptCount
+            // to verify call-path coverage see the fallback as an actual text-prompt
+            // consumption — otherwise a regression that routes back through the legacy
+            // PromptForTextAsync flow could silently pass.
+            TextPromptCount++;
+            var output = ConnectionNode.CloneIdentityFrom(initial);
+            output.Name = TextPromptResult;
+            output.TunnelEnabled = initial.TunnelEnabled;
+            output.TunnelConfigId = initial.TunnelConfigId;
+            return Task.FromResult<ConnectionNode?>(output);
+        }
+        return Task.FromResult<ConnectionNode?>(null);
     }
 
     public virtual Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null)

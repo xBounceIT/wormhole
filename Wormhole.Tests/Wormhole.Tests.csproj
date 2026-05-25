@@ -96,6 +96,8 @@
     <Compile Include="..\Data\SqliteTypeHandlers.cs" Link="Data\SqliteTypeHandlers.cs" />
     <Compile Include="..\Data\MigrationRunner.cs" Link="Data\MigrationRunner.cs" />
     <Compile Include="..\ViewModels\ConnectionEditorViewModel.cs" Link="ViewModels\ConnectionEditorViewModel.cs" />
+    <Compile Include="..\ViewModels\TunnelPickerViewModel.cs" Link="ViewModels\TunnelPickerViewModel.cs" />
+    <Compile Include="..\ViewModels\FolderEditorViewModel.cs" Link="ViewModels\FolderEditorViewModel.cs" />
     <Compile Include="..\ViewModels\ConnectionTreeViewModel.cs" Link="ViewModels\ConnectionTreeViewModel.cs" />
     <Compile Include="..\ViewModels\CredentialsViewModel.cs" Link="ViewModels\CredentialsViewModel.cs" />
     <Compile Include="..\ViewModels\TunnelConfigsViewModel.cs" Link="ViewModels\TunnelConfigsViewModel.cs" />

@@ -718,11 +718,11 @@ public class ConnectionEditorViewModelTests
         // The default state for a new connection — let the inheritance resolver supply the
         // tunnel from the parent folder. Both backing fields must remain null on save.
         var vm = await NewEditorAsync();
-        await vm.LoadTunnelConfigsAsync();
+        await vm.TunnelPicker.LoadAsync();
 
-        vm.SelectedTunnel = ConnectionEditorViewModel.InheritTunnel;
+        vm.TunnelPicker.SelectedTunnel = vm.TunnelPicker.InheritTunnel;
 
-        Assert.Same(ConnectionEditorViewModel.InheritTunnel, vm.SelectedTunnel);
+        Assert.Same(vm.TunnelPicker.InheritTunnel, vm.TunnelPicker.SelectedTunnel);
 
         var sink = new ConnectionNode();
         vm.WriteTo(sink);
@@ -736,11 +736,11 @@ public class ConnectionEditorViewModelTests
     {
         // Explicit "no tunnel" — overrides any folder-inherited tunnel by setting Enabled=false.
         var vm = await NewEditorAsync();
-        await vm.LoadTunnelConfigsAsync();
+        await vm.TunnelPicker.LoadAsync();
 
-        vm.SelectedTunnel = ConnectionEditorViewModel.NoTunnel;
+        vm.TunnelPicker.SelectedTunnel = TunnelPickerViewModel.NoTunnel;
 
-        Assert.Same(ConnectionEditorViewModel.NoTunnel, vm.SelectedTunnel);
+        Assert.Same(TunnelPickerViewModel.NoTunnel, vm.TunnelPicker.SelectedTunnel);
 
         var sink = new ConnectionNode();
         vm.WriteTo(sink);
@@ -756,11 +756,11 @@ public class ConnectionEditorViewModelTests
         var vm = new ConnectionEditorViewModel(
             new EmptyCredentialRepository(),
             new MultiTunnelConfigRepository(wg));
-        await vm.LoadTunnelConfigsAsync();
+        await vm.TunnelPicker.LoadAsync();
 
-        vm.SelectedTunnel = wg;
+        vm.TunnelPicker.SelectedTunnel = wg;
 
-        Assert.Same(wg, vm.SelectedTunnel);
+        Assert.Same(wg, vm.TunnelPicker.SelectedTunnel);
 
         var sink = new ConnectionNode();
         vm.WriteTo(sink);
@@ -775,7 +775,7 @@ public class ConnectionEditorViewModelTests
     public async Task LoadFrom_TunnelSentinelStates_RoundTrip(bool? enabled)
     {
         var vm = await NewEditorAsync();
-        await vm.LoadTunnelConfigsAsync();
+        await vm.TunnelPicker.LoadAsync();
 
         var node = new ConnectionNode
         {
@@ -801,7 +801,7 @@ public class ConnectionEditorViewModelTests
         var vm = new ConnectionEditorViewModel(
             new EmptyCredentialRepository(),
             new MultiTunnelConfigRepository(wg));
-        await vm.LoadTunnelConfigsAsync();
+        await vm.TunnelPicker.LoadAsync();
 
         var node = new ConnectionNode
         {
@@ -814,7 +814,7 @@ public class ConnectionEditorViewModelTests
         vm.LoadFrom(node);
 
         // Selection round-trips to the real TunnelConfig instance, not a sentinel.
-        Assert.Same(wg, vm.SelectedTunnel);
+        Assert.Same(wg, vm.TunnelPicker.SelectedTunnel);
 
         var sink = new ConnectionNode();
         vm.WriteTo(sink);
@@ -831,7 +831,7 @@ public class ConnectionEditorViewModelTests
         // saving doesn't silently drop the TunnelConfigId.
         var deletedId = Guid.NewGuid();
         var vm = await NewEditorAsync();
-        await vm.LoadTunnelConfigsAsync();
+        await vm.TunnelPicker.LoadAsync();
 
         var node = new ConnectionNode
         {
@@ -843,7 +843,7 @@ public class ConnectionEditorViewModelTests
         };
         vm.LoadFrom(node);
 
-        Assert.Contains(vm.AvailableTunnelConfigs, t => t.Id == deletedId);
+        Assert.Contains(vm.TunnelPicker.AvailableTunnelConfigs, t => t.Id == deletedId);
 
         var sink = new ConnectionNode();
         vm.WriteTo(sink);
@@ -865,7 +865,7 @@ public class ConnectionEditorViewModelTests
         var vm = new ConnectionEditorViewModel(
             new EmptyCredentialRepository(),
             new MultiTunnelConfigRepository(wg));
-        await vm.LoadTunnelConfigsAsync();
+        await vm.TunnelPicker.LoadAsync();
 
         var node = new ConnectionNode
         {
@@ -877,7 +877,7 @@ public class ConnectionEditorViewModelTests
         };
         vm.LoadFrom(node);
 
-        Assert.Same(wg, vm.SelectedTunnel);
+        Assert.Same(wg, vm.TunnelPicker.SelectedTunnel);
 
         // Round-trip preserves (null, guid) if the user doesn't touch the dropdown.
         // (Picking a different item in the combobox collapses to (true, newId) — a known
@@ -897,7 +897,7 @@ public class ConnectionEditorViewModelTests
         // pick a real value or No tunnel. The sentinel uses a distinct non-Empty id so
         // Guid.Empty falls through to the stale-placeholder path.
         var vm = await NewEditorAsync();
-        await vm.LoadTunnelConfigsAsync();
+        await vm.TunnelPicker.LoadAsync();
 
         var node = new ConnectionNode
         {
@@ -909,9 +909,9 @@ public class ConnectionEditorViewModelTests
         };
         vm.LoadFrom(node);
 
-        Assert.Contains(vm.AvailableTunnelConfigs, t => t.Id == Guid.Empty);
-        Assert.NotSame(ConnectionEditorViewModel.InheritTunnel, vm.SelectedTunnel);
-        Assert.Equal(Guid.Empty, vm.SelectedTunnel!.Id);
+        Assert.Contains(vm.TunnelPicker.AvailableTunnelConfigs, t => t.Id == Guid.Empty);
+        Assert.NotSame(vm.TunnelPicker.InheritTunnel, vm.TunnelPicker.SelectedTunnel);
+        Assert.Equal(Guid.Empty, vm.TunnelPicker.SelectedTunnel!.Id);
 
         var sink = new ConnectionNode();
         vm.WriteTo(sink);
@@ -931,11 +931,11 @@ public class ConnectionEditorViewModelTests
         // Force the invalid intermediate state directly via the SelectedTunnel setter and
         // then yank the id via the public backing setter — simulating a race where the
         // collection rebuilt between the two field writes.
-        vm.SelectedTunnel = ConnectionEditorViewModel.InheritTunnel;
-        vm.TunnelEnabled = true;
-        vm.SelectedTunnelConfigId = Guid.NewGuid(); // not in AvailableTunnelConfigs
+        vm.TunnelPicker.SelectedTunnel = vm.TunnelPicker.InheritTunnel;
+        vm.TunnelPicker.TunnelEnabled = true;
+        vm.TunnelPicker.SelectedTunnelConfigId = Guid.NewGuid(); // not in AvailableTunnelConfigs
 
-        Assert.Null(vm.SelectedTunnel);
+        Assert.Null(vm.TunnelPicker.SelectedTunnel);
     }
 
     [Fact]
@@ -945,12 +945,12 @@ public class ConnectionEditorViewModelTests
         var vm = new ConnectionEditorViewModel(
             new EmptyCredentialRepository(),
             new MultiTunnelConfigRepository(wg));
-        await vm.LoadTunnelConfigsAsync();
+        await vm.TunnelPicker.LoadAsync();
 
-        Assert.Equal(3, vm.AvailableTunnelConfigs.Count);
-        Assert.Same(ConnectionEditorViewModel.InheritTunnel, vm.AvailableTunnelConfigs[0]);
-        Assert.Same(ConnectionEditorViewModel.NoTunnel, vm.AvailableTunnelConfigs[1]);
-        Assert.Equal("wg-1", vm.AvailableTunnelConfigs[2].Name);
+        Assert.Equal(3, vm.TunnelPicker.AvailableTunnelConfigs.Count);
+        Assert.Same(vm.TunnelPicker.InheritTunnel, vm.TunnelPicker.AvailableTunnelConfigs[0]);
+        Assert.Same(TunnelPickerViewModel.NoTunnel, vm.TunnelPicker.AvailableTunnelConfigs[1]);
+        Assert.Equal("wg-1", vm.TunnelPicker.AvailableTunnelConfigs[2].Name);
     }
 
     private static async Task<ConnectionEditorViewModel> NewEditorAsync()

@@ -82,9 +82,9 @@
                             <TextBlock Text="VPN tunnel"
                                        Style="{StaticResource CaptionTextBlockStyle}" />
                             <ComboBox HorizontalAlignment="Stretch"
-                                      ItemsSource="{x:Bind ViewModel.AvailableTunnelConfigs}"
+                                      ItemsSource="{x:Bind ViewModel.TunnelPicker.AvailableTunnelConfigs}"
                                       ItemTemplate="{StaticResource TunnelItemTemplate}"
-                                      SelectedItem="{x:Bind ViewModel.SelectedTunnel, Mode=TwoWay}" />
+                                      SelectedItem="{x:Bind ViewModel.TunnelPicker.SelectedTunnel, Mode=TwoWay}" />
                             <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                                        Opacity="0.7"
                                        TextWrapping="Wrap"

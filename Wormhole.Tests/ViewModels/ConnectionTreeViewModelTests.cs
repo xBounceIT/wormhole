@@ -924,6 +924,59 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         Assert.False(child.IsExpanded);
     }
 
+    [Fact]
+    public async Task AddFolder_WithTunnel_PersistsTunnelFields()
+    {
+        var tunnelId = Guid.NewGuid();
+        var dialog = new FakeDialogService
+        {
+            EditFolderResult = new ConnectionNode
+            {
+                Kind = NodeKind.Folder,
+                Name = "Production",
+                TunnelEnabled = true,
+                TunnelConfigId = tunnelId,
+            },
+        };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        await vm.AddFolderCommand.ExecuteAsync(null);
+
+        var row = Assert.Single(await _repo.GetAllAsync());
+        Assert.Equal("Production", row.Name);
+        Assert.Equal(NodeKind.Folder, row.Kind);
+        Assert.True(row.TunnelEnabled);
+        Assert.Equal(tunnelId, row.TunnelConfigId);
+    }
+
+    [Fact]
+    public async Task Edit_FolderTunnelChange_PersistsTunnelFields()
+    {
+        // Start from a folder with no tunnel, then assign one via the editor and confirm both
+        // tunnel fields land in the DB. This is the bug the folder editor was added to fix —
+        // the inheritance resolver already walks folder TunnelEnabled/TunnelConfigId, but
+        // before this dialog there was no way for the user to set them.
+        var dialog = new FakeDialogService { TextPromptResult = "Production" };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+        await vm.AddFolderCommand.ExecuteAsync(null);
+
+        var tunnelId = Guid.NewGuid();
+        dialog.EditFolderResult = new ConnectionNode
+        {
+            Kind = NodeKind.Folder,
+            Name = "Production",
+            TunnelEnabled = true,
+            TunnelConfigId = tunnelId,
+        };
+        await vm.EditCommand.ExecuteAsync(vm.Roots.Single());
+
+        var row = (await _repo.GetAllAsync()).Single();
+        Assert.True(row.TunnelEnabled);
+        Assert.Equal(tunnelId, row.TunnelConfigId);
+    }
+
     private sealed class ThrowOnUpdateRepository : IConnectionRepository
     {
         private readonly IConnectionRepository _inner;

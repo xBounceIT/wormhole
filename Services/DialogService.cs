@@ -106,6 +106,33 @@ public sealed class DialogService : IDialogService
         return output;
     }
 
+    public async Task<ConnectionNode?> EditFolderAsync(ConnectionNode initial, bool isNew)
+    {
+        var form = new FolderEditorDialog();
+        await form.LoadAsync(initial);
+
+        var dialog = new ContentDialog
+        {
+            Title = isNew ? "New folder" : "Edit folder",
+            Content = form,
+            PrimaryButtonText = isNew ? "Create" : "Save",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = RequireXamlRoot(),
+            IsPrimaryButtonEnabled = form.IsValid,
+        };
+
+        form.ValidityChanged += (_, _) => dialog.IsPrimaryButtonEnabled = form.IsValid;
+        dialog.Opened += (_, _) => form.FocusNameField();
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary) return null;
+
+        var output = ConnectionNode.CloneIdentityFrom(initial);
+        form.WriteTo(output);
+        return output;
+    }
+
     public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null) =>
         ShowFormDialogAsync(new CredentialDialog(), initial, "credential");
 

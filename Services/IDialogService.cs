@@ -18,6 +18,14 @@ public interface IDialogService
     /// <param name="isNew">Controls dialog title and button copy.</param>
     Task<ConnectionNode?> EditConnectionAsync(ConnectionNode initial, bool isNew);
 
+    /// <summary>
+    /// Opens the folder editor pre-filled from <paramref name="initial"/> (Name + VPN tunnel —
+    /// the only fields a folder holds that descendants inherit via
+    /// <see cref="Data.InheritanceResolver"/>). Returns a new <see cref="ConnectionNode"/> on
+    /// Save; null on cancel. The input is not mutated.
+    /// </summary>
+    Task<ConnectionNode?> EditFolderAsync(ConnectionNode initial, bool isNew);
+
     Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null);
     Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null);
     Task<string?> PromptPasswordAsync(string title, string message);
