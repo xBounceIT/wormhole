@@ -240,8 +240,11 @@ public static class WatchguardWgsslImporter
     }
 
     /// <summary>
-    /// Read-only stream that concatenates two underlying streams. Disposes both on Dispose.
-    /// Used to splice peeked magic bytes back in front of the original input.
+    /// Read-only stream that concatenates two underlying streams. Disposes <c>_first</c>
+    /// (which we always own — it's the peeked-bytes MemoryStream) but NOT <c>_second</c>
+    /// (the original input is caller-owned per ImportAsync's contract; the caller passed it
+    /// in via <c>using</c> and expects to dispose it themselves). Used to splice peeked magic
+    /// bytes back in front of the original input.
     /// </summary>
     private sealed class ConcatStream : Stream
     {
@@ -284,10 +287,13 @@ public static class WatchguardWgsslImporter
 
         protected override void Dispose(bool disposing)
         {
+            // _first is the peeked-bytes MemoryStream we created internally — we own it.
+            // _second is the caller's input — leave it alone so the caller's `using` scope
+            // disposes it exactly once (avoids double-dispose + matches the documented
+            // ownership semantics of DetectAndOpenTarStreamAsync).
             if (disposing)
             {
                 try { _first.Dispose(); } catch { /* best effort */ }
-                try { _second.Dispose(); } catch { /* best effort */ }
             }
             base.Dispose(disposing);
         }

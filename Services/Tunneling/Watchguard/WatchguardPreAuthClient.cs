@@ -94,7 +94,7 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
                         "Watchguard CA certificate (PEM) contained no certificates.");
                 }
                 var pinned = caCerts;
-                handler.ServerCertificateCustomValidationCallback = (_, serverCert, _, errors) =>
+                handler.ServerCertificateCustomValidationCallback = (_, serverCert, peerChain, errors) =>
                 {
                     // When the user pinned a CA, the user-supplied CA — NOT the OS trust store —
                     // is the authoritative trust anchor. Returning true on SslPolicyErrors.None
@@ -111,6 +111,19 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
                     customChain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
                     customChain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
                     customChain.ChainPolicy.CustomTrustStore.AddRange(pinned);
+                    // Copy the intermediates the server sent (the leaf is at ChainElements[0];
+                    // anything above it is an intermediate) into ExtraStore so a Firebox that
+                    // presents a "leaf → intermediate" chain rooted at the pinned CA validates
+                    // even when the intermediate isn't in the local machine trust store. Without
+                    // this, partial-chain deployments fail TLS even though the server's chain
+                    // is correct against the pinned root.
+                    if (peerChain is not null)
+                    {
+                        for (var i = 1; i < peerChain.ChainElements.Count; i++)
+                        {
+                            customChain.ChainPolicy.ExtraStore.Add(peerChain.ChainElements[i].Certificate);
+                        }
+                    }
                     return customChain.Build(serverCert);
                 };
             }

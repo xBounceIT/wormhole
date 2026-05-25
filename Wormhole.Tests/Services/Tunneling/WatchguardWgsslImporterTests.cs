@@ -189,6 +189,30 @@ public class WatchguardWgsslImporterTests
     }
 
     [Fact]
+    public async Task ImportAsync_LeavesCallerOwnedStreamOpen()
+    {
+        // Lifetime contract: ImportAsync MUST NOT dispose the caller's input stream — the
+        // dialog and other call sites pass the stream via `using` and dispose it themselves.
+        // A previous draft of ConcatStream's Dispose closed the inner input too, which would
+        // surface as ObjectDisposedException at the call site's outer `using` boundary on
+        // some runtimes / observers that re-touch the stream after import.
+        using var stream = BuildTarGz(new[]
+        {
+            ("client.ovpn", "remote firebox.example.com 443"),
+            ("ca.crt", "ca"),
+            ("client.crt", "cert"),
+            ("client.pem", "key"),
+        });
+
+        _ = await WatchguardWgsslImporter.ImportAsync(stream);
+
+        // CanRead / CanSeek throw on disposed MemoryStream — accessing them as a smoke test
+        // is enough to detect a double-dispose without touching the bytes.
+        Assert.True(stream.CanRead);
+        Assert.True(stream.CanSeek);
+    }
+
+    [Fact]
     public async Task ImportAsync_RejectsGzipBomb()
     {
         // Hostile bundle: small on disk, expands to far more than the 64 MiB cap. Guards
