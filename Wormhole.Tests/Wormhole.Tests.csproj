@@ -87,6 +87,10 @@
     <Compile Include="..\Data\Repositories\IConnectionRepository.cs" Link="Data\Repositories\IConnectionRepository.cs" />
     <Compile Include="..\Data\Repositories\ConnectionRepository.cs" Link="Data\Repositories\ConnectionRepository.cs" />
     <Compile Include="..\Data\Repositories\CredentialRepository.cs" Link="Data\Repositories\CredentialRepository.cs" />
+    <Compile Include="..\Models\Backup\BackupDocument.cs" Link="Models\Backup\BackupDocument.cs" />
+    <Compile Include="..\Services\Backup\IBackupService.cs" Link="Services\Backup\IBackupService.cs" />
+    <Compile Include="..\Services\Backup\BackupService.cs" Link="Services\Backup\BackupService.cs" />
+    <Compile Include="..\Data\Repositories\TunnelConfigRepository.cs" Link="Data\Repositories\TunnelConfigRepository.cs" />
     <Compile Include="..\Services\MRemoteNg\IMRemoteNgImportService.cs" Link="Services\MRemoteNg\IMRemoteNgImportService.cs" />
     <Compile Include="..\Services\MRemoteNg\MRemoteNgImportService.cs" Link="Services\MRemoteNg\MRemoteNgImportService.cs" />
     <Compile Include="..\Services\MRemoteNg\MRemoteNgXmlReader.cs" Link="Services\MRemoteNg\MRemoteNgXmlReader.cs" />
@@ -108,6 +112,7 @@
     <Compile Include="..\Services\Rdp\RdpCrashSentinelService.cs" Link="Services\Rdp\RdpCrashSentinelService.cs" />
     <Compile Include="..\Interop\Terminal\TerminalBridge.cs" Link="Interop\Terminal\TerminalBridge.cs" />
     <Compile Include="..\Interop\Terminal\TerminalReplayBuffer.cs" Link="Interop\Terminal\TerminalReplayBuffer.cs" />
+    <Compile Include="..\Interop\Terminal\TerminalOutputCoalescer.cs" Link="Interop\Terminal\TerminalOutputCoalescer.cs" />
 
     <Compile Include="..\Models\TransferDirection.cs" Link="Models\TransferDirection.cs" />
     <Compile Include="..\Models\TransferRequest.cs" Link="Models\TransferRequest.cs" />

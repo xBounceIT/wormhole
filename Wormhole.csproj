@@ -39,6 +39,24 @@
     <_WebView2LoaderRid Condition="'$(_WebView2LoaderRid)' == '' And ('$(PlatformTarget)' == 'AnyCPU' Or '$(PlatformTarget)' == 'Any CPU')">win-x64</_WebView2LoaderRid>
   </PropertyGroup>
 
+  <!-- Release-only perf flags. R2R does ahead-of-time JIT at publish time so cold start
+       on an installed app skips most first-time JIT work for the app's own assemblies.
+       Composite R2R (PublishReadyToRunComposite) is intentionally NOT enabled: it
+       requires SelfContained=true to fold framework assemblies into the composite
+       image, but scripts/Build-Installer.ps1 publishes framework-dependent (the
+       SelfContained flag is set to false there), so composite would either warn or
+       silently fall back to per-assembly R2R. Per-assembly R2R already captures most
+       of the cold-start win for an app this size. PGO is on by default in .NET 10
+       but pinned here for clarity. Debug builds keep JIT-only behavior so iteration
+       time isn't paying the R2R cost on every F5. Workstation GC stays the default —
+       WinUI desktop apps benefit more from its lower pause times than ServerGC's
+       higher allocation throughput. -->
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <PublishReadyToRun>true</PublishReadyToRun>
+    <TieredCompilation>true</TieredCompilation>
+    <TieredPGO>true</TieredPGO>
+  </PropertyGroup>
+
   <ItemGroup>
     <AssemblyMetadata Include="RepositoryUrl" Value="$(RepositoryUrl)" />
   </ItemGroup>

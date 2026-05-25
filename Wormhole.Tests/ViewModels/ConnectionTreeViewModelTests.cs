@@ -103,12 +103,20 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         if (File.Exists(_dbPath)) File.Delete(_dbPath);
     }
 
-    private ConnectionTreeViewModel CreateVm(FakeDialogService? dialog = null) => new(
-        _repo,
-        new InheritanceResolver(),
-        new NullSessionTabFactory(),
-        dialog ?? new FakeDialogService(),
-        NullLogger<ConnectionTreeViewModel>.Instance);
+    private ConnectionTreeViewModel CreateVm(FakeDialogService? dialog = null)
+    {
+        var vm = new ConnectionTreeViewModel(
+            _repo,
+            new InheritanceResolver(),
+            new NullSessionTabFactory(),
+            dialog ?? new FakeDialogService(),
+            NullLogger<ConnectionTreeViewModel>.Instance);
+        // Tests assert synchronously after assigning SearchText; disable the production
+        // 120ms debounce so the filter walk runs inline rather than on a scheduled
+        // continuation. Production code uses the default delay.
+        vm.SearchDebounceDelay = TimeSpan.Zero;
+        return vm;
+    }
 
     private static ConnectionNode MakeConnectionDraft(string name, ProtocolType protocol, string host, int? port, string? username)
         => new()
@@ -646,6 +654,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
             new NullSessionTabFactory(),
             dialog,
             NullLogger<ConnectionTreeViewModel>.Instance);
+        vm.SearchDebounceDelay = TimeSpan.Zero;
         await vm.RefreshAsync();
         await vm.AddFolderCommand.ExecuteAsync(null);
 

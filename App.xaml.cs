@@ -7,6 +7,7 @@ using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Services.Backup;
 using Wormhole.Services.MRemoteNg;
 using Wormhole.Services.Rdp;
 using Wormhole.Services.Ssh;
@@ -66,7 +67,10 @@ public partial class App : Application
     /// Recovery contract: read the sentinel first (does NOT delete), apply the DB update,
     /// then clear the sentinel on success. If the DB update fails, the sentinel persists
     /// and the next launch retries — losing the crash signal to a transient DB error would
-    /// resurrect the crash loop. Runs once at startup, before the first window is activated.
+    /// resurrect the crash loop. Runs once at startup, before the first window is activated —
+    /// deferring past Activate would race the user double-clicking the offending profile
+    /// before the auto-flag DB write lands, and the in-memory tree snapshot would still
+    /// hold the pre-recovery row even after the write.
     /// </summary>
     private async Task RecoverFromRdpCrashSentinelAsync()
     {
@@ -171,6 +175,7 @@ public partial class App : Application
         services.AddSingleton<ISftpService, SftpService>();
         services.AddSingleton<IFileTransferDialogService, FileTransferDialogService>();
         services.AddSingleton<IMRemoteNgImportService, MRemoteNgImportService>();
+        services.AddSingleton<IBackupService, BackupService>();
 
         var assemblyVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "0.0.0";
         services.AddHttpClient(UpdateService.HttpClientName, client =>
@@ -204,6 +209,8 @@ public partial class App : Application
         services.AddTransient<SftpSessionViewModel>();
         services.AddTransient<TunnelConfigsViewModel>();
         services.AddTransient<MRemoteNgImportDialogViewModel>();
+        services.AddTransient<BackupExportDialogViewModel>();
+        services.AddTransient<BackupImportDialogViewModel>();
 
         services.AddSingleton<MainWindow>();
 

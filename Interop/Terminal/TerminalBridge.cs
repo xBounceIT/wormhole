@@ -11,12 +11,19 @@ public sealed class TerminalBridge : IDisposable
 {
     private const uint MinimumUsableColumns = 20;
     private const uint MinimumUsableRows = 8;
+    // Window chosen to be small enough that interactive output (keystroke echo,
+    // single-line prompts) still feels instant, while large enough that a bursty
+    // remote (e.g. cat large_file) collapses many SSH packets per ~frame into one
+    // WebView2 PostWebMessageAsString. ~12 ms ≈ 80 fps cap on terminal updates.
+    private const int CoalesceWindowMs = 12;
 
     private readonly CoreWebView2 _webView;
     private readonly ISshSession _session;
     private readonly ILogger<TerminalBridge> _logger;
     private readonly IAppSettingsService _settingsService;
     private readonly DispatcherQueue _dispatcher;
+    private readonly TerminalOutputCoalescer _coalescer;
+    private DispatcherQueueTimer? _coalesceTimer;
     private bool _disposed;
     private bool _firstOutputLogged;
     private uint _lastColumns;
@@ -39,13 +46,14 @@ public sealed class TerminalBridge : IDisposable
             ?? throw new InvalidOperationException(
                 "TerminalBridge must be constructed on a thread with a DispatcherQueue (the UI thread).");
 
+        _coalescer = new TerminalOutputCoalescer(PostCoalescedBytes, ArmCoalesceTimer);
+
         _session.DataReceived += OnDataReceived;
         _webView.WebMessageReceived += OnWebMessageReceived;
     }
 
     private void OnDataReceived(object? sender, ReadOnlyMemory<byte> data)
     {
-        // TODO: throttle/coalesce writes to avoid postMessage backpressure on bursts.
         if (_disposed) return;
         if (!_firstOutputLogged && data.Length > 0)
         {
@@ -53,14 +61,18 @@ public sealed class TerminalBridge : IDisposable
             _logger.LogInformation("First SSH shell output received: {ByteCount} bytes.", data.Length);
         }
 
-        // SSH read pump fires on a background thread; marshal to the UI thread before
-        // calling any WebView2 method (they're thread-affine to the creator thread).
-        var snapshot = data;
-        if (!_dispatcher.TryEnqueue(() => PostBytesToWebView(snapshot)))
-        {
-            _logger.LogWarning("Failed to enqueue SSH output for WebView posting.");
-        }
+        // SSH read pump fires on a background thread. The coalescer buffers bytes here
+        // and arms a one-shot dispatcher timer (one trip to the UI thread per ~12 ms
+        // window) instead of one DispatcherQueue.TryEnqueue per chunk — see comment on
+        // CoalesceWindowMs above.
+        _coalescer.Append(data.Span);
     }
+
+    /// <summary>
+    /// Returns true if bytes are sitting in the coalescer waiting for the next tick.
+    /// Exposed for tests; production code drives this through <see cref="OnDataReceived"/>.
+    /// </summary>
+    internal bool HasPendingCoalescedBytes => _coalescer.HasPending;
 
     public void RequestFocus()
     {
@@ -68,20 +80,6 @@ public sealed class TerminalBridge : IDisposable
         if (!_dispatcher.TryEnqueue(PostFocusToWebView))
         {
             _logger.LogWarning("Failed to enqueue terminal focus request.");
-        }
-    }
-
-    /// <summary>
-    /// Tells xterm.js to reset its buffer + scrollback. Used by ConnectAsync before
-    /// the new SSH pump starts feeding bytes so the user doesn't see the old session's
-    /// MOTD stacked under the new one (PuTTY's Restart-Session semantics).
-    /// </summary>
-    public void Reset()
-    {
-        if (_disposed) return;
-        if (!_dispatcher.TryEnqueue(PostResetToWebView))
-        {
-            _logger.LogWarning("Failed to enqueue terminal reset.");
         }
     }
 
@@ -100,6 +98,53 @@ public sealed class TerminalBridge : IDisposable
         }
     }
 
+    private void ArmCoalesceTimer()
+    {
+        // Called by the coalescer on the SSH read-pump thread on the empty → buffered
+        // transition. We must create / start the DispatcherQueueTimer on the dispatcher
+        // thread; route through TryEnqueue. Subsequent appends within the window will
+        // see _timerArmed=true in the coalescer and skip re-arming.
+        if (!_dispatcher.TryEnqueue(StartCoalesceTimer))
+        {
+            // TryEnqueue only returns false during dispatcher shutdown (window closing /
+            // app exit) — a one-way state per the Microsoft.UI.Dispatching docs. Do NOT
+            // call _coalescer.Flush() inline here: Flush invokes the post delegate, which
+            // touches the thread-affine WebView2, and calling it from the SSH pump thread
+            // would throw RPC_E_WRONG_THREAD and possibly corrupt WebView2 state.
+            //
+            // We must Suspend the coalescer rather than just log: without it, _timerArmed
+            // stays true and the buffered bytes are stuck (subsequent Appends skip the
+            // arm callback because they see _timerArmed=true, so the buffer grows without
+            // bound until disposal). Suspend drops the pending bytes and short-circuits
+            // future Appends so the SSH pump stops accumulating output for a dispatcher
+            // that will never accept it.
+            _logger.LogWarning("Failed to enqueue coalesce-timer arm; suspending coalescer (dispatcher unavailable).");
+            _coalescer.Suspend();
+        }
+    }
+
+    private void StartCoalesceTimer()
+    {
+        if (_disposed) return;
+        if (_coalesceTimer is null)
+        {
+            _coalesceTimer = _dispatcher.CreateTimer();
+            _coalesceTimer.Interval = TimeSpan.FromMilliseconds(CoalesceWindowMs);
+            _coalesceTimer.IsRepeating = false;
+            _coalesceTimer.Tick += (_, _) => _coalescer.Flush();
+        }
+        _coalesceTimer.Stop();
+        _coalesceTimer.Start();
+    }
+
+    private bool PostCoalescedBytes(ReadOnlyMemory<byte> data)
+    {
+        // Coalescer invokes us on the UI thread via the dispatcher timer tick.
+        if (_disposed || data.Length == 0) return false;
+        PostStringToWebView("d:" + Convert.ToBase64String(data.Span), "posting SSH output");
+        return true;
+    }
+
     private void PostBytesToWebView(ReadOnlyMemory<byte> data)
     {
         if (_disposed) return;
@@ -109,11 +154,6 @@ public sealed class TerminalBridge : IDisposable
     private void PostFocusToWebView()
     {
         PostStringToWebView("f:", "requesting terminal focus");
-    }
-
-    private void PostResetToWebView()
-    {
-        PostStringToWebView("x:", "resetting terminal");
     }
 
     private void PostStringToWebView(string message, string operation)
@@ -238,8 +278,25 @@ public sealed class TerminalBridge : IDisposable
     public void Dispose()
     {
         if (_disposed) return;
-        _disposed = true;
         _session.DataReceived -= OnDataReceived;
         _webView.WebMessageReceived -= OnWebMessageReceived;
+        // Stop pending coalesce ticks first so a late timer doesn't fire concurrently
+        // with the final drain below. Already-queued Tick handlers will see
+        // _coalescer._disposed==true (set by _coalescer.Dispose() below) and short-circuit.
+        _coalesceTimer?.Stop();
+        _coalesceTimer = null;
+        // Final drain: bytes that arrived in the active ~12ms window haven't been posted
+        // yet — without this synchronous flush they're silently dropped when the tab
+        // closes immediately after remote output (regression vs. the pre-coalescer
+        // one-chunk-per-marshal path that flushed each chunk on arrival). _disposed is
+        // still false here so PostCoalescedBytes will actually post to the WebView,
+        // which is alive at this point in the teardown (Dispose runs on the UI thread
+        // before the WebView2 host is torn down by the view-unload path). Catch any
+        // post-time exception so a WebView2 already mid-teardown can't propagate out of
+        // Dispose.
+        try { _coalescer.Flush(); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Final coalescer flush during Dispose failed."); }
+        _disposed = true;
+        _coalescer.Dispose();
     }
 }

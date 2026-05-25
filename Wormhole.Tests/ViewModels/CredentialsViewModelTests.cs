@@ -544,5 +544,11 @@ public class CredentialsViewModelTests
 
         public Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync()
             => Task.FromResult<MRemoteNgImportResult?>(null);
+
+        public Task<Wormhole.Models.Backup.BackupExportResult?> PromptForBackupExportAsync()
+            => Task.FromResult<Wormhole.Models.Backup.BackupExportResult?>(null);
+
+        public Task<Wormhole.Models.Backup.BackupImportResult?> PromptForBackupImportAsync()
+            => Task.FromResult<Wormhole.Models.Backup.BackupImportResult?>(null);
     }
 }

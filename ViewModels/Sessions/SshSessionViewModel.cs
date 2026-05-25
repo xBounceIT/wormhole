@@ -167,7 +167,21 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         if (_reconnectRequestedWhileDetached)
         {
             _reconnectRequestedWhileDetached = false;
-            await DetachAsync().ConfigureAwait(true);
+            // Same reasoning as RetryAsync: skip the Disconnected interlude that
+            // DetachAsync would introduce, so the connecting overlay is up for
+            // the entire teardown→reconnect window and no phantom text flashes
+            // through. Clear xterm.js now so it's empty by the time Connected
+            // hides the overlay.
+            Status = SessionStatus.Connecting;
+            try
+            {
+                webView.PostWebMessageAsString("clear:");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug(ex, "Suppressed exception while clearing xterm.js before background-tab reconnect.");
+            }
+            await TearDownSessionAsync().ConfigureAwait(true);
             await ConnectAsync().ConfigureAwait(true);
             return;
         }
@@ -221,7 +235,24 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             else _reconnectRequestedWhileDetached = true;
             return;
         }
-        await DetachAsync().ConfigureAwait(true);
+
+        // Flip to Connecting BEFORE the teardown so the failed (or live) overlay
+        // hands off directly to the opaque connecting overlay — going through
+        // DetachAsync's Status=Disconnected interlude would otherwise leave a
+        // sub-frame window with no overlay, exposing the prior session's text as
+        // a brief phantom flash. Post the clear in the same sync chunk so xterm.js
+        // is wiped while the overlay covers it, ready for the Connected handoff.
+        Status = SessionStatus.Connecting;
+        try
+        {
+            _webView.PostWebMessageAsString("clear:");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Suppressed exception while clearing xterm.js before retry.");
+        }
+
+        await TearDownSessionAsync().ConfigureAwait(true);
         ErrorMessage = null;
         await ConnectAsync().ConfigureAwait(true);
     }
@@ -239,6 +270,19 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
     public async Task DetachAsync()
     {
+        await TearDownSessionAsync().ConfigureAwait(true);
+        Status = SessionStatus.Disconnected;
+    }
+
+    // Session teardown WITHOUT a Status change — used by RetryAsync / AttachAsync's
+    // reconnect-while-detached branch so the overlay can stay on Connecting through
+    // the whole flow. Going through Disconnected (as DetachAsync does) creates a
+    // sub-frame window where neither the failed nor the connecting overlay is
+    // showing, and the user sees the prior session's text flash through. Public
+    // DetachAsync is the explicit "user hit Disconnect" path — it still ends in
+    // Disconnected and is the only place that should.
+    private async Task TearDownSessionAsync()
+    {
         // Signal cancel to any in-flight ConnectAsync; do NOT Dispose() — the awaiter still
         // holds the token. The CTS is GC-eligible once both sides drop their references.
         var cts = _cts;
@@ -246,7 +290,6 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         try { cts?.Cancel(); } catch { /* already disposed */ }
 
         await SafeDisposeSessionAsync().ConfigureAwait(true);
-        Status = SessionStatus.Disconnected;
     }
 
     public void ReportFailure(string message)
@@ -321,6 +364,27 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         if (profile is null || _webView is null) return;
         if (Interlocked.CompareExchange(ref _connectInFlight, 1, 0) != 0) return;
 
+        // Reset xterm.js before flipping to Connecting so the prior session's text
+        // doesn't bleed through the (now opaque) overlay nor reappear above the new
+        // shell's banner the moment the overlay hides. Harmless on first-time connect
+        // (xterm.js is already empty). The same-VM rebind path in AttachAsync does
+        // NOT reach here — it replays the buffer instead, which is the correct
+        // behavior for a tab switch.
+        //
+        // Swallow ALL exceptions: this runs BEFORE the main try/finally that resets
+        // _connectInFlight, so an uncaught throw here would leak past ConnectAsync
+        // and leave the flag stuck at 1, permanently jamming every future Retry on
+        // this VM (the CompareExchange guard above would silently no-op forever).
+        // The clear is purely cosmetic — never let it block the connect path.
+        try
+        {
+            _webView.PostWebMessageAsString("clear:");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Suppressed exception while clearing xterm.js before connect.");
+        }
+
         Status = SessionStatus.Connecting;
         ErrorMessage = null;
         ResetOutputState();
@@ -360,12 +424,6 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             _session.DataReceived += OnSessionDataReceived;
             _session.Closed += OnSessionClosed;
             _bridge = new TerminalBridge(liveWebView, _session, _loggerFactory.CreateLogger<TerminalBridge>(), _settingsService);
-            // Wipe xterm's buffer + scrollback before the new pump feeds bytes — without this
-            // a Reconnect leaves the previous session's MOTD stacked above the new one (the
-            // old slow teardown happened to mask this; the PuTTY-style fast path makes it
-            // obvious). The reset is enqueued via the dispatcher and posted to WebView2 in
-            // FIFO order, so it lands before the first "d:" payload from _session.Start.
-            _bridge.Reset();
             _session.Start();
 
             // Mirror SshHostKeyValidator.Decide which treats null *and* empty as unpinned —
