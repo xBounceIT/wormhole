@@ -1,4 +1,11 @@
 using System;
+using System.Collections.Generic;
+using System.Net;
+using System.Net.Http;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using System.Web;
 using Wormhole.Services.Tunneling.Watchguard;
 using Xunit;
 
@@ -6,6 +13,82 @@ namespace Wormhole.Tests.Services.Tunneling;
 
 public class WatchguardPreAuthClientTests
 {
+    [Fact]
+    public async Task LogonAsync_PostsExpectedFormFields()
+    {
+        // Regression-locks the wire format of the initial logon leg against tazjin/watchblob's
+        // urls.go templateChallengeTriggerUri. The `style` + `fw_logon_type=logon` fields are
+        // required by some Fireware revs to route into the challenge-aware code path; their
+        // absence silently lands in a legacy path that never issues 2FA challenges.
+        var captured = new CapturingHandler(canned: "<resp><logon_status>1</logon_status></resp>");
+        using var http = new HttpClient(captured);
+        using var client = new WatchguardPreAuthClient(http);
+
+        await client.LogonAsync(
+            server: "firebox.example.com", port: 443,
+            username: "alice", password: "p4ss", domain: "Firebox-DB",
+            cancellationToken: CancellationToken.None);
+
+        var form = captured.LastForm;
+        Assert.Equal("sslvpn_logon", form["action"]);
+        Assert.Equal("fw_logon_progress.xsl", form["style"]);
+        Assert.Equal("logon", form["fw_logon_type"]);
+        Assert.Equal("Firebox-DB", form["fw_domain"]);
+        Assert.Equal("alice", form["fw_username"]);
+        Assert.Equal("p4ss", form["fw_password"]);
+    }
+
+    [Fact]
+    public async Task RespondToChallengeAsync_PostsResponseFieldNotFwPassword()
+    {
+        // Regression-locks the wire format of the challenge-response leg against
+        // tazjin/watchblob's urls.go templateResponseUri. The OTP must go in `response`
+        // with `fw_logon_type=response`, NOT in `fw_password` — MFA-enabled gateways reject
+        // the second step otherwise.
+        var captured = new CapturingHandler(canned: "<resp><logon_status>1</logon_status></resp>");
+        using var http = new HttpClient(captured);
+        using var client = new WatchguardPreAuthClient(http);
+
+        await client.RespondToChallengeAsync(
+            server: "firebox.example.com", port: 443,
+            logonId: "session-abc-123", otpCode: "654321",
+            cancellationToken: CancellationToken.None);
+
+        var form = captured.LastForm;
+        Assert.Equal("sslvpn_logon", form["action"]);
+        Assert.Equal("fw_logon_progress.xsl", form["style"]);
+        Assert.Equal("response", form["fw_logon_type"]);
+        Assert.Equal("session-abc-123", form["fw_logon_id"]);
+        Assert.Equal("654321", form["response"]);
+        // The OTP must NOT be sent in fw_password on the response leg — that was the bug.
+        Assert.False(form.AllKeys.Contains("fw_password"),
+            "challenge response must not include fw_password (it expects `response` instead).");
+    }
+
+    /// <summary>
+    /// Test-only HttpMessageHandler that returns a canned XML body and records the request's
+    /// form fields for assertion. Mirrors what a stub Firebox listener would provide without
+    /// the ceremony (and HttpListener URLACL requirements on Windows).
+    /// </summary>
+    private sealed class CapturingHandler : HttpMessageHandler
+    {
+        private readonly string _canned;
+        public System.Collections.Specialized.NameValueCollection LastForm { get; private set; } = new();
+
+        public CapturingHandler(string canned) { _canned = canned; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var body = await request.Content!.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            LastForm = HttpUtility.ParseQueryString(body);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(_canned, Encoding.UTF8, "application/xml"),
+            };
+        }
+    }
+
+
     [Theory]
     [InlineData("attacker.com@victim.com")]
     [InlineData("evil.com/path")]

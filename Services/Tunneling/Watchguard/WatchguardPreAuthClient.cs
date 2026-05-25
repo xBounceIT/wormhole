@@ -153,12 +153,18 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
         var uri = BuildLogonUri(server, port);
         var form = new Dictionary<string, string>
         {
-            // Field names mirror the official client's HTTP request capture; the Firebox is
-            // strict about case and ordering on older Fireware builds.
+            // Field names + values mirror the official client's HTTP request capture as
+            // reverse-engineered in tazjin/watchblob (urls.go templateChallengeTriggerUri).
+            // The Firebox is strict about case and ordering on older Fireware builds, and the
+            // `style` + `fw_logon_type=logon` fields are required for the initial logon leg
+            // to be routed to the challenge-aware code path; without them some firmware revs
+            // fall back to a legacy code path that never issues challenges.
             ["action"] = "sslvpn_logon",
+            ["style"] = "fw_logon_progress.xsl",
+            ["fw_logon_type"] = "logon",
+            ["fw_domain"] = domain,
             ["fw_username"] = username,
             ["fw_password"] = password,
-            ["fw_domain"] = domain,
         };
         return await PostFormAsync(uri, form, cancellationToken).ConfigureAwait(false);
     }
@@ -169,11 +175,19 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
         var uri = BuildLogonUri(server, port);
         var form = new Dictionary<string, string>
         {
+            // The challenge-response leg uses a DIFFERENT shape from the initial logon — the
+            // OTP goes in `response`, not `fw_password`, and `fw_logon_type` switches from
+            // "logon" to "response". MFA-enabled Fireboxes reject the second step otherwise.
+            // Field names captured from tazjin/watchblob (urls.go templateResponseUri).
+            //
+            // After a successful response leg the same OTP also becomes the OpenVPN
+            // auth-user-pass password (the gateway records the (user, OTP) tuple as a
+            // one-shot accept) — that's handled by the caller in WatchguardTunnelProvider.
             ["action"] = "sslvpn_logon",
+            ["style"] = "fw_logon_progress.xsl",
+            ["fw_logon_type"] = "response",
             ["fw_logon_id"] = logonId,
-            // The challenge response is posted in fw_password — that's the WatchGuard quirk
-            // the official client implements. The OTP then becomes the OpenVPN password.
-            ["fw_password"] = otpCode,
+            ["response"] = otpCode,
         };
         return await PostFormAsync(uri, form, cancellationToken).ConfigureAwait(false);
     }
