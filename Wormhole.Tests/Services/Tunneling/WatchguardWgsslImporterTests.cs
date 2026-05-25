@@ -1,5 +1,6 @@
 using System.Formats.Tar;
 using System.IO;
+using System.IO.Compression;
 using System.Text;
 using System.Threading.Tasks;
 using Wormhole.Services.Tunneling.Watchguard;
@@ -162,6 +163,56 @@ public class WatchguardWgsslImporterTests
         Assert.Equal(4443, result.Port);
     }
 
+    [Fact]
+    public async Task ImportAsync_AcceptsGzippedTarBundle()
+    {
+        // Real `.wgssl` exports from a Firebox are gzip-compressed tar archives (the vendor
+        // extraction workflow itself renames them to `.tgz`). The importer must transparently
+        // decompress these — otherwise normal user inputs fail with a tar-parsing error
+        // before client.ovpn is ever read.
+        const string clientOvpn = "remote firebox.example.com 4443";
+        using var stream = BuildTarGz(new[]
+        {
+            ("client.ovpn", clientOvpn),
+            ("ca.crt", "ca"),
+            ("client.crt", "cert"),
+            ("client.pem", "key"),
+        });
+
+        var result = await WatchguardWgsslImporter.ImportAsync(stream);
+
+        Assert.Equal("firebox.example.com", result.Server);
+        Assert.Equal(4443, result.Port);
+        Assert.Equal("ca", result.CaPem);
+        Assert.Equal("cert", result.ClientCertPem);
+        Assert.Equal("key", result.ClientKeyPem);
+    }
+
+    [Fact]
+    public async Task ImportAsync_RejectsGzipBomb()
+    {
+        // Hostile bundle: small on disk, expands to far more than the 64 MiB cap. Guards
+        // against the worst-case gzip ratio (~1000:1 on repetitive payloads). The cap is
+        // applied on the DECOMPRESSED byte count, so the bomb trips it before the tar reader
+        // ever attempts to allocate per-entry buffers.
+        var giant = new string('A', 80 * 1024 * 1024); // 80 MiB plaintext
+        using var rawTar = BuildTar(new[]
+        {
+            ("client.ovpn", "remote firebox 443"),
+            ("ca.crt", giant),
+            ("client.crt", "cert"),
+            ("client.pem", "key"),
+        });
+        using var gz = new MemoryStream();
+        using (var compressor = new GZipStream(gz, CompressionLevel.Optimal, leaveOpen: true))
+        {
+            rawTar.CopyTo(compressor);
+        }
+        gz.Position = 0;
+
+        await Assert.ThrowsAsync<InvalidDataException>(() => WatchguardWgsslImporter.ImportAsync(gz));
+    }
+
     /// <summary>Build a minimal POSIX-ustar tar archive in memory containing the named files.</summary>
     private static MemoryStream BuildTar((string Name, string Content)[] files)
     {
@@ -180,5 +231,19 @@ public class WatchguardWgsslImporterTests
         }
         ms.Position = 0;
         return ms;
+    }
+
+    /// <summary>Same as <see cref="BuildTar"/> but the bytes are gzip-compressed — matches the
+    /// real-world .wgssl bundle shape.</summary>
+    private static MemoryStream BuildTarGz((string Name, string Content)[] files)
+    {
+        using var raw = BuildTar(files);
+        var gz = new MemoryStream();
+        using (var compressor = new GZipStream(gz, CompressionLevel.Optimal, leaveOpen: true))
+        {
+            raw.CopyTo(compressor);
+        }
+        gz.Position = 0;
+        return gz;
     }
 }
