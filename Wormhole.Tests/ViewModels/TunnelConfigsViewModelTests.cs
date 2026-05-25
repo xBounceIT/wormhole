@@ -679,6 +679,9 @@ public class TunnelConfigsViewModelTests
         public Task<ConnectionNode?> EditConnectionAsync(ConnectionNode initial, bool isNew) =>
             Task.FromResult<ConnectionNode?>(null);
 
+        public Task<ConnectionNode?> EditFolderAsync(ConnectionNode initial, bool isNew) =>
+            Task.FromResult<ConnectionNode?>(null);
+
         public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null) =>
             Task.FromResult<CredentialDraft?>(null);
 

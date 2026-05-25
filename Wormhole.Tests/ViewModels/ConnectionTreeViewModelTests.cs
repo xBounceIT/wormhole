@@ -933,6 +933,100 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         Assert.False(child.IsExpanded);
     }
 
+    [Fact]
+    public async Task AddFolder_WithTunnel_PersistsTunnelFields()
+    {
+        var tunnelId = Guid.NewGuid();
+        var dialog = new FakeDialogService
+        {
+            EditFolderResult = new ConnectionNode
+            {
+                Kind = NodeKind.Folder,
+                Name = "Production",
+                TunnelEnabled = true,
+                TunnelConfigId = tunnelId,
+            },
+        };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        await vm.AddFolderCommand.ExecuteAsync(null);
+
+        var row = Assert.Single(await _repo.GetAllAsync());
+        Assert.Equal("Production", row.Name);
+        Assert.Equal(NodeKind.Folder, row.Kind);
+        Assert.True(row.TunnelEnabled);
+        Assert.Equal(tunnelId, row.TunnelConfigId);
+    }
+
+    [Fact]
+    public async Task Edit_FolderTunnelChange_PersistsTunnelFields()
+    {
+        // Start from a folder with no tunnel, then assign one via the editor and confirm both
+        // tunnel fields land in the DB. This is the bug the folder editor was added to fix —
+        // the inheritance resolver already walks folder TunnelEnabled/TunnelConfigId, but
+        // before this dialog there was no way for the user to set them.
+        var dialog = new FakeDialogService { TextPromptResult = "Production" };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+        await vm.AddFolderCommand.ExecuteAsync(null);
+
+        var tunnelId = Guid.NewGuid();
+        dialog.EditFolderResult = new ConnectionNode
+        {
+            Kind = NodeKind.Folder,
+            Name = "Production",
+            TunnelEnabled = true,
+            TunnelConfigId = tunnelId,
+        };
+        await vm.EditCommand.ExecuteAsync(vm.Roots.Single());
+
+        var row = (await _repo.GetAllAsync()).Single();
+        Assert.True(row.TunnelEnabled);
+        Assert.Equal(tunnelId, row.TunnelConfigId);
+    }
+
+    [Fact]
+    public async Task Edit_FolderRename_PreservesInheritedDefaultsOnFolder()
+    {
+        // Regression for codex PR review: folders carry inheritance defaults for their
+        // descendants (mRemoteNG import populates Protocol / Host / Username / CredentialId
+        // / RdpDomain on container nodes — see MRemoteNgImportService.Walk). The folder
+        // editor only writes Name + tunnel, so a rename MUST round-trip every other field
+        // untouched. Pre-fix, DialogService.EditFolderAsync used CloneIdentityFrom and
+        // silently nulled all of them.
+        var credentialId = Guid.NewGuid();
+        var seed = new ConnectionNode
+        {
+            Kind = NodeKind.Folder,
+            Name = "Linux Servers",
+            Protocol = ProtocolType.Ssh,
+            Host = "bastion.example.com",
+            Port = 2222,
+            Username = "admin",
+            CredentialId = credentialId,
+            RdpDomain = "CORP",
+        };
+        await _repo.AddAsync(seed);
+
+        var dialog = new FakeDialogService { TextPromptResult = "Linux Production" };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        await vm.EditCommand.ExecuteAsync(vm.Roots.Single());
+
+        var row = (await _repo.GetAllAsync()).Single();
+        Assert.Equal("Linux Production", row.Name);
+        // The inheritance defaults must survive the rename — otherwise descendants
+        // that resolved through this folder lose their config.
+        Assert.Equal(ProtocolType.Ssh, row.Protocol);
+        Assert.Equal("bastion.example.com", row.Host);
+        Assert.Equal(2222, row.Port);
+        Assert.Equal("admin", row.Username);
+        Assert.Equal(credentialId, row.CredentialId);
+        Assert.Equal("CORP", row.RdpDomain);
+    }
+
     private sealed class ThrowOnUpdateRepository : IConnectionRepository
     {
         private readonly IConnectionRepository _inner;

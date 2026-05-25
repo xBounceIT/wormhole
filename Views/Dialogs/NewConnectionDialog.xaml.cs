@@ -50,7 +50,7 @@ public sealed partial class NewConnectionDialog : UserControl
     public async Task LoadAsync(ConnectionNode initial)
     {
         await ViewModel.LoadCredentialsAsync();
-        await ViewModel.LoadTunnelConfigsAsync();
+        await ViewModel.TunnelPicker.LoadAsync();
         ViewModel.LoadFrom(initial);
     }
 

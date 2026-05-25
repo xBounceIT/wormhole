@@ -182,17 +182,16 @@ public partial class ConnectionTreeViewModel : ObservableObject
     [RelayCommand]
     private async Task AddFolder(TreeNodeViewModel? clicked)
     {
-        var name = await _dialog.PromptForTextAsync("New folder", "Name");
-        if (string.IsNullOrWhiteSpace(name)) return;
-
         var parentId = ResolveParentId(clicked);
-        await SafeAddAsync(new ConnectionNode
+        var seed = new ConnectionNode
         {
-            Name = name,
             Kind = NodeKind.Folder,
             ParentId = parentId,
             SortOrder = NextSortOrder(parentId),
-        });
+        };
+        var edited = await _dialog.EditFolderAsync(seed, isNew: true);
+        if (edited is null) return;
+        await SafeAddAsync(edited);
     }
 
     [RelayCommand]
@@ -219,10 +218,9 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
         if (node.Kind == NodeKind.Folder)
         {
-            var name = await _dialog.PromptForTextAsync("Rename folder", "Name", defaultValue: node.Name);
-            if (string.IsNullOrWhiteSpace(name) || name == node.Name) return;
-            node.Name = name;
-            await SafeUpdateAsync(node);
+            var editedFolder = await _dialog.EditFolderAsync(node, isNew: false);
+            if (editedFolder is null) return;
+            await SafeUpdateAsync(editedFolder);
             return;
         }
 
@@ -306,8 +304,11 @@ public partial class ConnectionTreeViewModel : ObservableObject
         {
             _logger.LogError(ex, "Failed to update {Kind} '{Name}'", node.Kind, node.Name);
             await _dialog.ShowMessageAsync("Couldn't save", ex.Message);
-            // Edit mutates clicked.Node in place before persistence; reload from the DB
-            // so the tree reflects what was actually committed, not the unsaved draft.
+            // PersistTreeStructureAsync mutates ParentId/SortOrder on the live nodes before
+            // calling here (see ApplyAndCollectChangedNodes), so on failure the in-memory
+            // tree is ahead of the DB. Reload so the tree reflects what was actually
+            // committed, not the unsaved draft. (Edit-flow callers pass a fresh clone and
+            // don't touch the original node, so this reload is a no-op for them.)
             await RefreshAsync();
         }
     }
