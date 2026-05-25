@@ -100,7 +100,28 @@
              the profile so they can be edited / rotated independently and stored alongside
              (DPAPI-encrypted) instead of inlined in the profile blob. -->
         <StackPanel x:Name="OpenVpnPanel" Spacing="10" Visibility="Collapsed">
-            <TextBlock Text="Profile" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+            <Grid Margin="0,4,0,0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0"
+                           Text="Profile"
+                           Style="{StaticResource BodyStrongTextBlockStyle}"
+                           VerticalAlignment="Center" />
+                <Button Grid.Column="1"
+                        Content="Import from file…"
+                        ToolTipService.ToolTip="Load a .ovpn profile from disk"
+                        Click="OnImportOvpnFile" />
+            </Grid>
+            <!-- Surfaces .ovpn import errors inline. Cannot use a nested ContentDialog
+                 here because TunnelDialog itself is hosted in a ContentDialog and WinUI 3
+                 forbids two open at the same XamlRoot. -->
+            <InfoBar x:Name="OvpnImportErrorBar"
+                     IsOpen="False"
+                     IsClosable="True"
+                     Severity="Error"
+                     Title="Couldn't read file" />
             <TextBox x:Name="ProfileOvpnBox"
                      Header="OpenVPN profile (.ovpn contents)"
                      PlaceholderText="client&#x0a;proto udp&#x0a;remote vpn.example.com 1194&#x0a;..."

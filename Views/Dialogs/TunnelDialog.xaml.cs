@@ -1,8 +1,11 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Windows.Storage.Pickers;
+using Wormhole.Helpers;
 using Wormhole.Models;
 
 namespace Wormhole.Views.Dialogs;
@@ -180,6 +183,47 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
     private void OnPasswordFieldChanged(object sender, RoutedEventArgs e)
     {
         ValidityChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private async void OnImportOvpnFile(object sender, RoutedEventArgs e)
+    {
+        // async void + COM-backed FileOpenPicker: any throw here would otherwise hit
+        // App.UnhandledException with the host dialog frozen, so the entire body is in
+        // try/catch and failures are surfaced through the inline InfoBar.
+        try
+        {
+            OvpnImportErrorBar.IsOpen = false;
+
+            var mainWindow = App.Current.MainWindow
+                ?? throw new InvalidOperationException("Main window is not available.");
+            var hwnd = mainWindow.GetHwnd();
+
+            var picker = new FileOpenPicker
+            {
+                ViewMode = PickerViewMode.List,
+                SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
+            };
+            picker.FileTypeFilter.Add(".ovpn");
+            picker.FileTypeFilter.Add(".conf");
+            // "*" lets users pick profiles saved without an extension — some vendor portals
+            // serve the file as plain "client" with no suffix.
+            picker.FileTypeFilter.Add("*");
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+
+            var file = await picker.PickSingleFileAsync();
+            if (file is null) return;
+
+            var text = await File.ReadAllTextAsync(file.Path);
+            // No trim: inline <ca>/<cert>/<key> blocks rely on internal newlines, and the
+            // build path already preserves the blob verbatim — mirror that contract on the
+            // way in so a round-trip through import matches a hand-paste.
+            ProfileOvpnBox.Text = text;
+        }
+        catch (Exception ex)
+        {
+            OvpnImportErrorBar.Message = ex.Message;
+            OvpnImportErrorBar.IsOpen = true;
+        }
     }
 
     private void OnKindChanged(object sender, SelectionChangedEventArgs e)
