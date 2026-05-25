@@ -765,9 +765,8 @@ public sealed class BackupService : IBackupService
             node.TunnelConfigId = null;
         }
         if (node.Kind == NodeKind.Connection
-            && node.TunnelEnabled == true
-            && node.TunnelConfigId is null
-            && !HasResolvableAncestorTunnelConfig(node, nodesById, resolvableTunnelIds))
+            && IsEffectivelyTunnelEnabled(node, nodesById)
+            && !HasEffectiveResolvableTunnelConfig(node, nodesById, resolvableTunnelIds))
         {
             result.Warnings.Add(
                 $"Node '{node.Name}' had tunneling enabled but no resolvable tunnel config; tunneling disabled.");
@@ -775,23 +774,44 @@ public sealed class BackupService : IBackupService
         }
     }
 
-    private static bool HasResolvableAncestorTunnelConfig(
+    private static bool IsEffectivelyTunnelEnabled(
+        ConnectionNode node,
+        IReadOnlyDictionary<Guid, ConnectionNode> nodesById)
+    {
+        foreach (var current in WalkNodeAndAncestors(node, nodesById))
+        {
+            if (current.TunnelEnabled is { } enabled) return enabled;
+        }
+        return false;
+    }
+
+    private static bool HasEffectiveResolvableTunnelConfig(
         ConnectionNode node,
         IReadOnlyDictionary<Guid, ConnectionNode> nodesById,
         HashSet<Guid> resolvableTunnelIds)
     {
-        var seen = new HashSet<Guid> { node.Id };
-        var parentId = node.ParentId;
-        while (parentId is Guid id && seen.Add(id))
+        foreach (var current in WalkNodeAndAncestors(node, nodesById))
         {
-            if (!nodesById.TryGetValue(id, out var parent)) return false;
-            if (parent.TunnelConfigId is Guid tunId && resolvableTunnelIds.Contains(tunId))
+            if (current.TunnelConfigId is Guid tunId && resolvableTunnelIds.Contains(tunId))
             {
                 return true;
             }
-            parentId = parent.ParentId;
         }
         return false;
+    }
+
+    private static IEnumerable<ConnectionNode> WalkNodeAndAncestors(
+        ConnectionNode node,
+        IReadOnlyDictionary<Guid, ConnectionNode> nodesById)
+    {
+        var current = node;
+        var seen = new HashSet<Guid>();
+        while (seen.Add(current.Id))
+        {
+            yield return current;
+            if (current.ParentId is not Guid parentId) yield break;
+            if (!nodesById.TryGetValue(parentId, out current)) yield break;
+        }
     }
 
     /// <summary>

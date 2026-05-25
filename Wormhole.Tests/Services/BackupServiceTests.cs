@@ -1122,6 +1122,71 @@ public sealed class BackupServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ImportAsync_DisablesChildWhenInheritedTunnelEnabledHasNoResolvableConfig()
+    {
+        // If a folder loses its tunnel config and a child inherits only TunnelEnabled=true,
+        // the child would otherwise resolve to "enabled but no config" and fail at runtime.
+        // Disable the connection node itself while leaving the folder's enablement intact for
+        // sibling connections that may provide their own TunnelConfigId override.
+        var dst = await CreateEnvAsync();
+        var folderId = Guid.NewGuid();
+        var childId = Guid.NewGuid();
+        var missingFolderTun = Guid.NewGuid();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "encryption": "none",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "payload": {
+                "nodes": [
+                  {
+                    "id": "{{folderId}}",
+                    "name": "folder",
+                    "kind": 0,
+                    "sortOrder": 0,
+                    "tunnelEnabled": true,
+                    "tunnelConfigId": "{{missingFolderTun}}",
+                    "createdAt": "{{DateTime.UtcNow:O}}",
+                    "updatedAt": "{{DateTime.UtcNow:O}}"
+                  },
+                  {
+                    "id": "{{childId}}",
+                    "parentId": "{{folderId}}",
+                    "name": "vpn-leaf",
+                    "kind": 1,
+                    "sortOrder": 1,
+                    "protocol": 0,
+                    "host": "h",
+                    "port": 22,
+                    "createdAt": "{{DateTime.UtcNow:O}}",
+                    "updatedAt": "{{DateTime.UtcNow:O}}"
+                  }
+                ],
+                "credentials": [], "tunnels": [], "passwords": [], "privateKeys": [], "tunnelPayloads": []
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "folder-missing-child-inherits-enabled.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var result = await dst.Service.ImportAsync(path, null);
+
+        Assert.Equal(2, result.NodesImported);
+        Assert.Contains(result.Warnings, w => w.Contains("missing tunnel", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Warnings, w => w.Contains("tunneling disabled", StringComparison.OrdinalIgnoreCase));
+        var nodes = await dst.Connections.GetAllAsync();
+        var folder = nodes.Single(n => n.Id == folderId);
+        var child = nodes.Single(n => n.Id == childId);
+        Assert.Equal(true, folder.TunnelEnabled);
+        Assert.Null(folder.TunnelConfigId);
+        Assert.Equal(false, child.TunnelEnabled);
+
+        var resolved = new InheritanceResolver().Resolve(child, nodes.ToDictionary(n => n.Id));
+        Assert.False(resolved.TunnelEnabled);
+        Assert.Null(resolved.TunnelConfigId);
+    }
+
+    [Fact]
     public async Task ImportAsync_RejectsFilesLargerThanCap()
     {
         var dst = await CreateEnvAsync();
