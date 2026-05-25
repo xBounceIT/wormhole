@@ -214,6 +214,31 @@ public sealed partial class SshTerminalView : UserControl
 
         var vm = _viewModel;
         if (vm is null) return;
+        // Push WinUI keyboard focus into the WebView2 before AttachAsync fires
+        // its JS-side term.focus(). Without this, a freshly-opened tab leaves
+        // focus on the connection tree and the first keystrokes are dropped
+        // until the user clicks inside the terminal.
+        //
+        // Wrapped in its own try/catch (separate from the AttachAsync try below)
+        // for two reasons: (1) a Focus exception during a WebView2 teardown race
+        // must not escape this async void handler and crash the process; (2) a
+        // focus failure must not bubble up to vm.ReportFailure and mark a healthy
+        // SSH session as Failed. IsLoaded gates the call so we don't focus a
+        // control whose Unloaded raced ahead of this dispatcher run.
+        if (IsLoaded)
+        {
+            try
+            {
+                TerminalView.Focus(FocusState.Programmatic);
+            }
+            catch (Exception ex)
+            {
+                // App.Current can be null during process shutdown — accessed via ?. so an
+                // NRE inside this catch can't escape and crash the async void handler.
+                var logger = App.Current?.Services?.GetService<ILogger<SshTerminalView>>();
+                logger?.LogDebug(ex, "SshTerminalView focus push suppressed (likely teardown race).");
+            }
+        }
         try
         {
             await vm.AttachAsync(TerminalView.CoreWebView2, size);

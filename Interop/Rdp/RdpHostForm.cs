@@ -247,6 +247,67 @@ internal sealed class RdpHostForm : FormsForm
         catch (Exception ex) { _logger?.LogDebug(ex, "Post-Connect ClearTextPassword scrub failed (suppressed)."); }
     }
 
+    /// <summary>
+    /// Push Win32 keyboard focus into the embedded ActiveX child HWND so the first
+    /// keystroke after a fresh connect lands on the remote logon screen instead of
+    /// the WinUI connection tree. Idempotent. Must run on the STA UI thread (same as
+    /// every other API on this form). No-ops when the form or the AxHost child
+    /// hasn't been realised yet — that path is reachable during a teardown race
+    /// between the OCX firing OnLoginComplete and the VM detaching the session.
+    /// SetFocus targets <c>_ax.Handle</c> rather than the form's HWND because the
+    /// OCX paints into the AxHost child and Win32 focus is HWND-specific (Z-order
+    /// alone doesn't redirect keyboard input).
+    /// </summary>
+    public void RequestFocus()
+    {
+        // EnsureStaThread is intentionally OUTSIDE the try below. STA violations are
+        // programming errors that should surface loudly via the InvalidOperationException
+        // throw, not be silently swallowed as a Debug log.
+        EnsureStaThread();
+        if (!IsHandleCreated || !_ax.IsHandleCreated) return;
+        try
+        {
+            // Capture the handle FIRST so a teardown race between IsHandleCreated and
+            // SetFocus can't slip SetFocus(NULL) through — SetFocus(NULL) is a valid
+            // Win32 call that DETACHES keyboard focus from the calling thread, breaking
+            // input until something else takes focus. Reading _ax.Handle can internally
+            // dispatch Win32 calls during a handle-recreate, so do this BEFORE the
+            // SetLastSystemError(0) below or that Win32 traffic would clobber the
+            // zeroed error code and make the diagnostic log misattribute.
+            var hwnd = _ax.Handle;
+            if (hwnd == IntPtr.Zero) return;
+
+            // SetFocus returns the previously-focused HWND (or IntPtr.Zero) and does NOT
+            // throw on Win32 failure — it signals via NULL + GetLastError. NULL with
+            // zero last-error is normal (no prior focus owner); NULL with a nonzero
+            // last-error means a real failure (e.g. hwnd belongs to a thread without
+            // the input queue). Surface that case so a user reporting 'first keystroke
+            // still dropped' has a diagnostic trail; without SetLastError + this check
+            // the failure is completely silent.
+            Marshal.SetLastSystemError(0);
+            var previous = Win32Interop.SetFocus(hwnd);
+            if (previous == IntPtr.Zero)
+            {
+                var err = Marshal.GetLastWin32Error();
+                if (err != 0)
+                {
+                    _logger?.LogWarning(
+                        "RdpHostForm.RequestFocus: SetFocus returned NULL with Win32 error {Error:X8} for HWND {Hwnd:X}.",
+                        err, hwnd.ToInt64());
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // The native SetFocus call itself doesn't throw. The managed wrappers around
+            // _ax.Handle (ObjectDisposedException, COMException from teardown) can —
+            // swallow so a teardown race doesn't poison the OCX event handler whose
+            // continuation requested focus. NOTE: this catch does NOT cover the
+            // EnsureStaThread() at the top of the method — that's intentionally loud.
+            _logger?.LogDebug(ex, "RdpHostForm.RequestFocus suppressed (likely teardown race).");
+        }
+    }
+
     /// <summary>Idempotent disconnect. Tolerates the OCX already being in a disconnected state.
     /// All-exception catch is intentional: teardown must not throw — a server-side termination
     /// can surface as a COMException (RPC), the OCX may not expose <c>Disconnect</c> on an older

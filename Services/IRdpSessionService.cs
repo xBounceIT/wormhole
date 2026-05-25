@@ -64,6 +64,14 @@ public interface IRdpSession : IDisposable
 
     /// <summary>Request a graceful disconnect; idempotent.</summary>
     void Disconnect();
+
+    /// <summary>
+    /// Push Win32 keyboard focus into the embedded RDP ActiveX child window. Called when
+    /// the session reaches Connected so the first keystroke into the remote logon screen
+    /// is captured without an extra click. Idempotent and safe on an already-focused HWND;
+    /// no-ops if the host or OCX HWND isn't realised yet.
+    /// </summary>
+    void Focus();
 }
 
 /// <summary>Disconnect description supplied to the view-model. <paramref name="IsClean"/> tracks whether

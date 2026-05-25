@@ -158,6 +158,45 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public void Connected_PushesWin32FocusIntoActiveXHwnd()
+    {
+        // First-keystroke-dropped fix: when the OCX fires OnLoginComplete (mapped to
+        // IRdpSession.Connected) the VM must call _session.Focus() so the embedded ActiveX
+        // HWND receives keyboard focus. Without this the user has to click the RDP surface
+        // before the first keystroke (e.g. into the Windows logon screen) is captured.
+        var (vm, _, _, _, _) = CreateVm();
+        vm.Initialize(MakeProfile());
+        var fake = new FakeRdpSession();
+        vm.AttachConnectedSessionForTesting(fake);
+        // Attach itself doesn't push focus — it's the OCX's OnLoginComplete that does.
+        Assert.Equal(0, fake.FocusCount);
+
+        fake.RaiseConnected();
+
+        Assert.Equal(1, fake.FocusCount);
+    }
+
+    [Fact]
+    public void AutoReconnected_DoesNotPushFocus()
+    {
+        // Auto-reconnect is not user-initiated. If the user has moved focus to another
+        // tab / search box / app during the reconnect banner, pulling focus back to the
+        // RDP surface mid-typing is worse than the original problem. The OCX retains its
+        // own Win32 focus across most auto-reconnect cycles, so leaving focus alone is
+        // the right default. Cold connect (RaiseConnected) is the only path that pushes.
+        var (vm, _, _, _, _) = CreateVm();
+        vm.Initialize(MakeProfile());
+        var fake = new FakeRdpSession();
+        vm.AttachConnectedSessionForTesting(fake);
+        fake.RaiseAutoReconnecting(new RdpReconnectInfo(2, 20, 0));
+        var beforeReconnect = fake.FocusCount;
+
+        fake.RaiseAutoReconnected();
+
+        Assert.Equal(beforeReconnect, fake.FocusCount);
+    }
+
+    [Fact]
     public void AutoReconnected_RestoresConnectedStatusAndClearsReconnectBanner()
     {
         // Without forwarding OnAutoReconnected, AutoReconnecting drove Status to Connecting

@@ -160,6 +160,8 @@ public sealed class RdpSessionService : IRdpSessionService
 
         public void Disconnect() => _form.Disconnect();
 
+        public void Focus() => _form.RequestFocus();
+
         public void Dispose()
         {
             try { _form.Dispose(); }
