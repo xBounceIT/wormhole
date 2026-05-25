@@ -278,14 +278,25 @@ public sealed class TerminalBridge : IDisposable
     public void Dispose()
     {
         if (_disposed) return;
-        _disposed = true;
         _session.DataReceived -= OnDataReceived;
         _webView.WebMessageReceived -= OnWebMessageReceived;
-        // Stop pending coalesce ticks first so a late timer doesn't fire after the
-        // WebView has been torn down. The coalescer itself is then drained of any
-        // residual bytes (which the timer would have flushed).
+        // Stop pending coalesce ticks first so a late timer doesn't fire concurrently
+        // with the final drain below. Already-queued Tick handlers will see
+        // _coalescer._disposed==true (set by _coalescer.Dispose() below) and short-circuit.
         _coalesceTimer?.Stop();
         _coalesceTimer = null;
+        // Final drain: bytes that arrived in the active ~12ms window haven't been posted
+        // yet — without this synchronous flush they're silently dropped when the tab
+        // closes immediately after remote output (regression vs. the pre-coalescer
+        // one-chunk-per-marshal path that flushed each chunk on arrival). _disposed is
+        // still false here so PostCoalescedBytes will actually post to the WebView,
+        // which is alive at this point in the teardown (Dispose runs on the UI thread
+        // before the WebView2 host is torn down by the view-unload path). Catch any
+        // post-time exception so a WebView2 already mid-teardown can't propagate out of
+        // Dispose.
+        try { _coalescer.Flush(); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Final coalescer flush during Dispose failed."); }
+        _disposed = true;
         _coalescer.Dispose();
     }
 }
