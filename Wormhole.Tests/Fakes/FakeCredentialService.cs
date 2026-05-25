@@ -30,9 +30,16 @@ public sealed class FakeCredentialService : ICredentialService
         Task.FromResult(Passwords.TryGetValue(credentialId, out var p) ? p : null);
     public Task DeletePasswordAsync(Guid credentialId) { Passwords.Remove(credentialId); return Task.CompletedTask; }
 
-    public Task StorePrivateKeyAsync(Guid credentialId, byte[] privateKeyBytes) { PrivateKeys[credentialId] = privateKeyBytes; return Task.CompletedTask; }
+    // Production CredentialService.StorePrivateKeyAsync hands the bytes to ProtectedData.Protect
+    // which copies before returning, so callers are free to zero/reuse the input array. Mirror
+    // that contract here with an explicit defensive copy so tests reflect the real lifetime,
+    // not an aliased reference.
+    public Task StorePrivateKeyAsync(Guid credentialId, byte[] privateKeyBytes) { PrivateKeys[credentialId] = (byte[])privateKeyBytes.Clone(); return Task.CompletedTask; }
+    // Clone on Read too — production ReadProtectedAsync returns a fresh ProtectedData.Unprotect
+    // buffer per call, so callers are free to zero/mutate the result. The fake must match that
+    // lifetime contract or callers that zero the returned bytes corrupt the in-memory dict.
     public Task<byte[]?> ReadPrivateKeyAsync(Guid credentialId) =>
-        Task.FromResult(PrivateKeys.TryGetValue(credentialId, out var b) ? b : null);
+        Task.FromResult(PrivateKeys.TryGetValue(credentialId, out var b) ? (byte[]?)b.Clone() : null);
     public Task DeletePrivateKeyAsync(Guid credentialId) { PrivateKeys.Remove(credentialId); return Task.CompletedTask; }
 
     /// <summary>Set true to make <see cref="StoreTunnelConfigAsync"/> throw — drives the
@@ -42,10 +49,12 @@ public sealed class FakeCredentialService : ICredentialService
     public Task StoreTunnelConfigAsync(Guid tunnelConfigId, byte[] configBytes)
     {
         if (ThrowOnStoreTunnelConfig) throw new InvalidOperationException("simulated secret write failure");
-        TunnelConfigs[tunnelConfigId] = configBytes;
+        // Defensive copy — production CredentialService passes the bytes through DPAPI.Protect
+        // before retaining anything, so callers can zero the input.
+        TunnelConfigs[tunnelConfigId] = (byte[])configBytes.Clone();
         return Task.CompletedTask;
     }
     public Task<byte[]?> ReadTunnelConfigAsync(Guid tunnelConfigId) =>
-        Task.FromResult(TunnelConfigs.TryGetValue(tunnelConfigId, out var b) ? b : null);
+        Task.FromResult(TunnelConfigs.TryGetValue(tunnelConfigId, out var b) ? (byte[]?)b.Clone() : null);
     public Task DeleteTunnelConfigAsync(Guid tunnelConfigId) { TunnelConfigs.Remove(tunnelConfigId); return Task.CompletedTask; }
 }

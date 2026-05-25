@@ -53,6 +53,19 @@
             <ProgressBar Minimum="0" Maximum="1"
                          Value="{x:Bind ViewModel.Update.DownloadProgress, Mode=OneWay}"
                          Visibility="{x:Bind ViewModel.Update.IsBusy, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+
+            <TextBlock Text="Backup &amp; Restore" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
+            <TextBlock TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}">
+                Export your connections, credentials, SSH keys, and VPN tunnels to a JSON file,
+                or restore a backup taken from another installation. Existing items with the
+                same ID are kept; the import never overwrites.
+            </TextBlock>
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <Button Content="Export backup..."
+                        Command="{x:Bind ViewModel.ExportBackupCommand}" />
+                <Button Content="Import backup..."
+                        Command="{x:Bind ViewModel.ImportBackupCommand}" />
+            </StackPanel>
         </StackPanel>
     </ScrollViewer>
 </Page>

@@ -1,5 +1,6 @@
 using System.Threading.Tasks;
 using Wormhole.Models;
+using Wormhole.Models.Backup;
 using Wormhole.Services;
 
 namespace Wormhole.Tests.Fakes;
@@ -110,5 +111,27 @@ public class FakeDialogService : IDialogService
     {
         MRemoteNgImportPromptCount++;
         return Task.FromResult(MRemoteNgImportResult);
+    }
+
+    /// <summary>Drives <see cref="PromptForBackupExportAsync"/>; null = user closed the
+    /// dialog without exporting.</summary>
+    public BackupExportResult? BackupExportResult { get; set; }
+    /// <summary>Drives <see cref="PromptForBackupImportAsync"/>; null = user closed the
+    /// dialog without importing.</summary>
+    public BackupImportResult? BackupImportResult { get; set; }
+
+    public int BackupExportPromptCount { get; private set; }
+    public int BackupImportPromptCount { get; private set; }
+
+    public virtual Task<BackupExportResult?> PromptForBackupExportAsync()
+    {
+        BackupExportPromptCount++;
+        return Task.FromResult(BackupExportResult);
+    }
+
+    public virtual Task<BackupImportResult?> PromptForBackupImportAsync()
+    {
+        BackupImportPromptCount++;
+        return Task.FromResult(BackupImportResult);
     }
 }

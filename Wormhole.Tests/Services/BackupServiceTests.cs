@@ -1,0 +1,943 @@
+using System.Text;
+using Microsoft.Data.Sqlite;
+using Microsoft.Extensions.Logging.Abstractions;
+using Wormhole.Data;
+using Wormhole.Data.Repositories;
+using Wormhole.Models;
+using Wormhole.Services.Backup;
+using Wormhole.Tests.Fakes;
+using Xunit;
+
+namespace Wormhole.Tests.Services;
+
+public sealed class BackupServiceTests : IDisposable
+{
+    // Mirrors the production migrations 0001-0006 plus the tunnel-config schema. Inlined
+    // because the test project links sources but can't reach the main assembly's embedded
+    // migration resources.
+    private const string SchemaSql = @"
+        CREATE TABLE Nodes (
+            Id                       TEXT     PRIMARY KEY NOT NULL,
+            ParentId                 TEXT     NULL REFERENCES Nodes(Id) ON DELETE CASCADE,
+            Name                     TEXT     NOT NULL,
+            Kind                     INTEGER  NOT NULL,
+            SortOrder                INTEGER  NOT NULL DEFAULT 0,
+            Protocol                 INTEGER  NULL,
+            Host                     TEXT     NULL,
+            Port                     INTEGER  NULL,
+            Username                 TEXT     NULL,
+            CredentialId             TEXT     NULL,
+            RdpDomain                TEXT     NULL,
+            RdpScreenSize            TEXT     NULL,
+            RdpFullScreen            INTEGER  NULL,
+            RdpColorDepth            INTEGER  NULL,
+            RdpUseAllMonitors        INTEGER  NULL,
+            RdpAudioMode             INTEGER  NULL,
+            RdpAudioCaptureMode      INTEGER  NULL,
+            RdpKeyboardHookMode      INTEGER  NULL,
+            RdpRedirectClipboard     INTEGER  NULL,
+            RdpRedirectPrinters      INTEGER  NULL,
+            RdpRedirectSmartCards    INTEGER  NULL,
+            RdpRedirectPorts         INTEGER  NULL,
+            RdpRedirectDevices       INTEGER  NULL,
+            RdpRedirectDrives        TEXT     NULL,
+            RdpConnectionSpeed       INTEGER  NULL,
+            RdpDesktopBackground     INTEGER  NULL,
+            RdpFontSmoothing         INTEGER  NULL,
+            RdpDesktopComposition    INTEGER  NULL,
+            RdpWindowDrag            INTEGER  NULL,
+            RdpMenuAnimation         INTEGER  NULL,
+            RdpVisualStyles          INTEGER  NULL,
+            RdpBitmapCaching         INTEGER  NULL,
+            RdpAutoReconnect         INTEGER  NULL,
+            RdpServerAuthentication  INTEGER  NULL,
+            RdpGatewayUsageMethod    INTEGER  NULL,
+            RdpGatewayHostname       TEXT     NULL,
+            RdpGatewayCredentialId   TEXT     NULL,
+            RdpGatewayBypassLocal    INTEGER  NULL,
+            RdpGatewayUseSameCreds   INTEGER  NULL,
+            RdpUseExternalClient     INTEGER  NULL,
+            SshKeyFileName           TEXT     NULL,
+            SshKnownHostFingerprint  TEXT     NULL,
+            TunnelEnabled            INTEGER  NULL,
+            TunnelConfigId           TEXT     NULL,
+            CreatedAt                TEXT     NOT NULL,
+            UpdatedAt                TEXT     NOT NULL
+        );
+        CREATE INDEX IX_Nodes_ParentId ON Nodes(ParentId);
+        CREATE TABLE CredentialProfiles (
+            Id                  TEXT     PRIMARY KEY NOT NULL,
+            Name                TEXT     NOT NULL,
+            Username            TEXT     NULL,
+            Domain              TEXT     NULL,
+            Kind                INTEGER  NOT NULL,
+            PrivateKeyFileName  TEXT     NULL,
+            Protocol            INTEGER  NOT NULL DEFAULT 0,
+            CreatedAt           TEXT     NOT NULL
+        );
+        CREATE UNIQUE INDEX UX_CredentialProfiles_Name ON CredentialProfiles(Name);
+        CREATE TABLE TunnelConfigs (
+            Id         TEXT     PRIMARY KEY NOT NULL,
+            Name       TEXT     NOT NULL,
+            Kind       INTEGER  NOT NULL,
+            CreatedAt  TEXT     NOT NULL,
+            UpdatedAt  TEXT     NOT NULL
+        );
+        CREATE UNIQUE INDEX UX_TunnelConfigs_Name ON TunnelConfigs(Name);";
+
+    private readonly string _scratchDir;
+
+    public BackupServiceTests()
+    {
+        SqliteTypeHandlers.Register();
+        _scratchDir = Path.Combine(Path.GetTempPath(), "wormhole-backup-tests-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(_scratchDir);
+    }
+
+    public void Dispose()
+    {
+        SqliteConnection.ClearAllPools();
+        if (Directory.Exists(_scratchDir)) Directory.Delete(_scratchDir, recursive: true);
+        GC.SuppressFinalize(this);
+    }
+
+    private sealed record Env(
+        SqliteConnectionFactory Factory,
+        ConnectionRepository Connections,
+        CredentialRepository Credentials,
+        TunnelConfigRepository Tunnels,
+        FakeCredentialService Secrets,
+        BackupService Service);
+
+    private async Task<Env> CreateEnvAsync()
+    {
+        var dbPath = Path.Combine(_scratchDir, $"wormhole-{Guid.NewGuid():N}.db");
+        var factory = new SqliteConnectionFactory($"Data Source={dbPath}");
+        await new MigrationRunner(
+            factory, NullLogger<MigrationRunner>.Instance,
+            new List<Migration> { new("0001_initial", SchemaSql) }).RunAsync();
+
+        var connections = new ConnectionRepository(factory);
+        var credentials = new CredentialRepository(factory);
+        var tunnels = new TunnelConfigRepository(factory);
+        var secrets = new FakeCredentialService();
+        var service = new BackupService(
+            connections, credentials, tunnels, secrets,
+            NullLogger<BackupService>.Instance);
+        return new Env(factory, connections, credentials, tunnels, secrets, service);
+    }
+
+    [Fact]
+    public async Task ExportImport_PlainJson_RoundTrips()
+    {
+        var src = await CreateEnvAsync();
+        var (folderId, leafId, credId, sshCredId, tunnelId) = await SeedSampleDataAsync(src);
+
+        var path = Path.Combine(_scratchDir, "plain.json");
+        var exportResult = await src.Service.ExportAsync(path, password: null);
+        Assert.False(exportResult.Encrypted);
+        Assert.Equal(2, exportResult.NodeCount);
+        Assert.Equal(2, exportResult.CredentialCount);
+        Assert.Equal(1, exportResult.TunnelCount);
+        Assert.Equal(1, exportResult.PasswordCount);
+        Assert.Equal(1, exportResult.PrivateKeyCount);
+        Assert.Equal(1, exportResult.TunnelPayloadCount);
+
+        var dst = await CreateEnvAsync();
+        var importResult = await dst.Service.ImportAsync(path, password: null);
+        Assert.Equal(2, importResult.NodesImported);
+        Assert.Equal(0, importResult.NodesSkipped);
+        Assert.Equal(2, importResult.CredentialsImported);
+        Assert.Equal(1, importResult.TunnelsImported);
+
+        // Verify bit-identical secrets.
+        Assert.Equal("hunter2", dst.Secrets.Passwords[credId]);
+        Assert.Equal(new byte[] { 1, 2, 3, 4, 5 }, dst.Secrets.PrivateKeys[sshCredId]);
+        Assert.Equal(new byte[] { 9, 8, 7 }, dst.Secrets.TunnelConfigs[tunnelId]);
+
+        var dstNodes = await dst.Connections.GetAllAsync();
+        Assert.Equal(2, dstNodes.Count);
+        var dstLeaf = dstNodes.Single(n => n.Id == leafId);
+        Assert.Equal(folderId, dstLeaf.ParentId);
+        Assert.Equal("server.example.com", dstLeaf.Host);
+    }
+
+    [Fact]
+    public async Task ExportImport_Encrypted_RoundTrips()
+    {
+        var src = await CreateEnvAsync();
+        await SeedSampleDataAsync(src);
+
+        var path = Path.Combine(_scratchDir, "encrypted.json");
+        var exportResult = await src.Service.ExportAsync(path, password: "correct horse battery");
+        Assert.True(exportResult.Encrypted);
+
+        // File should not contain plaintext credential bytes anywhere.
+        var fileText = await File.ReadAllTextAsync(path);
+        Assert.DoesNotContain("hunter2", fileText);
+        Assert.DoesNotContain("server.example.com", fileText);
+
+        var dst = await CreateEnvAsync();
+        var importResult = await dst.Service.ImportAsync(path, password: "correct horse battery");
+        Assert.Equal(2, importResult.NodesImported);
+        Assert.Equal(2, importResult.CredentialsImported);
+        Assert.Equal(1, importResult.TunnelsImported);
+        Assert.Equal(1, importResult.PasswordsImported);
+    }
+
+    [Fact]
+    public async Task InspectAsync_ReportsEncryption()
+    {
+        var src = await CreateEnvAsync();
+        await SeedSampleDataAsync(src);
+
+        var plainPath = Path.Combine(_scratchDir, "plain.json");
+        await src.Service.ExportAsync(plainPath, null);
+        var encPath = Path.Combine(_scratchDir, "encrypted.json");
+        await src.Service.ExportAsync(encPath, "pwd");
+
+        Assert.False((await src.Service.InspectAsync(plainPath)).Encrypted);
+        Assert.True((await src.Service.InspectAsync(encPath)).Encrypted);
+    }
+
+    [Fact]
+    public async Task ImportAsync_EncryptedWithoutPassword_ThrowsPasswordRequired()
+    {
+        var src = await CreateEnvAsync();
+        await SeedSampleDataAsync(src);
+        var path = Path.Combine(_scratchDir, "needs-password.json");
+        await src.Service.ExportAsync(path, "pwd");
+
+        var dst = await CreateEnvAsync();
+        await Assert.ThrowsAsync<BackupPasswordRequiredException>(
+            () => dst.Service.ImportAsync(path, password: null));
+
+        // No partial DB writes.
+        Assert.Empty(await dst.Connections.GetAllAsync());
+        Assert.Empty(await dst.Credentials.GetAllAsync());
+        Assert.Empty(await dst.Tunnels.GetAllAsync());
+    }
+
+    [Fact]
+    public async Task ImportAsync_WrongPassword_ThrowsBadPasswordAndDoesNotWriteAnything()
+    {
+        var src = await CreateEnvAsync();
+        await SeedSampleDataAsync(src);
+        var path = Path.Combine(_scratchDir, "wrong-password.json");
+        await src.Service.ExportAsync(path, "real-password");
+
+        var dst = await CreateEnvAsync();
+        await Assert.ThrowsAsync<BackupBadPasswordException>(
+            () => dst.Service.ImportAsync(path, password: "wrong-password"));
+
+        Assert.Empty(await dst.Connections.GetAllAsync());
+        Assert.Empty(await dst.Credentials.GetAllAsync());
+        Assert.Empty(await dst.Tunnels.GetAllAsync());
+        Assert.Empty(dst.Secrets.Passwords);
+    }
+
+    [Fact]
+    public async Task ImportAsync_MergeByIdSkipsDuplicates()
+    {
+        var src = await CreateEnvAsync();
+        var (folderId, leafId, credId, _, tunnelId) = await SeedSampleDataAsync(src);
+
+        var path = Path.Combine(_scratchDir, "merge.json");
+        await src.Service.ExportAsync(path, null);
+
+        var dst = await CreateEnvAsync();
+        // Pre-seed the destination with one credential and one tunnel that match the
+        // exported IDs. Those should be skipped on import; the rest should land.
+        await dst.Credentials.AddAsync(new CredentialProfile
+        {
+            Id = credId,
+            Name = "preexisting",
+            Kind = CredentialKind.Password,
+            Protocol = ProtocolType.Ssh,
+        });
+        await dst.Tunnels.AddAsync(new TunnelConfig { Id = tunnelId, Name = "preexisting-tun" });
+
+        var result = await dst.Service.ImportAsync(path, null);
+        Assert.Equal(1, result.CredentialsImported);
+        Assert.Equal(1, result.CredentialsSkipped);
+        Assert.Equal(0, result.TunnelsImported);
+        Assert.Equal(1, result.TunnelsSkipped);
+        // Skipped credentials don't get their passwords restored either.
+        Assert.False(dst.Secrets.Passwords.ContainsKey(credId));
+        // But the tunnel payload for the *skipped* tunnel must not have been written.
+        Assert.False(dst.Secrets.TunnelConfigs.ContainsKey(tunnelId));
+
+        // Pre-existing credential name is preserved (no overwrite).
+        var preserved = await dst.Credentials.GetByIdAsync(credId);
+        Assert.NotNull(preserved);
+        Assert.Equal("preexisting", preserved!.Name);
+    }
+
+    [Fact]
+    public async Task ImportAsync_NameCollisionUsesBinaryCollationLikeSqlite()
+    {
+        // SQLite's default BINARY collation on the UNIQUE INDEX makes 'alice' and 'ALICE'
+        // distinct rows. Our in-memory skip check must match SQLite's view so we don't
+        // over-skip rows the DB would happily accept.
+        var src = await CreateEnvAsync();
+        await src.Credentials.AddAsync(new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Name = "ALICE",
+            Kind = CredentialKind.Password,
+            Protocol = ProtocolType.Ssh,
+            CreatedAt = DateTime.UtcNow,
+        });
+        var path = Path.Combine(_scratchDir, "case-only-differs.json");
+        await src.Service.ExportAsync(path, null);
+
+        var dst = await CreateEnvAsync();
+        await dst.Credentials.AddAsync(new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Name = "alice",
+            Kind = CredentialKind.Password,
+            Protocol = ProtocolType.Ssh,
+            CreatedAt = DateTime.UtcNow,
+        });
+
+        var result = await dst.Service.ImportAsync(path, null);
+        // 'ALICE' should land alongside 'alice' — SQLite would not raise UNIQUE.
+        Assert.Equal(1, result.CredentialsImported);
+        Assert.Equal(0, result.CredentialsSkipped);
+        Assert.Equal(2, (await dst.Credentials.GetAllAsync()).Count);
+    }
+
+    [Fact]
+    public async Task ImportAsync_DropsNullArrayElementsWithWarning()
+    {
+        // System.Text.Json admits JSON null into a List<T> as a literal null reference. Every
+        // import loop must tolerate that — the fix filters them up-front and warns once.
+        var dst = await CreateEnvAsync();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "encryption": "none",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "payload": {
+                "nodes": [null],
+                "credentials": [null, { "id": "{{Guid.NewGuid()}}", "name": "alice", "kind": 0, "protocol": 0, "createdAt": "{{DateTime.UtcNow:O}}" }],
+                "tunnels": [null],
+                "passwords": [null],
+                "privateKeys": [null],
+                "tunnelPayloads": [null]
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "null-elements.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var result = await dst.Service.ImportAsync(path, null);
+        Assert.Equal(1, result.CredentialsImported);
+        Assert.Contains(result.Warnings, w => w.Contains("null entries", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ImportAsync_RejectsEmptyCiphertext()
+    {
+        var dst = await CreateEnvAsync();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "encryption": "aes-gcm",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "encryptedPayload": {
+                "kdf": "pbkdf2-sha256",
+                "iterations": 600000,
+                "saltB64": "AAAAAAAAAAAAAAAAAAAAAA==",
+                "nonceB64": "AAAAAAAAAAAAAAAA",
+                "ciphertextB64": "",
+                "tagB64": "AAAAAAAAAAAAAAAAAAAAAA=="
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "empty-ciphertext.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => dst.Service.ImportAsync(path, "anything"));
+    }
+
+    [Fact]
+    public async Task ImportAsync_HandlesNullNodeName()
+    {
+        // Same scenario as null credential name, but on the Nodes table. Nodes.Name is NOT NULL
+        // in the schema, so without the in-loop coerce the import would crash on the FK insert.
+        var dst = await CreateEnvAsync();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "encryption": "none",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "payload": {
+                "nodes": [
+                  { "id": "{{Guid.NewGuid()}}", "name": null, "kind": 1, "sortOrder": 0, "protocol": 0, "host": "h", "port": 22, "createdAt": "{{DateTime.UtcNow:O}}", "updatedAt": "{{DateTime.UtcNow:O}}" }
+                ],
+                "credentials": [], "tunnels": [], "passwords": [], "privateKeys": [], "tunnelPayloads": []
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "null-node-name.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var result = await dst.Service.ImportAsync(path, null);
+        Assert.Equal(1, result.NodesImported);
+        var node = (await dst.Connections.GetAllAsync()).Single();
+        Assert.Equal(string.Empty, node.Name);
+    }
+
+    [Fact]
+    public async Task ImportAsync_BreaksParentChildCycleByRerooting()
+    {
+        // Two nodes A and B with A.ParentId=B and B.ParentId=A. The topological pass must
+        // null one of the ParentIds so AddAsync doesn't hit an FK violation. Without the fix,
+        // ordered=[B, A] is inserted and B's reference to A (not yet present) trips the FK.
+        var dst = await CreateEnvAsync();
+        var aId = Guid.NewGuid();
+        var bId = Guid.NewGuid();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "encryption": "none",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "payload": {
+                "nodes": [
+                  { "id": "{{aId}}", "parentId": "{{bId}}", "name": "A", "kind": 1, "sortOrder": 0, "protocol": 0, "host": "h", "port": 22, "createdAt": "{{DateTime.UtcNow:O}}", "updatedAt": "{{DateTime.UtcNow:O}}" },
+                  { "id": "{{bId}}", "parentId": "{{aId}}", "name": "B", "kind": 1, "sortOrder": 1, "protocol": 0, "host": "h", "port": 22, "createdAt": "{{DateTime.UtcNow:O}}", "updatedAt": "{{DateTime.UtcNow:O}}" }
+                ],
+                "credentials": [], "tunnels": [], "passwords": [], "privateKeys": [], "tunnelPayloads": []
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "cycle.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var result = await dst.Service.ImportAsync(path, null);
+        Assert.Equal(2, result.NodesImported);
+        Assert.Contains(result.Warnings, w => w.Contains("Cycle", StringComparison.OrdinalIgnoreCase));
+        // At least one of the two must have had its ParentId nulled; the other can still
+        // reference its now-inserted partner.
+        var nodes = (await dst.Connections.GetAllAsync()).ToList();
+        Assert.Equal(2, nodes.Count);
+        Assert.Contains(nodes, n => n.ParentId is null);
+    }
+
+    [Fact]
+    public async Task ImportAsync_HandlesDuplicateNodeIdsInPayload()
+    {
+        // Two node entries with the same Id. ToDictionary would have crashed; the TryAdd
+        // path must accept the first and warn about the second.
+        var dst = await CreateEnvAsync();
+        var sharedId = Guid.NewGuid();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "encryption": "none",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "payload": {
+                "nodes": [
+                  { "id": "{{sharedId}}", "name": "first", "kind": 1, "sortOrder": 0, "protocol": 0, "host": "h", "port": 22, "createdAt": "{{DateTime.UtcNow:O}}", "updatedAt": "{{DateTime.UtcNow:O}}" },
+                  { "id": "{{sharedId}}", "name": "second", "kind": 1, "sortOrder": 1, "protocol": 0, "host": "h", "port": 22, "createdAt": "{{DateTime.UtcNow:O}}", "updatedAt": "{{DateTime.UtcNow:O}}" }
+                ],
+                "credentials": [], "tunnels": [], "passwords": [], "privateKeys": [], "tunnelPayloads": []
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "dup-node-id.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var result = await dst.Service.ImportAsync(path, null);
+        Assert.Equal(1, result.NodesImported);
+        Assert.Contains(result.Warnings, w => w.Contains("Duplicate node id", StringComparison.OrdinalIgnoreCase));
+        Assert.Single(await dst.Connections.GetAllAsync());
+    }
+
+    [Fact]
+    public async Task ImportAsync_HandlesNullCredentialName()
+    {
+        // Hostile/hand-edited JSON with "name": null. HashSet<string>.Contains(null) under
+        // Ordinal comparer throws ArgumentNullException — the null-coerce guard must skip-or-empty.
+        var dst = await CreateEnvAsync();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "encryption": "none",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "payload": {
+                "nodes": [],
+                "credentials": [
+                  { "id": "{{Guid.NewGuid()}}", "name": null, "kind": 0, "protocol": 0, "createdAt": "{{DateTime.UtcNow:O}}" }
+                ],
+                "tunnels": [], "passwords": [], "privateKeys": [], "tunnelPayloads": []
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "null-name.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        // Must not throw ArgumentNullException — coerced name is acceptable.
+        var result = await dst.Service.ImportAsync(path, null);
+        Assert.Equal(1, result.CredentialsImported);
+    }
+
+    [Fact]
+    public async Task ImportAsync_RejectsMalformedEnvelopeShape()
+    {
+        // Encrypted envelope with a 2-byte tag — AesGcm's constructor throws ArgumentException
+        // (NOT CryptographicException), so without our explicit length pre-check the raw
+        // exception message would leak to the user.
+        var dst = await CreateEnvAsync();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "encryption": "aes-gcm",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "encryptedPayload": {
+                "kdf": "pbkdf2-sha256",
+                "iterations": 600000,
+                "saltB64": "AAAAAAAAAAAAAAAAAAAAAA==",
+                "nonceB64": "AAAAAAAAAAAAAAAA",
+                "ciphertextB64": "AA==",
+                "tagB64": "AAA="
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "bad-tag.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var ex = await Assert.ThrowsAsync<InvalidDataException>(
+            () => dst.Service.ImportAsync(path, "anything"));
+        Assert.Contains("malformed", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ImportAsync_SkipsCredentialWhoseNameCollidesWithExisting()
+    {
+        // CredentialProfiles.Name has a UNIQUE index; a backup credential whose Id is new but
+        // whose Name matches a locally-renamed credential must be skipped with a warning, not
+        // crash the whole import on the SQLite UNIQUE constraint.
+        var src = await CreateEnvAsync();
+        var srcCred = new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Name = "alice",
+            Kind = CredentialKind.Password,
+            Protocol = ProtocolType.Ssh,
+            CreatedAt = DateTime.UtcNow,
+        };
+        await src.Credentials.AddAsync(srcCred);
+        await src.Secrets.StorePasswordAsync(srcCred.Id, "secret");
+
+        var path = Path.Combine(_scratchDir, "name-collision.json");
+        await src.Service.ExportAsync(path, null);
+
+        var dst = await CreateEnvAsync();
+        // Different Id, same Name — the existing-by-name check must skip.
+        await dst.Credentials.AddAsync(new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Name = "alice",
+            Kind = CredentialKind.Password,
+            Protocol = ProtocolType.Ssh,
+            CreatedAt = DateTime.UtcNow,
+        });
+
+        var result = await dst.Service.ImportAsync(path, null);
+        Assert.Equal(0, result.CredentialsImported);
+        Assert.Equal(1, result.CredentialsSkipped);
+        Assert.Contains(result.Warnings, w => w.Contains("alice", StringComparison.OrdinalIgnoreCase));
+        // Imported password for a skipped credential must NOT clobber the local credential's
+        // (which we never stored a password for).
+        Assert.Empty(dst.Secrets.Passwords);
+    }
+
+    [Fact]
+    public async Task ImportAsync_HandlesDuplicateIdsInPayloadWithoutCrashing()
+    {
+        // A hand-edited or buggy backup file can contain the same credential Id twice. The
+        // in-loop tracking sets must mark the first insert as already-present so the second
+        // is skipped instead of hitting a SQLite PK violation.
+        var dst = await CreateEnvAsync();
+        var sharedId = Guid.NewGuid();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "app": "Wormhole",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "encryption": "none",
+              "payload": {
+                "nodes": [],
+                "credentials": [
+                  { "id": "{{sharedId}}", "name": "alice", "kind": 0, "protocol": 0, "createdAt": "{{DateTime.UtcNow:O}}" },
+                  { "id": "{{sharedId}}", "name": "alice-dup", "kind": 0, "protocol": 0, "createdAt": "{{DateTime.UtcNow:O}}" }
+                ],
+                "tunnels": [],
+                "passwords": [],
+                "privateKeys": [],
+                "tunnelPayloads": []
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "dup-ids.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var result = await dst.Service.ImportAsync(path, null);
+        Assert.Equal(1, result.CredentialsImported);
+        Assert.Equal(1, result.CredentialsSkipped);
+        Assert.Single(await dst.Credentials.GetAllAsync());
+    }
+
+    [Fact]
+    public async Task ImportAsync_RejectsAstronomicalPbkdf2Iterations()
+    {
+        // A hostile or corrupted backup file could specify a multi-billion iteration count
+        // intended to spin a thread for hours inside PBKDF2. Reject it cleanly.
+        var dst = await CreateEnvAsync();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "app": "Wormhole",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "encryption": "aes-gcm",
+              "encryptedPayload": {
+                "kdf": "pbkdf2-sha256",
+                "iterations": 2000000000,
+                "saltB64": "AAAAAAAAAAAAAAAAAAAAAA==",
+                "nonceB64": "AAAAAAAAAAAAAAAA",
+                "ciphertextB64": "AA==",
+                "tagB64": "AAAAAAAAAAAAAAAAAAAAAA=="
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "astronomical.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var ex = await Assert.ThrowsAsync<InvalidDataException>(
+            () => dst.Service.ImportAsync(path, "anything"));
+        Assert.Contains("iteration", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task ExportAsync_FailedExportPreservesPreexistingFile()
+    {
+        var src = await CreateEnvAsync();
+        await SeedSampleDataAsync(src);
+
+        // Pre-existing backup at the very path we'll attempt to export to — by symlinking
+        // (or in our case, the simpler trick: making the path itself a directory so
+        // File.Create fails, while a sibling file we want to preserve sits elsewhere we can
+        // assert on). Pick a target inside a directory whose parent is itself a file —
+        // File.Create on tmpPath = "C:\...\nope.json\nope.json.tmp" can't succeed because the
+        // parent path component is a regular file. The export fails inside the tmp write.
+        var sentinelPath = Path.Combine(_scratchDir, "real-good-backup.json");
+        var sentinel = "preexisting good backup content — must not be lost";
+        await File.WriteAllTextAsync(sentinelPath, sentinel);
+
+        // Build a path whose parent doesn't exist as a directory — File.Create throws,
+        // forcing the catch -> TryDelete branch, with the sentinel sitting safely at a
+        // different location. After the failure, both files must be in the expected state.
+        var unwritable = Path.Combine(_scratchDir, "nonexistent-dir", "x.json");
+        await Assert.ThrowsAnyAsync<Exception>(() => src.Service.ExportAsync(unwritable, null));
+
+        // Sentinel must be untouched.
+        Assert.True(File.Exists(sentinelPath));
+        Assert.Equal(sentinel, await File.ReadAllTextAsync(sentinelPath));
+        // No .tmp file leaked at the unwritable target's path.
+        Assert.False(File.Exists(unwritable + ".tmp"));
+    }
+
+    [Fact]
+    public async Task ImportAsync_HandlesNullListField()
+    {
+        // Round 4: JSON with `"nodes": null` (explicit null OVERRIDES the default initializer
+        // — STJ doesn't preserve `new List<T>()`). The coerce-to-empty in ImportAsync must
+        // run BEFORE FilterNullsInPlace would NRE on a null list reference.
+        var dst = await CreateEnvAsync();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "encryption": "none",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "payload": {
+                "nodes": null,
+                "credentials": null,
+                "tunnels": null,
+                "passwords": null,
+                "privateKeys": null,
+                "tunnelPayloads": null
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "null-lists.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        // Should not throw — all the null lists are coerced to empty.
+        var result = await dst.Service.ImportAsync(path, null);
+        Assert.Equal(0, result.NodesImported);
+        Assert.Equal(0, result.CredentialsImported);
+    }
+
+    [Fact]
+    public async Task ImportAsync_NullsOutDanglingCredentialAndTunnelRefs()
+    {
+        // Round 4: a node referencing a credential or tunnel that's neither in the local DB
+        // nor in the import payload would otherwise survive with a dangling pointer (the
+        // schema doesn't FK-enforce these). Scrub-and-warn.
+        var dst = await CreateEnvAsync();
+        var missingCred = Guid.NewGuid();
+        var missingTun = Guid.NewGuid();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "encryption": "none",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "payload": {
+                "nodes": [
+                  {
+                    "id": "{{Guid.NewGuid()}}",
+                    "name": "danglesvr",
+                    "kind": 1,
+                    "sortOrder": 0,
+                    "protocol": 0,
+                    "host": "h",
+                    "port": 22,
+                    "credentialId": "{{missingCred}}",
+                    "tunnelConfigId": "{{missingTun}}",
+                    "createdAt": "{{DateTime.UtcNow:O}}",
+                    "updatedAt": "{{DateTime.UtcNow:O}}"
+                  }
+                ],
+                "credentials": [], "tunnels": [], "passwords": [], "privateKeys": [], "tunnelPayloads": []
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "dangling-refs.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var result = await dst.Service.ImportAsync(path, null);
+        Assert.Equal(1, result.NodesImported);
+        Assert.Contains(result.Warnings, w => w.Contains("missing credential", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(result.Warnings, w => w.Contains("missing tunnel", StringComparison.OrdinalIgnoreCase));
+        var node = (await dst.Connections.GetAllAsync()).Single();
+        Assert.Null(node.CredentialId);
+        Assert.Null(node.TunnelConfigId);
+    }
+
+    [Fact]
+    public async Task ImportAsync_RejectsFilesLargerThanCap()
+    {
+        var dst = await CreateEnvAsync();
+        var hugePath = Path.Combine(_scratchDir, "huge.json");
+        // 65 MiB of bytes — over the 64 MiB cap. Use SetLength to avoid actually allocating
+        // 65 MiB of '0' bytes in test memory.
+        using (var fs = File.Create(hugePath))
+        {
+            fs.SetLength(65L * 1024 * 1024);
+        }
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => dst.Service.ImportAsync(hugePath, null));
+    }
+
+    [Fact]
+    public async Task ImportAsync_TopologicallyInsertsNodesEvenWhenBackupOrderIsReversed()
+    {
+        // Build a backup file by hand whose Nodes array deliberately lists the leaf BEFORE
+        // its parent folder. A naive in-order insert would fail the ParentId FK; the
+        // topological pass must reorder so the folder lands first.
+        var dst = await CreateEnvAsync();
+
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "Folder",
+            Kind = NodeKind.Folder,
+            SortOrder = 1,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+        var leaf = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "Leaf",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            Host = "h",
+            Port = 22,
+            SortOrder = 2,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+
+        // Hand-craft the JSON with leaf first, folder second.
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "app": "Wormhole",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "encryption": "none",
+              "payload": {
+                "nodes": [
+                  {{NodeJson(leaf)}},
+                  {{NodeJson(folder)}}
+                ],
+                "credentials": [],
+                "tunnels": [],
+                "passwords": [],
+                "privateKeys": [],
+                "tunnelPayloads": []
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "reversed.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var result = await dst.Service.ImportAsync(path, null);
+        Assert.Equal(2, result.NodesImported);
+        Assert.Empty(result.Warnings);
+        var nodes = await dst.Connections.GetAllAsync();
+        Assert.Equal(2, nodes.Count);
+        Assert.Equal(folder.Id, nodes.Single(n => n.Id == leaf.Id).ParentId);
+    }
+
+    [Fact]
+    public async Task ImportAsync_OrphanNodeIsImportedAtRootWithWarning()
+    {
+        // A node whose ParentId references a non-existent parent (and is not present in the
+        // backup file) should be re-rooted at null instead of failing the entire import.
+        var dst = await CreateEnvAsync();
+
+        var orphan = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = Guid.NewGuid(),
+            Name = "Orphan",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            Host = "h",
+            Port = 22,
+            SortOrder = 0,
+            CreatedAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow,
+        };
+
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "app": "Wormhole",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "encryption": "none",
+              "payload": {
+                "nodes": [{{NodeJson(orphan)}}],
+                "credentials": [],
+                "tunnels": [],
+                "passwords": [],
+                "privateKeys": [],
+                "tunnelPayloads": []
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "orphan.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var result = await dst.Service.ImportAsync(path, null);
+        Assert.Equal(1, result.NodesImported);
+        Assert.Single(result.Warnings);
+        var rerooted = (await dst.Connections.GetAllAsync()).Single();
+        Assert.Null(rerooted.ParentId);
+    }
+
+    /// <summary>Minimal hand-written JSON object for a ConnectionNode — only the fields
+    /// the test cases here care about. Other nullable columns are omitted so the deserializer
+    /// fills in default values.</summary>
+    private static string NodeJson(ConnectionNode n)
+    {
+        var parentJson = n.ParentId is null ? "null" : $"\"{n.ParentId}\"";
+        var protocolJson = n.Protocol is null ? "null" : ((int)n.Protocol.Value).ToString();
+        var portJson = n.Port is null ? "null" : n.Port.Value.ToString();
+        var hostJson = n.Host is null ? "null" : $"\"{n.Host}\"";
+        return $$"""
+            {
+              "id": "{{n.Id}}",
+              "parentId": {{parentJson}},
+              "name": "{{n.Name}}",
+              "kind": {{(int)n.Kind}},
+              "sortOrder": {{n.SortOrder}},
+              "protocol": {{protocolJson}},
+              "host": {{hostJson}},
+              "port": {{portJson}},
+              "createdAt": "{{n.CreatedAt:O}}",
+              "updatedAt": "{{n.UpdatedAt:O}}"
+            }
+            """;
+    }
+
+    /// <summary>Seeds a folder + one connection beneath it, two credentials (password +
+    /// SSH key), and one tunnel with its DPAPI payload. Returns the IDs so tests can target
+    /// specific rows.</summary>
+    private static async Task<(Guid folderId, Guid leafId, Guid credId, Guid sshCredId, Guid tunnelId)>
+        SeedSampleDataAsync(Env env)
+    {
+        var passwordCred = new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Name = "alice",
+            Username = "alice",
+            Kind = CredentialKind.Password,
+            Protocol = ProtocolType.Ssh,
+            CreatedAt = DateTime.UtcNow,
+        };
+        await env.Credentials.AddAsync(passwordCred);
+        await env.Secrets.StorePasswordAsync(passwordCred.Id, "hunter2");
+
+        var sshKeyCred = new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Name = "alice-key",
+            Username = "alice",
+            Kind = CredentialKind.SshKey,
+            Protocol = ProtocolType.Ssh,
+            PrivateKeyFileName = "id_ed25519",
+            CreatedAt = DateTime.UtcNow,
+        };
+        await env.Credentials.AddAsync(sshKeyCred);
+        await env.Secrets.StorePrivateKeyAsync(sshKeyCred.Id, new byte[] { 1, 2, 3, 4, 5 });
+
+        var tunnel = new TunnelConfig { Id = Guid.NewGuid(), Name = "office-vpn", Kind = TunnelKind.WireGuard };
+        await env.Tunnels.AddAsync(tunnel);
+        await env.Secrets.StoreTunnelConfigAsync(tunnel.Id, new byte[] { 9, 8, 7 });
+
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "Production",
+            Kind = NodeKind.Folder,
+            SortOrder = 1,
+        };
+        await env.Connections.AddAsync(folder);
+
+        var leaf = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "app01",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            Host = "server.example.com",
+            Port = 22,
+            Username = "alice",
+            CredentialId = passwordCred.Id,
+            TunnelConfigId = tunnel.Id,
+            TunnelEnabled = true,
+            SortOrder = 2,
+        };
+        await env.Connections.AddAsync(leaf);
+
+        return (folder.Id, leaf.Id, passwordCred.Id, sshKeyCred.Id, tunnel.Id);
+    }
+}
