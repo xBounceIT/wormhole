@@ -321,6 +321,27 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         if (profile is null || _webView is null) return;
         if (Interlocked.CompareExchange(ref _connectInFlight, 1, 0) != 0) return;
 
+        // Reset xterm.js before flipping to Connecting so the prior session's text
+        // doesn't bleed through the (now opaque) overlay nor reappear above the new
+        // shell's banner the moment the overlay hides. Harmless on first-time connect
+        // (xterm.js is already empty). The same-VM rebind path in AttachAsync does
+        // NOT reach here — it replays the buffer instead, which is the correct
+        // behavior for a tab switch.
+        //
+        // Swallow ALL exceptions: this runs BEFORE the main try/finally that resets
+        // _connectInFlight, so an uncaught throw here would leak past ConnectAsync
+        // and leave the flag stuck at 1, permanently jamming every future Retry on
+        // this VM (the CompareExchange guard above would silently no-op forever).
+        // The clear is purely cosmetic — never let it block the connect path.
+        try
+        {
+            _webView.PostWebMessageAsString("clear:");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Suppressed exception while clearing xterm.js before connect.");
+        }
+
         Status = SessionStatus.Connecting;
         ErrorMessage = null;
         ResetOutputState();

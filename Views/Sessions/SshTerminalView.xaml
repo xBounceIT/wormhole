@@ -18,7 +18,7 @@
                            VerticalAlignment="Stretch"
                            MinHeight="240" />
 
-        <Border Background="#CC0c0c0c"
+        <Border Background="#0c0c0c"
                 Visibility="{Binding IsConnecting, Converter={StaticResource BoolToVisibilityConverter}}">
             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12">
                 <ProgressRing IsActive="True" Width="32" Height="32" />
@@ -45,7 +45,7 @@
                        FontSize="12" />
         </Border>
 
-        <Border Background="#E60c0c0c"
+        <Border Background="#0c0c0c"
                 Visibility="{Binding IsFailed, Converter={StaticResource BoolToVisibilityConverter}}">
             <StackPanel HorizontalAlignment="Center"
                         VerticalAlignment="Center"
