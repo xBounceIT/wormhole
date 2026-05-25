@@ -107,12 +107,19 @@ public sealed class TerminalBridge : IDisposable
         if (!_dispatcher.TryEnqueue(StartCoalesceTimer))
         {
             // TryEnqueue only returns false during dispatcher shutdown (window closing /
-            // app exit). Do NOT call _coalescer.Flush() inline here — Flush invokes the
-            // post delegate, which touches the thread-affine WebView2; calling it from
-            // the SSH pump thread would throw RPC_E_WRONG_THREAD and possibly corrupt
-            // WebView2 state. The buffered bytes are simply dropped, matching the
-            // pre-coalescer behavior of logging+dropping on TryEnqueue failure.
-            _logger.LogWarning("Failed to enqueue coalesce-timer arm; dropping buffered SSH output (dispatcher unavailable).");
+            // app exit) — a one-way state per the Microsoft.UI.Dispatching docs. Do NOT
+            // call _coalescer.Flush() inline here: Flush invokes the post delegate, which
+            // touches the thread-affine WebView2, and calling it from the SSH pump thread
+            // would throw RPC_E_WRONG_THREAD and possibly corrupt WebView2 state.
+            //
+            // We must Suspend the coalescer rather than just log: without it, _timerArmed
+            // stays true and the buffered bytes are stuck (subsequent Appends skip the
+            // arm callback because they see _timerArmed=true, so the buffer grows without
+            // bound until disposal). Suspend drops the pending bytes and short-circuits
+            // future Appends so the SSH pump stops accumulating output for a dispatcher
+            // that will never accept it.
+            _logger.LogWarning("Failed to enqueue coalesce-timer arm; suspending coalescer (dispatcher unavailable).");
+            _coalescer.Suspend();
         }
     }
 
