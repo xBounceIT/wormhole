@@ -243,6 +243,10 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         FortinetPanel.Visibility = SelectedKind == TunnelKind.Fortinet
             ? Visibility.Visible
             : Visibility.Collapsed;
+        // Stale import-error from a previous OpenVPN session would otherwise re-surface when
+        // the user toggles Kind away and back. The InfoBar is OpenVPN-specific, so reset it
+        // whenever the active panel changes.
+        OvpnImportErrorBar.IsOpen = false;
     }
 
     private static List<string> SplitCsv(string s) =>
