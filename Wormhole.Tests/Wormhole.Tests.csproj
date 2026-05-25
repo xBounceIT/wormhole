@@ -51,6 +51,7 @@
     <Compile Include="..\Models\WireGuardSettings.cs" Link="Models\WireGuardSettings.cs" />
     <Compile Include="..\Models\FortinetSettings.cs" Link="Models\FortinetSettings.cs" />
     <Compile Include="..\Models\OpenVpnSettings.cs" Link="Models\OpenVpnSettings.cs" />
+    <Compile Include="..\Models\WatchguardSettings.cs" Link="Models\WatchguardSettings.cs" />
     <Compile Include="..\Models\MRemoteNgFileInfo.cs" Link="Models\MRemoteNgFileInfo.cs" />
     <Compile Include="..\Models\MRemoteNgImportPlan.cs" Link="Models\MRemoteNgImportPlan.cs" />
     <Compile Include="..\Models\MRemoteNgImportProgress.cs" Link="Models\MRemoteNgImportProgress.cs" />
@@ -64,6 +65,13 @@
     <Compile Include="..\Services\Tunneling\Fortinet\FortinetTunnelProvider.cs" Link="Services\Tunneling\Fortinet\FortinetTunnelProvider.cs" />
     <Compile Include="..\Services\Tunneling\Fortinet\FortinetProcessHost.cs" Link="Services\Tunneling\Fortinet\FortinetProcessHost.cs" />
     <Compile Include="..\Services\Tunneling\Fortinet\FortinetSidecarConfig.cs" Link="Services\Tunneling\Fortinet\FortinetSidecarConfig.cs" />
+    <Compile Include="..\Services\Tunneling\OpenVpn\OpenVpnProcessHost.cs" Link="Services\Tunneling\OpenVpn\OpenVpnProcessHost.cs" />
+    <Compile Include="..\Services\Tunneling\OpenVpn\OpenVpnSidecarConfig.cs" Link="Services\Tunneling\OpenVpn\OpenVpnSidecarConfig.cs" />
+    <Compile Include="..\Services\Tunneling\IOtpPromptService.cs" Link="Services\Tunneling\IOtpPromptService.cs" />
+    <Compile Include="..\Services\Tunneling\Watchguard\WatchguardTunnelProvider.cs" Link="Services\Tunneling\Watchguard\WatchguardTunnelProvider.cs" />
+    <Compile Include="..\Services\Tunneling\Watchguard\WatchguardProfileBuilder.cs" Link="Services\Tunneling\Watchguard\WatchguardProfileBuilder.cs" />
+    <Compile Include="..\Services\Tunneling\Watchguard\WatchguardWgsslImporter.cs" Link="Services\Tunneling\Watchguard\WatchguardWgsslImporter.cs" />
+    <Compile Include="..\Services\Tunneling\Watchguard\WatchguardPreAuthClient.cs" Link="Services\Tunneling\Watchguard\WatchguardPreAuthClient.cs" />
     <Compile Include="..\Data\Repositories\ITunnelConfigRepository.cs" Link="Data\Repositories\ITunnelConfigRepository.cs" />
     <Compile Include="..\Helpers\AppPaths.cs" Link="Helpers\AppPaths.cs" />
     <Compile Include="..\Helpers\AzureAdCredentialDetector.cs" Link="Helpers\AzureAdCredentialDetector.cs" />
