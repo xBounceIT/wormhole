@@ -201,12 +201,17 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
                 ViewMode = PickerViewMode.List,
                 SuggestedStartLocation = PickerLocationId.Downloads,
             };
-            // Only the two expected extensions — dropping the "*" wildcard avoids a known
-            // FileOpenPicker rejection on some Win11 builds where mixing wildcards with extension
-            // filters throws at PickSingleFileAsync. Users who absolutely need to point at a
-            // file with a different extension can rename it first.
+            // Accepted extensions match what the importer's content-sniffer handles. The
+            // vendor extraction workflow itself renames `.wgssl` → `.tgz` before extracting,
+            // so users frequently end up with the renamed bundle on disk — whitelisting
+            // `.tgz` (and `.gz` for hand-prepared bundles) keeps the picker usable for those
+            // cases instead of forcing them to rename back. Dropping the "*" wildcard avoids
+            // a known FileOpenPicker rejection on some Win11 builds where mixing wildcards
+            // with extension filters throws at PickSingleFileAsync.
             picker.FileTypeFilter.Add(".wgssl");
+            picker.FileTypeFilter.Add(".tgz");
             picker.FileTypeFilter.Add(".tar");
+            picker.FileTypeFilter.Add(".gz");
             WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
 
             var file = await picker.PickSingleFileAsync();
