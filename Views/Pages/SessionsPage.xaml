@@ -37,7 +37,7 @@
                                              PlaceholderTemplate="{StaticResource ProtocolPlaceholderTemplate}" />
     </Page.Resources>
 
-    <Grid>
+    <Grid Background="#0c0c0c">
         <StackPanel HorizontalAlignment="Center"
                     VerticalAlignment="Center"
                     Spacing="12"
