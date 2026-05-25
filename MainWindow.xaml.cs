@@ -18,6 +18,15 @@ public sealed partial class MainWindow : Window
     // plus NavigationView's empirically-observed PaneCustomContent padding (~12).
     private const double PaneCustomContentInset = 28;
 
+    // Pane padding/separator above and below the footer items block. Tuned so
+    // the bounded tree leaves a small gap before the footer rather than butting
+    // right up against it.
+    private const double FooterChromeReserve = 24;
+
+    // Floor so a transient zero-height layout pass (e.g. before the footer
+    // items have measured) doesn't collapse the tree to nothing.
+    private const double MinConnectionsTreeHeight = 100;
+
     private readonly INavigationService _navigationService;
 
     private bool _isResizingSidebar;
@@ -68,6 +77,14 @@ public sealed partial class MainWindow : Window
         {
             ViewModel.MaxAvailableWidth = args.NewSize.Width;
         };
+
+        // NavigationView.PaneCustomContent sits in an Auto-height row of the
+        // pane template, so ConnectionTreeView is measured with infinite
+        // height and its TreeView's internal ScrollViewer never engages —
+        // the tree just grows and z-orders over the footer items. Bound the
+        // tree's height to "pane height minus footer block" on every resize
+        // so the built-in scroller takes over and the footer stays visible.
+        NavView.SizeChanged += (_, _) => ApplyConnectionsTreeMaxHeight();
 
         Activated += OnFirstActivated;
 
@@ -139,8 +156,26 @@ public sealed partial class MainWindow : Window
         if (_minSidebarMeasured) return;
         _minSidebarMeasured = true;
         // Defer until after the footer items have applied their templates so DesiredSize
-        // reflects icon + text + internal padding rather than zero.
-        NavView.DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, ComputeMinSidebarWidth);
+        // reflects icon + text + internal padding rather than zero. The same deferral
+        // also lets the footer items' ActualHeight settle for ApplyConnectionsTreeMaxHeight.
+        NavView.DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
+        {
+            ComputeMinSidebarWidth();
+            ApplyConnectionsTreeMaxHeight();
+        });
+    }
+
+    private void ApplyConnectionsTreeMaxHeight()
+    {
+        double footerHeight = 0;
+        foreach (var item in new[] { CredentialsItem, SessionsItem, TunnelsItem, SettingsItem })
+        {
+            if (item is null) continue;
+            footerHeight += item.ActualHeight;
+        }
+
+        var available = NavView.ActualHeight - footerHeight - FooterChromeReserve;
+        ConnectionsTree.MaxHeight = Math.Max(MinConnectionsTreeHeight, available);
     }
 
     private void ComputeMinSidebarWidth()
