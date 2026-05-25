@@ -379,6 +379,13 @@ public partial class TunnelConfigsViewModel : ObservableObject
                 WireGuard: null,
                 OpenVpn: null,
                 Fortinet: DeserializeOrEmpty<FortinetSettings>(secret, config, ref loadFailure)),
+            TunnelKind.Watchguard => new TunnelDraft(
+                config.Name,
+                config.Kind,
+                WireGuard: null,
+                OpenVpn: null,
+                Fortinet: null,
+                Watchguard: DeserializeOrEmpty<WatchguardSettings>(secret, config, ref loadFailure)),
             _ => new TunnelDraft(config.Name, config.Kind, WireGuard: null, OpenVpn: null, Fortinet: null),
         };
         return (draft, loadFailure);
@@ -413,6 +420,8 @@ public partial class TunnelConfigsViewModel : ObservableObject
             draft.OpenVpn ?? throw new InvalidOperationException("OpenVPN settings are missing for an OpenVPN draft.")),
         TunnelKind.Fortinet => JsonSerializer.SerializeToUtf8Bytes(
             draft.Fortinet ?? throw new InvalidOperationException("Fortinet settings are missing for a Fortinet draft.")),
+        TunnelKind.Watchguard => JsonSerializer.SerializeToUtf8Bytes(
+            draft.Watchguard ?? throw new InvalidOperationException("Watchguard settings are missing for a Watchguard draft.")),
         _ => throw new InvalidOperationException($"Unsupported tunnel kind '{draft.Kind}'."),
     };
 
@@ -435,6 +444,9 @@ public partial class TunnelConfigsViewModel : ObservableObject
                 return;
             case TunnelKind.Fortinet:
                 ValidateFortinet(draft.Fortinet);
+                return;
+            case TunnelKind.Watchguard:
+                ValidateWatchguard(draft.Watchguard);
                 return;
             default:
                 throw new InvalidOperationException($"Unsupported tunnel kind '{draft.Kind}'.");
@@ -473,6 +485,21 @@ public partial class TunnelConfigsViewModel : ObservableObject
         // single space passed as a password would otherwise reach the gateway as %20 and bounce
         // back as a cryptic 'invalid credentials' instead of a clean client-side rejection.
         if (string.IsNullOrWhiteSpace(fg.Password)) sb.AppendLine("Password is required.");
+        if (sb.Length > 0) throw new InvalidOperationException(sb.ToString().TrimEnd());
+    }
+
+    private static void ValidateWatchguard(WatchguardSettings? wg)
+    {
+        if (wg is null)
+            throw new InvalidOperationException("Watchguard settings are required for a Watchguard tunnel.");
+        var sb = new StringBuilder();
+        if (string.IsNullOrWhiteSpace(wg.Server)) sb.AppendLine("Server is required.");
+        if (wg.Port is < 1 or > 65535) sb.AppendLine("Port must be between 1 and 65535.");
+        if (string.IsNullOrWhiteSpace(wg.Username)) sb.AppendLine("Username is required.");
+        if (string.IsNullOrWhiteSpace(wg.Password)) sb.AppendLine("Password is required.");
+        if (string.IsNullOrWhiteSpace(wg.CaPem)) sb.AppendLine("CA certificate (PEM) is required.");
+        if (string.IsNullOrWhiteSpace(wg.ClientCertPem)) sb.AppendLine("Client certificate (PEM) is required.");
+        if (string.IsNullOrWhiteSpace(wg.ClientKeyPem)) sb.AppendLine("Client private key (PEM) is required.");
         if (sb.Length > 0) throw new InvalidOperationException(sb.ToString().TrimEnd());
     }
 

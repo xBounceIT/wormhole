@@ -108,6 +108,32 @@ public class TunnelManagerTests
         await instance!.DisposeAsync();
     }
 
+    [Fact]
+    public async Task Establish_DispatchesByKind_Watchguard()
+    {
+        // Same dispatch lock for Watchguard: a Watchguard-kind config must reach the Watchguard
+        // provider, not the OpenVPN one (even though Watchguard reuses the OpenVPN sidecar
+        // under the hood — the dispatch is by Kind, not by transport).
+        var ovpn = new FakeProvider(TunnelKind.OpenVpn);
+        var wgg = new FakeProvider(TunnelKind.Watchguard);
+        var mgr = BuildManager(out var repo, out var creds, providers: new ITunnelProvider[] { ovpn, wgg });
+
+        var configId = Guid.NewGuid();
+        repo.Configs[configId] = new TunnelConfig { Id = configId, Name = "corp-wgg", Kind = TunnelKind.Watchguard };
+        creds.TunnelConfigs[configId] = new byte[] { 7, 7, 7 };
+
+        var profile = Profile(tunnelEnabled: true, tunnelConfigId: configId);
+
+        var instance = await mgr.EstablishAsync(profile, CancellationToken.None);
+
+        Assert.NotNull(instance);
+        Assert.Equal(0, ovpn.EstablishCount);
+        Assert.Equal(1, wgg.EstablishCount);
+        Assert.Equal(new byte[] { 7, 7, 7 }, wgg.LastSecret);
+
+        await instance!.DisposeAsync();
+    }
+
     private static TunnelManager BuildManager(
         out FakeTunnelConfigRepository repo,
         out FakeCredentialService credentials,

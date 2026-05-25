@@ -7,6 +7,7 @@ using Microsoft.UI.Xaml.Controls;
 using Windows.Storage.Pickers;
 using Wormhole.Helpers;
 using Wormhole.Models;
+using Wormhole.Services.Tunneling.Watchguard;
 
 namespace Wormhole.Views.Dialogs;
 
@@ -55,6 +56,14 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
                 // all-whitespace password would otherwise pass the dialog gate and fail at the
                 // gateway with a generic 'invalid credentials' message.
                 !string.IsNullOrWhiteSpace(FortinetPasswordBox.Password),
+            TunnelKind.Watchguard =>
+                !string.IsNullOrWhiteSpace(WatchguardServerBox.Text) &&
+                IsValidPort(WatchguardPortBox.Text) &&
+                !string.IsNullOrWhiteSpace(WatchguardUsernameBox.Text) &&
+                !string.IsNullOrWhiteSpace(WatchguardPasswordBox.Password) &&
+                !string.IsNullOrWhiteSpace(WatchguardCaPemBox.Text) &&
+                !string.IsNullOrWhiteSpace(WatchguardClientCertPemBox.Text) &&
+                !string.IsNullOrWhiteSpace(WatchguardClientKeyPemBox.Text),
             _ => false,
         };
 
@@ -94,6 +103,23 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         FortinetTrustCertCheck.IsChecked = fg.TrustServerCertificate;
         FortinetCertPinBox.Text = fg.ServerCertSha256Pin ?? string.Empty;
 
+        var wgg = initial.Watchguard ?? new WatchguardSettings();
+        // Coalesce every string field defensively: System.Text.Json happily assigns null to a
+        // non-nullable string property if the on-disk JSON has the key explicitly null, and
+        // TextBox.Text = null throws NRE. The Fortinet branch above does the same with `?? string.Empty`
+        // / `?? "Firebox-DB"` for its nullable fields; the Watchguard fields are non-nullable in
+        // the model but the deserializer's behavior makes that a weak guarantee at the boundary.
+        WatchguardServerBox.Text = wgg.Server ?? string.Empty;
+        WatchguardPortBox.Text = (wgg.Port is >= 1 and <= 65535 ? wgg.Port : 443).ToString();
+        WatchguardUsernameBox.Text = wgg.Username ?? string.Empty;
+        WatchguardPasswordBox.Password = wgg.Password ?? string.Empty;
+        WatchguardDomainBox.Text = string.IsNullOrEmpty(wgg.Domain) ? "Firebox-DB" : wgg.Domain;
+        WatchguardCaPemBox.Text = wgg.CaPem ?? string.Empty;
+        WatchguardClientCertPemBox.Text = wgg.ClientCertPem ?? string.Empty;
+        WatchguardClientKeyPemBox.Text = wgg.ClientKeyPem ?? string.Empty;
+        WatchguardVerifyX509NameBox.Text = wgg.VerifyX509Name ?? string.Empty;
+        WatchguardTrustCertCheck.IsChecked = wgg.TrustServerCertificate;
+
         UpdateKindPanels();
     }
 
@@ -106,6 +132,7 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
             TunnelKind.WireGuard => new TunnelDraft(name, kind, BuildWireGuard(), OpenVpn: null, Fortinet: null),
             TunnelKind.OpenVpn => new TunnelDraft(name, kind, WireGuard: null, BuildOpenVpn(), Fortinet: null),
             TunnelKind.Fortinet => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, BuildFortinet()),
+            TunnelKind.Watchguard => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, Fortinet: null, Watchguard: BuildWatchguard()),
             _ => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, Fortinet: null),
         };
     }
@@ -133,6 +160,99 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         Username = string.IsNullOrWhiteSpace(OpenVpnUsernameBox.Text) ? null : OpenVpnUsernameBox.Text.Trim(),
         Password = string.IsNullOrEmpty(OpenVpnPasswordBox.Password) ? null : OpenVpnPasswordBox.Password,
     };
+
+    private WatchguardSettings BuildWatchguard()
+    {
+        return new WatchguardSettings
+        {
+            Server = WatchguardServerBox.Text.Trim(),
+            Port = TryParseInt(WatchguardPortBox.Text) ?? 443,
+            Username = WatchguardUsernameBox.Text.Trim(),
+            // Same reasoning as Fortinet: strip only trailing CR/LF (paste artifacts) — leave
+            // every other character intact so legitimate whitespace in a password survives.
+            Password = WatchguardPasswordBox.Password?.TrimEnd('\r', '\n') ?? string.Empty,
+            Domain = string.IsNullOrWhiteSpace(WatchguardDomainBox.Text) ? "Firebox-DB" : WatchguardDomainBox.Text.Trim(),
+            CaPem = WatchguardCaPemBox.Text,
+            ClientCertPem = WatchguardClientCertPemBox.Text,
+            ClientKeyPem = WatchguardClientKeyPemBox.Text,
+            VerifyX509Name = string.IsNullOrWhiteSpace(WatchguardVerifyX509NameBox.Text)
+                ? WatchguardSettings.DefaultVerifyX509Name
+                : WatchguardVerifyX509NameBox.Text.Trim(),
+            TrustServerCertificate = WatchguardTrustCertCheck.IsChecked == true,
+        };
+    }
+
+    private async void OnWatchguardImportClicked(object sender, RoutedEventArgs e)
+    {
+        // Whole method body in try/catch — the HWND lookup, COM init, and tar parsing can all
+        // throw, and async void would otherwise bubble those to App.UnhandledException with
+        // the editor still open. Errors surface in the WatchguardImportStatus InfoBar inside
+        // the panel, NOT a secondary ContentDialog — TunnelDialog itself is hosted in a
+        // ContentDialog and WinUI 3 only permits one ContentDialog per XamlRoot.
+        WatchguardImportStatus.IsOpen = false;
+        try
+        {
+            var mainWindow = App.Current.MainWindow
+                ?? throw new InvalidOperationException("Main window is not available.");
+            var hwnd = mainWindow.GetHwnd();
+
+            var picker = new FileOpenPicker
+            {
+                ViewMode = PickerViewMode.List,
+                SuggestedStartLocation = PickerLocationId.Downloads,
+            };
+            // Only the two expected extensions — dropping the "*" wildcard avoids a known
+            // FileOpenPicker rejection on some Win11 builds where mixing wildcards with extension
+            // filters throws at PickSingleFileAsync. Users who absolutely need to point at a
+            // file with a different extension can rename it first.
+            picker.FileTypeFilter.Add(".wgssl");
+            picker.FileTypeFilter.Add(".tar");
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+
+            var file = await picker.PickSingleFileAsync();
+            if (file is null) return;
+
+            using var stream = await file.OpenStreamForReadAsync();
+            // No explicit dialog-scoped CancellationToken is exposed here, but the importer's
+            // per-entry size cap (1 MiB) and entry-count cap protect against OOM.
+            var imported = await WatchguardWgsslImporter.ImportAsync(stream);
+
+            WatchguardServerBox.Text = imported.Server;
+            WatchguardPortBox.Text = imported.Port.ToString();
+            WatchguardCaPemBox.Text = imported.CaPem;
+            WatchguardClientCertPemBox.Text = imported.ClientCertPem;
+            WatchguardClientKeyPemBox.Text = imported.ClientKeyPem;
+            ValidityChanged?.Invoke(this, EventArgs.Empty);
+
+            WatchguardImportStatus.Severity = InfoBarSeverity.Success;
+            WatchguardImportStatus.Title = "Imported";
+            WatchguardImportStatus.Message = $"Loaded server '{imported.Server}:{imported.Port}' from {file.Name}.";
+            WatchguardImportStatus.IsOpen = true;
+        }
+        catch (Exception ex)
+        {
+            // Inline error reporting via the InfoBar. The fallback used to be a nested
+            // ContentDialog, but WinUI rejects a second ContentDialog inside the same XamlRoot
+            // — the parent TunnelDialog ContentDialog is still open here — and the error would
+            // be silently swallowed. The InfoBar lives inside our panel so it has no such
+            // restriction. Defensive null-check on InfoBar in case the UserControl was unloaded
+            // mid-await (e.g. user closed the parent dialog while picker was up).
+            try
+            {
+                if (WatchguardImportStatus is null) return;
+                WatchguardImportStatus.Severity = InfoBarSeverity.Error;
+                WatchguardImportStatus.Title = "Couldn't import .wgssl";
+                WatchguardImportStatus.Message = ex.Message;
+                WatchguardImportStatus.IsOpen = true;
+            }
+            catch
+            {
+                // Last-resort swallow: nothing meaningful to do if even setting the InfoBar
+                // properties fails (the visual tree is gone). The original ex was already
+                // surfaced via the failed import; the user re-tries.
+            }
+        }
+    }
 
     private FortinetSettings BuildFortinet()
     {
@@ -241,6 +361,9 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
             ? Visibility.Visible
             : Visibility.Collapsed;
         FortinetPanel.Visibility = SelectedKind == TunnelKind.Fortinet
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        WatchguardPanel.Visibility = SelectedKind == TunnelKind.Watchguard
             ? Visibility.Visible
             : Visibility.Collapsed;
         // Stale import-error from a previous OpenVPN session would otherwise re-surface when

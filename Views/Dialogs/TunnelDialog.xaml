@@ -152,6 +152,99 @@
             </Grid>
         </StackPanel>
 
+        <!-- Watchguard fields: Mobile VPN with SSL is OpenVPN over TCP/443 with a Firebox CA;
+             we collect server+credentials in the top grid, certs in the Advanced expander, and
+             expose an Import button to ingest the .wgssl bundle a Firebox emits. -->
+        <StackPanel x:Name="WatchguardPanel" Spacing="10" Visibility="Collapsed">
+            <Button x:Name="WatchguardImportButton"
+                    Content="Import from .wgssl…"
+                    Click="OnWatchguardImportClicked"
+                    HorizontalAlignment="Left" />
+            <!-- Inline status bar for .wgssl import outcomes. We can't `ContentDialog.ShowAsync`
+                 an error from here because the TunnelDialog itself is already a ContentDialog and
+                 WinUI 3 only allows one ContentDialog per XamlRoot — the second ShowAsync would
+                 throw silently. An InfoBar inside our panel sidesteps that constraint. -->
+            <InfoBar x:Name="WatchguardImportStatus"
+                     IsOpen="False"
+                     IsClosable="True"
+                     Severity="Error" />
+
+            <Grid ColumnSpacing="16">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Spacing="10">
+                    <TextBlock Text="Gateway" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+                    <TextBox x:Name="WatchguardServerBox"
+                             Header="Server"
+                             PlaceholderText="firebox.example.com"
+                             TextChanged="OnFieldChanged" />
+                    <TextBox x:Name="WatchguardPortBox"
+                             Header="Port"
+                             Text="443"
+                             TextChanged="OnFieldChanged" />
+                    <TextBox x:Name="WatchguardDomainBox"
+                             Header="Authentication domain"
+                             Text="Firebox-DB" />
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Spacing="10">
+                    <TextBlock Text="Credentials" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+                    <TextBox x:Name="WatchguardUsernameBox"
+                             Header="Username"
+                             TextChanged="OnFieldChanged" />
+                    <PasswordBox x:Name="WatchguardPasswordBox"
+                                 Header="Password"
+                                 PasswordChanged="OnPasswordFieldChanged" />
+                </StackPanel>
+            </Grid>
+
+            <Expander Header="Certificates &amp; advanced"
+                      HorizontalAlignment="Stretch"
+                      HorizontalContentAlignment="Stretch">
+                <StackPanel Spacing="10">
+                    <TextBox x:Name="WatchguardCaPemBox"
+                             Header="CA certificate (PEM)"
+                             AcceptsReturn="True"
+                             TextWrapping="NoWrap"
+                             FontFamily="Consolas"
+                             MinHeight="80"
+                             MaxHeight="140"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto"
+                             ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                             TextChanged="OnFieldChanged" />
+                    <TextBox x:Name="WatchguardClientCertPemBox"
+                             Header="Client certificate (PEM)"
+                             AcceptsReturn="True"
+                             TextWrapping="NoWrap"
+                             FontFamily="Consolas"
+                             MinHeight="80"
+                             MaxHeight="140"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto"
+                             ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                             TextChanged="OnFieldChanged" />
+                    <TextBox x:Name="WatchguardClientKeyPemBox"
+                             Header="Client private key (PEM)"
+                             AcceptsReturn="True"
+                             TextWrapping="NoWrap"
+                             FontFamily="Consolas"
+                             MinHeight="80"
+                             MaxHeight="140"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto"
+                             ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                             TextChanged="OnFieldChanged" />
+                    <TextBox x:Name="WatchguardVerifyX509NameBox"
+                             Header="verify-x509-name subject (advanced)"
+                             FontFamily="Consolas"
+                             PlaceholderText="leave default unless the Firebox uses a custom server cert" />
+                    <CheckBox x:Name="WatchguardTrustCertCheck"
+                              Content="Trust server certificate (skip subject pin)" />
+                </StackPanel>
+            </Expander>
+        </StackPanel>
+
         <!-- Fortinet fields: Gateway and Credentials sit side-by-side; the Advanced
              expander spans the full width below so the TOTP/cert-pin block has room. -->
         <StackPanel x:Name="FortinetPanel" Spacing="10" Visibility="Collapsed">
