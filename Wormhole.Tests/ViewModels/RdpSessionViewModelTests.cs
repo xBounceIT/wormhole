@@ -197,6 +197,26 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public async Task AttachAsync_OnRebindWithLiveSession_PushesFocus()
+    {
+        // Rebind path: Sessions↔Settings nav back to a connected RDP tab re-runs
+        // RdpSurfaceHost.OnLoaded → AttachAsync. With _session already set, the rebind
+        // branch SetBounds/Show/Focus the existing OCX so the first keystroke after
+        // nav-back lands on the remote session without a click. Without this test the
+        // contract is only enforced by manual verification — pin it so a future refactor
+        // that moves the TryFocusSession call out of the rebind branch trips a failure.
+        var (vm, _, _, _, _) = CreateVm();
+        vm.Initialize(MakeProfile());
+        var fake = new FakeRdpSession();
+        vm.AttachConnectedSessionForTesting(fake);
+        var beforeRebind = fake.FocusCount;
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Empty);
+
+        Assert.Equal(beforeRebind + 1, fake.FocusCount);
+    }
+
+    [Fact]
     public void AutoReconnected_RestoresConnectedStatusAndClearsReconnectBanner()
     {
         // Without forwarding OnAutoReconnected, AutoReconnecting drove Status to Connecting
