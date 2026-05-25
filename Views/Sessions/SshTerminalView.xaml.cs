@@ -40,6 +40,12 @@ public sealed partial class SshTerminalView : UserControl
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
+        // Restore the WebView2 surface that OnUnloaded collapsed to suppress airspace
+        // bleed. Done before the DataContext check so a null-VM Loaded doesn't leave a
+        // previously-collapsed WebView stuck Collapsed (DataContextChanged won't re-fire
+        // Loaded later to recover it).
+        TerminalView.Visibility = Visibility.Visible;
+
         var newVm = DataContext as SshSessionViewModel;
         if (newVm is null) return;
 
@@ -287,6 +293,15 @@ public sealed partial class SshTerminalView : UserControl
     // posting to a disposed WebView2 until reconnect or tab close.
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
+        // Collapse the WebView2 BEFORE detaching: WinUI 3's TabView leaving parent visibility
+        // to its child doesn't reliably suspend WebView2's composition surface, so a
+        // background tab still painting (heavy SSH output, or an xterm.js re-render fired
+        // by text selection) can bleed pixels into the selected tab. Setting Visibility on
+        // the WebView2 element itself propagates to its render surface.
+        // (RdpSurfaceHost solves the equivalent airspace problem differently — it reparents
+        // the ActiveX HWND via DetachView — so the mechanism is unique to this file.)
+        TerminalView.Visibility = Visibility.Collapsed;
+
         _handshakeGeneration++;
         if (_viewModel is not null)
         {
