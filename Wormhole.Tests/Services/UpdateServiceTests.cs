@@ -321,6 +321,62 @@ public class UpdateServiceTests
         }
     }
 
+    [Fact]
+    public void RotateInstallerCache_DeletesOlderInstallers_KeepsCurrent()
+    {
+        using var tmp = new TempDir();
+        File.WriteAllText(Path.Combine(tmp.Path, "Wormhole-0.1.0-win-x64-setup.exe"), "old");
+        File.WriteAllText(Path.Combine(tmp.Path, "Wormhole-0.2.0-win-x64-setup.exe"), "old");
+        File.WriteAllText(Path.Combine(tmp.Path, "Wormhole-0.3.0-win-x64-setup.exe"), "new");
+
+        UpdateService.RotateInstallerCache(tmp.Path, "Wormhole-0.3.0-win-x64-setup.exe");
+
+        var remaining = Directory.EnumerateFiles(tmp.Path).Select(Path.GetFileName).OrderBy(n => n).ToArray();
+        Assert.Single(remaining, "Wormhole-0.3.0-win-x64-setup.exe");
+    }
+
+    [Fact]
+    public void RotateInstallerCache_IgnoresUnrelatedFiles()
+    {
+        using var tmp = new TempDir();
+        File.WriteAllText(Path.Combine(tmp.Path, "readme.txt"), "x");
+        File.WriteAllText(Path.Combine(tmp.Path, "Wormhole-0.1.0-win-x64-setup.exe.part"), "x");
+        File.WriteAllText(Path.Combine(tmp.Path, "Wormhole-0.1.0-win-x64-setup.exe"), "old");
+        File.WriteAllText(Path.Combine(tmp.Path, "Wormhole-0.2.0-win-x64-setup.exe"), "new");
+
+        UpdateService.RotateInstallerCache(tmp.Path, "Wormhole-0.2.0-win-x64-setup.exe");
+
+        var remaining = Directory.EnumerateFiles(tmp.Path).Select(Path.GetFileName).ToHashSet();
+        Assert.Contains("Wormhole-0.2.0-win-x64-setup.exe", remaining);
+        Assert.Contains("Wormhole-0.1.0-win-x64-setup.exe.part", remaining);
+        Assert.Contains("readme.txt", remaining);
+        Assert.DoesNotContain("Wormhole-0.1.0-win-x64-setup.exe", remaining);
+    }
+
+    [Fact]
+    public void RotateInstallerCache_DoesNotThrow_WhenDirectoryMissing()
+    {
+        var missing = Path.Combine(Path.GetTempPath(), "wormhole-rotate-" + Guid.NewGuid());
+        UpdateService.RotateInstallerCache(missing, "Wormhole-0.2.0-win-x64-setup.exe");
+        Assert.False(Directory.Exists(missing));
+    }
+
+    private sealed class TempDir : IDisposable
+    {
+        public string Path { get; }
+
+        public TempDir()
+        {
+            Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "wormhole-rotate-" + Guid.NewGuid());
+            Directory.CreateDirectory(Path);
+        }
+
+        public void Dispose()
+        {
+            try { Directory.Delete(Path, recursive: true); } catch { }
+        }
+    }
+
     private static UpdateService NewService(
         Func<HttpRequestMessage, HttpResponseMessage> handler,
         FakeAppSettingsService? settings = null,
