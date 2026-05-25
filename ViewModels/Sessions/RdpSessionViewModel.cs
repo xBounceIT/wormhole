@@ -215,7 +215,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         if (Profile is null || _ownerHwnd == IntPtr.Zero) return;
 
         var forcePrompt = FailedDueToCredentials;
-        await FullTeardownAsync().ConfigureAwait(true);
+        await FullTeardownAsync(fastTunnelTeardown: true).ConfigureAwait(true);
 
         // Geometry will be re-supplied by the surface host's first SetBounds after the new
         // session attaches; seed with a 1x1 so the form is valid until that arrives.
@@ -647,9 +647,12 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
     /// <summary>
     /// User-initiated teardown (Disconnect / Retry / tab close): cancel any in-flight
-    /// connect, dispose the session, return to a clean Disconnected state.
+    /// connect, dispose the session, return to a clean Disconnected state. Awaits
+    /// tunnel disposal so callers like <see cref="CloseAsync"/> can rely on the await
+    /// meaning "everything is released" — pass <paramref name="fastTunnelTeardown"/>
+    /// only from <see cref="RetryAsync"/> where the user wants PuTTY-instant feel.
     /// </summary>
-    private async Task FullTeardownAsync()
+    private async Task FullTeardownAsync(bool fastTunnelTeardown = false)
     {
         var cts = _cts;
         _cts = null;
@@ -659,7 +662,19 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         cts?.Dispose();
 
         DisposeSessionSilently();
-        await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
+        if (fastTunnelTeardown)
+        {
+            // Reconnect path only: VPN sidecar shutdown can take 100s of ms and the
+            // user has just asked for "kill and reconnect". The _tunnel field is
+            // nulled atomically inside DisposeTunnelSilentlyAsync
+            // (Interlocked.Exchange) before its await, so the fresh ConnectAsync
+            // running immediately afterwards won't see the old reference.
+            _ = DisposeTunnelSilentlyAsync();
+        }
+        else
+        {
+            await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
+        }
         DetachExternalProcess();
         Status = SessionStatus.Disconnected;
         ErrorMessage = null;
@@ -844,9 +859,11 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         session.AutoReconnecting -= OnSessionAutoReconnecting;
         session.AutoReconnected -= OnSessionAutoReconnected;
 
-        try { session.Disconnect(); }
-        catch (Exception ex) { _logger.LogWarning(ex, "Disconnect threw during teardown."); }
-
+        // No explicit session.Disconnect() — RdpHostForm.Dispose itself no longer
+        // calls the OCX's polite MCS termination (see comment there), so Dispose
+        // tears the OCX down via AxHost without blocking the UI/STA thread on a
+        // server ack. Events were unsubscribed above, so any late OnDisconnected
+        // from the OCX during teardown is safely dropped.
         try { session.Dispose(); }
         catch (Exception ex) { _logger.LogWarning(ex, "Dispose threw during teardown."); }
     }

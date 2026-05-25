@@ -410,8 +410,13 @@ internal sealed class RdpHostForm : FormsForm
     {
         if (disposing)
         {
-            try { Disconnect(); }
-            catch (Exception ex) { _logger?.LogDebug(ex, "Disconnect during Dispose threw (suppressed)."); }
+            // Deliberately do NOT call Disconnect() here — the OCX's polite MCS
+            // termination blocks the UI/STA thread on a server ack, and disposal
+            // is on the user-facing reconnect / tab-close path. AxHost.Dispose
+            // tears down the OCX via COM teardown; the server detects the drop
+            // via the resulting socket close. Callers that genuinely need an
+            // orderly protocol shutdown can still call Disconnect() explicitly
+            // before Dispose.
             DetachEventsSink();
             try { _ax?.Dispose(); }
             catch (Exception ex) { _logger?.LogDebug(ex, "AxHost Dispose threw (suppressed)."); }
