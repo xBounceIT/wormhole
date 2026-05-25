@@ -859,12 +859,11 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         session.AutoReconnecting -= OnSessionAutoReconnecting;
         session.AutoReconnected -= OnSessionAutoReconnected;
 
-        // Skip the polite ocx.Disconnect() round-trip — Dispose tears down the
-        // host form which releases the OCX and yanks the underlying socket,
-        // mirroring PuTTY's "kill the session" model. The polite call would
-        // block the UI/STA thread on MCS termination ack, adding perceptible
-        // lag to the tab-context-menu Reconnect path. Events already unsubscribed
-        // above, so any late OnDisconnected from the OCX is safely dropped.
+        // No explicit session.Disconnect() — RdpHostForm.Dispose itself no longer
+        // calls the OCX's polite MCS termination (see comment there), so Dispose
+        // tears the OCX down via AxHost without blocking the UI/STA thread on a
+        // server ack. Events were unsubscribed above, so any late OnDisconnected
+        // from the OCX during teardown is safely dropped.
         try { session.Dispose(); }
         catch (Exception ex) { _logger.LogWarning(ex, "Dispose threw during teardown."); }
     }
