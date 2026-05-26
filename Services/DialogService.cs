@@ -227,6 +227,85 @@ public sealed class DialogService : IDialogService
         return accepted ? passwordBox.Password : null;
     }
 
+    public async Task<(string Username, string Password)?> PromptCredentialsAsync(string title, string message, string? initialUsername = null)
+    {
+        var userBox = new TextBox
+        {
+            Header = "Username",
+            PlaceholderText = "user or DOMAIN\\user",
+            Text = initialUsername ?? string.Empty,
+            Width = 320,
+        };
+        var passwordBox = new PasswordBox
+        {
+            Header = "Password",
+            PlaceholderText = "Password",
+            Width = 320,
+        };
+        var panel = new StackPanel { Spacing = 8 };
+        if (!string.IsNullOrEmpty(message))
+        {
+            panel.Children.Add(new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap });
+        }
+        panel.Children.Add(userBox);
+        panel.Children.Add(passwordBox);
+
+        var dialog = new ContentDialog
+        {
+            Title = title,
+            Content = panel,
+            PrimaryButtonText = "Connect",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = RequireXamlRoot(),
+            IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(userBox.Text),
+        };
+
+        // Both fields required. The password field is allowed to be blank (some servers
+        // accept empty passwords / passwordless accounts), but a blank username with no
+        // profile-side fallback is exactly the case this dialog exists to fix — keep
+        // Connect disabled until the user types something.
+        userBox.TextChanged += (_, _) =>
+            dialog.IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(userBox.Text);
+
+        var submittedViaEnter = false;
+        userBox.KeyDown += (_, args) =>
+        {
+            // Enter in the username field advances to the password field rather than
+            // submitting — submitting here would hand the OCX a blank password the user
+            // never had a chance to type.
+            if (args.Key != Windows.System.VirtualKey.Enter) return;
+            if (string.IsNullOrWhiteSpace(userBox.Text)) return;
+            passwordBox.Focus(FocusState.Programmatic);
+            args.Handled = true;
+        };
+        passwordBox.KeyDown += (_, args) =>
+        {
+            if (args.Key != Windows.System.VirtualKey.Enter) return;
+            if (string.IsNullOrWhiteSpace(userBox.Text)) return;
+            submittedViaEnter = true;
+            dialog.Hide();
+            args.Handled = true;
+        };
+
+        dialog.Opened += (_, _) =>
+        {
+            // Focus the empty field first — username if blank, otherwise password — so the
+            // user lands on the field that actually needs input.
+            if (string.IsNullOrWhiteSpace(userBox.Text))
+                userBox.Focus(FocusState.Programmatic);
+            else
+                passwordBox.Focus(FocusState.Programmatic);
+        };
+
+        var result = await dialog.ShowAsync();
+        var accepted = result == ContentDialogResult.Primary || submittedViaEnter;
+        if (!accepted) return null;
+        var username = userBox.Text.Trim();
+        if (string.IsNullOrEmpty(username)) return null;
+        return (username, passwordBox.Password);
+    }
+
     public async Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync()
     {
         var control = new MRemoteNgImportDialog();

@@ -15,6 +15,7 @@ public class FakeDialogService : IDialogService
 {
     public string? TextPromptResult { get; set; }
     public string? PasswordPromptResult { get; set; }
+    public (string Username, string Password)? CredentialsPromptResult { get; set; }
     public bool ConfirmResult { get; set; } = true;
 
     /// <summary>
@@ -36,6 +37,7 @@ public class FakeDialogService : IDialogService
     public MRemoteNgImportResult? MRemoteNgImportResult { get; set; }
 
     public int PasswordPromptCount { get; private set; }
+    public int CredentialsPromptCount { get; private set; }
     public int TextPromptCount { get; private set; }
     public int MRemoteNgImportPromptCount { get; private set; }
 
@@ -145,6 +147,12 @@ public class FakeDialogService : IDialogService
     {
         PasswordPromptCount++;
         return Task.FromResult(PasswordPromptResult);
+    }
+
+    public virtual Task<(string Username, string Password)?> PromptCredentialsAsync(string title, string message, string? initialUsername = null)
+    {
+        CredentialsPromptCount++;
+        return Task.FromResult(CredentialsPromptResult);
     }
 
     public virtual Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync()

@@ -127,6 +127,19 @@ internal sealed class RdpHostForm : FormsForm
         dynamic adv = ocx.AdvancedSettings9;
         adv.RDPPort = profile.Port;
 
+        // NLA / CredSSP: mstsc.exe enables CredSSP by default; the embedded OCX
+        // defaults it to VARIANT_FALSE, which makes any server configured for
+        // "require NLA" (the default on modern Windows) terminate the session
+        // with exDiscReasonNlaRequired (2825) — surfaced as the "Network Level
+        // Authentication is not supported" overlay. Enabling it here restores
+        // parity with mstsc. Kept loud (not TrySetOptional) for the same reason
+        // as AuthenticationLevel below: the OCX default is the broken value, so
+        // silently swallowing a missing-property error would just resurrect the
+        // exact bug this line fixes with no diagnostic for the user. The
+        // property lives on IMsRdpClientAdvancedSettings5 (RDP 5.1+) and is
+        // effectively universal on any supported Windows mstscax build.
+        adv.EnableCredSspSupport = true;
+
         // mstsc-style: pass password through ClearTextPassword. The OCX consumes it during
         // Connect() and then we proactively clear it in Start() so the plaintext doesn't
         // linger in OCX-owned memory longer than necessary.
