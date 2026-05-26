@@ -318,21 +318,30 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
             try
             {
-                var password = await ResolvePasswordAsync(profile, forcePromptForPassword, token).ConfigureAwait(true);
+                var resolved = await ResolveCredentialsAsync(profile, forcePromptForPassword, token).ConfigureAwait(true);
                 if (token.IsCancellationRequested)
                 {
                     Status = SessionStatus.Disconnected;
                     return;
                 }
 
-                // ResolvePasswordAsync returns null only when the user cancelled the prompt —
+                // ResolveCredentialsAsync returns null only when the user cancelled the prompt —
                 // silent return to Disconnected, not Failed (no error message to show). Covers
                 // both "no saved credential" and "credential Id pointed at a deleted Credential
                 // Manager entry, fell through to a prompt, user cancelled". Either way, no.
-                if (password is null)
+                if (resolved is not { } creds)
                 {
                     Status = SessionStatus.Disconnected;
                     return;
+                }
+                var password = creds.Password;
+                // If the user typed a username at the prompt (because the profile didn't have
+                // one), thread it into the profile so PrepareConnectProfileAsync and the OCX
+                // both see a real username instead of falling back to the current Windows
+                // session identity.
+                if (!string.Equals(creds.Username, profile.Username, StringComparison.Ordinal))
+                {
+                    profile = profile with { Username = creds.Username };
                 }
 
                 var (gwUser, gwPassword) = await ResolveGatewayCredentialsAsync(profile, token).ConfigureAwait(true);
@@ -463,17 +472,31 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         }
     }
 
-    private async Task<string?> ResolvePasswordAsync(ConnectionProfile profile, bool forcePrompt, CancellationToken token)
+    /// <summary>
+    /// Resolve the credentials needed for the RDP connection. Returns <c>(Username,
+    /// Password)</c> on success or <c>null</c> if the user cancels a prompt. When the
+    /// profile already has a username, <c>Username</c> in the result is just
+    /// <c>profile.Username</c>; when it doesn't, the user is prompted for BOTH fields
+    /// (without this, a profile saved with no username would silently hand the OCX a blank
+    /// username and the OCX would fill it from the current Windows session — never
+    /// surfacing a username field to the user).
+    /// </summary>
+    private async Task<(string Username, string Password)?> ResolveCredentialsAsync(ConnectionProfile profile, bool forcePrompt, CancellationToken token)
     {
+        var profileUsername = profile.Username ?? string.Empty;
+
         if (!forcePrompt && profile.CredentialId is { } credId)
         {
             try
             {
                 var stored = await _credentialService.ReadPasswordAsync(credId).ConfigureAwait(true);
-                if (!string.IsNullOrEmpty(stored)) return stored;
-                // Stored credential profile points at a Credential Manager entry that was
-                // deleted out-of-band; fall through to a prompt rather than crash.
-                _logger.LogInformation("Credential {CredentialId} not found in Credential Manager — prompting.", credId);
+                if (!string.IsNullOrEmpty(stored) && !string.IsNullOrEmpty(profileUsername))
+                    return (profileUsername, stored);
+                // Either the stored password is missing (Credential Manager entry deleted
+                // out-of-band) or the profile has no username — either way we fall through
+                // to a prompt instead of handing the OCX partial credentials.
+                if (string.IsNullOrEmpty(stored))
+                    _logger.LogInformation("Credential {CredentialId} not found in Credential Manager — prompting.", credId);
             }
             catch (Exception ex)
             {
@@ -482,14 +505,24 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         }
         token.ThrowIfCancellationRequested();
 
-        var prefix = !string.IsNullOrEmpty(profile.RdpDomain)
-            ? $"{profile.RdpDomain}\\{profile.Username ?? ""}"
-            : (profile.Username ?? string.Empty);
-        var promptMsg = string.IsNullOrEmpty(prefix)
-            ? $"Enter password for {profile.Host}"
-            : $"Enter password for {prefix}@{profile.Host}";
+        // No username on the profile → prompt for username + password. Without this the
+        // password-only dialog asked for half the credentials and the OCX silently used the
+        // current Windows user as the implicit username.
+        if (string.IsNullOrEmpty(profileUsername))
+        {
+            var prompted = await _dialog.PromptCredentialsAsync(
+                "RDP credentials",
+                $"Enter credentials for {profile.Host}",
+                initialUsername: null).ConfigureAwait(true);
+            return prompted;
+        }
 
-        return await _dialog.PromptPasswordAsync("RDP credentials", promptMsg).ConfigureAwait(true);
+        var prefix = !string.IsNullOrEmpty(profile.RdpDomain)
+            ? $"{profile.RdpDomain}\\{profileUsername}"
+            : profileUsername;
+        var promptMsg = $"Enter password for {prefix}@{profile.Host}";
+        var password = await _dialog.PromptPasswordAsync("RDP credentials", promptMsg).ConfigureAwait(true);
+        return password is null ? null : (profileUsername, password);
     }
 
     /// <summary>

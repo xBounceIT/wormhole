@@ -691,6 +691,9 @@ public class TunnelConfigsViewModelTests
         public Task<string?> PromptPasswordAsync(string title, string message) =>
             Task.FromResult<string?>(null);
 
+        public Task<(string Username, string Password)?> PromptCredentialsAsync(string title, string message, string? initialUsername = null) =>
+            Task.FromResult<(string Username, string Password)?>(null);
+
         public Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync() =>
             Task.FromResult<MRemoteNgImportResult?>(null);
 

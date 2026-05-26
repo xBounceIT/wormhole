@@ -30,6 +30,15 @@ public interface IDialogService
     Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null);
     Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null);
     Task<string?> PromptPasswordAsync(string title, string message);
+
+    /// <summary>
+    /// Prompt for username + password together. Used when the connection profile has no
+    /// stored username (a plain password prompt would leave the user no way to type one),
+    /// or when the caller specifically wants the user to confirm both fields. Returns null
+    /// on cancel; otherwise a non-empty tuple — both fields are required to enable the
+    /// Connect button.
+    /// </summary>
+    Task<(string Username, string Password)?> PromptCredentialsAsync(string title, string message, string? initialUsername = null);
     Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync();
 
     /// <summary>Show the export-backup dialog. Returns the result on success, null if the

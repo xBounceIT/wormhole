@@ -414,6 +414,43 @@ public class RdpSessionViewModelTests
         Assert.False(fake.Disposed);
     }
 
+    [Fact]
+    public async Task AttachAsync_NoUsernameOnProfile_PromptsForCredentialsAndForwardsTypedUsername()
+    {
+        // Profiles created without a username used to fall through to a password-only
+        // prompt, which let the OCX silently use the current Windows user as the implicit
+        // username. The fix routes the empty-username case through PromptCredentialsAsync
+        // and threads the typed username into the profile that reaches the OCX.
+        var (vm, svc, _, dlg, _) = CreateVm();
+        dlg.CredentialsPromptResult = ("typed-user", "typed-password");
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with { Username = null });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(1, dlg.CredentialsPromptCount);
+        Assert.Equal(0, dlg.PasswordPromptCount);
+        Assert.Equal("typed-user", svc.LastProfile?.Username);
+    }
+
+    [Fact]
+    public async Task AttachAsync_NoUsernameOnProfile_UserCancelsCredentialsPrompt_TransitionsToDisconnected()
+    {
+        // Cancelling the new credentials prompt must mirror the existing password-prompt
+        // cancel path: silent return to Disconnected, no error overlay, no OCX session.
+        var (vm, svc, _, dlg, _) = CreateVm();
+        dlg.CredentialsPromptResult = null;
+
+        vm.Initialize(MakeProfile() with { Username = null });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(1, dlg.CredentialsPromptCount);
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.Equal(0, svc.ConnectCount);
+    }
+
     // --- Per-connection VPN routing -------------------------------------------------------
 
     [Fact]
@@ -615,6 +652,10 @@ public class RdpSessionViewModelTests
             Protocol = ProtocolType.Rdp,
             Host = "host",
             Port = 3389,
+            // Default to a non-empty username so the credential-resolution path stays on
+            // the password-only prompt branch; tests that exercise the missing-username
+            // branch override this with `MakeProfile() with { Username = null }`.
+            Username = "rdp-user",
             RdpFullScreen = fullScreen,
         };
 
