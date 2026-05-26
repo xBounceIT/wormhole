@@ -342,6 +342,26 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 if (!string.Equals(creds.Username, profile.Username, StringComparison.Ordinal))
                 {
                     profile = profile with { Username = creds.Username };
+
+                    // The external-client routing decision at the top of ConnectAsync ran with
+                    // the empty profile.Username, so an AAD-flavored username typed at the
+                    // credentials prompt (e.g. "AzureAD\alice@tenant.com") won't have triggered
+                    // the auto-route to mstsc.exe. Continuing on the embedded mstscax path with
+                    // that identity would delay-load the WAM broker DLLs and crash the process
+                    // with SEH 0xC06D007F — the exact failure the routing guard exists to
+                    // prevent. Re-evaluate the same guard with the late-bound username and
+                    // mirror the early-return branch: launch mstsc.exe, or fail closed when a
+                    // tunnel is enabled (the loopback bridge can't host an external mstsc).
+                    if (await ShouldUseExternalClientAsync(profile).ConfigureAwait(true))
+                    {
+                        if (profile.TunnelEnabled)
+                        {
+                            ReportFailure(TunnelExternalClientUnsupportedMessage, dueToCredentials: false);
+                            return;
+                        }
+                        LaunchExternalProcess(profile);
+                        return;
+                    }
                 }
 
                 var (gwUser, gwPassword) = await ResolveGatewayCredentialsAsync(profile, token).ConfigureAwait(true);

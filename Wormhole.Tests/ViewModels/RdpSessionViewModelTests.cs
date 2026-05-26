@@ -451,6 +451,36 @@ public class RdpSessionViewModelTests
         Assert.Equal(0, svc.ConnectCount);
     }
 
+    [Fact]
+    public async Task AttachAsync_PromptedUsernameIsAzureAd_TunnelEnabled_FailsClosedAtExternalClientGuard()
+    {
+        // The external-client guard at the top of ConnectAsync runs BEFORE the credentials
+        // prompt, so a profile with empty Username slips past it even when the user is
+        // about to type an AAD identity. The fix re-evaluates the guard after the prompt
+        // returns: combined with a tunnel, it should land on the same
+        // TunnelExternalClientUnsupportedMessage as a profile that started with the AAD
+        // username — proving we'd have refused embedded mstscax routing in the non-tunnel
+        // case too (where the late re-check would have redirected to mstsc.exe instead of
+        // crashing on WAM broker DLL load).
+        var provider = new FakeTunnelProvider();
+        var (vm, svc, _, dlg, _) = CreateVm(tunnelProviders: new ITunnelProvider[] { provider });
+        dlg.CredentialsPromptResult = ("AzureAD\\alice@tenant.com", "pwd");
+        vm.Initialize(MakeProfile() with
+        {
+            Username = null,
+            TunnelEnabled = true,
+            TunnelConfigId = Guid.NewGuid(),
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.Contains("host network", vm.ErrorMessage);
+        Assert.Equal(0, svc.ConnectCount);
+        Assert.Equal(0, provider.EstablishCount);
+        Assert.Equal(1, dlg.CredentialsPromptCount);
+    }
+
     // --- Per-connection VPN routing -------------------------------------------------------
 
     [Fact]
