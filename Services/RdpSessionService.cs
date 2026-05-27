@@ -105,6 +105,11 @@ public sealed class RdpSessionService : IRdpSessionService
         private readonly ILogger _logger;
         private bool _loggedOn;
         private HostBounds _lastBounds = HostBounds.Empty;
+        // One-shot per adapter: emits the diagnostic on the first SetBounds that is NOT the
+        // (0,0,1,1) Seed placeholder. The cold-connect and Retry paths both seed with Seed
+        // before real layout arrives (RdpSessionViewModel.cs:222, :411), so gating on Empty
+        // alone would always record the useless 1×1 placeholder and never the real geometry.
+        private bool _firstRealBoundsLogged;
 
         public RdpSessionAdapter(RdpHostForm form, ILogger logger)
         {
@@ -152,9 +157,51 @@ public sealed class RdpSessionService : IRdpSessionService
             if (bounds == _lastBounds) return;
             _lastBounds = bounds;
             Win32Interop.MoveWindow(_form.Hwnd, bounds.X, bounds.Y, bounds.Width, bounds.Height, bRepaint: true);
+            // Diagnostic: log once per adapter the FIRST real bounds (skipping the (0,0,1,1)
+            // Seed placeholder the VM uses before real layout arrives). Set the flag after a
+            // successful log so a transient logger fault retries on the next call instead of
+            // permanently suppressing the diagnostic.
+            if (!_firstRealBoundsLogged && bounds != HostBounds.Seed)
+            {
+                _logger.LogInformation(
+                    "RDP MoveWindow (first real bounds): x={X} y={Y} w={W} h={H}.",
+                    bounds.X, bounds.Y, bounds.Width, bounds.Height);
+                _firstRealBoundsLogged = true;
+            }
         }
 
-        public void Show() => Win32Interop.ShowWindow(_form.Hwnd, Win32Interop.SW_SHOWNA);
+        public void Show()
+        {
+            Win32Interop.ShowWindow(_form.Hwnd, Win32Interop.SW_SHOWNA);
+            // Emit the post-Show diagnostic on every Show() call — not gated. Show() is rare
+            // (called from AttachAsync once per attach: cold connect + each rebind after a
+            // nav-away). A latched gate would hide exactly the rebind path most likely to
+            // surface a "black after navigating back" regression. WS_POPUP is surfaced
+            // separately because the reparent flow explicitly strips it — a regression would
+            // otherwise be buried inside the raw hex style. The rect is screen coordinates
+            // (GetWindowRect's contract); compare against the "MoveWindow (first real bounds)"
+            // entry above for client-relative geometry.
+            var style = Win32Interop.GetWindowLong(_form.Hwnd, Win32Interop.GWL_STYLE);
+            if (!Win32Interop.GetWindowRect(_form.Hwnd, out var r))
+            {
+                var err = Marshal.GetLastWin32Error();
+                _logger.LogInformation(
+                    "RDP HWND post-Show: style=0x{Style:X8} (WS_VISIBLE={Visible}, WS_CHILD={Child}, WS_POPUP={Popup}); GetWindowRect failed (Win32 error {Error}).",
+                    style,
+                    (style & Win32Interop.WS_VISIBLE) != 0,
+                    (style & Win32Interop.WS_CHILD) != 0,
+                    (style & Win32Interop.WS_POPUP) != 0,
+                    err);
+                return;
+            }
+            _logger.LogInformation(
+                "RDP HWND post-Show: style=0x{Style:X8} (WS_VISIBLE={Visible}, WS_CHILD={Child}, WS_POPUP={Popup}), screenRect=({L},{T})-({R},{B}).",
+                style,
+                (style & Win32Interop.WS_VISIBLE) != 0,
+                (style & Win32Interop.WS_CHILD) != 0,
+                (style & Win32Interop.WS_POPUP) != 0,
+                r.left, r.top, r.right, r.bottom);
+        }
 
         public void Hide() => Win32Interop.ShowWindow(_form.Hwnd, Win32Interop.SW_HIDE);
 

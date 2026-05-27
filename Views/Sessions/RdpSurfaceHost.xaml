@@ -35,9 +35,19 @@
         <!-- Reserved layout slot for the reparented WinForms+ActiveX host. The actual native
              child window is positioned in window-client physical pixels via MoveWindow from
              the code-behind on every LayoutUpdated tick. This Grid stays empty visually but
-             is the size/position anchor. -->
+             is the size/position anchor.
+
+             Background MUST be Transparent (not an opaque brush, and not {x:Null}). WinUI 3
+             renders XAML through DirectComposition, and an opaque Grid Background paints a
+             composition surface that occludes the reparented child HWND beneath it — the
+             symptom is a solid rectangle in the slot's brush color instead of the OCX paint
+             output. A Transparent brush solves that (DComp does not occlude through alpha=0
+             pixels) AND keeps the slot hit-testable so right-click on empty regions of the
+             surface still bubbles to the parent Grid's ContextFlyout (Disconnect / Reconnect
+             / Open in System Remote Desktop). {x:Null} would also be visually transparent
+             but disables hit-testing entirely. -->
         <Grid x:Name="HostSurface"
-              Background="#FF000000"
+              Background="Transparent"
               HorizontalAlignment="Stretch"
               VerticalAlignment="Stretch" />
 

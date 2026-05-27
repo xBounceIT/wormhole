@@ -34,6 +34,19 @@ internal static class Win32Interop
     [DllImport("user32.dll", SetLastError = true)]
     public static extern IntPtr SetFocus(IntPtr hWnd);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct RECT
+    {
+        public int left;
+        public int top;
+        public int right;
+        public int bottom;
+    }
+
     public const uint WM_SIZE = 0x0005;
     public const uint WM_DPICHANGED = 0x02E0;
 
@@ -42,6 +55,7 @@ internal static class Win32Interop
     public const int SW_SHOWNA = 8; // Show without activating
 
     public const int GWL_STYLE = -16;
+    public const int WS_VISIBLE = 0x10000000;
     public const int WS_CHILD = 0x40000000;
     public const int WS_POPUP = unchecked((int)0x80000000);
 }
