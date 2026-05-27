@@ -36,7 +36,8 @@ public sealed partial class MainWindow : Window
 
     private OverlappedPresenter? _windowPresenter;
     private OverlappedPresenterState _currentWindowState;
-    private bool _closeAfterSessionCleanup;
+    private bool _sessionCleanupInProgress;
+    private bool _sessionCleanupComplete;
 
     public ShellViewModel ViewModel { get; }
 
@@ -99,17 +100,23 @@ public sealed partial class MainWindow : Window
 
     private async void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
     {
-        if (_closeAfterSessionCleanup) return;
+        if (_sessionCleanupComplete) return;
 
         args.Cancel = true;
-        _closeAfterSessionCleanup = true;
+        if (_sessionCleanupInProgress) return;
+
+        _sessionCleanupInProgress = true;
         try
         {
             await ViewModel.CloseAllSessionsAsync();
         }
         finally
         {
-            Close();
+            _sessionCleanupComplete = true;
+            if (!DispatcherQueue.TryEnqueue(Close))
+            {
+                Close();
+            }
         }
     }
 
