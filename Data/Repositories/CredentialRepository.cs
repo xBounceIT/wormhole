@@ -21,7 +21,7 @@ public sealed class CredentialRepository : ICredentialRepository
         var rows = await connection.QueryAsync<CredentialProfile>(new CommandDefinition(
             $"SELECT {SelectColumns} FROM CredentialProfiles ORDER BY Name;",
             cancellationToken: cancellationToken));
-        return rows.ToList();
+        return rows as IReadOnlyList<CredentialProfile> ?? rows.ToList();
     }
 
     public async Task<CredentialProfile?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)

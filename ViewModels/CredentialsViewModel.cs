@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
@@ -14,13 +14,16 @@ public partial class CredentialsViewModel : ObservableObject
     private readonly ICredentialService _credentialService;
     private readonly IDialogService _dialog;
     private readonly ILogger<CredentialsViewModel> _logger;
+    private readonly HashSet<CredentialProfile> _selectedCredentialSet = new();
+    private bool _hasLoaded;
 
-    public ObservableCollection<CredentialProfile> Credentials { get; } = new();
+    public BulkObservableCollection<CredentialProfile> Credentials { get; } = new();
+    public BulkObservableCollection<CredentialProfile> FilteredCredentials { get; } = new();
 
     /// <summary>
     /// Mirrors GridView.SelectedItems via the page code-behind. Bulk commands read this directly.
     /// </summary>
-    public ObservableCollection<CredentialProfile> SelectedCredentials { get; } = new();
+    public BulkObservableCollection<CredentialProfile> SelectedCredentials { get; } = new();
 
     public bool IsEmpty => Credentials.Count == 0;
 
@@ -39,29 +42,13 @@ public partial class CredentialsViewModel : ObservableObject
     public string SelectionStatus => $"{SelectedCount} selected";
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(FilteredCredentials))]
-    [NotifyPropertyChangedFor(nameof(HasMatches))]
-    [NotifyPropertyChangedFor(nameof(HasNoMatches))]
     private string searchText = string.Empty;
 
-    public IReadOnlyList<CredentialProfile> FilteredCredentials
-    {
-        get
-        {
-            if (string.IsNullOrWhiteSpace(SearchText))
-            {
-                return Credentials.ToList();
-            }
+    // Search is bound with UpdateSourceTrigger=PropertyChanged, so debounce production
+    // keystrokes to avoid rebuilding the visible collection on every character.
+    internal TimeSpan SearchDebounceDelay { get; set; } = TimeSpan.FromMilliseconds(120);
 
-            var q = SearchText.Trim();
-            return Credentials
-                .Where(c =>
-                    Contains(c.Name, q) ||
-                    Contains(c.Username, q) ||
-                    Contains(c.Domain, q))
-                .ToList();
-        }
-    }
+    private CancellationTokenSource? _filterDebounceCts;
 
     public CredentialsViewModel(
         ICredentialRepository repository,
@@ -75,15 +62,19 @@ public partial class CredentialsViewModel : ObservableObject
         _logger = logger;
         Credentials.CollectionChanged += (_, _) =>
         {
-            OnPropertyChanged(nameof(FilteredCredentials));
+            RebuildFilteredCredentials(SearchText);
             OnPropertyChanged(nameof(IsEmpty));
+        };
+        FilteredCredentials.CollectionChanged += (_, _) =>
+        {
             OnPropertyChanged(nameof(HasMatches));
             OnPropertyChanged(nameof(HasNoMatches));
             OnPropertyChanged(nameof(CanSelectAll));
             SelectAllCommand.NotifyCanExecuteChanged();
         };
-        SelectedCredentials.CollectionChanged += (_, _) =>
+        SelectedCredentials.CollectionChanged += (_, args) =>
         {
+            UpdateSelectedCredentialSet(args);
             OnPropertyChanged(nameof(HasSelection));
             OnPropertyChanged(nameof(SelectedCount));
             OnPropertyChanged(nameof(SelectionStatus));
@@ -91,21 +82,118 @@ public partial class CredentialsViewModel : ObservableObject
         };
     }
 
+    public bool IsSelected(CredentialProfile profile) => _selectedCredentialSet.Contains(profile);
+
+    public Task EnsureLoadedAsync() =>
+        _hasLoaded ? Task.CompletedTask : LoadAsync();
+
     partial void OnSearchTextChanged(string value)
     {
-        OnPropertyChanged(nameof(CanSelectAll));
-        SelectAllCommand.NotifyCanExecuteChanged();
+        ScheduleFilter(value);
+    }
+
+    private void ScheduleFilter(string query)
+    {
+        var prior = _filterDebounceCts;
+        _filterDebounceCts = null;
+        if (prior is not null)
+        {
+            try { prior.Cancel(); } catch (ObjectDisposedException) { }
+            prior.Dispose();
+        }
+
+        if (SearchDebounceDelay <= TimeSpan.Zero)
+        {
+            RebuildFilteredCredentials(query);
+            return;
+        }
+
+        var cts = new CancellationTokenSource();
+        _filterDebounceCts = cts;
+        _ = DebouncedApplyFilterAsync(query, cts);
+    }
+
+    private async Task DebouncedApplyFilterAsync(string query, CancellationTokenSource cts)
+    {
+        try
+        {
+            await Task.Delay(SearchDebounceDelay, cts.Token).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        finally
+        {
+            if (ReferenceEquals(_filterDebounceCts, cts))
+            {
+                _filterDebounceCts = null;
+            }
+            cts.Dispose();
+        }
+
+        if (_filterDebounceCts is not null) return;
+        RebuildFilteredCredentials(query);
     }
 
     [RelayCommand(CanExecute = nameof(CanSelectAll))]
     private void SelectAll()
     {
+        if (FilteredCredentials.Count == 0) return;
+
+        var next = new List<CredentialProfile>(SelectedCredentials.Count + FilteredCredentials.Count);
+        next.AddRange(SelectedCredentials);
+        var changed = false;
         foreach (var profile in FilteredCredentials)
         {
-            if (!SelectedCredentials.Contains(profile))
+            if (!_selectedCredentialSet.Contains(profile))
             {
-                SelectedCredentials.Add(profile);
+                next.Add(profile);
+                changed = true;
             }
+        }
+        if (changed) SelectedCredentials.ReplaceAll(next);
+    }
+
+    private void UpdateSelectedCredentialSet(NotifyCollectionChangedEventArgs args)
+    {
+        switch (args.Action)
+        {
+            case NotifyCollectionChangedAction.Add:
+                AddSelected(args.NewItems);
+                break;
+            case NotifyCollectionChangedAction.Remove:
+                RemoveSelected(args.OldItems);
+                break;
+            case NotifyCollectionChangedAction.Replace:
+                RemoveSelected(args.OldItems);
+                AddSelected(args.NewItems);
+                break;
+            case NotifyCollectionChangedAction.Reset:
+                _selectedCredentialSet.Clear();
+                foreach (var profile in SelectedCredentials)
+                {
+                    _selectedCredentialSet.Add(profile);
+                }
+                break;
+        }
+    }
+
+    private void AddSelected(System.Collections.IList? items)
+    {
+        if (items is null) return;
+        foreach (CredentialProfile profile in items)
+        {
+            _selectedCredentialSet.Add(profile);
+        }
+    }
+
+    private void RemoveSelected(System.Collections.IList? items)
+    {
+        if (items is null) return;
+        foreach (CredentialProfile profile in items)
+        {
+            _selectedCredentialSet.Remove(profile);
         }
     }
 
@@ -118,11 +206,8 @@ public partial class CredentialsViewModel : ObservableObject
             // Drop selection before swapping the collection — Singleton VM means stale
             // CredentialProfile references would otherwise survive across reloads/navigations.
             SelectedCredentials.Clear();
-            Credentials.Clear();
-            foreach (var row in rows)
-            {
-                Credentials.Add(row);
-            }
+            Credentials.ReplaceAll(rows);
+            _hasLoaded = true;
         }
         catch (Exception ex)
         {
@@ -316,8 +401,39 @@ public partial class CredentialsViewModel : ObservableObject
     private static bool Contains(string? haystack, string needle) =>
         haystack is not null && haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
 
-    private bool NameExists(string name, Guid? excludingId) =>
-        Credentials.Any(c =>
-            (excludingId is null || c.Id != excludingId.Value) &&
-            string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
+    private void RebuildFilteredCredentials(string query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            FilteredCredentials.ReplaceAll(Credentials);
+            return;
+        }
+
+        var q = query.Trim();
+        var matches = new List<CredentialProfile>(Credentials.Count);
+        foreach (var credential in Credentials)
+        {
+            if (Contains(credential.Name, q) ||
+                Contains(credential.Username, q) ||
+                Contains(credential.Domain, q))
+            {
+                matches.Add(credential);
+            }
+        }
+
+        FilteredCredentials.ReplaceAll(matches);
+    }
+
+    private bool NameExists(string name, Guid? excludingId)
+    {
+        var hasExcludedId = excludingId.HasValue;
+        var excludedId = excludingId.GetValueOrDefault();
+        foreach (var credential in Credentials)
+        {
+            if (hasExcludedId && credential.Id == excludedId) continue;
+            if (string.Equals(credential.Name, name, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+
+        return false;
+    }
 }

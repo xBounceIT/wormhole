@@ -21,7 +21,7 @@ public sealed partial class TunnelConfigsPage : Page
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
         base.OnNavigatedTo(e);
-        _ = ViewModel.LoadCommand.ExecuteAsync(null);
+        _ = ViewModel.EnsureLoadedAsync();
     }
 
     private void OnCardDoubleTapped(object sender, DoubleTappedRoutedEventArgs e)

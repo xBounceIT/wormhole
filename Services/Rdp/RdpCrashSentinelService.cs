@@ -19,7 +19,7 @@ namespace Wormhole.Services.Rdp;
 /// deliberate effort; (2) the AAD WAM crash kills the entire process, so a "concurrent
 /// crash + concurrent success" scenario is impossible in the AAD case the sentinel targets.
 /// </summary>
-public sealed class RdpCrashSentinelService : IRdpCrashSentinelService
+public sealed class RdpCrashSentinelService : IRdpCrashSentinelService, IDisposable
 {
     private const string SentinelFileName = "rdp-in-flight.json";
 
@@ -32,7 +32,7 @@ public sealed class RdpCrashSentinelService : IRdpCrashSentinelService
 
     private readonly ILogger<RdpCrashSentinelService> _logger;
     private readonly string _sentinelPath;
-    private readonly object _writeLock = new();
+    private readonly SemaphoreSlim _fileGate = new(1, 1);
 
     public RdpCrashSentinelService(ILogger<RdpCrashSentinelService> logger)
         : this(logger, Path.Combine(AppPaths.GetAppDataDirectory(), SentinelFileName))
@@ -47,83 +47,92 @@ public sealed class RdpCrashSentinelService : IRdpCrashSentinelService
         _sentinelPath = sentinelPath;
     }
 
-    public Task MarkConnectInFlightAsync(Guid nodeId, string host, CancellationToken cancellationToken = default)
+    public async Task MarkConnectInFlightAsync(Guid nodeId, string host, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var record = new RdpCrashRecord(nodeId, host ?? string.Empty, DateTimeOffset.UtcNow);
         var payload = JsonSerializer.SerializeToUtf8Bytes(record, JsonOptions);
 
-        // The write itself is synchronous so a crash mid-Mark can't interleave with a
-        // concurrent Clear from another VM's terminal-status hook. The lock pairs with
-        // ClearAsync. Threaded as Task.Run so we don't block the dispatcher with file I/O.
-        return Task.Run(() =>
+        // Serialize Mark/Clear/Read without pinning a ThreadPool worker for disk I/O.
+        // Once the gate is acquired, complete the tmp+rename sequence even if the caller's
+        // token is later canceled; that matches the old Task.Run semantics, where the token
+        // only affected scheduling and the in-flight file operation ran to completion.
+        await _fileGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            lock (_writeLock)
-            {
-                var dir = Path.GetDirectoryName(_sentinelPath);
-                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            var dir = Path.GetDirectoryName(_sentinelPath);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 
-                var tmp = _sentinelPath + ".tmp";
-                File.WriteAllBytes(tmp, payload);
-                // Move with overwrite is atomic on Windows NTFS — either the new file is in
-                // place or the old one is. No "half-written sentinel" failure mode.
-                File.Move(tmp, _sentinelPath, overwrite: true);
-                _logger.LogDebug("RDP crash sentinel written for node {NodeId} host {Host}.", nodeId, host);
-            }
-        }, cancellationToken);
+            var tmp = _sentinelPath + ".tmp";
+            await File.WriteAllBytesAsync(tmp, payload, CancellationToken.None).ConfigureAwait(false);
+            // Move with overwrite is atomic on Windows NTFS — either the new file is in
+            // place or the old one is. No "half-written sentinel" failure mode.
+            File.Move(tmp, _sentinelPath, overwrite: true);
+            _logger.LogDebug("RDP crash sentinel written for node {NodeId} host {Host}.", nodeId, host);
+        }
+        finally
+        {
+            _fileGate.Release();
+        }
     }
 
-    public Task ClearAsync(CancellationToken cancellationToken = default)
+    public async Task ClearAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.Run(() =>
+        await _fileGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            lock (_writeLock)
+            if (!File.Exists(_sentinelPath)) return;
+            try
             {
-                if (!File.Exists(_sentinelPath)) return;
-                try
-                {
-                    File.Delete(_sentinelPath);
-                    _logger.LogDebug("RDP crash sentinel cleared.");
-                }
-                catch (IOException ex)
-                {
-                    // A locked-file race (e.g. virus scanner) shouldn't fail the connect path.
-                    // Worst case: the next launch sees the sentinel and auto-flags the profile
-                    // even though it actually succeeded — an annoying but not dangerous false
-                    // positive (the user can manually uncheck in the editor afterwards).
-                    _logger.LogWarning(ex, "Failed to clear RDP crash sentinel — next launch may see a stale orphan.");
-                }
+                File.Delete(_sentinelPath);
+                _logger.LogDebug("RDP crash sentinel cleared.");
             }
-        }, cancellationToken);
+            catch (IOException ex)
+            {
+                // A locked-file race (e.g. virus scanner) shouldn't fail the connect path.
+                // Worst case: the next launch sees the sentinel and auto-flags the profile
+                // even though it actually succeeded — an annoying but not dangerous false
+                // positive (the user can manually uncheck in the editor afterwards).
+                _logger.LogWarning(ex, "Failed to clear RDP crash sentinel — next launch may see a stale orphan.");
+            }
+        }
+        finally
+        {
+            _fileGate.Release();
+        }
     }
 
-    public Task<RdpCrashRecord?> TryReadOrphanAsync(CancellationToken cancellationToken = default)
+    public async Task<RdpCrashRecord?> TryReadOrphanAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.Run<RdpCrashRecord?>(() =>
+        await _fileGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
         {
-            lock (_writeLock)
+            if (!File.Exists(_sentinelPath)) return null;
+            try
             {
-                if (!File.Exists(_sentinelPath)) return null;
-                try
-                {
-                    var bytes = File.ReadAllBytes(_sentinelPath);
-                    var record = JsonSerializer.Deserialize<RdpCrashRecord>(bytes, JsonOptions);
-                    return record;
-                }
-                catch (Exception ex) when (ex is JsonException or IOException)
-                {
-                    // Malformed payload: we can't act on it. Delete defensively so we don't
-                    // log the same warning every launch, then return null. Healthy sentinels
-                    // stay on disk until the caller explicitly calls ClearAsync after a
-                    // successful recovery action.
-                    _logger.LogWarning(ex, "RDP crash sentinel is malformed — deleting without acting on it.");
-                    try { File.Delete(_sentinelPath); }
-                    catch (IOException deleteEx) { _logger.LogWarning(deleteEx, "Failed to delete malformed RDP crash sentinel."); }
-                    return null;
-                }
+                var bytes = await File.ReadAllBytesAsync(_sentinelPath, CancellationToken.None).ConfigureAwait(false);
+                var record = JsonSerializer.Deserialize<RdpCrashRecord>(bytes, JsonOptions);
+                return record;
             }
-        }, cancellationToken);
+            catch (Exception ex) when (ex is JsonException or IOException)
+            {
+                // Malformed payload: we can't act on it. Delete defensively so we don't
+                // log the same warning every launch, then return null. Healthy sentinels
+                // stay on disk until the caller explicitly calls ClearAsync after a
+                // successful recovery action.
+                _logger.LogWarning(ex, "RDP crash sentinel is malformed — deleting without acting on it.");
+                try { File.Delete(_sentinelPath); }
+                catch (IOException deleteEx) { _logger.LogWarning(deleteEx, "Failed to delete malformed RDP crash sentinel."); }
+                return null;
+            }
+        }
+        finally
+        {
+            _fileGate.Release();
+        }
     }
+
+    public void Dispose() => _fileGate.Dispose();
 }

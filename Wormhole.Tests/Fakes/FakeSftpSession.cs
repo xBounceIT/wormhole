@@ -13,6 +13,8 @@ public sealed class FakeSftpSession : ISftpSession
 {
     public ConcurrentDictionary<string, byte[]> Files { get; } = new();
     public ConcurrentDictionary<string, bool> Directories { get; } = new();
+    public ConcurrentDictionary<string, int> ExistsCallCounts { get; } = new();
+    public ConcurrentDictionary<string, int> CreateDirectoryCallCounts { get; } = new();
     public int DisposeCount { get; private set; }
 
     /// <summary>Counts how many SFTP calls are "in flight" at once. The orchestrator
@@ -82,6 +84,7 @@ public sealed class FakeSftpSession : ISftpSession
     public Task<bool> ExistsAsync(string path, CancellationToken cancellationToken = default)
     {
         using var guard = Enter();
+        ExistsCallCounts.AddOrUpdate(path, 1, (_, count) => count + 1);
         return Task.FromResult(Directories.ContainsKey(path) || Files.ContainsKey(path));
     }
 
@@ -107,6 +110,7 @@ public sealed class FakeSftpSession : ISftpSession
     public Task CreateDirectoryAsync(string remotePath, CancellationToken cancellationToken = default)
     {
         using var guard = Enter();
+        CreateDirectoryCallCounts.AddOrUpdate(remotePath, 1, (_, count) => count + 1);
         Directories[remotePath] = true;
         return Task.CompletedTask;
     }

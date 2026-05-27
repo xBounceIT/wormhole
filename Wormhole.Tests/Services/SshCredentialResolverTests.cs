@@ -106,6 +106,25 @@ public class SshCredentialResolverTests
         Assert.NotNull(creds.PrivateKey);
     }
 
+    [Fact]
+    public async Task Resolve_KeyCredential_ReadsKeyAndStoredPassphraseConcurrently()
+    {
+        var credId = Guid.NewGuid();
+        var dialogs = new FakeDialogService();
+        var service = new ConcurrentKeyCredentialService(new byte[] { 9, 9 }, "passphrase");
+        var resolver = NewResolver(
+            dialogs,
+            repo: new FakeCredentialRepository(new CredentialProfile { Id = credId, Kind = CredentialKind.SshKey }),
+            creds: service,
+            inspector: new FakePrivateKeyInspector(isEncrypted: true));
+
+        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: credId));
+
+        Assert.Equal("passphrase", creds.KeyPassphrase);
+        Assert.NotNull(creds.PrivateKey);
+    }
+
+
     // Encrypted key with no stored passphrase must prompt — not silently return null
     // and let SshSessionService throw later.
     [Fact]
@@ -171,7 +190,7 @@ public class SshCredentialResolverTests
     private static SshCredentialResolver NewResolver(
         FakeDialogService dialogs,
         FakeCredentialRepository? repo = null,
-        FakeCredentialService? creds = null,
+        ICredentialService? creds = null,
         FakePrivateKeyInspector? inspector = null)
         => new(
             repo ?? new FakeCredentialRepository(),
@@ -218,5 +237,40 @@ public class SshCredentialResolverTests
         private readonly bool _isEncrypted;
         public FakePrivateKeyInspector(bool isEncrypted = false) { _isEncrypted = isEncrypted; }
         public bool IsEncrypted(byte[] keyBytes) => _isEncrypted;
+    }
+
+    private sealed class ConcurrentKeyCredentialService : ICredentialService
+    {
+        private readonly byte[] _key;
+        private readonly string _passphrase;
+        private readonly TaskCompletionSource _passwordReadStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public ConcurrentKeyCredentialService(byte[] key, string passphrase)
+        {
+            _key = key;
+            _passphrase = passphrase;
+        }
+
+        public Task StorePasswordAsync(Guid credentialId, string password) => throw new NotImplementedException();
+
+        public Task<string?> ReadPasswordAsync(Guid credentialId)
+        {
+            _passwordReadStarted.TrySetResult();
+            return Task.FromResult<string?>(_passphrase);
+        }
+
+        public Task DeletePasswordAsync(Guid credentialId) => throw new NotImplementedException();
+        public Task StorePrivateKeyAsync(Guid credentialId, byte[] privateKeyBytes) => throw new NotImplementedException();
+
+        public async Task<byte[]?> ReadPrivateKeyAsync(Guid credentialId)
+        {
+            await _passwordReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+            return (byte[])_key.Clone();
+        }
+
+        public Task DeletePrivateKeyAsync(Guid credentialId) => throw new NotImplementedException();
+        public Task StoreTunnelConfigAsync(Guid tunnelConfigId, byte[] configBytes) => throw new NotImplementedException();
+        public Task<byte[]?> ReadTunnelConfigAsync(Guid tunnelConfigId) => throw new NotImplementedException();
+        public Task DeleteTunnelConfigAsync(Guid tunnelConfigId) => throw new NotImplementedException();
     }
 }

@@ -88,6 +88,19 @@ public class MRemoteNgXmlReaderTests
     }
 
     [Fact]
+    public void Parse_ReportsWhetherAnyNodeHasPasswordPayload()
+    {
+        using var emptyStream = ToStream(EmptyConnections);
+        MRemoteNgXmlReader.Parse(emptyStream, out _, out var emptyHasPasswordPayload);
+
+        using var nestedStream = ToStream(NestedTree);
+        MRemoteNgXmlReader.Parse(nestedStream, out _, out var nestedHasPasswordPayload);
+
+        Assert.False(emptyHasPasswordPayload);
+        Assert.True(nestedHasPasswordPayload);
+    }
+
+    [Fact]
     public void Parse_RejectsNonMRemoteNgRoot()
     {
         using var stream = ToStream("<?xml version=\"1.0\"?><Wrong/>");

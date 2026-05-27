@@ -82,7 +82,14 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
         if (!File.Exists(path)) throw new FileNotFoundException("File not found.", path);
 
         cancellationToken.ThrowIfCancellationRequested();
-        using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        using var fs = new FileStream(path, new FileStreamOptions
+        {
+            Mode = FileMode.Open,
+            Access = FileAccess.Read,
+            Share = FileShare.Read,
+            BufferSize = 64 * 1024,
+            Options = FileOptions.SequentialScan,
+        });
         var settings = new System.Xml.XmlReaderSettings
         {
             DtdProcessing = System.Xml.DtdProcessing.Prohibit,
@@ -178,8 +185,7 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
         IProgress<MRemoteNgImportProgress>? progress,
         CancellationToken cancellationToken)
     {
-        var (root, rawRoots) = await ReadXmlAsync(path, cancellationToken);
-        var hasPasswordPayloads = rawRoots.Any(NodeHasPasswordPayload);
+        var (root, rawRoots, hasPasswordPayloads) = ReadXml(path, cancellationToken);
         EnsureSupportedEncryption(new MRemoteNgFileInfo(
             root.ConfVersion, root.EncryptionEngine, root.BlockCipherMode,
             root.Protected, root.FullFileEncryption, root.KdfIterations,
@@ -211,11 +217,15 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
         // bottom of whatever the user already has. Without this, every imported batch overwrites
         // sort positions of existing roots.
         var existingNodes = await _connectionRepository.GetAllAsync(cancellationToken);
-        var rootSortStart = existingNodes
-            .Where(n => n.ParentId is null)
-            .Select(n => n.SortOrder)
-            .DefaultIfEmpty(-1)
-            .Max() + 1;
+        var maxRootSortOrder = -1;
+        foreach (var existingNode in existingNodes)
+        {
+            if (existingNode.ParentId is null && existingNode.SortOrder > maxRootSortOrder)
+            {
+                maxRootSortOrder = existingNode.SortOrder;
+            }
+        }
+        var rootSortStart = maxRootSortOrder + 1;
 
         for (var i = 0; i < rawRoots.Count; i++)
         {
@@ -581,23 +591,33 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
     private async Task<IReadOnlyCollection<string>> CollectExistingCredentialNamesAsync(CancellationToken ct)
     {
         var existing = await _credentialRepository.GetAllAsync(ct);
-        return existing.Select(c => c.Name).ToList();
+        var names = new List<string>(existing.Count);
+        foreach (var credential in existing)
+        {
+            names.Add(credential.Name);
+        }
+        return names;
     }
 
-    private static async Task<(MRemoteNgRoot Root, IReadOnlyList<MRemoteNgRawNode> Roots)> ReadXmlAsync(
+    private static (MRemoteNgRoot Root, IReadOnlyList<MRemoteNgRawNode> Roots, bool HasPasswordPayloads) ReadXml(
         string path, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(path)) throw new ArgumentException("Path is required.", nameof(path));
         if (!File.Exists(path)) throw new FileNotFoundException("File not found.", path);
 
-        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
-            bufferSize: 4096, useAsync: true);
+        using var stream = new FileStream(path, new FileStreamOptions
+        {
+            Mode = FileMode.Open,
+            Access = FileAccess.Read,
+            Share = FileShare.Read,
+            BufferSize = 64 * 1024,
+            Options = FileOptions.SequentialScan,
+        });
         ct.ThrowIfCancellationRequested();
-        // XDocument.Load is synchronous. Callers (PlanCoreAsync, InspectAsync) are responsible
-        // for pushing us onto a worker thread before invoking — PlanAsync wraps PlanCoreAsync
-        // in Task.Run for that reason, and InspectAsync is short enough to tolerate.
-        var root = MRemoteNgXmlReader.Parse(stream, out var roots);
-        return (root, roots);
+        // XDocument.Load is synchronous. PlanAsync wraps PlanCoreAsync in Task.Run before this
+        // is invoked so large imports don't tie up the dispatcher.
+        var root = MRemoteNgXmlReader.Parse(stream, out var roots, out var hasPasswordPayloads);
+        return (root, roots, hasPasswordPayloads);
     }
 
     private static void EnsureSupportedEncryption(MRemoteNgFileInfo info, bool requirePasswordDecryption)
@@ -631,10 +651,6 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
         }
     }
 
-    private static bool NodeHasPasswordPayload(MRemoteNgRawNode raw) =>
-        PasswordFieldRequiresDecryption(raw.PasswordCipher, raw.InheritPassword) ||
-        raw.Children.Any(NodeHasPasswordPayload);
-
     private static bool PasswordFieldRequiresDecryption(string? passwordCipher, bool inheritPassword) =>
         !inheritPassword && !string.IsNullOrWhiteSpace(passwordCipher);
 
@@ -643,20 +659,23 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
 
     private static bool TryMapProtocol(string raw, out ProtocolType protocol)
     {
-        switch (raw?.Trim().ToUpperInvariant())
+        var normalized = raw.AsSpan().Trim();
+        if (normalized.Equals("SSH", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Equals("SSH1", StringComparison.OrdinalIgnoreCase) ||
+            normalized.Equals("SSH2", StringComparison.OrdinalIgnoreCase))
         {
-            case "SSH":
-            case "SSH1":
-            case "SSH2":
-                protocol = ProtocolType.Ssh;
-                return true;
-            case "RDP":
-                protocol = ProtocolType.Rdp;
-                return true;
-            default:
-                protocol = default;
-                return false;
+            protocol = ProtocolType.Ssh;
+            return true;
         }
+
+        if (normalized.Equals("RDP", StringComparison.OrdinalIgnoreCase))
+        {
+            protocol = ProtocolType.Rdp;
+            return true;
+        }
+
+        protocol = default;
+        return false;
     }
 
     // mRemoteNG `Resolution` values: "FullScreen", "FitToWindow", or "WxH" like "1920x1080".

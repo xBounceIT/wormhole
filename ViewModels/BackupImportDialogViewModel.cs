@@ -191,23 +191,53 @@ public sealed partial class BackupImportDialogViewModel : ObservableObject, IDis
 
     private static string SummarizeResult(BackupImportResult r)
     {
-        var lines = new List<string>
-        {
-            $"{r.NodesImported} nodes imported ({r.NodesSkipped} skipped)",
-            $"{r.CredentialsImported} credentials imported ({r.CredentialsSkipped} skipped)",
-            $"{r.TunnelsImported} tunnels imported ({r.TunnelsSkipped} skipped)",
-        };
-        var summary = string.Join(", ", lines) + ".";
+        var summary =
+            $"{r.NodesImported} nodes imported ({r.NodesSkipped} skipped), " +
+            $"{r.CredentialsImported} credentials imported ({r.CredentialsSkipped} skipped), " +
+            $"{r.TunnelsImported} tunnels imported ({r.TunnelsSkipped} skipped).";
         if (r.Warnings.Count > 0)
         {
-            var shown = r.Warnings.Take(3).ToList();
-            summary += $" Warnings ({r.Warnings.Count}): {string.Join(" ", shown)}";
-            if (r.Warnings.Count > shown.Count)
+            const int warningPreviewCount = 3;
+            var shownCount = Math.Min(r.Warnings.Count, warningPreviewCount);
+            summary += $" Warnings ({r.Warnings.Count}): {JoinFirstWarnings(r.Warnings, shownCount, " ")}";
+            if (r.Warnings.Count > shownCount)
             {
-                summary += $" (+{r.Warnings.Count - shown.Count} more; see logs.)";
+                summary += $" (+{r.Warnings.Count - shownCount} more; see logs.)";
             }
         }
         return summary;
+    }
+
+    private static string JoinFirstWarnings(List<string> warnings, int count, string separator)
+    {
+        if (count <= 0) return string.Empty;
+        if (count == 1) return warnings[0];
+
+        return string.Create(EstimateJoinedLength(warnings, count, separator.Length), (warnings, count, separator), static (destination, state) =>
+        {
+            var offset = 0;
+            for (var i = 0; i < state.count; i++)
+            {
+                if (i > 0)
+                {
+                    state.separator.AsSpan().CopyTo(destination[offset..]);
+                    offset += state.separator.Length;
+                }
+
+                state.warnings[i].AsSpan().CopyTo(destination[offset..]);
+                offset += state.warnings[i].Length;
+            }
+        });
+    }
+
+    private static int EstimateJoinedLength(List<string> values, int count, int separatorLength)
+    {
+        var length = separatorLength * (count - 1);
+        for (var i = 0; i < count; i++)
+        {
+            length += values[i].Length;
+        }
+        return length;
     }
 
     public void Dispose()

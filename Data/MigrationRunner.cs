@@ -37,16 +37,30 @@ public sealed class MigrationRunner
     {
         using var connection = _factory.Open();
 
-        await connection.ExecuteAsync(@"
+        await connection.ExecuteAsync(new CommandDefinition(@"
             CREATE TABLE IF NOT EXISTS __migration_history (
                 Id TEXT PRIMARY KEY NOT NULL,
                 AppliedAtUtc TEXT NOT NULL
-            );");
+            );",
+            cancellationToken: cancellationToken));
 
-        var applied = (await connection.QueryAsync<string>(
-            "SELECT Id FROM __migration_history;")).ToHashSet(StringComparer.Ordinal);
+        var appliedRows = await connection.QueryAsync<string>(new CommandDefinition(
+            "SELECT Id FROM __migration_history;",
+            cancellationToken: cancellationToken));
+        var applied = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var id in appliedRows)
+        {
+            applied.Add(id);
+        }
 
-        var pending = _migrations.Where(m => !applied.Contains(m.Id)).ToList();
+        var pending = new List<Migration>(_migrations.Count);
+        foreach (var migration in _migrations)
+        {
+            if (!applied.Contains(migration.Id))
+            {
+                pending.Add(migration);
+            }
+        }
 
         foreach (var migration in pending)
         {
@@ -55,11 +69,15 @@ public sealed class MigrationRunner
             using var tx = connection.BeginTransaction();
             try
             {
-                await connection.ExecuteAsync(migration.Sql, transaction: tx);
-                await connection.ExecuteAsync(
+                await connection.ExecuteAsync(new CommandDefinition(
+                    migration.Sql,
+                    transaction: tx,
+                    cancellationToken: cancellationToken));
+                await connection.ExecuteAsync(new CommandDefinition(
                     "INSERT INTO __migration_history (Id, AppliedAtUtc) VALUES (@Id, @AppliedAtUtc);",
                     new { migration.Id, AppliedAtUtc = DateTime.UtcNow.ToString("O") },
-                    transaction: tx);
+                    transaction: tx,
+                    cancellationToken: cancellationToken));
                 tx.Commit();
             }
             catch

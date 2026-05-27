@@ -1,3 +1,5 @@
+using System.Buffers;
+using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -14,14 +16,16 @@ public sealed class UpdateService : IUpdateService, IDisposable
     public const string HttpClientName = "github";
     public const string DownloadHttpClientName = "github-download";
     private const string InstallerArguments = "/SILENT /RESTARTAPP";
+    private const int InstallerDownloadBufferSize = 81920;
+    private const double DownloadProgressReportStep = 0.01;
+    private static readonly TimeSpan DownloadProgressReportInterval = TimeSpan.FromMilliseconds(100);
 
     private static readonly Regex GithubUrlPattern = new(
         @"^https?://github\.com/(?<owner>[^/]+)/(?<repo>[^/]+?)(?:\.git)?/?$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
-
-    private static readonly char[] ShaSidecarSeparators = { ' ', '\t' };
+    private static readonly string? RepositoryUrl = ResolveRepositoryUrl();
 
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly IAppSettingsService _settingsService;
@@ -44,7 +48,7 @@ public sealed class UpdateService : IUpdateService, IDisposable
         _settingsService = settingsService;
         _logger = logger;
         _installerLauncher = installerLauncher;
-        TryCleanupPartialDownloads();
+        _ = Task.Run(() => TryCleanupPartialDownloads(_serviceCts.Token));
     }
 
     public async Task<UpdateCheckResult> CheckAsync(CancellationToken cancellationToken = default)
@@ -183,15 +187,40 @@ public sealed class UpdateService : IUpdateService, IDisposable
 
             {
                 await using var network = await response.Content.ReadAsStreamAsync(linkedCts.Token).ConfigureAwait(false);
-                await using var file = new FileStream(partPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 81920, useAsync: true);
-                var buffer = new byte[81920];
-                int read;
-                while ((read = await network.ReadAsync(buffer, linkedCts.Token).ConfigureAwait(false)) > 0)
+                await using var file = new FileStream(
+                    partPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    InstallerDownloadBufferSize,
+                    useAsync: true);
+                var rented = ArrayPool<byte>.Shared.Rent(InstallerDownloadBufferSize);
+                var lastProgressReport = Stopwatch.GetTimestamp();
+                var lastReportedProgress = 0d;
+                try
                 {
-                    await file.WriteAsync(buffer.AsMemory(0, read), linkedCts.Token).ConfigureAwait(false);
-                    sha.AppendData(buffer, 0, read);
-                    downloaded += read;
-                    if (total > 0) progress?.Report((double)downloaded / total);
+                    var buffer = rented.AsMemory(0, InstallerDownloadBufferSize);
+                    int read;
+                    while ((read = await network.ReadAsync(buffer, linkedCts.Token).ConfigureAwait(false)) > 0)
+                    {
+                        await file.WriteAsync(buffer[..read], linkedCts.Token).ConfigureAwait(false);
+                        sha.AppendData(rented, 0, read);
+                        downloaded += read;
+                        if (total > 0
+                            && progress is not null
+                            && ShouldReportDownloadProgress(
+                                downloaded,
+                                total,
+                                ref lastReportedProgress,
+                                ref lastProgressReport))
+                        {
+                            progress.Report(lastReportedProgress);
+                        }
+                    }
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(rented);
                 }
             }
 
@@ -291,19 +320,35 @@ public sealed class UpdateService : IUpdateService, IDisposable
 
     internal static string? ParseShaSidecar(string raw)
     {
-        if (string.IsNullOrWhiteSpace(raw)) return null;
-        var first = raw.Split('\n', '\r').FirstOrDefault(s => !string.IsNullOrWhiteSpace(s))?.Trim();
-        if (string.IsNullOrEmpty(first)) return null;
-        var token = first.Split(ShaSidecarSeparators, 2, StringSplitOptions.RemoveEmptyEntries)[0];
-        return token.Length == 64 && token.All(IsHexChar) ? token.ToLowerInvariant() : null;
+        if (string.IsNullOrEmpty(raw)) return null;
+
+        var remaining = raw.AsSpan();
+        while (true)
+        {
+            var newline = remaining.IndexOfAny('\r', '\n');
+            var line = newline >= 0 ? remaining[..newline] : remaining;
+            var token = GetFirstShaSidecarToken(line);
+            if (!token.IsEmpty)
+                return NormalizeSha256Token(token);
+
+            if (newline < 0)
+                return null;
+
+            remaining = remaining[(newline + 1)..];
+        }
     }
 
     private static bool TryResolveRepository(out string owner, out string repo)
+        => TryParseRepoUrl(RepositoryUrl, out owner, out repo);
+
+    private static string? ResolveRepositoryUrl()
     {
-        var attr = typeof(UpdateService).Assembly
-            .GetCustomAttributes<AssemblyMetadataAttribute>()
-            .FirstOrDefault(a => a.Key == "RepositoryUrl");
-        return TryParseRepoUrl(attr?.Value, out owner, out repo);
+        foreach (var attr in typeof(UpdateService).Assembly.GetCustomAttributes<AssemblyMetadataAttribute>())
+        {
+            if (attr.Key == "RepositoryUrl") return attr.Value;
+        }
+
+        return null;
     }
 
     private async Task<string?> TryFetchSha256SidecarAsync(
@@ -313,8 +358,13 @@ public sealed class UpdateService : IUpdateService, IDisposable
         CancellationToken ct)
     {
         var sidecarName = installerAsset.Name + ".sha256";
-        var sidecar = release.Assets.FirstOrDefault(a =>
-            string.Equals(a.Name, sidecarName, StringComparison.OrdinalIgnoreCase));
+        GitHubReleaseAsset? sidecar = null;
+        foreach (var asset in release.Assets)
+        {
+            if (!string.Equals(asset.Name, sidecarName, StringComparison.OrdinalIgnoreCase)) continue;
+            sidecar = asset;
+            break;
+        }
         if (sidecar?.BrowserDownloadUrl is null) return null;
         try
         {
@@ -332,6 +382,53 @@ public sealed class UpdateService : IUpdateService, IDisposable
 
     private static bool IsHexChar(char c) =>
         (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+
+    private static ReadOnlySpan<char> GetFirstShaSidecarToken(ReadOnlySpan<char> line)
+    {
+        line = line.Trim();
+        if (line.IsEmpty)
+            return ReadOnlySpan<char>.Empty;
+
+        var tokenEnd = line.IndexOfAny(' ', '\t');
+        return tokenEnd >= 0 ? line[..tokenEnd] : line;
+    }
+
+    private static string? NormalizeSha256Token(ReadOnlySpan<char> token)
+    {
+        if (token.Length != 64)
+            return null;
+
+        for (var i = 0; i < token.Length; i++)
+        {
+            if (!IsHexChar(token[i]))
+                return null;
+        }
+
+        return string.Create(token.Length, token, static (destination, source) =>
+        {
+            for (var i = 0; i < source.Length; i++)
+                destination[i] = char.ToLowerInvariant(source[i]);
+        });
+    }
+
+    private static bool ShouldReportDownloadProgress(
+        long downloaded,
+        long total,
+        ref double lastReportedProgress,
+        ref long lastProgressReportTimestamp)
+    {
+        var currentProgress = Math.Clamp((double)downloaded / total, 0d, 1d);
+        if (currentProgress < 1d
+            && currentProgress - lastReportedProgress < DownloadProgressReportStep
+            && Stopwatch.GetElapsedTime(lastProgressReportTimestamp) < DownloadProgressReportInterval)
+        {
+            return false;
+        }
+
+        lastReportedProgress = currentProgress;
+        lastProgressReportTimestamp = Stopwatch.GetTimestamp();
+        return true;
+    }
 
     private void StripMarkOfTheWeb(string path)
     {
@@ -361,15 +458,17 @@ public sealed class UpdateService : IUpdateService, IDisposable
         }
     }
 
-    private void TryCleanupPartialDownloads()
+    private void TryCleanupPartialDownloads(CancellationToken cancellationToken)
     {
         try
         {
+            if (cancellationToken.IsCancellationRequested) return;
             var dir = AppPaths.GetUpdateCacheDirectory();
             if (!Directory.Exists(dir)) return;
             var cutoff = DateTime.UtcNow - TimeSpan.FromHours(24);
             foreach (var file in Directory.EnumerateFiles(dir, "*.part"))
             {
+                if (cancellationToken.IsCancellationRequested) return;
                 if (File.GetLastWriteTimeUtc(file) < cutoff)
                 {
                     try { File.Delete(file); }

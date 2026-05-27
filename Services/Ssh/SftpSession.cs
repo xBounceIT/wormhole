@@ -44,9 +44,13 @@ internal sealed class SftpSession : ISftpSession
     public Task<IReadOnlyList<SftpEntry>> ListDirectoryAsync(string path, CancellationToken cancellationToken = default) =>
         RunAsync(() =>
         {
-            var entries = new List<SftpEntry>();
-            foreach (var file in _client.ListDirectory(path))
+            var files = _client.ListDirectory(path);
+            var entries = files is ICollection<ISftpFile> collection
+                ? new List<SftpEntry>(Math.Max(0, collection.Count - 2))
+                : new List<SftpEntry>();
+            foreach (var file in files)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 // Self/parent entries are noisy in a two-pane browser; the pane VM
                 // navigates via a dedicated "up" button instead.
                 if (file.Name == "." || file.Name == "..") continue;

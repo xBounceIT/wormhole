@@ -1,3 +1,4 @@
+using System.Collections.Specialized;
 using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
@@ -24,6 +25,57 @@ public class CredentialsViewModelTests
         Assert.False(vm.IsEmpty);
         Assert.Contains(vm.Credentials, c => c.Name == "alpha");
         Assert.Contains(vm.Credentials, c => c.Name == "beta");
+    }
+
+    [Fact]
+    public async Task LoadAsync_ReplacesVisibleCredentialsWithSingleReset()
+    {
+        var repo = new FakeCredentialRepository(
+            MakeProfile("alpha", ProtocolType.Ssh),
+            MakeProfile("beta", ProtocolType.Rdp),
+            MakeProfile("gamma", ProtocolType.Ssh));
+        var vm = NewVm(repo);
+        var addEvents = 0;
+        var resetEvents = 0;
+        vm.FilteredCredentials.CollectionChanged += (_, args) =>
+        {
+            if (args.Action == NotifyCollectionChangedAction.Add) addEvents++;
+            if (args.Action == NotifyCollectionChangedAction.Reset) resetEvents++;
+        };
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Equal(3, vm.FilteredCredentials.Count);
+        Assert.Equal(0, addEvents);
+        Assert.Equal(1, resetEvents);
+    }
+
+    [Fact]
+    public async Task EnsureLoadedAsync_skips_repository_after_successful_load()
+    {
+        var repo = new FakeCredentialRepository(MakeProfile("alpha", ProtocolType.Ssh));
+        var vm = NewVm(repo);
+
+        await vm.EnsureLoadedAsync();
+        await vm.EnsureLoadedAsync();
+
+        Assert.Equal(1, repo.GetAllCallCount);
+        Assert.Single(vm.Credentials);
+    }
+
+    [Fact]
+    public async Task LoadCommand_still_forces_refresh_after_ensure_loaded()
+    {
+        var repo = new FakeCredentialRepository(MakeProfile("alpha", ProtocolType.Ssh));
+        var vm = NewVm(repo);
+
+        await vm.EnsureLoadedAsync();
+        repo.Profiles.Add(MakeProfile("beta", ProtocolType.Rdp));
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Equal(2, repo.GetAllCallCount);
+        Assert.Equal(2, vm.Credentials.Count);
     }
 
     [Fact]
@@ -388,6 +440,37 @@ public class CredentialsViewModelTests
     }
 
     [Fact]
+    public async Task IsSelected_tracks_selection_collection_mutations()
+    {
+        var a = MakeProfile("a", ProtocolType.Ssh);
+        var b = MakeProfile("b", ProtocolType.Ssh);
+        var repo = new FakeCredentialRepository(a, b);
+        var vm = NewVm(repo);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        var first = vm.Credentials.Single(c => c.Name == "a");
+        var second = vm.Credentials.Single(c => c.Name == "b");
+
+        Assert.False(vm.IsSelected(first));
+
+        vm.SelectedCredentials.Add(first);
+        Assert.True(vm.IsSelected(first));
+        Assert.False(vm.IsSelected(second));
+
+        vm.SelectedCredentials.ReplaceAll(new[] { first, second });
+        Assert.True(vm.IsSelected(first));
+        Assert.True(vm.IsSelected(second));
+
+        vm.SelectedCredentials.Remove(first);
+        Assert.False(vm.IsSelected(first));
+        Assert.True(vm.IsSelected(second));
+
+        vm.SelectedCredentials.Clear();
+        Assert.False(vm.IsSelected(first));
+        Assert.False(vm.IsSelected(second));
+    }
+
+    [Fact]
     public async Task SelectAll_selects_visible_filtered_credentials_without_duplicates()
     {
         var alpha = MakeProfile("alpha", ProtocolType.Ssh);
@@ -406,6 +489,31 @@ public class CredentialsViewModelTests
         Assert.Contains(vm.SelectedCredentials, c => c.Name == "alpha");
         Assert.Contains(vm.SelectedCredentials, c => c.Name == "gamma");
         Assert.DoesNotContain(vm.SelectedCredentials, c => c.Name == "beta");
+    }
+
+    [Fact]
+    public async Task SelectAll_batches_selection_into_single_reset()
+    {
+        var repo = new FakeCredentialRepository(
+            MakeProfile("alpha", ProtocolType.Ssh),
+            MakeProfile("beta", ProtocolType.Rdp),
+            MakeProfile("gamma", ProtocolType.Ssh));
+        var vm = NewVm(repo);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        var addEvents = 0;
+        var resetEvents = 0;
+        vm.SelectedCredentials.CollectionChanged += (_, args) =>
+        {
+            if (args.Action == NotifyCollectionChangedAction.Add) addEvents++;
+            if (args.Action == NotifyCollectionChangedAction.Reset) resetEvents++;
+        };
+
+        vm.SelectAllCommand.Execute(null);
+
+        Assert.Equal(3, vm.SelectedCredentials.Count);
+        Assert.Equal(0, addEvents);
+        Assert.Equal(1, resetEvents);
     }
 
     [Fact]
@@ -479,6 +587,28 @@ public class CredentialsViewModelTests
         Assert.Empty(vm.FilteredCredentials);
     }
 
+    [Fact]
+    public async Task SearchText_debounces_filter_rebuilds_to_latest_value()
+    {
+        var repo = new FakeCredentialRepository(
+            MakeProfile("alpha", ProtocolType.Ssh),
+            MakeProfile("beta", ProtocolType.Rdp),
+            MakeProfile("gamma", ProtocolType.Ssh));
+        var vm = NewVm(repo);
+        vm.SearchDebounceDelay = TimeSpan.FromMilliseconds(40);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        vm.SearchText = "a";
+        vm.SearchText = "gam";
+
+        Assert.Equal(3, vm.FilteredCredentials.Count);
+
+        await Task.Delay(90);
+
+        Assert.Single(vm.FilteredCredentials);
+        Assert.Equal("gamma", vm.FilteredCredentials[0].Name);
+    }
+
     private static CredentialProfile MakeProfile(
         string name,
         ProtocolType protocol,
@@ -498,13 +628,22 @@ public class CredentialsViewModelTests
     private static CredentialsViewModel NewVm(
         FakeCredentialRepository repo,
         FakeCredentialService? credService = null,
-        FakeDialogService? dialog = null) =>
-        new(repo, credService ?? new FakeCredentialService(), dialog ?? new FakeDialogService(), NullLogger<CredentialsViewModel>.Instance);
+        FakeDialogService? dialog = null)
+    {
+        var vm = new CredentialsViewModel(
+            repo,
+            credService ?? new FakeCredentialService(),
+            dialog ?? new FakeDialogService(),
+            NullLogger<CredentialsViewModel>.Instance);
+        vm.SearchDebounceDelay = TimeSpan.Zero;
+        return vm;
+    }
 
     private sealed class FakeCredentialRepository : ICredentialRepository
     {
         public List<CredentialProfile> Profiles { get; }
         public bool GetAllShouldThrow { get; set; }
+        public int GetAllCallCount { get; private set; }
 
         public FakeCredentialRepository(params CredentialProfile[] initial)
         {
@@ -513,6 +652,7 @@ public class CredentialsViewModelTests
 
         public Task<IReadOnlyList<CredentialProfile>> GetAllAsync(CancellationToken ct = default)
         {
+            GetAllCallCount++;
             if (GetAllShouldThrow) throw new InvalidOperationException("repo offline");
             return Task.FromResult<IReadOnlyList<CredentialProfile>>(Profiles.OrderBy(p => p.Name).ToList());
         }

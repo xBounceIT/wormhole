@@ -141,14 +141,14 @@ public sealed class TerminalBridge : IDisposable
     {
         // Coalescer invokes us on the UI thread via the dispatcher timer tick.
         if (_disposed || data.Length == 0) return false;
-        PostStringToWebView("d:" + Convert.ToBase64String(data.Span), "posting SSH output");
+        PostDataBytesToWebView(data, "posting SSH output");
         return true;
     }
 
     private void PostBytesToWebView(ReadOnlyMemory<byte> data)
     {
         if (_disposed) return;
-        PostStringToWebView("d:" + Convert.ToBase64String(data.Span), "posting SSH output");
+        PostDataBytesToWebView(data, "posting SSH output");
     }
 
     private void PostFocusToWebView()
@@ -174,6 +174,24 @@ public sealed class TerminalBridge : IDisposable
         }
     }
 
+    private void PostDataBytesToWebView(ReadOnlyMemory<byte> data, string operation)
+    {
+        if (_disposed || data.Length == 0) return;
+
+        var encodedLength = ((data.Length + 2) / 3) * 4;
+        var message = string.Create(encodedLength + 2, data, static (destination, source) =>
+        {
+            destination[0] = 'd';
+            destination[1] = ':';
+            if (!Convert.TryToBase64Chars(source.Span, destination[2..], out var written)
+                || written != destination.Length - 2)
+            {
+                throw new FormatException("Failed to encode terminal output for WebView.");
+            }
+        });
+        PostStringToWebView(message, operation);
+    }
+
     private async void OnWebMessageReceived(CoreWebView2 sender, CoreWebView2WebMessageReceivedEventArgs args)
     {
         // WebView2 raises this through an event, so the handler must be async void.
@@ -185,22 +203,24 @@ public sealed class TerminalBridge : IDisposable
 
             if (msg.StartsWith("d:", StringComparison.Ordinal))
             {
-                var payload = Encoding.UTF8.GetBytes(msg.AsSpan(2).ToString());
+                var payload = EncodeUtf8(msg.AsSpan(2));
                 await _session.WriteAsync(payload);
             }
             else if (msg.StartsWith("b:", StringComparison.Ordinal))
             {
                 // xterm's onBinary path (e.g. legacy mouse reports): payload is raw bytes
                 // base64-encoded by JS, NOT UTF-8 text. Decode and forward verbatim.
-                var payload = Convert.FromBase64String(msg.Substring(2));
+                var payload = DecodeBase64Bytes(msg.AsSpan(2));
                 await _session.WriteAsync(payload);
             }
             else if (msg.StartsWith("r:", StringComparison.Ordinal))
             {
-                var parts = msg.AsSpan(2).ToString().Split('x');
-                if (parts.Length == 2 &&
-                    uint.TryParse(parts[0], out var cols) &&
-                    uint.TryParse(parts[1], out var rows))
+                var size = msg.AsSpan(2);
+                var separator = size.IndexOf('x');
+                if (separator > 0 &&
+                    separator < size.Length - 1 &&
+                    uint.TryParse(size[..separator], out var cols) &&
+                    uint.TryParse(size[(separator + 1)..], out var rows))
                 {
                     if (cols < MinimumUsableColumns || rows < MinimumUsableRows)
                     {
@@ -231,7 +251,7 @@ public sealed class TerminalBridge : IDisposable
                 if (!_settingsService.Current.AutoCopyOnSelect) return;
                 try
                 {
-                    var text = Encoding.UTF8.GetString(Convert.FromBase64String(msg.Substring(2)));
+                    var text = Encoding.UTF8.GetString(DecodeBase64Bytes(msg.AsSpan(2)));
                     if (string.IsNullOrEmpty(text)) return;
                     var pkg = new DataPackage();
                     pkg.SetText(text);
@@ -273,6 +293,44 @@ public sealed class TerminalBridge : IDisposable
         {
             _logger.LogError(ex, "TerminalBridge: failed to handle a WebView2 message.");
         }
+    }
+
+    private static byte[] EncodeUtf8(ReadOnlySpan<char> text)
+    {
+        var payload = new byte[Encoding.UTF8.GetByteCount(text)];
+        Encoding.UTF8.GetBytes(text, payload);
+        return payload;
+    }
+
+    private static byte[] DecodeBase64Bytes(ReadOnlySpan<char> encoded)
+    {
+        if (encoded.IsEmpty) return Array.Empty<byte>();
+
+        var decodedLength = GetBase64DecodedLength(encoded);
+        if (decodedLength < 0)
+        {
+            throw new FormatException("Invalid base64 payload from terminal WebView.");
+        }
+
+        var buffer = new byte[decodedLength];
+        if (!Convert.TryFromBase64Chars(encoded, buffer, out var bytesWritten) ||
+            bytesWritten != decodedLength)
+        {
+            throw new FormatException("Invalid base64 payload from terminal WebView.");
+        }
+
+        return buffer;
+    }
+
+    private static int GetBase64DecodedLength(ReadOnlySpan<char> encoded)
+    {
+        if (encoded.Length % 4 != 0) return -1;
+
+        var padding = 0;
+        if (encoded[^1] == '=') padding++;
+        if (encoded.Length > 1 && encoded[^2] == '=') padding++;
+
+        return (encoded.Length / 4 * 3) - padding;
     }
 
     public void Dispose()

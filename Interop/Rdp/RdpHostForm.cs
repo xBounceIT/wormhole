@@ -761,10 +761,12 @@ internal sealed class RdpHostForm : FormsForm
                   ?? new System.Drawing.Rectangle(0, 0, 1920, 1080);
             return (Math.Max(640, sb.Width), Math.Max(480, sb.Height));
         }
-        var parts = screenSize.Split('x', 'X');
-        if (parts.Length == 2 &&
-            int.TryParse(parts[0].Trim(), out var w) &&
-            int.TryParse(parts[1].Trim(), out var h) &&
+        var size = screenSize.AsSpan();
+        var separator = size.IndexOfAny('x', 'X');
+        if (separator >= 0 &&
+            size[(separator + 1)..].IndexOfAny('x', 'X') < 0 &&
+            int.TryParse(size[..separator].Trim(), out var w) &&
+            int.TryParse(size[(separator + 1)..].Trim(), out var h) &&
             w >= 640 && h >= 480)
         {
             return (w, h);

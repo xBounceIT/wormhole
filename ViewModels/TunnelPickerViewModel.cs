@@ -1,5 +1,4 @@
 using System;
-using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -27,6 +26,7 @@ public partial class TunnelPickerViewModel : ObservableObject
     private static readonly Guid NoTunnelId = new("ffffffff-ffff-ffff-ffff-ffffffffffff");
 
     private readonly ITunnelConfigRepository _repository;
+    private readonly Dictionary<Guid, TunnelConfig> _availableTunnelConfigsById = new();
 
     public TunnelPickerViewModel(ITunnelConfigRepository repository, string inheritLabel = "(Inherit from folder)")
     {
@@ -36,6 +36,8 @@ public partial class TunnelPickerViewModel : ObservableObject
         // before LoadAsync still has inherit/off to return.
         AvailableTunnelConfigs.Add(InheritTunnel);
         AvailableTunnelConfigs.Add(NoTunnel);
+        _availableTunnelConfigsById[InheritTunnel.Id] = InheritTunnel;
+        _availableTunnelConfigsById[NoTunnel.Id] = NoTunnel;
     }
 
     /// <summary>Sentinel for "inherit from parent". <see cref="TunnelEnabled"/> stays null
@@ -61,7 +63,7 @@ public partial class TunnelPickerViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(SelectedTunnel))]
     private Guid? selectedTunnelConfigId;
 
-    public ObservableCollection<TunnelConfig> AvailableTunnelConfigs { get; } = new();
+    public BulkObservableCollection<TunnelConfig> AvailableTunnelConfigs { get; } = new();
 
     /// <summary>
     /// Single combobox binding that encodes the tri-state via two sentinels and the
@@ -83,7 +85,7 @@ public partial class TunnelPickerViewModel : ObservableObject
             // persisted the id — a contradiction the user can't see.
             if (SelectedTunnelConfigId is { } id)
             {
-                return AvailableTunnelConfigs.FirstOrDefault(t => t.Id == id);
+                return _availableTunnelConfigsById.GetValueOrDefault(id);
             }
             // No bound ConfigId: pure inherit (null enable) or pure force-on (true enable).
             // The latter ("force on, inherit ConfigId from ancestor") has no sentinel in
@@ -137,10 +139,13 @@ public partial class TunnelPickerViewModel : ObservableObject
     public async Task LoadAsync()
     {
         var configs = await _repository.GetAllAsync().ConfigureAwait(true);
-        AvailableTunnelConfigs.Clear();
-        AvailableTunnelConfigs.Add(InheritTunnel);
-        AvailableTunnelConfigs.Add(NoTunnel);
-        foreach (var c in configs) AvailableTunnelConfigs.Add(c);
+        var available = new List<TunnelConfig>(configs.Count + 2)
+        {
+            InheritTunnel,
+            NoTunnel,
+        };
+        available.AddRange(configs);
+        ReplaceAvailableTunnelConfigs(available);
 
         // Preserve a currently-bound selection that points at a tunnel no longer in the list
         // (e.g. deleted in another window).
@@ -181,11 +186,23 @@ public partial class TunnelPickerViewModel : ObservableObject
     {
         if (id is not { } guid) return;
         if (guid == InheritTunnel.Id || guid == NoTunnel.Id) return;
-        if (AvailableTunnelConfigs.Any(t => t.Id == guid)) return;
-        AvailableTunnelConfigs.Add(new TunnelConfig
+        if (_availableTunnelConfigsById.ContainsKey(guid)) return;
+        var stale = new TunnelConfig
         {
             Id = guid,
             Name = $"(missing tunnel {guid:N})",
-        });
+        };
+        _availableTunnelConfigsById[guid] = stale;
+        AvailableTunnelConfigs.Add(stale);
+    }
+
+    private void ReplaceAvailableTunnelConfigs(IReadOnlyList<TunnelConfig> available)
+    {
+        _availableTunnelConfigsById.Clear();
+        foreach (var config in available)
+        {
+            _availableTunnelConfigsById[config.Id] = config;
+        }
+        AvailableTunnelConfigs.ReplaceAll(available);
     }
 }

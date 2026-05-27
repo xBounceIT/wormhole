@@ -2,68 +2,46 @@ namespace Wormhole.Helpers;
 
 internal static class AppPaths
 {
-    public static string GetAppDataDirectory()
-    {
-        return Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "Wormhole");
-    }
+    private static readonly string AppDataDirectory = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Wormhole");
 
-    public static string GetDatabaseFilePath()
-    {
-        return Path.Combine(GetAppDataDirectory(), "wormhole.db");
-    }
+    private static readonly string DatabaseFilePath = Path.Combine(AppDataDirectory, "wormhole.db");
+    private static readonly string SettingsFilePath = Path.Combine(AppDataDirectory, "settings.json");
+    private static readonly string LogsDirectory = Path.Combine(AppDataDirectory, "logs");
+    private static readonly string KeysDirectory = Path.Combine(AppDataDirectory, "keys");
+    private static readonly string TunnelConfigsDirectory = Path.Combine(AppDataDirectory, "tunnels");
+    private static readonly string UpdateCacheDirectory = Path.Combine(AppDataDirectory, "cache", "updates");
+    private static readonly string WebView2UserDataDirectory = Path.Combine(AppDataDirectory, "webview2");
+    private static readonly string WebAssetsDirectory = Path.Combine(AppContext.BaseDirectory, "Assets", "web");
+    private static readonly string WgProxyExecutablePath = Path.Combine(AppContext.BaseDirectory, "wormhole-wgproxy.exe");
+    private static readonly string FortiProxyExecutablePath = Path.Combine(AppContext.BaseDirectory, "wormhole-fortiproxy.exe");
+    private static readonly string OvpnProxyExecutablePath = Path.Combine(AppContext.BaseDirectory, "wormhole-ovpnproxy.exe");
 
-    public static string GetSettingsFilePath()
-    {
-        return Path.Combine(GetAppDataDirectory(), "settings.json");
-    }
+    public static string GetAppDataDirectory() => AppDataDirectory;
 
-    public static string GetLogsDirectory()
-    {
-        return Path.Combine(GetAppDataDirectory(), "logs");
-    }
+    public static string GetDatabaseFilePath() => DatabaseFilePath;
 
-    public static string GetKeysDirectory()
-    {
-        return Path.Combine(GetAppDataDirectory(), "keys");
-    }
+    public static string GetSettingsFilePath() => SettingsFilePath;
 
-    public static string GetTunnelConfigsDirectory()
-    {
-        return Path.Combine(GetAppDataDirectory(), "tunnels");
-    }
+    public static string GetLogsDirectory() => LogsDirectory;
 
-    public static string GetUpdateCacheDirectory()
-    {
-        return Path.Combine(GetAppDataDirectory(), "cache", "updates");
-    }
+    public static string GetKeysDirectory() => KeysDirectory;
+
+    public static string GetTunnelConfigsDirectory() => TunnelConfigsDirectory;
+
+    public static string GetUpdateCacheDirectory() => UpdateCacheDirectory;
 
     // WebView2's default user-data folder is `{exe_dir}\{exe_name}.WebView2\`,
     // which the app cannot create when installed under Program Files without
     // elevation. Pin it under %LOCALAPPDATA%\Wormhole\ to match sibling state.
-    public static string GetWebView2UserDataDirectory()
-    {
-        return Path.Combine(GetAppDataDirectory(), "webview2");
-    }
+    public static string GetWebView2UserDataDirectory() => WebView2UserDataDirectory;
 
-    public static string GetWebAssetsDirectory()
-    {
-        return Path.Combine(AppContext.BaseDirectory, "Assets", "web");
-    }
+    public static string GetWebAssetsDirectory() => WebAssetsDirectory;
 
-    public static string GetWgProxyExecutablePath()
-    {
-        return Path.Combine(AppContext.BaseDirectory, "wormhole-wgproxy.exe");
-    }
+    public static string GetWgProxyExecutablePath() => WgProxyExecutablePath;
 
-    public static string GetFortiProxyExecutablePath()
-    {
-        return Path.Combine(AppContext.BaseDirectory, "wormhole-fortiproxy.exe");
-    }
+    public static string GetFortiProxyExecutablePath() => FortiProxyExecutablePath;
 
-    public static string GetOvpnProxyExecutablePath()
-    {
-        return Path.Combine(AppContext.BaseDirectory, "wormhole-ovpnproxy.exe");
-    }
+    public static string GetOvpnProxyExecutablePath() => OvpnProxyExecutablePath;
 }

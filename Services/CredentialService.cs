@@ -16,35 +16,33 @@ public sealed class CredentialService : ICredentialService
         _logger = logger;
     }
 
-    public Task StorePasswordAsync(Guid credentialId, string password)
-    {
-        CredentialManager.WriteCredential(
+    public Task StorePasswordAsync(Guid credentialId, string password) =>
+        Task.Run(() => CredentialManager.WriteCredential(
             applicationName: CredentialName(credentialId),
             userName: credentialId.ToString(),
             secret: password,
             comment: "Wormhole credential",
-            persistence: CredentialPersistence.LocalMachine);
-        return Task.CompletedTask;
-    }
+            persistence: CredentialPersistence.LocalMachine));
 
-    public Task<string?> ReadPasswordAsync(Guid credentialId)
-    {
-        var cred = CredentialManager.ReadCredential(CredentialName(credentialId));
-        return Task.FromResult(cred?.Password);
-    }
+    public Task<string?> ReadPasswordAsync(Guid credentialId) =>
+        Task.Run(() =>
+        {
+            var cred = CredentialManager.ReadCredential(CredentialName(credentialId));
+            return cred?.Password;
+        });
 
-    public Task DeletePasswordAsync(Guid credentialId)
-    {
-        try
+    public Task DeletePasswordAsync(Guid credentialId) =>
+        Task.Run(() =>
         {
-            CredentialManager.DeleteCredential(CredentialName(credentialId));
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "Failed to delete credential {CredentialId} from Credential Manager.", credentialId);
-        }
-        return Task.CompletedTask;
-    }
+            try
+            {
+                CredentialManager.DeleteCredential(CredentialName(credentialId));
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to delete credential {CredentialId} from Credential Manager.", credentialId);
+            }
+        });
 
     public Task StorePrivateKeyAsync(Guid credentialId, byte[] privateKeyBytes) =>
         WriteProtectedAsync(KeyPath(credentialId), privateKeyBytes);
@@ -67,16 +65,17 @@ public sealed class CredentialService : ICredentialService
     private static async Task WriteProtectedAsync(string path, byte[] data)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var protectedBlob = ProtectedData.Protect(data, optionalEntropy: null, DataProtectionScope.CurrentUser);
-        await File.WriteAllBytesAsync(path, protectedBlob);
+        var protectedBlob = await Task.Run(() =>
+            ProtectedData.Protect(data, optionalEntropy: null, DataProtectionScope.CurrentUser)).ConfigureAwait(false);
+        await File.WriteAllBytesAsync(path, protectedBlob).ConfigureAwait(false);
     }
 
     private static async Task<byte[]?> ReadProtectedAsync(string path)
     {
+        byte[] protectedBlob;
         try
         {
-            var protectedBlob = await File.ReadAllBytesAsync(path);
-            return ProtectedData.Unprotect(protectedBlob, optionalEntropy: null, DataProtectionScope.CurrentUser);
+            protectedBlob = await File.ReadAllBytesAsync(path).ConfigureAwait(false);
         }
         catch (FileNotFoundException)
         {
@@ -86,22 +85,25 @@ public sealed class CredentialService : ICredentialService
         {
             return null;
         }
+
+        return await Task.Run(() =>
+            ProtectedData.Unprotect(protectedBlob, optionalEntropy: null, DataProtectionScope.CurrentUser)).ConfigureAwait(false);
     }
 
-    private static Task DeleteFileIfExistsAsync(string path)
-    {
-        try
+    private static Task DeleteFileIfExistsAsync(string path) =>
+        Task.Run(() =>
         {
-            File.Delete(path);
-        }
-        catch (FileNotFoundException)
-        {
-        }
-        catch (DirectoryNotFoundException)
-        {
-        }
-        return Task.CompletedTask;
-    }
+            try
+            {
+                File.Delete(path);
+            }
+            catch (FileNotFoundException)
+            {
+            }
+            catch (DirectoryNotFoundException)
+            {
+            }
+        });
 
     private static string CredentialName(Guid credentialId) => CredentialPrefix + credentialId;
 

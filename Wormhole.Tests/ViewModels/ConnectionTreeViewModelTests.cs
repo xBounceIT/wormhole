@@ -1,3 +1,4 @@
+using System.Collections.Specialized;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Data;
@@ -14,6 +15,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
 {
     private static readonly string[] ExpectedSortOrderAbc = { "A", "B", "C" };
     private static readonly string[] ExpectedReorderBca = { "B", "C", "A" };
+    private static readonly string[] ExpectedReorderCab = { "C", "A", "B" };
 
     // Inlined from Data/Migrations/0001_initial.sql + 0003_add_tunnel_config.sql + 0003_rdp_extras.sql
     // + 0004_rdp_use_external_client.sql: the test project links source files rather than
@@ -99,7 +101,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
 
     public void Dispose()
     {
-        SqliteConnection.ClearPool(new SqliteConnection(_connectionString));
+        SqliteConnection.ClearAllPools();
         if (File.Exists(_dbPath)) File.Delete(_dbPath);
     }
 
@@ -333,6 +335,29 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         var child = Assert.Single(root.Children);
         Assert.Equal("leaf", child.Name);
         Assert.Equal(NodeKind.Connection, child.Kind);
+    }
+
+    [Fact]
+    public async Task RefreshAsync_InitialLoadBulkReplacesRootLevel()
+    {
+        await _repo.AddAsync(new ConnectionNode { Kind = NodeKind.Folder, Name = "A", SortOrder = 0 });
+        await _repo.AddAsync(new ConnectionNode { Kind = NodeKind.Folder, Name = "B", SortOrder = 1 });
+        await _repo.AddAsync(new ConnectionNode { Kind = NodeKind.Folder, Name = "C", SortOrder = 2 });
+
+        var vm = CreateVm();
+        var addEvents = 0;
+        var resetEvents = 0;
+        vm.Roots.CollectionChanged += (_, args) =>
+        {
+            if (args.Action == NotifyCollectionChangedAction.Add) addEvents++;
+            if (args.Action == NotifyCollectionChangedAction.Reset) resetEvents++;
+        };
+
+        await vm.RefreshAsync();
+
+        Assert.Equal(0, addEvents);
+        Assert.Equal(1, resetEvents);
+        Assert.Equal(ExpectedSortOrderAbc, vm.Roots.Select(r => r.Name));
     }
 
     [Fact]
@@ -592,6 +617,57 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         await vm.RefreshAsync();
 
         Assert.Same(vmBefore, vm.Roots.Single());
+    }
+
+    [Fact]
+    public async Task RefreshAsync_ReordersExistingRootNodesWithoutReplacingViewModels()
+    {
+        var a = new ConnectionNode { Kind = NodeKind.Folder, Name = "A", SortOrder = 0 };
+        var b = new ConnectionNode { Kind = NodeKind.Folder, Name = "B", SortOrder = 1 };
+        var c = new ConnectionNode { Kind = NodeKind.Folder, Name = "C", SortOrder = 2 };
+        await _repo.AddAsync(a);
+        await _repo.AddAsync(b);
+        await _repo.AddAsync(c);
+
+        var vm = CreateVm();
+        await vm.RefreshAsync();
+        var beforeByName = vm.Roots.ToDictionary(node => node.Name);
+
+        c.SortOrder = 0;
+        a.SortOrder = 1;
+        b.SortOrder = 2;
+        await _repo.UpdateManyAsync(new[] { a, b, c });
+
+        await vm.RefreshAsync();
+
+        Assert.Equal(ExpectedReorderCab, vm.Roots.Select(node => node.Name));
+        Assert.Same(beforeByName["C"], vm.Roots[0]);
+        Assert.Same(beforeByName["A"], vm.Roots[1]);
+        Assert.Same(beforeByName["B"], vm.Roots[2]);
+    }
+
+    [Fact]
+    public async Task OpenConnectionAsync_UsesLoadedSnapshotWithoutReloadingRepository()
+    {
+        await _repo.AddAsync(MakeConnectionDraft("prod-web", ProtocolType.Ssh, "host", null, "alice"));
+        var countingRepo = new CountingConnectionRepository(_repo);
+        var tabs = new CapturingSessionTabFactory();
+        var vm = new ConnectionTreeViewModel(
+            countingRepo,
+            new InheritanceResolver(),
+            tabs,
+            new FakeDialogService(),
+            NullLogger<ConnectionTreeViewModel>.Instance);
+        vm.SearchDebounceDelay = TimeSpan.Zero;
+        await vm.RefreshAsync();
+        countingRepo.GetAllCallCount = 0;
+
+        await vm.OpenConnectionCommand.ExecuteAsync(vm.Roots.Single());
+
+        Assert.Equal(0, countingRepo.GetAllCallCount);
+        Assert.NotNull(tabs.LastOpened);
+        Assert.Equal("host", tabs.LastOpened!.Host);
+        Assert.Equal("alice", tabs.LastOpened.Username);
     }
 
     [Fact]
@@ -1055,8 +1131,44 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
             => _inner.DeleteAsync(id, ct);
     }
 
+    private sealed class CountingConnectionRepository : IConnectionRepository
+    {
+        private readonly IConnectionRepository _inner;
+        public int GetAllCallCount { get; set; }
+
+        public CountingConnectionRepository(IConnectionRepository inner) => _inner = inner;
+
+        public async Task<IReadOnlyList<ConnectionNode>> GetAllAsync(System.Threading.CancellationToken ct = default)
+        {
+            GetAllCallCount++;
+            return await _inner.GetAllAsync(ct);
+        }
+
+        public Task<ConnectionNode?> GetByIdAsync(Guid id, System.Threading.CancellationToken ct = default)
+            => _inner.GetByIdAsync(id, ct);
+        public Task<IReadOnlyList<(Guid Id, string Name)>> GetByTunnelConfigIdAsync(Guid tunnelConfigId, int limit, System.Threading.CancellationToken ct = default)
+            => _inner.GetByTunnelConfigIdAsync(tunnelConfigId, limit, ct);
+        public Task AddAsync(ConnectionNode node, System.Threading.CancellationToken ct = default)
+            => _inner.AddAsync(node, ct);
+        public Task UpdateAsync(ConnectionNode node, System.Threading.CancellationToken ct = default)
+            => _inner.UpdateAsync(node, ct);
+        public Task UpdateManyAsync(IReadOnlyCollection<ConnectionNode> nodes, System.Threading.CancellationToken ct = default)
+            => _inner.UpdateManyAsync(nodes, ct);
+        public Task UpdateHostFingerprintAsync(Guid nodeId, string fingerprint, System.Threading.CancellationToken ct = default)
+            => _inner.UpdateHostFingerprintAsync(nodeId, fingerprint, ct);
+        public Task DeleteAsync(Guid id, System.Threading.CancellationToken ct = default)
+            => _inner.DeleteAsync(id, ct);
+    }
+
     private sealed class NullSessionTabFactory : ISessionTabFactory
     {
         public void Open(ConnectionProfile profile) { /* tests don't exercise tab opening */ }
+    }
+
+    private sealed class CapturingSessionTabFactory : ISessionTabFactory
+    {
+        public ConnectionProfile? LastOpened { get; private set; }
+
+        public void Open(ConnectionProfile profile) => LastOpened = profile;
     }
 }

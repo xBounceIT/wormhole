@@ -23,6 +23,11 @@ public interface ISshSession : IAsyncDisposable
 {
     string? HostFingerprint { get; }
 
+    /// <summary>
+    /// Raised synchronously from the SSH read pump with the bytes just read from the shell.
+    /// The memory is valid only for the duration of the event callback; subscribers that need
+    /// to retain data must copy it before returning.
+    /// </summary>
     event EventHandler<ReadOnlyMemory<byte>>? DataReceived;
     /// <summary>
     /// Raised once when the underlying SSH stream closes (EOF, network drop, or remote

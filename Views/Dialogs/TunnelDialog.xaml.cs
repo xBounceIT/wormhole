@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Windows.Storage.Pickers;
@@ -13,8 +12,6 @@ namespace Wormhole.Views.Dialogs;
 
 public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
 {
-    private static readonly char[] CsvSeparators = { ',', ';' };
-
     public event EventHandler? ValidityChanged;
 
     public TunnelDialog()
@@ -377,8 +374,28 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         OvpnImportErrorBar.IsOpen = false;
     }
 
-    private static List<string> SplitCsv(string s) =>
-        s.Split(CsvSeparators, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+    private static List<string> SplitCsv(string s)
+    {
+        var values = new List<string>(4);
+        var start = 0;
+        for (var i = 0; i < s.Length; i++)
+        {
+            if (s[i] is ',' or ';')
+            {
+                AddCsvValue(values, s.AsSpan(start, i - start));
+                start = i + 1;
+            }
+        }
+
+        AddCsvValue(values, s.AsSpan(start));
+        return values;
+    }
+
+    private static void AddCsvValue(List<string> values, ReadOnlySpan<char> value)
+    {
+        value = value.Trim();
+        if (!value.IsEmpty) values.Add(value.ToString());
+    }
 
     private static int? TryParseInt(string s) =>
         int.TryParse(s, out var n) ? n : (int?)null;

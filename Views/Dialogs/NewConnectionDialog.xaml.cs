@@ -49,8 +49,9 @@ public sealed partial class NewConnectionDialog : UserControl
     /// so the SelectedTunnel binding can resolve a saved TunnelConfigId.</summary>
     public async Task LoadAsync(ConnectionNode initial)
     {
-        await ViewModel.LoadCredentialsAsync();
-        await ViewModel.TunnelPicker.LoadAsync();
+        var credentials = ViewModel.LoadCredentialsAsync();
+        var tunnels = ViewModel.TunnelPicker.LoadAsync();
+        await Task.WhenAll(credentials, tunnels);
         ViewModel.LoadFrom(initial);
     }
 

@@ -1,5 +1,7 @@
+using System.Buffers;
 using Microsoft.Extensions.Logging;
 using Renci.SshNet;
+
 namespace Wormhole.Services.Ssh;
 
 internal sealed class SshSession : ISshSession
@@ -63,7 +65,7 @@ internal sealed class SshSession : ISshSession
     private async Task ReadPumpAsync()
     {
         var ct = _cts.Token;
-        var buffer = new byte[8192];
+        var buffer = ArrayPool<byte>.Shared.Rent(8192);
         var remoteClosed = false;
         try
         {
@@ -72,7 +74,7 @@ internal sealed class SshSession : ISshSession
                 int n;
                 try
                 {
-                    n = await _stream.ReadAsync(buffer.AsMemory(), ct).ConfigureAwait(false);
+                    n = await _stream.ReadAsync(buffer.AsMemory(0, 8192), ct).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) { return; }
                 catch (ObjectDisposedException) { return; }
@@ -90,13 +92,13 @@ internal sealed class SshSession : ISshSession
                     return;
                 }
 
-                var snapshot = new byte[n];
-                Array.Copy(buffer, snapshot, n);
-
                 // Subscriber exceptions (e.g. WebView2 disposed mid-send) must not kill the pump.
+                // The event is synchronous and its memory is valid only until Invoke returns.
+                // Current subscribers copy immediately into their replay/coalescing buffers,
+                // avoiding a per-read allocation here while keeping retained data safe.
                 try
                 {
-                    DataReceived?.Invoke(this, snapshot);
+                    DataReceived?.Invoke(this, buffer.AsMemory(0, n));
                 }
                 catch (Exception ex)
                 {
@@ -106,6 +108,7 @@ internal sealed class SshSession : ISshSession
         }
         finally
         {
+            ArrayPool<byte>.Shared.Return(buffer);
             // Only surface Closed if the *remote* end ended the session. Our own
             // DisposeAsync cancels the CTS first; we don't want to fire Closed on a
             // user-initiated tear-down (the VM is already managing that state).

@@ -31,7 +31,7 @@ public sealed class SshSessionService : ISshSessionService
                 $"Connection '{profile.Name}' has no username; provide one before connecting.");
 
         var authMethods = SshAuthMethodsBuilder.Build(profile.Username!, credentials);
-        if (authMethods.Count == 0)
+        if (authMethods.Length == 0)
         {
             throw new InvalidOperationException(
                 $"Connection '{profile.Name}' has no usable credentials (password or private key).");
@@ -40,7 +40,7 @@ public sealed class SshSessionService : ISshSessionService
         ConnectionInfo connectionInfo;
         if (tunnel is null)
         {
-            connectionInfo = new ConnectionInfo(profile.Host, profile.Port, profile.Username, authMethods.ToArray());
+            connectionInfo = new ConnectionInfo(profile.Host, profile.Port, profile.Username, authMethods);
         }
         else
         {
@@ -55,7 +55,7 @@ public sealed class SshSessionService : ISshSessionService
                 profile.Host, profile.Port, profile.Username,
                 ProxyTypes.Socks5, socks.Address.ToString(), socks.Port,
                 proxyUsername: string.Empty, proxyPassword: string.Empty,
-                authMethods.ToArray());
+                authMethods);
             _logger.LogDebug("Routing SSH connect through SOCKS5 tunnel at {Endpoint}.", socks);
         }
         connectionInfo.Timeout = TimeSpan.FromSeconds(15);
@@ -80,10 +80,11 @@ public sealed class SshSessionService : ISshSessionService
 
         try
         {
-            // Task.Run's CT only governs scheduling; SSH.NET's sync Connect ignores CT once
-            // started. WaitAsync gives the awaiter an exit path; the catch block disposes
-            // the client to interrupt the in-flight socket.
-            await Task.Run(client.Connect, cancellationToken).WaitAsync(cancellationToken).ConfigureAwait(false);
+            // Pass CancellationToken.None to Task.Run on purpose: SSH.NET's sync Connect ignores
+            // CT once started. WaitAsync gives the awaiter an exit path; the catch block disposes
+            // the client to interrupt the in-flight socket. Forwarding the token to Task.Run only
+            // adds a redundant pre-scheduling cancel check and diverges from the SFTP connect path.
+            await Task.Run(client.Connect, CancellationToken.None).WaitAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {

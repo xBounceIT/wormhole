@@ -15,6 +15,8 @@ namespace Wormhole.Services.Sftp;
 /// </summary>
 public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
 {
+    private const int TransferBufferSize = 128 * 1024;
+
     private readonly ILogger<FileTransferOrchestrator> _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly CancellationTokenSource _shutdown = new();
@@ -82,6 +84,9 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
             return;
         }
 
+        var ensuredRemoteDirectories = new HashSet<string>(StringComparer.Ordinal);
+        var ensuredLocalDirectories = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         foreach (var file in flattened)
         {
             token.ThrowIfCancellationRequested();
@@ -95,7 +100,12 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
                 // by the time their EnsureDestinationParentAsync runs.
                 try
                 {
-                    await EnsureDestinationDirectoryAsync(request.Direction, file.DestinationPath, token).ConfigureAwait(false);
+                    await EnsureDestinationDirectoryAsync(
+                        request.Direction,
+                        file.DestinationPath,
+                        ensuredRemoteDirectories,
+                        ensuredLocalDirectories,
+                        token).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
@@ -134,7 +144,12 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
             // Ensure parent directory exists on the destination side (transfer of nested
             // directories means a deeper file may arrive before its parent has been
             // mkdir'd by a directory entry).
-            await EnsureDestinationParentAsync(request.Direction, file.DestinationPath, token).ConfigureAwait(false);
+            await EnsureDestinationParentAsync(
+                request.Direction,
+                file.DestinationPath,
+                ensuredRemoteDirectories,
+                ensuredLocalDirectories,
+                token).ConfigureAwait(false);
 
             var row = new TransferItemViewModel(file.RelativeName, request.Direction, file.IncomingSize ?? 0, token, RemoveRow);
             if (!AddToTransfers(row))
@@ -214,31 +229,24 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
             // anything inside it lands. mkdir is idempotent in both EnsureDestinationDirectoryAsync
             // and System.IO.Directory.CreateDirectory, so duplicate emissions for the
             // same dir are safe.
-            var rootDest = direction == TransferDirection.LocalToRemote
-                ? Services.Sftp.RemotePath.Join(destDir, item.Name)
-                : Path.Combine(destDir, item.Name);
+            var rootDest = Services.Sftp.RemotePath.Join(destDir, item.Name);
             acc.Add(new FlattenedItem(item.SourcePath, rootDest, item.Name, IncomingSize: null, SourceIsLocal: true, IsDirectory: true));
 
-            foreach (var di in new DirectoryInfo(item.SourcePath).EnumerateDirectories("*", SearchOption.AllDirectories))
+            var root = new DirectoryInfo(item.SourcePath);
+            var rootPrefixLength = GetChildPathPrefixLength(root.FullName);
+            foreach (var entry in root.EnumerateFileSystemInfos("*", SearchOption.AllDirectories))
             {
                 token.ThrowIfCancellationRequested();
-                var rel = Path.GetRelativePath(item.SourcePath, di.FullName);
-                var destRel = item.Name + "/" + rel.Replace(Path.DirectorySeparatorChar, '/');
-                var dest = direction == TransferDirection.LocalToRemote
-                    ? Services.Sftp.RemotePath.Join(destDir, destRel)
-                    : Path.Combine(destDir, destRel.Replace('/', Path.DirectorySeparatorChar));
-                acc.Add(new FlattenedItem(di.FullName, dest, destRel, IncomingSize: null, SourceIsLocal: true, IsDirectory: true));
-            }
-
-            foreach (var fi in new DirectoryInfo(item.SourcePath).EnumerateFiles("*", SearchOption.AllDirectories))
-            {
-                token.ThrowIfCancellationRequested();
-                var rel = Path.GetRelativePath(item.SourcePath, fi.FullName);
-                var destRel = item.Name + "/" + rel.Replace(Path.DirectorySeparatorChar, '/');
-                var dest = direction == TransferDirection.LocalToRemote
-                    ? Services.Sftp.RemotePath.Join(destDir, destRel)
-                    : Path.Combine(destDir, destRel.Replace('/', Path.DirectorySeparatorChar));
-                acc.Add(new FlattenedItem(fi.FullName, dest, destRel, fi.Length, SourceIsLocal: true, IsDirectory: false));
+                var destRel = JoinRemoteRootAndLocalRelative(item.Name, entry.FullName, rootPrefixLength);
+                var dest = Services.Sftp.RemotePath.Join(destDir, destRel);
+                if (entry is DirectoryInfo)
+                {
+                    acc.Add(new FlattenedItem(entry.FullName, dest, destRel, IncomingSize: null, SourceIsLocal: true, IsDirectory: true));
+                }
+                else if (entry is FileInfo fi)
+                {
+                    acc.Add(new FlattenedItem(entry.FullName, dest, destRel, fi.Length, SourceIsLocal: true, IsDirectory: false));
+                }
             }
         }
         else
@@ -255,7 +263,7 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
         // their own directory entries the same way; the result is one entry per dir
         // in pre-order.
         var rootDest = direction == TransferDirection.RemoteToLocal
-            ? Path.Combine(destDir, relRoot.Replace('/', Path.DirectorySeparatorChar))
+            ? JoinLocalRootAndRemoteRelative(destDir, relRoot)
             : Services.Sftp.RemotePath.Join(destDir, relRoot);
         acc.Add(new FlattenedItem(remoteRoot, rootDest, relRoot, IncomingSize: null, SourceIsLocal: false, IsDirectory: true));
 
@@ -289,11 +297,89 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
             else
             {
                 var dest = direction == TransferDirection.RemoteToLocal
-                    ? Path.Combine(destDir, childRel.Replace('/', Path.DirectorySeparatorChar))
+                    ? JoinLocalRootAndRemoteRelative(destDir, childRel)
                     : Services.Sftp.RemotePath.Join(destDir, childRel);
                 acc.Add(new FlattenedItem(e.FullPath, dest, childRel, e.Size, SourceIsLocal: false, IsDirectory: false));
             }
         }
+    }
+
+    private static int GetChildPathPrefixLength(string rootPath)
+    {
+        var trimmedLength = rootPath.Length;
+        while (trimmedLength > 0 &&
+               (rootPath[trimmedLength - 1] == Path.DirectorySeparatorChar ||
+                rootPath[trimmedLength - 1] == Path.AltDirectorySeparatorChar))
+        {
+            trimmedLength--;
+        }
+        return trimmedLength + 1;
+    }
+
+    private static string JoinRemoteRootAndLocalRelative(
+        string rootName,
+        string childPath,
+        int rootPrefixLength)
+    {
+        var relativeLength = Math.Max(0, childPath.Length - rootPrefixLength);
+        var length = rootName.Length + 1 + relativeLength;
+        return string.Create(length, (rootName, childPath, rootPrefixLength), static (destination, state) =>
+        {
+            state.rootName.AsSpan().CopyTo(destination);
+            destination[state.rootName.Length] = Services.Sftp.RemotePath.Separator;
+            var target = destination[(state.rootName.Length + 1)..];
+            var child = state.rootPrefixLength < state.childPath.Length
+                ? state.childPath.AsSpan(state.rootPrefixLength)
+                : ReadOnlySpan<char>.Empty;
+            for (var i = 0; i < child.Length; i++)
+            {
+                var ch = child[i];
+                target[i] = ch == Path.DirectorySeparatorChar || ch == Path.AltDirectorySeparatorChar
+                    ? Services.Sftp.RemotePath.Separator
+                    : ch;
+            }
+        });
+    }
+
+    private static string JoinLocalRootAndRemoteRelative(string localRoot, string remoteRelative)
+    {
+        if (string.IsNullOrEmpty(localRoot))
+            return RemoteRelativeToLocalPath(remoteRelative);
+
+        var needsSeparator = !EndsInLocalDirectorySeparator(localRoot);
+        var separatorLength = needsSeparator ? 1 : 0;
+        return string.Create(localRoot.Length + separatorLength + remoteRelative.Length, (localRoot, remoteRelative, needsSeparator), static (destination, state) =>
+        {
+            state.localRoot.AsSpan().CopyTo(destination);
+            var offset = state.localRoot.Length;
+            if (state.needsSeparator)
+            {
+                destination[offset] = Path.DirectorySeparatorChar;
+                offset++;
+            }
+
+            CopyRemoteRelativeAsLocal(state.remoteRelative, destination[offset..]);
+        });
+    }
+
+    private static string RemoteRelativeToLocalPath(string remoteRelative) =>
+        string.Create(remoteRelative.Length, remoteRelative, static (destination, source) =>
+            CopyRemoteRelativeAsLocal(source, destination));
+
+    private static void CopyRemoteRelativeAsLocal(ReadOnlySpan<char> remoteRelative, Span<char> destination)
+    {
+        for (var i = 0; i < remoteRelative.Length; i++)
+        {
+            destination[i] = remoteRelative[i] == Services.Sftp.RemotePath.Separator
+                ? Path.DirectorySeparatorChar
+                : remoteRelative[i];
+        }
+    }
+
+    private static bool EndsInLocalDirectorySeparator(string path)
+    {
+        var last = path[^1];
+        return last == Path.DirectorySeparatorChar || last == Path.AltDirectorySeparatorChar;
     }
 
     /// <summary>
@@ -327,13 +413,27 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
 
         if (direction == TransferDirection.LocalToRemote)
         {
-            await using var src = new FileStream(file.SourcePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+            await using var src = new FileStream(file.SourcePath, new FileStreamOptions
+            {
+                Mode = FileMode.Open,
+                Access = FileAccess.Read,
+                Share = FileShare.Read,
+                BufferSize = TransferBufferSize,
+                Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
+            });
             await RunSerializedAsync(() => Session.UploadAsync(src, file.DestinationPath, progress, token)).ConfigureAwait(false);
         }
         else if (direction == TransferDirection.RemoteToLocal)
         {
             Directory.CreateDirectory(Path.GetDirectoryName(file.DestinationPath)!);
-            await using var dst = new FileStream(file.DestinationPath, FileMode.Create, FileAccess.Write, FileShare.None);
+            await using var dst = new FileStream(file.DestinationPath, new FileStreamOptions
+            {
+                Mode = FileMode.Create,
+                Access = FileAccess.Write,
+                Share = FileShare.None,
+                BufferSize = TransferBufferSize,
+                Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
+            });
             await RunSerializedAsync(() => Session.DownloadAsync(file.SourcePath, dst, progress, token)).ConfigureAwait(false);
         }
         else
@@ -366,18 +466,23 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
         return SafeFileLength(path);
     }
 
-    private async Task EnsureDestinationParentAsync(TransferDirection direction, string destination, CancellationToken token)
+    private async Task EnsureDestinationParentAsync(
+        TransferDirection direction,
+        string destination,
+        HashSet<string> ensuredRemoteDirectories,
+        HashSet<string> ensuredLocalDirectories,
+        CancellationToken token)
     {
         if (direction == TransferDirection.LocalToRemote)
         {
             var parent = Services.Sftp.RemotePath.Parent(destination);
             if (string.IsNullOrEmpty(parent) || parent == "/") return;
-            await EnsureRemoteDirectoryAsync(parent, token).ConfigureAwait(false);
+            await EnsureRemoteDirectoryAsync(parent, ensuredRemoteDirectories, token).ConfigureAwait(false);
         }
         else
         {
             var parent = Path.GetDirectoryName(destination);
-            if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
+            if (!string.IsNullOrEmpty(parent)) EnsureLocalDirectory(parent, ensuredLocalDirectories);
         }
     }
 
@@ -386,16 +491,21 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
     /// directory-entry branch in the transfer loop so empty subtrees survive the
     /// copy. Idempotent on both sides: a path that already exists is a no-op.
     /// </summary>
-    private async Task EnsureDestinationDirectoryAsync(TransferDirection direction, string destination, CancellationToken token)
+    private async Task EnsureDestinationDirectoryAsync(
+        TransferDirection direction,
+        string destination,
+        HashSet<string> ensuredRemoteDirectories,
+        HashSet<string> ensuredLocalDirectories,
+        CancellationToken token)
     {
         if (direction == TransferDirection.LocalToRemote)
         {
             if (string.IsNullOrEmpty(destination) || destination == "/") return;
-            await EnsureRemoteDirectoryAsync(destination, token).ConfigureAwait(false);
+            await EnsureRemoteDirectoryAsync(destination, ensuredRemoteDirectories, token).ConfigureAwait(false);
         }
         else
         {
-            Directory.CreateDirectory(destination);
+            EnsureLocalDirectory(destination, ensuredLocalDirectories);
         }
     }
 
@@ -404,22 +514,53 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
     /// ancestor, then creates downward. Servers vary on whether SFTP exposes a
     /// native mkdir -p, so we do it ourselves under the session gate.
     /// </summary>
-    private Task EnsureRemoteDirectoryAsync(string remotePath, CancellationToken token) =>
+    private Task EnsureRemoteDirectoryAsync(
+        string remotePath,
+        HashSet<string> ensuredRemoteDirectories,
+        CancellationToken token)
+    {
+        if (string.IsNullOrEmpty(remotePath) || remotePath == "/") return Task.CompletedTask;
+        if (ensuredRemoteDirectories.Contains(remotePath)) return Task.CompletedTask;
+
+        return EnsureRemoteDirectoryCoreAsync(remotePath, ensuredRemoteDirectories, token);
+    }
+
+    private Task EnsureRemoteDirectoryCoreAsync(
+        string remotePath,
+        HashSet<string> ensuredRemoteDirectories,
+        CancellationToken token) =>
         RunSerializedAsync(async () =>
         {
-            if (await Session.ExistsAsync(remotePath, token).ConfigureAwait(false)) return;
+            if (ensuredRemoteDirectories.Contains(remotePath)) return;
+
             var stack = new Stack<string>();
             var p = remotePath;
-            while (!string.IsNullOrEmpty(p) && p != "/" && !await Session.ExistsAsync(p, token).ConfigureAwait(false))
+            while (!string.IsNullOrEmpty(p) && p != "/" && !ensuredRemoteDirectories.Contains(p))
             {
+                if (await Session.ExistsAsync(p, token).ConfigureAwait(false))
+                {
+                    ensuredRemoteDirectories.Add(p);
+                    break;
+                }
+
                 stack.Push(p);
                 p = Services.Sftp.RemotePath.Parent(p);
             }
             while (stack.Count > 0)
             {
-                await Session.CreateDirectoryAsync(stack.Pop(), token).ConfigureAwait(false);
+                var dir = stack.Pop();
+                if (ensuredRemoteDirectories.Contains(dir)) continue;
+                await Session.CreateDirectoryAsync(dir, token).ConfigureAwait(false);
+                ensuredRemoteDirectories.Add(dir);
             }
         });
+
+    private static void EnsureLocalDirectory(string path, HashSet<string> ensuredLocalDirectories)
+    {
+        if (ensuredLocalDirectories.Contains(path)) return;
+        Directory.CreateDirectory(path);
+        ensuredLocalDirectories.Add(path);
+    }
 
     // === helpers ==============================================================
 
@@ -520,6 +661,8 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
     {
         private readonly DispatcherQueue? _dispatcher;
         private readonly Action<long> _onReport;
+        private long _latestValue;
+        private int _queued;
 
         public DispatchedProgress(DispatcherQueue? dispatcher, Action<long> onReport)
         {
@@ -533,9 +676,30 @@ public sealed class FileTransferOrchestrator : IFileTransferOrchestrator
             // tests can observe progress. Production: marshal to UI.
             if (_dispatcher is null) { _onReport(value); return; }
             if (_dispatcher.HasThreadAccess) { _onReport(value); return; }
-            // Ignore the TryEnqueue bool: dropping a single progress tick during teardown
-            // is the desired behavior. Logging here would spam the dropped-tick rate.
-            _dispatcher.TryEnqueue(() => _onReport(value));
+            Interlocked.Exchange(ref _latestValue, value);
+            if (Interlocked.CompareExchange(ref _queued, 1, 0) != 0) return;
+            // Ignore the TryEnqueue bool: dropping progress during teardown is the desired
+            // behavior. Logging here would spam at the transfer callback rate.
+            if (!_dispatcher.TryEnqueue(Drain))
+            {
+                Interlocked.Exchange(ref _queued, 0);
+            }
+        }
+
+        private void Drain()
+        {
+            var value = Interlocked.Read(ref _latestValue);
+            Interlocked.Exchange(ref _queued, 0);
+            _onReport(value);
+
+            if (Interlocked.Read(ref _latestValue) == value) return;
+            if (Interlocked.CompareExchange(ref _queued, 1, 0) == 0)
+            {
+                if (_dispatcher?.TryEnqueue(Drain) != true)
+                {
+                    Interlocked.Exchange(ref _queued, 0);
+                }
+            }
         }
     }
 

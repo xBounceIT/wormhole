@@ -11,9 +11,13 @@ namespace Wormhole.Tests.Fakes;
 public sealed class FakeTunnelConfigRepository : ITunnelConfigRepository
 {
     public Dictionary<Guid, TunnelConfig> Configs { get; } = new();
+    public int GetAllCallCount { get; private set; }
 
-    public Task<IReadOnlyList<TunnelConfig>> GetAllAsync(CancellationToken cancellationToken = default) =>
-        Task.FromResult<IReadOnlyList<TunnelConfig>>(Configs.Values.ToList());
+    public Task<IReadOnlyList<TunnelConfig>> GetAllAsync(CancellationToken cancellationToken = default)
+    {
+        GetAllCallCount++;
+        return Task.FromResult<IReadOnlyList<TunnelConfig>>(Configs.Values.ToList());
+    }
 
     public Task<TunnelConfig?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
         Task.FromResult(Configs.TryGetValue(id, out var c) ? c : null);

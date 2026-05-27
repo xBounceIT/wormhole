@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Collections.ObjectModel;
 using System.Linq;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -20,6 +19,8 @@ public partial class ConnectionEditorViewModel : ObservableObject
 {
     private readonly ICredentialRepository _credentialRepository;
     private readonly List<CredentialProfile> _allCredentials = new();
+    private readonly Dictionary<Guid, CredentialProfile> _allCredentialsById = new();
+    private readonly Dictionary<Guid, CredentialProfile> _availableCredentialsById = new();
     private bool _suppressPresetSync;
     private bool _suppressAadAutoFlag;
     // True when the editor (not the user, not the persisted DB value) set RdpUseExternalClient
@@ -47,7 +48,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// <see cref="CredentialKind.SshKey"/> since the RDP host only consumes the password secret.
     /// Rebuilt on load and whenever Protocol changes.
     /// </summary>
-    public ObservableCollection<CredentialProfile> AvailableCredentials { get; } = new();
+    public BulkObservableCollection<CredentialProfile> AvailableCredentials { get; } = new();
 
     #region General
 
@@ -260,7 +261,9 @@ public partial class ConnectionEditorViewModel : ObservableObject
     }
 
     private CredentialProfile? GetCredentialById(Guid? id) =>
-        id is null ? null : AvailableCredentials.FirstOrDefault(c => c.Id == id);
+        id is { } guid && _availableCredentialsById.TryGetValue(guid, out var credential)
+            ? credential
+            : null;
 
     [ObservableProperty]
     private bool rdpGatewayBypassLocal = true;
@@ -354,7 +357,12 @@ public partial class ConnectionEditorViewModel : ObservableObject
     {
         var creds = await _credentialRepository.GetAllAsync().ConfigureAwait(true);
         _allCredentials.Clear();
-        _allCredentials.AddRange(creds);
+        _allCredentialsById.Clear();
+        foreach (var credential in creds)
+        {
+            _allCredentials.Add(credential);
+            _allCredentialsById[credential.Id] = credential;
+        }
         RebuildAvailableCredentials();
     }
 
@@ -369,16 +377,20 @@ public partial class ConnectionEditorViewModel : ObservableObject
         var credentialProtocol = CredentialProtocolFor(Protocol);
         var connectionIsRdp = Protocol == ProtocolType.Rdp;
 
-        AvailableCredentials.Clear();
-        AvailableCredentials.Add(NoneCredential);
+        var available = new List<CredentialProfile>(_allCredentials.Count + 3)
+        {
+            NoneCredential,
+        };
         foreach (var c in _allCredentials)
         {
             if (c.Protocol != credentialProtocol) continue;
             // RDP login only consumes the password secret — SSH-key credentials would force the
             // user into a misleading prompt path. Filter them out.
             if (connectionIsRdp && c.Kind == CredentialKind.SshKey) continue;
-            AvailableCredentials.Add(c);
+            available.Add(c);
         }
+
+        ReplaceAvailableCredentials(available);
 
         // Preserve the existing main + gateway selections when they no longer match the filter
         // so edit round-trip doesn't lose the binding on a saved node.
@@ -392,9 +404,21 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private void AppendStaleSelection(Guid? id)
     {
         if (id is not { } guid) return;
-        if (AvailableCredentials.Any(c => c.Id == guid)) return;
-        var stale = _allCredentials.FirstOrDefault(c => c.Id == guid);
-        if (stale is not null) AvailableCredentials.Add(stale);
+        if (_availableCredentialsById.ContainsKey(guid)) return;
+        if (!_allCredentialsById.TryGetValue(guid, out var stale)) return;
+
+        _availableCredentialsById[stale.Id] = stale;
+        AvailableCredentials.Add(stale);
+    }
+
+    private void ReplaceAvailableCredentials(IReadOnlyList<CredentialProfile> available)
+    {
+        _availableCredentialsById.Clear();
+        foreach (var credential in available)
+        {
+            _availableCredentialsById[credential.Id] = credential;
+        }
+        AvailableCredentials.ReplaceAll(available);
     }
 
     /// <summary>SFTP connections reuse SSH credentials per the project's credential model
@@ -407,7 +431,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
         // When the user explicitly switches the connection protocol, drop a previously-bound
         // credential that no longer matches the new filter. The alternative — preserving it as
         // a stale entry — would silently expose a protocol-incompatible binding on save.
-        if (CredentialId is { } id && _allCredentials.FirstOrDefault(c => c.Id == id) is { } cred)
+        if (CredentialId is { } id && _allCredentialsById.TryGetValue(id, out var cred))
         {
             var expectedProtocol = CredentialProtocolFor(value);
             var connectionIsRdp = value == ProtocolType.Rdp;
@@ -428,7 +452,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     // (Username, RdpDomain) all use the same auto-tick/auto-untick logic.
     partial void OnCredentialIdChanged(Guid? value)
     {
-        if (value is { } id && !AvailableCredentials.Any(c => c.Id == id))
+        if (value is { } id && !_availableCredentialsById.ContainsKey(id))
         {
             AppendStaleSelection(id);
             OnPropertyChanged(nameof(SelectedCredential));
@@ -439,7 +463,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     partial void OnRdpGatewayCredentialIdChanged(Guid? value)
     {
-        if (value is { } id && !AvailableCredentials.Any(c => c.Id == id))
+        if (value is { } id && !_availableCredentialsById.ContainsKey(id))
         {
             AppendStaleSelection(id);
             OnPropertyChanged(nameof(SelectedGatewayCredential));

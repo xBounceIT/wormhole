@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 
 namespace Wormhole.Interop.Terminal;
 
@@ -98,13 +99,15 @@ internal sealed class TerminalOutputCoalescer : IDisposable
     /// </summary>
     public void Flush()
     {
-        byte[] snapshot;
+        byte[]? rented = null;
+        int length;
         lock (_lock)
         {
             _timerArmed = false;
             if (_disposed || _suspended || _length == 0) return;
-            snapshot = new byte[_length];
-            Array.Copy(_buffer, 0, snapshot, 0, _length);
+            length = _length;
+            rented = ArrayPool<byte>.Shared.Rent(length);
+            _buffer.AsSpan(0, length).CopyTo(rented);
             _length = 0;
             // Trim back to default after a one-off burst grew the buffer past the
             // shrink threshold — without this, a single `cat huge_file` would pin the
@@ -114,7 +117,14 @@ internal sealed class TerminalOutputCoalescer : IDisposable
                 _buffer = new byte[InitialCapacityBytes];
             }
         }
-        _post(snapshot);
+        try
+        {
+            _post(rented.AsMemory(0, length));
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
     }
 
     public void Dispose()

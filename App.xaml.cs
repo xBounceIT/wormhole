@@ -205,13 +205,13 @@ public partial class App : Application
         services.AddSingleton<QuickConnectViewModel>();
         services.AddSingleton<SettingsViewModel>();
         services.AddSingleton<CredentialsViewModel>();
+        services.AddSingleton<TunnelConfigsViewModel>();
         services.AddSingleton<UpdateViewModel>();
         services.AddTransient<ConnectionEditorViewModel>();
         services.AddTransient<FolderEditorViewModel>();
         services.AddTransient<SshSessionViewModel>();
         services.AddTransient<RdpSessionViewModel>();
         services.AddTransient<SftpSessionViewModel>();
-        services.AddTransient<TunnelConfigsViewModel>();
         services.AddTransient<MRemoteNgImportDialogViewModel>();
         services.AddTransient<BackupExportDialogViewModel>();
         services.AddTransient<BackupImportDialogViewModel>();

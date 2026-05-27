@@ -58,16 +58,28 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
 
         if (credential.Kind == CredentialKind.SshKey)
         {
-            var key = await _credentialService.ReadPrivateKeyAsync(credential.Id).ConfigureAwait(true);
-            cancellationToken.ThrowIfCancellationRequested();
+            var passphraseTask = _credentialService.ReadPasswordAsync(credential.Id);
+            byte[]? key;
+            try
+            {
+                key = await _credentialService.ReadPrivateKeyAsync(credential.Id).ConfigureAwait(true);
+                cancellationToken.ThrowIfCancellationRequested();
+            }
+            catch
+            {
+                _ = ObserveCredentialReadAsync(passphraseTask);
+                throw;
+            }
+
             if (key is null || key.Length == 0)
             {
+                _ = ObserveCredentialReadAsync(passphraseTask);
                 return await PromptForPasswordAsync(profile, cancellationToken).ConfigureAwait(true);
             }
             // Any stored secret for a key credential is the passphrase used to *decrypt the
             // key*, not a login password. Surface it in KeyPassphrase so the service won't
             // also try it as PasswordAuthenticationMethod.
-            var passphrase = await _credentialService.ReadPasswordAsync(credential.Id).ConfigureAwait(true);
+            var passphrase = await passphraseTask.ConfigureAwait(true);
             cancellationToken.ThrowIfCancellationRequested();
             // If no passphrase was stored, probe whether the key actually needs one.
             // If encrypted, prompt rather than handing the blob to SshSessionService
@@ -93,6 +105,12 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
             return new SshCredentials(stored, null, null);
         }
         return await PromptForPasswordAsync(profile, cancellationToken).ConfigureAwait(true);
+    }
+
+    private static async Task ObserveCredentialReadAsync(Task<string?> task)
+    {
+        try { await task.ConfigureAwait(false); }
+        catch { /* best-effort observer for an abandoned overlapping read */ }
     }
 
     private async Task<SshCredentials> PromptForPasswordAsync(ConnectionProfile profile, CancellationToken cancellationToken)

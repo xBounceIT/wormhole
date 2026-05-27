@@ -136,6 +136,34 @@ public sealed class FileTransferOrchestratorTests : IDisposable
     }
 
     [Fact]
+    public async Task EnqueueAsync_LocalToRemote_ReusesEnsuredRemoteParentsWithinBatch()
+    {
+        var sftp = new FakeSftpSession();
+        await using var orch = NewOrchestrator(sftp);
+        var first = Path.Combine(_localRoot, "a.txt");
+        var second = Path.Combine(_localRoot, "b.txt");
+        File.WriteAllText(first, "a");
+        File.WriteAllText(second, "b");
+
+        var request = new TransferRequest(
+            TransferDirection.LocalToRemote,
+            "/home/user/deep/nested",
+            new[]
+            {
+                new TransferItem(first, "a.txt", false),
+                new TransferItem(second, "b.txt", false),
+            });
+        await orch.EnqueueAsync(request, NeverPrompted, CancellationToken.None);
+
+        Assert.Equal(1, sftp.ExistsCallCounts["/home/user/deep/nested"]);
+        Assert.Equal(1, sftp.ExistsCallCounts["/home/user/deep"]);
+        Assert.Equal(1, sftp.CreateDirectoryCallCounts["/home/user/deep"]);
+        Assert.Equal(1, sftp.CreateDirectoryCallCounts["/home/user/deep/nested"]);
+        Assert.True(sftp.Files.ContainsKey("/home/user/deep/nested/a.txt"));
+        Assert.True(sftp.Files.ContainsKey("/home/user/deep/nested/b.txt"));
+    }
+
+    [Fact]
     public async Task EnqueueAsync_SerializesSftpCalls()
     {
         var sftp = new FakeSftpSession();
@@ -203,6 +231,29 @@ public sealed class FileTransferOrchestratorTests : IDisposable
         Assert.True(File.Exists(Path.Combine(_localRoot, "root", "sub", "sub2", "c.txt")));
     }
 
+    [Fact]
+    public async Task EnqueueAsync_RemoteToLocal_MapsRemoteSeparatorsToLocalPaths()
+    {
+        var sftp = new FakeSftpSession();
+        sftp.Directories["/home/user/root"] = true;
+        sftp.Directories["/home/user/root/sub"] = true;
+        sftp.Directories["/home/user/root/sub/sub2"] = true;
+        sftp.Files["/home/user/root/sub/sub2/leaf.txt"] = new byte[] { 7 };
+        await using var orch = NewOrchestrator(sftp);
+
+        var request = new TransferRequest(
+            TransferDirection.RemoteToLocal,
+            _localRoot,
+            new[] { new TransferItem("/home/user/root", "root", true) });
+
+        await orch.EnqueueAsync(request, NeverPrompted, CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.Equal(
+            new byte[] { 7 },
+            File.ReadAllBytes(Path.Combine(_localRoot, "root", "sub", "sub2", "leaf.txt")));
+    }
+
     // === regression: malicious server filename must not escape destination ===
     [Fact]
     public async Task EnqueueAsync_SkipsRemoteEntryWithUnsafeName()
@@ -253,6 +304,30 @@ public sealed class FileTransferOrchestratorTests : IDisposable
 
         Assert.True(sftp.Directories.ContainsKey("/home/user/payload"));
         Assert.True(sftp.Directories.ContainsKey("/home/user/payload/empty_dir"));
+    }
+
+    [Fact]
+    public async Task EnqueueAsync_LocalToRemote_UploadsNestedDirectoryFilesWithRemoteSeparators()
+    {
+        var sourceDir = Path.Combine(_localRoot, "payload");
+        var nestedDir = Path.Combine(sourceDir, "sub", "sub2");
+        Directory.CreateDirectory(nestedDir);
+        File.WriteAllText(Path.Combine(nestedDir, "leaf.txt"), "leaf");
+
+        var sftp = new FakeSftpSession();
+        sftp.Directories["/home/user"] = true;
+        await using var orch = NewOrchestrator(sftp);
+
+        var request = new TransferRequest(
+            TransferDirection.LocalToRemote,
+            "/home/user",
+            new[] { new TransferItem(sourceDir, "payload", true) });
+        await orch.EnqueueAsync(request, NeverPrompted, CancellationToken.None)
+            .WaitAsync(TimeSpan.FromSeconds(5));
+
+        Assert.True(sftp.Directories.ContainsKey("/home/user/payload/sub"));
+        Assert.True(sftp.Directories.ContainsKey("/home/user/payload/sub/sub2"));
+        Assert.Equal("leaf", System.Text.Encoding.UTF8.GetString(sftp.Files["/home/user/payload/sub/sub2/leaf.txt"]));
     }
 
     [Fact]

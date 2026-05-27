@@ -1,3 +1,4 @@
+using System.Collections.Specialized;
 using System.IO;
 using Wormhole.ViewModels.Sessions.Transfer;
 using Xunit;
@@ -33,6 +34,47 @@ public sealed class LocalFilePaneViewModelTests : IDisposable
             e => { Assert.Equal("a.txt", e.Name); Assert.False(e.IsDirectory); Assert.Equal(5, e.Size); });
         Assert.Equal(_root, pane.CurrentPath);
         Assert.Null(pane.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task LoadAsync_SortsDirectoriesThenFilesByName()
+    {
+        File.WriteAllText(Path.Combine(_root, "z-file.txt"), "z");
+        File.WriteAllText(Path.Combine(_root, "A-file.txt"), "a");
+        Directory.CreateDirectory(Path.Combine(_root, "z-dir"));
+        Directory.CreateDirectory(Path.Combine(_root, "A-dir"));
+
+        var pane = new LocalFilePaneViewModel();
+        await pane.LoadAsync(_root);
+
+        Assert.Collection(pane.Entries,
+            e => { Assert.Equal("A-dir", e.Name); Assert.True(e.IsDirectory); },
+            e => { Assert.Equal("z-dir", e.Name); Assert.True(e.IsDirectory); },
+            e => { Assert.Equal("A-file.txt", e.Name); Assert.False(e.IsDirectory); },
+            e => { Assert.Equal("z-file.txt", e.Name); Assert.False(e.IsDirectory); });
+    }
+
+    [Fact]
+    public async Task LoadAsync_ReplacesEntriesWithSingleReset()
+    {
+        File.WriteAllText(Path.Combine(_root, "a.txt"), "hello");
+        File.WriteAllText(Path.Combine(_root, "b.txt"), "hello");
+        Directory.CreateDirectory(Path.Combine(_root, "subdir"));
+
+        var pane = new LocalFilePaneViewModel();
+        var addEvents = 0;
+        var resetEvents = 0;
+        pane.Entries.CollectionChanged += (_, args) =>
+        {
+            if (args.Action == NotifyCollectionChangedAction.Add) addEvents++;
+            if (args.Action == NotifyCollectionChangedAction.Reset) resetEvents++;
+        };
+
+        await pane.LoadAsync(_root);
+
+        Assert.Equal(3, pane.Entries.Count);
+        Assert.Equal(0, addEvents);
+        Assert.Equal(1, resetEvents);
     }
 
     [Fact]

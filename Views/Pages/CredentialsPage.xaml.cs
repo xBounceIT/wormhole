@@ -26,7 +26,7 @@ public sealed partial class CredentialsPage : Page
         // VM is Singleton — subscribe per navigation and unsubscribe in OnNavigatedFrom so
         // visited pages aren't pinned by a handler the VM keeps alive.
         ViewModel.SelectedCredentials.CollectionChanged += OnSelectedCredentialsChanged;
-        _ = ViewModel.LoadCommand.ExecuteAsync(null);
+        _ = ViewModel.EnsureLoadedAsync();
     }
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)
@@ -70,7 +70,7 @@ public sealed partial class CredentialsPage : Page
         var checkBox = FindSelectCheckBox(container);
         if (checkBox is not null)
         {
-            checkBox.IsChecked = ViewModel.SelectedCredentials.Contains(profile);
+            checkBox.IsChecked = ViewModel.IsSelected(profile);
         }
     }
 
@@ -80,7 +80,7 @@ public sealed partial class CredentialsPage : Page
 
         if (cb.IsChecked == true)
         {
-            if (!ViewModel.SelectedCredentials.Contains(profile))
+            if (!ViewModel.IsSelected(profile))
                 ViewModel.SelectedCredentials.Add(profile);
         }
         else
@@ -105,7 +105,7 @@ public sealed partial class CredentialsPage : Page
             if (CredentialsGrid.ContainerFromItem(item) is not GridViewItem container) continue;
             var checkBox = FindSelectCheckBox(container);
             if (checkBox is null) continue;
-            var shouldBeChecked = item is CredentialProfile profile && ViewModel.SelectedCredentials.Contains(profile);
+            var shouldBeChecked = item is CredentialProfile profile && ViewModel.IsSelected(profile);
             if (checkBox.IsChecked != shouldBeChecked) checkBox.IsChecked = shouldBeChecked;
         }
     }
