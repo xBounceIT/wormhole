@@ -13,6 +13,7 @@ public partial class SettingsViewModel : ObservableObject
     private readonly IDialogService _dialog;
     private readonly ConnectionTreeViewModel _connectionTree;
     private readonly CredentialsViewModel _credentials;
+    private readonly TunnelConfigsViewModel _tunnels;
     private readonly ILogger<SettingsViewModel> _logger;
 
     [ObservableProperty]
@@ -35,12 +36,14 @@ public partial class SettingsViewModel : ObservableObject
         IDialogService dialog,
         ConnectionTreeViewModel connectionTree,
         CredentialsViewModel credentials,
+        TunnelConfigsViewModel tunnels,
         ILogger<SettingsViewModel> logger)
     {
         _settingsService = settingsService;
         _dialog = dialog;
         _connectionTree = connectionTree;
         _credentials = credentials;
+        _tunnels = tunnels;
         _logger = logger;
         Update = update;
         theme = _settingsService.Current.Theme;
@@ -108,9 +111,7 @@ public partial class SettingsViewModel : ObservableObject
         {
             await _connectionTree.RefreshAsync();
             await _credentials.LoadCommand.ExecuteAsync(null);
-            // TunnelConfigsViewModel is registered as Transient — there's no shared instance to
-            // refresh here. The Tunnels page resolves a fresh VM on navigation, which always
-            // loads fresh data from the repo.
+            await _tunnels.LoadCommand.ExecuteAsync(null);
         }
         catch (Exception ex)
         {

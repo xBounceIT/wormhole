@@ -326,13 +326,10 @@ public sealed partial class MRemoteNgImportDialogViewModel : ObservableObject, I
 
     private static string SummarizeResult(MRemoteNgImportResult r)
     {
-        var parts = new List<string>
-        {
-            $"{r.FoldersCreated} folder{Pluralize(r.FoldersCreated)}",
-            $"{r.ConnectionsCreated} connection{Pluralize(r.ConnectionsCreated)}",
-            $"{r.CredentialsCreated} credential{Pluralize(r.CredentialsCreated)}",
-        };
-        var s = "Imported " + string.Join(", ", parts) + ".";
+        var s =
+            $"Imported {r.FoldersCreated} folder{Pluralize(r.FoldersCreated)}, " +
+            $"{r.ConnectionsCreated} connection{Pluralize(r.ConnectionsCreated)}, " +
+            $"{r.CredentialsCreated} credential{Pluralize(r.CredentialsCreated)}.";
         if (r.SkippedUnsupportedProtocols > 0)
         {
             s += $" Skipped {r.SkippedUnsupportedProtocols} unsupported connection" +
@@ -344,13 +341,15 @@ public sealed partial class MRemoteNgImportDialogViewModel : ObservableObject, I
             // unreadable. The full list is in the logs for power users. `DroppedWarningCount`
             // covers anything past the soft cap in the importer, so the "+N more" number is
             // honest even for pathological files with hundreds of warnings.
-            var shown = r.Warnings.Take(2).ToList();
-            s += " Warnings: " + string.Join("; ", shown);
-            var listOverflow = r.Warnings.Count - shown.Count;
+            const int warningPreviewCount = 2;
+            var shownCount = Math.Min(r.Warnings.Count, warningPreviewCount);
+            s += " Warnings: " + JoinFirstWarnings(r.Warnings, shownCount, "; ");
+            var listOverflow = r.Warnings.Count - shownCount;
             var totalOverflow = listOverflow + r.DroppedWarningCount;
             if (totalOverflow > 0)
             {
-                s += $"; +{totalOverflow} more (see logs).";
+                if (shownCount > 0) s += "; ";
+                s += $"+{totalOverflow} more (see logs).";
             }
             else
             {
@@ -361,6 +360,38 @@ public sealed partial class MRemoteNgImportDialogViewModel : ObservableObject, I
     }
 
     private static string Pluralize(int n) => n == 1 ? string.Empty : "s";
+
+    private static string JoinFirstWarnings(IReadOnlyList<string> warnings, int count, string separator)
+    {
+        if (count <= 0) return string.Empty;
+        if (count == 1) return warnings[0];
+
+        return string.Create(EstimateJoinedLength(warnings, count, separator.Length), (warnings, count, separator), static (destination, state) =>
+        {
+            var offset = 0;
+            for (var i = 0; i < state.count; i++)
+            {
+                if (i > 0)
+                {
+                    state.separator.AsSpan().CopyTo(destination[offset..]);
+                    offset += state.separator.Length;
+                }
+
+                state.warnings[i].AsSpan().CopyTo(destination[offset..]);
+                offset += state.warnings[i].Length;
+            }
+        });
+    }
+
+    private static int EstimateJoinedLength(IReadOnlyList<string> values, int count, int separatorLength)
+    {
+        var length = separatorLength * (count - 1);
+        for (var i = 0; i < count; i++)
+        {
+            length += values[i].Length;
+        }
+        return length;
+    }
 
     public void Dispose()
     {

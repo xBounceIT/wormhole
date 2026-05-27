@@ -25,7 +25,7 @@ public sealed class TunnelConfigRepository : ITunnelConfigRepository
         var rows = await connection.QueryAsync<TunnelConfig>(new CommandDefinition(
             $"SELECT {SelectColumns} FROM TunnelConfigs ORDER BY Name;",
             cancellationToken: cancellationToken));
-        return rows.ToList();
+        return rows as IReadOnlyList<TunnelConfig> ?? rows.ToList();
     }
 
     public async Task<TunnelConfig?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)

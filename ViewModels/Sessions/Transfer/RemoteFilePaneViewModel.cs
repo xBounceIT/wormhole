@@ -29,13 +29,18 @@ public sealed class RemoteFilePaneViewModel : FilePaneViewModel
         return SerializeAsync(async () =>
         {
             var entries = await _session.ListDirectoryAsync(path, cancellationToken).ConfigureAwait(false);
-            return (IReadOnlyList<FileEntryViewModel>)entries.Select(e => new FileEntryViewModel(
-                name: e.Name,
-                fullPath: e.FullPath,
-                isDirectory: e.IsDirectory,
-                isSymbolicLink: e.IsSymbolicLink,
-                size: e.Size,
-                lastModifiedUtc: e.LastModifiedUtc)).ToList();
+            var viewEntries = new List<FileEntryViewModel>(entries.Count);
+            foreach (var entry in entries)
+            {
+                viewEntries.Add(new FileEntryViewModel(
+                    name: entry.Name,
+                    fullPath: entry.FullPath,
+                    isDirectory: entry.IsDirectory,
+                    isSymbolicLink: entry.IsSymbolicLink,
+                    size: entry.Size,
+                    lastModifiedUtc: entry.LastModifiedUtc));
+            }
+            return (IReadOnlyList<FileEntryViewModel>)viewEntries;
         });
     }
 

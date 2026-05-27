@@ -10,22 +10,30 @@ namespace Wormhole.Services.Ssh;
 /// </summary>
 public static class SshAuthMethodsBuilder
 {
-    public static List<AuthenticationMethod> Build(string username, SshCredentials credentials)
+    public static AuthenticationMethod[] Build(string username, SshCredentials credentials)
     {
-        var methods = new List<AuthenticationMethod>();
-        if (credentials.PrivateKey is { Length: > 0 })
+        var privateKey = credentials.PrivateKey;
+        var password = credentials.Password;
+        var hasPrivateKey = privateKey is { Length: > 0 };
+        var hasPassword = !string.IsNullOrEmpty(password);
+        var count = (hasPrivateKey ? 1 : 0) + (hasPassword ? 1 : 0);
+        if (count == 0) return Array.Empty<AuthenticationMethod>();
+
+        var methods = new AuthenticationMethod[count];
+        var index = 0;
+        if (hasPrivateKey)
         {
             // KeyPassphrase is consumed locally to decrypt the key — never sent as a login
             // password. SSH.NET throws SshPassPhraseNullOrEmptyException at parse time if the
             // key is encrypted and we passed no passphrase; the caller re-prompts.
             var keyFile = string.IsNullOrEmpty(credentials.KeyPassphrase)
-                ? new PrivateKeyFile(new MemoryStream(credentials.PrivateKey))
-                : new PrivateKeyFile(new MemoryStream(credentials.PrivateKey), credentials.KeyPassphrase);
-            methods.Add(new PrivateKeyAuthenticationMethod(username, keyFile));
+                ? new PrivateKeyFile(new MemoryStream(privateKey!))
+                : new PrivateKeyFile(new MemoryStream(privateKey!), credentials.KeyPassphrase);
+            methods[index++] = new PrivateKeyAuthenticationMethod(username, keyFile);
         }
-        if (!string.IsNullOrEmpty(credentials.Password))
+        if (hasPassword)
         {
-            methods.Add(new PasswordAuthenticationMethod(username, credentials.Password));
+            methods[index] = new PasswordAuthenticationMethod(username, password);
         }
         return methods;
     }

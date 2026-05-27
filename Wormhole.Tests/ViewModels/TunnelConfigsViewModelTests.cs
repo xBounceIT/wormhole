@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
@@ -33,6 +34,60 @@ public class TunnelConfigsViewModelTests
         Assert.Equal("alpha", vm.Configs[0].Name);
         Assert.False(vm.IsEmpty);
         Assert.True(vm.HasMatches);
+    }
+
+    [Fact]
+    public async Task Load_ReplacesConfigsAndFilterWithSingleReset()
+    {
+        var (vm, repo, _, _, _) = CreateVm();
+        repo.Configs[Guid.NewGuid()] = new TunnelConfig { Id = Guid.NewGuid(), Name = "alpha", Kind = TunnelKind.WireGuard };
+        repo.Configs[Guid.NewGuid()] = new TunnelConfig { Id = Guid.NewGuid(), Name = "beta", Kind = TunnelKind.OpenVpn };
+
+        var configResets = 0;
+        var filterResets = 0;
+        vm.Configs.CollectionChanged += (_, args) =>
+        {
+            if (args.Action == NotifyCollectionChangedAction.Reset) configResets++;
+        };
+        vm.FilteredConfigs.CollectionChanged += (_, args) =>
+        {
+            if (args.Action == NotifyCollectionChangedAction.Reset) filterResets++;
+        };
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Equal(1, configResets);
+        Assert.Equal(1, filterResets);
+        Assert.Equal(2, vm.Configs.Count);
+        Assert.Equal(2, vm.FilteredConfigs.Count);
+    }
+
+    [Fact]
+    public async Task EnsureLoadedAsync_skips_repository_after_successful_load()
+    {
+        var (vm, repo, _, _, _) = CreateVm();
+        repo.Configs[Guid.NewGuid()] = new TunnelConfig { Id = Guid.NewGuid(), Name = "alpha", Kind = TunnelKind.WireGuard };
+
+        await vm.EnsureLoadedAsync();
+        await vm.EnsureLoadedAsync();
+
+        Assert.Equal(1, repo.GetAllCallCount);
+        Assert.Single(vm.Configs);
+    }
+
+    [Fact]
+    public async Task LoadCommand_still_forces_refresh_after_ensure_loaded()
+    {
+        var (vm, repo, _, _, _) = CreateVm();
+        repo.Configs[Guid.NewGuid()] = new TunnelConfig { Id = Guid.NewGuid(), Name = "alpha", Kind = TunnelKind.WireGuard };
+
+        await vm.EnsureLoadedAsync();
+        repo.Configs[Guid.NewGuid()] = new TunnelConfig { Id = Guid.NewGuid(), Name = "beta", Kind = TunnelKind.OpenVpn };
+
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.Equal(2, repo.GetAllCallCount);
+        Assert.Equal(2, vm.Configs.Count);
     }
 
     [Fact]
@@ -87,6 +142,27 @@ public class TunnelConfigsViewModelTests
         Assert.False(vm.HasMatches);
         Assert.True(vm.HasNoMatches);
         Assert.False(vm.IsEmpty);
+    }
+
+    [Fact]
+    public async Task SearchText_debounces_filter_rebuilds_to_latest_value()
+    {
+        var (vm, repo, _, _, _) = CreateVm();
+        vm.SearchDebounceDelay = TimeSpan.FromMilliseconds(40);
+        repo.Configs[Guid.NewGuid()] = new TunnelConfig { Id = Guid.NewGuid(), Name = "alpha", Kind = TunnelKind.WireGuard };
+        repo.Configs[Guid.NewGuid()] = new TunnelConfig { Id = Guid.NewGuid(), Name = "beta", Kind = TunnelKind.OpenVpn };
+        repo.Configs[Guid.NewGuid()] = new TunnelConfig { Id = Guid.NewGuid(), Name = "gamma", Kind = TunnelKind.Fortinet };
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        vm.SearchText = "a";
+        vm.SearchText = "fort";
+
+        Assert.Equal(3, vm.FilteredConfigs.Count);
+
+        await Task.Delay(90);
+
+        Assert.Single(vm.FilteredConfigs);
+        Assert.Equal("gamma", vm.FilteredConfigs[0].Name);
     }
 
     [Fact]
@@ -234,6 +310,31 @@ public class TunnelConfigsViewModelTests
         Assert.DoesNotContain(dialog.Messages, m => m.title == "Name already in use");
         var stored = JsonSerializer.Deserialize<WireGuardSettings>(creds.TunnelConfigs[id])!;
         Assert.Equal("host2:51820", stored.PeerEndpoint);
+    }
+
+    [Fact]
+    public async Task EditTunnel_RefreshesActiveFilter()
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        var id = Guid.NewGuid();
+        repo.Configs[id] = new TunnelConfig { Id = id, Name = "alpha", Kind = TunnelKind.WireGuard };
+        creds.TunnelConfigs[id] = JsonSerializer.SerializeToUtf8Bytes(new WireGuardSettings
+        {
+            InterfacePrivateKey = "k1",
+            InterfaceAddress = "10.0.0.2/32",
+            PeerPublicKey = "k2",
+            PeerEndpoint = "host:51820",
+        });
+        await vm.LoadCommand.ExecuteAsync(null);
+        vm.SearchText = "alpha";
+        Assert.Single(vm.FilteredConfigs);
+
+        dialog.TunnelPromptResult = NewWireGuardDraft("renamed");
+
+        await vm.EditTunnelCommand.ExecuteAsync(vm.Configs[0]);
+
+        Assert.Empty(vm.FilteredConfigs);
+        Assert.True(vm.HasNoMatches);
     }
 
     [Fact]
@@ -590,6 +691,24 @@ public class TunnelConfigsViewModelTests
         Assert.Equal("home", vm.FilteredConfigs[0].Name);
     }
 
+    [Theory]
+    [InlineData(TunnelKind.WireGuard, "wire")]
+    [InlineData(TunnelKind.OpenVpn, "openv")]
+    [InlineData(TunnelKind.Fortinet, "fort")]
+    [InlineData(TunnelKind.Watchguard, "watch")]
+    public async Task Filter_MatchesAllTunnelKindNames(TunnelKind kind, string query)
+    {
+        var (vm, repo, _, _, _) = CreateVm();
+        repo.Configs[Guid.NewGuid()] = new TunnelConfig { Id = Guid.NewGuid(), Name = "match", Kind = kind };
+        repo.Configs[Guid.NewGuid()] = new TunnelConfig { Id = Guid.NewGuid(), Name = "other", Kind = OtherKind(kind) };
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        vm.SearchText = query;
+
+        Assert.Single(vm.FilteredConfigs);
+        Assert.Equal("match", vm.FilteredConfigs[0].Name);
+    }
+
     private static TunnelDraft NewWireGuardDraft(string name) =>
         new(name, TunnelKind.WireGuard, new WireGuardSettings
         {
@@ -616,6 +735,9 @@ public class TunnelConfigsViewModelTests
             Password = "s3cret",
         });
 
+    private static TunnelKind OtherKind(TunnelKind kind) =>
+        kind == TunnelKind.WireGuard ? TunnelKind.OpenVpn : TunnelKind.WireGuard;
+
     private static (
         TunnelConfigsViewModel Vm,
         FakeTunnelConfigRepository Repo,
@@ -630,6 +752,7 @@ public class TunnelConfigsViewModelTests
         var vm = new TunnelConfigsViewModel(
             repo, conns, creds, dialog,
             NullLogger<TunnelConfigsViewModel>.Instance);
+        vm.SearchDebounceDelay = TimeSpan.Zero;
         return (vm, repo, conns, creds, dialog);
     }
 

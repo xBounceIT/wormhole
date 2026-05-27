@@ -102,11 +102,12 @@ public sealed partial class FilePaneControl : UserControl
     private void OnSelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (ViewModel is null) return;
-        ViewModel.SelectedEntries.Clear();
+        var selected = new List<FileEntryViewModel>(EntriesList.SelectedItems.Count);
         foreach (var item in EntriesList.SelectedItems)
         {
-            if (item is FileEntryViewModel fe) ViewModel.SelectedEntries.Add(fe);
+            if (item is FileEntryViewModel fe) selected.Add(fe);
         }
+        ViewModel.SelectedEntries.ReplaceAll(selected);
     }
 
     // === toolbar ==============================================================
@@ -423,24 +424,27 @@ public sealed partial class FilePaneControl : UserControl
     private async void OnDragItemsStarting(object sender, DragItemsStartingEventArgs e)
     {
         if (ViewModel is null) return;
-        var selected = e.Items.OfType<FileEntryViewModel>().ToList();
-        if (selected.Count == 0) return;
-
-        var items = selected
-            .Select(s => new TransferItem(s.FullPath, s.Name, s.IsDirectory))
-            .ToList();
+        var items = new List<TransferItem>(e.Items.Count);
+        var selectedLocalItems = ViewModel.IsLocal ? new List<FileEntryViewModel>(e.Items.Count) : null;
+        foreach (var rawItem in e.Items)
+        {
+            if (rawItem is not FileEntryViewModel selected) continue;
+            items.Add(new TransferItem(selected.FullPath, selected.Name, selected.IsDirectory));
+            selectedLocalItems?.Add(selected);
+        }
+        if (items.Count == 0) return;
 
         // In-app sentinel: the matching Drop on the other pane reads this back without
         // staging temp files. The other pane's Drop also handles the typed item list.
         e.Data.Properties[PaneSentinelKey] = ViewModel.IsLocal ? "Local" : "Remote";
         e.Data.Properties[PaneItemsKey] = items;
 
-        if (ViewModel.IsLocal)
+        if (selectedLocalItems is not null)
         {
             // Local pane: bytes already on disk, so attach StorageFile/StorageFolder
             // directly. Lets the OS treat this as a normal file drag for Explorer drop.
-            var storage = new List<Windows.Storage.IStorageItem>();
-            foreach (var s in selected)
+            var storage = new List<Windows.Storage.IStorageItem>(selectedLocalItems.Count);
+            foreach (var s in selectedLocalItems)
             {
                 try
                 {
@@ -507,9 +511,14 @@ public sealed partial class FilePaneControl : UserControl
             if (e.DataView.Contains(StandardDataFormats.StorageItems))
             {
                 var storage = await e.DataView.GetStorageItemsAsync();
-                var items = storage
-                    .Select(s => new TransferItem(s.Path, s.Name, s is Windows.Storage.StorageFolder))
-                    .ToList();
+                var items = new List<TransferItem>(storage.Count);
+                foreach (var item in storage)
+                {
+                    items.Add(new TransferItem(
+                        item.Path,
+                        item.Name,
+                        item is Windows.Storage.StorageFolder));
+                }
                 if (items.Count == 0) return;
                 // Explorer drop: source is always local on Windows. Target direction is
                 // determined by THIS pane (the drop receiver).
@@ -606,13 +615,17 @@ public sealed partial class FilePaneControl : UserControl
     private static void CopyDirectory(string source, string dest)
     {
         Directory.CreateDirectory(dest);
-        foreach (var file in Directory.EnumerateFiles(source))
+        foreach (var entry in new DirectoryInfo(source).EnumerateFileSystemInfos())
         {
-            File.Copy(file, Path.Combine(dest, Path.GetFileName(file)), overwrite: true);
-        }
-        foreach (var dir in Directory.EnumerateDirectories(source))
-        {
-            CopyDirectory(dir, Path.Combine(dest, Path.GetFileName(dir)));
+            var target = Path.Combine(dest, entry.Name);
+            if (entry is DirectoryInfo directory)
+            {
+                CopyDirectory(directory.FullName, target);
+            }
+            else if (entry is FileInfo file)
+            {
+                file.CopyTo(target, overwrite: true);
+            }
         }
     }
 }

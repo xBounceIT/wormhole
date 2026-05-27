@@ -1,4 +1,3 @@
-using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
@@ -18,9 +17,10 @@ public partial class ConnectionTreeViewModel : ObservableObject
     private readonly IDialogService _dialog;
     private readonly ILogger<ConnectionTreeViewModel> _logger;
     private IReadOnlyList<ConnectionNode> _lastSnapshot = Array.Empty<ConnectionNode>();
+    private Dictionary<Guid, ConnectionNode> _lastSnapshotById = new();
     private bool _isLoading;
 
-    public ObservableCollection<TreeNodeViewModel> Roots { get; } = new();
+    public BulkObservableCollection<TreeNodeViewModel> Roots { get; } = new();
 
     [ObservableProperty]
     private TreeNodeViewModel? selectedNode;
@@ -160,11 +160,13 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
         try
         {
-            var all = await _repository.GetAllAsync();
-            var byId = all.ToDictionary(n => n.Id);
-            if (!byId.TryGetValue(vm.Node.Id, out var node)) return;
+            if (!_lastSnapshotById.TryGetValue(vm.Node.Id, out var node))
+            {
+                await RefreshAsync();
+                if (!_lastSnapshotById.TryGetValue(vm.Node.Id, out node)) return;
+            }
 
-            var profile = _inheritanceResolver.Resolve(node, byId);
+            var profile = _inheritanceResolver.Resolve(node, _lastSnapshotById);
             // Factory dispatches by protocol: SSH gets the real terminal, RDP/SFTP get
             // placeholder tabs whose DataTemplate renders the "not implemented yet" notice.
             _tabFactory.Open(profile);
@@ -351,7 +353,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
         try
         {
             await _repository.UpdateManyAsync(updates);
-            _lastSnapshot = await _repository.GetAllAsync();
+            SetSnapshot(await _repository.GetAllAsync());
         }
         catch (Exception ex)
         {
@@ -401,11 +403,18 @@ public partial class ConnectionTreeViewModel : ObservableObject
       : clicked.Kind == NodeKind.Folder ? clicked.Node.Id
       : clicked.Node.ParentId;
 
-    private int NextSortOrder(Guid? parentId) =>
-        _lastSnapshot.Where(n => n.ParentId == parentId)
-                     .Select(n => n.SortOrder)
-                     .DefaultIfEmpty(-1)
-                     .Max() + 1;
+    private int NextSortOrder(Guid? parentId)
+    {
+        var max = -1;
+        foreach (var node in _lastSnapshot)
+        {
+            if (node.ParentId == parentId && node.SortOrder > max)
+            {
+                max = node.SortOrder;
+            }
+        }
+        return max + 1;
+    }
 
     private async Task SafeAddAsync(ConnectionNode node)
     {
@@ -424,7 +433,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
     private async Task LoadAsync()
     {
         var all = await _repository.GetAllAsync();
-        _lastSnapshot = all;
+        SetSnapshot(all);
 
         var byParent = new Dictionary<Guid, List<ConnectionNode>>();
         var topLevel = new List<ConnectionNode>();
@@ -445,7 +454,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
         Reconcile(Roots, topLevel, byParent);
 
-        if (SelectedNode is not null && all.All(n => n.Id != SelectedNode.Node.Id))
+        if (SelectedNode is not null && !_lastSnapshotById.ContainsKey(SelectedNode.Node.Id))
         {
             SelectedNode = null;
         }
@@ -552,10 +561,27 @@ public partial class ConnectionTreeViewModel : ObservableObject
     // reusing existing TreeNodeViewModel instances by Id so the TreeView's container
     // tree — and therefore selection, expansion, focus — survives the refresh.
     private static void Reconcile(
-        ObservableCollection<TreeNodeViewModel> current,
+        BulkObservableCollection<TreeNodeViewModel> current,
         IReadOnlyList<ConnectionNode> target,
         IReadOnlyDictionary<Guid, List<ConnectionNode>> byParent)
     {
+        if (current.Count == 0)
+        {
+            if (target.Count == 0) return;
+
+            var next = new List<TreeNodeViewModel>(target.Count);
+            foreach (var node in target)
+            {
+                var vm = new TreeNodeViewModel(node);
+                byParent.TryGetValue(node.Id, out var children);
+                Reconcile(vm.Children, children ?? (IReadOnlyList<ConnectionNode>)Array.Empty<ConnectionNode>(), byParent);
+                next.Add(vm);
+            }
+
+            current.ReplaceAll(next);
+            return;
+        }
+
         var targetIds = new HashSet<Guid>(target.Count);
         foreach (var n in target) targetIds.Add(n.Id);
 
@@ -567,21 +593,42 @@ public partial class ConnectionTreeViewModel : ObservableObject
             }
         }
 
+        var existingById = new Dictionary<Guid, TreeNodeViewModel>(current.Count);
+        var currentIndexById = new Dictionary<Guid, int>(current.Count);
+        for (var i = 0; i < current.Count; i++)
+        {
+            var vm = current[i];
+            existingById[vm.Node.Id] = vm;
+            currentIndexById[vm.Node.Id] = i;
+        }
+
         for (var i = 0; i < target.Count; i++)
         {
             var node = target[i];
-            var existingIdx = IndexOfById(current, node.Id);
             TreeNodeViewModel vm;
-            if (existingIdx < 0)
+            if (!existingById.TryGetValue(node.Id, out var existing))
             {
                 vm = new TreeNodeViewModel(node);
                 current.Insert(i, vm);
+                existingById[node.Id] = vm;
+                RefreshIndexMap(current, currentIndexById, start: i, endInclusive: current.Count - 1);
             }
             else
             {
-                vm = current[existingIdx];
+                vm = existing;
                 vm.Node = node;
-                if (existingIdx != i) current.Move(existingIdx, i);
+                if (i >= current.Count || !ReferenceEquals(current[i], vm))
+                {
+                    if (currentIndexById.TryGetValue(node.Id, out var existingIdx) && existingIdx != i)
+                    {
+                        current.Move(existingIdx, i);
+                        RefreshIndexMap(
+                            current,
+                            currentIndexById,
+                            start: Math.Min(existingIdx, i),
+                            endInclusive: Math.Max(existingIdx, i));
+                    }
+                }
             }
 
             byParent.TryGetValue(node.Id, out var children);
@@ -589,13 +636,27 @@ public partial class ConnectionTreeViewModel : ObservableObject
         }
     }
 
-    private static int IndexOfById(ObservableCollection<TreeNodeViewModel> list, Guid id)
+    private static void RefreshIndexMap(
+        BulkObservableCollection<TreeNodeViewModel> current,
+        Dictionary<Guid, int> currentIndexById,
+        int start,
+        int endInclusive)
     {
-        for (var i = 0; i < list.Count; i++)
+        for (var i = start; i <= endInclusive; i++)
         {
-            if (list[i].Node.Id == id) return i;
+            currentIndexById[current[i].Node.Id] = i;
         }
-        return -1;
+    }
+
+    private void SetSnapshot(IReadOnlyList<ConnectionNode> snapshot)
+    {
+        _lastSnapshot = snapshot;
+        var byId = new Dictionary<Guid, ConnectionNode>(snapshot.Count);
+        foreach (var node in snapshot)
+        {
+            byId[node.Id] = node;
+        }
+        _lastSnapshotById = byId;
     }
 }
 
@@ -609,7 +670,7 @@ public sealed partial class TreeNodeViewModel : ObservableObject
     [ObservableProperty]
     private ConnectionNode node = null!;
 
-    public ObservableCollection<TreeNodeViewModel> Children { get; } = new();
+    public BulkObservableCollection<TreeNodeViewModel> Children { get; } = new();
     public string Name => Node.Name;
     public NodeKind Kind => Node.Kind;
 

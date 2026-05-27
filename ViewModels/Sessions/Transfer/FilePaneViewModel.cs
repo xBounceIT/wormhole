@@ -1,6 +1,6 @@
-using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Wormhole.ViewModels;
 
 namespace Wormhole.ViewModels.Sessions.Transfer;
 
@@ -11,6 +11,8 @@ namespace Wormhole.ViewModels.Sessions.Transfer;
 /// </summary>
 public abstract partial class FilePaneViewModel : ObservableObject
 {
+    private static readonly IComparer<FileEntryViewModel> EntryComparer = Comparer<FileEntryViewModel>.Create(CompareEntries);
+
     // Interlocked-backed sentinel for the load-in-progress flag. Using a plain bool
     // here would race: two callers (e.g. concurrent RefreshAsync + LoadInitialAsync)
     // could both observe IsBusy=false before either has set IsBusy=true, then both
@@ -18,11 +20,11 @@ public abstract partial class FilePaneViewModel : ObservableObject
     // SelectedEntries.Clear() depending on interleaving.
     private int _loadInFlight;
 
-    public ObservableCollection<FileEntryViewModel> Entries { get; } = new();
+    public BulkObservableCollection<FileEntryViewModel> Entries { get; } = new();
 
     /// <summary>Selection is two-way bound from the ListView's SelectedItems. The
     /// view layer mirrors selection changes here; toolbar commands read it directly.</summary>
-    public ObservableCollection<FileEntryViewModel> SelectedEntries { get; } = new();
+    public BulkObservableCollection<FileEntryViewModel> SelectedEntries { get; } = new();
 
     [ObservableProperty]
     private string currentPath = string.Empty;
@@ -49,12 +51,9 @@ public abstract partial class FilePaneViewModel : ObservableObject
         try
         {
             var entries = await ListAsync(path, cancellationToken).ConfigureAwait(true);
+            var sorted = await SortEntriesAsync(entries, cancellationToken).ConfigureAwait(true);
             CurrentPath = path;
-            Entries.Clear();
-            foreach (var e in entries.OrderBy(e => e.SortKind).ThenBy(e => e.Name, StringComparer.OrdinalIgnoreCase))
-            {
-                Entries.Add(e);
-            }
+            Entries.ReplaceAll(sorted);
             SelectedEntries.Clear();
         }
         catch (OperationCanceledException) { /* swallow on cancel */ }
@@ -199,4 +198,50 @@ public abstract partial class FilePaneViewModel : ObservableObject
     protected abstract Task RenameCoreAsync(FileEntryViewModel entry, string newName, CancellationToken cancellationToken);
     protected abstract string ParentOf(string path);
     protected abstract string Join(string parent, string name);
+
+    private static Task<FileEntryViewModel[]> SortEntriesAsync(
+        IReadOnlyList<FileEntryViewModel> entries,
+        CancellationToken cancellationToken)
+    {
+        if (entries.Count < 256)
+        {
+            return Task.FromResult(SortEntries(entries, cancellationToken));
+        }
+
+        return Task.Run(() => SortEntries(entries, cancellationToken), cancellationToken);
+    }
+
+    private static FileEntryViewModel[] SortEntries(
+        IReadOnlyList<FileEntryViewModel> entries,
+        CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var sorted = new FileEntryViewModel[entries.Count];
+        for (var i = 0; i < entries.Count; i++)
+        {
+            sorted[i] = entries[i];
+        }
+
+        if (sorted.Length > 1)
+        {
+            Array.Sort(sorted, EntryComparer);
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        return sorted;
+    }
+
+    private static int CompareEntries(FileEntryViewModel? x, FileEntryViewModel? y)
+    {
+        if (ReferenceEquals(x, y)) return 0;
+        if (x is null) return -1;
+        if (y is null) return 1;
+
+        var kind = x.SortKind.CompareTo(y.SortKind);
+        if (kind != 0) return kind;
+
+        var name = StringComparer.OrdinalIgnoreCase.Compare(x.Name, y.Name);
+        return name != 0
+            ? name
+            : StringComparer.Ordinal.Compare(x.Name, y.Name);
+    }
 }

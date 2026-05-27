@@ -15,11 +15,6 @@ internal static class RdpDriveList
 {
     public const string AllSentinel = "all";
 
-    private static readonly char[] Separators = { ',', ';', ' ' };
-
-    private static string[] Tokenise(string raw) =>
-        raw.Split(Separators, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-
     /// <summary>
     /// Parse a raw user-entered or persisted string into a set of upper-case drive letters.
     /// Tokens are split on <c>, ; SPACE</c>; any token that isn't a single A–Z letter is
@@ -32,7 +27,8 @@ internal static class RdpDriveList
         if (string.Equals(raw, AllSentinel, StringComparison.OrdinalIgnoreCase)) return null;
 
         var seen = new HashSet<char>();
-        foreach (var token in Tokenise(raw))
+        var remaining = raw.AsSpan();
+        while (TryReadNextToken(ref remaining, out var token))
         {
             if (TryParseLetter(token, out var ch)) seen.Add(ch);
         }
@@ -46,16 +42,19 @@ internal static class RdpDriveList
     public static string? Validate(string raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return "Specify at least one drive letter (e.g. C,D).";
-        var pieces = Tokenise(raw);
-        if (pieces.Length == 0) return "Specify at least one drive letter (e.g. C,D).";
+        var remaining = raw.AsSpan();
+        if (!TryReadNextToken(ref remaining, out var p)) return "Specify at least one drive letter (e.g. C,D).";
+
         var seen = new HashSet<char>();
-        foreach (var p in pieces)
+        do
         {
             if (p.Length != 1) return $"'{p}' is not a single drive letter.";
             var ch = char.ToUpperInvariant(p[0]);
             if (ch < 'A' || ch > 'Z') return $"'{p}' is not a drive letter (A-Z).";
             if (!seen.Add(ch)) return $"Drive '{ch}' is listed more than once.";
         }
+        while (TryReadNextToken(ref remaining, out p));
+
         return null;
     }
 
@@ -68,7 +67,8 @@ internal static class RdpDriveList
 
         var seen = new HashSet<char>();
         var ordered = new List<char>(4);
-        foreach (var token in Tokenise(raw))
+        var remaining = raw.AsSpan();
+        while (TryReadNextToken(ref remaining, out var token))
         {
             if (!TryParseLetter(token, out var ch)) continue;
             if (seen.Add(ch)) ordered.Add(ch);
@@ -76,7 +76,24 @@ internal static class RdpDriveList
         return string.Join(',', ordered);
     }
 
-    private static bool TryParseLetter(string token, out char ch)
+    private static bool TryReadNextToken(ref ReadOnlySpan<char> remaining, out ReadOnlySpan<char> token)
+    {
+        while (!remaining.IsEmpty)
+        {
+            var separator = remaining.IndexOfAny(',', ';', ' ');
+            var rawToken = separator >= 0 ? remaining[..separator] : remaining;
+            remaining = separator >= 0 ? remaining[(separator + 1)..] : ReadOnlySpan<char>.Empty;
+
+            token = rawToken.Trim();
+            if (!token.IsEmpty)
+                return true;
+        }
+
+        token = ReadOnlySpan<char>.Empty;
+        return false;
+    }
+
+    private static bool TryParseLetter(ReadOnlySpan<char> token, out char ch)
     {
         if (token.Length != 1)
         {

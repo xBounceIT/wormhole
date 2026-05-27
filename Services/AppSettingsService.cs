@@ -30,7 +30,7 @@ public sealed class AppSettingsService : IAppSettingsService
         lock (_writeLock)
         {
             Directory.CreateDirectory(AppPaths.GetAppDataDirectory());
-            File.WriteAllText(AppPaths.GetSettingsFilePath(), JsonSerializer.Serialize(Current, JsonOptions));
+            File.WriteAllBytes(AppPaths.GetSettingsFilePath(), JsonSerializer.SerializeToUtf8Bytes(Current, JsonOptions));
         }
         SettingsChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -38,11 +38,18 @@ public sealed class AppSettingsService : IAppSettingsService
     private static AppSettings Load()
     {
         var path = AppPaths.GetSettingsFilePath();
-        if (!File.Exists(path)) return new AppSettings();
         try
         {
-            var json = File.ReadAllText(path);
+            var json = File.ReadAllBytes(path);
             return JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
+        }
+        catch (FileNotFoundException)
+        {
+            return new AppSettings();
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return new AppSettings();
         }
         catch
         {

@@ -1,4 +1,5 @@
 using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Formats.Tar;
 using System.IO;
@@ -73,7 +74,7 @@ public static class WatchguardWgsslImporter
         // in any order — the tar format is single-pass, but the file layout the Firebox emits
         // isn't guaranteed alphabetical and we don't want a "missing entry" error to depend on
         // which file the archive lists last.
-        var entries = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var entries = new Dictionary<string, string>(capacity: 4, StringComparer.OrdinalIgnoreCase);
         var seenEntryCount = 0;
         await using var _tarOwner = tarStream;
         await using var reader = new TarReader(tarStream, leaveOpen: true);
@@ -111,9 +112,10 @@ public static class WatchguardWgsslImporter
                     "Refusing to load.");
             }
 
-            using var ms = new MemoryStream();
+            var initialCapacity = entry.Length > 0 ? (int)entry.Length : 0;
+            using var ms = initialCapacity == 0 ? new MemoryStream() : new MemoryStream(initialCapacity);
             await CopyWithCapAsync(entry.DataStream, ms, MaxEntrySizeBytes, cancellationToken).ConfigureAwait(false);
-            entries[name] = Encoding.UTF8.GetString(ms.ToArray());
+            entries[name] = DecodeUtf8(ms);
         }
 
         var missing = new List<string>();
@@ -151,54 +153,146 @@ public static class WatchguardWgsslImporter
     /// </summary>
     private static async Task CopyWithCapAsync(Stream source, Stream destination, int capBytes, CancellationToken ct)
     {
-        var buffer = new byte[8192];
-        long total = 0;
-        int read;
-        while ((read = await source.ReadAsync(buffer.AsMemory(0, buffer.Length), ct).ConfigureAwait(false)) > 0)
+        var rented = ArrayPool<byte>.Shared.Rent(8192);
+        try
         {
-            total += read;
-            if (total > capBytes)
+            var buffer = rented.AsMemory(0, 8192);
+            long total = 0;
+            int read;
+            while ((read = await source.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
             {
-                throw new InvalidDataException(
-                    $"A .wgssl entry exceeded the {capBytes}-byte safety cap during read. Refusing to load.");
+                total += read;
+                if (total > capBytes)
+                {
+                    throw new InvalidDataException(
+                        $"A .wgssl entry exceeded the {capBytes}-byte safety cap during read. Refusing to load.");
+                }
+                await destination.WriteAsync(buffer[..read], ct).ConfigureAwait(false);
             }
-            await destination.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
         }
     }
 
-    private static readonly char[] s_directiveSeparators = { ' ', '\t' };
+    private static string DecodeUtf8(MemoryStream stream)
+    {
+        return Encoding.UTF8.GetString(stream.GetBuffer(), 0, checked((int)stream.Length));
+    }
 
     private static (string Server, int Port) ParseRemote(string clientOvpn)
     {
-        foreach (var rawLine in clientOvpn.Split('\n'))
+        var remaining = clientOvpn.AsSpan();
+        while (true)
         {
+            ReadOnlySpan<char> rawLine;
+            var newline = remaining.IndexOf('\n');
+            if (newline < 0)
+            {
+                rawLine = remaining;
+                remaining = ReadOnlySpan<char>.Empty;
+            }
+            else
+            {
+                rawLine = remaining[..newline];
+                remaining = remaining[(newline + 1)..];
+            }
+
             var line = rawLine.Trim();
-            if (line.Length == 0 || line.StartsWith('#') || line.StartsWith(';')) continue;
+            if (line.Length == 0 || line[0] == '#' || line[0] == ';')
+            {
+                if (remaining.IsEmpty) break;
+                continue;
+            }
+
             // OpenVPN config tokens can be separated by space OR tab; old .wgssl archives have
-            // been seen using tabs. Use a unified whitespace split so both work.
-            if (!StartsWithDirective(line, "remote")) continue;
+            // been seen using tabs. Parse token spans directly so large configs don't allocate
+            // one string per line while we search for the remote directive.
+            if (!TryConsumeDirective(line, "remote", out var rest))
+            {
+                if (remaining.IsEmpty) break;
+                continue;
+            }
 
             // remote <host> [<port>] [<proto>] — port and proto are optional; default port for
             // WatchGuard SSL VPN is 443 even if omitted from the directive.
-            var parts = line.Split(s_directiveSeparators, StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length < 2) continue;
-            var server = parts[1].Trim();
+            if (!TryReadToken(rest, out var server, out rest))
+            {
+                if (remaining.IsEmpty) break;
+                continue;
+            }
+
             var port = 443;
-            if (parts.Length >= 3 && int.TryParse(parts[2], out var parsedPort) && parsedPort is >= 1 and <= 65535)
+            if (TryReadToken(rest, out var portToken, out _) &&
+                int.TryParse(portToken, out var parsedPort) &&
+                parsedPort is >= 1 and <= 65535)
+            {
                 port = parsedPort;
-            return (server, port);
+            }
+            return (server.ToString(), port);
         }
 
         throw new InvalidDataException(
             "The embedded client.ovpn has no 'remote <host> <port>' directive — can't infer the gateway address.");
     }
 
-    private static bool StartsWithDirective(string line, string directive)
+    private static bool TryConsumeDirective(
+        ReadOnlySpan<char> line,
+        string directive,
+        out ReadOnlySpan<char> rest)
     {
-        if (line.Length <= directive.Length) return false;
-        if (!line.StartsWith(directive, StringComparison.OrdinalIgnoreCase)) return false;
+        if (line.Length <= directive.Length ||
+            !line[..directive.Length].Equals(directive, StringComparison.OrdinalIgnoreCase))
+        {
+            rest = default;
+            return false;
+        }
+
         var next = line[directive.Length];
-        return next == ' ' || next == '\t';
+        if (next != ' ' && next != '\t')
+        {
+            rest = default;
+            return false;
+        }
+
+        rest = TrimTokenWhitespace(line[(directive.Length + 1)..]);
+        return true;
+    }
+
+    private static bool TryReadToken(
+        ReadOnlySpan<char> value,
+        out ReadOnlySpan<char> token,
+        out ReadOnlySpan<char> rest)
+    {
+        value = TrimTokenWhitespace(value);
+        if (value.IsEmpty)
+        {
+            token = default;
+            rest = default;
+            return false;
+        }
+
+        var end = 0;
+        while (end < value.Length && value[end] != ' ' && value[end] != '\t')
+        {
+            end++;
+        }
+
+        token = value[..end];
+        rest = value[end..];
+        return true;
+    }
+
+    private static ReadOnlySpan<char> TrimTokenWhitespace(ReadOnlySpan<char> value)
+    {
+        var start = 0;
+        while (start < value.Length && (value[start] == ' ' || value[start] == '\t'))
+        {
+            start++;
+        }
+
+        return value[start..];
     }
 
     /// <summary>

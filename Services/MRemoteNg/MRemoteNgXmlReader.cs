@@ -10,6 +10,12 @@ internal static class MRemoteNgXmlReader
     private static readonly XNamespace Mrng = "http://mremoteng.org";
 
     public static MRemoteNgRoot Parse(Stream xml, out IReadOnlyList<MRemoteNgRawNode> roots)
+        => Parse(xml, out roots, out _);
+
+    public static MRemoteNgRoot Parse(
+        Stream xml,
+        out IReadOnlyList<MRemoteNgRawNode> roots,
+        out bool hasPasswordPayloads)
     {
         ArgumentNullException.ThrowIfNull(xml);
 
@@ -40,23 +46,43 @@ internal static class MRemoteNgXmlReader
         // with no namespace declaration of their own — they live in the empty namespace. Look
         // for elements by LocalName so we don't miss them.
         var collected = new List<MRemoteNgRawNode>();
-        foreach (var nodeElement in rootElement.Elements().Where(IsNodeElement))
+        hasPasswordPayloads = false;
+        foreach (var nodeElement in rootElement.Elements())
         {
-            collected.Add(ReadNode(nodeElement));
+            if (!IsNodeElement(nodeElement))
+            {
+                continue;
+            }
+
+            collected.Add(ReadNode(nodeElement, out var nodeHasPasswordPayload));
+            hasPasswordPayloads |= nodeHasPasswordPayload;
         }
         roots = collected;
         return root;
     }
 
-    private static bool IsNodeElement(XElement element) => element.Name.LocalName == "Node";
+    private static bool IsNodeElement(XElement element) =>
+        string.Equals(element.Name.LocalName, "Node", StringComparison.Ordinal);
 
-    private static MRemoteNgRawNode ReadNode(XElement element)
+    private static MRemoteNgRawNode ReadNode(XElement element, out bool hasPasswordPayload)
     {
         var children = new List<MRemoteNgRawNode>();
-        foreach (var child in element.Elements().Where(IsNodeElement))
+        var childHasPasswordPayloads = false;
+        foreach (var child in element.Elements())
         {
-            children.Add(ReadNode(child));
+            if (!IsNodeElement(child))
+            {
+                continue;
+            }
+
+            children.Add(ReadNode(child, out var childHasPasswordPayload));
+            childHasPasswordPayloads |= childHasPasswordPayload;
         }
+
+        var passwordCipher = Attr(element, "Password");
+        var inheritPassword = AttrBool(element, "InheritPassword");
+        hasPasswordPayload = childHasPasswordPayloads ||
+                             (!inheritPassword && !string.IsNullOrWhiteSpace(passwordCipher));
 
         return new MRemoteNgRawNode(
             Type: Attr(element, "Type"),
@@ -67,13 +93,13 @@ internal static class MRemoteNgXmlReader
             Port: Attr(element, "Port"),
             Username: Attr(element, "Username"),
             Domain: Attr(element, "Domain"),
-            PasswordCipher: Attr(element, "Password"),
+            PasswordCipher: passwordCipher,
             Resolution: Attr(element, "Resolution"),
             // Inherit* attributes only present on older exports; modern mRemoteNG
             // collapses inheritance into per-leaf duplication. We honor either form.
             InheritUsername: AttrBool(element, "InheritUsername"),
             InheritDomain: AttrBool(element, "InheritDomain"),
-            InheritPassword: AttrBool(element, "InheritPassword"),
+            InheritPassword: inheritPassword,
             InheritHostname: AttrBool(element, "InheritHostname"),
             InheritPort: AttrBool(element, "InheritPort"),
             InheritProtocol: AttrBool(element, "InheritProtocol"),

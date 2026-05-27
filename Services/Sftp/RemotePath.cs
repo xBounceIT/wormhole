@@ -25,10 +25,10 @@ public static class RemotePath
     public static string Parent(string path)
     {
         if (string.IsNullOrEmpty(path) || path == "/") return "/";
-        var trimmed = path.TrimEnd('/');
+        var trimmed = path.AsSpan().TrimEnd('/');
         var idx = trimmed.LastIndexOf('/');
         if (idx <= 0) return "/";
-        return trimmed.Substring(0, idx);
+        return trimmed[..idx].ToString();
     }
 
     /// <summary>Returns the final segment (filename) of <paramref name="path"/>, or an
@@ -36,9 +36,12 @@ public static class RemotePath
     public static string Leaf(string path)
     {
         if (string.IsNullOrEmpty(path) || path == "/") return string.Empty;
-        var trimmed = path.TrimEnd('/');
+        var trimmed = path.AsSpan().TrimEnd('/');
         var idx = trimmed.LastIndexOf('/');
-        return idx < 0 ? trimmed : trimmed.Substring(idx + 1);
+        if (idx < 0)
+            return trimmed.Length == path.Length ? path : trimmed.ToString();
+
+        return trimmed[(idx + 1)..].ToString();
     }
 
     /// <summary>True if the path is well-formed absolute POSIX (starts with '/') and

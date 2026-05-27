@@ -32,7 +32,7 @@ public sealed class FortinetProcessHost : IAsyncDisposable
     {
         _process = process;
         _logger = logger;
-        _stderrPump = Task.Run(PumpStderrAsync);
+        _stderrPump = PumpStderrAsync();
     }
 
     public IPEndPoint SocksEndpoint => new(IPAddress.Loopback, _socksPort);

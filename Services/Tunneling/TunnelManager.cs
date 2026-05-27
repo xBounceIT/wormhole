@@ -62,22 +62,45 @@ public sealed class TunnelManager
         }
 
         var configId = profile.TunnelConfigId.Value;
-        var config = await _configs.GetByIdAsync(configId, cancellationToken).ConfigureAwait(false)
-            ?? throw new InvalidOperationException(
+        var configTask = _configs.GetByIdAsync(configId, cancellationToken);
+        var secretTask = _credentials.ReadTunnelConfigAsync(configId);
+
+        TunnelConfig? config;
+        try
+        {
+            config = await configTask.ConfigureAwait(false);
+        }
+        catch
+        {
+            await ObserveSilentlyAsync(secretTask).ConfigureAwait(false);
+            throw;
+        }
+        if (config is null)
+        {
+            await ObserveSilentlyAsync(secretTask).ConfigureAwait(false);
+            throw new InvalidOperationException(
                 $"Tunnel config {configId} for connection '{profile.Name}' was not found.");
+        }
 
         if (!_providers.TryGetValue(config.Kind, out var provider))
         {
+            await ObserveSilentlyAsync(secretTask).ConfigureAwait(false);
             throw new InvalidOperationException(
                 $"No tunnel provider is registered for kind '{config.Kind}'.");
         }
 
-        var secret = await _credentials.ReadTunnelConfigAsync(configId).ConfigureAwait(false)
+        var secret = await secretTask.ConfigureAwait(false)
             ?? throw new InvalidOperationException(
                 $"Tunnel secret blob for config {configId} is missing on disk.");
 
         _logger.LogInformation("Establishing {Kind} tunnel '{Name}'.", config.Kind, config.Name);
 
         return await provider.EstablishAsync(config, secret, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task ObserveSilentlyAsync(Task task)
+    {
+        try { await task.ConfigureAwait(false); }
+        catch { /* preserve the primary failure from the config/provider path */ }
     }
 }

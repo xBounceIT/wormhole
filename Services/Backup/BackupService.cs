@@ -23,6 +23,8 @@ public sealed class BackupService : IBackupService
     private const int SaltLength = 16;
     private const int NonceLength = 12;   // GCM standard
     private const int KeyLength = 32;     // AES-256
+    private const int SecretExportMaxConcurrency = 4;
+    private const int BackupFileBufferSize = 128 * 1024;
     // Cap files we open with full deserialization. A real backup of 10k connections is well
     // under 16 MiB even with embedded base64 SSH keys; 64 MiB is a paranoid headroom that
     // still prevents OOM from a hostile gigabyte-scale .json the user might pick by mistake.
@@ -63,85 +65,30 @@ public sealed class BackupService : IBackupService
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(targetPath);
 
-        Report(progress, 5, "Reading connections...");
-        var nodes = await _connectionRepo.GetAllAsync(cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
+        Report(progress, 5, "Reading metadata...");
+        var nodesTask = _connectionRepo.GetAllAsync(cancellationToken);
+        var credentialsTask = _credentialRepo.GetAllAsync(cancellationToken);
+        var tunnelsTask = _tunnelRepo.GetAllAsync(cancellationToken);
+        await Task.WhenAll(nodesTask, credentialsTask, tunnelsTask).ConfigureAwait(false);
 
-        Report(progress, 15, "Reading credentials...");
-        var credentials = await _credentialRepo.GetAllAsync(cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
-
-        Report(progress, 25, "Reading tunnels...");
-        var tunnels = await _tunnelRepo.GetAllAsync(cancellationToken);
+        var nodes = await nodesTask.ConfigureAwait(false);
+        var credentials = await credentialsTask.ConfigureAwait(false);
+        var tunnels = await tunnelsTask.ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
 
         var payload = new BackupPayload
         {
-            Nodes = nodes.ToList(),
-            Credentials = credentials.ToList(),
-            Tunnels = tunnels.ToList(),
+            Nodes = AsPayloadList(nodes),
+            Credentials = AsPayloadList(credentials),
+            Tunnels = AsPayloadList(tunnels),
         };
 
         // Pull secrets per row. Missing secrets are not an error — a credential row can exist
         // without a stored password yet (e.g. created but never used), and skipping it keeps
         // the export resilient to that state.
         Report(progress, 40, "Reading secrets...");
-        foreach (var cred in credentials)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (cred.Kind == CredentialKind.Password)
-            {
-                var pwd = await _credentialService.ReadPasswordAsync(cred.Id);
-                if (pwd is not null)
-                {
-                    payload.Passwords.Add(new BackupPasswordEntry { CredentialId = cred.Id, Password = pwd });
-                }
-            }
-            else if (cred.Kind == CredentialKind.SshKey)
-            {
-                var keyBytes = await _credentialService.ReadPrivateKeyAsync(cred.Id);
-                if (keyBytes is not null)
-                {
-                    try
-                    {
-                        payload.PrivateKeys.Add(new BackupPrivateKeyEntry
-                        {
-                            CredentialId = cred.Id,
-                            OriginalFileName = cred.PrivateKeyFileName,
-                            DataB64 = Convert.ToBase64String(keyBytes),
-                        });
-                    }
-                    finally
-                    {
-                        // Zero the decrypted key bytes once they're Base64'd into the payload.
-                        // The Base64 string copy lives on the managed heap until GC (immutable),
-                        // but at least the raw key buffer doesn't.
-                        CryptographicOperations.ZeroMemory(keyBytes);
-                    }
-                }
-            }
-        }
-
-        foreach (var tunnel in tunnels)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var configBytes = await _credentialService.ReadTunnelConfigAsync(tunnel.Id);
-            if (configBytes is not null)
-            {
-                try
-                {
-                    payload.TunnelPayloads.Add(new BackupTunnelPayloadEntry
-                    {
-                        TunnelConfigId = tunnel.Id,
-                        DataB64 = Convert.ToBase64String(configBytes),
-                    });
-                }
-                finally
-                {
-                    CryptographicOperations.ZeroMemory(configBytes);
-                }
-            }
-        }
+        await ExportCredentialSecretsAsync(credentials, payload, cancellationToken).ConfigureAwait(false);
+        await ExportTunnelSecretsAsync(tunnels, payload, cancellationToken).ConfigureAwait(false);
 
         Report(progress, 70, "Serializing...");
         var doc = new BackupDocument
@@ -177,7 +124,7 @@ public sealed class BackupService : IBackupService
         var tempPath = targetPath + ".tmp";
         try
         {
-            await using (var stream = File.Create(tempPath))
+            await using (var stream = CreateBackupWriteStream(tempPath))
             {
                 await JsonSerializer.SerializeAsync(stream, doc, JsonOptions, cancellationToken);
             }
@@ -208,13 +155,122 @@ public sealed class BackupService : IBackupService
         };
     }
 
+    private async Task ExportCredentialSecretsAsync(
+        IReadOnlyList<CredentialProfile> credentials,
+        BackupPayload payload,
+        CancellationToken cancellationToken)
+    {
+        var passwordEntries = new BackupPasswordEntry?[credentials.Count];
+        var keyEntries = new BackupPrivateKeyEntry?[credentials.Count];
+        var options = new ParallelOptions
+        {
+            CancellationToken = cancellationToken,
+            MaxDegreeOfParallelism = SecretExportMaxConcurrency,
+        };
+
+        await Parallel.ForAsync(0, credentials.Count, options, async (i, ct) =>
+        {
+            var cred = credentials[i];
+            ct.ThrowIfCancellationRequested();
+            if (cred.Kind == CredentialKind.Password)
+            {
+                var pwd = await _credentialService.ReadPasswordAsync(cred.Id).ConfigureAwait(false);
+                if (pwd is not null)
+                {
+                    passwordEntries[i] = new BackupPasswordEntry { CredentialId = cred.Id, Password = pwd };
+                }
+                return;
+            }
+
+            if (cred.Kind != CredentialKind.SshKey) return;
+
+            var keyBytes = await _credentialService.ReadPrivateKeyAsync(cred.Id).ConfigureAwait(false);
+            if (keyBytes is null) return;
+            try
+            {
+                keyEntries[i] = new BackupPrivateKeyEntry
+                {
+                    CredentialId = cred.Id,
+                    OriginalFileName = cred.PrivateKeyFileName,
+                    DataB64 = Convert.ToBase64String(keyBytes),
+                };
+            }
+            finally
+            {
+                // Zero the decrypted key bytes once they're Base64'd into the payload.
+                // The Base64 string copy lives on the managed heap until GC (immutable),
+                // but at least the raw key buffer doesn't.
+                CryptographicOperations.ZeroMemory(keyBytes);
+            }
+        }).ConfigureAwait(false);
+
+        foreach (var entry in passwordEntries)
+        {
+            if (entry is not null) payload.Passwords.Add(entry);
+        }
+        foreach (var entry in keyEntries)
+        {
+            if (entry is not null) payload.PrivateKeys.Add(entry);
+        }
+    }
+
+    private static List<T> AsPayloadList<T>(IReadOnlyList<T> items)
+    {
+        if (items is List<T> list) return list;
+
+        var copy = new List<T>(items.Count);
+        for (var i = 0; i < items.Count; i++)
+        {
+            copy.Add(items[i]);
+        }
+        return copy;
+    }
+
+    private async Task ExportTunnelSecretsAsync(
+        IReadOnlyList<TunnelConfig> tunnels,
+        BackupPayload payload,
+        CancellationToken cancellationToken)
+    {
+        var entries = new BackupTunnelPayloadEntry?[tunnels.Count];
+        var options = new ParallelOptions
+        {
+            CancellationToken = cancellationToken,
+            MaxDegreeOfParallelism = SecretExportMaxConcurrency,
+        };
+
+        await Parallel.ForAsync(0, tunnels.Count, options, async (i, ct) =>
+        {
+            var tunnel = tunnels[i];
+            ct.ThrowIfCancellationRequested();
+            var configBytes = await _credentialService.ReadTunnelConfigAsync(tunnel.Id).ConfigureAwait(false);
+            if (configBytes is null) return;
+            try
+            {
+                entries[i] = new BackupTunnelPayloadEntry
+                {
+                    TunnelConfigId = tunnel.Id,
+                    DataB64 = Convert.ToBase64String(configBytes),
+                };
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(configBytes);
+            }
+        }).ConfigureAwait(false);
+
+        foreach (var entry in entries)
+        {
+            if (entry is not null) payload.TunnelPayloads.Add(entry);
+        }
+    }
+
     public async Task<BackupInspectResult> InspectAsync(
         string sourcePath,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
         EnsureFileSizeAcceptable(sourcePath);
-        await using var stream = File.OpenRead(sourcePath);
+        await using var stream = OpenBackupReadStream(sourcePath);
         var doc = await JsonSerializer.DeserializeAsync<BackupDocument>(stream, JsonOptions, cancellationToken)
                   ?? throw new InvalidDataException("Backup file is empty or malformed.");
         ValidateEncryption(doc.Encryption);
@@ -237,7 +293,7 @@ public sealed class BackupService : IBackupService
 
         Report(progress, 5, "Reading file...");
         BackupDocument doc;
-        await using (var stream = File.OpenRead(sourcePath))
+        await using (var stream = OpenBackupReadStream(sourcePath))
         {
             doc = await JsonSerializer.DeserializeAsync<BackupDocument>(stream, JsonOptions, cancellationToken)
                   ?? throw new InvalidDataException("Backup file is empty or malformed.");
@@ -305,20 +361,30 @@ public sealed class BackupService : IBackupService
         // Insert order: credentials first (no FKs), then tunnels (no FKs), then nodes
         // (topological order on ParentId, since the FK is enforced with PRAGMA foreign_keys=ON).
 
-        Report(progress, 25, "Importing credentials...");
-        var existingCredentials = await _credentialRepo.GetAllAsync(cancellationToken);
+        Report(progress, 25, "Reading existing records...");
+        var existingCredentialsTask = _credentialRepo.GetAllAsync(cancellationToken);
+        var existingTunnelsTask = _tunnelRepo.GetAllAsync(cancellationToken);
+        var existingNodesTask = _connectionRepo.GetAllAsync(cancellationToken);
+        await Task.WhenAll(existingCredentialsTask, existingTunnelsTask, existingNodesTask).ConfigureAwait(false);
+
+        Report(progress, 30, "Importing credentials...");
+        var existingCredentials = await existingCredentialsTask.ConfigureAwait(false);
         // Track BOTH ids and names: CredentialProfiles.Name has a UNIQUE index, so a backup
         // row whose Id is new but whose Name collides with a locally-renamed credential would
         // fail the FK on AddAsync. Skip-with-warning matches the "merge by ID; never overwrite"
         // policy. StringComparer.Ordinal matches SQLite's default BINARY collation, so we
         // only skip what SQLite would actually reject — Alice and ALICE coexist in the DB and
         // here too.
-        var existingCredentialIds = existingCredentials.Select(c => c.Id).ToHashSet();
+        var existingCredentialIds = new HashSet<Guid>(existingCredentials.Count);
         // Coerce null defensively here too — the DB schema currently enforces NOT NULL on
         // Name, but if that constraint ever relaxes (or some non-Dapper write bypasses it),
         // ToHashSet under Ordinal would otherwise throw ArgumentNullException at construction.
-        var existingCredentialNames = existingCredentials.Select(c => c.Name ?? string.Empty)
-            .ToHashSet(StringComparer.Ordinal);
+        var existingCredentialNames = new HashSet<string>(existingCredentials.Count, StringComparer.Ordinal);
+        foreach (var existingCredential in existingCredentials)
+        {
+            existingCredentialIds.Add(existingCredential.Id);
+            existingCredentialNames.Add(existingCredential.Name ?? string.Empty);
+        }
         var insertedCredentialIds = new HashSet<Guid>();
         foreach (var cred in payload.Credentials)
         {
@@ -348,11 +414,15 @@ public sealed class BackupService : IBackupService
             result.CredentialsImported++;
         }
 
-        Report(progress, 40, "Importing tunnels...");
-        var existingTunnels = await _tunnelRepo.GetAllAsync(cancellationToken);
-        var existingTunnelIds = existingTunnels.Select(t => t.Id).ToHashSet();
-        var existingTunnelNames = existingTunnels.Select(t => t.Name ?? string.Empty)
-            .ToHashSet(StringComparer.Ordinal);
+        Report(progress, 45, "Importing tunnels...");
+        var existingTunnels = await existingTunnelsTask.ConfigureAwait(false);
+        var existingTunnelIds = new HashSet<Guid>(existingTunnels.Count);
+        var existingTunnelNames = new HashSet<string>(existingTunnels.Count, StringComparer.Ordinal);
+        foreach (var existingTunnel in existingTunnels)
+        {
+            existingTunnelIds.Add(existingTunnel.Id);
+            existingTunnelNames.Add(existingTunnel.Name ?? string.Empty);
+        }
         var insertedTunnelIds = new HashSet<Guid>();
         foreach (var tunnel in payload.Tunnels)
         {
@@ -379,9 +449,13 @@ public sealed class BackupService : IBackupService
             result.TunnelsImported++;
         }
 
-        Report(progress, 55, "Importing connections...");
-        var existingNodes = await _connectionRepo.GetAllAsync(cancellationToken);
-        var existingNodeIds = existingNodes.Select(n => n.Id).ToHashSet();
+        Report(progress, 60, "Importing connections...");
+        var existingNodes = await existingNodesTask.ConfigureAwait(false);
+        var existingNodeIds = new HashSet<Guid>(existingNodes.Count);
+        foreach (var existingNode in existingNodes)
+        {
+            existingNodeIds.Add(existingNode.Id);
+        }
         // Topologically sort by ParentId: a node can be inserted once its parent is null or
         // already present. The backup file's order is whatever GetAllAsync returned at export
         // time (sorted by SortOrder, Name), which is NOT guaranteed to be parent-before-child.
@@ -394,7 +468,11 @@ public sealed class BackupService : IBackupService
         // connect time. The schema doesn't enforce these as FKs, so SQLite won't catch it.
         var resolvableCredentialIds = new HashSet<Guid>(existingCredentialIds);
         var resolvableTunnelIds = new HashSet<Guid>(existingTunnelIds);
-        var nodesById = existingNodes.ToDictionary(n => n.Id);
+        var nodesById = new Dictionary<Guid, ConnectionNode>(existingNodes.Count + ordered.Count);
+        foreach (var existingNode in existingNodes)
+        {
+            nodesById[existingNode.Id] = existingNode;
+        }
         foreach (var node in ordered)
         {
             nodesById.TryAdd(node.Id, node);
@@ -428,7 +506,7 @@ public sealed class BackupService : IBackupService
         //     since the backup was taken must not have it silently rolled back.
         //   * Orphan secret (ID not in DB at all) → skip silently.
 
-        Report(progress, 75, "Restoring passwords...");
+        Report(progress, 78, "Restoring passwords...");
         foreach (var entry in payload.Passwords)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -443,7 +521,7 @@ public sealed class BackupService : IBackupService
             result.PasswordsImported++;
         }
 
-        Report(progress, 85, "Restoring SSH keys...");
+        Report(progress, 87, "Restoring SSH keys...");
         foreach (var entry in payload.PrivateKeys)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -475,7 +553,7 @@ public sealed class BackupService : IBackupService
             }
         }
 
-        Report(progress, 95, "Restoring tunnel payloads...");
+        Report(progress, 96, "Restoring tunnel payloads...");
         foreach (var entry in payload.TunnelPayloads)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -548,8 +626,8 @@ public sealed class BackupService : IBackupService
             }
         }
         var ordered = new List<ConnectionNode>(byId.Count);
-        var visited = new HashSet<Guid>();
-        var inFlight = new HashSet<Guid>();
+        var visited = new HashSet<Guid>(byId.Count);
+        var inFlight = new HashSet<Guid>(byId.Count);
 
         // Depth cap: each Visit frame consumes a portion of the calling thread's stack
         // (default ~1 MB on the WinUI STA). A linear chain of ~10k nodes fits comfortably in
@@ -764,54 +842,42 @@ public sealed class BackupService : IBackupService
                 $"Node '{node.Name}' references missing tunnel {tunId}; tunnel cleared.");
             node.TunnelConfigId = null;
         }
-        if (node.Kind == NodeKind.Connection
-            && IsEffectivelyTunnelEnabled(node, nodesById)
-            && !HasEffectiveResolvableTunnelConfig(node, nodesById, resolvableTunnelIds))
+        if (node.Kind == NodeKind.Connection)
         {
-            result.Warnings.Add(
-                $"Node '{node.Name}' had tunneling enabled but no resolvable tunnel config; tunneling disabled.");
-            node.TunnelEnabled = false;
+            var tunnelState = ResolveTunnelImportState(node, nodesById, resolvableTunnelIds);
+            if (tunnelState.Enabled && !tunnelState.HasResolvableConfig)
+            {
+                result.Warnings.Add(
+                    $"Node '{node.Name}' had tunneling enabled but no resolvable tunnel config; tunneling disabled.");
+                node.TunnelEnabled = false;
+            }
         }
     }
 
-    private static bool IsEffectivelyTunnelEnabled(
-        ConnectionNode node,
-        IReadOnlyDictionary<Guid, ConnectionNode> nodesById)
-    {
-        foreach (var current in WalkNodeAndAncestors(node, nodesById))
-        {
-            if (current.TunnelEnabled is { } enabled) return enabled;
-        }
-        return false;
-    }
-
-    private static bool HasEffectiveResolvableTunnelConfig(
+    private static (bool Enabled, bool HasResolvableConfig) ResolveTunnelImportState(
         ConnectionNode node,
         IReadOnlyDictionary<Guid, ConnectionNode> nodesById,
         HashSet<Guid> resolvableTunnelIds)
     {
-        foreach (var current in WalkNodeAndAncestors(node, nodesById))
-        {
-            if (current.TunnelConfigId is Guid tunId && resolvableTunnelIds.Contains(tunId))
-            {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    private static IEnumerable<ConnectionNode> WalkNodeAndAncestors(
-        ConnectionNode node,
-        IReadOnlyDictionary<Guid, ConnectionNode> nodesById)
-    {
         var current = node;
         var seen = new HashSet<Guid>();
+        bool? effectiveTunnelEnabled = null;
+        var hasResolvableTunnelConfig = false;
+
         while (seen.Add(current.Id))
         {
-            yield return current;
-            if (current.ParentId is not Guid parentId) yield break;
-            if (!nodesById.TryGetValue(parentId, out current)) yield break;
+            effectiveTunnelEnabled ??= current.TunnelEnabled;
+            if (current.TunnelConfigId is Guid tunId && resolvableTunnelIds.Contains(tunId))
+            {
+                hasResolvableTunnelConfig = true;
+                break;
+            }
+
+            if (current.ParentId is not Guid parentId) break;
+            if (!nodesById.TryGetValue(parentId, out current)) break;
         }
+
+        return (effectiveTunnelEnabled.GetValueOrDefault(), hasResolvableTunnelConfig);
     }
 
     /// <summary>
@@ -895,6 +961,26 @@ public sealed class BackupService : IBackupService
         catch (IOException) { /* best-effort cleanup */ }
         catch (UnauthorizedAccessException) { }
     }
+
+    private static FileStream OpenBackupReadStream(string path) =>
+        new(path, new FileStreamOptions
+        {
+            Mode = FileMode.Open,
+            Access = FileAccess.Read,
+            Share = FileShare.Read,
+            BufferSize = BackupFileBufferSize,
+            Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
+        });
+
+    private static FileStream CreateBackupWriteStream(string path) =>
+        new(path, new FileStreamOptions
+        {
+            Mode = FileMode.Create,
+            Access = FileAccess.Write,
+            Share = FileShare.None,
+            BufferSize = BackupFileBufferSize,
+            Options = FileOptions.Asynchronous,
+        });
 
     private static void EnsureFileSizeAcceptable(string path)
     {

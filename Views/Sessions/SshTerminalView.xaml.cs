@@ -206,10 +206,12 @@ public sealed partial class SshTerminalView : UserControl
         var size = TerminalSize.Default;
         if (msg.Length > 6 && msg[5] == ':')
         {
-            var parts = msg.Substring(6).Split('x');
-            if (parts.Length == 2 &&
-                uint.TryParse(parts[0], out var cols) &&
-                uint.TryParse(parts[1], out var rows) &&
+            var dimensions = msg.AsSpan(6);
+            var separator = dimensions.IndexOf('x');
+            if (separator > 0 &&
+                separator < dimensions.Length - 1 &&
+                uint.TryParse(dimensions[..separator], out var cols) &&
+                uint.TryParse(dimensions[(separator + 1)..], out var rows) &&
                 cols > 0 && rows > 0)
             {
                 size = new TerminalSize(cols, rows);

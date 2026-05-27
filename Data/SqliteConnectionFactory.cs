@@ -13,17 +13,17 @@ public sealed class SqliteConnectionFactory : ISqliteConnectionFactory
 
     public SqliteConnectionFactory(string connectionString)
     {
-        _connectionString = connectionString;
+        var builder = new SqliteConnectionStringBuilder(connectionString)
+        {
+            ForeignKeys = true,
+        };
+        _connectionString = builder.ToString();
     }
 
     public SqliteConnection Open()
     {
         var connection = new SqliteConnection(_connectionString);
         connection.Open();
-        // Enforce foreign keys on every connection (SQLite default is off).
-        using var pragma = connection.CreateCommand();
-        pragma.CommandText = "PRAGMA foreign_keys = ON;";
-        pragma.ExecuteNonQuery();
         return connection;
     }
 }

@@ -16,8 +16,6 @@ public sealed class InheritanceResolver
                 $"InheritanceResolver can only resolve a connection node, but '{node.Name}' is a {node.Kind}.");
         }
 
-        var chain = WalkParents(node, nodesById);
-
         ProtocolType? protocol = null;
         string? host = null;
         int? port = null;
@@ -58,47 +56,64 @@ public sealed class InheritanceResolver
         bool? tunnelEnabled = null;
         Guid? tunnelConfigId = null;
 
-        foreach (var ancestor in chain)
+        HashSet<Guid>? seen = null;
+        var current = node;
+        while (true)
         {
-            protocol ??= ancestor.Protocol;
-            host ??= ancestor.Host;
-            port ??= ancestor.Port;
-            username ??= ancestor.Username;
-            credentialId ??= ancestor.CredentialId;
-            rdpDomain ??= ancestor.RdpDomain;
-            rdpScreenSize ??= ancestor.RdpScreenSize;
-            rdpFullScreen ??= ancestor.RdpFullScreen;
-            rdpColorDepth ??= ancestor.RdpColorDepth;
-            rdpUseAllMonitors ??= ancestor.RdpUseAllMonitors;
-            rdpAudioMode ??= ancestor.RdpAudioMode;
-            rdpAudioCaptureMode ??= ancestor.RdpAudioCaptureMode;
-            rdpKeyboardHookMode ??= ancestor.RdpKeyboardHookMode;
-            rdpRedirectClipboard ??= ancestor.RdpRedirectClipboard;
-            rdpRedirectPrinters ??= ancestor.RdpRedirectPrinters;
-            rdpRedirectSmartCards ??= ancestor.RdpRedirectSmartCards;
-            rdpRedirectPorts ??= ancestor.RdpRedirectPorts;
-            rdpRedirectDevices ??= ancestor.RdpRedirectDevices;
-            rdpRedirectDrives ??= ancestor.RdpRedirectDrives;
-            rdpConnectionSpeed ??= ancestor.RdpConnectionSpeed;
-            rdpDesktopBackground ??= ancestor.RdpDesktopBackground;
-            rdpFontSmoothing ??= ancestor.RdpFontSmoothing;
-            rdpDesktopComposition ??= ancestor.RdpDesktopComposition;
-            rdpWindowDrag ??= ancestor.RdpWindowDrag;
-            rdpMenuAnimation ??= ancestor.RdpMenuAnimation;
-            rdpVisualStyles ??= ancestor.RdpVisualStyles;
-            rdpBitmapCaching ??= ancestor.RdpBitmapCaching;
-            rdpAutoReconnect ??= ancestor.RdpAutoReconnect;
-            rdpServerAuthentication ??= ancestor.RdpServerAuthentication;
-            rdpGatewayUsageMethod ??= ancestor.RdpGatewayUsageMethod;
-            rdpGatewayHostname ??= ancestor.RdpGatewayHostname;
-            rdpGatewayCredentialId ??= ancestor.RdpGatewayCredentialId;
-            rdpGatewayBypassLocal ??= ancestor.RdpGatewayBypassLocal;
-            rdpGatewayUseSameCreds ??= ancestor.RdpGatewayUseSameCreds;
-            rdpUseExternalClient ??= ancestor.RdpUseExternalClient;
-            sshKeyFileName ??= ancestor.SshKeyFileName;
-            sshKnownHostFingerprint ??= ancestor.SshKnownHostFingerprint;
-            tunnelEnabled ??= ancestor.TunnelEnabled;
-            tunnelConfigId ??= ancestor.TunnelConfigId;
+            if (seen is not null && !seen.Add(current.Id))
+            {
+                throw new InvalidOperationException(
+                    $"Detected a cycle in the node tree at '{current.Name}' ({current.Id}).");
+            }
+
+            protocol ??= current.Protocol;
+            host ??= current.Host;
+            port ??= current.Port;
+            username ??= current.Username;
+            credentialId ??= current.CredentialId;
+            rdpDomain ??= current.RdpDomain;
+            rdpScreenSize ??= current.RdpScreenSize;
+            rdpFullScreen ??= current.RdpFullScreen;
+            rdpColorDepth ??= current.RdpColorDepth;
+            rdpUseAllMonitors ??= current.RdpUseAllMonitors;
+            rdpAudioMode ??= current.RdpAudioMode;
+            rdpAudioCaptureMode ??= current.RdpAudioCaptureMode;
+            rdpKeyboardHookMode ??= current.RdpKeyboardHookMode;
+            rdpRedirectClipboard ??= current.RdpRedirectClipboard;
+            rdpRedirectPrinters ??= current.RdpRedirectPrinters;
+            rdpRedirectSmartCards ??= current.RdpRedirectSmartCards;
+            rdpRedirectPorts ??= current.RdpRedirectPorts;
+            rdpRedirectDevices ??= current.RdpRedirectDevices;
+            rdpRedirectDrives ??= current.RdpRedirectDrives;
+            rdpConnectionSpeed ??= current.RdpConnectionSpeed;
+            rdpDesktopBackground ??= current.RdpDesktopBackground;
+            rdpFontSmoothing ??= current.RdpFontSmoothing;
+            rdpDesktopComposition ??= current.RdpDesktopComposition;
+            rdpWindowDrag ??= current.RdpWindowDrag;
+            rdpMenuAnimation ??= current.RdpMenuAnimation;
+            rdpVisualStyles ??= current.RdpVisualStyles;
+            rdpBitmapCaching ??= current.RdpBitmapCaching;
+            rdpAutoReconnect ??= current.RdpAutoReconnect;
+            rdpServerAuthentication ??= current.RdpServerAuthentication;
+            rdpGatewayUsageMethod ??= current.RdpGatewayUsageMethod;
+            rdpGatewayHostname ??= current.RdpGatewayHostname;
+            rdpGatewayCredentialId ??= current.RdpGatewayCredentialId;
+            rdpGatewayBypassLocal ??= current.RdpGatewayBypassLocal;
+            rdpGatewayUseSameCreds ??= current.RdpGatewayUseSameCreds;
+            rdpUseExternalClient ??= current.RdpUseExternalClient;
+            sshKeyFileName ??= current.SshKeyFileName;
+            sshKnownHostFingerprint ??= current.SshKnownHostFingerprint;
+            tunnelEnabled ??= current.TunnelEnabled;
+            tunnelConfigId ??= current.TunnelConfigId;
+
+            if (current.ParentId is not Guid parentId) break;
+            if (!nodesById.TryGetValue(parentId, out var parent)) break;
+            if (seen is null)
+            {
+                seen = new HashSet<Guid>();
+                seen.Add(current.Id);
+            }
+            current = parent;
         }
 
         if (protocol is null)
@@ -156,28 +171,6 @@ public sealed class InheritanceResolver
             TunnelEnabled = tunnelEnabled ?? false,
             TunnelConfigId = tunnelConfigId,
         };
-    }
-
-    private static IEnumerable<ConnectionNode> WalkParents(
-        ConnectionNode start, IReadOnlyDictionary<Guid, ConnectionNode> nodesById)
-    {
-        var seen = new HashSet<Guid>();
-        var current = start;
-        while (current is not null)
-        {
-            if (!seen.Add(current.Id))
-            {
-                throw new InvalidOperationException(
-                    $"Detected a cycle in the node tree at '{current.Name}' ({current.Id}).");
-            }
-            yield return current;
-            if (current.ParentId is null) yield break;
-            if (!nodesById.TryGetValue(current.ParentId.Value, out var parent))
-            {
-                yield break;
-            }
-            current = parent;
-        }
     }
 
     private static int DefaultPortFor(ProtocolType protocol) => protocol switch

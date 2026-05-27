@@ -12,18 +12,18 @@ public static class HostSpecParser
     public static HostSpec Parse(string input)
     {
         ArgumentNullException.ThrowIfNull(input);
-        var s = input.Trim();
+        var s = input.AsSpan().Trim();
 
         string? user = null;
         var at = s.IndexOf('@');
         if (at > 0)
         {
-            user = s.Substring(0, at);
-            s = s.Substring(at + 1);
+            user = s[..at].ToString();
+            s = s[(at + 1)..];
         }
 
         // Bracketed form: [host]:port — host may contain colons (IPv6).
-        if (s.StartsWith('['))
+        if (!s.IsEmpty && s[0] == '[')
         {
             var closeBracket = s.IndexOf(']');
             if (closeBracket < 0)
@@ -31,20 +31,20 @@ public static class HostSpecParser
                 throw new FormatException(
                     $"Invalid host specifier '{input}': missing ']' to close bracketed host.");
             }
-            var host = s.Substring(1, closeBracket - 1);
-            var rest = s.Substring(closeBracket + 1);
-            if (host.Length == 0)
+            var host = s[1..closeBracket];
+            var rest = s[(closeBracket + 1)..];
+            if (host.IsEmpty)
             {
                 throw new FormatException(
                     $"Invalid host specifier '{input}': bracketed host is empty.");
             }
-            if (rest.Length == 0)
+            if (rest.IsEmpty)
             {
-                return new HostSpec(user, host, null);
+                return new HostSpec(user, host.ToString(), null);
             }
-            if (rest.Length > 1 && rest[0] == ':' && TryParsePort(rest.AsSpan(1), out var bp))
+            if (rest.Length > 1 && rest[0] == ':' && TryParsePort(rest[1..], out var bp))
             {
-                return new HostSpec(user, host, bp);
+                return new HostSpec(user, host.ToString(), bp);
             }
             // Reject garbage after the closing bracket so callers don't silently
             // connect to the wrong endpoint with the trailing chars stripped.
@@ -57,26 +57,26 @@ public static class HostSpecParser
         // protocol default port. Users who want an explicit IPv6 port must bracket the host.
         if (CountChar(s, ':') > 1)
         {
-            if (s.Length == 0)
+            if (s.IsEmpty)
                 throw new FormatException($"Invalid host specifier '{input}': host is empty.");
-            return new HostSpec(user, s, null);
+            return new HostSpec(user, s.ToString(), null);
         }
 
         int? port = null;
         var colon = s.LastIndexOf(':');
-        if (colon > 0 && TryParsePort(s.AsSpan(colon + 1), out var p))
+        if (colon > 0 && TryParsePort(s[(colon + 1)..], out var p))
         {
             port = p;
-            s = s.Substring(0, colon);
+            s = s[..colon];
         }
 
-        if (s.Length == 0)
+        if (s.IsEmpty)
         {
             throw new FormatException(
                 $"Invalid host specifier '{input}': host is empty.");
         }
 
-        return new HostSpec(user, s, port);
+        return new HostSpec(user, s.ToString(), port);
     }
 
     private static bool TryParsePort(ReadOnlySpan<char> text, out int port)
@@ -89,7 +89,7 @@ public static class HostSpecParser
         return false;
     }
 
-    private static int CountChar(string s, char c)
+    private static int CountChar(ReadOnlySpan<char> s, char c)
     {
         var n = 0;
         for (var i = 0; i < s.Length; i++)

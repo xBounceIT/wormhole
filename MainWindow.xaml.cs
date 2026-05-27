@@ -38,6 +38,7 @@ public sealed partial class MainWindow : Window
     private OverlappedPresenterState _currentWindowState;
     private bool _sessionCleanupInProgress;
     private bool _sessionCleanupComplete;
+    private double _lastConnectionsTreeMaxHeight = double.NaN;
 
     public ShellViewModel ViewModel { get; }
 
@@ -91,11 +92,13 @@ public sealed partial class MainWindow : Window
 
         Activated += OnFirstActivated;
 
-        _ = Task.Run(async () =>
-        {
-            await Task.Delay(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
-            await ViewModel.Update.RunStartupCheckAsync().ConfigureAwait(false);
-        });
+        _ = RunStartupUpdateCheckAsync();
+    }
+
+    private async Task RunStartupUpdateCheckAsync()
+    {
+        await Task.Delay(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+        await ViewModel.Update.RunStartupCheckAsync().ConfigureAwait(false);
     }
 
     private async void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
@@ -192,16 +195,24 @@ public sealed partial class MainWindow : Window
 
     private void ApplyConnectionsTreeMaxHeight()
     {
-        double footerHeight = 0;
-        foreach (var item in new[] { CredentialsItem, SessionsItem, TunnelsItem, SettingsItem })
-        {
-            if (item is null) continue;
-            footerHeight += item.ActualHeight;
-        }
+        var footerHeight =
+            GetActualHeight(CredentialsItem) +
+            GetActualHeight(SessionsItem) +
+            GetActualHeight(TunnelsItem) +
+            GetActualHeight(SettingsItem);
 
         var available = NavView.ActualHeight - footerHeight - FooterChromeReserve;
-        ConnectionsTree.MaxHeight = Math.Max(MinConnectionsTreeHeight, available);
+        var maxHeight = Math.Max(MinConnectionsTreeHeight, available);
+        if (Math.Abs(maxHeight - _lastConnectionsTreeMaxHeight) < 0.5)
+        {
+            return;
+        }
+
+        _lastConnectionsTreeMaxHeight = maxHeight;
+        ConnectionsTree.MaxHeight = maxHeight;
     }
+
+    private static double GetActualHeight(FrameworkElement? element) => element?.ActualHeight ?? 0;
 
     private void ComputeMinSidebarWidth()
     {

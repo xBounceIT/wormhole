@@ -46,7 +46,7 @@ public sealed class LocalTcpForwarder : IAsyncDisposable
         var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         var fwd = new LocalTcpForwarder(tunnel, targetHost, targetPort, listener, logger);
-        fwd._acceptLoop = Task.Run(fwd.AcceptLoopAsync);
+        fwd._acceptLoop = fwd.AcceptLoopAsync();
         return fwd;
     }
 
@@ -70,20 +70,24 @@ public sealed class LocalTcpForwarder : IAsyncDisposable
                     return;
                 }
 
-                var handler = Task.Run(() => HandleClientAsync(client, _cts.Token));
+                var handler = HandleClientAsync(client, _cts.Token);
                 lock (_handlersGate) _handlers.Add(handler);
                 // Reap completed handlers from the tracking set so it doesn't grow unbounded
                 // under a long-lived session.
-                _ = handler.ContinueWith(t =>
-                {
-                    lock (_handlersGate) _handlers.Remove(t);
-                }, TaskScheduler.Default);
+                _ = RemoveHandlerWhenCompleteAsync(handler);
             }
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Local tunnel forwarder accept loop on port {Port} crashed.", LocalPort);
         }
+    }
+
+    private async Task RemoveHandlerWhenCompleteAsync(Task handler)
+    {
+        try { await handler.ConfigureAwait(false); }
+        catch { /* observed by DisposeAsync / handled inside HandleClientAsync */ }
+        lock (_handlersGate) _handlers.Remove(handler);
     }
 
     private async Task HandleClientAsync(TcpClient client, CancellationToken ct)

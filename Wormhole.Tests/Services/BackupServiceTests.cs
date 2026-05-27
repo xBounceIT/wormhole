@@ -1202,6 +1202,44 @@ public sealed class BackupServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ImportAsync_ReadsExistingMetadataConcurrently()
+    {
+        var gate = new ConcurrentGetAllGate(expectedStarts: 3);
+        var service = new BackupService(
+            new BlockingConnectionRepository(gate),
+            new BlockingCredentialRepository(gate),
+            new BlockingTunnelConfigRepository(gate),
+            new FakeCredentialService(),
+            NullLogger<BackupService>.Instance);
+        var path = Path.Combine(_scratchDir, "empty-import.json");
+        await File.WriteAllTextAsync(path, $$"""
+            {
+              "schemaVersion": 1,
+              "encryption": "none",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "payload": {
+                "nodes": [],
+                "credentials": [],
+                "tunnels": [],
+                "passwords": [],
+                "privateKeys": [],
+                "tunnelPayloads": []
+              }
+            }
+            """, Encoding.UTF8);
+
+        var importTask = service.ImportAsync(path, null);
+
+        await gate.WaitForAllStartedAsync(TimeSpan.FromSeconds(1));
+        gate.Release();
+        var result = await importTask;
+
+        Assert.Equal(0, result.NodesImported);
+        Assert.Equal(0, result.CredentialsImported);
+        Assert.Equal(0, result.TunnelsImported);
+    }
+
+    [Fact]
     public async Task ImportAsync_TopologicallyInsertsNodesEvenWhenBackupOrderIsReversed()
     {
         // Build a backup file by hand whose Nodes array deliberately lists the leaf BEFORE
@@ -1333,6 +1371,127 @@ public sealed class BackupServiceTests : IDisposable
               "updatedAt": "{{n.UpdatedAt:O}}"
             }
             """;
+    }
+
+    private sealed class ConcurrentGetAllGate
+    {
+        private readonly int _expectedStarts;
+        private readonly TaskCompletionSource _allStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _started;
+
+        public ConcurrentGetAllGate(int expectedStarts)
+        {
+            _expectedStarts = expectedStarts;
+        }
+
+        public async Task WaitAsync()
+        {
+            if (Interlocked.Increment(ref _started) == _expectedStarts)
+            {
+                _allStarted.TrySetResult();
+            }
+            await _release.Task.ConfigureAwait(false);
+        }
+
+        public async Task WaitForAllStartedAsync(TimeSpan timeout)
+        {
+            var completed = await Task.WhenAny(_allStarted.Task, Task.Delay(timeout)).ConfigureAwait(false);
+            if (!ReferenceEquals(completed, _allStarted.Task))
+            {
+                throw new TimeoutException("Existing metadata reads did not start concurrently.");
+            }
+            await _allStarted.Task.ConfigureAwait(false);
+        }
+
+        public void Release() => _release.TrySetResult();
+    }
+
+    private sealed class BlockingCredentialRepository : ICredentialRepository
+    {
+        private readonly ConcurrentGetAllGate _gate;
+
+        public BlockingCredentialRepository(ConcurrentGetAllGate gate) => _gate = gate;
+
+        public async Task<IReadOnlyList<CredentialProfile>> GetAllAsync(CancellationToken cancellationToken = default)
+        {
+            await _gate.WaitAsync().ConfigureAwait(false);
+            return Array.Empty<CredentialProfile>();
+        }
+
+        public Task<CredentialProfile?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
+            Task.FromResult<CredentialProfile?>(null);
+
+        public Task AddAsync(CredentialProfile profile, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task UpdateAsync(CredentialProfile profile, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task DeleteAsync(Guid id, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class BlockingTunnelConfigRepository : ITunnelConfigRepository
+    {
+        private readonly ConcurrentGetAllGate _gate;
+
+        public BlockingTunnelConfigRepository(ConcurrentGetAllGate gate) => _gate = gate;
+
+        public async Task<IReadOnlyList<TunnelConfig>> GetAllAsync(CancellationToken cancellationToken = default)
+        {
+            await _gate.WaitAsync().ConfigureAwait(false);
+            return Array.Empty<TunnelConfig>();
+        }
+
+        public Task<TunnelConfig?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
+            Task.FromResult<TunnelConfig?>(null);
+
+        public Task AddAsync(TunnelConfig config, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task UpdateAsync(TunnelConfig config, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task DeleteAsync(Guid id, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+    }
+
+    private sealed class BlockingConnectionRepository : IConnectionRepository
+    {
+        private readonly ConcurrentGetAllGate _gate;
+
+        public BlockingConnectionRepository(ConcurrentGetAllGate gate) => _gate = gate;
+
+        public async Task<IReadOnlyList<ConnectionNode>> GetAllAsync(CancellationToken cancellationToken = default)
+        {
+            await _gate.WaitAsync().ConfigureAwait(false);
+            return Array.Empty<ConnectionNode>();
+        }
+
+        public Task<ConnectionNode?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
+            Task.FromResult<ConnectionNode?>(null);
+
+        public Task<IReadOnlyList<(Guid Id, string Name)>> GetByTunnelConfigIdAsync(
+            Guid tunnelConfigId,
+            int limit,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<(Guid Id, string Name)>>(Array.Empty<(Guid Id, string Name)>());
+
+        public Task AddAsync(ConnectionNode node, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task UpdateAsync(ConnectionNode node, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task UpdateManyAsync(IReadOnlyCollection<ConnectionNode> nodes, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task UpdateHostFingerprintAsync(Guid nodeId, string fingerprint, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
+
+        public Task DeleteAsync(Guid id, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
     }
 
     /// <summary>Seeds a folder + one connection beneath it, two credentials (password +

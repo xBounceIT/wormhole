@@ -30,7 +30,7 @@ public sealed class SftpService : ISftpService
                 $"Connection '{profile.Name}' has no username; provide one before connecting.");
 
         var authMethods = SshAuthMethodsBuilder.Build(profile.Username!, credentials);
-        if (authMethods.Count == 0)
+        if (authMethods.Length == 0)
         {
             throw new InvalidOperationException(
                 $"Connection '{profile.Name}' has no usable credentials (password or private key).");
@@ -39,7 +39,7 @@ public sealed class SftpService : ISftpService
         ConnectionInfo connectionInfo;
         if (tunnel is null)
         {
-            connectionInfo = new ConnectionInfo(profile.Host, profile.Port, profile.Username, authMethods.ToArray());
+            connectionInfo = new ConnectionInfo(profile.Host, profile.Port, profile.Username, authMethods);
         }
         else
         {
@@ -52,7 +52,7 @@ public sealed class SftpService : ISftpService
                 profile.Host, profile.Port, profile.Username,
                 ProxyTypes.Socks5, socks.Address.ToString(), socks.Port,
                 proxyUsername: string.Empty, proxyPassword: string.Empty,
-                authMethods.ToArray());
+                authMethods);
             _logger.LogDebug("Routing SFTP connect through SOCKS5 tunnel at {Endpoint}.", socks);
         }
         connectionInfo.Timeout = TimeSpan.FromSeconds(15);

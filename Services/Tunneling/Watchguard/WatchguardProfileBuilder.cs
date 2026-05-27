@@ -51,7 +51,7 @@ public static class WatchguardProfileBuilder
         RejectInlineTagClose(settings.ClientCertPem, "Client certificate", "cert");
         RejectInlineTagClose(settings.ClientKeyPem, "Client private key", "key");
 
-        var sb = new StringBuilder();
+        var sb = new StringBuilder(EstimateProfileLength(settings));
         // Use \n explicitly (not Environment.NewLine) so the synthesized profile is byte-identical
         // across platforms — keeps the golden-file test stable on CI vs. dev machines.
         sb.Append("client").Append('\n');
@@ -121,8 +121,47 @@ public static class WatchguardProfileBuilder
         sb.Append('<').Append(tag).Append('>').Append('\n');
         // Normalize CRLF/CR -> LF inside PEM bodies so the synthesized profile stays byte-stable
         // regardless of where the user pasted from (Windows clipboard, Unix file, browser).
-        sb.Append(pem.Replace("\r\n", "\n").Replace("\r", "\n").TrimEnd('\n'));
+        AppendNormalizedPemBody(sb, pem);
         sb.Append('\n');
         sb.Append("</").Append(tag).Append('>').Append('\n');
+    }
+
+    private static int EstimateProfileLength(WatchguardSettings settings)
+    {
+        var length = 512
+                     + settings.Server.Length
+                     + settings.CaPem.Length
+                     + settings.ClientCertPem.Length
+                     + settings.ClientKeyPem.Length;
+        if (!settings.TrustServerCertificate && !string.IsNullOrWhiteSpace(settings.VerifyX509Name))
+        {
+            length += settings.VerifyX509Name.Length;
+        }
+        return length;
+    }
+
+    private static void AppendNormalizedPemBody(StringBuilder sb, string pem)
+    {
+        var end = pem.Length;
+        while (end > 0 && (pem[end - 1] == '\n' || pem[end - 1] == '\r'))
+        {
+            end--;
+        }
+
+        for (var i = 0; i < end; i++)
+        {
+            var ch = pem[i];
+            if (ch != '\r')
+            {
+                sb.Append(ch);
+                continue;
+            }
+
+            sb.Append('\n');
+            if (i + 1 < end && pem[i + 1] == '\n')
+            {
+                i++;
+            }
+        }
     }
 }

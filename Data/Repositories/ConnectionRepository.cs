@@ -53,9 +53,9 @@ public sealed class ConnectionRepository : IConnectionRepository
     {
         using var connection = _factory.Open();
         var rows = await connection.QueryAsync<ConnectionNode>(new CommandDefinition(
-            $"SELECT {SelectColumns} FROM Nodes ORDER BY SortOrder, Name;",
+            $"SELECT {SelectColumns} FROM Nodes ORDER BY ParentId, SortOrder, Name;",
             cancellationToken: cancellationToken));
-        return rows.ToList();
+        return rows as IReadOnlyList<ConnectionNode> ?? rows.ToList();
     }
 
     public async Task<ConnectionNode?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
@@ -76,7 +76,12 @@ public sealed class ConnectionRepository : IConnectionRepository
             "SELECT Id, Name FROM Nodes WHERE TunnelConfigId = @tunnelConfigId LIMIT @limit;",
             new { tunnelConfigId, limit },
             cancellationToken: cancellationToken));
-        return rows.Select(r => (r.Id, r.Name)).ToList();
+        var result = new List<(Guid Id, string Name)>(limit);
+        foreach (var row in rows)
+        {
+            result.Add((row.Id, row.Name));
+        }
+        return result;
     }
 
     private sealed record TunnelRefRow(Guid Id, string Name);

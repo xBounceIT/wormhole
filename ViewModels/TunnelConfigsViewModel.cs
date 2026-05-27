@@ -1,7 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Collections.ObjectModel;
-using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
@@ -21,6 +19,7 @@ public partial class TunnelConfigsViewModel : ObservableObject
     private readonly ICredentialService _credentials;
     private readonly IDialogService _dialog;
     private readonly ILogger<TunnelConfigsViewModel> _logger;
+    private bool _hasLoaded;
 
     public TunnelConfigsViewModel(
         ITunnelConfigRepository repo,
@@ -36,14 +35,19 @@ public partial class TunnelConfigsViewModel : ObservableObject
         _logger = logger;
         Configs.CollectionChanged += (_, _) =>
         {
-            OnPropertyChanged(nameof(FilteredConfigs));
+            ApplyFilter(SearchText);
             OnPropertyChanged(nameof(IsEmpty));
+        };
+        FilteredConfigs.CollectionChanged += (_, _) =>
+        {
             OnPropertyChanged(nameof(HasMatches));
             OnPropertyChanged(nameof(HasNoMatches));
         };
     }
 
-    public ObservableCollection<TunnelConfig> Configs { get; } = new();
+    public BulkObservableCollection<TunnelConfig> Configs { get; } = new();
+
+    public BulkObservableCollection<TunnelConfig> FilteredConfigs { get; } = new();
 
     public bool IsEmpty => Configs.Count == 0;
 
@@ -52,28 +56,84 @@ public partial class TunnelConfigsViewModel : ObservableObject
     public bool HasNoMatches => !IsEmpty && !HasMatches;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(FilteredConfigs))]
-    [NotifyPropertyChangedFor(nameof(HasMatches))]
-    [NotifyPropertyChangedFor(nameof(HasNoMatches))]
     private string searchText = string.Empty;
 
-    public IReadOnlyList<TunnelConfig> FilteredConfigs
-    {
-        get
-        {
-            if (string.IsNullOrWhiteSpace(SearchText))
-            {
-                return Configs.ToList();
-            }
+    // Search is bound with UpdateSourceTrigger=PropertyChanged, so debounce production
+    // keystrokes to avoid rebuilding the visible collection on every character.
+    internal TimeSpan SearchDebounceDelay { get; set; } = TimeSpan.FromMilliseconds(120);
 
-            var q = SearchText.Trim();
-            return Configs
-                .Where(c =>
-                    Contains(c.Name, q) ||
-                    Contains(c.Kind.ToString(), q))
-                .ToList();
+    private CancellationTokenSource? _filterDebounceCts;
+
+    partial void OnSearchTextChanged(string value) => ScheduleFilter(value);
+
+    private void ScheduleFilter(string query)
+    {
+        var prior = _filterDebounceCts;
+        _filterDebounceCts = null;
+        if (prior is not null)
+        {
+            try { prior.Cancel(); } catch (ObjectDisposedException) { }
+            prior.Dispose();
         }
+
+        if (SearchDebounceDelay <= TimeSpan.Zero)
+        {
+            ApplyFilter(query);
+            return;
+        }
+
+        var cts = new CancellationTokenSource();
+        _filterDebounceCts = cts;
+        _ = DebouncedApplyFilterAsync(query, cts);
     }
+
+    private async Task DebouncedApplyFilterAsync(string query, CancellationTokenSource cts)
+    {
+        try
+        {
+            await Task.Delay(SearchDebounceDelay, cts.Token).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        finally
+        {
+            if (ReferenceEquals(_filterDebounceCts, cts))
+            {
+                _filterDebounceCts = null;
+            }
+            cts.Dispose();
+        }
+
+        if (_filterDebounceCts is not null) return;
+        ApplyFilter(query);
+    }
+
+    private void ApplyFilter(string query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            FilteredConfigs.ReplaceAll(Configs);
+            return;
+        }
+
+        var q = query.Trim();
+        var matches = new List<TunnelConfig>(Configs.Count);
+        foreach (var config in Configs)
+        {
+            if (Contains(config.Name, q) ||
+                KindContains(config.Kind, q))
+            {
+                matches.Add(config);
+            }
+        }
+
+        FilteredConfigs.ReplaceAll(matches);
+    }
+
+    public Task EnsureLoadedAsync() =>
+        _hasLoaded ? Task.CompletedTask : LoadAsync();
 
     [RelayCommand]
     private async Task LoadAsync()
@@ -81,11 +141,8 @@ public partial class TunnelConfigsViewModel : ObservableObject
         try
         {
             var rows = await _repo.GetAllAsync();
-            Configs.Clear();
-            foreach (var row in rows)
-            {
-                Configs.Add(row);
-            }
+            Configs.ReplaceAll(rows);
+            _hasLoaded = true;
         }
         catch (Exception ex)
         {
@@ -264,6 +321,7 @@ public partial class TunnelConfigsViewModel : ObservableObject
                 }));
             config.Name = draft.Name;
             config.Kind = draft.Kind;
+            ApplyFilter(SearchText);
         }
         catch (Exception ex)
         {
@@ -300,7 +358,7 @@ public partial class TunnelConfigsViewModel : ObservableObject
 
         if (referencing.Count > 0)
         {
-            var sample = string.Join(", ", referencing.Take(sampleCap).Select(n => $"'{n.Name}'"));
+            var sample = FormatReferenceSample(referencing, sampleCap);
             var more = referencing.Count > sampleCap ? " and more" : string.Empty;
             await _dialog.ShowMessageAsync(
                 "Tunnel is in use",
@@ -327,6 +385,18 @@ public partial class TunnelConfigsViewModel : ObservableObject
             _logger.LogError(ex, "Failed to delete tunnel '{Name}'", config.Name);
             await _dialog.ShowMessageAsync("Couldn't delete tunnel", ex.Message);
         }
+    }
+
+    private static string FormatReferenceSample(IReadOnlyList<(Guid Id, string Name)> references, int sampleCap)
+    {
+        var count = Math.Min(references.Count, sampleCap);
+        var sb = new StringBuilder(count * 16);
+        for (var i = 0; i < count; i++)
+        {
+            if (i > 0) sb.Append(", ");
+            sb.Append('\'').Append(references[i].Name).Append('\'');
+        }
+        return sb.ToString();
     }
 
     // Always returns a draft: failures degrade to empty per-kind settings so the user can
@@ -457,12 +527,12 @@ public partial class TunnelConfigsViewModel : ObservableObject
     {
         if (wg is null)
             throw new InvalidOperationException("WireGuard settings are required for a WireGuard tunnel.");
-        var sb = new StringBuilder();
-        if (string.IsNullOrWhiteSpace(wg.InterfacePrivateKey)) sb.AppendLine("Interface private key is required.");
-        if (string.IsNullOrWhiteSpace(wg.InterfaceAddress)) sb.AppendLine("Interface address is required (e.g. 10.0.0.2/32).");
-        if (string.IsNullOrWhiteSpace(wg.PeerPublicKey)) sb.AppendLine("Peer public key is required.");
-        if (string.IsNullOrWhiteSpace(wg.PeerEndpoint)) sb.AppendLine("Peer endpoint is required (host:port).");
-        if (sb.Length > 0) throw new InvalidOperationException(sb.ToString().TrimEnd());
+        StringBuilder? sb = null;
+        if (string.IsNullOrWhiteSpace(wg.InterfacePrivateKey)) AppendValidationError(ref sb, "Interface private key is required.");
+        if (string.IsNullOrWhiteSpace(wg.InterfaceAddress)) AppendValidationError(ref sb, "Interface address is required (e.g. 10.0.0.2/32).");
+        if (string.IsNullOrWhiteSpace(wg.PeerPublicKey)) AppendValidationError(ref sb, "Peer public key is required.");
+        if (string.IsNullOrWhiteSpace(wg.PeerEndpoint)) AppendValidationError(ref sb, "Peer endpoint is required (host:port).");
+        ThrowValidationErrors(sb);
     }
 
     private static void ValidateOpenVpn(OpenVpnSettings? ovpn)
@@ -477,30 +547,39 @@ public partial class TunnelConfigsViewModel : ObservableObject
     {
         if (fg is null)
             throw new InvalidOperationException("Fortinet settings are required for a Fortinet tunnel.");
-        var sb = new StringBuilder();
-        if (string.IsNullOrWhiteSpace(fg.Host)) sb.AppendLine("Gateway host is required.");
-        if (fg.Port is < 1 or > 65535) sb.AppendLine("Port must be between 1 and 65535.");
-        if (string.IsNullOrWhiteSpace(fg.Username)) sb.AppendLine("Username is required.");
+        StringBuilder? sb = null;
+        if (string.IsNullOrWhiteSpace(fg.Host)) AppendValidationError(ref sb, "Gateway host is required.");
+        if (fg.Port is < 1 or > 65535) AppendValidationError(ref sb, "Port must be between 1 and 65535.");
+        if (string.IsNullOrWhiteSpace(fg.Username)) AppendValidationError(ref sb, "Username is required.");
         // IsNullOrWhiteSpace mirrors every other required field (and ValidateWireGuard) — a
         // single space passed as a password would otherwise reach the gateway as %20 and bounce
         // back as a cryptic 'invalid credentials' instead of a clean client-side rejection.
-        if (string.IsNullOrWhiteSpace(fg.Password)) sb.AppendLine("Password is required.");
-        if (sb.Length > 0) throw new InvalidOperationException(sb.ToString().TrimEnd());
+        if (string.IsNullOrWhiteSpace(fg.Password)) AppendValidationError(ref sb, "Password is required.");
+        ThrowValidationErrors(sb);
     }
 
     private static void ValidateWatchguard(WatchguardSettings? wg)
     {
         if (wg is null)
             throw new InvalidOperationException("Watchguard settings are required for a Watchguard tunnel.");
-        var sb = new StringBuilder();
-        if (string.IsNullOrWhiteSpace(wg.Server)) sb.AppendLine("Server is required.");
-        if (wg.Port is < 1 or > 65535) sb.AppendLine("Port must be between 1 and 65535.");
-        if (string.IsNullOrWhiteSpace(wg.Username)) sb.AppendLine("Username is required.");
-        if (string.IsNullOrWhiteSpace(wg.Password)) sb.AppendLine("Password is required.");
-        if (string.IsNullOrWhiteSpace(wg.CaPem)) sb.AppendLine("CA certificate (PEM) is required.");
-        if (string.IsNullOrWhiteSpace(wg.ClientCertPem)) sb.AppendLine("Client certificate (PEM) is required.");
-        if (string.IsNullOrWhiteSpace(wg.ClientKeyPem)) sb.AppendLine("Client private key (PEM) is required.");
-        if (sb.Length > 0) throw new InvalidOperationException(sb.ToString().TrimEnd());
+        StringBuilder? sb = null;
+        if (string.IsNullOrWhiteSpace(wg.Server)) AppendValidationError(ref sb, "Server is required.");
+        if (wg.Port is < 1 or > 65535) AppendValidationError(ref sb, "Port must be between 1 and 65535.");
+        if (string.IsNullOrWhiteSpace(wg.Username)) AppendValidationError(ref sb, "Username is required.");
+        if (string.IsNullOrWhiteSpace(wg.Password)) AppendValidationError(ref sb, "Password is required.");
+        if (string.IsNullOrWhiteSpace(wg.CaPem)) AppendValidationError(ref sb, "CA certificate (PEM) is required.");
+        if (string.IsNullOrWhiteSpace(wg.ClientCertPem)) AppendValidationError(ref sb, "Client certificate (PEM) is required.");
+        if (string.IsNullOrWhiteSpace(wg.ClientKeyPem)) AppendValidationError(ref sb, "Client private key (PEM) is required.");
+        ThrowValidationErrors(sb);
+    }
+
+    private static void AppendValidationError(ref StringBuilder? sb, string message) =>
+        (sb ??= new StringBuilder()).AppendLine(message);
+
+    private static void ThrowValidationErrors(StringBuilder? sb)
+    {
+        if (sb is { Length: > 0 })
+            throw new InvalidOperationException(sb.ToString().TrimEnd());
     }
 
     // Best-effort compensate when a DPAPI secret write fails after the SQLite row has already
@@ -527,8 +606,29 @@ public partial class TunnelConfigsViewModel : ObservableObject
     private static bool Contains(string? haystack, string needle) =>
         haystack is not null && haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
 
-    private bool NameExists(string name, Guid? excludingId) =>
-        Configs.Any(c =>
-            (excludingId is null || c.Id != excludingId.Value) &&
-            string.Equals(c.Name, name, StringComparison.OrdinalIgnoreCase));
+    private static bool KindContains(TunnelKind kind, string needle)
+    {
+        var name = kind switch
+        {
+            TunnelKind.WireGuard => nameof(TunnelKind.WireGuard),
+            TunnelKind.OpenVpn => nameof(TunnelKind.OpenVpn),
+            TunnelKind.Fortinet => nameof(TunnelKind.Fortinet),
+            TunnelKind.Watchguard => nameof(TunnelKind.Watchguard),
+            _ => null,
+        };
+        return Contains(name, needle);
+    }
+
+    private bool NameExists(string name, Guid? excludingId)
+    {
+        var hasExcludedId = excludingId.HasValue;
+        var excludedId = excludingId.GetValueOrDefault();
+        foreach (var config in Configs)
+        {
+            if (hasExcludedId && config.Id == excludedId) continue;
+            if (string.Equals(config.Name, name, StringComparison.OrdinalIgnoreCase)) return true;
+        }
+
+        return false;
+    }
 }
