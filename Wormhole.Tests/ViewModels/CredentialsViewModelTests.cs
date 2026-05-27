@@ -388,6 +388,27 @@ public class CredentialsViewModelTests
     }
 
     [Fact]
+    public async Task SelectAll_selects_visible_filtered_credentials_without_duplicates()
+    {
+        var alpha = MakeProfile("alpha", ProtocolType.Ssh);
+        var beta = MakeProfile("beta", ProtocolType.Rdp);
+        var gamma = MakeProfile("gamma", ProtocolType.Ssh);
+        var repo = new FakeCredentialRepository(alpha, beta, gamma);
+        var vm = NewVm(repo);
+        await vm.LoadCommand.ExecuteAsync(null);
+        vm.SearchText = "g";
+        vm.SelectedCredentials.Add(vm.Credentials.Single(c => c.Name == "alpha"));
+
+        vm.SelectAllCommand.Execute(null);
+        vm.SelectAllCommand.Execute(null);
+
+        Assert.Equal(2, vm.SelectedCredentials.Count);
+        Assert.Contains(vm.SelectedCredentials, c => c.Name == "alpha");
+        Assert.Contains(vm.SelectedCredentials, c => c.Name == "gamma");
+        Assert.DoesNotContain(vm.SelectedCredentials, c => c.Name == "beta");
+    }
+
+    [Fact]
     public async Task HasNoMatches_is_true_when_search_filters_everything_out()
     {
         var repo = new FakeCredentialRepository(MakeProfile("alpha", ProtocolType.Ssh));

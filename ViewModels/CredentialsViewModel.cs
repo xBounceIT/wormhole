@@ -88,6 +88,18 @@ public partial class CredentialsViewModel : ObservableObject
     }
 
     [RelayCommand]
+    private void SelectAll()
+    {
+        foreach (var profile in FilteredCredentials)
+        {
+            if (!SelectedCredentials.Contains(profile))
+            {
+                SelectedCredentials.Add(profile);
+            }
+        }
+    }
+
+    [RelayCommand]
     private async Task LoadAsync()
     {
         try

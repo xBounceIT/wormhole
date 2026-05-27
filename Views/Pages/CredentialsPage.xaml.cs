@@ -95,7 +95,7 @@ public sealed partial class CredentialsPage : Page
         ViewModel.SelectedCredentials.Clear();
     }
 
-    // Fires when SelectedCredentials mutates by any path (toolbar Clear, bulk delete, etc.).
+    // Fires when SelectedCredentials mutates by any path (toolbar Select all, Clear, bulk delete, etc.).
     // Re-sync every realized CheckBox so the visual matches the VM source of truth.
     private void OnSelectedCredentialsChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
