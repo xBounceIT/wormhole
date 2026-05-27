@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Threading;
@@ -29,7 +30,9 @@ public class RdpSessionViewModelTests
         Assert.Null(vm.ErrorMessage);
         Assert.False(vm.IsConnecting);
         Assert.False(vm.IsConnected);
+        Assert.True(vm.IsDisconnected);
         Assert.False(vm.IsFailed);
+        Assert.False(vm.CanDisconnect);
     }
 
     [Fact]
@@ -78,55 +81,109 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
-    public void LogonError_PreAuthFailed_SetsCredentialsFailureFlag()
+    public void LogonError_BadPassword_WaitsForDisconnectThenMarksCredentialFailure()
     {
-        // Per IMsTscAxEvents.OnLogonError docs, -3 = pre-authentication failed → the user
-        // should be prompted to re-enter credentials on retry.
+        // Per IMsTscAxEvents.OnLogonError docs, 0 = bad password. The event itself is
+        // not terminal; the VM records it and waits for OnDisconnected to decide state.
         var (vm, _, _, _, _) = CreateVm();
         vm.Initialize(MakeProfile());
         var fake = new FakeRdpSession();
-        vm.AttachConnectedSessionForTesting(fake);
+        vm.AttachConnectedSessionForTesting(fake, hasLoggedOn: false);
 
-        fake.RaiseLogonError(-3);
+        fake.RaiseLogonError(0);
+
+        Assert.Equal(SessionStatus.Connected, vm.Status);
+        Assert.False(fake.Disposed);
+
+        fake.RaiseDisconnected(new RdpDisconnectInfo(2055, 0, "The logon credentials are not valid.", IsClean: false));
 
         Assert.Equal(SessionStatus.Failed, vm.Status);
         Assert.True(vm.FailedDueToCredentials);
-        Assert.Contains("Pre-authentication failed", vm.ErrorMessage);
+        Assert.Equal("The logon credentials are not valid.", vm.ErrorMessage);
     }
 
     [Fact]
-    public void LogonError_UserCancelledCredentialsDialog_SilentDisconnect()
+    public void LogonError_ContinueLogon_DoesNotDisconnect()
     {
-        // -2 = user dismissed the OCX's credentials dialog. That's a user action, not an
-        // auth failure — the VM should transition to Disconnected without surfacing the
-        // failure overlay.
+        // -2 = ARBITRATION_CODE_CONTINUE_LOGON. This is a normal Winlogon notification,
+        // not cancellation, so the VM must leave the native RDP surface alive.
         var (vm, _, _, _, _) = CreateVm();
         vm.Initialize(MakeProfile());
         var fake = new FakeRdpSession();
-        vm.AttachConnectedSessionForTesting(fake);
+        vm.AttachConnectedSessionForTesting(fake, hasLoggedOn: false);
 
         fake.RaiseLogonError(-2);
 
-        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.Equal(SessionStatus.Connected, vm.Status);
         Assert.False(vm.FailedDueToCredentials);
         Assert.Null(vm.ErrorMessage);
+        Assert.False(fake.Disposed);
     }
 
     [Fact]
-    public void LogonError_InformationDialog_DoesNotMarkCredentialFailure()
+    public void LogonError_InformationDialog_DoesNotTearDown()
     {
-        // -5 = informational dialog displayed (e.g. "Lock Workstation Failed"). Not an auth
-        // problem; surface the message but don't prompt for credentials on retry.
+        // 3 = LOGON_WARNING. The client may show a dialog; it is not by itself terminal.
         var (vm, _, _, _, _) = CreateVm();
         vm.Initialize(MakeProfile());
         var fake = new FakeRdpSession();
-        vm.AttachConnectedSessionForTesting(fake);
+        vm.AttachConnectedSessionForTesting(fake, hasLoggedOn: false);
 
-        fake.RaiseLogonError(-5);
+        fake.RaiseLogonError(3);
+
+        Assert.Equal(SessionStatus.Connected, vm.Status);
+        Assert.False(vm.FailedDueToCredentials);
+        Assert.Null(vm.ErrorMessage);
+        Assert.False(fake.Disposed);
+    }
+
+    [Fact]
+    public void Disconnected_CleanCodeBeforeLogin_TransitionsToFailed()
+    {
+        var (vm, _, _, _, _) = CreateVm();
+        vm.Initialize(MakeProfile());
+        var fake = new FakeRdpSession();
+        vm.AttachConnectedSessionForTesting(fake, hasLoggedOn: false);
+
+        fake.RaiseDisconnected(new RdpDisconnectInfo(2, 0, "The server closed the pre-login session.", IsClean: true));
 
         Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.Equal("The server closed the pre-login session.", vm.ErrorMessage);
         Assert.False(vm.FailedDueToCredentials);
-        Assert.Contains("information dialog", vm.ErrorMessage);
+    }
+
+    [Fact]
+    public void Disconnected_CredentialFaultWithoutLogonError_ForcesCredentialRetry()
+    {
+        // Some NLA/CredSSP failures arrive as OnDisconnected codes without a preceding
+        // OnLogonError. The VM still has to flag credentials so Retry prompts instead of
+        // replaying the same saved bad password.
+        var (vm, _, _, _, _) = CreateVm();
+        vm.Initialize(MakeProfile());
+        var fake = new FakeRdpSession();
+        vm.AttachConnectedSessionForTesting(fake, hasLoggedOn: false);
+
+        fake.RaiseDisconnected(new RdpDisconnectInfo(2055, 0, "Login failed.", IsClean: false));
+
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.True(vm.FailedDueToCredentials);
+        Assert.Equal("Login failed.", vm.ErrorMessage);
+    }
+
+    [Fact]
+    public void LoginComplete_MarksSessionLoggedOn_ForCleanDisconnectClassification()
+    {
+        var (vm, _, _, _, _) = CreateVm();
+        vm.Initialize(MakeProfile());
+        var fake = new FakeRdpSession();
+        vm.AttachConnectedSessionForTesting(fake, hasLoggedOn: false);
+
+        fake.RaiseLoginComplete();
+        fake.RaiseDisconnected(new RdpDisconnectInfo(2, 0, "User-initiated disconnect.", IsClean: true));
+
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.Null(vm.ErrorMessage);
+        Assert.False(vm.FailedDueToCredentials);
     }
 
     [Fact]
@@ -160,15 +217,15 @@ public class RdpSessionViewModelTests
     [Fact]
     public void Connected_PushesWin32FocusIntoActiveXHwnd()
     {
-        // First-keystroke-dropped fix: when the OCX fires OnLoginComplete (mapped to
-        // IRdpSession.Connected) the VM must call _session.Focus() so the embedded ActiveX
-        // HWND receives keyboard focus. Without this the user has to click the RDP surface
-        // before the first keystroke (e.g. into the Windows logon screen) is captured.
+        // First-keystroke-dropped fix: when the OCX fires OnConnected, the VM must call
+        // _session.Focus() so the embedded ActiveX HWND receives keyboard focus. Without
+        // this the user has to click the RDP surface before the first keystroke (e.g. into
+        // the Windows logon screen) is captured.
         var (vm, _, _, _, _) = CreateVm();
         vm.Initialize(MakeProfile());
         var fake = new FakeRdpSession();
         vm.AttachConnectedSessionForTesting(fake);
-        // Attach itself doesn't push focus — it's the OCX's OnLoginComplete that does.
+        // Attach itself doesn't push focus — it's the OCX's OnConnected that does.
         Assert.Equal(0, fake.FocusCount);
 
         fake.RaiseConnected();
@@ -214,6 +271,36 @@ public class RdpSessionViewModelTests
         await vm.AttachAsync(IntPtr.Zero, HostBounds.Empty);
 
         Assert.Equal(beforeRebind + 1, fake.FocusCount);
+    }
+
+    [Fact]
+    public async Task AttachAsync_RebindSetBoundsThrows_SurfacesFailure()
+    {
+        var (vm, _, _, _, _) = CreateVm();
+        vm.Initialize(MakeProfile());
+        var fake = new FakeRdpSession { ThrowOnSetBounds = true };
+        vm.AttachConnectedSessionForTesting(fake);
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.Contains("simulated SetBounds failure", vm.ErrorMessage);
+        Assert.True(fake.Disposed);
+    }
+
+    [Fact]
+    public void SetBounds_WhenLiveSessionResizeThrows_SurfacesFailure()
+    {
+        var (vm, _, _, _, _) = CreateVm();
+        vm.Initialize(MakeProfile());
+        var fake = new FakeRdpSession { ThrowOnSetBounds = true };
+        vm.AttachConnectedSessionForTesting(fake);
+
+        vm.SetBounds(HostBounds.Seed);
+
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.Contains("simulated SetBounds failure", vm.ErrorMessage);
+        Assert.True(fake.Disposed);
     }
 
     [Fact]
@@ -359,10 +446,11 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
-    public async Task ShouldUseExternalClient_CredentialLookupThrows_FailsSafeToEmbedded()
+    public async Task ShouldUseExternalClient_CredentialLookupThrows_FailsSafeToExternal()
     {
-        // A repository hiccup must surface as embedded-routing (per the implementation's
-        // documented contract). The user can still manually set the flag if they hit issues.
+        // A repository hiccup must not silently route to embedded for a credential that may
+        // be Azure AD-backed; embedded mstscax can crash the process on that path. Prefer
+        // mstsc.exe (or the tunnel fail-closed guard) until the identity can be inspected.
         var vm = CreateVmWith(new ThrowingCredentialRepository());
         var profile = MakeProfile() with
         {
@@ -370,7 +458,25 @@ public class RdpSessionViewModelTests
             CredentialId = Guid.NewGuid(),
         };
 
-        Assert.False(await vm.ShouldUseExternalClientAsync(profile));
+        Assert.True(await vm.ShouldUseExternalClientAsync(profile));
+    }
+
+    [Fact]
+    public async Task AttachAsync_TunnelEnabled_CredentialLookupThrows_FailsClosedBeforeEmbedded()
+    {
+        var (vm, svc, _, _, _) = CreateVm(credentialRepository: new ThrowingCredentialRepository());
+        vm.Initialize(MakeProfile() with
+        {
+            CredentialId = Guid.NewGuid(),
+            TunnelEnabled = true,
+            TunnelConfigId = Guid.NewGuid(),
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.Contains("external Remote Desktop client cannot be used", vm.ErrorMessage);
+        Assert.Equal(0, svc.ConnectCount);
     }
 
     [Fact]
@@ -390,6 +496,163 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public async Task DisconnectAsync_DuringInitialExternalRoutingDecision_CancelsStaleConnect()
+    {
+        var credId = Guid.NewGuid();
+        var repo = new BlockingCredentialRepository(new CredentialProfile
+        {
+            Id = credId,
+            Name = "aad",
+            Username = "alice",
+            Domain = "AzureAD",
+            Protocol = ProtocolType.Rdp,
+        });
+        var (vm, svc, _, _, _) = CreateVm(credentialRepository: repo);
+        var launchCount = 0;
+        vm.ExternalProcessLauncher = _ =>
+        {
+            launchCount++;
+            return Process.GetCurrentProcess();
+        };
+        vm.Initialize(MakeProfile() with { CredentialId = credId, RdpUseExternalClient = false });
+
+        var attachTask = vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+        await repo.GetByIdStarted.Task;
+
+        Assert.Equal(SessionStatus.Connecting, vm.Status);
+        Assert.True(vm.CanDisconnect);
+        Assert.False(vm.RetryCommand.CanExecute(null));
+
+        await vm.DisconnectAsync();
+        Assert.False(vm.CanDisconnect);
+        Assert.False(vm.RetryCommand.CanExecute(null));
+
+        repo.ReleaseGetById.SetResult(null);
+        await attachTask;
+
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.False(vm.IsExternalClientActive);
+        Assert.False(vm.CanDisconnect);
+        Assert.True(vm.RetryCommand.CanExecute(null));
+        Assert.Equal(0, launchCount);
+        Assert.Equal(0, svc.ConnectCount);
+    }
+
+    [Fact]
+    public async Task UseExternalClient_DuringInitialExternalRoutingDecision_DoesNotDoubleLaunch()
+    {
+        var credId = Guid.NewGuid();
+        var repo = new BlockingCredentialRepository(new CredentialProfile
+        {
+            Id = credId,
+            Name = "aad",
+            Username = "alice",
+            Domain = "AzureAD",
+            Protocol = ProtocolType.Rdp,
+        });
+        var (vm, svc, _, _, _) = CreateVm(credentialRepository: repo);
+        var launchCount = 0;
+        vm.ExternalProcessLauncher = _ =>
+        {
+            launchCount++;
+            return Process.GetCurrentProcess();
+        };
+        vm.Initialize(MakeProfile() with { CredentialId = credId, RdpUseExternalClient = false });
+
+        var attachTask = vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+        await repo.GetByIdStarted.Task;
+
+        await vm.UseExternalClient();
+        repo.ReleaseGetById.SetResult(null);
+        await attachTask;
+
+        Assert.Equal(SessionStatus.Connected, vm.Status);
+        Assert.True(vm.IsExternalClientActive);
+        Assert.Equal(1, launchCount);
+        Assert.Equal(0, svc.ConnectCount);
+    }
+
+    [Fact]
+    public async Task AttachAsync_ExternalClientLaunch_ShowsTrackedExternalState()
+    {
+        var (vm, svc, _, _, _) = CreateVm();
+        var launchCount = 0;
+        vm.ExternalProcessLauncher = _ =>
+        {
+            launchCount++;
+            return Process.GetCurrentProcess();
+        };
+        vm.Initialize(MakeProfile() with { RdpUseExternalClient = true });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(SessionStatus.Connected, vm.Status);
+        Assert.True(vm.IsExternalClientActive);
+        Assert.Contains("(external)", vm.Title);
+        Assert.Equal(1, launchCount);
+        Assert.Equal(0, svc.ConnectCount);
+
+        await vm.DisconnectAsync();
+
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.False(vm.IsExternalClientActive);
+        Assert.Equal("rdp-test", vm.Title);
+    }
+
+    [Fact]
+    public async Task AttachAsync_ExternalClientLaunch_UsesArgumentListAndBracketsIpv6()
+    {
+        var (vm, _, _, _, _) = CreateVm();
+        ProcessStartInfo? startInfo = null;
+        vm.ExternalProcessLauncher = psi =>
+        {
+            startInfo = psi;
+            return Process.GetCurrentProcess();
+        };
+        vm.Initialize(MakeProfile() with
+        {
+            RdpUseExternalClient = true,
+            Host = "2001:db8::10",
+            Port = 3390,
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.NotNull(startInfo);
+        Assert.Empty(startInfo.Arguments);
+        Assert.Single(startInfo.ArgumentList);
+        Assert.Equal("/v:[2001:db8::10]:3390", startInfo.ArgumentList[0]);
+
+        await vm.DisconnectAsync();
+    }
+
+    [Fact]
+    public async Task AttachAsync_ExternalClientExitsImmediately_DoesNotLeavePhantomExternalState()
+    {
+        var (vm, svc, _, _, _) = CreateVm();
+        vm.ExternalProcessLauncher = _ =>
+        {
+            var proc = Process.Start(new ProcessStartInfo("cmd.exe", "/c exit 0")
+            {
+                CreateNoWindow = true,
+                UseShellExecute = false,
+            });
+            Assert.NotNull(proc);
+            proc.WaitForExit();
+            return proc;
+        };
+        vm.Initialize(MakeProfile() with { RdpUseExternalClient = true });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.False(vm.IsExternalClientActive);
+        Assert.Null(vm.ErrorMessage);
+        Assert.Equal(0, svc.ConnectCount);
+    }
+
+    [Fact]
     public void CanUseExternalClient_IsFalseForTunneledProfiles()
     {
         var (vm, _, _, _, _) = CreateVm();
@@ -398,6 +661,37 @@ public class RdpSessionViewModelTests
 
         Assert.False(vm.CanUseExternalClient);
         Assert.False(vm.UseExternalClientCommand.CanExecute(null));
+    }
+
+    [Fact]
+    public async Task ExternalClientActive_DisablesDuplicateLaunchCommands()
+    {
+        var (vm, svc, _, _, _) = CreateVm();
+        var launchCount = 0;
+        vm.ExternalProcessLauncher = _ =>
+        {
+            launchCount++;
+            return Process.GetCurrentProcess();
+        };
+        vm.Initialize(MakeProfile() with { RdpUseExternalClient = true });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(SessionStatus.Connected, vm.Status);
+        Assert.True(vm.IsExternalClientActive);
+        Assert.True(vm.CanDisconnect);
+        Assert.False(vm.CanUseExternalClient);
+        Assert.False(vm.UseExternalClientCommand.CanExecute(null));
+        Assert.False(vm.RetryCommand.CanExecute(null));
+
+        await vm.UseExternalClient();
+        await vm.RetryAsync();
+
+        Assert.Equal(1, launchCount);
+        Assert.Equal(0, svc.ConnectCount);
+        Assert.Equal(SessionStatus.Connected, vm.Status);
+        Assert.True(vm.CanDisconnect);
+        Assert.True(vm.IsExternalClientActive);
     }
 
     [Fact]
@@ -452,6 +746,38 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public async Task AttachAsync_AfterPromptCancel_DoesNotAutoReconnectOnViewReload()
+    {
+        var (vm, svc, _, dlg, _) = CreateVm();
+        dlg.CredentialsPromptResult = null;
+        vm.Initialize(MakeProfile() with { Username = null });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.Equal(1, dlg.CredentialsPromptCount);
+        Assert.Equal(0, svc.ConnectCount);
+    }
+
+    [Fact]
+    public async Task AttachAsync_AfterEmbeddedFailure_DoesNotAutoRetryOnViewReload()
+    {
+        var (vm, svc, _, dlg, _) = CreateVm();
+        dlg.PasswordPromptResult = "password";
+        var session = new FakeRdpSession();
+        svc.NextSession = session;
+        vm.Initialize(MakeProfile());
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+        session.RaiseDisconnected(new RdpDisconnectInfo(516, 0, "Could not reach the server.", IsClean: false));
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.Equal(1, svc.ConnectCount);
+    }
+
+    [Fact]
     public async Task AttachAsync_PromptedUsernameIsAzureAd_TunnelEnabled_FailsClosedAtExternalClientGuard()
     {
         // The external-client guard at the top of ConnectAsync runs BEFORE the credentials
@@ -479,6 +805,24 @@ public class RdpSessionViewModelTests
         Assert.Equal(0, svc.ConnectCount);
         Assert.Equal(0, provider.EstablishCount);
         Assert.Equal(1, dlg.CredentialsPromptCount);
+    }
+
+    [Fact]
+    public async Task AttachAsync_PromptedUsernameIsAzureAd_ClearsEmbeddedCrashSentinelBeforeExternalLaunch()
+    {
+        var sentinel = new FakeRdpCrashSentinelService();
+        var (vm, svc, _, dlg, _) = CreateVm(sentinel: sentinel);
+        dlg.CredentialsPromptResult = ("AzureAD\\alice@tenant.com", "pwd");
+        vm.ExternalProcessLauncher = _ => null;
+        vm.Initialize(MakeProfile() with { Username = null });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Single(sentinel.Marks);
+        Assert.Equal(1, sentinel.ClearCount);
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.False(vm.IsExternalClientActive);
+        Assert.Equal(0, svc.ConnectCount);
     }
 
     [Fact]
@@ -798,6 +1142,66 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public async Task AttachAsync_TunnelEnabled_WarnServerAuthenticationIsAllowed()
+    {
+        var configId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        var provider = new FakeTunnelProvider();
+        tunnelRepo.Configs[configId] = new TunnelConfig { Id = configId, Name = "corp", Kind = TunnelKind.WireGuard };
+
+        var (vm, svc, creds, dlg, _) = CreateVm(
+            tunnelRepo: tunnelRepo,
+            tunnelProviders: new ITunnelProvider[] { provider });
+        creds.TunnelConfigs[configId] = new byte[] { 1, 2, 3 };
+        dlg.PasswordPromptResult = "password";
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with
+        {
+            TunnelEnabled = true,
+            TunnelConfigId = configId,
+            RdpServerAuthentication = 2,
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(1, provider.EstablishCount);
+        Assert.Equal(1, svc.ConnectCount);
+        Assert.Equal(2, svc.LastProfile?.RdpServerAuthentication);
+    }
+
+    [Fact]
+    public async Task Disconnected_WithTunnel_ShowsFailureBeforeTunnelDisposeCompletes()
+    {
+        var configId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        var instance = new FakeTunnelInstance
+        {
+            ReleaseDispose = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+        var provider = new FakeTunnelProvider(instance);
+        tunnelRepo.Configs[configId] = new TunnelConfig { Id = configId, Name = "corp", Kind = TunnelKind.WireGuard };
+
+        var (vm, svc, creds, dlg, _) = CreateVm(
+            tunnelRepo: tunnelRepo,
+            tunnelProviders: new ITunnelProvider[] { provider });
+        creds.TunnelConfigs[configId] = new byte[] { 1, 2, 3 };
+        dlg.PasswordPromptResult = "password";
+        var session = new FakeRdpSession();
+        svc.NextSession = session;
+        vm.Initialize(MakeProfile() with { TunnelEnabled = true, TunnelConfigId = configId });
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        session.RaiseDisconnected(new RdpDisconnectInfo(516, 0, "Could not reach the server.", IsClean: false));
+        await instance.DisposeStarted.Task;
+
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.Equal("Could not reach the server.", vm.ErrorMessage);
+
+        instance.ReleaseDispose.SetResult(null);
+    }
+
+    [Fact]
     public async Task DisconnectAsync_DuringTunnelEstablish_DisposesLateTunnelAndStaysDisconnected()
     {
         var configId = Guid.NewGuid();
@@ -857,6 +1261,38 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public async Task DisconnectAsync_WithTunnel_ShowsDisconnectedBeforeTunnelDisposeCompletes()
+    {
+        var configId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        var instance = new FakeTunnelInstance
+        {
+            ReleaseDispose = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously),
+        };
+        var provider = new FakeTunnelProvider(instance);
+        tunnelRepo.Configs[configId] = new TunnelConfig { Id = configId, Name = "corp", Kind = TunnelKind.WireGuard };
+
+        var (vm, svc, creds, dlg, _) = CreateVm(
+            tunnelRepo: tunnelRepo,
+            tunnelProviders: new ITunnelProvider[] { provider });
+        creds.TunnelConfigs[configId] = new byte[] { 1, 2, 3 };
+        dlg.PasswordPromptResult = "password";
+        svc.NextSession = new FakeRdpSession();
+        vm.Initialize(MakeProfile() with { TunnelEnabled = true, TunnelConfigId = configId });
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+        vm.Status = SessionStatus.Connected;
+
+        var disconnectTask = vm.DisconnectAsync();
+        await instance.DisposeStarted.Task;
+
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.Null(vm.ErrorMessage);
+
+        instance.ReleaseDispose.SetResult(null);
+        await disconnectTask;
+    }
+
+    [Fact]
     public async Task DisconnectAsync_DuringRdpServiceConnect_DisposesLateSessionAndStaysDisconnected()
     {
         var (vm, svc, _, dlg, _) = CreateVm();
@@ -874,6 +1310,63 @@ public class RdpSessionViewModelTests
         await attachTask;
 
         Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.True(session.Disposed);
+    }
+
+    [Fact]
+    public async Task AttachAsync_EarlySynchronousDisconnect_DisposesAssignedSessionAndShowsFailure()
+    {
+        var (vm, svc, _, dlg, _) = CreateVm();
+        dlg.PasswordPromptResult = "password";
+        var session = new FakeRdpSession();
+        svc.NextSession = session;
+        svc.AfterSessionReady = s =>
+            ((FakeRdpSession)s).RaiseDisconnected(new RdpDisconnectInfo(516, 0, "Could not reach the server.", IsClean: false));
+        vm.Initialize(MakeProfile());
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.Equal("Could not reach the server.", vm.ErrorMessage);
+        Assert.True(session.Disposed);
+    }
+
+    [Fact]
+    public async Task AttachAsync_OnConnectedBeforeLogin_DoesNotClearCrashSentinelUntilLoginComplete()
+    {
+        var sentinel = new FakeRdpCrashSentinelService();
+        var (vm, svc, _, dlg, _) = CreateVm(sentinel: sentinel);
+        dlg.PasswordPromptResult = "password";
+        var session = new FakeRdpSession();
+        svc.NextSession = session;
+        svc.AfterSessionReady = s => ((FakeRdpSession)s).RaiseConnected();
+        vm.Initialize(MakeProfile());
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(SessionStatus.Connected, vm.Status);
+        Assert.Single(sentinel.Marks);
+        Assert.Equal(0, sentinel.ClearCount);
+
+        session.RaiseLoginComplete();
+
+        Assert.Equal(1, sentinel.ClearCount);
+    }
+
+    [Fact]
+    public async Task AttachAsync_ShowThrowsAfterOnConnected_SurfacesFailure()
+    {
+        var (vm, svc, _, dlg, _) = CreateVm();
+        dlg.PasswordPromptResult = "password";
+        var session = new FakeRdpSession { ThrowOnShow = true };
+        svc.NextSession = session;
+        svc.AfterSessionReady = s => ((FakeRdpSession)s).RaiseConnected();
+        vm.Initialize(MakeProfile());
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.Contains("simulated Show failure", vm.ErrorMessage);
         Assert.True(session.Disposed);
     }
 
@@ -970,6 +1463,7 @@ public class RdpSessionViewModelTests
         public int ConnectCount { get; private set; }
         public TaskCompletionSource<object?> ConnectStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<object?>? ReleaseConnect { get; set; }
+        public Action<IRdpSession>? AfterSessionReady { get; set; }
 
         public async Task<IRdpSession> ConnectAsync(
             ConnectionProfile profile,
@@ -986,6 +1480,7 @@ public class RdpSessionViewModelTests
             if (NextSession is null) throw new InvalidOperationException("FakeRdpSessionService.NextSession not assigned.");
             // Mirror the real service: subscribe-via-callback runs before the handshake starts.
             onSessionReady?.Invoke(NextSession);
+            AfterSessionReady?.Invoke(NextSession);
             ConnectStarted.TrySetResult(null);
             if (ReleaseConnect is not null)
             {
@@ -1039,6 +1534,8 @@ public class RdpSessionViewModelTests
         public int DisposeCount { get; private set; }
         public TaskCompletionSource<object?> BindStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<object?>? ReleaseBind { get; set; }
+        public TaskCompletionSource<object?> DisposeStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<object?>? ReleaseDispose { get; set; }
         public TunnelState State { get; private set; } = TunnelState.Up;
         public event EventHandler<TunnelStateChangedEventArgs>? StateChanged;
         public IPEndPoint? Socks5Endpoint => null;
@@ -1058,12 +1555,16 @@ public class RdpSessionViewModelTests
             return BoundPort;
         }
 
-        public ValueTask DisposeAsync()
+        public async ValueTask DisposeAsync()
         {
             DisposeCount++;
             State = TunnelState.Closed;
             StateChanged?.Invoke(this, new TunnelStateChangedEventArgs(TunnelState.Closed));
-            return ValueTask.CompletedTask;
+            DisposeStarted.TrySetResult(null);
+            if (ReleaseDispose is not null)
+            {
+                await ReleaseDispose.Task.ConfigureAwait(false);
+            }
         }
     }
 
@@ -1096,6 +1597,30 @@ public class RdpSessionViewModelTests
             => throw new InvalidOperationException("simulated repository fault");
         public Task<CredentialProfile?> GetByIdAsync(System.Guid id, CancellationToken ct = default)
             => throw new InvalidOperationException("simulated repository fault");
+        public Task AddAsync(CredentialProfile profile, CancellationToken ct = default) => Task.CompletedTask;
+        public Task UpdateAsync(CredentialProfile profile, CancellationToken ct = default) => Task.CompletedTask;
+        public Task DeleteAsync(System.Guid id, CancellationToken ct = default) => Task.CompletedTask;
+    }
+
+    private sealed class BlockingCredentialRepository : Wormhole.Data.Repositories.ICredentialRepository
+    {
+        private readonly CredentialProfile _credential;
+
+        public BlockingCredentialRepository(CredentialProfile credential) => _credential = credential;
+
+        public TaskCompletionSource<object?> GetByIdStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<object?> ReleaseGetById { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<System.Collections.Generic.IReadOnlyList<CredentialProfile>> GetAllAsync(CancellationToken ct = default)
+            => Task.FromResult<System.Collections.Generic.IReadOnlyList<CredentialProfile>>(new[] { _credential });
+
+        public async Task<CredentialProfile?> GetByIdAsync(System.Guid id, CancellationToken ct = default)
+        {
+            GetByIdStarted.TrySetResult(null);
+            await ReleaseGetById.Task.ConfigureAwait(false);
+            return id == _credential.Id ? _credential : null;
+        }
+
         public Task AddAsync(CredentialProfile profile, CancellationToken ct = default) => Task.CompletedTask;
         public Task UpdateAsync(CredentialProfile profile, CancellationToken ct = default) => Task.CompletedTask;
         public Task DeleteAsync(System.Guid id, CancellationToken ct = default) => Task.CompletedTask;

@@ -8,9 +8,10 @@ public interface IRdpSessionService
     /// Open an RDP session. The optional <paramref name="onSessionReady"/> callback runs
     /// after the underlying session is constructed and its event surface is fully wired,
     /// but BEFORE the ActiveX handshake actually starts — callers MUST subscribe to
-    /// <see cref="IRdpSession.Connected"/> / <see cref="IRdpSession.Disconnected"/> /
-    /// <see cref="IRdpSession.LogonError"/> / <see cref="IRdpSession.FatalError"/> /
-    /// <see cref="IRdpSession.AutoReconnecting"/> there if they care about early events.
+    /// <see cref="IRdpSession.Connected"/> / <see cref="IRdpSession.LoginComplete"/> /
+    /// <see cref="IRdpSession.Disconnected"/> / <see cref="IRdpSession.LogonError"/> /
+    /// <see cref="IRdpSession.FatalError"/> / <see cref="IRdpSession.AutoReconnecting"/>
+    /// there if they care about early events.
     /// Subscribing only after the returned Task completes is racy: an immediate
     /// authentication reject during the synchronous Connect() inside Start() would fire
     /// the events with no subscribers and the caller would never see the terminal
@@ -34,8 +35,11 @@ public interface IRdpSession : IDisposable
     /// <summary>True once OnLoginComplete fires. False during the TLS+NLA handshake and after disconnect.</summary>
     bool IsLoggedOn { get; }
 
-    /// <summary>Raised after OnLoginComplete — credentials accepted, shell is starting.</summary>
+    /// <summary>Raised on OnConnected — server transport is established and the native surface is ready.</summary>
     event EventHandler? Connected;
+
+    /// <summary>Raised after OnLoginComplete — credentials accepted, shell is starting.</summary>
+    event EventHandler? LoginComplete;
 
     /// <summary>Raised on OnDisconnected. Carries a reason code + human description from GetErrorDescription.</summary>
     event EventHandler<RdpDisconnectInfo>? Disconnected;
@@ -67,8 +71,8 @@ public interface IRdpSession : IDisposable
 
     /// <summary>
     /// Push Win32 keyboard focus into the embedded RDP ActiveX child window. Called when
-    /// the session reaches Connected so the first keystroke into the remote logon screen
-    /// is captured without an extra click. Idempotent and safe on an already-focused HWND;
+    /// the native surface reaches Connected so the first keystroke into the remote logon
+    /// screen is captured without an extra click. Idempotent and safe on an already-focused HWND;
     /// no-ops if the host or OCX HWND isn't realised yet.
     /// </summary>
     void Focus();

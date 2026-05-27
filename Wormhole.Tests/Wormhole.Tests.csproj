@@ -122,6 +122,7 @@
     <Compile Include="..\Services\IRdpSessionService.cs" Link="Services\IRdpSessionService.cs" />
     <Compile Include="..\Services\Rdp\IRdpCrashSentinelService.cs" Link="Services\Rdp\IRdpCrashSentinelService.cs" />
     <Compile Include="..\Services\Rdp\RdpCrashSentinelService.cs" Link="Services\Rdp\RdpCrashSentinelService.cs" />
+    <Compile Include="..\Interop\Rdp\MsTscAxEventsSink.cs" Link="Interop\Rdp\MsTscAxEventsSink.cs" />
     <Compile Include="..\Interop\Terminal\TerminalBridge.cs" Link="Interop\Terminal\TerminalBridge.cs" />
     <Compile Include="..\Interop\Terminal\TerminalReplayBuffer.cs" Link="Interop\Terminal\TerminalReplayBuffer.cs" />
     <Compile Include="..\Interop\Terminal\TerminalOutputCoalescer.cs" Link="Interop\Terminal\TerminalOutputCoalescer.cs" />

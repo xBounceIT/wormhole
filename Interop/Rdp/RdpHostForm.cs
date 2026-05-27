@@ -27,6 +27,7 @@ internal sealed class RdpHostForm : FormsForm
     private bool _connectStarted;
 
     public event Action? Connected;
+    public event Action? LoginComplete;
     public event Action<int>? Disconnected;
     public event Action<int>? FatalError;
     public event Action<int>? LogonError;
@@ -129,8 +130,8 @@ internal sealed class RdpHostForm : FormsForm
 
         _ax.Invalidate();
         Invalidate(invalidateChildren: true);
-        EnsureVisibleAndRedraw("bounds");
-        return childMoved;
+        var visible = EnsureVisibleAndRedraw("bounds");
+        return childMoved && visible;
     }
 
     internal void LogWindowDiagnostics(ILogger logger, string context)
@@ -206,9 +207,9 @@ internal sealed class RdpHostForm : FormsForm
         // effectively universal on any supported Windows mstscax build.
         adv.EnableCredSspSupport = true;
 
-        // mstsc-style: pass password through ClearTextPassword. The OCX consumes it during
-        // Connect() and then we proactively clear it in Start() so the plaintext doesn't
-        // linger in OCX-owned memory longer than necessary.
+        // mstsc-style: pass password through ClearTextPassword. Connect() is asynchronous
+        // and the OCX may still need the value after Start() returns, including for its own
+        // reconnect flow, so do not mutate it after the handshake starts.
         if (password is not null) adv.ClearTextPassword = password;
         ApplyPromptSuppression(
             ocx,
@@ -245,12 +246,11 @@ internal sealed class RdpHostForm : FormsForm
         TrySetOptional(() => adv.NetworkConnectionType = (uint)profile.RdpConnectionSpeed);
         TrySetOptional(() => adv.EnableAutoReconnect = profile.RdpAutoReconnect);
         // AuthenticationLevel stays loud (not TrySetOptional) — it controls server-cert
-        // validation enforcement (0=Warn / 1=Require / 2=DoNotConnect) and the OCX default
-        // is the *weakest* value (0). Silently swallowing this setter when the OCX doesn't
-        // expose it would downgrade a user who picked Require/DoNotConnect to a vulnerable
-        // posture without their knowledge. The property is on IMsRdpClientAdvancedSettings5
-        // (RDP 5.1+) and effectively universal; if it ever does fail, the user should see
-        // the error and update their Remote Desktop client rather than connect insecurely.
+        // validation enforcement (0=No server authentication, 1=Require, 2=Warn/prompt).
+        // The OCX default is the weakest value (0), so swallowing a setter failure would
+        // silently downgrade users who chose Require or Warn. The property is on
+        // IMsRdpClientAdvancedSettings4+ and is effectively universal; if it ever does fail,
+        // the user should see the error and update their Remote Desktop client.
         adv.AuthenticationLevel = (uint)profile.RdpServerAuthentication;
 
         // --- Gateway ---
@@ -315,14 +315,15 @@ internal sealed class RdpHostForm : FormsForm
         AttachEventsSink();
     }
 
-    internal void EnsureVisibleAndRedraw(string context)
+    internal bool EnsureVisibleAndRedraw(string context)
     {
         EnsureStaThread();
         var hostHwnd = Hwnd;
-        ForceVisibleTop(hostHwnd, "host", context);
+        var hostVisible = ForceVisibleTop(hostHwnd, "host", context);
+        var axVisible = true;
         if (_ax.IsHandleCreated)
         {
-            ForceVisibleTop(_ax.Handle, "axhost", context);
+            axVisible = ForceVisibleTop(_ax.Handle, "axhost", context);
         }
 
         RequestRedraw(hostHwnd, "host");
@@ -330,6 +331,8 @@ internal sealed class RdpHostForm : FormsForm
         {
             RequestRedraw(_ax.Handle, "axhost");
         }
+
+        return hostVisible && axVisible;
     }
 
     /// <summary>Initiate the RDP handshake. Configure must have been called first.</summary>
@@ -340,14 +343,6 @@ internal sealed class RdpHostForm : FormsForm
         _connectStarted = true;
         dynamic ocx = RequireOcx();
         ocx.Connect();
-        // Clear the plaintext password from the OCX's settings now that Connect() has
-        // consumed it for the authentication handshake. The OCX retains the value for
-        // auto-reconnect, so this is a trade-off: we accept that auto-reconnect of a
-        // dropped session can't replay the password (the user gets the failure overlay
-        // and Retry button instead), in exchange for not leaving the plaintext sitting
-        // in COM-owned memory across the connection's lifetime.
-        try { ocx.AdvancedSettings9.ClearTextPassword = string.Empty; }
-        catch (Exception ex) { _logger?.LogDebug(ex, "Post-Connect ClearTextPassword scrub failed (suppressed)."); }
     }
 
     /// <summary>
@@ -451,8 +446,10 @@ internal sealed class RdpHostForm : FormsForm
             string desc = (string)ocx.GetErrorDescription((uint)code, (uint)extended);
             return (extended, desc);
         }
-        catch (Exception ex) when (ex is COMException or RuntimeBinderException)
+        catch (Exception ex) when (
+            ex is COMException or RuntimeBinderException or InvalidCastException or InvalidOperationException or ObjectDisposedException)
         {
+            _logger?.LogDebug(ex, "RDP disconnect-info lookup failed; using fallback description for reason {Code}.", code);
             return (0, fallback);
         }
     }
@@ -467,18 +464,21 @@ internal sealed class RdpHostForm : FormsForm
         cpc.FindConnectionPoint(ref iid, out _connectionPoint);
         if (_connectionPoint is null) return;
 
-        // Hook each sink event before Advise so initial messages aren't lost. Only
-        // OnLoginComplete (post-auth, shell up) maps to our Connected event — OnConnected
-        // fires after the TLS handshake but before NLA/credential validation, so emitting
-        // it would briefly flip the VM to Connected even when a logon error follows.
+        // Hook each sink event before Advise so initial messages aren't lost. OnConnected
+        // means the native control has established server transport and can own the canvas;
+        // OnLoginComplete is a distinct post-authentication milestone.
+        _sink.Connected += () =>
+        {
+            Connected?.Invoke();
+            _logger?.LogInformation("RDP OnConnected fired.");
+        };
         _sink.LoginComplete += () =>
         {
             // Invoke before logging: MsTscAxEventsSink wraps this lambda in Safe() which
             // catches every exception. If the logger throws (rolling-file lock, disk full,
-            // async sink queue full), a logger-first order would skip Connected?.Invoke()
-            // and leave the VM stranded in Connecting until the ConnectTimeout watchdog
-            // fires "RDP server didn't respond" — even though authentication succeeded.
-            Connected?.Invoke();
+            // async sink queue full), a logger-first order would skip LoginComplete?.Invoke()
+            // and leave the VM without a logged-on marker for later disconnect handling.
+            LoginComplete?.Invoke();
             _logger?.LogInformation("RDP OnLoginComplete fired.");
         };
         _sink.Disconnected += code => Disconnected?.Invoke(code);
@@ -575,9 +575,9 @@ internal sealed class RdpHostForm : FormsForm
         }
     }
 
-    private void ForceVisibleTop(IntPtr hwnd, string label, string context)
+    private bool ForceVisibleTop(IntPtr hwnd, string label, string context)
     {
-        if (hwnd == IntPtr.Zero) return;
+        if (hwnd == IntPtr.Zero) return false;
         Marshal.SetLastSystemError(0);
         if (!Win32Interop.SetWindowPos(
                 hwnd,
@@ -597,7 +597,9 @@ internal sealed class RdpHostForm : FormsForm
                 context,
                 hwnd.ToInt64(),
                 Marshal.GetLastWin32Error());
+            return false;
         }
+        return true;
     }
 
     private void ApplyPromptSuppression(dynamic ocx, dynamic adv, bool hasPassword, IntPtr ownerHwnd, bool hasUsername, bool hasDomain)

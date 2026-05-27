@@ -31,6 +31,10 @@ public sealed class RdpSessionService : IRdpSessionService
         {
             throw new InvalidOperationException("RdpSessionService.ConnectAsync must be invoked on the STA UI thread.");
         }
+        if (ownerHwnd == IntPtr.Zero)
+        {
+            throw new InvalidOperationException("RDP host cannot be embedded because the owner window handle is not available.");
+        }
         cancellationToken.ThrowIfCancellationRequested();
 
         var form = new RdpHostForm(_loggerFactory.CreateLogger<RdpHostForm>());
@@ -159,8 +163,12 @@ public sealed class RdpSessionService : IRdpSessionService
             _logger = logger;
             _form.Connected += () =>
             {
-                _loggedOn = true;
                 Connected?.Invoke(this, EventArgs.Empty);
+            };
+            _form.LoginComplete += () =>
+            {
+                _loggedOn = true;
+                LoginComplete?.Invoke(this, EventArgs.Empty);
             };
             _form.Disconnected += code =>
             {
@@ -187,6 +195,7 @@ public sealed class RdpSessionService : IRdpSessionService
         public bool IsLoggedOn => _loggedOn;
 
         public event EventHandler? Connected;
+        public event EventHandler? LoginComplete;
         public event EventHandler<RdpDisconnectInfo>? Disconnected;
         public event EventHandler<int>? FatalError;
         public event EventHandler<int>? LogonError;
@@ -197,7 +206,11 @@ public sealed class RdpSessionService : IRdpSessionService
         {
             if (bounds.Width < 1 || bounds.Height < 1) return;
             if (bounds == _lastBounds) return;
-            if (!_form.SetHostBounds(bounds.X, bounds.Y, bounds.Width, bounds.Height)) return;
+            if (!_form.SetHostBounds(bounds.X, bounds.Y, bounds.Width, bounds.Height))
+            {
+                throw new InvalidOperationException(
+                    $"RDP host failed to apply bounds x={bounds.X}, y={bounds.Y}, width={bounds.Width}, height={bounds.Height}.");
+            }
             _lastBounds = bounds;
             // Diagnostic: log once per adapter the FIRST real bounds (skipping the (0,0,1,1)
             // Seed placeholder the VM uses before real layout arrives). Set the flag after a
@@ -216,7 +229,10 @@ public sealed class RdpSessionService : IRdpSessionService
         public void Show()
         {
             Win32Interop.ShowWindow(_form.Hwnd, Win32Interop.SW_SHOWNA);
-            _form.EnsureVisibleAndRedraw("show");
+            if (!_form.EnsureVisibleAndRedraw("show"))
+            {
+                throw new InvalidOperationException("RDP host failed to become visible after Show().");
+            }
             // Emit the post-Show diagnostic on every Show() call — not gated. Show() is rare
             // (called from AttachAsync once per attach: cold connect + each rebind after a
             // nav-away). A latched gate would hide exactly the rebind path most likely to

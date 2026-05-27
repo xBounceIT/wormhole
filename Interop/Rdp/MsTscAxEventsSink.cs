@@ -83,7 +83,11 @@ public sealed class MsTscAxEventsSink : IMsTscAxEvents
     private void Safe(string handler, Action invoke)
     {
         try { invoke(); }
-        catch (Exception ex) { _onHandlerFault?.Invoke(handler, ex); }
+        catch (Exception ex)
+        {
+            try { _onHandlerFault?.Invoke(handler, ex); }
+            catch { /* Never let diagnostics failures escape back into COM event dispatch. */ }
+        }
     }
 
     public void OnConnecting() => Safe(nameof(OnConnecting), () => Connecting?.Invoke());
