@@ -129,8 +129,7 @@ internal sealed class RdpHostForm : FormsForm
 
         _ax.Invalidate();
         Invalidate(invalidateChildren: true);
-        RequestRedraw(hostHwnd, "host");
-        RequestRedraw(axHwnd, "axhost");
+        EnsureVisibleAndRedraw("bounds");
         return childMoved;
     }
 
@@ -210,7 +209,14 @@ internal sealed class RdpHostForm : FormsForm
         // mstsc-style: pass password through ClearTextPassword. The OCX consumes it during
         // Connect() and then we proactively clear it in Start() so the plaintext doesn't
         // linger in OCX-owned memory longer than necessary.
-        if (!string.IsNullOrEmpty(password)) adv.ClearTextPassword = password;
+        if (password is not null) adv.ClearTextPassword = password;
+        ApplyPromptSuppression(
+            ocx,
+            adv,
+            hasPassword: password is not null,
+            ownerHwnd: ownerHwnd,
+            hasUsername: !string.IsNullOrEmpty(profile.Username),
+            hasDomain: !string.IsNullOrEmpty(profile.RdpDomain));
 
         TrySetOptional(() => adv.RedirectClipboard = profile.RdpRedirectClipboard);
         TrySetOptional(() => adv.RedirectPrinters = profile.RdpRedirectPrinters);
@@ -307,6 +313,23 @@ internal sealed class RdpHostForm : FormsForm
         // Wire the events sink now so we don't miss an OnConnected that fires immediately
         // after Connect() returns.
         AttachEventsSink();
+    }
+
+    internal void EnsureVisibleAndRedraw(string context)
+    {
+        EnsureStaThread();
+        var hostHwnd = Hwnd;
+        ForceVisibleTop(hostHwnd, "host", context);
+        if (_ax.IsHandleCreated)
+        {
+            ForceVisibleTop(_ax.Handle, "axhost", context);
+        }
+
+        RequestRedraw(hostHwnd, "host");
+        if (_ax.IsHandleCreated)
+        {
+            RequestRedraw(_ax.Handle, "axhost");
+        }
     }
 
     /// <summary>Initiate the RDP handshake. Configure must have been called first.</summary>
@@ -552,6 +575,72 @@ internal sealed class RdpHostForm : FormsForm
         }
     }
 
+    private void ForceVisibleTop(IntPtr hwnd, string label, string context)
+    {
+        if (hwnd == IntPtr.Zero) return;
+        Marshal.SetLastSystemError(0);
+        if (!Win32Interop.SetWindowPos(
+                hwnd,
+                Win32Interop.HWND_TOP,
+                0,
+                0,
+                0,
+                0,
+                Win32Interop.SWP_NOMOVE |
+                Win32Interop.SWP_NOSIZE |
+                Win32Interop.SWP_NOACTIVATE |
+                Win32Interop.SWP_SHOWWINDOW))
+        {
+            _logger?.LogWarning(
+                "RDP {Label} SetWindowPos(show/top) failed during {Context} for HWND 0x{Hwnd:X} (Win32 error {Error}).",
+                label,
+                context,
+                hwnd.ToInt64(),
+                Marshal.GetLastWin32Error());
+        }
+    }
+
+    private void ApplyPromptSuppression(dynamic ocx, dynamic adv, bool hasPassword, IntPtr ownerHwnd, bool hasUsername, bool hasDomain)
+    {
+        if (ownerHwnd != IntPtr.Zero)
+        {
+            TrySetOptionalCredential(() => adv.UIParentWindowHandle = ownerHwnd.ToInt64(), out _);
+        }
+
+        if (!hasPassword)
+        {
+            _logger?.LogInformation(
+                "RDP credential prompt suppression skipped: hasUsername={HasUsername}, hasDomain={HasDomain}, hasPassword={HasPassword}.",
+                hasUsername,
+                hasDomain,
+                false);
+            return;
+        }
+
+        var applied = 0;
+        var failed = 0;
+        if (TrySetOptionalCredential(() => ocx.PromptForCredsOnClient = false, out var promptForCredsOnClient))
+        {
+            if (promptForCredsOnClient) applied++; else failed++;
+        }
+        if (TrySetOptionalCredential(() => ocx.AllowPromptingForCredentials = false, out var allowPrompting))
+        {
+            if (allowPrompting) applied++; else failed++;
+        }
+        if (TrySetOptionalCredential(() => adv.PromptForCredentials = false, out var promptForCredentials))
+        {
+            if (promptForCredentials) applied++; else failed++;
+        }
+
+        _logger?.LogInformation(
+            "RDP credential prompt suppression applied: hasUsername={HasUsername}, hasDomain={HasDomain}, hasPassword={HasPassword}, applied={Applied}, failed={Failed}.",
+            hasUsername,
+            hasDomain,
+            true,
+            applied,
+            failed);
+    }
+
     private static void LogWindowDiagnostics(ILogger logger, string context, string label, IntPtr hwnd)
     {
         if (hwnd == IntPtr.Zero)
@@ -604,6 +693,39 @@ internal sealed class RdpHostForm : FormsForm
         try { set(); }
         catch (RuntimeBinderException) { }
         catch (COMException ex) when (ex.HResult == DISP_E_UNKNOWNNAME || ex.HResult == DISP_E_MEMBERNOTFOUND) { }
+    }
+
+    private static bool TrySetOptionalCredential(Action set, out bool applied)
+    {
+        const int DISP_E_UNKNOWNNAME = unchecked((int)0x80020006);
+        const int DISP_E_MEMBERNOTFOUND = unchecked((int)0x80020003);
+        const int DISP_E_TYPEMISMATCH = unchecked((int)0x80020005);
+        applied = false;
+        try
+        {
+            set();
+            applied = true;
+            return true;
+        }
+        catch (RuntimeBinderException)
+        {
+            return true;
+        }
+        catch (COMException ex) when (
+            ex.HResult == DISP_E_UNKNOWNNAME ||
+            ex.HResult == DISP_E_MEMBERNOTFOUND ||
+            ex.HResult == DISP_E_TYPEMISMATCH)
+        {
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static int NormaliseColorDepth(int requested) =>

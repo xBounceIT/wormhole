@@ -36,6 +36,8 @@ public sealed partial class MainWindow : Window
 
     private OverlappedPresenter? _windowPresenter;
     private OverlappedPresenterState _currentWindowState;
+    private bool _sessionCleanupInProgress;
+    private bool _sessionCleanupComplete;
 
     public ShellViewModel ViewModel { get; }
 
@@ -67,6 +69,7 @@ public sealed partial class MainWindow : Window
         }
 
         SystemBackdrop = new MicaBackdrop { Kind = Microsoft.UI.Composition.SystemBackdrops.MicaKind.Base };
+        AppWindow.Closing += OnAppWindowClosing;
 
         _navigationService.Initialize(ContentFrame);
         _navigationService.Navigate(typeof(SessionsPage));
@@ -93,6 +96,28 @@ public sealed partial class MainWindow : Window
             await Task.Delay(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
             await ViewModel.Update.RunStartupCheckAsync().ConfigureAwait(false);
         });
+    }
+
+    private async void OnAppWindowClosing(AppWindow sender, AppWindowClosingEventArgs args)
+    {
+        if (_sessionCleanupComplete) return;
+
+        args.Cancel = true;
+        if (_sessionCleanupInProgress) return;
+
+        _sessionCleanupInProgress = true;
+        try
+        {
+            await ViewModel.CloseAllSessionsAsync();
+        }
+        finally
+        {
+            _sessionCleanupComplete = true;
+            if (!DispatcherQueue.TryEnqueue(Close))
+            {
+                Close();
+            }
+        }
     }
 
     private void OnFirstActivated(object sender, WindowActivatedEventArgs args)

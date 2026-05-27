@@ -481,6 +481,230 @@ public class RdpSessionViewModelTests
         Assert.Equal(1, dlg.CredentialsPromptCount);
     }
 
+    [Fact]
+    public async Task AttachAsync_SavedCredentialUsernameDomainPassword_ConnectsWithoutPrompt()
+    {
+        var credId = Guid.NewGuid();
+        var credential = new CredentialProfile
+        {
+            Id = credId,
+            Name = "corp-rdp",
+            Username = "svc-rdp",
+            Domain = "CORP",
+            Protocol = ProtocolType.Rdp,
+        };
+        var secrets = new FakeCredentialService(new Dictionary<Guid, string> { [credId] = "saved-secret" });
+        var (vm, svc, _, dlg, _) = CreateVm(
+            credentialRepository: new SingleCredentialRepository(credential),
+            creds: secrets);
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with { Username = null, RdpDomain = null, CredentialId = credId });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(0, dlg.PasswordPromptCount);
+        Assert.Equal(0, dlg.CredentialsPromptCount);
+        Assert.Equal("svc-rdp", svc.LastProfile?.Username);
+        Assert.Equal("CORP", svc.LastProfile?.RdpDomain);
+        Assert.Equal("saved-secret", svc.LastPassword);
+    }
+
+    [Fact]
+    public async Task AttachAsync_ExplicitUsernameAndDomainOverrideCredentialIdentity()
+    {
+        var credId = Guid.NewGuid();
+        var credential = new CredentialProfile
+        {
+            Id = credId,
+            Name = "corp-rdp",
+            Username = "svc-rdp",
+            Domain = "CORP",
+            Protocol = ProtocolType.Rdp,
+        };
+        var secrets = new FakeCredentialService(new Dictionary<Guid, string> { [credId] = "saved-secret" });
+        var (vm, svc, _, _, _) = CreateVm(
+            credentialRepository: new SingleCredentialRepository(credential),
+            creds: secrets);
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with
+        {
+            Username = "local-user",
+            RdpDomain = "LOCAL",
+            CredentialId = credId,
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal("local-user", svc.LastProfile?.Username);
+        Assert.Equal("LOCAL", svc.LastProfile?.RdpDomain);
+        Assert.Equal("saved-secret", svc.LastPassword);
+    }
+
+    [Fact]
+    public async Task AttachAsync_LinkedCredentialDomainUsedWhenProfileDomainBlank()
+    {
+        var credId = Guid.NewGuid();
+        var credential = new CredentialProfile
+        {
+            Id = credId,
+            Name = "corp-rdp",
+            Username = "ignored-by-explicit-profile",
+            Domain = "CORP",
+            Protocol = ProtocolType.Rdp,
+        };
+        var secrets = new FakeCredentialService(new Dictionary<Guid, string> { [credId] = "saved-secret" });
+        var (vm, svc, _, _, _) = CreateVm(
+            credentialRepository: new SingleCredentialRepository(credential),
+            creds: secrets);
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with
+        {
+            Username = "node-user",
+            RdpDomain = null,
+            CredentialId = credId,
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal("node-user", svc.LastProfile?.Username);
+        Assert.Equal("CORP", svc.LastProfile?.RdpDomain);
+    }
+
+    [Fact]
+    public async Task AttachAsync_LinkedCredentialDomainPreservesDomainSlashUsername()
+    {
+        var credId = Guid.NewGuid();
+        var credential = new CredentialProfile
+        {
+            Id = credId,
+            Name = "corp-rdp",
+            Username = "OTHER\\svc-rdp",
+            Domain = "CORP",
+            Protocol = ProtocolType.Rdp,
+        };
+        var secrets = new FakeCredentialService(new Dictionary<Guid, string> { [credId] = "saved-secret" });
+        var (vm, svc, _, _, _) = CreateVm(
+            credentialRepository: new SingleCredentialRepository(credential),
+            creds: secrets);
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with { Username = null, RdpDomain = null, CredentialId = credId });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal("OTHER\\svc-rdp", svc.LastProfile?.Username);
+        Assert.Equal("CORP", svc.LastProfile?.RdpDomain);
+    }
+
+    [Fact]
+    public async Task AttachAsync_EmptySavedPassword_IsPassedWithoutPrompt()
+    {
+        var credId = Guid.NewGuid();
+        var credential = new CredentialProfile
+        {
+            Id = credId,
+            Name = "empty-password",
+            Username = "svc-rdp",
+            Protocol = ProtocolType.Rdp,
+        };
+        var secrets = new FakeCredentialService(new Dictionary<Guid, string> { [credId] = string.Empty });
+        var (vm, svc, _, dlg, _) = CreateVm(
+            credentialRepository: new SingleCredentialRepository(credential),
+            creds: secrets);
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with { Username = null, CredentialId = credId });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(0, dlg.PasswordPromptCount);
+        Assert.Equal(0, dlg.CredentialsPromptCount);
+        Assert.Equal(string.Empty, svc.LastPassword);
+    }
+
+    [Fact]
+    public async Task AttachAsync_MissingSavedSecret_UserCancelsPrompt_TransitionsToDisconnected()
+    {
+        var credId = Guid.NewGuid();
+        var credential = new CredentialProfile
+        {
+            Id = credId,
+            Name = "missing-secret",
+            Username = "svc-rdp",
+            Protocol = ProtocolType.Rdp,
+        };
+        var (vm, svc, _, dlg, _) = CreateVm(
+            credentialRepository: new SingleCredentialRepository(credential));
+        dlg.PasswordPromptResult = null;
+
+        vm.Initialize(MakeProfile() with { Username = null, CredentialId = credId });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(1, dlg.PasswordPromptCount);
+        Assert.Equal(0, svc.ConnectCount);
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+    }
+
+    [Fact]
+    public async Task AttachAsync_PromptedDomainSlashUsername_IsNormalizedBeforeConnect()
+    {
+        var (vm, svc, _, dlg, _) = CreateVm();
+        dlg.CredentialsPromptResult = ("CORP\\alice", "typed-password");
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with { Username = null, RdpDomain = null });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal("alice", svc.LastProfile?.Username);
+        Assert.Equal("CORP", svc.LastProfile?.RdpDomain);
+        Assert.Equal("typed-password", svc.LastPassword);
+    }
+
+    [Fact]
+    public async Task AttachAsync_PromptedDomainSlashUsername_WithExplicitDomainPreservesUsername()
+    {
+        var (vm, svc, _, dlg, _) = CreateVm();
+        dlg.CredentialsPromptResult = ("CORP\\alice", "typed-password");
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with { Username = null, RdpDomain = "EXPLICIT" });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal("CORP\\alice", svc.LastProfile?.Username);
+        Assert.Equal("EXPLICIT", svc.LastProfile?.RdpDomain);
+    }
+
+    [Fact]
+    public async Task AttachAsync_PromptedDomainSlashUsername_WithCredentialDomainPreservesUsername()
+    {
+        var credId = Guid.NewGuid();
+        var credential = new CredentialProfile
+        {
+            Id = credId,
+            Name = "domain-only",
+            Domain = "CORP",
+            Protocol = ProtocolType.Rdp,
+        };
+        var (vm, svc, _, dlg, _) = CreateVm(
+            credentialRepository: new SingleCredentialRepository(credential));
+        dlg.CredentialsPromptResult = ("OTHER\\alice", "typed-password");
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with { Username = null, RdpDomain = null, CredentialId = credId });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal("OTHER\\alice", svc.LastProfile?.Username);
+        Assert.Equal("CORP", svc.LastProfile?.RdpDomain);
+        Assert.Equal("typed-password", svc.LastPassword);
+    }
+
     // --- Per-connection VPN routing -------------------------------------------------------
 
     [Fact]
@@ -742,6 +966,7 @@ public class RdpSessionViewModelTests
     {
         public IRdpSession? NextSession { get; set; }
         public ConnectionProfile? LastProfile { get; private set; }
+        public string? LastPassword { get; private set; }
         public int ConnectCount { get; private set; }
         public TaskCompletionSource<object?> ConnectStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<object?>? ReleaseConnect { get; set; }
@@ -757,6 +982,7 @@ public class RdpSessionViewModelTests
         {
             ConnectCount++;
             LastProfile = profile;
+            LastPassword = password;
             if (NextSession is null) throw new InvalidOperationException("FakeRdpSessionService.NextSession not assigned.");
             // Mirror the real service: subscribe-via-callback runs before the handshake starts.
             onSessionReady?.Invoke(NextSession);
