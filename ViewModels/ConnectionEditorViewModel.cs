@@ -125,7 +125,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     #region Display
 
     /// <summary>Mstsc-style preset string ("640x480" … "Full screen"). Null/empty means
-    /// "auto" (use the monitor work area, see <c>RdpHostForm.ResolveDesktopSize</c>).</summary>
+    /// "auto" (fit the embedded tab surface, see <c>RdpHostForm.ResolveDesktopSize</c>).</summary>
     [ObservableProperty]
     private string? rdpScreenSize;
 

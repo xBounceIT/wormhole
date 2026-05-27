@@ -78,6 +78,7 @@
     <Compile Include="..\Helpers\Glyphs.cs" Link="Helpers\Glyphs.cs" />
     <Compile Include="..\Helpers\HostSpec.cs" Link="Helpers\HostSpec.cs" />
     <Compile Include="..\Helpers\RdpDriveList.cs" Link="Helpers\RdpDriveList.cs" />
+    <Compile Include="..\Helpers\RdpDesktopSizeResolver.cs" Link="Helpers\RdpDesktopSizeResolver.cs" />
     <Compile Include="..\Helpers\RdpScreenSizes.cs" Link="Helpers\RdpScreenSizes.cs" />
     <Compile Include="..\Services\IAppSettingsService.cs" Link="Services\IAppSettingsService.cs" />
     <Compile Include="..\Services\IUpdateService.cs" Link="Services\IUpdateService.cs" />

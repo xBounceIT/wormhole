@@ -16,6 +16,8 @@ public interface IRdpSessionService
     /// authentication reject during the synchronous Connect() inside Start() would fire
     /// the events with no subscribers and the caller would never see the terminal
     /// transition.
+    /// <paramref name="initialBounds"/> is the first known embedded surface rectangle; the
+    /// service uses it to size and activate the native ActiveX host before the handshake.
     /// </summary>
     Task<IRdpSession> ConnectAsync(
         ConnectionProfile profile,
@@ -23,6 +25,7 @@ public interface IRdpSessionService
         IntPtr ownerHwnd,
         string? gatewayUsername = null,
         string? gatewayPassword = null,
+        HostBounds initialBounds = default,
         Action<IRdpSession>? onSessionReady = null,
         CancellationToken cancellationToken = default);
 }

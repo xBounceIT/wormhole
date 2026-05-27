@@ -485,11 +485,12 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 // returned Task completes would drop those events and strand us in Connecting.
                 var session = await _rdpService.ConnectAsync(
                     connectProfile, password, ownerHwnd, gwUser, gwPassword,
+                    initialBounds: initialBounds,
                     onSessionReady: s =>
                     {
                         AttachSession(s, hasLoggedOn: false);
                     },
-                    token).ConfigureAwait(true);
+                    cancellationToken: token).ConfigureAwait(true);
                 if (!IsAttemptCurrent(teardownGeneration))
                 {
                     try { session.Dispose(); }
