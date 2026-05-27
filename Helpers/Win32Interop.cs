@@ -27,6 +27,21 @@ internal static class Win32Interop
     [DllImport("user32.dll", SetLastError = true)]
     public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetWindowPos(
+        IntPtr hWnd,
+        IntPtr hWndInsertAfter,
+        int X,
+        int Y,
+        int cx,
+        int cy,
+        uint uFlags);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool RedrawWindow(IntPtr hWnd, IntPtr lprcUpdate, IntPtr hrgnUpdate, uint flags);
+
     // SetLastError = true so a NULL return can be diagnosed via Marshal.GetLastWin32Error.
     // SetFocus returns the previously-focused HWND (or IntPtr.Zero) and indicates failure
     // via NULL + nonzero GetLastError (NULL + zero error means the window had no prior
@@ -57,5 +72,17 @@ internal static class Win32Interop
     public const int GWL_STYLE = -16;
     public const int WS_VISIBLE = 0x10000000;
     public const int WS_CHILD = 0x40000000;
+    public const int WS_CLIPCHILDREN = 0x02000000;
+    public const int WS_CLIPSIBLINGS = 0x04000000;
     public const int WS_POPUP = unchecked((int)0x80000000);
+
+    public const uint SWP_NOSIZE = 0x0001;
+    public const uint SWP_NOMOVE = 0x0002;
+    public const uint SWP_NOZORDER = 0x0004;
+    public const uint SWP_NOACTIVATE = 0x0010;
+    public const uint SWP_FRAMECHANGED = 0x0020;
+
+    public const uint RDW_INVALIDATE = 0x0001;
+    public const uint RDW_ALLCHILDREN = 0x0080;
+    public const uint RDW_UPDATENOW = 0x0100;
 }

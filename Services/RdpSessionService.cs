@@ -44,11 +44,29 @@ public sealed class RdpSessionService : IRdpSessionService
             // set, which produces a popup hosted inside another window: focus, clipping, and
             // Alt-Tab all misbehave. Switch the style to WS_CHILD before reparenting — this is
             // the canonical Win32 recipe for embedding a foreign HWND into a host window.
+            Marshal.SetLastSystemError(0);
             var style = Win32Interop.GetWindowLong(form.Hwnd, Win32Interop.GWL_STYLE);
-            var childStyle = (style & ~Win32Interop.WS_POPUP) | Win32Interop.WS_CHILD;
-            if (childStyle != style)
+            var getStyleError = Marshal.GetLastWin32Error();
+            if (style == 0 && getStyleError != 0)
             {
-                _ = Win32Interop.SetWindowLong(form.Hwnd, Win32Interop.GWL_STYLE, childStyle);
+                throw new InvalidOperationException(
+                    $"GetWindowLong failed while reading embedded RDP host style (Win32 error {getStyleError}).");
+            }
+            var childStyle = (style & ~Win32Interop.WS_POPUP) |
+                             Win32Interop.WS_CHILD |
+                             Win32Interop.WS_CLIPCHILDREN |
+                             Win32Interop.WS_CLIPSIBLINGS;
+            var styleChanged = childStyle != style;
+            if (styleChanged)
+            {
+                Marshal.SetLastSystemError(0);
+                var previousStyle = Win32Interop.SetWindowLong(form.Hwnd, Win32Interop.GWL_STYLE, childStyle);
+                var styleError = Marshal.GetLastWin32Error();
+                if (previousStyle == 0 && styleError != 0)
+                {
+                    throw new InvalidOperationException(
+                        $"SetWindowLong failed while applying embedded RDP host style (Win32 error {styleError}).");
+                }
             }
 
             // SetParent returns the previous parent on success, NULL on failure — but it can
@@ -65,6 +83,30 @@ public sealed class RdpSessionService : IRdpSessionService
                 {
                     throw new InvalidOperationException(
                         $"SetParent failed reparenting the RDP host onto the WinUI main window (Win32 error {err}).");
+                }
+            }
+            if (styleChanged)
+            {
+                // Apply the non-client/style recalculation after SetParent, once the host is
+                // actually a child of the WinUI window. Doing it before reparenting can leave
+                // USER32 with cached top-level frame state for the new child HWND.
+                Marshal.SetLastSystemError(0);
+                if (!Win32Interop.SetWindowPos(
+                        form.Hwnd,
+                        IntPtr.Zero,
+                        0,
+                        0,
+                        0,
+                        0,
+                        Win32Interop.SWP_NOMOVE |
+                        Win32Interop.SWP_NOSIZE |
+                        Win32Interop.SWP_NOZORDER |
+                        Win32Interop.SWP_NOACTIVATE |
+                        Win32Interop.SWP_FRAMECHANGED))
+                {
+                    _logger.LogWarning(
+                        "SetWindowPos(SWP_FRAMECHANGED) failed after reparenting RDP host (Win32 error {Error}).",
+                        Marshal.GetLastWin32Error());
                 }
             }
             cancellationToken.ThrowIfCancellationRequested();
@@ -155,8 +197,8 @@ public sealed class RdpSessionService : IRdpSessionService
         {
             if (bounds.Width < 1 || bounds.Height < 1) return;
             if (bounds == _lastBounds) return;
+            if (!_form.SetHostBounds(bounds.X, bounds.Y, bounds.Width, bounds.Height)) return;
             _lastBounds = bounds;
-            Win32Interop.MoveWindow(_form.Hwnd, bounds.X, bounds.Y, bounds.Width, bounds.Height, bRepaint: true);
             // Diagnostic: log once per adapter the FIRST real bounds (skipping the (0,0,1,1)
             // Seed placeholder the VM uses before real layout arrives). Set the flag after a
             // successful log so a transient logger fault retries on the next call instead of
@@ -164,8 +206,9 @@ public sealed class RdpSessionService : IRdpSessionService
             if (!_firstRealBoundsLogged && bounds != HostBounds.Seed)
             {
                 _logger.LogInformation(
-                    "RDP MoveWindow (first real bounds): x={X} y={Y} w={W} h={H}.",
+                    "RDP SetHostBounds (first real bounds): x={X} y={Y} w={W} h={H}.",
                     bounds.X, bounds.Y, bounds.Width, bounds.Height);
+                _form.LogWindowDiagnostics(_logger, "first-real-bounds");
                 _firstRealBoundsLogged = true;
             }
         }
@@ -179,28 +222,9 @@ public sealed class RdpSessionService : IRdpSessionService
             // surface a "black after navigating back" regression. WS_POPUP is surfaced
             // separately because the reparent flow explicitly strips it — a regression would
             // otherwise be buried inside the raw hex style. The rect is screen coordinates
-            // (GetWindowRect's contract); compare against the "MoveWindow (first real bounds)"
+            // (GetWindowRect's contract); compare against the "SetHostBounds (first real bounds)"
             // entry above for client-relative geometry.
-            var style = Win32Interop.GetWindowLong(_form.Hwnd, Win32Interop.GWL_STYLE);
-            if (!Win32Interop.GetWindowRect(_form.Hwnd, out var r))
-            {
-                var err = Marshal.GetLastWin32Error();
-                _logger.LogInformation(
-                    "RDP HWND post-Show: style=0x{Style:X8} (WS_VISIBLE={Visible}, WS_CHILD={Child}, WS_POPUP={Popup}); GetWindowRect failed (Win32 error {Error}).",
-                    style,
-                    (style & Win32Interop.WS_VISIBLE) != 0,
-                    (style & Win32Interop.WS_CHILD) != 0,
-                    (style & Win32Interop.WS_POPUP) != 0,
-                    err);
-                return;
-            }
-            _logger.LogInformation(
-                "RDP HWND post-Show: style=0x{Style:X8} (WS_VISIBLE={Visible}, WS_CHILD={Child}, WS_POPUP={Popup}), screenRect=({L},{T})-({R},{B}).",
-                style,
-                (style & Win32Interop.WS_VISIBLE) != 0,
-                (style & Win32Interop.WS_CHILD) != 0,
-                (style & Win32Interop.WS_POPUP) != 0,
-                r.left, r.top, r.right, r.bottom);
+            _form.LogWindowDiagnostics(_logger, "post-Show");
         }
 
         public void Hide() => Win32Interop.ShowWindow(_form.Hwnd, Win32Interop.SW_HIDE);

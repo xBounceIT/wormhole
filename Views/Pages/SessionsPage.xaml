@@ -37,23 +37,25 @@
                                              PlaceholderTemplate="{StaticResource ProtocolPlaceholderTemplate}" />
     </Page.Resources>
 
-    <Grid Background="#0c0c0c">
-        <StackPanel HorizontalAlignment="Center"
-                    VerticalAlignment="Center"
-                    Spacing="12"
-                    MaxWidth="420"
-                    Visibility="{x:Bind ViewModel.IsEmpty, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}">
-            <FontIcon Glyph="&#xE968;" FontSize="48" Opacity="0.5" />
-            <TextBlock Text="No active sessions"
-                       Style="{StaticResource SubtitleTextBlockStyle}"
-                       HorizontalAlignment="Center" />
-            <TextBlock Text="Pick a connection from the tree or use Quick Connect to start a session."
-                       Style="{StaticResource BodyTextBlockStyle}"
-                       Opacity="0.7"
-                       HorizontalAlignment="Center"
-                       TextAlignment="Center"
-                       TextWrapping="Wrap" />
-        </StackPanel>
+    <Grid>
+        <Grid Background="#0c0c0c"
+              Visibility="{x:Bind ViewModel.IsEmpty, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}">
+            <StackPanel HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Spacing="12"
+                        MaxWidth="420">
+                <FontIcon Glyph="&#xE968;" FontSize="48" Opacity="0.5" />
+                <TextBlock Text="No active sessions"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           HorizontalAlignment="Center" />
+                <TextBlock Text="Pick a connection from the tree or use Quick Connect to start a session."
+                           Style="{StaticResource BodyTextBlockStyle}"
+                           Opacity="0.7"
+                           HorizontalAlignment="Center"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+        </Grid>
 
         <TabView x:Name="SessionTabs"
                  TabItemsSource="{x:Bind ViewModel.Tabs, Mode=OneWay}"
