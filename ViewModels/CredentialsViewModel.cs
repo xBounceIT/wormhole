@@ -28,6 +28,8 @@ public partial class CredentialsViewModel : ObservableObject
 
     public bool HasNoMatches => !IsEmpty && !HasMatches;
 
+    public bool CanSelectAll => HasMatches;
+
     public bool HasSelection => SelectedCredentials.Count > 0;
 
     public int SelectedCount => SelectedCredentials.Count;
@@ -77,6 +79,8 @@ public partial class CredentialsViewModel : ObservableObject
             OnPropertyChanged(nameof(IsEmpty));
             OnPropertyChanged(nameof(HasMatches));
             OnPropertyChanged(nameof(HasNoMatches));
+            OnPropertyChanged(nameof(CanSelectAll));
+            SelectAllCommand.NotifyCanExecuteChanged();
         };
         SelectedCredentials.CollectionChanged += (_, _) =>
         {
@@ -85,6 +89,24 @@ public partial class CredentialsViewModel : ObservableObject
             OnPropertyChanged(nameof(SelectionStatus));
             DeleteSelectedCommand.NotifyCanExecuteChanged();
         };
+    }
+
+    partial void OnSearchTextChanged(string value)
+    {
+        OnPropertyChanged(nameof(CanSelectAll));
+        SelectAllCommand.NotifyCanExecuteChanged();
+    }
+
+    [RelayCommand(CanExecute = nameof(CanSelectAll))]
+    private void SelectAll()
+    {
+        foreach (var profile in FilteredCredentials)
+        {
+            if (!SelectedCredentials.Contains(profile))
+            {
+                SelectedCredentials.Add(profile);
+            }
+        }
     }
 
     [RelayCommand]
