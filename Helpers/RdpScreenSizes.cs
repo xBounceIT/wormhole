@@ -6,12 +6,12 @@ namespace Wormhole.Helpers;
 /// Shared RDP screen-size constants. The editor's screen-size picker and the ActiveX host's
 /// resolver both look at the same strings — if the sentinel was duplicated as a literal
 /// (and one got renamed for localisation), the resolver would silently fall back to its
-/// 1280x800 default instead of using the monitor work area.
+/// fixed-size default instead of fitting the embedded RDP surface.
 /// </summary>
 public static class RdpScreenSizes
 {
-    /// <summary>Sentinel meaning "use the monitor work area". Pinned at the bottom of the
-    /// editor's preset list.</summary>
+    /// <summary>Sentinel meaning "fill the available RDP surface". Pinned at the bottom of
+    /// the editor's preset list.</summary>
     public const string FullScreenSentinel = "Full screen";
 
     /// <summary>Preset list surfaced by the editor's screen-size combo. Mirrors the mstsc

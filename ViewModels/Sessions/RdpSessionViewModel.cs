@@ -47,6 +47,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     private bool _hasLoggedOn;
     private bool _teardownRequested;
     private int? _lastLogonErrorCode;
+    private HostBounds _lastMeasuredBounds = HostBounds.Empty;
     // Set when the profile (or the user via UseExternalClientCommand) routes this tab to
     // the system Remote Desktop client instead of the embedded ActiveX. Tracked so we can
     // clean up the Exited subscription on teardown without killing the user's session.
@@ -160,6 +161,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             throw new InvalidOperationException("Initialize must be called before AttachAsync.");
 
         _ownerHwnd = ownerHwnd;
+        RememberMeasuredBounds(bounds);
         EnsureDispatcher();
 
         if (_session is not null)
@@ -213,6 +215,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
     public void SetBounds(HostBounds bounds)
     {
+        RememberMeasuredBounds(bounds);
         var session = _session;
         if (session is null) return;
 
@@ -277,9 +280,10 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         var forcePrompt = FailedDueToCredentials;
         await FullTeardownAsync(fastTunnelTeardown: true).ConfigureAwait(true);
 
-        // Geometry will be re-supplied by the surface host's first SetBounds after the new
-        // session attaches; seed with a 1x1 so the form is valid until that arrives.
-        await ConnectAsync(_ownerHwnd, HostBounds.Seed, forcePromptForPassword: forcePrompt).ConfigureAwait(true);
+        // Reuse the last real layout bounds for desktop-size negotiation. Passing the 1x1
+        // seed through here would make default/Full screen retries negotiate a 640x480
+        // remote desktop that is only smart-sized inside the tab afterward.
+        await ConnectAsync(_ownerHwnd, GetRetryInitialBounds(), forcePromptForPassword: forcePrompt).ConfigureAwait(true);
     }
 
     // Mirrors SshSessionViewModel: while Connecting, an in-flight ConnectAsync still holds
@@ -485,11 +489,12 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 // returned Task completes would drop those events and strand us in Connecting.
                 var session = await _rdpService.ConnectAsync(
                     connectProfile, password, ownerHwnd, gwUser, gwPassword,
+                    initialBounds: initialBounds,
                     onSessionReady: s =>
                     {
                         AttachSession(s, hasLoggedOn: false);
                     },
-                    token).ConfigureAwait(true);
+                    cancellationToken: token).ConfigureAwait(true);
                 if (!IsAttemptCurrent(teardownGeneration))
                 {
                     try { session.Dispose(); }
@@ -937,6 +942,17 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
     private bool IsAttemptCurrent(int teardownGeneration) =>
         Volatile.Read(ref _teardownGeneration) == teardownGeneration;
+
+    private void RememberMeasuredBounds(HostBounds bounds)
+    {
+        if (!bounds.IsDegenerate())
+        {
+            _lastMeasuredBounds = bounds;
+        }
+    }
+
+    private HostBounds GetRetryInitialBounds() =>
+        _lastMeasuredBounds.IsDegenerate() ? HostBounds.Empty : _lastMeasuredBounds;
 
     private void ClearConnectWatchdog(CancellationTokenSource? expected = null)
     {

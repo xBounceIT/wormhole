@@ -23,6 +23,7 @@ public sealed class RdpSessionService : IRdpSessionService
         IntPtr ownerHwnd,
         string? gatewayUsername = null,
         string? gatewayPassword = null,
+        HostBounds initialBounds = default,
         Action<IRdpSession>? onSessionReady = null,
         CancellationToken cancellationToken = default)
     {
@@ -37,11 +38,18 @@ public sealed class RdpSessionService : IRdpSessionService
         }
         cancellationToken.ThrowIfCancellationRequested();
 
-        var form = new RdpHostForm(_loggerFactory.CreateLogger<RdpHostForm>());
+        var form = CreateRealizedHostForm();
         try
         {
-            _ = form.Hwnd; // force handle creation + AxHost CreateControl before Configure / SetParent
-            form.Configure(profile, password, gatewayUsername, gatewayPassword, ownerHwnd);
+            var surfaceBounds = initialBounds.IsDegenerate(minDim: 1) ? HostBounds.Empty : initialBounds;
+            form.Configure(
+                profile,
+                password,
+                gatewayUsername,
+                gatewayPassword,
+                ownerHwnd,
+                surfaceBounds.Width,
+                surfaceBounds.Height);
             cancellationToken.ThrowIfCancellationRequested();
 
             // WinForms creates a top-level Form with WS_POPUP. SetParent alone leaves that bit
@@ -115,6 +123,15 @@ public sealed class RdpSessionService : IRdpSessionService
             }
             cancellationToken.ThrowIfCancellationRequested();
 
+            // Force the OCX visible/in-place-active before Connect(). Use the real first
+            // surface bounds when available; otherwise a 1x1 child is enough to keep
+            // mstscax from starting the handshake against a never-shown ActiveX host.
+            var activationBounds = surfaceBounds.IsDegenerate(minDim: 1) ? HostBounds.Seed : surfaceBounds;
+            if (!form.SetHostBounds(activationBounds.X, activationBounds.Y, activationBounds.Width, activationBounds.Height))
+            {
+                throw new InvalidOperationException("RDP host failed to activate its initial native surface.");
+            }
+
             // Construct the adapter BEFORE Start() and let the caller subscribe via
             // onSessionReady — both legs together close the early-event race. Adapter-then-VM
             // subscriptions are fully wired by the time ocx.Connect() runs synchronously
@@ -136,6 +153,40 @@ public sealed class RdpSessionService : IRdpSessionService
             }
             throw;
         }
+    }
+
+    private RdpHostForm CreateRealizedHostForm()
+    {
+        var hostLogger = _loggerFactory.CreateLogger<RdpHostForm>();
+        var candidates = AxMsRdpClient9NotSafeForScripting.GetRegisteredClasses();
+        for (var i = 0; i < candidates.Count - 1; i++)
+        {
+            RdpHostForm? form = null;
+            try
+            {
+                form = new RdpHostForm(candidates[i], hostLogger);
+                _ = form.Hwnd; // force handle creation + AxHost CreateControl before Configure / SetParent
+                return form;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "RDP ActiveX class {ClassName} ({Clsid}) failed during activation; trying next registered class.",
+                    candidates[i].Name,
+                    candidates[i].ClsidString);
+                try { form?.Dispose(); }
+                catch (Exception disposeEx)
+                {
+                    _logger.LogDebug(disposeEx, "RDP host form Dispose failed after ActiveX activation fallback.");
+                }
+            }
+        }
+
+        var fallback = candidates[^1];
+        var finalForm = new RdpHostForm(fallback, hostLogger);
+        _ = finalForm.Hwnd;
+        return finalForm;
     }
 
     /// <summary>

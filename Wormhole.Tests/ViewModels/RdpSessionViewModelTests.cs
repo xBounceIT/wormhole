@@ -289,6 +289,62 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public async Task AttachAsync_FirstConnectPassesInitialBoundsToService()
+    {
+        var (vm, svc, _, dlg, _) = CreateVm();
+        dlg.PasswordPromptResult = "password";
+        svc.NextSession = new FakeRdpSession();
+        vm.Initialize(MakeProfile());
+        var bounds = new HostBounds(12, 34, 1600, 900);
+
+        await vm.AttachAsync(IntPtr.Zero, bounds);
+
+        Assert.Equal(bounds, svc.LastInitialBounds);
+    }
+
+    [Fact]
+    public async Task RetryAsync_UsesLastMeasuredBoundsForInitialDesktopSizing()
+    {
+        var (vm, svc, _, dlg, _) = CreateVm();
+        dlg.PasswordPromptResult = "password";
+        var firstSession = new FakeRdpSession();
+        svc.NextSession = firstSession;
+        vm.Initialize(MakeProfile());
+        var ownerHwnd = (IntPtr)0x1234;
+        var realBounds = new HostBounds(12, 34, 1600, 900);
+
+        await vm.AttachAsync(ownerHwnd, HostBounds.Seed);
+        vm.SetBounds(realBounds);
+        firstSession.RaiseDisconnected(new RdpDisconnectInfo(516, 0, "Could not reach the server.", IsClean: false));
+        svc.NextSession = new FakeRdpSession();
+
+        await vm.RetryAsync();
+
+        Assert.Equal(2, svc.ConnectCount);
+        Assert.Equal(realBounds, svc.LastInitialBounds);
+    }
+
+    [Fact]
+    public async Task RetryAsync_WithoutMeasuredBounds_DoesNotReuseSeedForInitialDesktopSizing()
+    {
+        var (vm, svc, _, dlg, _) = CreateVm();
+        dlg.PasswordPromptResult = "password";
+        var firstSession = new FakeRdpSession();
+        svc.NextSession = firstSession;
+        vm.Initialize(MakeProfile());
+        var ownerHwnd = (IntPtr)0x1234;
+
+        await vm.AttachAsync(ownerHwnd, HostBounds.Seed);
+        firstSession.RaiseDisconnected(new RdpDisconnectInfo(516, 0, "Could not reach the server.", IsClean: false));
+        svc.NextSession = new FakeRdpSession();
+
+        await vm.RetryAsync();
+
+        Assert.Equal(2, svc.ConnectCount);
+        Assert.Equal(HostBounds.Empty, svc.LastInitialBounds);
+    }
+
+    [Fact]
     public void SetBounds_WhenLiveSessionResizeThrows_SurfacesFailure()
     {
         var (vm, _, _, _, _) = CreateVm();
@@ -1460,6 +1516,7 @@ public class RdpSessionViewModelTests
         public IRdpSession? NextSession { get; set; }
         public ConnectionProfile? LastProfile { get; private set; }
         public string? LastPassword { get; private set; }
+        public HostBounds LastInitialBounds { get; private set; }
         public int ConnectCount { get; private set; }
         public TaskCompletionSource<object?> ConnectStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<object?>? ReleaseConnect { get; set; }
@@ -1471,12 +1528,14 @@ public class RdpSessionViewModelTests
             IntPtr ownerHwnd,
             string? gatewayUsername = null,
             string? gatewayPassword = null,
+            HostBounds initialBounds = default,
             Action<IRdpSession>? onSessionReady = null,
             CancellationToken cancellationToken = default)
         {
             ConnectCount++;
             LastProfile = profile;
             LastPassword = password;
+            LastInitialBounds = initialBounds;
             if (NextSession is null) throw new InvalidOperationException("FakeRdpSessionService.NextSession not assigned.");
             // Mirror the real service: subscribe-via-callback runs before the handshake starts.
             onSessionReady?.Invoke(NextSession);

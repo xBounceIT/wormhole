@@ -37,6 +37,13 @@ internal sealed class RdpHostForm : FormsForm
     public event Action? AutoReconnected;
 
     public RdpHostForm(ILogger<RdpHostForm>? logger = null)
+        : this(AxMsRdpClient9NotSafeForScripting.GetRegisteredClasses()[0], logger)
+    {
+    }
+
+    internal RdpHostForm(
+        AxMsRdpClient9NotSafeForScripting.RdpActiveXClass activeXClass,
+        ILogger<RdpHostForm>? logger = null)
     {
         EnsureStaThread();
 
@@ -52,10 +59,14 @@ internal sealed class RdpHostForm : FormsForm
         MaximizeBox = false;
         Text = "Wormhole RDP host";
 
-        _ax = new AxMsRdpClient9NotSafeForScripting
+        _ax = new AxMsRdpClient9NotSafeForScripting(activeXClass)
         {
             Dock = DockStyle.Fill,
         };
+        _logger?.LogInformation(
+            "RDP ActiveX class selected: {ClassName} ({Clsid}).",
+            _ax.ActiveXClassName,
+            _ax.ActiveXClsid);
         _ax.HandleCreated += (_, _) => _logger?.LogDebug("RDP AxHost HandleCreated.");
         Controls.Add(_ax);
     }
@@ -113,6 +124,7 @@ internal sealed class RdpHostForm : FormsForm
         {
             _ax.SetBounds(0, 0, width, height);
             PerformLayout();
+            TrySetOptional(() => ((dynamic)_ax.Ocx!).AdvancedSettings9.SmartSizing = true);
         }
         catch (Exception ex)
         {
@@ -158,7 +170,9 @@ internal sealed class RdpHostForm : FormsForm
         string? password,
         string? gatewayUsername = null,
         string? gatewayPassword = null,
-        IntPtr ownerHwnd = default)
+        IntPtr ownerHwnd = default,
+        int initialSurfaceWidth = 0,
+        int initialSurfaceHeight = 0)
     {
         EnsureStaThread();
         dynamic ocx = RequireOcx();
@@ -169,13 +183,18 @@ internal sealed class RdpHostForm : FormsForm
         if (!string.IsNullOrEmpty(profile.RdpDomain)) ocx.Domain = profile.RdpDomain;
 
         // --- Display ---
-        // ownerHwnd lets ResolveDesktopSize size the "Full screen" preset against the monitor
-        // hosting the owner window — avoids letterboxing on a secondary display whose DPI /
-        // resolution differs from PrimaryScreen.
-        var (dw, dh) = ResolveDesktopSize(profile.RdpScreenSize, ownerHwnd);
+        var (dw, dh) = ResolveDesktopSize(
+            profile.RdpScreenSize,
+            ownerHwnd,
+            initialSurfaceWidth,
+            initialSurfaceHeight);
         ocx.DesktopWidth = dw;
         ocx.DesktopHeight = dh;
         ocx.ColorDepth = NormaliseColorDepth(profile.RdpColorDepth);
+        // Keep the whole remote logon surface visible inside the tab. Without this, a
+        // monitor-sized/default "Full screen" desktop hosted in a smaller tab can show only
+        // the empty top-left corner and look like a blank RDP canvas.
+        TrySetOptional(() => ocx.AdvancedSettings9.SmartSizing = true);
         // UseMultimon is exposed via IMsRdpClientNonScriptable5 — IDispatch lookup against
         // the OCX finds it directly. Older builds without the interface return E_NOTFOUND
         // which TrySetOptional swallows. Pair with mstsc-style "Use all my monitors" UX.
@@ -740,12 +759,19 @@ internal sealed class RdpHostForm : FormsForm
             _ => 32,
         };
 
-    private static (int Width, int Height) ResolveDesktopSize(string? screenSize, IntPtr ownerHwnd)
+    private static (int Width, int Height) ResolveDesktopSize(
+        string? screenSize,
+        IntPtr ownerHwnd,
+        int initialSurfaceWidth,
+        int initialSurfaceHeight)
     {
-        // Null / empty / "Full screen" → use the work area of the monitor that hosts the owner
-        // window (typically the WinUI main window). Falling back to PrimaryScreen would mis-size
-        // the remote desktop whenever the app is running on a secondary monitor that differs in
-        // resolution / DPI from the primary.
+        // Null / empty / "Full screen" means "fill the embedded tab" in Wormhole. Using
+        // the whole owner monitor here makes the remote Windows logon UI center itself
+        // outside the visible tab surface, which reads as a blank canvas even though the
+        // RDP transport has connected. Fall back to the owner monitor only during very
+        // early layout races where the surface has not measured at all. If the surface is
+        // only the 1x1 seed used during retry/initial load, clamp to the RDP minimum rather
+        // than falling back to a full monitor-sized desktop.
         if (string.IsNullOrWhiteSpace(screenSize) ||
             string.Equals(screenSize, RdpScreenSizes.FullScreenSentinel, StringComparison.OrdinalIgnoreCase))
         {
@@ -761,19 +787,20 @@ internal sealed class RdpHostForm : FormsForm
             }
             var sb = (screen ?? Screen.PrimaryScreen)?.WorkingArea
                   ?? new System.Drawing.Rectangle(0, 0, 1920, 1080);
-            return (Math.Max(640, sb.Width), Math.Max(480, sb.Height));
+            return RdpDesktopSizeResolver.Resolve(
+                screenSize,
+                initialSurfaceWidth,
+                initialSurfaceHeight,
+                sb.Width,
+                sb.Height);
         }
-        var size = screenSize.AsSpan();
-        var separator = size.IndexOfAny('x', 'X');
-        if (separator >= 0 &&
-            size[(separator + 1)..].IndexOfAny('x', 'X') < 0 &&
-            int.TryParse(size[..separator].Trim(), out var w) &&
-            int.TryParse(size[(separator + 1)..].Trim(), out var h) &&
-            w >= 640 && h >= 480)
-        {
-            return (w, h);
-        }
-        return (1280, 800);
+
+        return RdpDesktopSizeResolver.Resolve(
+            screenSize,
+            initialSurfaceWidth,
+            initialSurfaceHeight,
+            fallbackWidth: 1920,
+            fallbackHeight: 1080);
     }
 
     /// <summary>
