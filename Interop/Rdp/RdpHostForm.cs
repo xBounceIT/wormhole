@@ -54,6 +54,7 @@ internal sealed class RdpHostForm : FormsForm
         {
             Dock = DockStyle.Fill,
         };
+        _ax.HandleCreated += (_, _) => _logger?.LogDebug("RDP AxHost HandleCreated.");
         Controls.Add(_ax);
     }
 
@@ -381,7 +382,16 @@ internal sealed class RdpHostForm : FormsForm
         // OnLoginComplete (post-auth, shell up) maps to our Connected event — OnConnected
         // fires after the TLS handshake but before NLA/credential validation, so emitting
         // it would briefly flip the VM to Connected even when a logon error follows.
-        _sink.LoginComplete += () => Connected?.Invoke();
+        _sink.LoginComplete += () =>
+        {
+            // Invoke before logging: MsTscAxEventsSink wraps this lambda in Safe() which
+            // catches every exception. If the logger throws (rolling-file lock, disk full,
+            // async sink queue full), a logger-first order would skip Connected?.Invoke()
+            // and leave the VM stranded in Connecting until the ConnectTimeout watchdog
+            // fires "RDP server didn't respond" — even though authentication succeeded.
+            Connected?.Invoke();
+            _logger?.LogInformation("RDP OnLoginComplete fired.");
+        };
         _sink.Disconnected += code => Disconnected?.Invoke(code);
         _sink.FatalError += code => FatalError?.Invoke(code);
         _sink.LogonError += code => LogonError?.Invoke(code);
