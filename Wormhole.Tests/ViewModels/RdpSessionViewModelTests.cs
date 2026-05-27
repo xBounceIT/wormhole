@@ -303,6 +303,48 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public async Task RetryAsync_UsesLastMeasuredBoundsForInitialDesktopSizing()
+    {
+        var (vm, svc, _, dlg, _) = CreateVm();
+        dlg.PasswordPromptResult = "password";
+        var firstSession = new FakeRdpSession();
+        svc.NextSession = firstSession;
+        vm.Initialize(MakeProfile());
+        var ownerHwnd = (IntPtr)0x1234;
+        var realBounds = new HostBounds(12, 34, 1600, 900);
+
+        await vm.AttachAsync(ownerHwnd, HostBounds.Seed);
+        vm.SetBounds(realBounds);
+        firstSession.RaiseDisconnected(new RdpDisconnectInfo(516, 0, "Could not reach the server.", IsClean: false));
+        svc.NextSession = new FakeRdpSession();
+
+        await vm.RetryAsync();
+
+        Assert.Equal(2, svc.ConnectCount);
+        Assert.Equal(realBounds, svc.LastInitialBounds);
+    }
+
+    [Fact]
+    public async Task RetryAsync_WithoutMeasuredBounds_DoesNotReuseSeedForInitialDesktopSizing()
+    {
+        var (vm, svc, _, dlg, _) = CreateVm();
+        dlg.PasswordPromptResult = "password";
+        var firstSession = new FakeRdpSession();
+        svc.NextSession = firstSession;
+        vm.Initialize(MakeProfile());
+        var ownerHwnd = (IntPtr)0x1234;
+
+        await vm.AttachAsync(ownerHwnd, HostBounds.Seed);
+        firstSession.RaiseDisconnected(new RdpDisconnectInfo(516, 0, "Could not reach the server.", IsClean: false));
+        svc.NextSession = new FakeRdpSession();
+
+        await vm.RetryAsync();
+
+        Assert.Equal(2, svc.ConnectCount);
+        Assert.Equal(HostBounds.Empty, svc.LastInitialBounds);
+    }
+
+    [Fact]
     public void SetBounds_WhenLiveSessionResizeThrows_SurfacesFailure()
     {
         var (vm, _, _, _, _) = CreateVm();
