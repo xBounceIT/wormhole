@@ -75,6 +75,7 @@ public sealed class MsTscAxEventsSink : IMsTscAxEvents
     public event Action<int>? Disconnected;
     public event Action<int>? FatalError;
     public event Action<int>? LogonError;
+    public event Action<int, int>? RemoteDesktopSizeChanged;
     public event Action<int, bool, int, int>? AutoReconnecting2;
     public event Action<int, int>? AutoReconnecting;
     public event Action? AutoReconnected;
@@ -96,7 +97,8 @@ public sealed class MsTscAxEventsSink : IMsTscAxEvents
     public void OnRequestLeaveFullScreen() { }
     public void OnFatalError(int errorCode) => Safe(nameof(OnFatalError), () => FatalError?.Invoke(errorCode));
     public void OnWarning(int warningCode) { }
-    public void OnRemoteDesktopSizeChange(int width, int height) { }
+    public void OnRemoteDesktopSizeChange(int width, int height) =>
+        Safe(nameof(OnRemoteDesktopSizeChange), () => RemoteDesktopSizeChanged?.Invoke(width, height));
     public void OnIdleTimeoutNotification() { }
     public void OnRequestContainerMinimize() { }
     public void OnConfirmClose(out bool fAllowClose) { fAllowClose = true; }
@@ -140,6 +142,7 @@ public sealed class MsTscAxEventsSink : IMsTscAxEvents
         Disconnected = null;
         FatalError = null;
         LogonError = null;
+        RemoteDesktopSizeChanged = null;
         AutoReconnecting2 = null;
         AutoReconnecting = null;
         AutoReconnected = null;

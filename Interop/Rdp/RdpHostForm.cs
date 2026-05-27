@@ -30,6 +30,7 @@ internal sealed class RdpHostForm : FormsForm
     public event Action<int>? Disconnected;
     public event Action<int>? FatalError;
     public event Action<int>? LogonError;
+    public event Action<int, int>? RemoteDesktopSizeChanged;
     public event Action<int, int>? AutoReconnecting;
     public event Action<int, bool, int, int>? AutoReconnecting2;
     public event Action? AutoReconnected;
@@ -78,6 +79,71 @@ internal sealed class RdpHostForm : FormsForm
                 _ = _ax.Handle;           // forces AxHost child HWND → OnHandleCreated → OCX instantiated
             }
             return Handle;
+        }
+    }
+
+    /// <summary>
+    /// Position the reparented host and force the AxHost child to fill the new client area.
+    /// WinForms normally handles Dock=Fill during layout, but the form is never shown through
+    /// normal WinForms ownership; it is reparented into WinUI as a native child HWND.
+    /// Explicitly sizing both layers avoids a valid top-level host rect with a stale or
+    /// unpainted ActiveX child.
+    /// </summary>
+    internal bool SetHostBounds(int x, int y, int width, int height)
+    {
+        EnsureStaThread();
+        if (width < 1 || height < 1) return false;
+
+        var hostHwnd = Hwnd;
+        Marshal.SetLastSystemError(0);
+        if (!Win32Interop.MoveWindow(hostHwnd, x, y, width, height, bRepaint: true))
+        {
+            _logger?.LogWarning(
+                "RDP host MoveWindow failed for x={X} y={Y} w={W} h={H} (Win32 error {Error}).",
+                x, y, width, height, Marshal.GetLastWin32Error());
+            return false;
+        }
+
+        if (!_ax.IsHandleCreated) return false;
+        var axHwnd = _ax.Handle;
+        if (axHwnd == IntPtr.Zero) return false;
+
+        try
+        {
+            _ax.SetBounds(0, 0, width, height);
+            PerformLayout();
+        }
+        catch (Exception ex)
+        {
+            _logger?.LogDebug(ex, "RDP AxHost managed layout refresh failed after host bounds changed.");
+        }
+
+        Marshal.SetLastSystemError(0);
+        var childMoved = Win32Interop.MoveWindow(axHwnd, 0, 0, width, height, bRepaint: true);
+        if (!childMoved)
+        {
+            _logger?.LogWarning(
+                "RDP AxHost MoveWindow failed for w={W} h={H} (Win32 error {Error}).",
+                width, height, Marshal.GetLastWin32Error());
+        }
+
+        _ax.Invalidate();
+        Invalidate(invalidateChildren: true);
+        RequestRedraw(hostHwnd, "host");
+        RequestRedraw(axHwnd, "axhost");
+        return childMoved;
+    }
+
+    internal void LogWindowDiagnostics(ILogger logger, string context)
+    {
+        LogWindowDiagnostics(logger, context, "host", Hwnd);
+        if (_ax.IsHandleCreated)
+        {
+            LogWindowDiagnostics(logger, context, "axhost", _ax.Handle);
+        }
+        else
+        {
+            logger.LogInformation("RDP HWND {Context}: axhost handle not created.", context);
         }
     }
 
@@ -395,6 +461,11 @@ internal sealed class RdpHostForm : FormsForm
         _sink.Disconnected += code => Disconnected?.Invoke(code);
         _sink.FatalError += code => FatalError?.Invoke(code);
         _sink.LogonError += code => LogonError?.Invoke(code);
+        _sink.RemoteDesktopSizeChanged += (width, height) =>
+        {
+            RemoteDesktopSizeChanged?.Invoke(width, height);
+            _logger?.LogInformation("RDP OnRemoteDesktopSizeChange fired: width={Width} height={Height}.", width, height);
+        };
         _sink.AutoReconnecting += (reason, attempt) => AutoReconnecting?.Invoke(reason, attempt);
         _sink.AutoReconnecting2 += (reason, available, attempt, max) =>
             AutoReconnecting2?.Invoke(reason, available, attempt, max);
@@ -463,6 +534,62 @@ internal sealed class RdpHostForm : FormsForm
         _ax.Ocx ?? throw new InvalidOperationException("RDP ActiveX not yet realised; access Hwnd first.");
 
     private object? TryGetOcx() => _ax.Ocx;
+
+    private void RequestRedraw(IntPtr hwnd, string label)
+    {
+        Marshal.SetLastSystemError(0);
+        if (!Win32Interop.RedrawWindow(
+                hwnd,
+                IntPtr.Zero,
+                IntPtr.Zero,
+                Win32Interop.RDW_INVALIDATE | Win32Interop.RDW_ALLCHILDREN | Win32Interop.RDW_UPDATENOW))
+        {
+            _logger?.LogWarning(
+                "RDP {Label} RedrawWindow failed for HWND 0x{Hwnd:X} (Win32 error {Error}).",
+                label,
+                hwnd.ToInt64(),
+                Marshal.GetLastWin32Error());
+        }
+    }
+
+    private static void LogWindowDiagnostics(ILogger logger, string context, string label, IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero)
+        {
+            logger.LogInformation("RDP HWND {Context}: {Label} hwnd is NULL.", context, label);
+            return;
+        }
+
+        var style = Win32Interop.GetWindowLong(hwnd, Win32Interop.GWL_STYLE);
+        if (!Win32Interop.GetWindowRect(hwnd, out var r))
+        {
+            logger.LogInformation(
+                "RDP {Label} HWND {Context}: hwnd=0x{Hwnd:X}, style=0x{Style:X8} (WS_VISIBLE={Visible}, WS_CHILD={Child}, WS_POPUP={Popup}); GetWindowRect failed (Win32 error {Error}).",
+                label,
+                context,
+                hwnd.ToInt64(),
+                style,
+                (style & Win32Interop.WS_VISIBLE) != 0,
+                (style & Win32Interop.WS_CHILD) != 0,
+                (style & Win32Interop.WS_POPUP) != 0,
+                Marshal.GetLastWin32Error());
+            return;
+        }
+
+        logger.LogInformation(
+            "RDP {Label} HWND {Context}: hwnd=0x{Hwnd:X}, style=0x{Style:X8} (WS_VISIBLE={Visible}, WS_CHILD={Child}, WS_POPUP={Popup}), screenRect=({L},{T})-({R},{B}).",
+            label,
+            context,
+            hwnd.ToInt64(),
+            style,
+            (style & Win32Interop.WS_VISIBLE) != 0,
+            (style & Win32Interop.WS_CHILD) != 0,
+            (style & Win32Interop.WS_POPUP) != 0,
+            r.left,
+            r.top,
+            r.right,
+            r.bottom);
+    }
 
     /// <summary>
     /// Apply a setter that may not exist on an older OCX build. We catch only the two
