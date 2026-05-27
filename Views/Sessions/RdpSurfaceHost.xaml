@@ -10,7 +10,7 @@
             <MenuFlyout>
                 <MenuFlyoutItem Text="Disconnect"
                                 Command="{Binding DisconnectCommand}"
-                                IsEnabled="{Binding IsConnected}">
+                                IsEnabled="{Binding CanDisconnect}">
                     <MenuFlyoutItem.Icon>
                         <FontIcon Glyph="&#xE8BB;" />
                     </MenuFlyoutItem.Icon>
@@ -69,6 +69,9 @@
                            TextAlignment="Center"
                            Opacity="0.7"
                            Visibility="Collapsed" />
+                <Button Content="Cancel"
+                        Command="{Binding DisconnectCommand}"
+                        HorizontalAlignment="Center" />
             </StackPanel>
         </Grid>
 
@@ -99,6 +102,57 @@
                     <Button Content="Open in System Remote Desktop"
                             Command="{Binding UseExternalClientCommand}"
                             IsEnabled="{Binding CanUseExternalClient}" />
+                </StackPanel>
+            </StackPanel>
+        </Grid>
+
+        <!-- Disconnected overlay -->
+        <Grid x:Name="DisconnectedOverlay"
+              Background="{ThemeResource LayerFillColorDefaultBrush}"
+              Visibility="{Binding IsDisconnected, Converter={StaticResource BoolToVisibilityConverter}}">
+            <StackPanel HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Spacing="16"
+                        MaxWidth="420">
+                <FontIcon Glyph="&#xE711;" FontSize="32" HorizontalAlignment="Center" />
+                <TextBlock Text="Disconnected"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           HorizontalAlignment="Center" />
+                <StackPanel Orientation="Horizontal"
+                            Spacing="8"
+                            HorizontalAlignment="Center">
+                    <Button Content="Reconnect"
+                            Command="{Binding RetryCommand}"
+                            Style="{StaticResource AccentButtonStyle}" />
+                    <Button Content="Open in System Remote Desktop"
+                            Command="{Binding UseExternalClientCommand}"
+                            IsEnabled="{Binding CanUseExternalClient}" />
+                </StackPanel>
+            </StackPanel>
+        </Grid>
+
+        <!-- External client overlay -->
+        <Grid x:Name="ExternalClientOverlay"
+              Background="{ThemeResource LayerFillColorDefaultBrush}"
+              Visibility="{Binding IsExternalClientActive, Converter={StaticResource BoolToVisibilityConverter}}">
+            <StackPanel HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Spacing="16"
+                        MaxWidth="440">
+                <FontIcon Glyph="&#xE8A7;" FontSize="32" HorizontalAlignment="Center" />
+                <TextBlock Text="Opened in System Remote Desktop"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           HorizontalAlignment="Center"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap" />
+                <StackPanel Orientation="Horizontal"
+                            Spacing="8"
+                            HorizontalAlignment="Center">
+                    <Button Content="Reconnect"
+                            Command="{Binding RetryCommand}"
+                            Style="{StaticResource AccentButtonStyle}" />
+                    <Button Content="Disconnect"
+                            Command="{Binding DisconnectCommand}" />
                 </StackPanel>
             </StackPanel>
         </Grid>

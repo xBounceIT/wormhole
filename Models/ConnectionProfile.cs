@@ -41,7 +41,7 @@ public sealed record ConnectionProfile
     public bool RdpAutoReconnect { get; init; } = true;
 
     // Advanced
-    public int RdpServerAuthentication { get; init; }       // 0=Warn, 1=Require, 2=DoNotConnect
+    public int RdpServerAuthentication { get; init; } = 2;  // 0=NoAuth, 1=Require, 2=Warn/prompt
     public int RdpGatewayUsageMethod { get; init; }         // 0=Direct, 1=Always, 2=Detect, 3=DefaultRdg
     public string? RdpGatewayHostname { get; init; }
     public Guid? RdpGatewayCredentialId { get; init; }

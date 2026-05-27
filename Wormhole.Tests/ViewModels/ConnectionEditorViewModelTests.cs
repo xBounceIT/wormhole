@@ -207,6 +207,27 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task LoadFrom_RdpServerAuthenticationDefault_IsWarnPrompt()
+    {
+        var vm = await NewEditorAsync();
+        var node = new ConnectionNode
+        {
+            Kind = NodeKind.Connection,
+            Name = "rdp-default",
+            Protocol = ProtocolType.Rdp,
+            Host = "h",
+        };
+
+        vm.LoadFrom(node);
+
+        Assert.Equal(2, vm.RdpServerAuthentication);
+        Assert.Equal(2, vm.ServerAuthChoices[0].Key);
+        Assert.Contains("Warn", vm.ServerAuthChoices[0].Value);
+        Assert.Equal(1, vm.ServerAuthChoices[1].Key);
+        Assert.Equal(0, vm.ServerAuthChoices[2].Key);
+    }
+
+    [Fact]
     public async Task LoadFrom_AllDrives_TogglesMode()
     {
         var vm = await NewEditorAsync();

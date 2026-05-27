@@ -144,7 +144,7 @@ public sealed class InheritanceResolver
             RdpVisualStyles = rdpVisualStyles ?? true,
             RdpBitmapCaching = rdpBitmapCaching ?? true,
             RdpAutoReconnect = rdpAutoReconnect ?? true,
-            RdpServerAuthentication = rdpServerAuthentication ?? 0,
+            RdpServerAuthentication = rdpServerAuthentication ?? 2,
             RdpGatewayUsageMethod = rdpGatewayUsageMethod ?? 0,
             RdpGatewayHostname = rdpGatewayHostname,
             RdpGatewayCredentialId = rdpGatewayCredentialId,

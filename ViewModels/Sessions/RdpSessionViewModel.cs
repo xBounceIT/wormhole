@@ -41,7 +41,12 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     private ITunnelInstance? _tunnel;
     private CancellationTokenSource? _cts;
     private int _connectInFlight;
+    private int _teardownGeneration;
     private IntPtr _ownerHwnd;
+    private bool _initialAutoConnectStarted;
+    private bool _hasLoggedOn;
+    private bool _teardownRequested;
+    private int? _lastLogonErrorCode;
     // Set when the profile (or the user via UseExternalClientCommand) routes this tab to
     // the system Remote Desktop client instead of the embedded ActiveX. Tracked so we can
     // clean up the Exited subscription on teardown without killing the user's session.
@@ -72,26 +77,23 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
         // Status lives on the base class — re-broadcast its dependents from the derived VM
         // since [NotifyPropertyChangedFor] only sees properties on its own partial class.
-        // We also use the Status change to clear the crash sentinel: once the embedded
-        // session reaches any non-Connecting state, the WAM delay-load danger window has
-        // closed (either we made it past the auth handshake, or we got a managed failure
-        // we can recover from cleanly). Fire-and-forget is fine — the sentinel writes are
-        // small, idempotent, and a missed clear just causes a benign auto-flag on the next
-        // launch (the user can uncheck if they disagree).
+        // We also use Status changes to clear the crash sentinel once the embedded session
+        // is either terminal or has completed login. OnConnected now means native surface
+        // ready, not authenticated, so Connected alone is not enough to close the WAM
+        // delay-load danger window. Fire-and-forget is fine — the sentinel writes are small,
+        // idempotent, and a missed clear just causes a benign auto-flag on the next launch.
         PropertyChanged += (_, args) =>
         {
             if (args.PropertyName == nameof(Status))
             {
                 OnPropertyChanged(nameof(IsConnecting));
                 OnPropertyChanged(nameof(IsConnected));
+                OnPropertyChanged(nameof(IsDisconnected));
                 OnPropertyChanged(nameof(IsFailed));
+                OnPropertyChanged(nameof(CanDisconnect));
                 RetryCommand.NotifyCanExecuteChanged();
 
-                if (Status != SessionStatus.Connecting && _ownsCrashSentinel)
-                {
-                    _ownsCrashSentinel = false;
-                    _ = _crashSentinel.ClearAsync();
-                }
+                ClearCrashSentinelIfSafe();
             }
         };
     }
@@ -114,16 +116,34 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     [ObservableProperty]
     private bool failedDueToCredentials;
 
+    /// <summary>True while this tab is tracking an external mstsc.exe process instead of an embedded OCX surface.</summary>
+    [ObservableProperty]
+    private bool isExternalClientActive;
+
     public bool IsConnecting => Status == SessionStatus.Connecting;
     public bool IsConnected => Status == SessionStatus.Connected;
+    public bool IsDisconnected => Status == SessionStatus.Disconnected;
     public bool IsFailed => Status == SessionStatus.Failed;
-    public bool CanUseExternalClient => Profile?.TunnelEnabled != true;
+    public bool CanUseExternalClient => Profile?.TunnelEnabled != true && !IsExternalClientActive;
+    public bool CanDisconnect => Status is SessionStatus.Connecting or SessionStatus.Connected || IsExternalClientActive;
+
+    internal Func<ProcessStartInfo, Process?> ExternalProcessLauncher { get; set; } = Process.Start;
 
     public override void Initialize(ConnectionProfile profile)
     {
         base.Initialize(profile);
+        _initialAutoConnectStarted = false;
         OnPropertyChanged(nameof(CanUseExternalClient));
+        OnPropertyChanged(nameof(CanDisconnect));
         UseExternalClientCommand.NotifyCanExecuteChanged();
+    }
+
+    partial void OnIsExternalClientActiveChanged(bool value)
+    {
+        OnPropertyChanged(nameof(CanUseExternalClient));
+        OnPropertyChanged(nameof(CanDisconnect));
+        UseExternalClientCommand.NotifyCanExecuteChanged();
+        RetryCommand.NotifyCanExecuteChanged();
     }
 
     // Protocol-specific bootstrapping is still done lazily on AttachAsync once the surface
@@ -146,13 +166,22 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         {
             // Re-attach path: surface host reloaded after nav-away. The session lives in
             // ShellViewModel.Tabs and the ActiveX is still connected.
-            _session.SetBounds(bounds);
-            _session.Show();
-            // Push Win32 keyboard focus back into the ActiveX HWND so the first keystroke
-            // after navigating back to this tab lands on the remote session rather than
-            // requiring a click. The native HWND retains focus across most WinUI nav
-            // transitions, but SetFocus is idempotent so this is safe to repeat.
-            TryFocusSession();
+            try
+            {
+                _session.SetBounds(bounds);
+                _session.Show();
+                // Push Win32 keyboard focus back into the ActiveX HWND so the first keystroke
+                // after navigating back to this tab lands on the remote session rather than
+                // requiring a click. The native HWND retains focus across most WinUI nav
+                // transitions, but SetFocus is idempotent so this is safe to repeat.
+                TryFocusSession();
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "RDP surface reattach failed.");
+                await DisposeAndTransitionAsync("RDP surface reattach failed: " + ex.Message, dueToCredentials: false)
+                    .ConfigureAwait(true);
+            }
             return;
         }
 
@@ -160,15 +189,43 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         // surface, so there's nothing to re-bind here. We just need to NOT spawn a second
         // mstsc.exe — the surface host is recreated on every Sessions↔Settings nav, and
         // without this guard the VM would launch a duplicate every time the tab is shown.
-        if (_externalProcess is { HasExited: false })
+        if (_externalProcess is { } externalProcess)
+        {
+            if (HasExternalProcessExited(externalProcess))
+            {
+                HandleExternalProcessExited(externalProcess, GetBaseTitle(Profile));
+            }
+            return;
+        }
+
+        // First view load auto-starts the tab. After a terminal state (failed,
+        // disconnected, prompt-cancel, external mstsc exit), the overlay owns the next
+        // action via Retry/Open External; navigating away and back must not silently
+        // start a fresh RDP attempt.
+        if (_initialAutoConnectStarted && Status is SessionStatus.Disconnected or SessionStatus.Failed)
         {
             return;
         }
 
+        _initialAutoConnectStarted = true;
         await ConnectAsync(ownerHwnd, bounds, forcePromptForPassword: false).ConfigureAwait(true);
     }
 
-    public void SetBounds(HostBounds bounds) => _session?.SetBounds(bounds);
+    public void SetBounds(HostBounds bounds)
+    {
+        var session = _session;
+        if (session is null) return;
+
+        try
+        {
+            session.SetBounds(bounds);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "RDP surface resize failed.");
+            MarshalToUi(() => DisposeAndTransitionAsync("RDP surface resize failed: " + ex.Message, dueToCredentials: false));
+        }
+    }
 
     public void DetachView()
     {
@@ -197,6 +254,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     {
         var profile = Profile;
         if (profile is null) return;
+        if (HasLiveExternalProcess(profile)) return;
         if (profile.TunnelEnabled)
         {
             if (Status is not SessionStatus.Connected and not SessionStatus.Connecting)
@@ -213,6 +271,8 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     public async Task RetryAsync()
     {
         if (Profile is null || _ownerHwnd == IntPtr.Zero) return;
+        if (Volatile.Read(ref _connectInFlight) != 0) return;
+        if (HasLiveExternalProcess(Profile)) return;
 
         var forcePrompt = FailedDueToCredentials;
         await FullTeardownAsync(fastTunnelTeardown: true).ConfigureAwait(true);
@@ -225,7 +285,10 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     // Mirrors SshSessionViewModel: while Connecting, an in-flight ConnectAsync still holds
     // _connectInFlight; a second one from RetryAsync would silently no-op. Disabling the
     // command keeps the tab context menu / failure overlay in sync with the actual state.
-    private bool CanRetry() => Status != SessionStatus.Connecting;
+    private bool CanRetry() =>
+        Status != SessionStatus.Connecting &&
+        !IsExternalClientActive &&
+        Volatile.Read(ref _connectInFlight) == 0;
 
     public override async ValueTask CloseAsync()
     {
@@ -245,8 +308,18 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         // cancelled. The outer try/finally guarantees the gate is released on every exit
         // path including external-client early-return and any throw from Mark/LaunchExternalProcess.
         if (Interlocked.CompareExchange(ref _connectInFlight, 1, 0) != 0) return;
+        var teardownGeneration = Volatile.Read(ref _teardownGeneration);
         try
         {
+            Status = SessionStatus.Connecting;
+            ErrorMessage = null;
+            FailedDueToCredentials = false;
+            IsExternalClientActive = false;
+            ReconnectAttempt = 0;
+            _hasLoggedOn = false;
+            _lastLogonErrorCode = null;
+            _teardownRequested = false;
+
             // External-client routing: opt-in flag OR auto-detected Azure-AD signal (saved
             // credential, node Username, node RdpDomain). The embedded mstscax delay-loads
             // WAM broker DLLs during AAD auth, which our unpackaged WinUI process can't
@@ -257,6 +330,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             // down the app.
             if (await ShouldUseExternalClientAsync(profile).ConfigureAwait(true))
             {
+                if (!IsAttemptCurrent(teardownGeneration)) return;
                 if (profile.TunnelEnabled)
                 {
                     ReportFailure(TunnelExternalClientUnsupportedMessage, dueToCredentials: false);
@@ -265,23 +339,24 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 LaunchExternalProcess(profile);
                 return;
             }
+            if (!IsAttemptCurrent(teardownGeneration)) return;
 
             if (profile.TunnelEnabled && profile.RdpGatewayUsageMethod != 0)
             {
                 ReportFailure(TunnelGatewayUnsupportedMessage, dueToCredentials: false);
                 return;
             }
-            if (profile.TunnelEnabled && profile.RdpServerAuthentication != 0)
+            if (profile.TunnelEnabled && profile.RdpServerAuthentication == 1)
             {
                 ReportFailure(TunnelStrictServerAuthUnsupportedMessage, dueToCredentials: false);
                 return;
             }
 
-            // Write the crash sentinel BEFORE flipping Status — the PropertyChanged hook
-            // clears the sentinel on any non-Connecting transition when _ownsCrashSentinel
-            // is true. Both the file write and the ownership flag must be in place before
-            // the OCX touches mstscax (where the native WAM crash originates) so a process
-            // death in that window leaves the sentinel behind for the next launch to read.
+            // Write the crash sentinel before the OCX touches mstscax (where the native WAM
+            // crash originates), so a process death in that window leaves the sentinel behind
+            // for the next launch. The Status hook only clears a sentinel owned by this VM,
+            // and _ownsCrashSentinel remains false until Mark succeeds, so it is safe for the
+            // visible Connecting state to start before this disk write.
             // Inner try/catch keeps a Mark failure (file lock, disk full, ACL denial) from
             // poisoning the connect path: we log and proceed without the recovery breadcrumb
             // for this attempt. Without this, an IOException from Task.Run inside Mark would
@@ -292,6 +367,11 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             {
                 await _crashSentinel.MarkConnectInFlightAsync(profile.NodeId, profile.Host).ConfigureAwait(true);
                 _ownsCrashSentinel = true;
+                if (!IsAttemptCurrent(teardownGeneration))
+                {
+                    ClearOwnedCrashSentinel();
+                    return;
+                }
             }
             catch (Exception ex)
             {
@@ -299,11 +379,6 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 // _ownsCrashSentinel stays false. No file on disk means there's nothing for
                 // the hook to clear; subsequent attempts behave normally.
             }
-
-            Status = SessionStatus.Connecting;
-            ErrorMessage = null;
-            FailedDueToCredentials = false;
-            ReconnectAttempt = 0;
 
             // The CTS exists from the start so FullTeardown / Disconnect can cancel an in-flight
             // connect, but the ConnectTimeout itself only kicks in once we've actually started
@@ -319,9 +394,10 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             try
             {
                 var resolved = await ResolveCredentialsAsync(profile, forcePromptForPassword, token).ConfigureAwait(true);
+                if (!IsAttemptCurrent(teardownGeneration)) return;
                 if (token.IsCancellationRequested)
                 {
-                    Status = SessionStatus.Disconnected;
+                    TransitionToDisconnectedIfCurrent(cts);
                     return;
                 }
 
@@ -331,6 +407,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 // Manager entry, fell through to a prompt, user cancelled". Either way, no.
                 if (resolved is not { } creds)
                 {
+                    ClearConnectWatchdog(cts);
                     Status = SessionStatus.Disconnected;
                     return;
                 }
@@ -364,6 +441,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                     // mstsc.exe. Re-evaluate the same guard with the late-bound identity.
                     if (await ShouldUseExternalClientAsync(profile).ConfigureAwait(true))
                     {
+                        if (!IsAttemptCurrent(teardownGeneration)) return;
                         if (profile.TunnelEnabled)
                         {
                             ReportFailure(TunnelExternalClientUnsupportedMessage, dueToCredentials: false);
@@ -375,7 +453,9 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 }
 
                 var (gwUser, gwPassword) = await ResolveGatewayCredentialsAsync(profile, token).ConfigureAwait(true);
+                if (!IsAttemptCurrent(teardownGeneration)) return;
                 var connectProfile = await PrepareConnectProfileAsync(profile, token).ConfigureAwait(true);
+                if (!IsAttemptCurrent(teardownGeneration)) return;
                 token.ThrowIfCancellationRequested();
 
                 // ConnectAsync returns immediately after kicking off the asynchronous OCX
@@ -407,43 +487,53 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                     connectProfile, password, ownerHwnd, gwUser, gwPassword,
                     onSessionReady: s =>
                     {
-                        s.Connected += OnSessionConnected;
-                        s.Disconnected += OnSessionDisconnected;
-                        s.FatalError += OnSessionFatalError;
-                        s.LogonError += OnSessionLogonError;
-                        s.AutoReconnecting += OnSessionAutoReconnecting;
-                        s.AutoReconnected += OnSessionAutoReconnected;
+                        AttachSession(s, hasLoggedOn: false);
                     },
                     token).ConfigureAwait(true);
-                _session = session;
+                if (!IsAttemptCurrent(teardownGeneration))
+                {
+                    try { session.Dispose(); }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Late RDP session dispose threw after stale connect attempt."); }
+                    return;
+                }
+                if (!ReferenceEquals(_session, session))
+                {
+                    try { session.Dispose(); }
+                    catch (Exception ex) { _logger.LogWarning(ex, "Late RDP session dispose threw after early terminal event."); }
+                    return;
+                }
                 token.ThrowIfCancellationRequested();
 
-                _session.SetBounds(initialBounds.IsDegenerate(minDim: 1) ? HostBounds.Seed : initialBounds);
-                _session.Show();
+                session.SetBounds(initialBounds.IsDegenerate(minDim: 1) ? HostBounds.Seed : initialBounds);
+                session.Show();
             }
             catch (OperationCanceledException) when (timedOut)
             {
                 DisposeSessionSilently();
                 await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
-                ReportFailure(TimeoutMessage, dueToCredentials: false);
+                if (ReferenceEquals(_cts, cts))
+                {
+                    ReportFailure(TimeoutMessage, dueToCredentials: false);
+                }
             }
             catch (OperationCanceledException)
             {
                 DisposeSessionSilently();
                 await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
-                Status = SessionStatus.Disconnected;
+                TransitionToDisconnectedIfCurrent(cts);
             }
             catch (Exception) when (token.IsCancellationRequested)
             {
                 DisposeSessionSilently();
                 await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
-                Status = SessionStatus.Disconnected;
+                TransitionToDisconnectedIfCurrent(cts);
             }
             catch (System.Runtime.InteropServices.COMException ex) when ((uint)ex.HResult == 0x80040154)
             {
                 // REGDB_E_CLASSNOTREG — mstscax not registered (Server Core, N edition).
                 DisposeSessionSilently();
                 await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
+                if (!IsAttemptCurrent(teardownGeneration)) return;
                 ReportFailure(
                     "Microsoft Remote Desktop ActiveX (mstscax.dll) is not registered on this system. " +
                     "Install the Remote Desktop Connection client.",
@@ -454,6 +544,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             {
                 DisposeSessionSilently();
                 await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
+                if (!IsAttemptCurrent(teardownGeneration)) return;
                 ReportFailure(ex.Message, dueToCredentials: false);
                 _logger.LogError(ex, "RDP connect failed for {Host}:{Port}.", profile.Host, profile.Port);
             }
@@ -463,6 +554,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             // Single point of release for _connectInFlight, regardless of whether we took the
             // external-client early-return, the embedded path, or threw out of either.
             Interlocked.Exchange(ref _connectInFlight, 0);
+            RetryCommand.NotifyCanExecuteChanged();
         }
     }
 
@@ -704,54 +796,78 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     {
         MarshalToUi(() =>
         {
+            if (!ReferenceEquals(_session, sender)) return;
+            ClearConnectWatchdog();
             ReconnectAttempt = 0;
             Status = SessionStatus.Connected;
-            // Push Win32 focus into the embedded ActiveX HWND now that the remote session
-            // is interactive. Without this the user has to click into the RDP surface
-            // before the first keystroke (e.g. into the Windows logon screen) is captured
-            // — the WinUI focus chain doesn't auto-forward into reparented child HWNDs.
+            ErrorMessage = null;
+            // Push Win32 focus into the embedded ActiveX HWND once the native RDP surface
+            // is ready. The Windows logon screen may still be ahead of LoginComplete, but
+            // keyboard input should land in the ActiveX canvas immediately.
             TryFocusSession();
+        });
+    }
+
+    private void OnSessionLoginComplete(object? sender, EventArgs e)
+    {
+        MarshalToUi(() =>
+        {
+            if (!ReferenceEquals(_session, sender)) return;
+            ClearConnectWatchdog();
+            _hasLoggedOn = true;
+            _lastLogonErrorCode = null;
+            ReconnectAttempt = 0;
+            ErrorMessage = null;
+            FailedDueToCredentials = false;
+            Status = SessionStatus.Connected;
+            ClearCrashSentinelIfSafe();
         });
     }
 
     private void OnSessionDisconnected(object? sender, RdpDisconnectInfo info)
     {
-        MarshalToUi(() => DisposeAndTransitionAsync(
-            failureMessage: info.IsClean ? null : info.Description,
-            dueToCredentials: false));
+        MarshalToUi(() =>
+        {
+            if (!ReferenceEquals(_session, sender)) return Task.CompletedTask;
+            var loggedOn = _hasLoggedOn || (sender as IRdpSession)?.IsLoggedOn == true;
+            var (failureMessage, dueToCredentials) = BuildDisconnectFailure(info, loggedOn, _teardownRequested, _lastLogonErrorCode);
+            return DisposeAndTransitionAsync(failureMessage, dueToCredentials);
+        });
     }
 
     private void OnSessionLogonError(object? sender, int code)
     {
-        // Per the IMsTscAxEvents.OnLogonError docs, the documented codes are nuanced:
-        //   -2 = the user cancelled the credentials dialog → not a failure, treat as cancel
-        //   -3 = pre-authentication failed → credential issue, prompt for re-entry on retry
-        //   -5 = an information dialog was displayed → not really an error
-        // Unknown / other codes fall through to a generic credential-failure overlay so the
-        // user still gets a recoverable retry path.
-        if (code == -2)
+        MarshalToUi(() =>
         {
-            // User dismissed the credentials prompt — silent disconnect, no failure UI.
-            MarshalToUi(() => DisposeAndTransitionAsync(failureMessage: null, dueToCredentials: false));
-            return;
-        }
-        var dueToCredentials = code != -5;
-        MarshalToUi(() => DisposeAndTransitionAsync(
-            failureMessage: RdpLogonErrors.Describe(code),
-            dueToCredentials: dueToCredentials));
+            if (!ReferenceEquals(_session, sender)) return;
+            _lastLogonErrorCode = code;
+            if (code == -2)
+            {
+                _logger.LogInformation("RDP OnLogonError reported continue-logon notification ({Code}); waiting for LoginComplete or Disconnected.", code);
+            }
+            else
+            {
+                _logger.LogInformation("RDP OnLogonError reported {Code}: {Description}", code, RdpLogonErrors.Describe(code));
+            }
+        });
     }
 
     private void OnSessionFatalError(object? sender, int code)
     {
-        MarshalToUi(() => DisposeAndTransitionAsync(
-            failureMessage: $"RDP fatal error (code {code}).",
-            dueToCredentials: false));
+        MarshalToUi(() =>
+        {
+            if (!ReferenceEquals(_session, sender)) return Task.CompletedTask;
+            return DisposeAndTransitionAsync(
+                failureMessage: $"RDP fatal error (code {code}).",
+                dueToCredentials: false);
+        });
     }
 
     private void OnSessionAutoReconnecting(object? sender, RdpReconnectInfo info)
     {
         MarshalToUi(() =>
         {
+            if (!ReferenceEquals(_session, sender)) return;
             ReconnectAttempt = info.Attempt;
             Status = SessionStatus.Connecting;
         });
@@ -771,9 +887,15 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         // "focus stays where the user put it", which is the right default.
         MarshalToUi(() =>
         {
+            if (!ReferenceEquals(_session, sender)) return;
+            ClearConnectWatchdog();
+            _hasLoggedOn = true;
+            _lastLogonErrorCode = null;
             ReconnectAttempt = 0;
             Status = SessionStatus.Connected;
             ErrorMessage = null;
+            FailedDueToCredentials = false;
+            ClearCrashSentinelIfSafe();
         });
     }
 
@@ -801,7 +923,53 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     {
         ErrorMessage = message;
         FailedDueToCredentials = dueToCredentials;
+        IsExternalClientActive = false;
         Status = SessionStatus.Failed;
+    }
+
+    private void TransitionToDisconnectedIfCurrent(CancellationTokenSource cts)
+    {
+        if (!ReferenceEquals(_cts, cts)) return;
+        ClearConnectWatchdog(cts);
+        IsExternalClientActive = false;
+        Status = SessionStatus.Disconnected;
+    }
+
+    private bool IsAttemptCurrent(int teardownGeneration) =>
+        Volatile.Read(ref _teardownGeneration) == teardownGeneration;
+
+    private void ClearConnectWatchdog(CancellationTokenSource? expected = null)
+    {
+        CancellationTokenSource? cts;
+        if (expected is null)
+        {
+            cts = Interlocked.Exchange(ref _cts, null);
+        }
+        else
+        {
+            cts = ReferenceEquals(Interlocked.CompareExchange(ref _cts, null, expected), expected)
+                ? expected
+                : null;
+        }
+
+        try { cts?.Dispose(); }
+        catch (Exception ex) { _logger.LogDebug(ex, "RDP connect watchdog dispose threw (suppressed)."); }
+    }
+
+    private void ClearCrashSentinelIfSafe()
+    {
+        if (!_ownsCrashSentinel) return;
+        if (Status == SessionStatus.Connecting) return;
+        if (Status == SessionStatus.Connected && !_hasLoggedOn) return;
+
+        ClearOwnedCrashSentinel();
+    }
+
+    private void ClearOwnedCrashSentinel()
+    {
+        if (!_ownsCrashSentinel) return;
+        _ownsCrashSentinel = false;
+        _ = _crashSentinel.ClearAsync();
     }
 
     /// <summary>
@@ -828,6 +996,8 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     /// </summary>
     private async Task FullTeardownAsync(bool fastTunnelTeardown = false)
     {
+        _teardownRequested = true;
+        Interlocked.Increment(ref _teardownGeneration);
         var cts = _cts;
         _cts = null;
         try { cts?.Cancel(); } catch { /* already disposed */ }
@@ -836,6 +1006,16 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         cts?.Dispose();
 
         DisposeSessionSilently();
+        DetachExternalProcess();
+        ResetTitleToBaseProfile();
+        Status = SessionStatus.Disconnected;
+        ErrorMessage = null;
+        FailedDueToCredentials = false;
+        IsExternalClientActive = false;
+        ReconnectAttempt = 0;
+        _hasLoggedOn = false;
+        _lastLogonErrorCode = null;
+
         if (fastTunnelTeardown)
         {
             // Reconnect path only: VPN sidecar shutdown can take 100s of ms and the
@@ -849,10 +1029,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         {
             await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
         }
-        DetachExternalProcess();
-        Status = SessionStatus.Disconnected;
-        ErrorMessage = null;
-        FailedDueToCredentials = false;
+        _teardownRequested = false;
     }
 
     /// <summary>
@@ -866,6 +1043,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     {
         var ext = _externalProcess;
         _externalProcess = null;
+        IsExternalClientActive = false;
         if (ext is null) return;
         try { ext.EnableRaisingEvents = false; } catch { /* may have already exited */ }
         try { ext.Dispose(); } catch (Exception ex) { _logger.LogDebug(ex, "Disposing external mstsc.exe handle threw (suppressed)."); }
@@ -906,11 +1084,11 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         }
         catch (Exception ex)
         {
-            // A repository hiccup must not silently route to embedded for an AAD credential —
-            // that's a crash. Log and assume non-AAD; the user can still set the flag manually
-            // if they hit issues.
-            _logger.LogWarning(ex, "Credential lookup for AAD detection failed; assuming non-AAD.");
-            return false;
+            // A repository hiccup must not silently route to embedded for a possibly-AAD
+            // credential — that's the crash-prone path. Fall back to mstsc.exe for normal
+            // RDP, or to the tunnel/external-client guard for tunneled profiles.
+            _logger.LogWarning(ex, "Credential lookup for AAD detection failed; routing RDP away from embedded mstscax.");
+            return true;
         }
         return AzureAdCredentialDetector.IsAzureAd(credential);
     }
@@ -924,9 +1102,13 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     /// </summary>
     private void LaunchExternalProcess(ConnectionProfile profile)
     {
+        ClearConnectWatchdog();
+        ClearOwnedCrashSentinel();
+
         Status = SessionStatus.Connecting;
         ErrorMessage = null;
         FailedDueToCredentials = false;
+        IsExternalClientActive = false;
         ReconnectAttempt = 0;
 
         Process? proc;
@@ -937,12 +1119,13 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             // AAD targets, the WAM broker flow) far more correctly than any flag we could
             // pass on the command line. The username/domain are intentionally omitted too;
             // mstsc.exe will use Windows credential roaming or prompt as appropriate.
-            var psi = new ProcessStartInfo("mstsc.exe", $"/v:\"{profile.Host}:{profile.Port}\"")
+            var psi = new ProcessStartInfo("mstsc.exe")
             {
                 UseShellExecute = false,
                 CreateNoWindow = false,
             };
-            proc = Process.Start(psi);
+            psi.ArgumentList.Add("/v:" + FormatMstscTarget(profile.Host, profile.Port));
+            proc = ExternalProcessLauncher(psi);
         }
         catch (Exception ex)
         {
@@ -960,42 +1143,142 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         }
 
         _externalProcess = proc;
+        var pid = 0;
+        try { pid = proc.Id; }
+        catch (Exception ex) { _logger.LogDebug(ex, "Could not read mstsc.exe process id after launch."); }
         try { proc.EnableRaisingEvents = true; }
         catch (Exception ex) { _logger.LogDebug(ex, "EnableRaisingEvents on external mstsc.exe threw (suppressed)."); }
 
-        var baseTitle = string.IsNullOrEmpty(profile.Name) ? profile.Host : profile.Name;
+        var baseTitle = GetBaseTitle(profile);
         proc.Exited += (_, _) =>
         {
-            MarshalToUi(() =>
-            {
-                // If FullTeardown / a Retry has already swapped or detached the tracked
-                // process, ignore this late Exited — it's about a process we no longer own.
-                if (!ReferenceEquals(_externalProcess, proc)) return;
-                _externalProcess = null;
-                Status = SessionStatus.Disconnected;
-                Title = baseTitle;
-                try { proc.Dispose(); } catch { /* nothing to do */ }
-            });
+            MarshalToUi(() => HandleExternalProcessExited(proc, baseTitle));
         };
 
+        // If mstsc.exe rejects the launch and exits before EnableRaisingEvents/subscription
+        // can observe it, do not leave the Wormhole tab in a phantom external-active state.
+        if (HasExternalProcessExited(proc))
+        {
+            HandleExternalProcessExited(proc, baseTitle);
+            return;
+        }
+        if (!ReferenceEquals(_externalProcess, proc)) return;
+
+        IsExternalClientActive = true;
         Status = SessionStatus.Connected;
         Title = baseTitle + " (external)";
+        if (!ReferenceEquals(_externalProcess, proc) || HasExternalProcessExited(proc))
+        {
+            IsExternalClientActive = false;
+            Status = SessionStatus.Disconnected;
+            ErrorMessage = null;
+            FailedDueToCredentials = false;
+            Title = baseTitle;
+            if (ReferenceEquals(_externalProcess, proc))
+            {
+                HandleExternalProcessExited(proc, baseTitle);
+            }
+            return;
+        }
         _logger.LogInformation(
             "Launched mstsc.exe (pid {Pid}) for {Host}:{Port} — external client mode.",
-            proc.Id, profile.Host, profile.Port);
+            pid, profile.Host, profile.Port);
+    }
+
+    private bool HasExternalProcessExited(Process proc)
+    {
+        try
+        {
+            if (proc.WaitForExit(milliseconds: 0)) return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not poll mstsc.exe process exit state.");
+        }
+
+        try
+        {
+            proc.Refresh();
+            if (proc.HasExited) return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not read mstsc.exe HasExited state.");
+        }
+
+        try
+        {
+            _ = proc.ExitTime;
+            return true;
+        }
+        catch (InvalidOperationException)
+        {
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Could not read mstsc.exe ExitTime state.");
+            return false;
+        }
+    }
+
+    private static string GetBaseTitle(ConnectionProfile profile) =>
+        string.IsNullOrEmpty(profile.Name) ? profile.Host : profile.Name;
+
+    private static string FormatMstscTarget(string host, int port)
+    {
+        if (IPAddress.TryParse(host, out var ip) &&
+            ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+        {
+            return $"[{host}]:{port}";
+        }
+
+        return $"{host}:{port}";
+    }
+
+    private bool HasLiveExternalProcess(ConnectionProfile profile)
+    {
+        if (_externalProcess is not { } externalProcess) return false;
+        if (!HasExternalProcessExited(externalProcess)) return true;
+
+        HandleExternalProcessExited(externalProcess, GetBaseTitle(profile));
+        return false;
+    }
+
+    private void HandleExternalProcessExited(Process proc, string baseTitle)
+    {
+        // If FullTeardown / a Retry has already swapped or detached the tracked process,
+        // ignore this late Exited — it is about a process we no longer own.
+        if (!ReferenceEquals(_externalProcess, proc)) return;
+        _externalProcess = null;
+        IsExternalClientActive = false;
+        Status = SessionStatus.Disconnected;
+        ErrorMessage = null;
+        FailedDueToCredentials = false;
+        Title = baseTitle;
+        try { proc.Dispose(); } catch { /* nothing to do */ }
+    }
+
+    private void ResetTitleToBaseProfile()
+    {
+        if (Profile is { } profile)
+        {
+            Title = GetBaseTitle(profile);
+        }
     }
 
     /// <summary>
     /// Event-driven teardown: dispose the dead session, then either flip to Disconnected
     /// (clean shutdown) or surface the failure overlay. Called from OnSessionDisconnected /
-    /// OnSessionLogonError / OnSessionFatalError so the shape stays consistent.
+    /// OnSessionFatalError so the shape stays consistent.
     /// </summary>
     private async Task DisposeAndTransitionAsync(string? failureMessage, bool dueToCredentials)
     {
+        ClearConnectWatchdog();
         DisposeSessionSilently();
-        await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
         if (failureMessage is null)
         {
+            IsExternalClientActive = false;
             Status = SessionStatus.Disconnected;
             ErrorMessage = null;
             FailedDueToCredentials = false;
@@ -1004,6 +1287,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         {
             ReportFailure(failureMessage, dueToCredentials);
         }
+        await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
     }
 
     private async Task DisposeTunnelSilentlyAsync()
@@ -1024,9 +1308,12 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     {
         var session = _session;
         _session = null;
+        _hasLoggedOn = false;
+        _lastLogonErrorCode = null;
         if (session is null) return;
 
         session.Connected -= OnSessionConnected;
+        session.LoginComplete -= OnSessionLoginComplete;
         session.Disconnected -= OnSessionDisconnected;
         session.FatalError -= OnSessionFatalError;
         session.LogonError -= OnSessionLogonError;
@@ -1043,37 +1330,120 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     }
 
     // Test-only hook mirroring the SSH pattern — lets unit tests bypass the real service.
-    internal void AttachConnectedSessionForTesting(IRdpSession session)
+    internal void AttachConnectedSessionForTesting(IRdpSession session, bool hasLoggedOn = true)
     {
-        _session = session;
-        _session.Connected += OnSessionConnected;
-        _session.Disconnected += OnSessionDisconnected;
-        _session.FatalError += OnSessionFatalError;
-        _session.LogonError += OnSessionLogonError;
-        _session.AutoReconnecting += OnSessionAutoReconnecting;
-        _session.AutoReconnected += OnSessionAutoReconnected;
+        AttachSession(session, hasLoggedOn);
         EnsureDispatcher();
         Status = SessionStatus.Connected;
+    }
+
+    private void AttachSession(IRdpSession session, bool hasLoggedOn)
+    {
+        _session = session;
+        _hasLoggedOn = hasLoggedOn || session.IsLoggedOn;
+        _lastLogonErrorCode = null;
+        session.Connected += OnSessionConnected;
+        session.LoginComplete += OnSessionLoginComplete;
+        session.Disconnected += OnSessionDisconnected;
+        session.FatalError += OnSessionFatalError;
+        session.LogonError += OnSessionLogonError;
+        session.AutoReconnecting += OnSessionAutoReconnecting;
+        session.AutoReconnected += OnSessionAutoReconnected;
+    }
+
+    private static (string? FailureMessage, bool DueToCredentials) BuildDisconnectFailure(
+        RdpDisconnectInfo info,
+        bool loggedOn,
+        bool teardownRequested,
+        int? lastLogonErrorCode)
+    {
+        if (teardownRequested) return (null, false);
+        if (loggedOn && info.IsClean) return (null, false);
+
+        var dueToCredentials =
+            (lastLogonErrorCode is { } logonCode && RdpLogonErrors.IsCredentialRelated(logonCode)) ||
+            RdpDisconnectReasons.IsCredentialRelated(info.Code) ||
+            RdpDisconnectReasons.IsCredentialRelated(info.ExtendedCode);
+        var message = RdpLogonErrors.BuildDisconnectMessage(lastLogonErrorCode, info);
+        return (message, dueToCredentials);
+    }
+
+    /// <summary>
+    /// Credential-related OnDisconnected codes from the IMsTscAxEvents.OnDisconnected
+    /// reference. These can arrive without a preceding OnLogonError on some NLA/CredSSP
+    /// paths, so they must still force the next Retry through the credential prompt.
+    /// </summary>
+    private static class RdpDisconnectReasons
+    {
+        public static bool IsCredentialRelated(int code) =>
+            code is
+                2055 or // SSL_ERR_LOGON_FAILURE
+                2567 or // SSL_ERR_NO_SUCH_USER
+                2823 or // SSL_ERR_ACCOUNT_DISABLED
+                3079 or // SSL_ERR_ACCOUNT_RESTRICTION
+                3335 or // SSL_ERR_ACCOUNT_LOCKED_OUT
+                3591 or // SSL_ERR_ACCOUNT_EXPIRED
+                3847 or // SSL_ERR_PASSWORD_EXPIRED
+                4615 or // SSL_ERR_PASSWORD_MUST_CHANGE
+                5639 or // SSL_ERR_DELEGATION_POLICY
+                5895 or // SSL_ERR_POLICY_NTLM_ONLY
+                6151 or // SSL_ERR_NO_AUTHENTICATING_AUTHORITY
+                8455;   // SSL_ERR_FRESH_CRED_REQUIRED_BY_SERVER
     }
 
     /// <summary>
     /// Mappings for the OnLogonError codes the ActiveX may raise, taken from the
     /// IMsTscAxEvents.OnLogonError reference at
     /// learn.microsoft.com/windows/win32/termserv/imstscaxevents-onlogonerror. The published
-    /// table only documents three values; an earlier revision had additional made-up mappings
-    /// (account disabled / locked / expired) that misclassified errors. Unknown codes fall
-    /// through to a generic message so the user still has something actionable.
+    /// table includes both errors and non-terminal logon notifications; OnLogonError alone
+    /// never decides terminal state because the OCX may still proceed to LoginComplete.
     /// </summary>
     private static class RdpLogonErrors
     {
         private static readonly Dictionary<int, string> Descriptions = new Dictionary<int, string>
         {
-            [-2] = "The credentials dialog was cancelled.",
-            [-3] = "Pre-authentication failed.",
-            [-5] = "An information dialog was displayed (e.g. Lock Workstation Failed).",
+            [-1073741715] = "The attempted logon is not valid. Check the username and password.",
+            [-1073741714] = "The account was blocked by logon restrictions.",
+            [-1073741276] = "The password is expired and must be changed.",
+            [-7] = "Winlogon displayed the Disconnect Refused dialog.",
+            [-6] = "Winlogon displayed the No Permissions dialog.",
+            [-5] = "Winlogon displayed the Session Contention dialog.",
+            [-4] = "Winlogon displayed the Reconnect dialog.",
+            [-3] = "Winlogon ended silently.",
+            [-2] = "Winlogon is continuing with the logon process.",
+            [-1] = "Access denied.",
+            [0] = "The logon credentials are not valid.",
+            [1] = "The password is expired and must be changed.",
+            [2] = "Another logon or post-logon error occurred.",
+            [3] = "The Remote Desktop client displayed a logon warning.",
         };
 
         public static string Describe(int code) =>
             Descriptions.TryGetValue(code, out var msg) ? msg : $"Logon failed (code {code}).";
+
+        public static bool IsCredentialRelated(int code) =>
+            code is -1073741715 or -1073741714 or -1073741276 or -6 or -1 or 0 or 1;
+
+        public static string BuildDisconnectMessage(int? logonCode, RdpDisconnectInfo info)
+        {
+            if (logonCode is null or -2)
+            {
+                return string.IsNullOrWhiteSpace(info.Description)
+                    ? $"RDP disconnected before login completed (reason {info.Code})."
+                    : info.Description;
+            }
+
+            var logonDescription = Describe(logonCode.Value);
+            if (string.IsNullOrWhiteSpace(info.Description))
+            {
+                return logonDescription;
+            }
+            if (string.Equals(logonDescription, info.Description, StringComparison.OrdinalIgnoreCase))
+            {
+                return info.Description;
+            }
+
+            return $"{logonDescription} {info.Description}";
+        }
     }
 }

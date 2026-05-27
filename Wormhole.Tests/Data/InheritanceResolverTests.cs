@@ -259,7 +259,7 @@ public class InheritanceResolverTests
     {
         // A bare RDP node with no RDP-specific fields set should still produce a usable
         // profile with mstsc-style defaults: 32-bit color, clipboard on, auto-reconnect on,
-        // connection speed = auto-detect, gateway disabled, NLA = warn.
+        // connection speed = auto-detect, gateway disabled, server authentication = warn.
         var node = new ConnectionNode
         {
             Id = Guid.NewGuid(),
@@ -277,7 +277,7 @@ public class InheritanceResolverTests
         Assert.True(profile.RdpAutoReconnect);
         Assert.Equal(7, profile.RdpConnectionSpeed);
         Assert.Equal(0, profile.RdpGatewayUsageMethod);
-        Assert.Equal(0, profile.RdpServerAuthentication);
+        Assert.Equal(2, profile.RdpServerAuthentication);
         Assert.Equal(2, profile.RdpKeyboardHookMode); // full-screen-only
         Assert.True(profile.RdpDesktopBackground);
         Assert.True(profile.RdpVisualStyles);

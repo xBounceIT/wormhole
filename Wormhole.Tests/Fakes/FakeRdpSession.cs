@@ -13,6 +13,8 @@ public sealed class FakeRdpSession : IRdpSession
     public IntPtr Hwnd => (IntPtr)0x1234;
     public bool IsLoggedOn { get; private set; }
     public bool Disposed { get; private set; }
+    public bool ThrowOnSetBounds { get; set; }
+    public bool ThrowOnShow { get; set; }
 
     /// <summary>Number of times <see cref="Focus"/> was called. Lets tests verify that the
     /// VM pushes Win32 focus into the ActiveX HWND when the session reaches Connected
@@ -20,21 +22,30 @@ public sealed class FakeRdpSession : IRdpSession
     public int FocusCount { get; private set; }
 
     public event EventHandler? Connected;
+    public event EventHandler? LoginComplete;
     public event EventHandler<RdpDisconnectInfo>? Disconnected;
     public event EventHandler<int>? FatalError;
     public event EventHandler<int>? LogonError;
     public event EventHandler<RdpReconnectInfo>? AutoReconnecting;
     public event EventHandler? AutoReconnected;
 
-    public void RaiseConnected() { IsLoggedOn = true; Connected?.Invoke(this, EventArgs.Empty); }
+    public void RaiseConnected() { Connected?.Invoke(this, EventArgs.Empty); }
+    public void RaiseLoginComplete() { IsLoggedOn = true; LoginComplete?.Invoke(this, EventArgs.Empty); }
     public void RaiseDisconnected(RdpDisconnectInfo info) { IsLoggedOn = false; Disconnected?.Invoke(this, info); }
     public void RaiseFatalError(int code) => FatalError?.Invoke(this, code);
     public void RaiseLogonError(int code) => LogonError?.Invoke(this, code);
     public void RaiseAutoReconnecting(RdpReconnectInfo info) => AutoReconnecting?.Invoke(this, info);
     public void RaiseAutoReconnected() { IsLoggedOn = true; AutoReconnected?.Invoke(this, EventArgs.Empty); }
 
-    public void SetBounds(HostBounds bounds) { }
-    public void Show() { }
+    public void SetBounds(HostBounds bounds)
+    {
+        if (ThrowOnSetBounds) throw new InvalidOperationException("simulated SetBounds failure");
+    }
+
+    public void Show()
+    {
+        if (ThrowOnShow) throw new InvalidOperationException("simulated Show failure");
+    }
     public void Hide() { }
     public void Disconnect() { }
     public void Focus() { FocusCount++; }

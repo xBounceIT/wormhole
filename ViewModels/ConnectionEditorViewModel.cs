@@ -236,9 +236,9 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     #region Advanced
 
-    /// <summary>0=Warn, 1=Require / fail-closed, 2=DoNotConnect.</summary>
+    /// <summary>0=No server authentication, 1=Require / fail-closed, 2=Warn / prompt.</summary>
     [ObservableProperty]
-    private int rdpServerAuthentication;
+    private int rdpServerAuthentication = 2;
 
     /// <summary>0=Direct (no gateway), 1=AlwaysUseGateway, 2=AutoDetect, 3=DefaultRdg.</summary>
     [ObservableProperty]
@@ -323,9 +323,9 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     public IReadOnlyList<KeyValuePair<int, string>> ServerAuthChoices { get; } = new[]
     {
-        new KeyValuePair<int, string>(0, "Warn me about server authentication failures"),
+        new KeyValuePair<int, string>(2, "Warn me if server authentication fails"),
         new KeyValuePair<int, string>(1, "Require server authentication"),
-        new KeyValuePair<int, string>(2, "Do not connect if authentication fails"),
+        new KeyValuePair<int, string>(0, "Do not authenticate the server"),
     };
 
     #endregion
@@ -550,7 +550,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
             RdpBitmapCaching = node.RdpBitmapCaching ?? true;
             RdpAutoReconnect = node.RdpAutoReconnect ?? true;
 
-            RdpServerAuthentication = node.RdpServerAuthentication ?? 0;
+            RdpServerAuthentication = node.RdpServerAuthentication ?? 2;
             RdpGatewayUsageMethod = node.RdpGatewayUsageMethod ?? 0;
             RdpGatewayHostname = node.RdpGatewayHostname ?? string.Empty;
             RdpGatewayCredentialId = node.RdpGatewayCredentialId;
