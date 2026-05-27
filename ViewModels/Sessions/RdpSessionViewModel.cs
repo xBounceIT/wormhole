@@ -335,23 +335,33 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                     return;
                 }
                 var password = creds.Password;
-                // If the user typed a username at the prompt (because the profile didn't have
-                // one), thread it into the profile so PrepareConnectProfileAsync and the OCX
-                // both see a real username instead of falling back to the current Windows
-                // session identity.
-                if (!string.Equals(creds.Username, profile.Username, StringComparison.Ordinal))
+                var resolvedProfile = profile with
                 {
-                    profile = profile with { Username = creds.Username };
+                    Username = creds.Username,
+                    RdpDomain = creds.Domain,
+                };
+                _logger.LogInformation(
+                    "RDP credentials resolved for {Host}:{Port}: hasUsername={HasUsername}, hasDomain={HasDomain}, passwordSource={PasswordSource}, usernameSource={UsernameSource}, domainSource={DomainSource}.",
+                    profile.Host,
+                    profile.Port,
+                    !string.IsNullOrEmpty(resolvedProfile.Username),
+                    !string.IsNullOrEmpty(resolvedProfile.RdpDomain),
+                    creds.PasswordSource,
+                    creds.UsernameSource,
+                    creds.DomainSource);
+
+                // Thread the resolved identity into the profile so PrepareConnectProfileAsync
+                // and the OCX both see the same username/domain. This covers linked saved
+                // credentials whose username/domain differ from the node's inherited fields.
+                if (!string.Equals(resolvedProfile.Username, profile.Username, StringComparison.Ordinal) ||
+                    !string.Equals(resolvedProfile.RdpDomain, profile.RdpDomain, StringComparison.Ordinal))
+                {
+                    profile = resolvedProfile;
 
                     // The external-client routing decision at the top of ConnectAsync ran with
-                    // the empty profile.Username, so an AAD-flavored username typed at the
-                    // credentials prompt (e.g. "AzureAD\alice@tenant.com") won't have triggered
-                    // the auto-route to mstsc.exe. Continuing on the embedded mstscax path with
-                    // that identity would delay-load the WAM broker DLLs and crash the process
-                    // with SEH 0xC06D007F — the exact failure the routing guard exists to
-                    // prevent. Re-evaluate the same guard with the late-bound username and
-                    // mirror the early-return branch: launch mstsc.exe, or fail closed when a
-                    // tunnel is enabled (the loopback bridge can't host an external mstsc).
+                    // the pre-resolution identity, so an AAD-flavored username/domain supplied
+                    // by a prompt or linked credential may not have triggered the auto-route to
+                    // mstsc.exe. Re-evaluate the same guard with the late-bound identity.
                     if (await ShouldUseExternalClientAsync(profile).ConfigureAwait(true))
                     {
                         if (profile.TunnelEnabled)
@@ -493,30 +503,78 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     }
 
     /// <summary>
-    /// Resolve the credentials needed for the RDP connection. Returns <c>(Username,
-    /// Password)</c> on success or <c>null</c> if the user cancels a prompt. When the
-    /// profile already has a username, <c>Username</c> in the result is just
-    /// <c>profile.Username</c>; when it doesn't, the user is prompted for BOTH fields
-    /// (without this, a profile saved with no username would silently hand the OCX a blank
-    /// username and the OCX would fill it from the current Windows session — never
-    /// surfacing a username field to the user).
+    /// Resolve the credentials needed for the RDP connection. Returns a fully resolved
+    /// username/domain/password set on success or <c>null</c> if the user cancels a prompt.
+    /// Identity precedence is explicit profile fields first, then the linked credential
+    /// profile, then an interactive Wormhole prompt.
     /// </summary>
-    private async Task<(string Username, string Password)?> ResolveCredentialsAsync(ConnectionProfile profile, bool forcePrompt, CancellationToken token)
+    private async Task<ResolvedRdpCredentials?> ResolveCredentialsAsync(ConnectionProfile profile, bool forcePrompt, CancellationToken token)
     {
-        var profileUsername = profile.Username ?? string.Empty;
+        CredentialProfile? credential = null;
+        if (profile.CredentialId is { } lookupId)
+        {
+            try
+            {
+                credential = await _credentialRepository.GetByIdAsync(lookupId, token).ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to read credential profile {CredentialId} for RDP identity resolution.", lookupId);
+            }
+        }
+        token.ThrowIfCancellationRequested();
+
+        var explicitUsername = NullIfWhiteSpace(profile.Username);
+        var explicitDomain = NullIfWhiteSpace(profile.RdpDomain);
+        var credentialUsername = NullIfWhiteSpace(credential?.Username);
+        var credentialDomain = NullIfWhiteSpace(credential?.Domain);
+
+        var username = explicitUsername ?? credentialUsername;
+        var domain = explicitDomain ?? credentialDomain;
+        var usernameSource = explicitUsername is not null
+            ? RdpCredentialValueSource.Profile
+            : credentialUsername is not null
+                ? RdpCredentialValueSource.Credential
+                : RdpCredentialValueSource.Prompt;
+        var domainSource = explicitDomain is not null
+            ? RdpCredentialValueSource.Profile
+            : credentialDomain is not null
+                ? RdpCredentialValueSource.Credential
+                : RdpCredentialValueSource.None;
+
+        if (username is not null)
+        {
+            var parsed = SplitDomainUsername(username, domain, allowDomainFromUsername: domain is null);
+            username = parsed.Username;
+            domain = parsed.Domain;
+            if (parsed.DomainSourceWasPrompt)
+            {
+                domainSource = usernameSource;
+            }
+        }
 
         if (!forcePrompt && profile.CredentialId is { } credId)
         {
             try
             {
                 var stored = await _credentialService.ReadPasswordAsync(credId).ConfigureAwait(true);
-                if (!string.IsNullOrEmpty(stored) && !string.IsNullOrEmpty(profileUsername))
-                    return (profileUsername, stored);
-                // Either the stored password is missing (Credential Manager entry deleted
-                // out-of-band) or the profile has no username — either way we fall through
-                // to a prompt instead of handing the OCX partial credentials.
-                if (string.IsNullOrEmpty(stored))
-                    _logger.LogInformation("Credential {CredentialId} not found in Credential Manager — prompting.", credId);
+                if (stored is not null && username is not null)
+                {
+                    return new ResolvedRdpCredentials(
+                        username,
+                        domain,
+                        stored,
+                        usernameSource,
+                        domainSource,
+                        RdpCredentialPasswordSource.SavedCredential);
+                }
+                // Missing secret or missing identity: prompt rather than handing the OCX
+                // partial credentials. Empty-string passwords are valid and already returned
+                // above because only null means the Credential Manager entry is missing.
+                if (stored is null)
+                {
+                    _logger.LogInformation("Credential {CredentialId} password not found in Credential Manager — prompting.", credId);
+                }
             }
             catch (Exception ex)
             {
@@ -525,24 +583,87 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         }
         token.ThrowIfCancellationRequested();
 
-        // No username on the profile → prompt for username + password. Without this the
-        // password-only dialog asked for half the credentials and the OCX silently used the
-        // current Windows user as the implicit username.
-        if (string.IsNullOrEmpty(profileUsername))
+        if (username is null)
         {
             var prompted = await _dialog.PromptCredentialsAsync(
                 "RDP credentials",
                 $"Enter credentials for {profile.Host}",
                 initialUsername: null).ConfigureAwait(true);
-            return prompted;
+            if (prompted is null) return null;
+
+            var parsedPrompt = SplitDomainUsername(
+                prompted.Value.Username,
+                explicitDomain ?? credentialDomain,
+                allowDomainFromUsername: explicitDomain is null && credentialDomain is null);
+            return new ResolvedRdpCredentials(
+                parsedPrompt.Username,
+                parsedPrompt.Domain,
+                prompted.Value.Password,
+                RdpCredentialValueSource.Prompt,
+                parsedPrompt.DomainSourceWasPrompt
+                    ? RdpCredentialValueSource.Prompt
+                    : explicitDomain is not null
+                        ? RdpCredentialValueSource.Profile
+                        : credentialDomain is not null
+                            ? RdpCredentialValueSource.Credential
+                            : RdpCredentialValueSource.None,
+                RdpCredentialPasswordSource.Prompt);
         }
 
-        var prefix = !string.IsNullOrEmpty(profile.RdpDomain)
-            ? $"{profile.RdpDomain}\\{profileUsername}"
-            : profileUsername;
+        var prefix = !string.IsNullOrEmpty(domain)
+            ? $"{domain}\\{username}"
+            : username;
         var promptMsg = $"Enter password for {prefix}@{profile.Host}";
         var password = await _dialog.PromptPasswordAsync("RDP credentials", promptMsg).ConfigureAwait(true);
-        return password is null ? null : (profileUsername, password);
+        return password is null
+            ? null
+            : new ResolvedRdpCredentials(
+                username,
+                domain,
+                password,
+                usernameSource,
+                domainSource,
+                RdpCredentialPasswordSource.Prompt);
+    }
+
+    private static string? NullIfWhiteSpace(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private static (string Username, string? Domain, bool DomainSourceWasPrompt) SplitDomainUsername(
+        string rawUsername,
+        string? existingDomain,
+        bool allowDomainFromUsername)
+    {
+        var username = rawUsername.Trim();
+        var domain = NullIfWhiteSpace(existingDomain);
+        if (!allowDomainFromUsername) return (username, domain, false);
+
+        var slash = username.IndexOf('\\');
+        if (slash <= 0 || slash == username.Length - 1) return (username, domain, false);
+
+        return (username[(slash + 1)..], username[..slash], true);
+    }
+
+    private sealed record ResolvedRdpCredentials(
+        string Username,
+        string? Domain,
+        string Password,
+        RdpCredentialValueSource UsernameSource,
+        RdpCredentialValueSource DomainSource,
+        RdpCredentialPasswordSource PasswordSource);
+
+    private enum RdpCredentialValueSource
+    {
+        None,
+        Profile,
+        Credential,
+        Prompt,
+    }
+
+    private enum RdpCredentialPasswordSource
+    {
+        SavedCredential,
+        Prompt,
     }
 
     /// <summary>

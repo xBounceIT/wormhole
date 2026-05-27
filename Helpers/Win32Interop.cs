@@ -4,6 +4,8 @@ namespace Wormhole.Helpers;
 
 internal static class Win32Interop
 {
+    public static readonly IntPtr HWND_TOP = IntPtr.Zero;
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
 
@@ -81,6 +83,7 @@ internal static class Win32Interop
     public const uint SWP_NOZORDER = 0x0004;
     public const uint SWP_NOACTIVATE = 0x0010;
     public const uint SWP_FRAMECHANGED = 0x0020;
+    public const uint SWP_SHOWWINDOW = 0x0040;
 
     public const uint RDW_INVALIDATE = 0x0001;
     public const uint RDW_ALLCHILDREN = 0x0080;

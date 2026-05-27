@@ -99,6 +99,10 @@ public sealed partial class RdpSurfaceHost : UserControl
         var bounds = ComputeBoundsPhysicalPx();
         if (bounds.IsDegenerate(minDim: 1)) bounds = HostBounds.Seed;
 
+        // Mark layout active before AttachAsync can show a credentials dialog. SizeChanged
+        // events fired while that dialog is open must be allowed to schedule a replay;
+        // otherwise the native host can stay at the initial 1x1 seed forever.
+        _attached = true;
         try
         {
             await ViewModel.AttachAsync(_ownerHwnd, bounds);
@@ -110,7 +114,11 @@ public sealed partial class RdpSurfaceHost : UserControl
         }
         // Re-check IsLoaded after the await: if the tab was closed while AttachAsync was in
         // flight, OnUnloaded already cleared _attached and we must not flip it back on.
-        if (IsLoaded) _attached = true;
+        if (IsLoaded)
+        {
+            ApplyLayout();
+            DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, ApplyLayout);
+        }
 
         // No WinUI focus push on rebind: AttachAsync's rebind branch already issued Win32
         // SetFocus on the OCX HWND, and pushing WinUI Focus(Programmatic) on this
@@ -247,6 +255,8 @@ public sealed partial class RdpSurfaceHost : UserControl
         {
             if (ViewModel is { IsConnected: true })
             {
+                ApplyLayout();
+                DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, ApplyLayout);
                 if (!_focusPushed && TryFocusHost())
                 {
                     _focusPushed = true;

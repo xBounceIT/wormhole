@@ -111,6 +111,8 @@
     <Compile Include="..\ViewModels\TunnelPickerViewModel.cs" Link="ViewModels\TunnelPickerViewModel.cs" />
     <Compile Include="..\ViewModels\FolderEditorViewModel.cs" Link="ViewModels\FolderEditorViewModel.cs" />
     <Compile Include="..\ViewModels\ConnectionTreeViewModel.cs" Link="ViewModels\ConnectionTreeViewModel.cs" />
+    <Compile Include="..\ViewModels\ShellViewModel.cs" Link="ViewModels\ShellViewModel.cs" />
+    <Compile Include="..\ViewModels\UpdateViewModel.cs" Link="ViewModels\UpdateViewModel.cs" />
     <Compile Include="..\ViewModels\CredentialsViewModel.cs" Link="ViewModels\CredentialsViewModel.cs" />
     <Compile Include="..\ViewModels\TunnelConfigsViewModel.cs" Link="ViewModels\TunnelConfigsViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\SessionTabViewModel.cs" Link="ViewModels\Sessions\SessionTabViewModel.cs" />

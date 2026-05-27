@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using CommunityToolkit.Mvvm.ComponentModel;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Wormhole.Services;
 using Wormhole.ViewModels.Sessions;
@@ -15,6 +16,7 @@ public partial class ShellViewModel : ObservableObject
     private const double TextFitPadding = 8;
 
     private readonly IAppSettingsService _settings;
+    private readonly ILogger<ShellViewModel> _logger;
 
     [ObservableProperty]
     private SessionTabViewModel? selectedTab;
@@ -76,11 +78,16 @@ public partial class ShellViewModel : ObservableObject
 
     public UpdateViewModel Update { get; }
 
-    public ShellViewModel(ConnectionTreeViewModel tree, UpdateViewModel update, IAppSettingsService settings)
+    public ShellViewModel(
+        ConnectionTreeViewModel tree,
+        UpdateViewModel update,
+        IAppSettingsService settings,
+        ILogger<ShellViewModel> logger)
     {
         Tree = tree;
         Update = update;
         _settings = settings;
+        _logger = logger;
 
         SidebarWidth = settings.Current.SidebarWidth;
 
@@ -111,5 +118,24 @@ public partial class ShellViewModel : ObservableObject
         if (_settings.Current.SidebarWidth == rounded) return;
         _settings.Current.SidebarWidth = rounded;
         _settings.Save();
+    }
+
+    public async Task CloseAllSessionsAsync()
+    {
+        var tabs = Tabs.ToArray();
+        foreach (var tab in tabs)
+        {
+            try
+            {
+                await tab.CloseAsync().ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Session tab '{Title}' failed to close during app shutdown.", tab.Title);
+            }
+        }
+
+        SelectedTab = null;
+        Tabs.Clear();
     }
 }

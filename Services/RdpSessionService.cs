@@ -216,6 +216,7 @@ public sealed class RdpSessionService : IRdpSessionService
         public void Show()
         {
             Win32Interop.ShowWindow(_form.Hwnd, Win32Interop.SW_SHOWNA);
+            _form.EnsureVisibleAndRedraw("show");
             // Emit the post-Show diagnostic on every Show() call — not gated. Show() is rare
             // (called from AttachAsync once per attach: cold connect + each rebind after a
             // nav-away). A latched gate would hide exactly the rebind path most likely to
