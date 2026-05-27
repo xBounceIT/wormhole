@@ -409,6 +409,23 @@ public class CredentialsViewModelTests
     }
 
     [Fact]
+    public async Task SelectAllCommand_is_available_when_visible_credentials_exist_without_selection()
+    {
+        var repo = new FakeCredentialRepository(MakeProfile("alpha", ProtocolType.Ssh));
+        var vm = NewVm(repo);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        Assert.False(vm.HasSelection);
+        Assert.True(vm.CanSelectAll);
+        Assert.True(vm.SelectAllCommand.CanExecute(null));
+
+        vm.SearchText = "no-such-thing";
+
+        Assert.False(vm.CanSelectAll);
+        Assert.False(vm.SelectAllCommand.CanExecute(null));
+    }
+
+    [Fact]
     public async Task HasNoMatches_is_true_when_search_filters_everything_out()
     {
         var repo = new FakeCredentialRepository(MakeProfile("alpha", ProtocolType.Ssh));
