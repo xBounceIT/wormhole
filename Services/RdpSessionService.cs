@@ -52,75 +52,15 @@ public sealed class RdpSessionService : IRdpSessionService
                 surfaceBounds.Height);
             cancellationToken.ThrowIfCancellationRequested();
 
-            // WinForms creates a top-level Form with WS_POPUP. SetParent alone leaves that bit
-            // set, which produces a popup hosted inside another window: focus, clipping, and
-            // Alt-Tab all misbehave. Switch the style to WS_CHILD before reparenting — this is
-            // the canonical Win32 recipe for embedding a foreign HWND into a host window.
-            Marshal.SetLastSystemError(0);
-            var style = Win32Interop.GetWindowLong(form.Hwnd, Win32Interop.GWL_STYLE);
-            var getStyleError = Marshal.GetLastWin32Error();
-            if (style == 0 && getStyleError != 0)
-            {
-                throw new InvalidOperationException(
-                    $"GetWindowLong failed while reading embedded RDP host style (Win32 error {getStyleError}).");
-            }
-            var childStyle = (style & ~Win32Interop.WS_POPUP) |
-                             Win32Interop.WS_CHILD |
-                             Win32Interop.WS_CLIPCHILDREN |
-                             Win32Interop.WS_CLIPSIBLINGS;
-            var styleChanged = childStyle != style;
-            if (styleChanged)
-            {
-                Marshal.SetLastSystemError(0);
-                var previousStyle = Win32Interop.SetWindowLong(form.Hwnd, Win32Interop.GWL_STYLE, childStyle);
-                var styleError = Marshal.GetLastWin32Error();
-                if (previousStyle == 0 && styleError != 0)
-                {
-                    throw new InvalidOperationException(
-                        $"SetWindowLong failed while applying embedded RDP host style (Win32 error {styleError}).");
-                }
-            }
-
-            // SetParent returns the previous parent on success, NULL on failure — but it can
-            // also return NULL on SUCCESS when the window had no previous parent (which is
-            // the normal case for a top-level WinForms Form). The only reliable way to
-            // disambiguate is to clear the last error before the call and consult it only
-            // when the return is NULL: nonzero error means real failure.
-            Marshal.SetLastSystemError(0);
-            var oldParent = Win32Interop.SetParent(form.Hwnd, ownerHwnd);
-            if (oldParent == IntPtr.Zero)
-            {
-                var err = Marshal.GetLastWin32Error();
-                if (err != 0)
-                {
-                    throw new InvalidOperationException(
-                        $"SetParent failed reparenting the RDP host onto the WinUI main window (Win32 error {err}).");
-                }
-            }
-            if (styleChanged)
-            {
-                // Apply the non-client/style recalculation after SetParent, once the host is
-                // actually a child of the WinUI window. Doing it before reparenting can leave
-                // USER32 with cached top-level frame state for the new child HWND.
-                Marshal.SetLastSystemError(0);
-                if (!Win32Interop.SetWindowPos(
-                        form.Hwnd,
-                        IntPtr.Zero,
-                        0,
-                        0,
-                        0,
-                        0,
-                        Win32Interop.SWP_NOMOVE |
-                        Win32Interop.SWP_NOSIZE |
-                        Win32Interop.SWP_NOZORDER |
-                        Win32Interop.SWP_NOACTIVATE |
-                        Win32Interop.SWP_FRAMECHANGED))
-                {
-                    _logger.LogWarning(
-                        "SetWindowPos(SWP_FRAMECHANGED) failed after reparenting RDP host (Win32 error {Error}).",
-                        Marshal.GetLastWin32Error());
-                }
-            }
+            // Host the OCX in a SEPARATE TOP-LEVEL WINDOW owned by the WinUI main window and
+            // positioned in screen coordinates over the tab — do NOT reparent it INTO the WinUI
+            // window. Reparenting (SetParent + WS_CHILD) makes the child composite BEHIND the
+            // XAML DirectComposition surface (the WinUI 3 "airspace" problem): the transparent
+            // tab slot then reveals the window background instead of the remote desktop. An owned
+            // top-level window is composited by DWM ABOVE the owner's content, so it renders
+            // correctly; the owner relationship keeps it minimizing/restoring/closing with the
+            // main window and out of the taskbar / Alt-Tab.
+            ConfigureAsOwnedOverlay(form.Hwnd, ownerHwnd);
             cancellationToken.ThrowIfCancellationRequested();
 
             // Force the OCX visible/in-place-active before Connect(). Use the real first
@@ -152,6 +92,83 @@ public sealed class RdpSessionService : IRdpSessionService
                 _logger.LogWarning(disposeEx, "RDP host form Dispose failed during cleanup of a failed Connect.");
             }
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Turn the (top-level, WS_POPUP) WinForms host into an owned overlay of the WinUI main
+    /// window: set the main window as owner (GWLP_HWNDPARENT) so it minimizes/restores/closes
+    /// with the parent and stays above it, and OR-in WS_EX_TOOLWINDOW so the overlay never gets a
+    /// taskbar / Alt-Tab entry. The overlay is intentionally left activatable (NOT
+    /// WS_EX_NOACTIVATE) so clicking the remote surface activates it and routes keyboard focus to
+    /// the OCX — and clicking the canvas while the app is backgrounded brings it forward — which a
+    /// non-activating overlay would block (programmatic show/reposition stays non-activating via
+    /// SW_SHOWNA / SWP_NOACTIVATE, so we only activate on a real user click). Deliberately does
+    /// NOT switch to WS_CHILD / SetParent — see <see cref="ConnectAsync"/> for why that breaks
+    /// rendering.
+    /// </summary>
+    private void ConfigureAsOwnedOverlay(IntPtr hwnd, IntPtr ownerHwnd)
+    {
+        // Owner is stored in GWLP_HWNDPARENT for a top-level window. Use the *LongPtr accessor
+        // so the 64-bit owner HWND isn't truncated. A NULL return is only a failure when the
+        // last error is nonzero (NULL + zero error means there was no previous owner).
+        Marshal.SetLastSystemError(0);
+        var previousOwner = Win32Interop.SetWindowLongPtr(hwnd, Win32Interop.GWLP_HWNDPARENT, ownerHwnd);
+        if (previousOwner == IntPtr.Zero)
+        {
+            var ownerError = Marshal.GetLastWin32Error();
+            if (ownerError != 0)
+            {
+                throw new InvalidOperationException(
+                    $"SetWindowLongPtr(GWLP_HWNDPARENT) failed setting the RDP overlay owner (Win32 error {ownerError}).");
+            }
+        }
+
+        // OR-in WS_EX_TOOLWINDOW so we don't clobber anything WinForms already set. NOTE: we do
+        // NOT add WS_EX_NOACTIVATE — the surface is interactive, so it must be able to take focus
+        // on click (see the method summary).
+        Marshal.SetLastSystemError(0);
+        var exStyle = Win32Interop.GetWindowLongPtr(hwnd, Win32Interop.GWL_EXSTYLE).ToInt64();
+        var getExError = Marshal.GetLastWin32Error();
+        if (exStyle == 0 && getExError != 0)
+        {
+            throw new InvalidOperationException(
+                $"GetWindowLongPtr(GWL_EXSTYLE) failed reading the RDP overlay styles (Win32 error {getExError}).");
+        }
+        var newExStyle = exStyle | Win32Interop.WS_EX_TOOLWINDOW;
+        if (newExStyle != exStyle)
+        {
+            Marshal.SetLastSystemError(0);
+            // Use the IntPtr(long) constructor rather than a cast: IntPtr is 64-bit on the only
+            // supported platforms (x64/arm64) so the ex-style value can't overflow, and the
+            // constructor avoids CA2020 (the (IntPtr)Int64 cast's .NET 7 checked-context change).
+            var previousExStyle = Win32Interop.SetWindowLongPtr(hwnd, Win32Interop.GWL_EXSTYLE, new IntPtr(newExStyle));
+            var setExError = Marshal.GetLastWin32Error();
+            if (previousExStyle == IntPtr.Zero && setExError != 0)
+            {
+                throw new InvalidOperationException(
+                    $"SetWindowLongPtr(GWL_EXSTYLE) failed applying the RDP overlay styles (Win32 error {setExError}).");
+            }
+        }
+
+        // Recompute the non-client frame after the style change.
+        Marshal.SetLastSystemError(0);
+        if (!Win32Interop.SetWindowPos(
+                hwnd,
+                IntPtr.Zero,
+                0,
+                0,
+                0,
+                0,
+                Win32Interop.SWP_NOMOVE |
+                Win32Interop.SWP_NOSIZE |
+                Win32Interop.SWP_NOZORDER |
+                Win32Interop.SWP_NOACTIVATE |
+                Win32Interop.SWP_FRAMECHANGED))
+        {
+            _logger.LogWarning(
+                "SetWindowPos(SWP_FRAMECHANGED) failed configuring RDP overlay styles (Win32 error {Error}).",
+                Marshal.GetLastWin32Error());
         }
     }
 
@@ -287,11 +304,10 @@ public sealed class RdpSessionService : IRdpSessionService
             // Emit the post-Show diagnostic on every Show() call — not gated. Show() is rare
             // (called from AttachAsync once per attach: cold connect + each rebind after a
             // nav-away). A latched gate would hide exactly the rebind path most likely to
-            // surface a "black after navigating back" regression. WS_POPUP is surfaced
-            // separately because the reparent flow explicitly strips it — a regression would
-            // otherwise be buried inside the raw hex style. The rect is screen coordinates
-            // (GetWindowRect's contract); compare against the "SetHostBounds (first real bounds)"
-            // entry above for client-relative geometry.
+            // surface a "blank after navigating back" regression. The overlay is a top-level
+            // owned window, so the expected style is WS_POPUP=true, WS_CHILD=false; the rect is
+            // screen coordinates (GetWindowRect's contract) and should match the tab's on-screen
+            // position computed by RdpSurfaceHost.ComputeBoundsScreenPx.
             _form.LogWindowDiagnostics(_logger, "post-Show");
         }
 

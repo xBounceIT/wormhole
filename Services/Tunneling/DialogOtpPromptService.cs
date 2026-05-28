@@ -178,7 +178,14 @@ public sealed class DialogOtpPromptService : IOtpPromptService, IDisposable
             });
         });
 
-        var result = await dialog.ShowAsync();
+        // Suppress any connected RDP overlay (a top-level window composited above the WinUI
+        // content) for the lifetime of this prompt so it can't occlude the centered dialog —
+        // an OTP prompt can fire while a different RDP tab is the active, visible one.
+        ContentDialogResult result;
+        using (Wormhole.Helpers.RdpOverlayCoordinator.Suppress())
+        {
+            result = await dialog.ShowAsync();
+        }
 
         // If the user has already submitted (Primary button or Enter), honor that even if the
         // token fired in the same dispatch tick — discarding a successful OTP that the gateway

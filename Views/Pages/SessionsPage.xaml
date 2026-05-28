@@ -98,8 +98,12 @@
                         </TabViewItem.Header>
                         <TabViewItem.ContextFlyout>
                             <!-- Click handlers (not Command bindings) because ElementName binding
-                                 can't escape the DataTemplate's namescope into the MenuFlyout popup. -->
-                            <MenuFlyout>
+                                 can't escape the DataTemplate's namescope into the MenuFlyout popup.
+                                 Opened/Closed suppress the connected RDP overlay (a top-level window
+                                 above WinUI) for the menu's lifetime, otherwise the menu — which drops
+                                 over the session content area — is occluded by the overlay. -->
+                            <MenuFlyout Opened="OnTabContextFlyoutOpened"
+                                        Closed="OnTabContextFlyoutClosed">
                                 <MenuFlyoutItem Text="Duplicate" Click="OnTabDuplicateClick">
                                     <MenuFlyoutItem.Icon>
                                         <FontIcon Glyph="&#xE8C8;" />
@@ -118,6 +122,23 @@
                                                 Visibility="{x:Bind CanOpenFileTransfer, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
                                     <MenuFlyoutItem.Icon>
                                         <FontIcon Glyph="&#xE8AB;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
+                                <!-- Disconnect / Open-External for RDP: the connected RDP surface is a top-level
+                                     overlay that intercepts right-clicks (they go to the remote desktop), so its
+                                     own ContextFlyout can't open over a live session. Surface these here instead. -->
+                                <MenuFlyoutItem Text="Disconnect"
+                                                Command="{x:Bind TabDisconnectCommand, Mode=OneWay}"
+                                                Visibility="{x:Bind CanTabDisconnect, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE8BB;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
+                                <MenuFlyoutItem Text="Open in System Remote Desktop"
+                                                Command="{x:Bind TabUseExternalClientCommand, Mode=OneWay}"
+                                                Visibility="{x:Bind CanTabUseExternalClient, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE8A7;" />
                                     </MenuFlyoutItem.Icon>
                                 </MenuFlyoutItem>
                                 <MenuFlyoutSeparator />

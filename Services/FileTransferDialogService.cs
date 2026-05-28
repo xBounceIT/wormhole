@@ -193,7 +193,12 @@ public sealed class FileTransferDialogService : IFileTransferDialogService
             // renders. Observe the task so a synchronous throw or failed pane load
             // surfaces in logs rather than disappearing as an UnobservedTaskException.
             _ = SafeInitializeAsync(view, vm);
-            await dialog.ShowAsync();
+            // Suppress any connected RDP overlay (top-level window above the WinUI content) so it
+            // can't occlude this dialog while an RDP tab is the active, visible one.
+            using (Wormhole.Helpers.RdpOverlayCoordinator.Suppress())
+            {
+                await dialog.ShowAsync();
+            }
         }
         finally
         {
