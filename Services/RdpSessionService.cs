@@ -133,7 +133,10 @@ public sealed class RdpSessionService : IRdpSessionService
         if (newExStyle != exStyle)
         {
             Marshal.SetLastSystemError(0);
-            var previousExStyle = Win32Interop.SetWindowLongPtr(hwnd, Win32Interop.GWL_EXSTYLE, (IntPtr)newExStyle);
+            // Use the IntPtr(long) constructor rather than a cast: IntPtr is 64-bit on the only
+            // supported platforms (x64/arm64) so the ex-style value can't overflow, and the
+            // constructor avoids CA2020 (the (IntPtr)Int64 cast's .NET 7 checked-context change).
+            var previousExStyle = Win32Interop.SetWindowLongPtr(hwnd, Win32Interop.GWL_EXSTYLE, new IntPtr(newExStyle));
             var setExError = Marshal.GetLastWin32Error();
             if (previousExStyle == IntPtr.Zero && setExError != 0)
             {
