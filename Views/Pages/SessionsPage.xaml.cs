@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Wormhole.Helpers;
 using Wormhole.Services;
 using Wormhole.ViewModels;
 using Wormhole.ViewModels.Sessions;
@@ -74,6 +75,26 @@ public sealed partial class SessionsPage : Page
         {
             await CloseTabAsync(tab);
         }
+    }
+
+    // Active suppression scope while a tab context menu is open. Only one tab context menu can be
+    // open at a time (opening another light-dismisses the first), so a single field suffices; the
+    // Dispose-before-reassign guards against any transient overlap.
+    private IDisposable? _tabFlyoutOverlaySuppression;
+
+    private void OnTabContextFlyoutOpened(object? sender, object e)
+    {
+        // The tab context menu drops over the session content area, where a connected RDP overlay
+        // (a top-level window composited above WinUI) would occlude it. Hide the overlay for the
+        // menu's open lifetime, mirroring the ContentDialog suppression.
+        _tabFlyoutOverlaySuppression?.Dispose();
+        _tabFlyoutOverlaySuppression = RdpOverlayCoordinator.Suppress();
+    }
+
+    private void OnTabContextFlyoutClosed(object? sender, object e)
+    {
+        _tabFlyoutOverlaySuppression?.Dispose();
+        _tabFlyoutOverlaySuppression = null;
     }
 
     private async void OnTabFileTransferClick(object sender, RoutedEventArgs e)
