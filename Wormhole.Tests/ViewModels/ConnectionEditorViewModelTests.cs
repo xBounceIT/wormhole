@@ -438,6 +438,113 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task FilterCredentials_EmptyQuery_ReturnsFullListIncludingNoneSentinel()
+    {
+        var sshA = new CredentialProfile { Name = "alpha", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var sshB = new CredentialProfile { Name = "bravo", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var repo = new MultiCredentialRepository(sshA, sshB);
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        await vm.LoadCredentialsAsync();
+
+        var all = vm.FilterCredentials("");
+
+        // Mirrors AvailableCredentials: the None sentinel leads, followed by the two matches.
+        Assert.Equal(vm.AvailableCredentials.Count, all.Count);
+        Assert.Equal(Guid.Empty, all[0].Id);
+        Assert.Contains(all, c => c.Name == "alpha");
+        Assert.Contains(all, c => c.Name == "bravo");
+    }
+
+    [Fact]
+    public async Task FilterCredentials_MatchesNameUsernameAndDomain_CaseInsensitively()
+    {
+        var byName = new CredentialProfile { Name = "Prod-Web", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var byUser = new CredentialProfile { Name = "svc", Username = "deployer", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var byDomain = new CredentialProfile { Name = "corp", Domain = "EXAMPLE", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var repo = new MultiCredentialRepository(byName, byUser, byDomain);
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        await vm.LoadCredentialsAsync();
+
+        Assert.Contains(vm.FilterCredentials("prod"), c => c.Name == "Prod-Web");
+        Assert.Contains(vm.FilterCredentials("DEPLOY"), c => c.Name == "svc");
+        Assert.Contains(vm.FilterCredentials("example"), c => c.Name == "corp");
+
+        var none = vm.FilterCredentials("zzz-no-match");
+        Assert.Empty(none);
+    }
+
+    [Fact]
+    public async Task ResolveCredentialByText_ExactNameMatchesCaseInsensitively_OtherwiseNull()
+    {
+        var cred = new CredentialProfile { Name = "Prod-Web", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var repo = new MultiCredentialRepository(cred);
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        await vm.LoadCredentialsAsync();
+
+        Assert.Same(cred, vm.ResolveCredentialByText("prod-web"));
+        Assert.Same(cred, vm.ResolveCredentialByText("  Prod-Web  "));
+        Assert.Null(vm.ResolveCredentialByText("prod")); // substring, not exact — no commit
+        Assert.Null(vm.ResolveCredentialByText(""));
+    }
+
+    [Fact]
+    public async Task ResolveCredentialForCommit_PrefersExactName_ThenUniqueFilterMatch()
+    {
+        // Commit-on-submit/blur: an exact Name wins even if the substring is ambiguous; a
+        // non-exact query that uniquely matches by Username/Domain still commits; an ambiguous
+        // substring commits nothing (caller keeps the current selection).
+        var prod = new CredentialProfile { Name = "prod", Username = "root", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var prodWeb = new CredentialProfile { Name = "prod-web", Username = "deployer", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var repo = new MultiCredentialRepository(prod, prodWeb);
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        await vm.LoadCredentialsAsync();
+
+        // Exact name beats the fact that "prod" is also a substring of "prod-web".
+        Assert.Same(prod, vm.ResolveCredentialForCommit("prod"));
+        // Unique match by Username (not an exact Name) commits.
+        Assert.Same(prodWeb, vm.ResolveCredentialForCommit("deploy"));
+        // Unique substring match by Name commits ("web" appears only in prod-web).
+        Assert.Same(prodWeb, vm.ResolveCredentialForCommit("web"));
+        // "roo" uniquely matches prod by Username.
+        Assert.Same(prod, vm.ResolveCredentialForCommit("roo"));
+        // No match and empty both yield null (keep current selection / handled as clear by caller).
+        Assert.Null(vm.ResolveCredentialForCommit("zzz"));
+        Assert.Null(vm.ResolveCredentialForCommit(""));
+    }
+
+    [Fact]
+    public async Task ResolveCredentialForCommit_AmbiguousMatch_ReturnsNull()
+    {
+        var a = new CredentialProfile { Name = "web-a", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var b = new CredentialProfile { Name = "web-b", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var repo = new MultiCredentialRepository(a, b);
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        await vm.LoadCredentialsAsync();
+
+        // "web" matches both — no unambiguous commit.
+        Assert.Null(vm.ResolveCredentialForCommit("web"));
+    }
+
+    [Fact]
+    public async Task SelectedCredential_SetToNull_ClearsBindingToPromptEveryTime()
+    {
+        // The picker's "empty text clears the selection" path applies null to SelectedCredential;
+        // the setter must map that back to CredentialId == null (prompt every time).
+        var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var repo = new MultiCredentialRepository(cred);
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        await vm.LoadCredentialsAsync();
+
+        vm.SelectedCredential = cred;
+        Assert.Equal(cred.Id, vm.CredentialId);
+
+        vm.SelectedCredential = null;
+
+        Assert.Null(vm.CredentialId);
+        Assert.Equal(Guid.Empty, vm.SelectedCredential!.Id); // getter returns the None sentinel
+    }
+
+    [Fact]
     public async Task WriteTo_ExplicitUsernameOverridesCredentialUsername()
     {
         // The free-text Username field is shown alongside the credential picker so users can

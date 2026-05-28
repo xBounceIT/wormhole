@@ -71,11 +71,16 @@
                         <StackPanel Spacing="4">
                             <TextBlock Text="Saved credentials"
                                        Style="{StaticResource CaptionTextBlockStyle}" />
-                            <ComboBox HorizontalAlignment="Stretch"
-                                      PlaceholderText="Prompt every time"
-                                      ItemsSource="{x:Bind ViewModel.AvailableCredentials}"
-                                      ItemTemplate="{StaticResource CredentialItemTemplate}"
-                                      SelectedItem="{x:Bind ViewModel.SelectedCredential, Mode=TwoWay}" />
+                            <AutoSuggestBox x:Name="CredentialBox"
+                                            HorizontalAlignment="Stretch"
+                                            PlaceholderText="Prompt every time"
+                                            QueryIcon="Find"
+                                            TextMemberPath="Name"
+                                            ItemTemplate="{StaticResource CredentialItemTemplate}"
+                                            TextChanged="OnCredentialTextChanged"
+                                            QuerySubmitted="OnCredentialQuerySubmitted"
+                                            GotFocus="OnCredentialGotFocus"
+                                            LostFocus="OnCredentialLostFocus" />
                         </StackPanel>
 
                         <StackPanel Spacing="4">
@@ -256,12 +261,17 @@
                         <StackPanel Spacing="4">
                             <TextBlock Text="Gateway credentials"
                                        Style="{StaticResource CaptionTextBlockStyle}" />
-                            <ComboBox HorizontalAlignment="Stretch"
-                                      PlaceholderText="Prompt every time"
-                                      ItemsSource="{x:Bind ViewModel.AvailableCredentials}"
-                                      ItemTemplate="{StaticResource CredentialItemTemplate}"
-                                      SelectedItem="{x:Bind ViewModel.SelectedGatewayCredential, Mode=TwoWay}"
-                                      IsEnabled="{x:Bind ViewModel.IsGatewayEnabled, Mode=OneWay}" />
+                            <AutoSuggestBox x:Name="GatewayCredentialBox"
+                                            HorizontalAlignment="Stretch"
+                                            PlaceholderText="Prompt every time"
+                                            QueryIcon="Find"
+                                            TextMemberPath="Name"
+                                            ItemTemplate="{StaticResource CredentialItemTemplate}"
+                                            TextChanged="OnGatewayCredentialTextChanged"
+                                            QuerySubmitted="OnGatewayCredentialQuerySubmitted"
+                                            GotFocus="OnGatewayCredentialGotFocus"
+                                            LostFocus="OnGatewayCredentialLostFocus"
+                                            IsEnabled="{x:Bind ViewModel.IsGatewayEnabled, Mode=OneWay}" />
                         </StackPanel>
                         <CheckBox Content="Use my RD Gateway credentials for the remote computer"
                                   IsChecked="{x:Bind ViewModel.RdpGatewayUseSameCreds, Mode=TwoWay}"
