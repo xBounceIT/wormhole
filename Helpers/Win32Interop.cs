@@ -55,6 +55,21 @@ internal static class Win32Interop
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
+    // Maps a point in a window's client area to screen coordinates. Used to position the
+    // owned RDP overlay (a top-level window) over the tab, which lives in the WinUI window's
+    // client area.
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
+
+    // The *LongPtr accessors are required for HWND-sized values (GWLP_HWNDPARENT) and to be
+    // safe on 64-bit; the app is x64/arm64 only, so the W entry points always exist.
+    [DllImport("user32.dll", SetLastError = true, EntryPoint = "GetWindowLongPtrW")]
+    public static extern IntPtr GetWindowLongPtr(IntPtr hWnd, int nIndex);
+
+    [DllImport("user32.dll", SetLastError = true, EntryPoint = "SetWindowLongPtrW")]
+    public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
+
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT
     {
@@ -62,6 +77,13 @@ internal static class Win32Interop
         public int top;
         public int right;
         public int bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct POINT
+    {
+        public int x;
+        public int y;
     }
 
     public const uint WM_SIZE = 0x0005;
@@ -72,11 +94,16 @@ internal static class Win32Interop
     public const int SW_SHOWNA = 8; // Show without activating
 
     public const int GWL_STYLE = -16;
+    public const int GWL_EXSTYLE = -20;
+    public const int GWLP_HWNDPARENT = -8; // Owner HWND for a top-level window
     public const int WS_VISIBLE = 0x10000000;
     public const int WS_CHILD = 0x40000000;
     public const int WS_CLIPCHILDREN = 0x02000000;
     public const int WS_CLIPSIBLINGS = 0x04000000;
     public const int WS_POPUP = unchecked((int)0x80000000);
+
+    public const int WS_EX_TOOLWINDOW = 0x00000080;  // No taskbar button / Alt-Tab entry
+    public const int WS_EX_NOACTIVATE = 0x08000000;  // Don't steal activation on click
 
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOMOVE = 0x0002;

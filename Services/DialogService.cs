@@ -2,6 +2,7 @@ using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Wormhole.Data.Repositories;
+using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Models.Backup;
 using Wormhole.ViewModels;
@@ -27,7 +28,7 @@ public sealed class DialogService : IDialogService
             CloseButtonText = "OK",
             XamlRoot = RequireXamlRoot(),
         };
-        return dialog.ShowAsync().AsTask();
+        return ShowDialogAsync(dialog);
     }
 
     public async Task<bool> ConfirmAsync(string title, string message, string primaryText = "Yes", string closeText = "No")
@@ -41,7 +42,7 @@ public sealed class DialogService : IDialogService
             DefaultButton = ContentDialogButton.Primary,
             XamlRoot = RequireXamlRoot(),
         };
-        var result = await dialog.ShowAsync();
+        var result = await ShowDialogAsync(dialog);
         return result == ContentDialogResult.Primary;
     }
 
@@ -74,7 +75,7 @@ public sealed class DialogService : IDialogService
             textBox.SelectAll();
         };
 
-        var result = await dialog.ShowAsync();
+        var result = await ShowDialogAsync(dialog);
         return result == ContentDialogResult.Primary ? textBox.Text.Trim() : null;
     }
 
@@ -97,7 +98,7 @@ public sealed class DialogService : IDialogService
         form.ValidityChanged += (_, _) => dialog.IsPrimaryButtonEnabled = form.IsValid;
         dialog.Opened += (_, _) => form.FocusNameField();
 
-        var result = await dialog.ShowAsync();
+        var result = await ShowDialogAsync(dialog);
         if (result != ContentDialogResult.Primary) return null;
 
         // Produce a fresh node mirroring `initial`'s identity/parent so the caller can update
@@ -126,7 +127,7 @@ public sealed class DialogService : IDialogService
         form.ValidityChanged += (_, _) => dialog.IsPrimaryButtonEnabled = form.IsValid;
         dialog.Opened += (_, _) => form.FocusNameField();
 
-        var result = await dialog.ShowAsync();
+        var result = await ShowDialogAsync(dialog);
         if (result != ContentDialogResult.Primary) return null;
 
         // Full Clone — not CloneIdentityFrom. Folders can carry Protocol / Host / Username /
@@ -181,7 +182,7 @@ public sealed class DialogService : IDialogService
         form.ValidityChanged += (_, _) => dialog.IsPrimaryButtonEnabled = form.IsValid;
         dialog.Opened += (_, _) => form.FocusNameField();
 
-        var result = await dialog.ShowAsync();
+        var result = await ShowDialogAsync(dialog);
         return result == ContentDialogResult.Primary ? form.BuildDraft() : null;
     }
 
@@ -222,7 +223,7 @@ public sealed class DialogService : IDialogService
 
         dialog.Opened += (_, _) => passwordBox.Focus(FocusState.Programmatic);
 
-        var result = await dialog.ShowAsync();
+        var result = await ShowDialogAsync(dialog);
         var accepted = result == ContentDialogResult.Primary || submittedViaEnter;
         return accepted ? passwordBox.Password : null;
     }
@@ -298,7 +299,7 @@ public sealed class DialogService : IDialogService
                 passwordBox.Focus(FocusState.Programmatic);
         };
 
-        var result = await dialog.ShowAsync();
+        var result = await ShowDialogAsync(dialog);
         var accepted = result == ContentDialogResult.Primary || submittedViaEnter;
         if (!accepted) return null;
         var username = userBox.Text.Trim();
@@ -369,7 +370,7 @@ public sealed class DialogService : IDialogService
         dialog.Closing += OnClosing;
         try
         {
-            await dialog.ShowAsync();
+            await ShowDialogAsync(dialog);
         }
         finally
         {
@@ -440,7 +441,7 @@ public sealed class DialogService : IDialogService
         dialog.Closing += OnClosing;
         try
         {
-            await dialog.ShowAsync();
+            await ShowDialogAsync(dialog);
         }
         finally
         {
@@ -496,7 +497,7 @@ public sealed class DialogService : IDialogService
         dialog.Closing += OnClosing;
         try
         {
-            await dialog.ShowAsync();
+            await ShowDialogAsync(dialog);
         }
         finally
         {
@@ -506,6 +507,18 @@ public sealed class DialogService : IDialogService
             vm.Dispose();
         }
         return vm.Result;
+    }
+
+    // Every ContentDialog renders centered over the active window's XamlRoot, where an owned
+    // RDP overlay (a top-level window composited above the WinUI content) would occlude it.
+    // Suppress the overlay for the lifetime of the dialog so dialogs stay visible/usable while
+    // an RDP tab is active.
+    private static async Task<ContentDialogResult> ShowDialogAsync(ContentDialog dialog)
+    {
+        using (RdpOverlayCoordinator.Suppress())
+        {
+            return await dialog.ShowAsync();
+        }
     }
 
     private static XamlRoot RequireXamlRoot() =>

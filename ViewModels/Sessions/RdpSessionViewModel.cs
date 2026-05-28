@@ -166,23 +166,28 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
         if (_session is not null)
         {
-            // Re-attach path: surface host reloaded after nav-away. The session lives in
-            // ShellViewModel.Tabs and the ActiveX is still connected.
-            try
+            // Re-attach path: surface host reloaded after nav-away. The session survives in
+            // ShellViewModel.Tabs. Reveal the surface only when actually Connected — if the
+            // session is mid-auto-reconnect (Status == Connecting), keep it hidden so the
+            // ConnectingOverlay (spinner + Cancel) shows instead of a stale surface popping over
+            // it (the native overlay is composited ABOVE the WinUI content).
+            if (Status == SessionStatus.Connected)
             {
-                _session.SetBounds(bounds);
-                _session.Show();
-                // Push Win32 keyboard focus back into the ActiveX HWND so the first keystroke
-                // after navigating back to this tab lands on the remote session rather than
-                // requiring a click. The native HWND retains focus across most WinUI nav
-                // transitions, but SetFocus is idempotent so this is safe to repeat.
-                TryFocusSession();
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "RDP surface reattach failed.");
-                await DisposeAndTransitionAsync("RDP surface reattach failed: " + ex.Message, dueToCredentials: false)
-                    .ConfigureAwait(true);
+                try
+                {
+                    if (!bounds.IsDegenerate(minDim: 1)) _session.SetBounds(bounds);
+                    _session.Show();
+                    // Push Win32 keyboard focus back into the ActiveX HWND so the first keystroke
+                    // after navigating back lands on the remote session rather than requiring a
+                    // click. SetFocus is idempotent so this is safe to repeat.
+                    TryFocusSession();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "RDP surface reattach failed.");
+                    await DisposeAndTransitionAsync("RDP surface reattach failed: " + ex.Message, dueToCredentials: false)
+                        .ConfigureAwait(true);
+                }
             }
             return;
         }
@@ -218,6 +223,12 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         RememberMeasuredBounds(bounds);
         var session = _session;
         if (session is null) return;
+        // Pushing bounds to the native host calls SetHostBounds → EnsureVisibleAndRedraw, which
+        // forces the window visible. Only do that when Connected; during Connecting / auto-reconnect
+        // a layout tick would otherwise reveal the surface over the WinUI ConnectingOverlay
+        // (spinner + Cancel). The surface is shown explicitly on the Connected flip
+        // (ResumeSurfaceForOverlay); here we only need to remember the latest measured bounds.
+        if (Status != SessionStatus.Connected) return;
 
         try
         {
@@ -232,11 +243,65 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
     public void DetachView()
     {
-        // Hide rather than tear down — the VM survives navigation. SetParent-to-null risks
-        // losing the ActiveX's internal device context; ShowWindow(SW_HIDE) is idempotent
-        // so we don't need to track our own visibility flag.
+        // Hide rather than tear down — the VM survives navigation. ShowWindow(SW_HIDE) is
+        // idempotent so we don't need to track our own visibility flag.
         try { _session?.Hide(); }
         catch (Exception ex) { _logger.LogWarning(ex, "Hide failed during DetachView."); }
+    }
+
+    /// <summary>
+    /// Hide the owned RDP overlay window while a modal WinUI dialog is shown over the tab (the
+    /// top-level overlay would otherwise occlude the dialog) or while the main window is
+    /// minimized. No-op when there is no live embedded session. Same native effect as
+    /// <see cref="DetachView"/>; kept separate for intent / call-site clarity.
+    /// </summary>
+    public void SuspendSurfaceForOverlay()
+    {
+        try { _session?.Hide(); }
+        catch (Exception ex) { _logger.LogDebug(ex, "RDP overlay suspend (Hide) suppressed."); }
+    }
+
+    /// <summary>
+    /// Re-show the owned RDP overlay on the Connected transition, after a covering dialog closed,
+    /// or after the main window was restored, re-applying the current surface bounds. No-op when
+    /// there is no live embedded session or it isn't Connected. Deliberately does NOT push keyboard
+    /// focus: this runs on every Status→Connected flip including auto-reconnect, and stealing focus
+    /// there would defeat <see cref="OnSessionAutoReconnected"/>'s no-focus-steal design.
+    /// Cold-connect focus is pushed by <see cref="OnSessionConnected"/>; nav-back focus by the
+    /// AttachAsync re-attach branch. A genuine show failure is surfaced as a session failure.
+    /// </summary>
+    public void ResumeSurfaceForOverlay(HostBounds bounds)
+    {
+        var session = _session;
+        if (session is null) return;
+        // Only the Connected state may reveal the surface. During Connecting / auto-reconnect /
+        // Failed / Disconnected the WinUI status overlays (spinner+Cancel, error+Retry) own the
+        // tab, and the top-level surface — composited ABOVE the WinUI content — must stay hidden
+        // so it doesn't occlude them.
+        if (Status != SessionStatus.Connected) return;
+        // If the freshly-computed bounds are degenerate (transient relayout / ClientToScreen
+        // failure), fall back to the last good measured bounds so we still reveal the surface at
+        // the right place — rather than flashing the 1x1 activation seed, or stranding it hidden
+        // when a later cached SetBounds no-ops. Bail only if no valid bounds exist yet at all.
+        if (bounds.IsDegenerate(minDim: 1))
+        {
+            if (_lastMeasuredBounds.IsDegenerate(minDim: 1)) return;
+            bounds = _lastMeasuredBounds;
+        }
+        try
+        {
+            session.SetBounds(bounds);
+            session.Show();
+        }
+        catch (Exception ex)
+        {
+            // A genuine failure to position/show the native surface leaves a blank tab — surface
+            // it as a session failure (error overlay + Retry) instead of silently swallowing, the
+            // same guarantee the old synchronous Show() in ConnectAsync provided.
+            _logger.LogWarning(ex, "RDP overlay resume failed; surfacing as session failure.");
+            MarshalToUi(() => DisposeAndTransitionAsync(
+                "RDP surface failed to become visible: " + ex.Message, dueToCredentials: false));
+        }
     }
 
     [RelayCommand]
@@ -510,7 +575,22 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 token.ThrowIfCancellationRequested();
 
                 session.SetBounds(initialBounds.IsDegenerate(minDim: 1) ? HostBounds.Seed : initialBounds);
-                session.Show();
+                // The overlay is now a top-level window composited ABOVE the WinUI content.
+                // Status can already be Connected here only when the OnConnected→Status update ran
+                // INLINE (e.g. the test harness with no UI dispatcher). In the running app,
+                // OnSessionConnected is marshalled to a later UI turn, so Status is still Connecting
+                // here and the else-branch keeps the surface hidden; RdpSurfaceHost reveals it on the
+                // Connected flip via ResumeSurfaceForOverlay, which surfaces show failures the same way.
+                if (Status == SessionStatus.Connected)
+                {
+                    session.Show();
+                }
+                else
+                {
+                    // Still handshaking: keep the surface hidden so the ConnectingOverlay (spinner
+                    // + Cancel) stays visible.
+                    session.Hide();
+                }
             }
             catch (OperationCanceledException) when (timedOut)
             {

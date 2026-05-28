@@ -3,6 +3,7 @@ using System.ComponentModel;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -14,9 +15,11 @@ using Wormhole.ViewModels.Sessions;
 namespace Wormhole.Views.Sessions;
 
 /// <summary>
-/// Hosts the reparented RDP ActiveX form. The ActiveX HWND lives in the main window's client
-/// area as a child window; this control owns the layout slot and drives MoveWindow on every
-/// SizeChanged / XamlRoot.Changed (DPI) tick to keep the child positioned over our bounds.
+/// Hosts the RDP ActiveX surface, which lives in a SEPARATE TOP-LEVEL window owned by the main
+/// window and composited above the WinUI content (not reparented in as a child — that hits the
+/// WinUI 3 airspace problem and renders behind the XAML). This control owns the layout slot and
+/// drives MoveWindow in SCREEN coordinates on every SizeChanged / XamlRoot.Changed (DPI) /
+/// AppWindow.Changed (move/resize/minimize) tick to keep the overlay positioned over our bounds.
 /// The Grid in XAML stays empty — the native surface paints itself over the slot.
 /// </summary>
 public sealed partial class RdpSurfaceHost : UserControl
@@ -30,6 +33,7 @@ public sealed partial class RdpSurfaceHost : UserControl
     private double _lastRasterScale = 1.0;
     private Window? _ownerWindow;
     private XamlRoot? _trackedXamlRoot;
+    private AppWindow? _trackedAppWindow;
     // One-shot per view load: ensures WinUI focus is pushed at most once per
     // RdpSurfaceHost instance, on the first IsConnected=true transition (cold connect).
     // Resets on Unloaded so a fresh view (Sessions↔Settings nav back, or close+reopen)
@@ -37,6 +41,10 @@ public sealed partial class RdpSurfaceHost : UserControl
     // Connecting → Connected) would re-fire TryFocusHost on every recovery and steal
     // focus from wherever the user moved it during the reconnect banner.
     private bool _focusPushed;
+    // True while a modal ContentDialog is shown over the tab. The overlay is hidden for the
+    // duration; layout/visibility ticks must not re-show it (a window move while the dialog is
+    // open would otherwise pop the overlay back over the dialog).
+    private bool _overlaySuppressed;
 
     public RdpSurfaceHost()
     {
@@ -45,10 +53,10 @@ public sealed partial class RdpSurfaceHost : UserControl
         Unloaded += OnUnloaded;
         SizeChanged += OnSizeChanged;
         // LayoutUpdated is intentionally NOT subscribed: it fires for every visual tree
-        // mutation project-wide, not just for this control. SizeChanged + XamlRoot.Changed
-        // (DPI / window resize) catch the geometry shifts we care about; the reparented
-        // ActiveX HWND keeps its position relative to the WinUI window client area on its
-        // own otherwise.
+        // mutation project-wide, not just for this control. SizeChanged + XamlRoot.Changed (DPI)
+        // + AppWindow.Changed (window move/resize/minimize) catch the geometry shifts we care
+        // about. The overlay is a separate top-level window and does NOT auto-track the owner's
+        // client area, so those handlers are required to keep it positioned.
     }
 
     public RdpSessionViewModel? ViewModel
@@ -96,7 +104,27 @@ public sealed partial class RdpSurfaceHost : UserControl
             _trackedXamlRoot.Changed += OnXamlRootChanged;
         }
 
-        var bounds = ComputeBoundsPhysicalPx();
+        // Follow the main window: the RDP surface is an owned TOP-LEVEL overlay positioned in
+        // screen coordinates, so it must be repositioned whenever the main window moves,
+        // resizes, maximizes/restores, or is minimized/restored. AppWindow.Changed reports all
+        // of these; per-monitor DPI changes are handled separately via XamlRoot.Changed above.
+        var appWindow = _ownerWindow.AppWindow;
+        if (appWindow is not null && !ReferenceEquals(_trackedAppWindow, appWindow))
+        {
+            if (_trackedAppWindow is not null) _trackedAppWindow.Changed -= OnOwnerAppWindowChanged;
+            _trackedAppWindow = appWindow;
+            _trackedAppWindow.Changed += OnOwnerAppWindowChanged;
+        }
+
+        // Hide the overlay while a modal ContentDialog is shown over the tab (the top-level
+        // overlay would otherwise occlude the centered dialog) and restore it when it closes.
+        RdpOverlayCoordinator.SuppressChanged -= OnOverlaySuppressChanged;
+        RdpOverlayCoordinator.SuppressChanged += OnOverlaySuppressChanged;
+        // Seed from the current state: SuppressChanged only fires on the 0↔1 edge, so a host that
+        // loads while a dialog is already open would otherwise miss the active suppression.
+        _overlaySuppressed = RdpOverlayCoordinator.IsSuppressed;
+
+        var bounds = ComputeBoundsScreenPx();
         if (bounds.IsDegenerate(minDim: 1)) bounds = HostBounds.Seed;
 
         // Mark layout active before AttachAsync can show a credentials dialog. SizeChanged
@@ -128,8 +156,8 @@ public sealed partial class RdpSurfaceHost : UserControl
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
-        // Hide rather than fully tear down — the VM survives navigation. SetParent-to-null
-        // risks losing the ActiveX's internal device context.
+        // Hide rather than fully tear down — the VM survives navigation. The owned overlay is
+        // just hidden via ShowWindow(SW_HIDE), not destroyed.
         ViewModel?.DetachView();
         _attached = false;
         // Reset so the next OnLoaded → cold-connect cycle (or close+reopen) can push WinUI
@@ -148,6 +176,14 @@ public sealed partial class RdpSurfaceHost : UserControl
             _trackedXamlRoot.Changed -= OnXamlRootChanged;
             _trackedXamlRoot = null;
         }
+
+        if (_trackedAppWindow is not null)
+        {
+            _trackedAppWindow.Changed -= OnOwnerAppWindowChanged;
+            _trackedAppWindow = null;
+        }
+
+        RdpOverlayCoordinator.SuppressChanged -= OnOverlaySuppressChanged;
 
         // Stop the timer (no further ticks fire) and drop our reference. The dispatcher
         // releases its pending-tick reference on Stop, so the captured `() => ApplyLayout()`
@@ -172,6 +208,49 @@ public sealed partial class RdpSurfaceHost : UserControl
         ScheduleLayoutRefresh();
     }
 
+    private void OnOwnerAppWindowChanged(AppWindow sender, AppWindowChangedEventArgs args)
+    {
+        if (!_attached || ViewModel is null) return;
+
+        // Minimize / restore: an owned overlay is auto-hidden by Windows when the owner
+        // minimizes, but the cached _lastBounds in the session adapter would suppress the
+        // re-show MoveWindow on restore, so drive Hide/Show explicitly here.
+        if (args.DidVisibilityChange)
+        {
+            if (sender.IsVisible)
+            {
+                if (!_overlaySuppressed) ViewModel.ResumeSurfaceForOverlay(ComputeBoundsScreenPx());
+            }
+            else
+            {
+                ViewModel.SuspendSurfaceForOverlay();
+            }
+            return;
+        }
+
+        // Move / resize / maximize / restore / monitor drag → reposition over the tab.
+        if (args.DidPositionChange || args.DidSizeChange || args.DidPresenterChange)
+        {
+            ScheduleLayoutRefresh();
+        }
+    }
+
+    private void OnOverlaySuppressChanged(bool suppress)
+    {
+        _overlaySuppressed = suppress;
+        if (!_attached || ViewModel is null) return;
+        if (suppress)
+        {
+            ViewModel.SuspendSurfaceForOverlay();
+        }
+        else if (_trackedAppWindow is null || _trackedAppWindow.IsVisible)
+        {
+            // Don't resume while the owner is minimized (a dialog dismissed during minimize) —
+            // the AppWindow restore handler re-shows it when the window comes back.
+            ViewModel.ResumeSurfaceForOverlay(ComputeBoundsScreenPx());
+        }
+    }
+
     private void ScheduleLayoutRefresh()
     {
         if (!_attached || ViewModel is null) return;
@@ -190,11 +269,17 @@ public sealed partial class RdpSurfaceHost : UserControl
     private void ApplyLayout()
     {
         if (!_attached || ViewModel is null) return;
+        // A covering dialog owns visibility while suppressed — don't reposition/re-show under it.
+        if (_overlaySuppressed) return;
+        // While the owner is minimized, ComputeBoundsScreenPx maps to off-screen coords and the
+        // SetBounds→EnsureVisibleAndRedraw side effect would (re)show the overlay; skip until the
+        // window is restored (the AppWindow visibility handler re-shows it then).
+        if (_trackedAppWindow is { IsVisible: false }) return;
 
         // Per-monitor DPI moves: WinUI 3 updates XamlRoot.RasterizationScale before layout
         // re-runs after a DPI change, so recomputing here picks up the new scale.
         _lastRasterScale = XamlRoot?.RasterizationScale ?? _lastRasterScale;
-        var bounds = ComputeBoundsPhysicalPx();
+        var bounds = ComputeBoundsScreenPx();
 
         // Skip degenerate sizes — during drag-reorder or initial layout the host may report
         // zero. < 8 px is visually pointless and triggers ActiveX layout glitches.
@@ -205,8 +290,13 @@ public sealed partial class RdpSurfaceHost : UserControl
         ViewModel.SetBounds(bounds);
     }
 
-    /// <summary>Compute host bounds in the owner window's client physical pixels.</summary>
-    private HostBounds ComputeBoundsPhysicalPx()
+    /// <summary>
+    /// Compute host bounds in SCREEN physical pixels. The RDP surface is an owned top-level
+    /// window (not a child of the WinUI window), so its position is the main window's client
+    /// origin on screen (<see cref="Win32Interop.ClientToScreen"/>) plus this element's offset
+    /// within the window content, both in physical pixels.
+    /// </summary>
+    private HostBounds ComputeBoundsScreenPx()
     {
         if (_ownerWindow?.Content is not UIElement root || ActualWidth <= 0 || ActualHeight <= 0)
         {
@@ -225,9 +315,20 @@ public sealed partial class RdpSurfaceHost : UserControl
         var topLeftDip = transform.TransformPoint(new Point(0, 0));
 
         var scale = _lastRasterScale > 0 ? _lastRasterScale : 1.0;
+
+        // Offset the element's window-client position by the main window's client origin on
+        // screen so the top-level overlay lands over the tab rather than at the screen corner.
+        // If the HWND is missing or ClientToScreen fails (invalid/teardown), report Empty so
+        // callers skip the move instead of positioning at a bogus origin.
+        var origin = new Win32Interop.POINT { x = 0, y = 0 };
+        if (_ownerHwnd == IntPtr.Zero || !Win32Interop.ClientToScreen(_ownerHwnd, ref origin))
+        {
+            return HostBounds.Empty;
+        }
+
         return new HostBounds(
-            (int)Math.Round(topLeftDip.X * scale),
-            (int)Math.Round(topLeftDip.Y * scale),
+            origin.x + (int)Math.Round(topLeftDip.X * scale),
+            origin.y + (int)Math.Round(topLeftDip.Y * scale),
             (int)Math.Round(ActualWidth * scale),
             (int)Math.Round(ActualHeight * scale));
     }
@@ -255,16 +356,32 @@ public sealed partial class RdpSurfaceHost : UserControl
         {
             if (ViewModel is { IsConnected: true })
             {
-                ApplyLayout();
-                DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, ApplyLayout);
+                // Push WinUI focus first so the Win32 SetFocus inside ResumeSurfaceForOverlay
+                // (and OnSessionConnected) wins last, landing keyboard focus on the OCX.
                 if (!_focusPushed && TryFocusHost())
                 {
                     _focusPushed = true;
                 }
+                // The overlay is a top-level window ABOVE the WinUI content; it was kept hidden
+                // during Connecting so the status overlays stayed visible. Show it now at the
+                // current bounds — unless a dialog is covering the tab or the owner is minimized
+                // (it'll be shown when the dialog closes / the window is restored).
+                if (!_overlaySuppressed && (_trackedAppWindow is null || _trackedAppWindow.IsVisible))
+                {
+                    ViewModel.ResumeSurfaceForOverlay(ComputeBoundsScreenPx());
+                }
+                DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, ApplyLayout);
             }
-            else if (ViewModel is { Status: SessionStatus.Disconnected or SessionStatus.Failed })
+            else
             {
-                _focusPushed = false;
+                // Not connected (Connecting / auto-reconnecting / Disconnected / Failed): hide the
+                // native overlay so it doesn't occlude the WinUI status overlays (spinner+Cancel,
+                // error+Retry, Disconnected). No-op when the session is already gone.
+                ViewModel?.SuspendSurfaceForOverlay();
+                if (ViewModel is { Status: SessionStatus.Disconnected or SessionStatus.Failed })
+                {
+                    _focusPushed = false;
+                }
             }
         }
     }

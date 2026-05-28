@@ -32,20 +32,19 @@
             </MenuFlyout>
         </Grid.ContextFlyout>
 
-        <!-- Reserved layout slot for the reparented WinForms+ActiveX host. The actual native
-             child window is positioned in window-client physical pixels via MoveWindow from
-             the code-behind on every LayoutUpdated tick. This Grid stays empty visually but
-             is the size/position anchor.
+        <!-- Reserved layout slot for the RDP host. The actual native surface is a SEPARATE
+             TOP-LEVEL window owned by the WinUI main window, positioned in SCREEN physical
+             pixels via MoveWindow from the code-behind (RdpSurfaceHost.ComputeBoundsScreenPx)
+             on every size/move/DPI tick. This Grid stays empty visually but is the
+             size/position anchor the overlay tracks.
 
-             Background MUST be Transparent (not an opaque brush, and not {x:Null}). WinUI 3
-             renders XAML through DirectComposition, and an opaque Grid Background paints a
-             composition surface that occludes the reparented child HWND beneath it — the
-             symptom is a solid rectangle in the slot's brush color instead of the OCX paint
-             output. A Transparent brush solves that (DComp does not occlude through alpha=0
-             pixels) AND keeps the slot hit-testable so right-click on empty regions of the
-             surface still bubbles to the parent Grid's ContextFlyout (Disconnect / Reconnect
-             / Open in System Remote Desktop). {x:Null} would also be visually transparent
-             but disables hit-testing entirely. -->
+             NOTE: the overlay is composited by DWM ABOVE the WinUI content (that is the whole
+             point — reparenting it INTO this window as a WS_CHILD put it BEHIND the XAML
+             DirectComposition surface, the WinUI 3 "airspace" problem, and the tab showed only
+             the window background). Background is still Transparent so right-click on empty
+             regions bubbles to the parent Grid's ContextFlyout (Disconnect / Reconnect / Open
+             in System Remote Desktop); {x:Null} would also be transparent but disables
+             hit-testing entirely. -->
         <Grid x:Name="HostSurface"
               Background="Transparent"
               HorizontalAlignment="Stretch"

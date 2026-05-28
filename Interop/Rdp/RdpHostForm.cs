@@ -11,9 +11,11 @@ namespace Wormhole.Interop.Rdp;
 
 /// <summary>
 /// WinForms <see cref="FormsForm"/> hosting the <see cref="AxMsRdpClient9NotSafeForScripting"/>
-/// ActiveX control. The form HWND is reparented onto the WinUI main window by
-/// <c>RdpSessionService</c>; the ActiveX paints into it. The form must be created and
-/// driven from the STA UI thread — see <see cref="EnsureStaThread"/>.
+/// ActiveX control. The form is a top-level window configured by <c>RdpSessionService</c> as an
+/// owned overlay of the WinUI main window (it is NOT reparented into the WinUI window — that
+/// composites the OCX behind the XAML surface, the WinUI 3 "airspace" problem); it is positioned
+/// in screen coordinates over the tab and the ActiveX paints into it. The form must be created
+/// and driven from the STA UI thread — see <see cref="EnsureStaThread"/>.
 /// </summary>
 internal sealed class RdpHostForm : FormsForm
 {
@@ -72,7 +74,7 @@ internal sealed class RdpHostForm : FormsForm
     }
 
     /// <summary>HWND of this form. Reading forces handle creation, which is what we want
-    /// before SetParent — the ActiveX host needs a real Win32 window to paint into.
+    /// before configuring/showing the overlay — the ActiveX host needs a real Win32 window to paint into.
     /// We also force the AxHost child's HWND explicitly: <see cref="Control.CreateControl()"/>
     /// short-circuits before creating any child handles when the parent Form is invisible
     /// (we never call <c>Show()</c> on this form), so without the explicit
@@ -95,11 +97,11 @@ internal sealed class RdpHostForm : FormsForm
     }
 
     /// <summary>
-    /// Position the reparented host and force the AxHost child to fill the new client area.
-    /// WinForms normally handles Dock=Fill during layout, but the form is never shown through
-    /// normal WinForms ownership; it is reparented into WinUI as a native child HWND.
-    /// Explicitly sizing both layers avoids a valid top-level host rect with a stale or
-    /// unpainted ActiveX child.
+    /// Position the owned top-level overlay (in screen coordinates) and force the AxHost child
+    /// to fill the new client area. WinForms normally handles Dock=Fill during layout, but the
+    /// form is never shown through normal WinForms ownership; it is driven as an owned overlay
+    /// of the WinUI window. Explicitly sizing both layers avoids a valid top-level host rect
+    /// with a stale or unpainted ActiveX child.
     /// </summary>
     internal bool SetHostBounds(int x, int y, int width, int height)
     {
