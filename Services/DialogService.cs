@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Windows.ApplicationModel.DataTransfer;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Models.Backup;
@@ -225,6 +226,65 @@ public sealed class DialogService : IDialogService
         var result = await dialog.ShowAsync();
         var accepted = result == ContentDialogResult.Primary || submittedViaEnter;
         return accepted ? passwordBox.Password : null;
+    }
+
+    public Task ShowCredentialsAsync(string title, string username, string secretLabel, string secret)
+    {
+        var panel = new StackPanel { Spacing = 8, MinWidth = 320 };
+
+        if (!string.IsNullOrEmpty(username))
+        {
+            panel.Children.Add(new TextBox
+            {
+                Header = "Username",
+                Text = username,
+                IsReadOnly = true,
+                IsSpellCheckEnabled = false,
+            });
+        }
+
+        // Read-only TextBox (not a PasswordBox) because the whole point is to reveal the
+        // secret in plaintext; selectable so the user can also copy manually. The header
+        // distinguishes a login password from an SSH key passphrase.
+        var secretField = new TextBox
+        {
+            Header = secretLabel,
+            Text = secret,
+            IsReadOnly = true,
+            IsSpellCheckEnabled = false,
+        };
+        panel.Children.Add(secretField);
+
+        var copyButton = new Button { Content = "Copy" };
+        copyButton.Click += (_, _) =>
+        {
+            try
+            {
+                var pkg = new DataPackage();
+                pkg.SetText(secret);
+                Clipboard.SetContent(pkg);
+                // Flush so the value survives Wormhole closing — otherwise the DataPackage is
+                // invalidated on exit and the user can't paste what they just copied.
+                Clipboard.Flush();
+            }
+            catch
+            {
+                // Clipboard.SetContent can throw COMException when another app holds the
+                // clipboard. A failed copy must not crash the reveal dialog. Deliberately not
+                // logged — the payload here is a credential.
+            }
+        };
+        panel.Children.Add(copyButton);
+
+        var dialog = new ContentDialog
+        {
+            Title = title,
+            Content = panel,
+            CloseButtonText = "Close",
+            XamlRoot = RequireXamlRoot(),
+        };
+
+        return dialog.ShowAsync().AsTask();
     }
 
     public async Task<(string Username, string Password)?> PromptCredentialsAsync(string title, string message, string? initialUsername = null)

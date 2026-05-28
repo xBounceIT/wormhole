@@ -15,6 +15,8 @@ public partial class ConnectionTreeViewModel : ObservableObject
     private readonly InheritanceResolver _inheritanceResolver;
     private readonly ISessionTabFactory _tabFactory;
     private readonly IDialogService _dialog;
+    private readonly ICredentialService _credentialService;
+    private readonly ICredentialRepository _credentialRepository;
     private readonly ILogger<ConnectionTreeViewModel> _logger;
     private IReadOnlyList<ConnectionNode> _lastSnapshot = Array.Empty<ConnectionNode>();
     private Dictionary<Guid, ConnectionNode> _lastSnapshotById = new();
@@ -129,12 +131,16 @@ public partial class ConnectionTreeViewModel : ObservableObject
         InheritanceResolver inheritanceResolver,
         ISessionTabFactory tabFactory,
         IDialogService dialog,
+        ICredentialService credentialService,
+        ICredentialRepository credentialRepository,
         ILogger<ConnectionTreeViewModel> logger)
     {
         _repository = repository;
         _inheritanceResolver = inheritanceResolver;
         _tabFactory = tabFactory;
         _dialog = dialog;
+        _credentialService = credentialService;
+        _credentialRepository = credentialRepository;
         _logger = logger;
     }
 
@@ -178,6 +184,62 @@ public partial class ConnectionTreeViewModel : ObservableObject
             // unhandled RelayCommand failure.
             _logger.LogError(ex, "Failed to open connection '{Name}'", vm.Name);
             await _dialog.ShowMessageAsync("Couldn't open connection", ex.Message);
+        }
+    }
+
+    [RelayCommand]
+    private async Task ShowCredentials(TreeNodeViewModel? clicked)
+    {
+        if (clicked is null || clicked.Kind != NodeKind.Connection) return;
+
+        try
+        {
+            if (!_lastSnapshotById.TryGetValue(clicked.Node.Id, out var node))
+            {
+                await RefreshAsync();
+                if (!_lastSnapshotById.TryGetValue(clicked.Node.Id, out node)) return;
+            }
+
+            // Resolve through inheritance so a credential set on a parent folder is honoured,
+            // matching what OpenConnectionAsync would actually authenticate with.
+            var profile = _inheritanceResolver.Resolve(node, _lastSnapshotById);
+
+            if (profile.CredentialId is not { } credId)
+            {
+                await _dialog.ShowMessageAsync(
+                    "No credentials",
+                    "This connection has no stored password or key passphrase.");
+                return;
+            }
+
+            // The stored secret for an SshKey credential is the private-key passphrase, not a
+            // login password — fetch the credential to label the field honestly.
+            var credential = await _credentialRepository.GetByIdAsync(credId);
+            var secret = await _credentialService.ReadPasswordAsync(credId);
+
+            if (string.IsNullOrEmpty(secret))
+            {
+                await _dialog.ShowMessageAsync(
+                    "No credentials",
+                    "This connection has no stored password or key passphrase.");
+                return;
+            }
+
+            var secretLabel = credential?.Kind == CredentialKind.SshKey ? "Key passphrase" : "Password";
+
+            await _dialog.ShowCredentialsAsync(
+                $"Credentials — {clicked.Name}",
+                profile.Username ?? string.Empty,
+                secretLabel,
+                secret);
+        }
+        catch (Exception ex)
+        {
+            // Mirror OpenConnectionAsync's error path: log + surface a dialog rather than
+            // letting the exception escape as an unhandled RelayCommand failure. The secret
+            // is never passed to the logger (CLAUDE.md: never log credentials).
+            _logger.LogError(ex, "Failed to reveal credentials for connection '{Name}'", clicked.Name);
+            await _dialog.ShowMessageAsync("Couldn't show credentials", ex.Message);
         }
     }
 
@@ -673,6 +735,7 @@ public sealed partial class TreeNodeViewModel : ObservableObject
     public BulkObservableCollection<TreeNodeViewModel> Children { get; } = new();
     public string Name => Node.Name;
     public NodeKind Kind => Node.Kind;
+    public bool IsConnection => Kind == NodeKind.Connection;
 
     [ObservableProperty]
     private bool isExpanded;
@@ -696,6 +759,7 @@ public sealed partial class TreeNodeViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(Name));
         OnPropertyChanged(nameof(Kind));
+        OnPropertyChanged(nameof(IsConnection));
         OnPropertyChanged(nameof(Glyph));
     }
 }

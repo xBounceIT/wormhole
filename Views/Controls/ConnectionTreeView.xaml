@@ -137,6 +137,13 @@
                                     </MenuFlyoutItem.Icon>
                                 </MenuFlyoutItem>
                                 <MenuFlyoutSeparator />
+                                <MenuFlyoutItem Text="Show credentials"
+                                                Click="OnShowCredentialsItemClick"
+                                                Visibility="{x:Bind IsConnection, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE7B3;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
                                 <MenuFlyoutItem Text="Edit"
                                                 Click="OnEditItemClick">
                                     <MenuFlyoutItem.Icon>
