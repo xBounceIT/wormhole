@@ -544,6 +544,28 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task CanUseSshAutoSudo_FalseForSshKeyCredential()
+    {
+        // SSH-key credentials never yield a login password (the secret is a key passphrase),
+        // so Auto sudo would be a silent no-op. The checkbox must stay hidden and a stale
+        // checked value must never persist.
+        var keyCred = new CredentialProfile { Name = "ssh-key", Protocol = ProtocolType.Ssh, Kind = CredentialKind.SshKey };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(keyCred), EmptyTunnelRepo());
+        await vm.LoadCredentialsAsync();
+        vm.Name = "n";
+        vm.Host = "h";
+        vm.SelectedCredential = keyCred;
+
+        Assert.False(vm.CanUseSshAutoSudo);
+
+        // Even if SshAutoSudo were somehow set, WriteTo must not persist it for a key credential.
+        vm.SshAutoSudo = true;
+        var node = new ConnectionNode();
+        vm.WriteTo(node);
+        Assert.Null(node.SshAutoSudo);
+    }
+
+    [Fact]
     public async Task SelectingAzureAdCredential_AutoFlagsRdpUseExternalClient()
     {
         // Picking an AAD credential in the editor should tick the "Open with system Remote

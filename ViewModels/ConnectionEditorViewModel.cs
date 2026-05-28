@@ -83,19 +83,23 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// <summary>
     /// When true, run "sudo su" automatically after the SSH session connects and send the
     /// connection's saved password at the sudo prompt. Only meaningful for SSH connections
-    /// that have a saved credential — see <see cref="CanUseSshAutoSudo"/>, which gates the
-    /// editor checkbox, and the WriteTo guard that prevents persisting a stale true value
+    /// backed by a saved password credential — see <see cref="CanUseSshAutoSudo"/>, which gates
+    /// the editor checkbox, and the WriteTo guard that prevents persisting a stale true value
     /// after the credential is cleared.
     /// </summary>
     [ObservableProperty]
     private bool sshAutoSudo;
 
     /// <summary>
-    /// Drives the Auto sudo checkbox's visibility. Hidden unless this is an SSH connection
-    /// with a saved credential selected, because the feature needs a stored password to send
-    /// at the sudo prompt.
+    /// Drives the Auto sudo checkbox's visibility. Hidden unless this is an SSH connection with
+    /// a saved <em>password</em> credential selected: the feature sends the login password at the
+    /// sudo prompt, and SSH-key credentials expose their secret as a key passphrase (not a
+    /// password) so <see cref="SshCredentialResolver"/> never yields a password for them — leaving
+    /// Auto sudo a silent no-op. The "(None)" sentinel has <see cref="CredentialKind.Password"/> by
+    /// default, so the explicit non-null id check is what excludes "prompt every time".
     /// </summary>
-    public bool CanUseSshAutoSudo => IsSsh && CredentialId is not null;
+    public bool CanUseSshAutoSudo =>
+        IsSsh && CredentialId is not null && SelectedCredential?.Kind == CredentialKind.Password;
 
     /// <summary>Sentinel for "no credential — prompt every time". ComboBox.PlaceholderText
     /// isn't selectable, so the picker needs a real item to round-trip to. Both selection
@@ -637,11 +641,11 @@ public partial class ConnectionEditorViewModel : ObservableObject
         }
         node.CredentialId = CredentialId;
 
-        // Persist Auto sudo only for an SSH connection that still has a saved credential.
-        // Clearing to null otherwise (protocol switched away, or credential removed while the
-        // hidden checkbox stayed ticked) keeps a stale true from leaking into a context where
-        // there's no password to send.
-        node.SshAutoSudo = (IsSsh && CredentialId is not null) ? SshAutoSudo : null;
+        // Persist Auto sudo only while the toggle is actually usable (SSH + saved password
+        // credential). Clearing to null otherwise (protocol switched away, credential removed,
+        // or a key-only credential selected while the hidden checkbox stayed ticked) keeps a
+        // stale true from leaking into a context where there's no password to send.
+        node.SshAutoSudo = CanUseSshAutoSudo ? SshAutoSudo : null;
 
         if (IsRdp)
         {
