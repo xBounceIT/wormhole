@@ -57,7 +57,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private string name = string.Empty;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsRdp), nameof(IsSsh), nameof(IsValid))]
+    [NotifyPropertyChangedFor(nameof(IsRdp), nameof(IsSsh), nameof(IsValid), nameof(CanUseSshAutoSudo))]
     private ProtocolType protocol = ProtocolType.Ssh;
 
     [ObservableProperty]
@@ -77,8 +77,25 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private string rdpDomain = string.Empty;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(SelectedCredential), nameof(IsAzureAdCredential), nameof(IsRdpUseExternalClientEditable))]
+    [NotifyPropertyChangedFor(nameof(SelectedCredential), nameof(IsAzureAdCredential), nameof(IsRdpUseExternalClientEditable), nameof(CanUseSshAutoSudo))]
     private Guid? credentialId;
+
+    /// <summary>
+    /// When true, run "sudo su" automatically after the SSH session connects and send the
+    /// connection's saved password at the sudo prompt. Only meaningful for SSH connections
+    /// that have a saved credential — see <see cref="CanUseSshAutoSudo"/>, which gates the
+    /// editor checkbox, and the WriteTo guard that prevents persisting a stale true value
+    /// after the credential is cleared.
+    /// </summary>
+    [ObservableProperty]
+    private bool sshAutoSudo;
+
+    /// <summary>
+    /// Drives the Auto sudo checkbox's visibility. Hidden unless this is an SSH connection
+    /// with a saved credential selected, because the feature needs a stored password to send
+    /// at the sudo prompt.
+    /// </summary>
+    public bool CanUseSshAutoSudo => IsSsh && CredentialId is not null;
 
     /// <summary>Sentinel for "no credential — prompt every time". ComboBox.PlaceholderText
     /// isn't selectable, so the picker needs a real item to round-trip to. Both selection
@@ -527,6 +544,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
             Username = node.Username ?? string.Empty;
             RdpDomain = node.RdpDomain ?? string.Empty;
             CredentialId = node.CredentialId;
+            SshAutoSudo = node.SshAutoSudo ?? false;
 
             RdpScreenSize = node.RdpScreenSize;
             RdpFullScreen = node.RdpFullScreen ?? false;
@@ -618,6 +636,12 @@ public partial class ConnectionEditorViewModel : ObservableObject
             node.Username = null;
         }
         node.CredentialId = CredentialId;
+
+        // Persist Auto sudo only for an SSH connection that still has a saved credential.
+        // Clearing to null otherwise (protocol switched away, or credential removed while the
+        // hidden checkbox stayed ticked) keeps a stale true from leaking into a context where
+        // there's no password to send.
+        node.SshAutoSudo = (IsSsh && CredentialId is not null) ? SshAutoSudo : null;
 
         if (IsRdp)
         {

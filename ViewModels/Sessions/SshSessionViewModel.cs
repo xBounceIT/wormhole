@@ -37,6 +37,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
     private ISshSession? _session;
     private TerminalBridge? _bridge;
+    private SshAutoSudoDriver? _autoSudo;
     private CancellationTokenSource? _cts;
     private CoreWebView2? _webView;
     // Survives DetachView so AttachAsync can tell a same-WebView reattach (tab
@@ -424,6 +425,19 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             _session.DataReceived += OnSessionDataReceived;
             _session.Closed += OnSessionClosed;
             _bridge = new TerminalBridge(liveWebView, _session, _loggerFactory.CreateLogger<TerminalBridge>(), _settingsService);
+
+            // Auto sudo: once the shell is up, run "sudo su" and feed the saved password at the
+            // sudo prompt. Only meaningful with a stored password — key-only logins and "prompt
+            // every time" connections have nothing to send, so the option isn't even offered.
+            // Subscribe BEFORE Start() (same reason as above): the shell's first output is
+            // usually its only output until we send input, so a driver that subscribes after the
+            // read pump starts can miss it and never fire on a fast/local connection.
+            if (profile.SshAutoSudo && _capturedCredentials?.Password is { Length: > 0 } sudoPassword)
+            {
+                _autoSudo = new SshAutoSudoDriver(_session, sudoPassword, _loggerFactory.CreateLogger<SshAutoSudoDriver>());
+                _autoSudo.Start();
+            }
+
             _session.Start();
 
             // Mirror SshHostKeyValidator.Decide which treats null *and* empty as unpinned —
@@ -571,6 +585,12 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     {
         CancelRemoteOutputWaitTimer();
         IsWaitingForRemoteOutput = false;
+
+        // Tear the Auto sudo driver down first so it unsubscribes from DataReceived before the
+        // session is disposed (and drops its in-memory copy of the password).
+        var autoSudo = _autoSudo;
+        _autoSudo = null;
+        autoSudo?.Dispose();
 
         var bridge = _bridge;
         _bridge = null;

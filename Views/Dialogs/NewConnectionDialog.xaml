@@ -78,6 +78,16 @@
                                       SelectedItem="{x:Bind ViewModel.SelectedCredential, Mode=TwoWay}" />
                         </StackPanel>
 
+                        <StackPanel Spacing="4"
+                                    Visibility="{x:Bind ViewModel.CanUseSshAutoSudo, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+                            <CheckBox Content="Auto sudo"
+                                      IsChecked="{x:Bind ViewModel.SshAutoSudo, Mode=TwoWay}" />
+                            <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                                       Opacity="0.7"
+                                       TextWrapping="Wrap"
+                                       Text="On connect, runs &quot;sudo su&quot; and sends the saved password at the sudo prompt. If sudo doesn't prompt (e.g. NOPASSWD or cached), the password is not sent." />
+                        </StackPanel>
+
                         <StackPanel Spacing="4">
                             <TextBlock Text="VPN tunnel"
                                        Style="{StaticResource CaptionTextBlockStyle}" />

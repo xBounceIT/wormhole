@@ -464,6 +464,86 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task CanUseSshAutoSudo_TrueOnlyForSshWithSavedCredential()
+    {
+        var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo());
+        await vm.LoadCredentialsAsync();
+
+        // SSH but "prompt every time" (no saved credential) → the feature has no password to
+        // send, so the checkbox stays hidden.
+        Assert.Equal(ProtocolType.Ssh, vm.Protocol);
+        Assert.False(vm.CanUseSshAutoSudo);
+
+        vm.SelectedCredential = cred;
+        Assert.True(vm.CanUseSshAutoSudo);
+    }
+
+    [Fact]
+    public async Task CanUseSshAutoSudo_FalseForNonSshProtocol()
+    {
+        var sshCred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
+        var vm = new ConnectionEditorViewModel(new MultiCredentialRepository(sshCred, rdpCred), EmptyTunnelRepo());
+        await vm.LoadCredentialsAsync();
+
+        vm.SelectedCredential = sshCred;
+        Assert.True(vm.CanUseSshAutoSudo);
+
+        vm.Protocol = ProtocolType.Rdp;
+        Assert.False(vm.CanUseSshAutoSudo);
+    }
+
+    [Fact]
+    public async Task WriteTo_AutoSudo_PersistsForSshWithCredential_ClearedWhenCredentialDropped()
+    {
+        var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo());
+        await vm.LoadCredentialsAsync();
+        vm.Name = "n";
+        vm.Host = "h";
+        vm.SelectedCredential = cred;
+        vm.SshAutoSudo = true;
+
+        var node = new ConnectionNode();
+        vm.WriteTo(node);
+        Assert.True(node.SshAutoSudo);
+
+        // Dropping the credential hides the checkbox; a stale checked value must not persist as
+        // true — there'd be no password to send at connect time.
+        vm.SelectedCredential = null;
+        var node2 = new ConnectionNode();
+        vm.WriteTo(node2);
+        Assert.Null(node2.SshAutoSudo);
+    }
+
+    [Fact]
+    public async Task LoadFrom_AutoSudo_RoundTrips()
+    {
+        var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo());
+        await vm.LoadCredentialsAsync();
+
+        var source = new ConnectionNode
+        {
+            Kind = NodeKind.Connection,
+            Name = "box",
+            Protocol = ProtocolType.Ssh,
+            Host = "h",
+            CredentialId = cred.Id,
+            SshAutoSudo = true,
+        };
+        vm.LoadFrom(source);
+
+        Assert.True(vm.SshAutoSudo);
+        Assert.True(vm.CanUseSshAutoSudo);
+
+        var sink = new ConnectionNode { Kind = NodeKind.Connection };
+        vm.WriteTo(sink);
+        Assert.True(sink.SshAutoSudo);
+    }
+
+    [Fact]
     public async Task SelectingAzureAdCredential_AutoFlagsRdpUseExternalClient()
     {
         // Picking an AAD credential in the editor should tick the "Open with system Remote

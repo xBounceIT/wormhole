@@ -59,6 +59,7 @@ public sealed class BackupServiceTests : IDisposable
             RdpUseExternalClient     INTEGER  NULL,
             SshKeyFileName           TEXT     NULL,
             SshKnownHostFingerprint  TEXT     NULL,
+            SshAutoSudo              INTEGER  NULL,
             TunnelEnabled            INTEGER  NULL,
             TunnelConfigId           TEXT     NULL,
             CreatedAt                TEXT     NOT NULL,

@@ -53,6 +53,7 @@ public sealed class InheritanceResolver
         bool? rdpUseExternalClient = null;
         string? sshKeyFileName = null;
         string? sshKnownHostFingerprint = null;
+        bool? sshAutoSudo = null;
         bool? tunnelEnabled = null;
         Guid? tunnelConfigId = null;
 
@@ -103,6 +104,7 @@ public sealed class InheritanceResolver
             rdpUseExternalClient ??= current.RdpUseExternalClient;
             sshKeyFileName ??= current.SshKeyFileName;
             sshKnownHostFingerprint ??= current.SshKnownHostFingerprint;
+            sshAutoSudo ??= current.SshAutoSudo;
             tunnelEnabled ??= current.TunnelEnabled;
             tunnelConfigId ??= current.TunnelConfigId;
 
@@ -168,6 +170,7 @@ public sealed class InheritanceResolver
             RdpUseExternalClient = rdpUseExternalClient ?? false,
             SshKeyFileName = sshKeyFileName,
             SshKnownHostFingerprint = sshKnownHostFingerprint,
+            SshAutoSudo = sshAutoSudo ?? false,
             TunnelEnabled = tunnelEnabled ?? false,
             TunnelConfigId = tunnelConfigId,
         };
