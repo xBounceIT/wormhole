@@ -155,6 +155,12 @@ public sealed partial class NewConnectionDialog : UserControl
         // else: text matched nothing unambiguous — keep the current selection and revert below.
 
         SyncCredentialText(box, current());
+
+        // Picking a suggestion whose committed display text differs from the tapped item — most
+        // notably the None sentinel, which we blank so the placeholder shows — re-writes box.Text
+        // mid-submit and leaves the suggestion list open. Force it shut on the next dispatcher
+        // tick, after the control finishes its own submit handling.
+        box.DispatcherQueue?.TryEnqueue(() => box.IsSuggestionListOpen = false);
     }
 
     private static void SyncCredentialText(AutoSuggestBox? box, CredentialProfile? selection)
