@@ -28,6 +28,11 @@ public partial class ConnectionEditorViewModel : ObservableObject
     // last AAD signal is cleared — otherwise the user is left with a ticked-and-editable
     // checkbox they never asked for after correcting a typo'd "AzureAD" Domain value.
     private bool _autoFlagAppliedByAad;
+    // The node's own SshAutoSudo value as loaded (null = inherits a folder default). Remembered
+    // so WriteTo can leave an untouched checkbox alone instead of baking the displayed default
+    // (false) back over an inherited value — otherwise merely renaming an inheriting connection
+    // would sever its inheritance. Null for a brand-new connection (LoadFrom never ran).
+    private bool? _loadedSshAutoSudo;
 
     public ConnectionEditorViewModel(
         ICredentialRepository credentialRepository,
@@ -548,6 +553,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
             Username = node.Username ?? string.Empty;
             RdpDomain = node.RdpDomain ?? string.Empty;
             CredentialId = node.CredentialId;
+            _loadedSshAutoSudo = node.SshAutoSudo;
             SshAutoSudo = node.SshAutoSudo ?? false;
 
             RdpScreenSize = node.RdpScreenSize;
@@ -641,11 +647,26 @@ public partial class ConnectionEditorViewModel : ObservableObject
         }
         node.CredentialId = CredentialId;
 
-        // Persist Auto sudo only while the toggle is actually usable (SSH + saved password
-        // credential). Clearing to null otherwise (protocol switched away, credential removed,
-        // or a key-only credential selected while the hidden checkbox stayed ticked) keeps a
-        // stale true from leaking into a context where there's no password to send.
-        node.SshAutoSudo = CanUseSshAutoSudo ? SshAutoSudo : null;
+        // Persist Auto sudo carefully so the connection editor never silently rewrites an
+        // inherited value:
+        //   * Not usable here (non-SSH, no credential, or a key-only credential) → null, so the
+        //     connection inherits rather than persisting a meaningless explicit value.
+        //   * Checkbox untouched since load → write back the original value (preserving a null
+        //     that inherits a folder default); merely renaming an inheriting connection must not
+        //     bake in an explicit off.
+        //   * User actually toggled it → write the explicit choice.
+        if (!CanUseSshAutoSudo)
+        {
+            node.SshAutoSudo = null;
+        }
+        else if (SshAutoSudo == (_loadedSshAutoSudo ?? false))
+        {
+            node.SshAutoSudo = _loadedSshAutoSudo;
+        }
+        else
+        {
+            node.SshAutoSudo = SshAutoSudo;
+        }
 
         if (IsRdp)
         {

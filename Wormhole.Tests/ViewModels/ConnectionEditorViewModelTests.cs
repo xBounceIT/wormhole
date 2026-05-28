@@ -566,6 +566,63 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task WriteTo_AutoSudo_PreservesInheritedNullWhenUnchanged()
+    {
+        // A child connection that inherits Auto sudo from its folder (own value null) must keep
+        // inheriting after an unrelated edit such as a rename — saving must not bake in an
+        // explicit false that severs inheritance from future folder changes.
+        var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo());
+        await vm.LoadCredentialsAsync();
+
+        var source = new ConnectionNode
+        {
+            Kind = NodeKind.Connection,
+            Name = "box",
+            Protocol = ProtocolType.Ssh,
+            Host = "h",
+            CredentialId = cred.Id,
+            SshAutoSudo = null, // inherits the folder default
+        };
+        vm.LoadFrom(source);
+        Assert.False(vm.SshAutoSudo); // the node's own null surfaces as an unchecked box
+
+        // User only renames; the checkbox is left untouched.
+        vm.Name = "box-renamed";
+        var sink = new ConnectionNode { Kind = NodeKind.Connection };
+        vm.WriteTo(sink);
+
+        Assert.Null(sink.SshAutoSudo); // inheritance preserved, not collapsed to false
+    }
+
+    [Fact]
+    public async Task WriteTo_AutoSudo_ExplicitToggleOverridesInheritedNull()
+    {
+        // When the user actually ticks the box on an inheriting connection, that is a deliberate
+        // override and must persist as an explicit true.
+        var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo());
+        await vm.LoadCredentialsAsync();
+
+        var source = new ConnectionNode
+        {
+            Kind = NodeKind.Connection,
+            Name = "box",
+            Protocol = ProtocolType.Ssh,
+            Host = "h",
+            CredentialId = cred.Id,
+            SshAutoSudo = null,
+        };
+        vm.LoadFrom(source);
+
+        vm.SshAutoSudo = true; // explicit user enable
+        var sink = new ConnectionNode { Kind = NodeKind.Connection };
+        vm.WriteTo(sink);
+
+        Assert.True(sink.SshAutoSudo);
+    }
+
+    [Fact]
     public async Task SelectingAzureAdCredential_AutoFlagsRdpUseExternalClient()
     {
         // Picking an AAD credential in the editor should tick the "Open with system Remote
