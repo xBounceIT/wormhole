@@ -92,6 +92,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 OnPropertyChanged(nameof(IsDisconnected));
                 OnPropertyChanged(nameof(IsFailed));
                 OnPropertyChanged(nameof(CanDisconnect));
+                OnPropertyChanged(nameof(CanTabDisconnect));
                 RetryCommand.NotifyCanExecuteChanged();
 
                 ClearCrashSentinelIfSafe();
@@ -102,6 +103,13 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     public override ProtocolType Protocol => ProtocolType.Rdp;
 
     public override ICommand? ReconnectCommand => RetryCommand;
+
+    // Surfaced on the tab context menu (see SessionTabViewModel) so Disconnect / Open-External
+    // remain reachable while a connected RDP overlay intercepts right-clicks on the surface.
+    public override ICommand? TabDisconnectCommand => DisconnectCommand;
+    public override bool CanTabDisconnect => CanDisconnect;
+    public override ICommand? TabUseExternalClientCommand => UseExternalClientCommand;
+    public override bool CanTabUseExternalClient => CanUseExternalClient;
 
     [ObservableProperty]
     private string? errorMessage;
@@ -136,6 +144,8 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         _initialAutoConnectStarted = false;
         OnPropertyChanged(nameof(CanUseExternalClient));
         OnPropertyChanged(nameof(CanDisconnect));
+        OnPropertyChanged(nameof(CanTabUseExternalClient));
+        OnPropertyChanged(nameof(CanTabDisconnect));
         UseExternalClientCommand.NotifyCanExecuteChanged();
     }
 
@@ -143,6 +153,8 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     {
         OnPropertyChanged(nameof(CanUseExternalClient));
         OnPropertyChanged(nameof(CanDisconnect));
+        OnPropertyChanged(nameof(CanTabUseExternalClient));
+        OnPropertyChanged(nameof(CanTabDisconnect));
         UseExternalClientCommand.NotifyCanExecuteChanged();
         RetryCommand.NotifyCanExecuteChanged();
     }

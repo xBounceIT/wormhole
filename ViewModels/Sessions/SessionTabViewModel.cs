@@ -40,6 +40,18 @@ public abstract partial class SessionTabViewModel : ObservableObject
     /// </summary>
     public virtual bool CanOpenFileTransfer => false;
 
+    /// <summary>
+    /// Disconnect / "Open in System Remote Desktop" actions surfaced on the TAB context menu so
+    /// they stay reachable for RDP. A connected RDP session is a top-level overlay that intercepts
+    /// pointer events (right-click correctly goes to the remote desktop), so the surface's own
+    /// ContextFlyout can't open over a live session. Default off; RDP overrides these and raises
+    /// PropertyChanged for the Can* flags whenever its state changes.
+    /// </summary>
+    public virtual ICommand? TabDisconnectCommand => null;
+    public virtual bool CanTabDisconnect => false;
+    public virtual ICommand? TabUseExternalClientCommand => null;
+    public virtual bool CanTabUseExternalClient => false;
+
     public virtual void Initialize(ConnectionProfile profile)
     {
         Profile = profile;

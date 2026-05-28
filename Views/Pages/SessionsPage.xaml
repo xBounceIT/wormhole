@@ -120,6 +120,23 @@
                                         <FontIcon Glyph="&#xE8AB;" />
                                     </MenuFlyoutItem.Icon>
                                 </MenuFlyoutItem>
+                                <!-- Disconnect / Open-External for RDP: the connected RDP surface is a top-level
+                                     overlay that intercepts right-clicks (they go to the remote desktop), so its
+                                     own ContextFlyout can't open over a live session. Surface these here instead. -->
+                                <MenuFlyoutItem Text="Disconnect"
+                                                Command="{x:Bind TabDisconnectCommand, Mode=OneWay}"
+                                                Visibility="{x:Bind CanTabDisconnect, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE8BB;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
+                                <MenuFlyoutItem Text="Open in System Remote Desktop"
+                                                Command="{x:Bind TabUseExternalClientCommand, Mode=OneWay}"
+                                                Visibility="{x:Bind CanTabUseExternalClient, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE8A7;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
                                 <MenuFlyoutSeparator />
                                 <MenuFlyoutItem Text="Close" Click="OnTabCloseClick">
                                     <MenuFlyoutItem.Icon>
