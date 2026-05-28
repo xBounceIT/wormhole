@@ -98,10 +98,14 @@ public sealed class RdpSessionService : IRdpSessionService
     /// <summary>
     /// Turn the (top-level, WS_POPUP) WinForms host into an owned overlay of the WinUI main
     /// window: set the main window as owner (GWLP_HWNDPARENT) so it minimizes/restores/closes
-    /// with the parent and stays above it, and OR-in WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW so
-    /// clicking the remote surface doesn't steal WinUI activation and the overlay never gets a
-    /// taskbar / Alt-Tab entry. Deliberately does NOT switch to WS_CHILD / SetParent — see
-    /// <see cref="ConnectAsync"/> for why that breaks rendering.
+    /// with the parent and stays above it, and OR-in WS_EX_TOOLWINDOW so the overlay never gets a
+    /// taskbar / Alt-Tab entry. The overlay is intentionally left activatable (NOT
+    /// WS_EX_NOACTIVATE) so clicking the remote surface activates it and routes keyboard focus to
+    /// the OCX — and clicking the canvas while the app is backgrounded brings it forward — which a
+    /// non-activating overlay would block (programmatic show/reposition stays non-activating via
+    /// SW_SHOWNA / SWP_NOACTIVATE, so we only activate on a real user click). Deliberately does
+    /// NOT switch to WS_CHILD / SetParent — see <see cref="ConnectAsync"/> for why that breaks
+    /// rendering.
     /// </summary>
     private void ConfigureAsOwnedOverlay(IntPtr hwnd, IntPtr ownerHwnd)
     {
@@ -120,7 +124,9 @@ public sealed class RdpSessionService : IRdpSessionService
             }
         }
 
-        // OR-in the extended styles so we don't clobber anything WinForms already set.
+        // OR-in WS_EX_TOOLWINDOW so we don't clobber anything WinForms already set. NOTE: we do
+        // NOT add WS_EX_NOACTIVATE — the surface is interactive, so it must be able to take focus
+        // on click (see the method summary).
         Marshal.SetLastSystemError(0);
         var exStyle = Win32Interop.GetWindowLongPtr(hwnd, Win32Interop.GWL_EXSTYLE).ToInt64();
         var getExError = Marshal.GetLastWin32Error();
@@ -129,7 +135,7 @@ public sealed class RdpSessionService : IRdpSessionService
             throw new InvalidOperationException(
                 $"GetWindowLongPtr(GWL_EXSTYLE) failed reading the RDP overlay styles (Win32 error {getExError}).");
         }
-        var newExStyle = exStyle | Win32Interop.WS_EX_NOACTIVATE | Win32Interop.WS_EX_TOOLWINDOW;
+        var newExStyle = exStyle | Win32Interop.WS_EX_TOOLWINDOW;
         if (newExStyle != exStyle)
         {
             Marshal.SetLastSystemError(0);

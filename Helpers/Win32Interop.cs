@@ -103,7 +103,6 @@ internal static class Win32Interop
     public const int WS_POPUP = unchecked((int)0x80000000);
 
     public const int WS_EX_TOOLWINDOW = 0x00000080;  // No taskbar button / Alt-Tab entry
-    public const int WS_EX_NOACTIVATE = 0x08000000;  // Don't steal activation on click
 
     public const uint SWP_NOSIZE = 0x0001;
     public const uint SWP_NOMOVE = 0x0002;
