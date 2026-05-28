@@ -287,6 +287,20 @@
       }, 50);
     });
 
+    // Full-screen TUI apps (nano, vim, less, htop) switch to the alternate screen
+    // buffer and back. The #terminal container's pixel size doesn't change across
+    // that switch, so neither the ResizeObserver nor window.resize fires — if the
+    // grid drifted while the alt buffer was active, nothing re-fits on exit and the
+    // restored shell repaints into a stale sub-rectangle of the canvas. Re-fit on
+    // every buffer switch to snap cols/rows (and the remote PTY via "r:") back to
+    // the real canvas size; the delayed second fit covers a transient layout settle.
+    if (term.buffer && typeof term.buffer.onBufferChange === "function") {
+      term.buffer.onBufferChange(function () {
+        scheduleFit(0, true);
+        scheduleFit(50, true);
+      });
+    }
+
     readyTimer = window.setTimeout(function () {
       if (!readySent) {
         fail("Terminal did not receive a usable layout size.");
