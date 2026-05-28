@@ -86,22 +86,37 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private Guid? credentialId;
 
     /// <summary>
-    /// When true, run "sudo su" automatically after the SSH session connects and send the
-    /// connection's saved password at the sudo prompt. Only meaningful for SSH connections
-    /// backed by a saved password credential — see <see cref="CanUseSshAutoSudo"/>, which gates
-    /// the editor checkbox, and the WriteTo guard that prevents persisting a stale true value
-    /// after the credential is cleared.
+    /// Tri-state Auto sudo selection: "inherit" (null — follow the folder default), "on" (true —
+    /// run "sudo su" and send the saved password on connect), or "off" (false — explicit override).
+    /// Modelled as a string to reuse the editor's existing radio/combo binding style; mapped to a
+    /// <c>bool?</c> in <see cref="WriteTo"/>. A plain checkbox couldn't express "inherit" vs an
+    /// explicit "off", so a child that inherits Auto sudo on from a folder could neither be shown
+    /// honestly nor be overridden off — hence the tri-state, mirroring the inheritable tunnel
+    /// setting.
     /// </summary>
     [ObservableProperty]
-    private bool sshAutoSudo;
+    private string sshAutoSudoMode = SshAutoSudoInherit;
+
+    internal const string SshAutoSudoInherit = "inherit";
+    internal const string SshAutoSudoOn = "on";
+    internal const string SshAutoSudoOff = "off";
+
+    public IReadOnlyList<KeyValuePair<string, string>> SshAutoSudoChoices { get; } = new[]
+    {
+        new KeyValuePair<string, string>(SshAutoSudoInherit, "Inherit from folder"),
+        new KeyValuePair<string, string>(SshAutoSudoOn, "On — run “sudo su” and send the saved password"),
+        new KeyValuePair<string, string>(SshAutoSudoOff, "Off"),
+    };
 
     /// <summary>
-    /// Drives the Auto sudo checkbox's visibility. Hidden unless this is an SSH connection with
-    /// a saved <em>password</em> credential selected: the feature sends the login password at the
-    /// sudo prompt, and SSH-key credentials expose their secret as a key passphrase (not a
-    /// password) so <see cref="SshCredentialResolver"/> never yields a password for them — leaving
-    /// Auto sudo a silent no-op. The "(None)" sentinel has <see cref="CredentialKind.Password"/> by
-    /// default, so the explicit non-null id check is what excludes "prompt every time".
+    /// Drives the Auto sudo control's visibility. Shown only for an SSH connection whose own
+    /// selected credential is a saved <em>password</em> credential: the feature sends the login
+    /// password at the sudo prompt, and SSH-key credentials expose their secret as a key passphrase
+    /// (not a password) so <see cref="SshCredentialResolver"/> never yields a password for them —
+    /// leaving Auto sudo a silent no-op. The "(None)" sentinel has <see cref="CredentialKind.Password"/>
+    /// by default, so the explicit non-null id check is what excludes "prompt every time". When the
+    /// control is hidden (incl. an inherited credential, where CredentialId is null here), WriteTo
+    /// leaves the loaded value untouched rather than clobbering it.
     /// </summary>
     public bool CanUseSshAutoSudo =>
         IsSsh && CredentialId is not null && SelectedCredential?.Kind == CredentialKind.Password;
@@ -554,7 +569,12 @@ public partial class ConnectionEditorViewModel : ObservableObject
             RdpDomain = node.RdpDomain ?? string.Empty;
             CredentialId = node.CredentialId;
             _loadedSshAutoSudo = node.SshAutoSudo;
-            SshAutoSudo = node.SshAutoSudo ?? false;
+            SshAutoSudoMode = node.SshAutoSudo switch
+            {
+                true => SshAutoSudoOn,
+                false => SshAutoSudoOff,
+                null => SshAutoSudoInherit,
+            };
 
             RdpScreenSize = node.RdpScreenSize;
             RdpFullScreen = node.RdpFullScreen ?? false;
@@ -647,16 +667,19 @@ public partial class ConnectionEditorViewModel : ObservableObject
         }
         node.CredentialId = CredentialId;
 
-        // Only persist an explicit Auto sudo choice when the checkbox was actually usable AND the
-        // user changed it; in every other case round-trip the originally loaded value untouched.
-        // The connection editor doesn't resolve folder inheritance, so a connection that inherits
-        // its password credential has CredentialId == null here and the checkbox is hidden —
-        // saving must not clobber a value the user couldn't even see (an explicit true that relies
-        // on an inherited credential, or a null that inherits a folder default). A key-only or
-        // credential-less connection likewise can't toggle it, so its loaded value (null for a new
-        // connection) is preserved as-is rather than forced to an explicit value.
-        node.SshAutoSudo = (CanUseSshAutoSudo && SshAutoSudo != (_loadedSshAutoSudo ?? false))
-            ? SshAutoSudo
+        // Persist the tri-state Auto sudo choice (inherit→null / on→true / off→false) only when the
+        // control was actually usable. When it's hidden — non-SSH, no credential, a key-only
+        // credential, or an inherited credential (CredentialId is null here because the editor
+        // doesn't resolve folder inheritance) — leave the loaded value untouched so saving never
+        // clobbers a value the user couldn't see (an explicit true relying on an inherited
+        // credential, or a null that inherits a folder default).
+        node.SshAutoSudo = CanUseSshAutoSudo
+            ? SshAutoSudoMode switch
+            {
+                SshAutoSudoOn => true,
+                SshAutoSudoOff => false,
+                _ => (bool?)null,
+            }
             : _loadedSshAutoSudo;
 
         if (IsRdp)
