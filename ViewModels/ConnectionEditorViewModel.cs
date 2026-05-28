@@ -421,6 +421,90 @@ public partial class ConnectionEditorViewModel : ObservableObject
         AvailableCredentials.ReplaceAll(available);
     }
 
+    /// <summary>
+    /// Filter <see cref="AvailableCredentials"/> for the credential pickers' type-to-search.
+    /// An empty/whitespace query returns the full list (including the <see cref="NoneCredential"/>
+    /// sentinel); otherwise entries match on Name/Username/Domain (case-insensitive substring),
+    /// mirroring <see cref="CredentialsViewModel"/>'s search. Returns a snapshot so callers can
+    /// bind it straight to AutoSuggestBox.ItemsSource without observing later source mutations.
+    /// </summary>
+    public IReadOnlyList<CredentialProfile> FilterCredentials(string? query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return AvailableCredentials.ToList();
+        }
+
+        var q = query.Trim();
+        var matches = new List<CredentialProfile>(AvailableCredentials.Count);
+        foreach (var credential in AvailableCredentials)
+        {
+            if (CredentialContains(credential.Name, q) ||
+                CredentialContains(credential.Username, q) ||
+                CredentialContains(credential.Domain, q))
+            {
+                matches.Add(credential);
+            }
+        }
+
+        return matches;
+    }
+
+    /// <summary>
+    /// Resolve an exact (case-insensitive) credential Name from <see cref="AvailableCredentials"/>,
+    /// or null when nothing matches. The picker's commit-on-Enter path uses this so typed text
+    /// that doesn't name a real credential leaves the current selection untouched.
+    /// </summary>
+    public CredentialProfile? ResolveCredentialByText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+
+        var t = text.Trim();
+        foreach (var credential in AvailableCredentials)
+        {
+            if (string.Equals(credential.Name, t, StringComparison.OrdinalIgnoreCase))
+            {
+                return credential;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Resolve typed picker text to a single credential to commit when the box is submitted or
+    /// loses focus: an exact (case-insensitive) <c>Name</c> wins; otherwise, if the same
+    /// Name/Username/Domain filter the dropdown uses yields exactly one real credential, that one
+    /// is taken. Ambiguous (more than one match) or empty/no-match returns null so the picker
+    /// leaves the current selection untouched (the caller reverts the stray text). The
+    /// <see cref="NoneCredential"/> sentinel is never auto-resolved — clearing is handled by the
+    /// caller treating empty text as "select none".
+    /// </summary>
+    public CredentialProfile? ResolveCredentialForCommit(string? text)
+    {
+        if (ResolveCredentialByText(text) is { } exact) return exact;
+        if (string.IsNullOrWhiteSpace(text)) return null;
+
+        var q = text.Trim();
+        CredentialProfile? single = null;
+        foreach (var credential in AvailableCredentials)
+        {
+            if (credential.Id == Guid.Empty) continue; // skip the None sentinel
+            if (CredentialContains(credential.Name, q) ||
+                CredentialContains(credential.Username, q) ||
+                CredentialContains(credential.Domain, q))
+            {
+                if (single is not null) return null; // ambiguous — don't guess
+                single = credential;
+            }
+        }
+
+        return single;
+    }
+
+    private static bool CredentialContains(string? haystack, string needle) =>
+        haystack is not null && haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
+
     /// <summary>SFTP connections reuse SSH credentials per the project's credential model
     /// (the credential dialog doesn't even let users create SFTP-tagged credentials).</summary>
     private static ProtocolType CredentialProtocolFor(ProtocolType connectionProtocol) =>
