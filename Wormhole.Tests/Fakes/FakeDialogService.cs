@@ -41,6 +41,11 @@ public class FakeDialogService : IDialogService
     public int TextPromptCount { get; private set; }
     public int MRemoteNgImportPromptCount { get; private set; }
 
+    /// <summary>Records of the read-only password-reveal dialog (<see cref="ShowPasswordAsync"/>).</summary>
+    public int ShowPasswordCount { get; private set; }
+    public string? LastShownPassword { get; private set; }
+    public string? LastShownUsername { get; private set; }
+
     public virtual Task ShowMessageAsync(string title, string message) => Task.CompletedTask;
 
     public virtual Task<bool> ConfirmAsync(string title, string message, string primaryText = "Yes", string closeText = "No")
@@ -147,6 +152,14 @@ public class FakeDialogService : IDialogService
     {
         PasswordPromptCount++;
         return Task.FromResult(PasswordPromptResult);
+    }
+
+    public virtual Task ShowPasswordAsync(string title, string username, string password)
+    {
+        ShowPasswordCount++;
+        LastShownUsername = username;
+        LastShownPassword = password;
+        return Task.CompletedTask;
     }
 
     public virtual Task<(string Username, string Password)?> PromptCredentialsAsync(string title, string message, string? initialUsername = null)

@@ -15,6 +15,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
     private readonly InheritanceResolver _inheritanceResolver;
     private readonly ISessionTabFactory _tabFactory;
     private readonly IDialogService _dialog;
+    private readonly ICredentialService _credentialService;
     private readonly ILogger<ConnectionTreeViewModel> _logger;
     private IReadOnlyList<ConnectionNode> _lastSnapshot = Array.Empty<ConnectionNode>();
     private Dictionary<Guid, ConnectionNode> _lastSnapshotById = new();
@@ -129,12 +130,14 @@ public partial class ConnectionTreeViewModel : ObservableObject
         InheritanceResolver inheritanceResolver,
         ISessionTabFactory tabFactory,
         IDialogService dialog,
+        ICredentialService credentialService,
         ILogger<ConnectionTreeViewModel> logger)
     {
         _repository = repository;
         _inheritanceResolver = inheritanceResolver;
         _tabFactory = tabFactory;
         _dialog = dialog;
+        _credentialService = credentialService;
         _logger = logger;
     }
 
@@ -178,6 +181,50 @@ public partial class ConnectionTreeViewModel : ObservableObject
             // unhandled RelayCommand failure.
             _logger.LogError(ex, "Failed to open connection '{Name}'", vm.Name);
             await _dialog.ShowMessageAsync("Couldn't open connection", ex.Message);
+        }
+    }
+
+    [RelayCommand]
+    private async Task ShowPassword(TreeNodeViewModel? clicked)
+    {
+        if (clicked is null || clicked.Kind != NodeKind.Connection) return;
+
+        try
+        {
+            if (!_lastSnapshotById.TryGetValue(clicked.Node.Id, out var node))
+            {
+                await RefreshAsync();
+                if (!_lastSnapshotById.TryGetValue(clicked.Node.Id, out node)) return;
+            }
+
+            // Resolve through inheritance so a credential set on a parent folder is honoured,
+            // matching what OpenConnectionAsync would actually authenticate with.
+            var profile = _inheritanceResolver.Resolve(node, _lastSnapshotById);
+
+            string? password = profile.CredentialId is { } credId
+                ? await _credentialService.ReadPasswordAsync(credId)
+                : null;
+
+            if (string.IsNullOrEmpty(password))
+            {
+                await _dialog.ShowMessageAsync(
+                    "No password",
+                    "This connection has no stored password.");
+                return;
+            }
+
+            await _dialog.ShowPasswordAsync(
+                $"Password — {clicked.Name}",
+                profile.Username ?? string.Empty,
+                password);
+        }
+        catch (Exception ex)
+        {
+            // Mirror OpenConnectionAsync's error path: log + surface a dialog rather than
+            // letting the exception escape as an unhandled RelayCommand failure. The password
+            // is never passed to the logger (CLAUDE.md: never log credentials).
+            _logger.LogError(ex, "Failed to reveal password for connection '{Name}'", clicked.Name);
+            await _dialog.ShowMessageAsync("Couldn't show password", ex.Message);
         }
     }
 
@@ -673,6 +720,7 @@ public sealed partial class TreeNodeViewModel : ObservableObject
     public BulkObservableCollection<TreeNodeViewModel> Children { get; } = new();
     public string Name => Node.Name;
     public NodeKind Kind => Node.Kind;
+    public bool IsConnection => Kind == NodeKind.Connection;
 
     [ObservableProperty]
     private bool isExpanded;
@@ -696,6 +744,7 @@ public sealed partial class TreeNodeViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(Name));
         OnPropertyChanged(nameof(Kind));
+        OnPropertyChanged(nameof(IsConnection));
         OnPropertyChanged(nameof(Glyph));
     }
 }

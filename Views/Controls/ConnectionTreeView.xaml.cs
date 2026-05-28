@@ -111,6 +111,14 @@ public sealed partial class ConnectionTreeView : UserControl
         }
     }
 
+    private void OnShowPasswordItemClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement fe && fe.DataContext is TreeNodeViewModel vm)
+        {
+            ViewModel.ShowPasswordCommand.Execute(vm);
+        }
+    }
+
     private void OnEditItemClick(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement fe && fe.DataContext is TreeNodeViewModel vm)

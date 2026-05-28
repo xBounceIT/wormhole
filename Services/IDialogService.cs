@@ -32,6 +32,13 @@ public interface IDialogService
     Task<string?> PromptPasswordAsync(string title, string message);
 
     /// <summary>
+    /// Reveal a stored password read-only. Shows the (optional) username and the password as
+    /// selectable plaintext plus a button to copy it to the clipboard. Display-only — there is
+    /// no result to collect.
+    /// </summary>
+    Task ShowPasswordAsync(string title, string username, string password);
+
+    /// <summary>
     /// Prompt for username + password together. Used when the connection profile has no
     /// stored username (a plain password prompt would leave the user no way to type one),
     /// or when the caller specifically wants the user to confirm both fields. Returns null
