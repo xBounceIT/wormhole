@@ -86,8 +86,10 @@ public sealed partial class NewConnectionDialog : UserControl
 
     // --- Searchable credential pickers (AutoSuggestBox) ---------------------------------------
     // Selection lives in the VM (CredentialId / RdpGatewayCredentialId); the suggestion list is
-    // ephemeral, so filtering can never clear the bound selection. Text shows the selected
-    // credential's Name; the NoneCredential sentinel maps to empty text so PlaceholderText shows.
+    // ephemeral, so filtering can never clear the bound selection. The box text shows the selected
+    // item's Name — including the "(None — prompt every time)" sentinel, which is displayed like
+    // any other row so a pick never rewrites Text mid-selection (that wedged the dropdown open).
+    // An untouched field stays empty so PlaceholderText shows; only a real selection sets text.
 
     private void OnCredentialTextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args) =>
         FilterSuggestions(sender, args);
@@ -155,18 +157,16 @@ public sealed partial class NewConnectionDialog : UserControl
         // else: text matched nothing unambiguous — keep the current selection and revert below.
 
         SyncCredentialText(box, current());
-
-        // Picking a suggestion whose committed display text differs from the tapped item — most
-        // notably the None sentinel, which we blank so the placeholder shows — re-writes box.Text
-        // mid-submit and leaves the suggestion list open. Force it shut on the next dispatcher
-        // tick, after the control finishes its own submit handling.
-        box.DispatcherQueue?.TryEnqueue(() => box.IsSuggestionListOpen = false);
+        box.IsSuggestionListOpen = false;
     }
 
     private static void SyncCredentialText(AutoSuggestBox? box, CredentialProfile? selection)
     {
         if (box is null) return;
-        var text = selection is null || selection.Id == Guid.Empty ? string.Empty : selection.Name;
+        // Show the selection's Name for every item, including the None sentinel — never blank it
+        // mid-pick. Empty only for a null (unresolved) selection, which lets PlaceholderText show
+        // on an untouched field.
+        var text = selection?.Name ?? string.Empty;
         if (box.Text != text) box.Text = text;
     }
 }
