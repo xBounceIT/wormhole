@@ -28,6 +28,11 @@ public partial class ConnectionEditorViewModel : ObservableObject
     // last AAD signal is cleared — otherwise the user is left with a ticked-and-editable
     // checkbox they never asked for after correcting a typo'd "AzureAD" Domain value.
     private bool _autoFlagAppliedByAad;
+    // The node's own SshAutoSudo value as loaded (null = inherits a folder default). Remembered
+    // so WriteTo can leave an untouched checkbox alone instead of baking the displayed default
+    // (false) back over an inherited value — otherwise merely renaming an inheriting connection
+    // would sever its inheritance. Null for a brand-new connection (LoadFrom never ran).
+    private bool? _loadedSshAutoSudo;
 
     public ConnectionEditorViewModel(
         ICredentialRepository credentialRepository,
@@ -57,7 +62,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private string name = string.Empty;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsRdp), nameof(IsSsh), nameof(IsValid))]
+    [NotifyPropertyChangedFor(nameof(IsRdp), nameof(IsSsh), nameof(IsValid), nameof(CanUseSshAutoSudo))]
     private ProtocolType protocol = ProtocolType.Ssh;
 
     [ObservableProperty]
@@ -77,8 +82,45 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private string rdpDomain = string.Empty;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(SelectedCredential), nameof(IsAzureAdCredential), nameof(IsRdpUseExternalClientEditable))]
+    [NotifyPropertyChangedFor(nameof(SelectedCredential), nameof(IsAzureAdCredential), nameof(IsRdpUseExternalClientEditable), nameof(CanUseSshAutoSudo))]
     private Guid? credentialId;
+
+    /// <summary>
+    /// Tri-state Auto sudo selection: "inherit" (null — follow the folder default), "on" (true —
+    /// run "sudo su" and send the saved password on connect), or "off" (false — explicit override).
+    /// Modelled as a string to reuse the editor's existing radio/combo binding style; mapped to a
+    /// <c>bool?</c> in <see cref="WriteTo"/>. A plain checkbox couldn't express "inherit" vs an
+    /// explicit "off", so a child that inherits Auto sudo on from a folder could neither be shown
+    /// honestly nor be overridden off — hence the tri-state, mirroring the inheritable tunnel
+    /// setting.
+    /// </summary>
+    [ObservableProperty]
+    private string sshAutoSudoMode = SshAutoSudoInherit;
+
+    internal const string SshAutoSudoInherit = "inherit";
+    internal const string SshAutoSudoOn = "on";
+    internal const string SshAutoSudoOff = "off";
+
+    public IReadOnlyList<KeyValuePair<string, string>> SshAutoSudoChoices { get; } = new[]
+    {
+        new KeyValuePair<string, string>(SshAutoSudoInherit, "Inherit from folder"),
+        new KeyValuePair<string, string>(SshAutoSudoOn, "On — run “sudo su” and send the saved password"),
+        new KeyValuePair<string, string>(SshAutoSudoOff, "Off"),
+    };
+
+    /// <summary>
+    /// Drives the Auto sudo control's visibility. Shown for an SSH connection unless the node's own
+    /// selected credential is an SSH <em>key</em> — the one case with provably no login password
+    /// (the secret is a key passphrase, so <see cref="SshCredentialResolver"/> never yields a
+    /// password and the runtime driver can't run). Every other case keeps the control visible
+    /// because the runtime resolves a usable password: an own password credential, an inherited
+    /// credential (own CredentialId is null here since the editor doesn't resolve folder
+    /// inheritance — the "(None)" sentinel is <see cref="CredentialKind.Password"/>), or
+    /// "prompt every time" (the resolver prompts and captures a password). Hiding only the
+    /// definitely-no-password case lets a child override an inherited Auto sudo on/off; when hidden,
+    /// WriteTo leaves the loaded value untouched rather than clobbering it.
+    /// </summary>
+    public bool CanUseSshAutoSudo => IsSsh && SelectedCredential?.Kind != CredentialKind.SshKey;
 
     /// <summary>Sentinel for "no credential — prompt every time". ComboBox.PlaceholderText
     /// isn't selectable, so the picker needs a real item to round-trip to. Both selection
@@ -611,6 +653,13 @@ public partial class ConnectionEditorViewModel : ObservableObject
             Username = node.Username ?? string.Empty;
             RdpDomain = node.RdpDomain ?? string.Empty;
             CredentialId = node.CredentialId;
+            _loadedSshAutoSudo = node.SshAutoSudo;
+            SshAutoSudoMode = node.SshAutoSudo switch
+            {
+                true => SshAutoSudoOn,
+                false => SshAutoSudoOff,
+                null => SshAutoSudoInherit,
+            };
 
             RdpScreenSize = node.RdpScreenSize;
             RdpFullScreen = node.RdpFullScreen ?? false;
@@ -702,6 +751,21 @@ public partial class ConnectionEditorViewModel : ObservableObject
             node.Username = null;
         }
         node.CredentialId = CredentialId;
+
+        // Persist the tri-state Auto sudo choice (inherit→null / on→true / off→false) only when the
+        // control was actually usable. When it's hidden — non-SSH, no credential, a key-only
+        // credential, or an inherited credential (CredentialId is null here because the editor
+        // doesn't resolve folder inheritance) — leave the loaded value untouched so saving never
+        // clobbers a value the user couldn't see (an explicit true relying on an inherited
+        // credential, or a null that inherits a folder default).
+        node.SshAutoSudo = CanUseSshAutoSudo
+            ? SshAutoSudoMode switch
+            {
+                SshAutoSudoOn => true,
+                SshAutoSudoOff => false,
+                _ => (bool?)null,
+            }
+            : _loadedSshAutoSudo;
 
         if (IsRdp)
         {

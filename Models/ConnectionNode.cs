@@ -55,6 +55,7 @@ public class ConnectionNode
 
     public string? SshKeyFileName { get; set; }
     public string? SshKnownHostFingerprint { get; set; }
+    public bool? SshAutoSudo { get; set; }
 
     public bool? TunnelEnabled { get; set; }
     public Guid? TunnelConfigId { get; set; }
@@ -133,6 +134,7 @@ public class ConnectionNode
         RdpUseExternalClient = RdpUseExternalClient,
         SshKeyFileName = SshKeyFileName,
         SshKnownHostFingerprint = SshKnownHostFingerprint,
+        SshAutoSudo = SshAutoSudo,
         TunnelEnabled = TunnelEnabled,
         TunnelConfigId = TunnelConfigId,
         CreatedAt = CreatedAt,

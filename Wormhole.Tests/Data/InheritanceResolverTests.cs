@@ -347,4 +347,75 @@ public class InheritanceResolverTests
         Assert.Equal("gw.example.com", profile.RdpGatewayHostname);
         Assert.Equal(credId, profile.RdpGatewayCredentialId);
     }
+
+    [Fact]
+    public void Resolve_SshAutoSudo_DefaultsFalseWhenUnset()
+    {
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "plain-ssh",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            Host = "host",
+        };
+        var nodes = new Dictionary<Guid, ConnectionNode> { [node.Id] = node };
+
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.False(profile.SshAutoSudo);
+    }
+
+    [Fact]
+    public void Resolve_SshAutoSudo_InheritsFromParentFolder()
+    {
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "elevated",
+            Kind = NodeKind.Folder,
+            Protocol = ProtocolType.Ssh,
+            SshAutoSudo = true,
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "box",
+            Kind = NodeKind.Connection,
+            Host = "box.example.com",
+        };
+        var nodes = new Dictionary<Guid, ConnectionNode> { [folder.Id] = folder, [node.Id] = node };
+
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.True(profile.SshAutoSudo);
+    }
+
+    [Fact]
+    public void Resolve_SshAutoSudoFalseOnChild_OverridesParentTrue()
+    {
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "elevated",
+            Kind = NodeKind.Folder,
+            Protocol = ProtocolType.Ssh,
+            SshAutoSudo = true,
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "no-sudo",
+            Kind = NodeKind.Connection,
+            Host = "host",
+            SshAutoSudo = false,
+        };
+        var nodes = new Dictionary<Guid, ConnectionNode> { [folder.Id] = folder, [node.Id] = node };
+
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.False(profile.SshAutoSudo);
+    }
 }
