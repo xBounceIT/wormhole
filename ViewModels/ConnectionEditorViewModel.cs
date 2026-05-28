@@ -647,26 +647,17 @@ public partial class ConnectionEditorViewModel : ObservableObject
         }
         node.CredentialId = CredentialId;
 
-        // Persist Auto sudo carefully so the connection editor never silently rewrites an
-        // inherited value:
-        //   * Not usable here (non-SSH, no credential, or a key-only credential) → null, so the
-        //     connection inherits rather than persisting a meaningless explicit value.
-        //   * Checkbox untouched since load → write back the original value (preserving a null
-        //     that inherits a folder default); merely renaming an inheriting connection must not
-        //     bake in an explicit off.
-        //   * User actually toggled it → write the explicit choice.
-        if (!CanUseSshAutoSudo)
-        {
-            node.SshAutoSudo = null;
-        }
-        else if (SshAutoSudo == (_loadedSshAutoSudo ?? false))
-        {
-            node.SshAutoSudo = _loadedSshAutoSudo;
-        }
-        else
-        {
-            node.SshAutoSudo = SshAutoSudo;
-        }
+        // Only persist an explicit Auto sudo choice when the checkbox was actually usable AND the
+        // user changed it; in every other case round-trip the originally loaded value untouched.
+        // The connection editor doesn't resolve folder inheritance, so a connection that inherits
+        // its password credential has CredentialId == null here and the checkbox is hidden —
+        // saving must not clobber a value the user couldn't even see (an explicit true that relies
+        // on an inherited credential, or a null that inherits a folder default). A key-only or
+        // credential-less connection likewise can't toggle it, so its loaded value (null for a new
+        // connection) is preserved as-is rather than forced to an explicit value.
+        node.SshAutoSudo = (CanUseSshAutoSudo && SshAutoSudo != (_loadedSshAutoSudo ?? false))
+            ? SshAutoSudo
+            : _loadedSshAutoSudo;
 
         if (IsRdp)
         {

@@ -623,6 +623,36 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task WriteTo_AutoSudo_PreservesExplicitTrueWhenCredentialInheritedAndHidden()
+    {
+        // A connection can carry an explicit SshAutoSudo=true while inheriting its password
+        // credential from a folder (own CredentialId null). The editor doesn't resolve
+        // inheritance, so the checkbox is hidden — but the runtime would still have a resolved
+        // password, so saving (e.g. after a rename) must not wipe the explicit true.
+        var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo());
+        await vm.LoadCredentialsAsync();
+
+        var source = new ConnectionNode
+        {
+            Kind = NodeKind.Connection,
+            Name = "box",
+            Protocol = ProtocolType.Ssh,
+            Host = "h",
+            CredentialId = null, // inherits the credential from a parent folder
+            SshAutoSudo = true,  // explicit override on the node itself
+        };
+        vm.LoadFrom(source);
+        Assert.False(vm.CanUseSshAutoSudo); // hidden: the editor can't see the inherited credential
+
+        vm.Name = "box-renamed";
+        var sink = new ConnectionNode { Kind = NodeKind.Connection };
+        vm.WriteTo(sink);
+
+        Assert.True(sink.SshAutoSudo); // explicit true preserved, not clobbered to null
+    }
+
+    [Fact]
     public async Task SelectingAzureAdCredential_AutoFlagsRdpUseExternalClient()
     {
         // Picking an AAD credential in the editor should tick the "Open with system Remote
