@@ -464,16 +464,16 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
-    public async Task CanUseSshAutoSudo_TrueOnlyForSshWithSavedCredential()
+    public async Task CanUseSshAutoSudo_ShownForSshIncludingPromptEveryTimeAndSavedPassword()
     {
         var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo());
         await vm.LoadCredentialsAsync();
 
-        // SSH but "prompt every time" (no saved credential) → the feature has no password to
-        // send, so the checkbox stays hidden.
+        // "Prompt every time" (no saved credential) still gets a password at runtime — and a
+        // child may inherit one from a folder — so the control is shown for SSH regardless.
         Assert.Equal(ProtocolType.Ssh, vm.Protocol);
-        Assert.False(vm.CanUseSshAutoSudo);
+        Assert.True(vm.CanUseSshAutoSudo);
 
         vm.SelectedCredential = cred;
         Assert.True(vm.CanUseSshAutoSudo);
@@ -495,23 +495,25 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
-    public async Task WriteTo_AutoSudo_PersistsOnForSshWithCredential_RevertsWhenCredentialDropped()
+    public async Task WriteTo_AutoSudo_PersistsOnForSshWithCredential_RevertsWhenKeyCredentialSelected()
     {
-        var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
-        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo());
+        var pwd = new CredentialProfile { Name = "ssh-pwd", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var key = new CredentialProfile { Name = "ssh-key", Protocol = ProtocolType.Ssh, Kind = CredentialKind.SshKey };
+        var vm = new ConnectionEditorViewModel(new MultiCredentialRepository(pwd, key), EmptyTunnelRepo());
         await vm.LoadCredentialsAsync();
         vm.Name = "n";
         vm.Host = "h";
-        vm.SelectedCredential = cred;
+        vm.SelectedCredential = pwd;
         vm.SshAutoSudoMode = ConnectionEditorViewModel.SshAutoSudoOn;
 
         var node = new ConnectionNode();
         vm.WriteTo(node);
         Assert.True(node.SshAutoSudo);
 
-        // Dropping the credential hides the control; with nothing loaded the persisted result
-        // reverts to null (inherit) rather than an explicit on with no password to send.
-        vm.SelectedCredential = null;
+        // Switching to a key credential hides the control (no password to send); with nothing
+        // loaded the persisted result reverts to null rather than a meaningless explicit on.
+        vm.SelectedCredential = key;
+        Assert.False(vm.CanUseSshAutoSudo);
         var node2 = new ConnectionNode();
         vm.WriteTo(node2);
         Assert.Null(node2.SshAutoSudo);
@@ -648,12 +650,12 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
-    public async Task WriteTo_AutoSudo_PreservesExplicitTrueWhenCredentialInheritedAndHidden()
+    public async Task CanUseSshAutoSudo_ShownForInheritedCredential_AllowsExplicitOff()
     {
-        // A connection can carry an explicit SshAutoSudo=true while inheriting its password
-        // credential from a folder (own CredentialId null). The editor doesn't resolve
-        // inheritance, so the control is hidden — but the runtime would still have a resolved
-        // password, so saving (e.g. after a rename) must not wipe the explicit true.
+        // A connection that inherits its password credential from a folder has CredentialId == null
+        // on the node, yet the runtime resolves a usable password. The control must stay visible in
+        // that case so a folder/imported default can't force Auto sudo on with no way to opt out —
+        // the user can select Off to write an explicit false.
         var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo());
         await vm.LoadCredentialsAsync();
@@ -664,17 +666,47 @@ public class ConnectionEditorViewModelTests
             Name = "box",
             Protocol = ProtocolType.Ssh,
             Host = "h",
-            CredentialId = null, // inherits the credential from a parent folder
-            SshAutoSudo = true,  // explicit override on the node itself
+            CredentialId = null, // inherits the credential (and possibly Auto sudo on) from a folder
+            SshAutoSudo = null,
         };
         vm.LoadFrom(source);
-        Assert.False(vm.CanUseSshAutoSudo); // hidden: the editor can't see the inherited credential
+        Assert.True(vm.CanUseSshAutoSudo); // visible despite the inherited credential
+        Assert.Equal(ConnectionEditorViewModel.SshAutoSudoInherit, vm.SshAutoSudoMode);
+
+        vm.SshAutoSudoMode = ConnectionEditorViewModel.SshAutoSudoOff; // explicit opt-out
+        var sink = new ConnectionNode { Kind = NodeKind.Connection };
+        vm.WriteTo(sink);
+
+        Assert.False(sink.SshAutoSudo); // explicit false persisted, overriding the inherited on
+    }
+
+    [Fact]
+    public async Task WriteTo_AutoSudo_PreservesExplicitTrueWhenHiddenByOwnKeyCredential()
+    {
+        // A node with its own SSH-key credential hides the control (no password to send). An
+        // explicit SshAutoSudo=true already on the node must be preserved on save, not clobbered —
+        // it becomes effective again if the credential later changes to a password.
+        var key = new CredentialProfile { Name = "ssh-key", Protocol = ProtocolType.Ssh, Kind = CredentialKind.SshKey };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(key), EmptyTunnelRepo());
+        await vm.LoadCredentialsAsync();
+
+        var source = new ConnectionNode
+        {
+            Kind = NodeKind.Connection,
+            Name = "box",
+            Protocol = ProtocolType.Ssh,
+            Host = "h",
+            CredentialId = key.Id, // own key credential → control hidden
+            SshAutoSudo = true,
+        };
+        vm.LoadFrom(source);
+        Assert.False(vm.CanUseSshAutoSudo);
 
         vm.Name = "box-renamed";
         var sink = new ConnectionNode { Kind = NodeKind.Connection };
         vm.WriteTo(sink);
 
-        Assert.True(sink.SshAutoSudo); // explicit true preserved, not clobbered
+        Assert.True(sink.SshAutoSudo); // preserved, not clobbered
     }
 
     [Fact]

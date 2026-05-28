@@ -109,17 +109,18 @@ public partial class ConnectionEditorViewModel : ObservableObject
     };
 
     /// <summary>
-    /// Drives the Auto sudo control's visibility. Shown only for an SSH connection whose own
-    /// selected credential is a saved <em>password</em> credential: the feature sends the login
-    /// password at the sudo prompt, and SSH-key credentials expose their secret as a key passphrase
-    /// (not a password) so <see cref="SshCredentialResolver"/> never yields a password for them —
-    /// leaving Auto sudo a silent no-op. The "(None)" sentinel has <see cref="CredentialKind.Password"/>
-    /// by default, so the explicit non-null id check is what excludes "prompt every time". When the
-    /// control is hidden (incl. an inherited credential, where CredentialId is null here), WriteTo
-    /// leaves the loaded value untouched rather than clobbering it.
+    /// Drives the Auto sudo control's visibility. Shown for an SSH connection unless the node's own
+    /// selected credential is an SSH <em>key</em> — the one case with provably no login password
+    /// (the secret is a key passphrase, so <see cref="SshCredentialResolver"/> never yields a
+    /// password and the runtime driver can't run). Every other case keeps the control visible
+    /// because the runtime resolves a usable password: an own password credential, an inherited
+    /// credential (own CredentialId is null here since the editor doesn't resolve folder
+    /// inheritance — the "(None)" sentinel is <see cref="CredentialKind.Password"/>), or
+    /// "prompt every time" (the resolver prompts and captures a password). Hiding only the
+    /// definitely-no-password case lets a child override an inherited Auto sudo on/off; when hidden,
+    /// WriteTo leaves the loaded value untouched rather than clobbering it.
     /// </summary>
-    public bool CanUseSshAutoSudo =>
-        IsSsh && CredentialId is not null && SelectedCredential?.Kind == CredentialKind.Password;
+    public bool CanUseSshAutoSudo => IsSsh && SelectedCredential?.Kind != CredentialKind.SshKey;
 
     /// <summary>Sentinel for "no credential — prompt every time". ComboBox.PlaceholderText
     /// isn't selectable, so the picker needs a real item to round-trip to. Both selection
