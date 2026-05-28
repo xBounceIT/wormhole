@@ -30,6 +30,20 @@
                            TextWrapping="Wrap"
                            Text="Descendants that choose &quot;Inherit from folder&quot; pick up this tunnel. &quot;Inherit from parent&quot; defers to this folder's own parent; &quot;No tunnel&quot; overrides any inherited tunnel for the whole subtree." />
             </StackPanel>
+
+            <StackPanel Spacing="4">
+                <TextBlock Text="Auto sudo (SSH)"
+                           Style="{StaticResource CaptionTextBlockStyle}" />
+                <ComboBox HorizontalAlignment="Stretch"
+                          ItemsSource="{x:Bind ViewModel.SshAutoSudoChoices}"
+                          SelectedValuePath="Key"
+                          DisplayMemberPath="Value"
+                          SelectedValue="{x:Bind ViewModel.SshAutoSudoMode, Mode=TwoWay}" />
+                <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                           Opacity="0.7"
+                           TextWrapping="Wrap"
+                           Text="Default for SSH descendants that choose &quot;Inherit from folder&quot;: when on, they run &quot;sudo su&quot; on connect and send the saved password. &quot;Inherit from parent&quot; defers to this folder's own parent." />
+            </StackPanel>
         </StackPanel>
     </ScrollViewer>
 </UserControl>

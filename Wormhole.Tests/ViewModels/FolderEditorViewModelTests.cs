@@ -104,6 +104,49 @@ public class FolderEditorViewModelTests
         Assert.Equal("Production", sink.Name);
     }
 
+    [Fact]
+    public async Task RoundTrip_SshAutoSudoInherit_PersistsNull()
+    {
+        var vm = new FolderEditorViewModel(new EmptyRepo());
+        await vm.LoadTunnelConfigsAsync();
+
+        var node = new ConnectionNode { Kind = NodeKind.Folder, Name = "Linux", SshAutoSudo = null };
+        vm.LoadFrom(node);
+        Assert.Equal(ConnectionEditorViewModel.SshAutoSudoInherit, vm.SshAutoSudoMode);
+
+        var sink = new ConnectionNode { Kind = NodeKind.Folder };
+        vm.WriteTo(sink);
+        Assert.Null(sink.SshAutoSudo);
+    }
+
+    [Fact]
+    public async Task RoundTrip_SshAutoSudoOn_PersistsTrue()
+    {
+        // The folder default that makes "Inherit from folder" on a child actually resolve to on.
+        var vm = new FolderEditorViewModel(new EmptyRepo());
+        await vm.LoadTunnelConfigsAsync();
+
+        var node = new ConnectionNode { Kind = NodeKind.Folder, Name = "Linux", SshAutoSudo = true };
+        vm.LoadFrom(node);
+        Assert.Equal(ConnectionEditorViewModel.SshAutoSudoOn, vm.SshAutoSudoMode);
+
+        var sink = new ConnectionNode { Kind = NodeKind.Folder };
+        vm.WriteTo(sink);
+        Assert.True(sink.SshAutoSudo);
+    }
+
+    [Fact]
+    public void WriteTo_SshAutoSudoOff_PersistsFalse()
+    {
+        var vm = new FolderEditorViewModel(new EmptyRepo());
+        vm.Name = "Linux";
+        vm.SshAutoSudoMode = ConnectionEditorViewModel.SshAutoSudoOff;
+
+        var sink = new ConnectionNode { Kind = NodeKind.Folder };
+        vm.WriteTo(sink);
+        Assert.False(sink.SshAutoSudo);
+    }
+
     private sealed class EmptyRepo : ITunnelConfigRepository
     {
         public Task<IReadOnlyList<TunnelConfig>> GetAllAsync(CancellationToken ct = default)
