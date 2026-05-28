@@ -16,6 +16,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
     private readonly ISessionTabFactory _tabFactory;
     private readonly IDialogService _dialog;
     private readonly ICredentialService _credentialService;
+    private readonly ICredentialRepository _credentialRepository;
     private readonly ILogger<ConnectionTreeViewModel> _logger;
     private IReadOnlyList<ConnectionNode> _lastSnapshot = Array.Empty<ConnectionNode>();
     private Dictionary<Guid, ConnectionNode> _lastSnapshotById = new();
@@ -131,6 +132,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
         ISessionTabFactory tabFactory,
         IDialogService dialog,
         ICredentialService credentialService,
+        ICredentialRepository credentialRepository,
         ILogger<ConnectionTreeViewModel> logger)
     {
         _repository = repository;
@@ -138,6 +140,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
         _tabFactory = tabFactory;
         _dialog = dialog;
         _credentialService = credentialService;
+        _credentialRepository = credentialRepository;
         _logger = logger;
     }
 
@@ -185,7 +188,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
     }
 
     [RelayCommand]
-    private async Task ShowPassword(TreeNodeViewModel? clicked)
+    private async Task ShowCredentials(TreeNodeViewModel? clicked)
     {
         if (clicked is null || clicked.Kind != NodeKind.Connection) return;
 
@@ -201,30 +204,42 @@ public partial class ConnectionTreeViewModel : ObservableObject
             // matching what OpenConnectionAsync would actually authenticate with.
             var profile = _inheritanceResolver.Resolve(node, _lastSnapshotById);
 
-            string? password = profile.CredentialId is { } credId
-                ? await _credentialService.ReadPasswordAsync(credId)
-                : null;
-
-            if (string.IsNullOrEmpty(password))
+            if (profile.CredentialId is not { } credId)
             {
                 await _dialog.ShowMessageAsync(
-                    "No password",
-                    "This connection has no stored password.");
+                    "No credentials",
+                    "This connection has no stored password or key passphrase.");
                 return;
             }
 
-            await _dialog.ShowPasswordAsync(
-                $"Password — {clicked.Name}",
+            // The stored secret for an SshKey credential is the private-key passphrase, not a
+            // login password — fetch the credential to label the field honestly.
+            var credential = await _credentialRepository.GetByIdAsync(credId);
+            var secret = await _credentialService.ReadPasswordAsync(credId);
+
+            if (string.IsNullOrEmpty(secret))
+            {
+                await _dialog.ShowMessageAsync(
+                    "No credentials",
+                    "This connection has no stored password or key passphrase.");
+                return;
+            }
+
+            var secretLabel = credential?.Kind == CredentialKind.SshKey ? "Key passphrase" : "Password";
+
+            await _dialog.ShowCredentialsAsync(
+                $"Credentials — {clicked.Name}",
                 profile.Username ?? string.Empty,
-                password);
+                secretLabel,
+                secret);
         }
         catch (Exception ex)
         {
             // Mirror OpenConnectionAsync's error path: log + surface a dialog rather than
-            // letting the exception escape as an unhandled RelayCommand failure. The password
+            // letting the exception escape as an unhandled RelayCommand failure. The secret
             // is never passed to the logger (CLAUDE.md: never log credentials).
-            _logger.LogError(ex, "Failed to reveal password for connection '{Name}'", clicked.Name);
-            await _dialog.ShowMessageAsync("Couldn't show password", ex.Message);
+            _logger.LogError(ex, "Failed to reveal credentials for connection '{Name}'", clicked.Name);
+            await _dialog.ShowMessageAsync("Couldn't show credentials", ex.Message);
         }
     }
 

@@ -105,7 +105,10 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         if (File.Exists(_dbPath)) File.Delete(_dbPath);
     }
 
-    private ConnectionTreeViewModel CreateVm(FakeDialogService? dialog = null, FakeCredentialService? creds = null)
+    private ConnectionTreeViewModel CreateVm(
+        FakeDialogService? dialog = null,
+        FakeCredentialService? creds = null,
+        FakeCredentialRepository? credRepo = null)
     {
         var vm = new ConnectionTreeViewModel(
             _repo,
@@ -113,6 +116,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
             new NullSessionTabFactory(),
             dialog ?? new FakeDialogService(),
             creds ?? new FakeCredentialService(),
+            credRepo ?? new FakeCredentialRepository(),
             NullLogger<ConnectionTreeViewModel>.Instance);
         // Tests assert synchronously after assigning SearchText; disable the production
         // 120ms debounce so the filter walk runs inline rather than on a scheduled
@@ -282,7 +286,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
-    public async Task ShowPassword_ConnectionWithStoredPassword_RevealsViaDialog()
+    public async Task ShowCredentials_ConnectionWithStoredPassword_RevealsViaDialog()
     {
         var credentialId = Guid.NewGuid();
         var node = MakeConnectionDraft("prod-web", ProtocolType.Ssh, "host", 22, "alice");
@@ -292,18 +296,44 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         var dialog = new FakeDialogService();
         var creds = new FakeCredentialService();
         creds.Passwords[credentialId] = "s3cret";
-        var vm = CreateVm(dialog, creds);
+        var credRepo = new FakeCredentialRepository(
+            new CredentialProfile { Id = credentialId, Kind = CredentialKind.Password });
+        var vm = CreateVm(dialog, creds, credRepo);
         await vm.RefreshAsync();
 
-        await vm.ShowPasswordCommand.ExecuteAsync(vm.Roots.Single());
+        await vm.ShowCredentialsCommand.ExecuteAsync(vm.Roots.Single());
 
-        Assert.Equal(1, dialog.ShowPasswordCount);
-        Assert.Equal("s3cret", dialog.LastShownPassword);
+        Assert.Equal(1, dialog.ShowCredentialsCount);
+        Assert.Equal("s3cret", dialog.LastShownSecret);
         Assert.Equal("alice", dialog.LastShownUsername);
+        Assert.Equal("Password", dialog.LastShownSecretLabel);
     }
 
     [Fact]
-    public async Task ShowPassword_ConnectionInheritsCredentialFromFolder_RevealsInheritedPassword()
+    public async Task ShowCredentials_SshKeyCredential_LabelsSecretAsKeyPassphrase()
+    {
+        var credentialId = Guid.NewGuid();
+        var node = MakeConnectionDraft("prod-web", ProtocolType.Ssh, "host", 22, "alice");
+        node.CredentialId = credentialId;
+        await _repo.AddAsync(node);
+
+        var dialog = new FakeDialogService();
+        var creds = new FakeCredentialService();
+        creds.Passwords[credentialId] = "key-passphrase";
+        var credRepo = new FakeCredentialRepository(
+            new CredentialProfile { Id = credentialId, Kind = CredentialKind.SshKey });
+        var vm = CreateVm(dialog, creds, credRepo);
+        await vm.RefreshAsync();
+
+        await vm.ShowCredentialsCommand.ExecuteAsync(vm.Roots.Single());
+
+        Assert.Equal(1, dialog.ShowCredentialsCount);
+        Assert.Equal("key-passphrase", dialog.LastShownSecret);
+        Assert.Equal("Key passphrase", dialog.LastShownSecretLabel);
+    }
+
+    [Fact]
+    public async Task ShowCredentials_ConnectionInheritsCredentialFromFolder_RevealsInheritedPassword()
     {
         var credentialId = Guid.NewGuid();
         var folder = new ConnectionNode { Kind = NodeKind.Folder, Name = "prod", CredentialId = credentialId };
@@ -320,14 +350,14 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         await vm.RefreshAsync();
 
         var childVm = vm.Roots.Single().Children.Single();
-        await vm.ShowPasswordCommand.ExecuteAsync(childVm);
+        await vm.ShowCredentialsCommand.ExecuteAsync(childVm);
 
-        Assert.Equal(1, dialog.ShowPasswordCount);
-        Assert.Equal("inherited-pw", dialog.LastShownPassword);
+        Assert.Equal(1, dialog.ShowCredentialsCount);
+        Assert.Equal("inherited-pw", dialog.LastShownSecret);
     }
 
     [Fact]
-    public async Task ShowPassword_ConnectionWithoutCredential_DoesNotRevealPassword()
+    public async Task ShowCredentials_ConnectionWithoutCredential_DoesNotRevealSecret()
     {
         var node = MakeConnectionDraft("keyonly", ProtocolType.Ssh, "host", 22, "alice");
         node.CredentialId = null;
@@ -337,13 +367,13 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         var vm = CreateVm(dialog);
         await vm.RefreshAsync();
 
-        await vm.ShowPasswordCommand.ExecuteAsync(vm.Roots.Single());
+        await vm.ShowCredentialsCommand.ExecuteAsync(vm.Roots.Single());
 
-        Assert.Equal(0, dialog.ShowPasswordCount);
+        Assert.Equal(0, dialog.ShowCredentialsCount);
     }
 
     [Fact]
-    public async Task ShowPassword_OnFolder_IsNoOp()
+    public async Task ShowCredentials_OnFolder_IsNoOp()
     {
         var credentialId = Guid.NewGuid();
         var folder = new ConnectionNode { Kind = NodeKind.Folder, Name = "prod", CredentialId = credentialId };
@@ -355,9 +385,9 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         var vm = CreateVm(dialog, creds);
         await vm.RefreshAsync();
 
-        await vm.ShowPasswordCommand.ExecuteAsync(vm.Roots.Single());
+        await vm.ShowCredentialsCommand.ExecuteAsync(vm.Roots.Single());
 
-        Assert.Equal(0, dialog.ShowPasswordCount);
+        Assert.Equal(0, dialog.ShowCredentialsCount);
     }
 
     [Fact]
@@ -738,6 +768,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
             tabs,
             new FakeDialogService(),
             new FakeCredentialService(),
+            new FakeCredentialRepository(),
             NullLogger<ConnectionTreeViewModel>.Instance);
         vm.SearchDebounceDelay = TimeSpan.Zero;
         await vm.RefreshAsync();
@@ -811,6 +842,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
             new NullSessionTabFactory(),
             dialog,
             new FakeCredentialService(),
+            new FakeCredentialRepository(),
             NullLogger<ConnectionTreeViewModel>.Instance);
         vm.SearchDebounceDelay = TimeSpan.Zero;
         await vm.RefreshAsync();

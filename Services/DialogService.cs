@@ -228,7 +228,7 @@ public sealed class DialogService : IDialogService
         return accepted ? passwordBox.Password : null;
     }
 
-    public Task ShowPasswordAsync(string title, string username, string password)
+    public Task ShowCredentialsAsync(string title, string username, string secretLabel, string secret)
     {
         var panel = new StackPanel { Spacing = 8, MinWidth = 320 };
 
@@ -244,15 +244,16 @@ public sealed class DialogService : IDialogService
         }
 
         // Read-only TextBox (not a PasswordBox) because the whole point is to reveal the
-        // secret in plaintext; selectable so the user can also copy manually.
-        var passwordField = new TextBox
+        // secret in plaintext; selectable so the user can also copy manually. The header
+        // distinguishes a login password from an SSH key passphrase.
+        var secretField = new TextBox
         {
-            Header = "Password",
-            Text = password,
+            Header = secretLabel,
+            Text = secret,
             IsReadOnly = true,
             IsSpellCheckEnabled = false,
         };
-        panel.Children.Add(passwordField);
+        panel.Children.Add(secretField);
 
         var copyButton = new Button { Content = "Copy" };
         copyButton.Click += (_, _) =>
@@ -260,7 +261,7 @@ public sealed class DialogService : IDialogService
             try
             {
                 var pkg = new DataPackage();
-                pkg.SetText(password);
+                pkg.SetText(secret);
                 Clipboard.SetContent(pkg);
                 // Flush so the value survives Wormhole closing — otherwise the DataPackage is
                 // invalidated on exit and the user can't paste what they just copied.

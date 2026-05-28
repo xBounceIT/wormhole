@@ -723,7 +723,7 @@ public class CredentialsViewModelTests
         public Task<string?> PromptPasswordAsync(string title, string message)
             => Task.FromResult<string?>(null);
 
-        public Task ShowPasswordAsync(string title, string username, string password)
+        public Task ShowCredentialsAsync(string title, string username, string secretLabel, string secret)
             => Task.CompletedTask;
 
         public Task<(string Username, string Password)?> PromptCredentialsAsync(string title, string message, string? initialUsername = null)
