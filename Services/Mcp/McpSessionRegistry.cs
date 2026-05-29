@@ -47,14 +47,11 @@ public sealed class McpSessionRegistry : IMcpSessionRegistry
     {
         var vm = await ResolveApprovedAsync(sessionId).ConfigureAwait(false);
         var timeout = TimeSpan.FromSeconds(timeoutSeconds <= 0 ? 30 : timeoutSeconds);
-        // Command text can contain inline secrets (e.g. "mysql -p<pass>"), so it's logged at
-        // Debug (off by default) rather than Information — see CLAUDE.md "never log credentials".
-        // The Information line below records that a command ran (host/user/outcome) without it.
-        _audit.LogDebug("run_command {User}@{Host}: {Command}", vm.Profile?.Username, vm.Profile?.Host, command);
 
         var result = await vm.RunCommandAsync(command, timeout, cancellationToken).ConfigureAwait(false);
 
-        // Audit the outcome but NOT the captured output — it can contain secrets.
+        // Audit the action and outcome but NEVER the command text or captured output — either can
+        // contain inline secrets (e.g. "mysql -p<pass>"). CLAUDE.md/AGENTS.md: never log credentials.
         _audit.LogInformation(
             "run_command {User}@{Host} -> exit={Exit} timedOut={TimedOut} truncated={Truncated} ({Length} chars)",
             vm.Profile?.Username, vm.Profile?.Host, result.ExitCode, result.TimedOut, result.Truncated, result.Output.Length);
