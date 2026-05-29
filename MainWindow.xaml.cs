@@ -115,11 +115,17 @@ public sealed partial class MainWindow : Window
         {
             try
             {
-                await App.Current.Services.GetRequiredService<IMcpServerHost>().StopAsync();
+                // Bound the wait: a long in-flight MCP request (e.g. a slow run_command) must not
+                // hold the window-close path open on Kestrel's graceful drain. The cancellation
+                // token forces shutdown after a short grace period; the process exit reclaims the
+                // rest. Stopping the host first also keeps new tool calls off the sessions that
+                // CloseAllSessionsAsync is about to dispose.
+                using var stopCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                await App.Current.Services.GetRequiredService<IMcpServerHost>().StopAsync(stopCts.Token);
             }
             catch (Exception)
             {
-                // Never let MCP shutdown block the app from closing.
+                // Never let MCP shutdown block (or break) the app from closing.
             }
             await ViewModel.CloseAllSessionsAsync();
         }

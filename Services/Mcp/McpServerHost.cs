@@ -13,9 +13,9 @@ namespace Wormhole.Services.Mcp;
 /// <inheritdoc />
 [System.Diagnostics.CodeAnalysis.SuppressMessage(
     "Microsoft.Reliability", "CA1001:Types that own disposable fields should be disposable",
-    Justification = "_lifecycleGate (SemaphoreSlim) holds no OS handle unless AvailableWaitHandle is " +
-        "touched (never), so GC reclaims it harmlessly. This is an app-lifetime singleton; disposing " +
-        "the gate at shutdown is pointless. Mirrors the SshSession/SshSessionViewModel gate convention.")]
+    Justification = "The SemaphoreSlim gates (_lifecycleGate, _tokenGate) hold no OS handle unless " +
+        "AvailableWaitHandle is touched (never), so GC reclaims them harmlessly. This is an app-lifetime " +
+        "singleton; disposing them at shutdown is pointless. Mirrors the SshSession/SshSessionViewModel gate convention.")]
 public sealed class McpServerHost : IMcpServerHost
 {
     public const int DefaultPort = 8765;
@@ -29,6 +29,9 @@ public sealed class McpServerHost : IMcpServerHost
     private readonly ICredentialService _credentials;
     private readonly ILogger<McpServerHost> _logger;
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
+    // Serializes the token read/generate/store path so concurrent first-time callers can't each
+    // mint a different token (one caller would get a token that never becomes the active one).
+    private readonly SemaphoreSlim _tokenGate = new(1, 1);
 
     private WebApplication? _app;
     private volatile string? _token;
@@ -130,18 +133,53 @@ public sealed class McpServerHost : IMcpServerHost
 
     public async Task<string> GetOrCreateTokenAsync()
     {
+        // Fast path: a token already exists.
         var existing = await _credentials.ReadPasswordAsync(TokenCredentialId).ConfigureAwait(false);
         if (!string.IsNullOrEmpty(existing))
         {
             _token = existing;
             return existing;
         }
-        return await RegenerateTokenAsync().ConfigureAwait(false);
+
+        // Create-if-missing under the gate so racing callers (e.g. StartAsync + a Settings
+        // copy/reveal) all observe the same token instead of each minting one.
+        await _tokenGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            // Re-check: another caller may have created the token while we waited.
+            existing = await _credentials.ReadPasswordAsync(TokenCredentialId).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(existing))
+            {
+                _token = existing;
+                return existing;
+            }
+            return await GenerateAndStoreTokenAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _tokenGate.Release();
+        }
     }
 
     public Task<string?> PeekTokenAsync() => _credentials.ReadPasswordAsync(TokenCredentialId);
 
     public async Task<string> RegenerateTokenAsync()
+    {
+        // Serialized against GetOrCreateTokenAsync so an explicit regenerate and a concurrent
+        // create-if-missing don't interleave and leave the active/persisted token inconsistent.
+        await _tokenGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            return await GenerateAndStoreTokenAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            _tokenGate.Release();
+        }
+    }
+
+    // Caller must hold _tokenGate.
+    private async Task<string> GenerateAndStoreTokenAsync()
     {
         var token = GenerateToken();
         await _credentials.StorePasswordAsync(TokenCredentialId, token).ConfigureAwait(false);
