@@ -755,6 +755,10 @@ public sealed partial class TreeNodeViewModel : ObservableObject
     public NodeKind Kind => Node.Kind;
     public bool IsConnection => Kind == NodeKind.Connection;
 
+    // Host (IP or FQDN) shown as the row tooltip on hover. Null for folders and
+    // for connections without a host set, which suppresses the tooltip entirely.
+    public string? Host => IsConnection ? Node.Host : null;
+
     [ObservableProperty]
     private bool isExpanded;
 
@@ -777,6 +781,7 @@ public sealed partial class TreeNodeViewModel : ObservableObject
         OnPropertyChanged(nameof(Name));
         OnPropertyChanged(nameof(Kind));
         OnPropertyChanged(nameof(IsConnection));
+        OnPropertyChanged(nameof(Host));
         OnPropertyChanged(nameof(Glyph));
     }
 }
