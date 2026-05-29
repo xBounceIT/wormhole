@@ -424,21 +424,23 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     [Fact]
     public async Task Duplicate_NestedConnection_StaysInSameFolder()
     {
-        var dialog = new FakeDialogService();
-        var vm = CreateVm(dialog);
+        // Seed the folder + child directly (like the sibling Duplicate tests) rather than
+        // driving the add commands — this test only cares that a duplicate keeps a non-null parent.
+        var folder = new ConnectionNode { Kind = NodeKind.Folder, Name = "Parent" };
+        await _repo.AddAsync(folder);
+        var leaf = MakeConnectionDraft("leaf", ProtocolType.Ssh, "host", 22, "alice");
+        leaf.ParentId = folder.Id;
+        await _repo.AddAsync(leaf);
+
+        var vm = CreateVm();
         await vm.RefreshAsync();
+        var folderVm = vm.Roots.Single();
 
-        dialog.TextPromptResult = "Parent";
-        await vm.AddFolderCommand.ExecuteAsync(null);
-        var folder = vm.Roots.Single();
-        dialog.EditConnectionResult = MakeConnectionDraft("leaf", ProtocolType.Ssh, "host", 22, "alice");
-        await vm.AddConnectionCommand.ExecuteAsync(folder);
-
-        await vm.DuplicateCommand.ExecuteAsync(folder.Children.Single());
+        await vm.DuplicateCommand.ExecuteAsync(folderVm.Children.Single());
 
         var copy = (await _repo.GetAllAsync()).Single(n => n.Name == "leaf (copy)");
-        Assert.Equal(folder.Node.Id, copy.ParentId);
-        Assert.Equal(2, folder.Children.Count);
+        Assert.Equal(folder.Id, copy.ParentId);
+        Assert.Equal(2, folderVm.Children.Count);
     }
 
     [Fact]

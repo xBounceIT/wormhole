@@ -298,20 +298,15 @@ public partial class ConnectionTreeViewModel : ObservableObject
     {
         if (clicked is null || clicked.Kind != NodeKind.Connection) return;
 
-        // Copy the node's OWN fields (not the inheritance-resolved profile) so the duplicate
-        // inherits from its parent exactly as the source does. CredentialId / RdpGatewayCredentialId /
-        // TunnelConfigId are re-used by design — credentials and tunnel configs are a shared pool
-        // referenced by id, so there are no secrets to copy.
+        // CloneAsNewIdentity copies the node's OWN fields (not the inheritance-resolved profile),
+        // assigns a fresh Id, and drops per-host pinned state — see ConnectionNode for why. The
+        // duplicate inherits from its parent exactly as the source does, and CredentialId /
+        // RdpGatewayCredentialId / TunnelConfigId are re-used by design (credentials and tunnel
+        // configs are a shared pool referenced by id, so there are no secrets to copy).
         var source = clicked.Node;
-        var copy = source.Clone();
-        copy.Id = Guid.NewGuid();
+        var copy = source.CloneAsNewIdentity();
         copy.Name = $"{source.Name} (copy)";
         copy.SortOrder = NextSortOrder(source.ParentId);
-        // Drop the source's pinned SSH host key. The duplicate is a new identity and the
-        // intended workflow is to repoint it at a different host; carrying the old fingerprint
-        // over would make SshHostKeyValidator reject the new host as a Mismatch instead of
-        // TOFU-pinning on first connect like any other new connection.
-        copy.SshKnownHostFingerprint = null;
 
         await SafeAddAsync(copy);
     }
