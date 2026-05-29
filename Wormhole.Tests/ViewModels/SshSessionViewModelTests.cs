@@ -591,6 +591,34 @@ public sealed class SshSessionViewModelTests
         Assert.True(vm.RegisterAttachedWebView(new object()));
     }
 
+    [Fact]
+    public async Task EnsureMcpApproved_Approved_IsMemoized_NoSecondDialog()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        var dialog = new FakeDialogService { ConfirmResult = true };
+
+        Assert.True(await vm.EnsureMcpApprovedAsync(dialog));
+        Assert.True(await vm.EnsureMcpApprovedAsync(dialog));
+
+        // The decision is cached, so the user is only prompted once for the session's life.
+        Assert.Equal(1, dialog.ConfirmCount);
+    }
+
+    [Fact]
+    public async Task EnsureMcpApproved_Denied_IsStickyAndMemoized()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        var dialog = new FakeDialogService { ConfirmResult = false };
+
+        Assert.False(await vm.EnsureMcpApprovedAsync(dialog));
+        Assert.False(await vm.EnsureMcpApprovedAsync(dialog));
+
+        // Denial is remembered without re-prompting.
+        Assert.Equal(1, dialog.ConfirmCount);
+    }
+
     private static (SshSessionViewModel Vm, FakeSshSession Session) CreateConnectedVm()
     {
         var vm = CreateViewModel();

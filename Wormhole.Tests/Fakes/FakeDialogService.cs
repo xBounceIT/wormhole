@@ -17,6 +17,7 @@ public class FakeDialogService : IDialogService
     public string? PasswordPromptResult { get; set; }
     public (string Username, string Password)? CredentialsPromptResult { get; set; }
     public bool ConfirmResult { get; set; } = true;
+    public int ConfirmCount { get; private set; }
 
     /// <summary>
     /// When non-null, drives <see cref="EditConnectionAsync"/>. The fake mirrors the real
@@ -50,7 +51,10 @@ public class FakeDialogService : IDialogService
     public virtual Task ShowMessageAsync(string title, string message) => Task.CompletedTask;
 
     public virtual Task<bool> ConfirmAsync(string title, string message, string primaryText = "Yes", string closeText = "No")
-        => Task.FromResult(ConfirmResult);
+    {
+        ConfirmCount++;
+        return Task.FromResult(ConfirmResult);
+    }
 
     public virtual Task<string?> PromptForTextAsync(string title, string label, string defaultValue = "")
     {

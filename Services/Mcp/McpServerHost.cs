@@ -79,10 +79,20 @@ public sealed class McpServerHost : IMcpServerHost
                 .WithTools<McpSshTools>();
 
             var app = builder.Build();
-            app.Use(BearerAuthMiddleware);
-            app.MapMcp();
+            try
+            {
+                app.Use(BearerAuthMiddleware);
+                app.MapMcp();
+                await app.StartAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Don't leak the half-built host (Kestrel listener, DI container) when binding
+                // fails — e.g. the port is already in use. The caller logs and reverts the toggle.
+                await app.DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
 
-            await app.StartAsync(cancellationToken).ConfigureAwait(false);
             _app = app;
             _runningPort = port;
             _logger.LogInformation("MCP server listening on {Endpoint}.", EndpointUrl);

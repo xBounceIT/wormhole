@@ -47,7 +47,10 @@ public sealed class McpSessionRegistry : IMcpSessionRegistry
     {
         var vm = await ResolveApprovedAsync(sessionId).ConfigureAwait(false);
         var timeout = TimeSpan.FromSeconds(timeoutSeconds <= 0 ? 30 : timeoutSeconds);
-        _audit.LogInformation("run_command {User}@{Host}: {Command}", vm.Profile?.Username, vm.Profile?.Host, command);
+        // Command text can contain inline secrets (e.g. "mysql -p<pass>"), so it's logged at
+        // Debug (off by default) rather than Information — see CLAUDE.md "never log credentials".
+        // The Information line below records that a command ran (host/user/outcome) without it.
+        _audit.LogDebug("run_command {User}@{Host}: {Command}", vm.Profile?.Username, vm.Profile?.Host, command);
 
         var result = await vm.RunCommandAsync(command, timeout, cancellationToken).ConfigureAwait(false);
 
@@ -74,7 +77,11 @@ public sealed class McpSessionRegistry : IMcpSessionRegistry
         var snapshot = vm.SnapshotTerminal();
         if (maxBytes > 0 && snapshot.Length > maxBytes)
         {
-            snapshot = snapshot[^maxBytes..];
+            var start = snapshot.Length - maxBytes;
+            // Don't start in the middle of a multi-byte UTF-8 sequence: skip continuation bytes
+            // (10xxxxxx) so GetString below doesn't emit a leading replacement char.
+            while (start < snapshot.Length && (snapshot[start] & 0xC0) == 0x80) start++;
+            snapshot = snapshot[start..];
         }
         _audit.LogInformation("read_terminal {User}@{Host}: {Bytes} bytes",
             vm.Profile?.Username, vm.Profile?.Host, snapshot.Length);
