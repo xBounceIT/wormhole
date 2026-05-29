@@ -104,6 +104,31 @@
     term.loadAddon(fit);
     term.open(container);
 
+    // GPU-accelerated rendering. xterm's default DOM renderer repaints by mutating the DOM,
+    // which makes keystroke echo, cursor movement, and scrollback navigation (vim, less,
+    // htop) feel laggy. The WebGL addon offloads glyph rendering to the GPU. It must load
+    // AFTER term.open() so the renderer/canvas exist. If the bundle is missing or WebGL2 is
+    // unavailable in this WebView2 host, keep the DOM renderer rather than failing the
+    // terminal — output stays correct either way, just slower.
+    const WebglAddonCtor = window.WebglAddon && window.WebglAddon.WebglAddon;
+    if (WebglAddonCtor) {
+      try {
+        const webgl = new WebglAddonCtor();
+        // A lost GPU context (driver reset, GPU process crash, long-backgrounded tab) would
+        // otherwise freeze the canvas. Dispose the addon so xterm transparently reverts to
+        // the DOM renderer for the rest of the session.
+        webgl.onContextLoss(function () {
+          console.warn("WebGL context lost; reverting to DOM renderer.");
+          webgl.dispose();
+        });
+        term.loadAddon(webgl);
+      } catch (err) {
+        console.warn("WebGL renderer unavailable; using DOM renderer.", err);
+      }
+    } else {
+      console.warn("WebGL renderer addon missing; using DOM renderer.");
+    }
+
     term.onData(function (data) {
       post("d:" + data);
     });

@@ -26,6 +26,15 @@ $assets = @(
     [pscustomobject]@{
         Url      = "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.js"
         Relative = "addon-fit\addon-fit.js"
+    },
+    # WebGL renderer. 0.19.0 is the addon-webgl version released with @xterm/xterm 6.0.0
+    # (same monorepo release commit as addon-fit 0.11.0). xterm's default DOM renderer is
+    # CPU-bound; this moves glyph rendering onto the GPU so typing echo, cursor movement,
+    # and scrollback navigation feel smooth. bridge.js falls back to the DOM renderer if the
+    # addon is missing or WebGL is unavailable, so this asset is an enhancement, not a hard dep.
+    [pscustomobject]@{
+        Url      = "https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.19.0/lib/addon-webgl.js"
+        Relative = "addon-webgl\addon-webgl.js"
     }
 )
 
