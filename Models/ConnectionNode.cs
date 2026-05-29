@@ -140,4 +140,23 @@ public class ConnectionNode
         CreatedAt = CreatedAt,
         UpdatedAt = UpdatedAt,
     };
+
+    /// <summary>
+    /// Full copy of every field but with a fresh <see cref="Id"/> and no per-host pinned
+    /// state — used to duplicate a connection. Contrast <see cref="CloneIdentityFrom"/>, which
+    /// keeps the source's Id and SSH host-key because an edit stays on the same host: a
+    /// duplicate is a NEW identity the user typically repoints at a different host, so
+    /// host-scoped state like <see cref="SshKnownHostFingerprint"/> must NOT carry over —
+    /// otherwise <c>SshHostKeyValidator</c> rejects the new host as a Mismatch instead of
+    /// TOFU-pinning on first connect. Add any future per-host/identity-scoped field reset here
+    /// so the duplicate path can't silently keep copying it. Placement concerns (Name, ParentId,
+    /// SortOrder) stay with the caller, which knows the tree context.
+    /// </summary>
+    public ConnectionNode CloneAsNewIdentity()
+    {
+        var copy = Clone();
+        copy.Id = Guid.NewGuid();
+        copy.SshKnownHostFingerprint = null;
+        return copy;
+    }
 }

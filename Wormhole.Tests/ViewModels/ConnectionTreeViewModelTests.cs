@@ -392,6 +392,99 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Duplicate_Connection_CopiesFieldsWithSuffix()
+    {
+        var credentialId = Guid.NewGuid();
+        var gatewayCredentialId = Guid.NewGuid();
+        var tunnelId = Guid.NewGuid();
+        var node = MakeConnectionDraft("prod-web", ProtocolType.Rdp, "host.example.com", 3389, "alice");
+        node.CredentialId = credentialId;
+        node.RdpGatewayCredentialId = gatewayCredentialId;
+        node.TunnelConfigId = tunnelId;
+        node.TunnelEnabled = true;
+        await _repo.AddAsync(node);
+
+        var vm = CreateVm();
+        await vm.RefreshAsync();
+
+        await vm.DuplicateCommand.ExecuteAsync(vm.Roots.Single());
+
+        var rows = await _repo.GetAllAsync();
+        Assert.Equal(2, rows.Count);
+        var copy = rows.Single(r => r.Id != node.Id);
+        Assert.Equal("prod-web (copy)", copy.Name);
+        Assert.Equal(node.ParentId, copy.ParentId);
+        Assert.Equal(ProtocolType.Rdp, copy.Protocol);
+        Assert.Equal("host.example.com", copy.Host);
+        Assert.Equal(3389, copy.Port);
+        Assert.Equal("alice", copy.Username);
+        Assert.Equal(credentialId, copy.CredentialId);
+        // Shared-pool credential/tunnel references are reused by design (see the Duplicate command).
+        Assert.Equal(gatewayCredentialId, copy.RdpGatewayCredentialId);
+        Assert.Equal(tunnelId, copy.TunnelConfigId);
+        Assert.True(copy.TunnelEnabled);
+        // The copy is appended after its source rather than colliding with its sort order.
+        Assert.True(copy.SortOrder > node.SortOrder);
+        Assert.Equal(2, vm.Roots.Count);
+    }
+
+    [Fact]
+    public async Task Duplicate_NestedConnection_StaysInSameFolder()
+    {
+        // Seed the folder + child directly (like the sibling Duplicate tests) rather than
+        // driving the add commands — this test only cares that a duplicate keeps a non-null parent.
+        var folder = new ConnectionNode { Kind = NodeKind.Folder, Name = "Parent" };
+        await _repo.AddAsync(folder);
+        var leaf = MakeConnectionDraft("leaf", ProtocolType.Ssh, "host", 22, "alice");
+        leaf.ParentId = folder.Id;
+        await _repo.AddAsync(leaf);
+
+        var vm = CreateVm();
+        await vm.RefreshAsync();
+        var folderVm = vm.Roots.Single();
+
+        await vm.DuplicateCommand.ExecuteAsync(folderVm.Children.Single());
+
+        var copy = (await _repo.GetAllAsync()).Single(n => n.Name == "leaf (copy)");
+        Assert.Equal(folder.Id, copy.ParentId);
+        Assert.Equal(2, folderVm.Children.Count);
+    }
+
+    [Fact]
+    public async Task Duplicate_Connection_ClearsSshHostFingerprint()
+    {
+        // The duplicate is a new identity meant to be repointed at a different host, so it must
+        // start unpinned and TOFU-pin on first connect. Carrying the source's pin over would make
+        // SshHostKeyValidator.Decide return Mismatch for a different host and reject the connect.
+        var node = MakeConnectionDraft("ssh-box", ProtocolType.Ssh, "host", 22, "alice");
+        node.SshKnownHostFingerprint = "SHA256:original-pin";
+        await _repo.AddAsync(node);
+
+        var vm = CreateVm();
+        await vm.RefreshAsync();
+
+        await vm.DuplicateCommand.ExecuteAsync(vm.Roots.Single());
+
+        var rows = await _repo.GetAllAsync();
+        Assert.Null(rows.Single(r => r.Id != node.Id).SshKnownHostFingerprint);
+        // The source's own pin is untouched.
+        Assert.Equal("SHA256:original-pin", rows.Single(r => r.Id == node.Id).SshKnownHostFingerprint);
+    }
+
+    [Fact]
+    public async Task Duplicate_OnFolder_IsNoOp()
+    {
+        var dialog = new FakeDialogService { TextPromptResult = "Linux" };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+        await vm.AddFolderCommand.ExecuteAsync(null);
+
+        await vm.DuplicateCommand.ExecuteAsync(vm.Roots.Single());
+
+        Assert.Single(await _repo.GetAllAsync());
+    }
+
+    [Fact]
     public async Task AddConnection_NullPortAndUsername_StoredAsNull()
     {
         var dialog = new FakeDialogService
