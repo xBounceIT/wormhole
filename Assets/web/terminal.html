@@ -23,8 +23,19 @@
         padding: 4px;
         box-sizing: border-box;
       }
-      .xterm {
-        height: 100%;
+      /* Don't force `.xterm { height: 100% }`. The fit addon rounds the row count
+         down to whole cells, so the rendered grid is a sub-cell shorter than the
+         available height. Stretching .xterm to 100% pulled its absolutely-positioned
+         .xterm-viewport (whose xterm.css default background is pure #000, NOT our
+         theme background) down past the last row, exposing that gap as a darker
+         black strip below the terminal. Letting .xterm size to its content keeps the
+         leftover space inside #terminal instead, where it shows #0c0c0c and blends in.
+         The viewport background is also pinned to the theme color so any transient
+         exposure during a resize re-fit stays invisible rather than flashing #000.
+         The selector must match xterm.css's own `.xterm .xterm-viewport` specificity
+         (its default is #000) — a bare `.xterm-viewport` rule loses and is ignored. */
+      .xterm .xterm-viewport {
+        background-color: #0c0c0c;
       }
       .xterm-viewport::-webkit-scrollbar {
         width: 8px;
