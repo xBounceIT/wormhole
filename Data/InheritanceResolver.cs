@@ -179,7 +179,6 @@ public sealed class InheritanceResolver
     private static int DefaultPortFor(ProtocolType protocol) => protocol switch
     {
         ProtocolType.Ssh => 22,
-        ProtocolType.Sftp => 22,
         ProtocolType.Rdp => 3389,
         _ => throw new ArgumentOutOfRangeException(nameof(protocol)),
     };

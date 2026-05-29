@@ -43,5 +43,5 @@ mRemoteNG. This file orients agents touching the codebase.
 
 ## Current gaps
 
-- The standalone SFTP session tab still renders the protocol placeholder; SFTP file transfer is available from connected SSH tabs.
+- SFTP is not a standalone session protocol — `ProtocolType` is `Ssh`/`Rdp` only. SFTP file transfer is available from connected SSH tabs (see `SftpService` + the File Transfer dialog).
 - [Views/Pages/ConnectionEditorPage.xaml](Views/Pages/ConnectionEditorPage.xaml) is a legacy placeholder page; the real editor is [Views/Dialogs/NewConnectionDialog.xaml](Views/Dialogs/NewConnectionDialog.xaml).

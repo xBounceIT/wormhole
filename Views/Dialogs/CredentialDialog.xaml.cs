@@ -13,8 +13,9 @@ public sealed partial class CredentialDialog : UserControl, IDraftForm<Credentia
         this.InitializeComponent();
     }
 
-    // Sftp intentionally omitted: SFTP sessions run over SSH and reuse an SSH credential.
-    public ProtocolType[] Protocols { get; } = new[] { ProtocolType.Ssh, ProtocolType.Rdp };
+    // Credentials are scoped per protocol (Ssh/Rdp). SFTP is not a protocol — file transfer
+    // runs over an SSH session and reuses that connection's SSH credential.
+    public ProtocolType[] Protocols { get; } = Enum.GetValues<ProtocolType>();
 
     private ProtocolType SelectedProtocol =>
         ProtocolBox.SelectedItem is ProtocolType p ? p : ProtocolType.Ssh;

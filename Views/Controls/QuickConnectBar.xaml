@@ -19,7 +19,6 @@
                   MinWidth="80">
             <ComboBoxItem Content="SSH" Tag="Ssh" />
             <ComboBoxItem Content="RDP" Tag="Rdp" />
-            <ComboBoxItem Content="SFTP" Tag="Sftp" />
         </ComboBox>
 
         <TextBox Grid.Column="1"
