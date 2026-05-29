@@ -11,7 +11,7 @@
 #define MyAppExeName    "Wormhole.exe"
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.1.13"
+  #define MyAppVersion "0.2.0"
 #endif
 
 #ifndef AppArchitecture
