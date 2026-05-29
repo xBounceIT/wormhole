@@ -1,5 +1,7 @@
 using System;
 using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Threading;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
@@ -45,6 +47,26 @@ public sealed partial class RdpSurfaceHost : UserControl
     // duration; layout/visibility ticks must not re-show it (a window move while the dialog is
     // open would otherwise pop the overlay back over the dialog).
     private bool _overlaySuppressed;
+
+    // Native subclass on the owner window so window MOVES reposition the overlay synchronously
+    // inside the WM_WINDOWPOSCHANGED message — the managed AppWindow.Changed + 16ms timer path
+    // lags a frame or more behind the OS-composited window during a drag, making the overlay
+    // look detached. _subclassProc is the GC root for the marshaled callback and MUST stay a
+    // field for the subclass lifetime. Each RdpSurfaceHost uses a distinct _subclassId so several
+    // RDP tabs can subclass the shared main window without colliding.
+    private static int _subclassIdSeq;
+    private Win32Interop.SubclassProc? _subclassProc; // non-null exactly while the subclass is installed
+    private UIntPtr _subclassId;
+    // Element-relative geometry (physical px) from the last non-degenerate ComputeBoundsScreenPx,
+    // consumed by the synchronous move path so it never has to touch a WinUI layout API (which is
+    // unsafe to re-enter mid-WndProc and reports stale values during a resize). Only the screen
+    // origin is recomputed in the hook via ClientToScreen.
+    private int _cachedOffsetX, _cachedOffsetY, _cachedWidthPx, _cachedHeightPx;
+    private bool _cacheValid;
+    // Last window client size seen via WM_WINDOWPOSCHANGED, to tell a move from a resize: a resize
+    // changes the element size too, which the cache can't know synchronously, so it defers to the
+    // async SizeChanged/timer path that recomputes after WinUI re-measures.
+    private int _lastWindowCx, _lastWindowCy;
 
     public RdpSurfaceHost()
     {
@@ -116,6 +138,18 @@ public sealed partial class RdpSurfaceHost : UserControl
             _trackedAppWindow.Changed += OnOwnerAppWindowChanged;
         }
 
+        // Subclass the owner window so a drag/shake repositions the overlay synchronously in the
+        // same WM_WINDOWPOSCHANGED message instead of trailing behind via AppWindow.Changed.
+        if (_subclassProc is null && _ownerHwnd != IntPtr.Zero)
+        {
+            _subclassProc = OwnerSubclassProc; // root the delegate before handing it to native code
+            _subclassId = (UIntPtr)(uint)Interlocked.Increment(ref _subclassIdSeq);
+            if (!Win32Interop.SetWindowSubclass(_ownerHwnd, _subclassProc, _subclassId, UIntPtr.Zero))
+            {
+                _subclassProc = null; // install failed — don't keep a thunk rooted for a subclass that isn't live
+            }
+        }
+
         // Hide the overlay while a modal ContentDialog is shown over the tab (the top-level
         // overlay would otherwise occlude the centered dialog) and restore it when it closes.
         RdpOverlayCoordinator.SuppressChanged -= OnOverlaySuppressChanged;
@@ -182,6 +216,15 @@ public sealed partial class RdpSurfaceHost : UserControl
             _trackedAppWindow.Changed -= OnOwnerAppWindowChanged;
             _trackedAppWindow = null;
         }
+
+        // Detach the owner subclass before dropping the delegate root. The main window outlives
+        // the tab, so the HWND is still valid here.
+        if (_subclassProc is not null && _ownerHwnd != IntPtr.Zero)
+        {
+            Win32Interop.RemoveWindowSubclass(_ownerHwnd, _subclassProc, _subclassId);
+        }
+        _subclassProc = null;
+        _cacheValid = false;
 
         RdpOverlayCoordinator.SuppressChanged -= OnOverlaySuppressChanged;
 
@@ -276,9 +319,8 @@ public sealed partial class RdpSurfaceHost : UserControl
         // window is restored (the AppWindow visibility handler re-shows it then).
         if (_trackedAppWindow is { IsVisible: false }) return;
 
-        // Per-monitor DPI moves: WinUI 3 updates XamlRoot.RasterizationScale before layout
-        // re-runs after a DPI change, so recomputing here picks up the new scale.
-        _lastRasterScale = XamlRoot?.RasterizationScale ?? _lastRasterScale;
+        // ComputeBoundsScreenPx refreshes _lastRasterScale from the live XamlRoot, so per-monitor
+        // DPI moves are picked up here without a separate scale read.
         var bounds = ComputeBoundsScreenPx();
 
         // Skip degenerate sizes — during drag-reorder or initial layout the host may report
@@ -314,6 +356,12 @@ public sealed partial class RdpSurfaceHost : UserControl
         }
         var topLeftDip = transform.TransformPoint(new Point(0, 0));
 
+        // Refresh the cached DPI scale from the live XamlRoot here (not only in ApplyLayout) so
+        // every caller — including resume-from-minimize, dialog-close, and reconnect, which don't
+        // refresh it themselves — composes bounds and populates the geometry cache below with the
+        // CURRENT scale. Safe: ComputeBoundsScreenPx only runs on the UI thread, never from the
+        // native WM_WINDOWPOSCHANGED callback (which reuses the cache instead of recomputing).
+        _lastRasterScale = XamlRoot?.RasterizationScale ?? _lastRasterScale;
         var scale = _lastRasterScale > 0 ? _lastRasterScale : 1.0;
 
         // Offset the element's window-client position by the main window's client origin on
@@ -326,11 +374,88 @@ public sealed partial class RdpSurfaceHost : UserControl
             return HostBounds.Empty;
         }
 
-        return new HostBounds(
-            origin.x + (int)Math.Round(topLeftDip.X * scale),
-            origin.y + (int)Math.Round(topLeftDip.Y * scale),
-            (int)Math.Round(ActualWidth * scale),
-            (int)Math.Round(ActualHeight * scale));
+        var offsetX = (int)Math.Round(topLeftDip.X * scale);
+        var offsetY = (int)Math.Round(topLeftDip.Y * scale);
+        var widthPx = (int)Math.Round(ActualWidth * scale);
+        var heightPx = (int)Math.Round(ActualHeight * scale);
+
+        var bounds = new HostBounds(origin.x + offsetX, origin.y + offsetY, widthPx, heightPx);
+
+        // Cache the element-relative pieces so the synchronous WM_WINDOWPOSCHANGED move path can
+        // re-derive screen bounds from just a fresh ClientToScreen, without a WinUI layout call.
+        // Only cache real geometry — a degenerate result would otherwise poison the fast path.
+        if (!bounds.IsDegenerate())
+        {
+            _cachedOffsetX = offsetX;
+            _cachedOffsetY = offsetY;
+            _cachedWidthPx = widthPx;
+            _cachedHeightPx = heightPx;
+            _cacheValid = true;
+        }
+
+        return bounds;
+    }
+
+    /// <summary>
+    /// Subclass procedure on the owner window. Chains to <see cref="Win32Interop.DefSubclassProc"/>
+    /// FIRST so the window's new rect is final, then — for a pure move — repositions the overlay
+    /// synchronously so it tracks the window in the same frame instead of trailing the async
+    /// AppWindow.Changed path. Must never let an exception escape into the native caller.
+    /// </summary>
+    private IntPtr OwnerSubclassProc(
+        IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam, UIntPtr id, UIntPtr data)
+    {
+        var result = Win32Interop.DefSubclassProc(hWnd, uMsg, wParam, lParam);
+
+        if (uMsg == Win32Interop.WM_WINDOWPOSCHANGED)
+        {
+            try
+            {
+                RepositionOverlaySynchronously(lParam);
+            }
+            catch (Exception ex)
+            {
+                var logger = App.Current?.Services?.GetService<ILogger<RdpSurfaceHost>>();
+                logger?.LogDebug(ex, "RDP overlay synchronous reposition failed.");
+            }
+        }
+
+        return result;
+    }
+
+    private void RepositionOverlaySynchronously(IntPtr lParamWindowPos)
+    {
+        // Mirror ApplyLayout's guards: a covering dialog or a minimized owner owns visibility, and
+        // we need a real geometry cache to derive bounds without a WinUI layout call.
+        if (!_attached || _viewModel is null || _overlaySuppressed || !_cacheValid) return;
+        if (_trackedAppWindow is { IsVisible: false }) return;
+
+        var wp = Marshal.PtrToStructure<Win32Interop.WINDOWPOS>(lParamWindowPos);
+
+        // Resize → the element size (and thus the cached offset) is about to change, but WinUI
+        // re-measures asynchronously so we can't know the new geometry here. Update the size
+        // tracker and defer to the SizeChanged/timer path that recomputes after the relayout.
+        var sizeChanged = (wp.flags & Win32Interop.SWP_NOSIZE) == 0 &&
+                          (wp.cx != _lastWindowCx || wp.cy != _lastWindowCy);
+        _lastWindowCx = wp.cx;
+        _lastWindowCy = wp.cy;
+        if (sizeChanged) return;
+
+        // Pure move: only the screen origin changed. Re-derive it from the owner's client origin
+        // plus the cached element offset (both physical px). No WinUI layout API is touched.
+        var origin = new Win32Interop.POINT { x = 0, y = 0 };
+        if (_ownerHwnd == IntPtr.Zero || !Win32Interop.ClientToScreen(_ownerHwnd, ref origin)) return;
+
+        var bounds = new HostBounds(
+            origin.x + _cachedOffsetX,
+            origin.y + _cachedOffsetY,
+            _cachedWidthPx,
+            _cachedHeightPx);
+        if (bounds.IsDegenerate()) return;
+
+        // SetBounds is gated on Status==Connected in the VM and dedupes equal bounds in the
+        // adapter, so a trailing async tick that computes the same value becomes a no-op.
+        _viewModel.SetBounds(bounds);
     }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
