@@ -442,6 +442,27 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Duplicate_Connection_ClearsSshHostFingerprint()
+    {
+        // The duplicate is a new identity meant to be repointed at a different host, so it must
+        // start unpinned and TOFU-pin on first connect. Carrying the source's pin over would make
+        // SshHostKeyValidator.Decide return Mismatch for a different host and reject the connect.
+        var node = MakeConnectionDraft("ssh-box", ProtocolType.Ssh, "host", 22, "alice");
+        node.SshKnownHostFingerprint = "SHA256:original-pin";
+        await _repo.AddAsync(node);
+
+        var vm = CreateVm();
+        await vm.RefreshAsync();
+
+        await vm.DuplicateCommand.ExecuteAsync(vm.Roots.Single());
+
+        var rows = await _repo.GetAllAsync();
+        Assert.Null(rows.Single(r => r.Id != node.Id).SshKnownHostFingerprint);
+        // The source's own pin is untouched.
+        Assert.Equal("SHA256:original-pin", rows.Single(r => r.Id == node.Id).SshKnownHostFingerprint);
+    }
+
+    [Fact]
     public async Task Duplicate_OnFolder_IsNoOp()
     {
         var dialog = new FakeDialogService { TextPromptResult = "Linux" };

@@ -307,6 +307,11 @@ public partial class ConnectionTreeViewModel : ObservableObject
         copy.Id = Guid.NewGuid();
         copy.Name = $"{source.Name} (copy)";
         copy.SortOrder = NextSortOrder(source.ParentId);
+        // Drop the source's pinned SSH host key. The duplicate is a new identity and the
+        // intended workflow is to repoint it at a different host; carrying the old fingerprint
+        // over would make SshHostKeyValidator reject the new host as a Mismatch instead of
+        // TOFU-pinning on first connect like any other new connection.
+        copy.SshKnownHostFingerprint = null;
 
         await SafeAddAsync(copy);
     }
