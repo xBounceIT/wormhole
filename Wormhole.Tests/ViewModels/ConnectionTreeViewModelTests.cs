@@ -394,9 +394,11 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     public async Task Duplicate_Connection_CopiesFieldsWithSuffix()
     {
         var credentialId = Guid.NewGuid();
+        var gatewayCredentialId = Guid.NewGuid();
         var tunnelId = Guid.NewGuid();
         var node = MakeConnectionDraft("prod-web", ProtocolType.Rdp, "host.example.com", 3389, "alice");
         node.CredentialId = credentialId;
+        node.RdpGatewayCredentialId = gatewayCredentialId;
         node.TunnelConfigId = tunnelId;
         node.TunnelEnabled = true;
         await _repo.AddAsync(node);
@@ -416,8 +418,12 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         Assert.Equal(3389, copy.Port);
         Assert.Equal("alice", copy.Username);
         Assert.Equal(credentialId, copy.CredentialId);
+        // Shared-pool credential/tunnel references are reused by design (see the Duplicate command).
+        Assert.Equal(gatewayCredentialId, copy.RdpGatewayCredentialId);
         Assert.Equal(tunnelId, copy.TunnelConfigId);
         Assert.True(copy.TunnelEnabled);
+        // The copy is appended after its source rather than colliding with its sort order.
+        Assert.True(copy.SortOrder > node.SortOrder);
         Assert.Equal(2, vm.Roots.Count);
     }
 
