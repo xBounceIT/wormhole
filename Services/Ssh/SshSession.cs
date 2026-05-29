@@ -9,6 +9,10 @@ internal sealed class SshSession : ISshSession
     private readonly SshClient _client;
     private readonly ShellStream _stream;
     private readonly CancellationTokenSource _cts = new();
+    // ShellStream's write buffer is not safe for concurrent access — SSH.NET's internal
+    // _sync lock guards reads and disposal only. Serialize all writes through this gate so
+    // overlapping callers can't corrupt the shared buffer (see WriteAsync).
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly ILogger<SshSession> _logger;
     private Task? _readPump;
     private int _disposed;
@@ -39,12 +43,32 @@ internal sealed class SshSession : ISshSession
     public async Task WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
     {
         if (IsDisposed) return;
+
+        // Writes reach this method from two unsynchronized sources: the WebView2 message
+        // handler (TerminalBridge.OnWebMessageReceived is async void, so it yields to the UI
+        // message pump at each await and a second keystroke handler can start before the first
+        // write finishes) and SshAutoSudoDriver's fire-and-forget line sends from the read-pump
+        // thread. ShellStream.WriteAsync/FlushAsync mutate a shared write buffer with no locking,
+        // so two overlapping writes scramble its offset/length bookkeeping and a byte gets dropped
+        // or never flushed — most visibly the lone "\r" from Enter, which strands the user at a
+        // prompt. Hold the gate across both the write and the flush so each write+flush is atomic.
         try
         {
+            await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { return; }
+
+        try
+        {
+            if (IsDisposed) return;
             await _stream.WriteAsync(data, cancellationToken).ConfigureAwait(false);
             await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
         }
         catch (ObjectDisposedException) { /* raced with Dispose */ }
+        finally
+        {
+            _writeLock.Release();
+        }
     }
 
     public Task ResizeAsync(uint columns, uint rows)
@@ -153,5 +177,11 @@ internal sealed class SshSession : ISshSession
             try { client.Dispose(); } catch { /* idempotent */ }
             try { cts.Dispose(); } catch { /* idempotent */ }
         });
+
+        // _writeLock is intentionally NOT disposed: an in-flight WriteAsync still needs to
+        // Release() it in its finally, and Release/WaitAsync on a disposed SemaphoreSlim throws
+        // ObjectDisposedException — worse, Dispose doesn't wake a queued waiter, which would
+        // strand it. It holds no OS handle unless AvailableWaitHandle is touched (we never do),
+        // so GC reclaims it harmlessly. Mirrors FileTransferOrchestrator's gate convention.
     }
 }
