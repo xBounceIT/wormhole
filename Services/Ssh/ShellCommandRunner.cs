@@ -69,11 +69,19 @@ internal sealed class ShellCommandRunner
         var startMarker = $"@@WHS_{token}@@";
         _endRegex = new Regex($@"@@WHE_{token}_(\d+)@@", RegexOptions.Compiled);
 
-        // %s/%d formatting means the echoed command line shows "@@WHS_%s@@" (with the format
-        // specifier), never the assembled "@@WHS_<token>@@" — so our scan only matches the
-        // shell's real output. \r mirrors the byte xterm.js sends for Enter.
+        // Run the command through `eval '<command>'` with POSIX single-quote escaping so the
+        // marker bookkeeping that follows on the same physical line stays isolated from the
+        // command text. Without this, a command with an inline comment ("echo ok # note") would
+        // comment out the trailing "$?"-capture + end-marker printf, and the runner would hang
+        // until timeout with no exit code. eval still runs in the current shell, so cd/export and
+        // other state changes persist (the point of driving the live shell).
+        //
+        // %s/%d formatting means the echoed line shows "@@WHS_%s@@"/"@@WHE_%s_%d@@" (with the
+        // format specifiers), never the assembled markers — so our scan only matches the shell's
+        // real output. \r mirrors the byte xterm.js sends for Enter.
+        var escapedCommand = command.Replace("'", "'\\''");
         var payload =
-            $"printf '@@WHS_%s@@\\n' {token}; {command}; __wh_rc=$?; printf '@@WHE_%s_%d@@\\n' {token} \"$__wh_rc\"\r";
+            $"printf '@@WHS_%s@@\\n' {token}; eval '{escapedCommand}'; __wh_rc=$?; printf '@@WHE_%s_%d@@\\n' {token} \"$__wh_rc\"\r";
 
         _session.DataReceived += OnDataReceived;
         try

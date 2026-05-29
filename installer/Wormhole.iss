@@ -1,12 +1,10 @@
 ; Wormhole installer (Inno Setup 6)
 ; Scaffold — wire up signing, custom pages, and per-architecture artifacts before shipping.
 ;
-; RUNTIME PREREQUISITES (framework-dependent publish — see scripts/Build-Installer.ps1):
-;   * .NET 10 Desktop Runtime (WindowsDesktop) — WinUI 3 / WindowsForms host
-;   * ASP.NET Core 10 Runtime — required by the in-app MCP server (Kestrel). Because the app
-;     references the Microsoft.AspNetCore.App shared framework, it will NOT launch if this
-;     runtime is absent. Before shipping, add a prerequisite check/bundler for BOTH runtimes
-;     (or switch the publish to self-contained).
+; RUNTIME: scripts/Build-Installer.ps1 publishes SELF-CONTAINED, so the .NET runtimes the app needs
+; (Microsoft.NETCore.App, Microsoft.WindowsDesktop.App, and Microsoft.AspNetCore.App — the last
+; required by the in-app MCP server / Kestrel) are bundled into the install directory. No .NET
+; runtime prerequisite is needed on the target machine.
 
 #define MyAppName       "Wormhole"
 #define MyAppPublisher  "Wormhole project"

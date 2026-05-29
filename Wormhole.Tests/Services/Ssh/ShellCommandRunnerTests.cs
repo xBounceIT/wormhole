@@ -67,6 +67,33 @@ public sealed class ShellCommandRunnerTests
     }
 
     [Fact]
+    public async Task RunAsync_WrapsCommandInEval_SoInlineCommentDoesNotBreakTrailer()
+    {
+        // An inline '#' must not comment out the end-marker bookkeeping: the command is wrapped
+        // in eval '...' so the '#' lives inside single quotes.
+        var session = new ScriptedSshSession { Output = "ok\r\n", ExitCode = 0 };
+        var runner = new ShellCommandRunner(session, NullLogger.Instance);
+
+        var result = await runner.RunAsync("echo ok # note", TimeSpan.FromSeconds(5), 1_000_000, CancellationToken.None);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.False(result.TimedOut);
+        Assert.Contains("eval 'echo ok # note'", session.LastPayload);
+    }
+
+    [Fact]
+    public async Task RunAsync_EscapesSingleQuotesInCommand()
+    {
+        var session = new ScriptedSshSession { Output = "hi\r\n", ExitCode = 0 };
+        var runner = new ShellCommandRunner(session, NullLogger.Instance);
+
+        await runner.RunAsync("echo 'hi'", TimeSpan.FromSeconds(5), 1_000_000, CancellationToken.None);
+
+        // echo 'hi' -> eval 'echo '\''hi'\'''  (each ' becomes '\'')
+        Assert.Contains(@"eval 'echo '\''hi'\'''", session.LastPayload);
+    }
+
+    [Fact]
     public async Task RunAsync_MarksTruncated_WhenOutputExceedsCap()
     {
         var big = new string('x', 5000) + "\r\n";
@@ -95,6 +122,8 @@ public sealed class ShellCommandRunnerTests
 
         public string? HostFingerprint => "SHA256:test";
 
+        public string? LastPayload { get; private set; }
+
         public event EventHandler<ReadOnlyMemory<byte>>? DataReceived;
 #pragma warning disable CS0067 // Closed is required by ISshSession but unused by this fake.
         public event EventHandler? Closed;
@@ -109,6 +138,7 @@ public sealed class ShellCommandRunnerTests
         public Task WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
         {
             var payload = Encoding.UTF8.GetString(data.Span);
+            LastPayload = payload;
             var match = TokenRegex.Match(payload);
             if (!match.Success) return Task.CompletedTask;
             var token = match.Value;
