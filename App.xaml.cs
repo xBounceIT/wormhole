@@ -8,6 +8,7 @@ using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Services;
 using Wormhole.Services.Backup;
+using Wormhole.Services.Mcp;
 using Wormhole.Services.MRemoteNg;
 using Wormhole.Services.Rdp;
 using Wormhole.Services.Ssh;
@@ -56,6 +57,28 @@ public partial class App : Application
 
         MainWindow = Services.GetRequiredService<MainWindow>();
         MainWindow.Activate();
+
+        await StartMcpServerIfEnabledAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Starts the in-app MCP server when the user has opted in. Started after the window is
+    /// activated so the session registry's UI dispatcher (App.Current.MainWindow.DispatcherQueue)
+    /// is available. A startup failure (e.g. port already in use) must never block the app.
+    /// </summary>
+    private async Task StartMcpServerIfEnabledAsync()
+    {
+        var settings = Services.GetRequiredService<IAppSettingsService>();
+        if (!settings.Current.EnableMcpServer) return;
+
+        try
+        {
+            await Services.GetRequiredService<IMcpServerHost>().StartAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            Services.GetService<ILogger<App>>()?.LogError(ex, "Failed to start MCP server at launch.");
+        }
     }
 
     /// <summary>
@@ -179,6 +202,9 @@ public partial class App : Application
         services.AddSingleton<IFileTransferDialogService, FileTransferDialogService>();
         services.AddSingleton<IMRemoteNgImportService, MRemoteNgImportService>();
         services.AddSingleton<IBackupService, BackupService>();
+
+        services.AddSingleton<IMcpSessionRegistry, McpSessionRegistry>();
+        services.AddSingleton<IMcpServerHost, McpServerHost>();
 
         var assemblyVersion = typeof(App).Assembly.GetName().Version?.ToString() ?? "0.0.0";
         services.AddHttpClient(UpdateService.HttpClientName, client =>

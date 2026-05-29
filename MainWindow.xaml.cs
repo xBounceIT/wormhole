@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
@@ -7,6 +8,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.Foundation;
 using Wormhole.Services;
+using Wormhole.Services.Mcp;
 using Wormhole.ViewModels;
 using Wormhole.Views.Pages;
 
@@ -111,6 +113,14 @@ public sealed partial class MainWindow : Window
         _sessionCleanupInProgress = true;
         try
         {
+            try
+            {
+                await App.Current.Services.GetRequiredService<IMcpServerHost>().StopAsync();
+            }
+            catch (Exception)
+            {
+                // Never let MCP shutdown block the app from closing.
+            }
             await ViewModel.CloseAllSessionsAsync();
         }
         finally

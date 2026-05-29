@@ -1,0 +1,148 @@
+using System.Text;
+using Microsoft.Extensions.Logging;
+using Microsoft.UI.Dispatching;
+using Wormhole.Services.Ssh;
+using Wormhole.ViewModels;
+using Wormhole.ViewModels.Sessions;
+
+namespace Wormhole.Services.Mcp;
+
+/// <inheritdoc />
+public sealed class McpSessionRegistry : IMcpSessionRegistry
+{
+    private readonly ShellViewModel _shell;
+    private readonly IDialogService _dialog;
+    private readonly ILogger _audit;
+
+    public McpSessionRegistry(ShellViewModel shell, IDialogService dialog, ILoggerFactory loggerFactory)
+    {
+        _shell = shell;
+        _dialog = dialog;
+        // Dedicated audit category so MCP-initiated actions are greppable in the Serilog file.
+        _audit = loggerFactory.CreateLogger("Wormhole.McpAudit");
+    }
+
+    public Task<IReadOnlyList<McpSessionInfo>> ListSessionsAsync(CancellationToken cancellationToken = default)
+        => OnUiAsync<IReadOnlyList<McpSessionInfo>>(() =>
+        {
+            var list = new List<McpSessionInfo>();
+            foreach (var tab in _shell.Tabs)
+            {
+                if (tab is SshSessionViewModel ssh && ssh.IsMcpConnected)
+                {
+                    var p = ssh.Profile;
+                    list.Add(new McpSessionInfo(
+                        ssh.McpId.ToString(),
+                        p?.Host ?? string.Empty,
+                        p?.Port ?? 0,
+                        p?.Username ?? string.Empty,
+                        ssh.Title,
+                        ssh.Status.ToString()));
+                }
+            }
+            return list;
+        });
+
+    public async Task<ShellCommandResult> RunCommandAsync(string sessionId, string command, int timeoutSeconds, CancellationToken cancellationToken = default)
+    {
+        var vm = await ResolveApprovedAsync(sessionId).ConfigureAwait(false);
+        var timeout = TimeSpan.FromSeconds(timeoutSeconds <= 0 ? 30 : timeoutSeconds);
+        _audit.LogInformation("run_command {User}@{Host}: {Command}", vm.Profile?.Username, vm.Profile?.Host, command);
+
+        var result = await vm.RunCommandAsync(command, timeout, cancellationToken).ConfigureAwait(false);
+
+        // Audit the outcome but NOT the captured output — it can contain secrets.
+        _audit.LogInformation(
+            "run_command {User}@{Host} -> exit={Exit} timedOut={TimedOut} truncated={Truncated} ({Length} chars)",
+            vm.Profile?.Username, vm.Profile?.Host, result.ExitCode, result.TimedOut, result.Truncated, result.Output.Length);
+        return result;
+    }
+
+    public async Task SendTextAsync(string sessionId, string text, CancellationToken cancellationToken = default)
+    {
+        var vm = await ResolveApprovedAsync(sessionId).ConfigureAwait(false);
+        // Log only the byte count — raw text may be a password typed at a prompt.
+        _audit.LogInformation("send_text {User}@{Host}: {Bytes} bytes",
+            vm.Profile?.Username, vm.Profile?.Host, Encoding.UTF8.GetByteCount(text));
+        await vm.SendTextAsync(text, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<string> ReadTerminalAsync(string sessionId, int maxBytes, CancellationToken cancellationToken = default)
+    {
+        var vm = await ResolveApprovedAsync(sessionId).ConfigureAwait(false);
+        // TerminalReplayBuffer.Snapshot is itself thread-safe, so no UI hop needed here.
+        var snapshot = vm.SnapshotTerminal();
+        if (maxBytes > 0 && snapshot.Length > maxBytes)
+        {
+            snapshot = snapshot[^maxBytes..];
+        }
+        _audit.LogInformation("read_terminal {User}@{Host}: {Bytes} bytes",
+            vm.Profile?.Username, vm.Profile?.Host, snapshot.Length);
+        return TerminalText.StripAnsi(Encoding.UTF8.GetString(snapshot));
+    }
+
+    // Resolve the session and obtain (or confirm) the user's per-session approval — all on the
+    // UI thread. Throws with an agent-readable message on any failure so the SDK surfaces it as
+    // a tool error.
+    private Task<SshSessionViewModel> ResolveApprovedAsync(string sessionId)
+        => OnUiAsync(async () =>
+        {
+            var vm = FindOnUi(sessionId)
+                ?? throw new InvalidOperationException(
+                    $"No live SSH session with id '{sessionId}'. Call list_sessions for current ids.");
+            if (!vm.IsMcpConnected)
+                throw new InvalidOperationException("That SSH session is not connected.");
+
+            var approved = await vm.EnsureMcpApprovedAsync(_dialog).ConfigureAwait(true);
+            if (!approved)
+                throw new InvalidOperationException("The user denied AI-agent control of that session.");
+            return vm;
+        });
+
+    // Must run on the UI thread (enumerates the UI-bound Tabs collection).
+    private SshSessionViewModel? FindOnUi(string sessionId)
+    {
+        foreach (var tab in _shell.Tabs)
+        {
+            if (tab is SshSessionViewModel ssh && ssh.McpId.ToString() == sessionId)
+            {
+                return ssh;
+            }
+        }
+        return null;
+    }
+
+    private static DispatcherQueue? Dispatcher => App.Current.MainWindow?.DispatcherQueue;
+
+    private static Task<T> OnUiAsync<T>(Func<T> func)
+    {
+        var dq = Dispatcher;
+        if (dq is null) return Task.FromResult(func()); // no window (tests/headless) — run inline
+        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!dq.TryEnqueue(() =>
+            {
+                try { tcs.SetResult(func()); }
+                catch (Exception ex) { tcs.SetException(ex); }
+            }))
+        {
+            tcs.SetException(new InvalidOperationException("UI dispatcher unavailable (window closing?)."));
+        }
+        return tcs.Task;
+    }
+
+    private static Task<T> OnUiAsync<T>(Func<Task<T>> func)
+    {
+        var dq = Dispatcher;
+        if (dq is null) return func();
+        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!dq.TryEnqueue(async () =>
+            {
+                try { tcs.SetResult(await func().ConfigureAwait(true)); }
+                catch (Exception ex) { tcs.SetException(ex); }
+            }))
+        {
+            tcs.SetException(new InvalidOperationException("UI dispatcher unavailable (window closing?)."));
+        }
+        return tcs.Task;
+    }
+}

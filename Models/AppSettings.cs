@@ -13,6 +13,11 @@ public sealed class AppSettings
     public string? SkippedUpdateVersion { get; set; }
 
     public int SidebarWidth { get; set; } = 320;
+
+    // In-app MCP server (lets AI agents control already-open SSH sessions). Off by default;
+    // the bearer token is stored in Windows Credential Manager, not here.
+    public bool EnableMcpServer { get; set; }
+    public int McpServerPort { get; set; } = 8765;
 }
 
 public enum ApplicationTheme

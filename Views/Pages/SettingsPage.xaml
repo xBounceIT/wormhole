@@ -66,6 +66,71 @@
                 <Button Content="Import backup..."
                         Command="{x:Bind ViewModel.ImportBackupCommand}" />
             </StackPanel>
+
+            <TextBlock Text="AI agent control (MCP server)" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
+            <TextBlock TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}">
+                Run a local MCP server so an AI agent (e.g. Claude) can control your already-open
+                SSH sessions — list them, run commands, type input, and read the terminal. The
+                server listens on localhost only and requires the bearer token below. The first
+                time an agent touches a session, Wormhole asks you to approve it.
+            </TextBlock>
+            <ToggleSwitch Header="Enable MCP server"
+                          IsOn="{x:Bind ViewModel.EnableMcpServer, Mode=TwoWay}" />
+            <NumberBox Header="Port"
+                       Value="{x:Bind ViewModel.McpServerPort, Mode=TwoWay}"
+                       SpinButtonPlacementMode="Inline"
+                       Minimum="1" Maximum="65535"
+                       Width="200"
+                       HorizontalAlignment="Left"
+                       IsEnabled="{x:Bind ViewModel.EnableMcpServer, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
+            <TextBlock Text="{x:Bind ViewModel.McpStatus, Mode=OneWay}"
+                       Style="{StaticResource CaptionTextBlockStyle}"
+                       Opacity="0.7" />
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <TextBox Header="Endpoint"
+                         Text="{x:Bind ViewModel.McpEndpoint, Mode=OneWay}"
+                         IsReadOnly="True" IsSpellCheckEnabled="False"
+                         Width="300" />
+                <Button Content="Copy" VerticalAlignment="Bottom"
+                        Command="{x:Bind ViewModel.CopyMcpEndpointCommand}" />
+            </StackPanel>
+            <StackPanel Orientation="Horizontal" Spacing="8">
+                <TextBox Header="Bearer token"
+                         Text="{x:Bind ViewModel.McpToken, Mode=OneWay}"
+                         IsReadOnly="True" IsSpellCheckEnabled="False"
+                         PlaceholderText="•••••••• (hidden — click Reveal)"
+                         Width="380" />
+                <Button Content="Reveal / hide" VerticalAlignment="Bottom"
+                        Command="{x:Bind ViewModel.RevealMcpTokenCommand}" />
+                <Button Content="Copy" VerticalAlignment="Bottom"
+                        Command="{x:Bind ViewModel.CopyMcpTokenCommand}" />
+                <Button Content="Regenerate" VerticalAlignment="Bottom"
+                        Command="{x:Bind ViewModel.RegenerateMcpTokenCommand}" />
+            </StackPanel>
+
+            <ComboBox Header="Client"
+                      SelectedIndex="{x:Bind ViewModel.McpClientIndex, Mode=TwoWay}"
+                      Width="240" HorizontalAlignment="Left" Margin="0,4,0,0">
+                <ComboBoxItem Content="Claude Code CLI" />
+                <ComboBoxItem Content="Claude Desktop" />
+                <ComboBoxItem Content="Codex" />
+            </ComboBox>
+            <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" TextWrapping="Wrap"
+                       Text="{x:Bind ViewModel.McpConfigCaption, Mode=OneWay}" />
+            <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"
+                       Text="Reveal the token first to include it in the box below, or just use Copy config which always copies the real token." />
+            <TextBox Header="{x:Bind ViewModel.McpConfigLabel, Mode=OneWay}"
+                     Text="{x:Bind ViewModel.McpConfigJson, Mode=OneWay}"
+                     IsReadOnly="True" IsSpellCheckEnabled="False"
+                     AcceptsReturn="True" TextWrapping="NoWrap"
+                     FontFamily="Consolas" FontSize="12"
+                     Height="240" Width="520"
+                     HorizontalAlignment="Left"
+                     ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                     ScrollViewer.VerticalScrollBarVisibility="Auto" />
+            <Button Content="Copy config"
+                    HorizontalAlignment="Left"
+                    Command="{x:Bind ViewModel.CopyMcpConfigCommand}" />
         </StackPanel>
     </ScrollViewer>
 </Page>
