@@ -70,6 +70,27 @@ internal static class Win32Interop
     [DllImport("user32.dll", SetLastError = true, EntryPoint = "SetWindowLongPtrW")]
     public static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
 
+    // Window subclassing via comctl32. Preferred over hand-rolled GWLP_WNDPROC swaps because it
+    // composes order-independently when several callers subclass the same HWND (each RDP tab's
+    // RdpSurfaceHost subclasses the shared main window). These exports exist on every supported
+    // Windows version and are not gated on the v6 common-controls manifest. The managed delegate
+    // passed to SetWindowSubclass MUST be rooted (kept in a field) for the lifetime of the
+    // subclass, or the GC collects the marshaled thunk and the next message crashes the process.
+    [UnmanagedFunctionPointer(CallingConvention.Winapi)]
+    public delegate IntPtr SubclassProc(
+        IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam, UIntPtr uIdSubclass, UIntPtr dwRefData);
+
+    [DllImport("comctl32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool SetWindowSubclass(IntPtr hWnd, SubclassProc pfnSubclass, UIntPtr uIdSubclass, UIntPtr dwRefData);
+
+    [DllImport("comctl32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool RemoveWindowSubclass(IntPtr hWnd, SubclassProc pfnSubclass, UIntPtr uIdSubclass);
+
+    [DllImport("comctl32.dll")]
+    public static extern IntPtr DefSubclassProc(IntPtr hWnd, uint uMsg, IntPtr wParam, IntPtr lParam);
+
     [StructLayout(LayoutKind.Sequential)]
     public struct RECT
     {
@@ -86,7 +107,21 @@ internal static class Win32Interop
         public int y;
     }
 
+    // lParam of WM_WINDOWPOSCHANGED points to a WINDOWPOS describing the window's new position/size.
+    [StructLayout(LayoutKind.Sequential)]
+    public struct WINDOWPOS
+    {
+        public IntPtr hwnd;
+        public IntPtr hwndInsertAfter;
+        public int x;
+        public int y;
+        public int cx;
+        public int cy;
+        public uint flags;
+    }
+
     public const uint WM_SIZE = 0x0005;
+    public const uint WM_WINDOWPOSCHANGED = 0x0047;
     public const uint WM_DPICHANGED = 0x02E0;
 
     public const int SW_HIDE = 0;
