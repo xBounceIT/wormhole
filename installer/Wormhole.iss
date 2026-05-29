@@ -1,5 +1,10 @@
 ; Wormhole installer (Inno Setup 6)
 ; Scaffold — wire up signing, custom pages, and per-architecture artifacts before shipping.
+;
+; RUNTIME: scripts/Build-Installer.ps1 publishes SELF-CONTAINED, so the .NET runtimes the app needs
+; (Microsoft.NETCore.App, Microsoft.WindowsDesktop.App, and Microsoft.AspNetCore.App — the last
+; required by the in-app MCP server / Kestrel) are bundled into the install directory. No .NET
+; runtime prerequisite is needed on the target machine.
 
 #define MyAppName       "Wormhole"
 #define MyAppPublisher  "Wormhole project"

@@ -1,7 +1,6 @@
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Windows.ApplicationModel.DataTransfer;
 using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Models;
@@ -257,24 +256,7 @@ public sealed class DialogService : IDialogService
         panel.Children.Add(secretField);
 
         var copyButton = new Button { Content = "Copy" };
-        copyButton.Click += (_, _) =>
-        {
-            try
-            {
-                var pkg = new DataPackage();
-                pkg.SetText(secret);
-                Clipboard.SetContent(pkg);
-                // Flush so the value survives Wormhole closing — otherwise the DataPackage is
-                // invalidated on exit and the user can't paste what they just copied.
-                Clipboard.Flush();
-            }
-            catch
-            {
-                // Clipboard.SetContent can throw COMException when another app holds the
-                // clipboard. A failed copy must not crash the reveal dialog. Deliberately not
-                // logged — the payload here is a credential.
-            }
-        };
+        copyButton.Click += (_, _) => ClipboardHelper.CopyText(secret);
         panel.Children.Add(copyButton);
 
         var dialog = new ContentDialog

@@ -33,11 +33,15 @@ if (-not (Test-Path $IsccPath)) {
 }
 
 Write-Host "Publishing $projectPath -> $publishDir"
+# Self-contained so the installed app bundles every runtime it needs — including the ASP.NET Core
+# runtime that the in-app MCP server (Kestrel) requires. A framework-dependent publish would make
+# the app fail to launch on machines without the ASP.NET Core runtime installed, even with the MCP
+# server disabled, because Microsoft.AspNetCore.App is resolved by hostfxr at process startup.
 & $DotNetPath publish $projectPath `
     -c $Configuration `
     -r "win-$Architecture" `
     -p:Platform=$Architecture `
-    --self-contained false `
+    --self-contained true `
     -o $publishDir
 
 Write-Host "Compiling installer $installerScript"

@@ -629,6 +629,92 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         _capturedCredentials = null;
     }
 
+    // === MCP (AI agent) control ============================================
+    //
+    // The MCP server drives the SAME live shell the user sees ("Option B"). These methods are
+    // invoked from MCP tool calls via IMcpSessionRegistry. _commandGate serializes agent
+    // commands so two run_command calls can't interleave their sentinels; the user's own
+    // keystrokes are unaffected (they flow through ISshSession's own write lock). _commandGate
+    // is intentionally never disposed — same convention as SshSession._writeLock (it holds no
+    // OS handle unless AvailableWaitHandle is touched, which we never do).
+    private readonly SemaphoreSlim _commandGate = new(1, 1);
+
+    // Memoized per-session consent. Computed lazily on the first agent action and cached for the
+    // tab's life (sticky allow/deny). Memoizing the TASK — not a bool flag — means concurrent
+    // first-touch tool calls await one shared approval dialog instead of racing two ContentDialogs
+    // (WinUI throws if a second dialog opens while one is showing). All access is on the UI thread
+    // (the registry marshals there before calling), so the ??= needs no lock.
+    private Task<bool>? _mcpApprovalTask;
+
+    /// <summary>
+    /// Stable, process-unique id for this SSH tab. The MCP server uses it to address a live
+    /// session across tool calls (a <see cref="ConnectionProfile.NodeId"/> can't — multiple
+    /// tabs may share one saved connection). Generated once and never reused.
+    /// </summary>
+    public Guid McpId { get; } = Guid.NewGuid();
+
+    /// <summary>
+    /// Per-session consent gate. The first agent action shows an approval dialog; the decision is
+    /// remembered for the tab's lifetime. MUST be called on the UI thread (shows a ContentDialog).
+    /// Concurrent callers share the single in-flight approval task; a failed dialog isn't cached,
+    /// so a later call re-asks.
+    /// </summary>
+    internal Task<bool> EnsureMcpApprovedAsync(IDialogService dialog)
+    {
+        if (_mcpApprovalTask is { } existing && !existing.IsFaulted && !existing.IsCanceled)
+            return existing;
+        return _mcpApprovalTask = AskMcpApprovalAsync(dialog);
+    }
+
+    private async Task<bool> AskMcpApprovalAsync(IDialogService dialog)
+    {
+        var host = Profile?.Host ?? "(unknown host)";
+        var user = Profile?.Username ?? "(unknown user)";
+        return await dialog.ConfirmAsync(
+            "Allow AI agent control?",
+            $"An AI agent is requesting control of the SSH session to {user}@{host}.\n\n" +
+            "If you allow it, the agent can run commands and send keystrokes in this session for " +
+            "as long as the tab stays open. Allow?",
+            "Allow", "Deny").ConfigureAwait(true);
+    }
+
+    /// <summary>True when a command can currently be dispatched to the live shell.</summary>
+    internal bool IsMcpConnected => Status == SessionStatus.Connected && _session is not null;
+
+    /// <summary>
+    /// Runs a command on the live interactive shell and captures its output + exit code (Option B).
+    /// Serialized per session via <see cref="_commandGate"/>.
+    /// </summary>
+    internal async Task<ShellCommandResult> RunCommandAsync(string command, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        var session = _session;
+        if (session is null || Status != SessionStatus.Connected)
+            throw new InvalidOperationException("SSH session is not connected.");
+
+        await _commandGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var runner = new ShellCommandRunner(session, _loggerFactory.CreateLogger<ShellCommandRunner>());
+            return await runner.RunAsync(command, timeout, 1_000_000, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _commandGate.Release();
+        }
+    }
+
+    /// <summary>Writes raw text to the live shell exactly as if the user had typed it.</summary>
+    internal async Task SendTextAsync(string text, CancellationToken cancellationToken)
+    {
+        var session = _session;
+        if (session is null || Status != SessionStatus.Connected)
+            throw new InvalidOperationException("SSH session is not connected.");
+        await session.WriteAsync(System.Text.Encoding.UTF8.GetBytes(text), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Snapshot of recent terminal output bytes (the replay ring buffer) for read_terminal.</summary>
+    internal byte[] SnapshotTerminal() => _replayBuffer.Snapshot();
+
     // === SFTP pre-warm =====================================================
     //
     // Called from the Status PropertyChanged handler. Status==Connected starts a
