@@ -2,135 +2,181 @@
 <Page
     x:Class="Wormhole.Views.Pages.SettingsPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:models="using:Wormhole.Models">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
-    <ScrollViewer Padding="24">
-        <StackPanel Spacing="16" MaxWidth="720" HorizontalAlignment="Left">
-            <TextBlock Text="Settings" Style="{StaticResource TitleTextBlockStyle}" />
+    <Page.Resources>
+        <!-- Shared layout for every settings tab's content so padding/width live in one place. -->
+        <Style x:Key="TabContentScrollStyle" TargetType="ScrollViewer">
+            <Setter Property="Padding" Value="16" />
+        </Style>
+        <Style x:Key="TabContentPanelStyle" TargetType="StackPanel">
+            <Setter Property="Spacing" Value="16" />
+            <Setter Property="MaxWidth" Value="720" />
+            <Setter Property="HorizontalAlignment" Value="Left" />
+        </Style>
+    </Page.Resources>
 
-            <TextBlock Text="Appearance" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
-            <ComboBox Header="Theme"
-                      SelectedIndex="{x:Bind ThemeIndex, Mode=TwoWay}"
-                      Width="240">
-                <ComboBoxItem Content="System default" />
-                <ComboBoxItem Content="Light" />
-                <ComboBoxItem Content="Dark" />
-            </ComboBox>
+    <Grid Padding="24" RowSpacing="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
 
-            <TextBlock Text="Tabs" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
-            <ToggleSwitch Header="Confirm before closing a connected tab"
-                          IsOn="{x:Bind ViewModel.ConfirmOnTabClose, Mode=TwoWay}" />
+        <TextBlock Grid.Row="0" Text="Settings" Style="{StaticResource TitleTextBlockStyle}" />
 
-            <TextBlock Text="Terminal" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
-            <ToggleSwitch Header="Auto-copy selection to clipboard"
-                          IsOn="{x:Bind ViewModel.AutoCopyOnSelect, Mode=TwoWay}" />
+        <TabView Grid.Row="1"
+                 IsAddTabButtonVisible="False"
+                 CanDragTabs="False"
+                 CanReorderTabs="False"
+                 TabWidthMode="SizeToContent">
 
-            <TextBlock Text="Updates" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
-            <TextBlock Text="{x:Bind ViewModel.Update.CurrentVersionText, Mode=OneWay}"
-                       Style="{StaticResource BodyTextBlockStyle}" />
-            <TextBlock Text="{x:Bind ViewModel.Update.LastCheckText, Mode=OneWay}"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Opacity="0.6" />
-            <ToggleSwitch Header="Automatically check for updates on startup"
-                          IsOn="{x:Bind ViewModel.AutoCheckForUpdates, Mode=TwoWay}" />
-            <StackPanel Orientation="Horizontal" Spacing="8">
-                <Button Content="Check now"
-                        Command="{x:Bind ViewModel.Update.CheckNowCommand}"
-                        IsEnabled="{x:Bind ViewModel.Update.IsBusy, Mode=OneWay, Converter={StaticResource InverseBoolConverter}, FallbackValue=True}" />
-                <Button Content="Install update"
-                        Command="{x:Bind ViewModel.Update.InstallCommand}"
-                        Visibility="{x:Bind ViewModel.Update.IsUpdateAvailable, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
-                <Button Content="View release notes"
-                        Command="{x:Bind ViewModel.Update.OpenReleasePageCommand}"
-                        Visibility="{x:Bind ViewModel.Update.IsUpdateAvailable, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
-                <ProgressRing IsActive="{x:Bind ViewModel.Update.IsBusy, Mode=OneWay}"
-                              Width="20" Height="20" />
-            </StackPanel>
-            <TextBlock Text="{x:Bind ViewModel.Update.Status, Mode=OneWay}"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Opacity="0.7" />
-            <ProgressBar Minimum="0" Maximum="1"
-                         Value="{x:Bind ViewModel.Update.DownloadProgress, Mode=OneWay}"
-                         Visibility="{x:Bind ViewModel.Update.IsBusy, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+            <!-- General: appearance, tabs, terminal -->
+            <TabViewItem Header="General" IsClosable="False">
+                <ScrollViewer Style="{StaticResource TabContentScrollStyle}">
+                    <StackPanel Style="{StaticResource TabContentPanelStyle}">
+                        <TextBlock Text="Appearance" Style="{StaticResource SubtitleTextBlockStyle}" />
+                        <ComboBox Header="Theme"
+                                  SelectedIndex="{x:Bind ThemeIndex, Mode=TwoWay}"
+                                  Width="240">
+                            <ComboBoxItem Content="System default" />
+                            <ComboBoxItem Content="Light" />
+                            <ComboBoxItem Content="Dark" />
+                        </ComboBox>
 
-            <TextBlock Text="Backup &amp; Restore" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
-            <TextBlock TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}">
-                Export your connections, credentials, SSH keys, and VPN tunnels to a JSON file,
-                or restore a backup taken from another installation. Existing items with the
-                same ID are kept; the import never overwrites.
-            </TextBlock>
-            <StackPanel Orientation="Horizontal" Spacing="8">
-                <Button Content="Export backup..."
-                        Command="{x:Bind ViewModel.ExportBackupCommand}" />
-                <Button Content="Import backup..."
-                        Command="{x:Bind ViewModel.ImportBackupCommand}" />
-            </StackPanel>
+                        <TextBlock Text="Tabs" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
+                        <ToggleSwitch Header="Confirm before closing a connected tab"
+                                      IsOn="{x:Bind ViewModel.ConfirmOnTabClose, Mode=TwoWay}" />
 
-            <TextBlock Text="AI agent control (MCP server)" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
-            <TextBlock TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}">
-                Run a local MCP server so an AI agent (e.g. Claude) can control your already-open
-                SSH sessions — list them, run commands, type input, and read the terminal. The
-                server listens on localhost only and requires the bearer token below. The first
-                time an agent touches a session, Wormhole asks you to approve it.
-            </TextBlock>
-            <ToggleSwitch Header="Enable MCP server"
-                          IsOn="{x:Bind ViewModel.EnableMcpServer, Mode=TwoWay}" />
-            <NumberBox Header="Port"
-                       Value="{x:Bind ViewModel.McpServerPort, Mode=TwoWay}"
-                       SpinButtonPlacementMode="Inline"
-                       Minimum="1" Maximum="65535"
-                       Width="200"
-                       HorizontalAlignment="Left"
-                       IsEnabled="{x:Bind ViewModel.EnableMcpServer, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
-            <TextBlock Text="{x:Bind ViewModel.McpStatus, Mode=OneWay}"
-                       Style="{StaticResource CaptionTextBlockStyle}"
-                       Opacity="0.7" />
-            <StackPanel Orientation="Horizontal" Spacing="8">
-                <TextBox Header="Endpoint"
-                         Text="{x:Bind ViewModel.McpEndpoint, Mode=OneWay}"
-                         IsReadOnly="True" IsSpellCheckEnabled="False"
-                         Width="300" />
-                <Button Content="Copy" VerticalAlignment="Bottom"
-                        Command="{x:Bind ViewModel.CopyMcpEndpointCommand}" />
-            </StackPanel>
-            <StackPanel Orientation="Horizontal" Spacing="8">
-                <TextBox Header="Bearer token"
-                         Text="{x:Bind ViewModel.McpToken, Mode=OneWay}"
-                         IsReadOnly="True" IsSpellCheckEnabled="False"
-                         PlaceholderText="•••••••• (hidden — click Reveal)"
-                         Width="380" />
-                <Button Content="Reveal / hide" VerticalAlignment="Bottom"
-                        Command="{x:Bind ViewModel.RevealMcpTokenCommand}" />
-                <Button Content="Copy" VerticalAlignment="Bottom"
-                        Command="{x:Bind ViewModel.CopyMcpTokenCommand}" />
-                <Button Content="Regenerate" VerticalAlignment="Bottom"
-                        Command="{x:Bind ViewModel.RegenerateMcpTokenCommand}" />
-            </StackPanel>
+                        <TextBlock Text="Terminal" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
+                        <ToggleSwitch Header="Auto-copy selection to clipboard"
+                                      IsOn="{x:Bind ViewModel.AutoCopyOnSelect, Mode=TwoWay}" />
+                    </StackPanel>
+                </ScrollViewer>
+            </TabViewItem>
 
-            <ComboBox Header="Client"
-                      SelectedIndex="{x:Bind ViewModel.McpClientIndex, Mode=TwoWay}"
-                      Width="240" HorizontalAlignment="Left" Margin="0,4,0,0">
-                <ComboBoxItem Content="Claude Code CLI" />
-                <ComboBoxItem Content="Claude Desktop" />
-                <ComboBoxItem Content="Codex" />
-            </ComboBox>
-            <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" TextWrapping="Wrap"
-                       Text="{x:Bind ViewModel.McpConfigCaption, Mode=OneWay}" />
-            <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"
-                       Text="Reveal the token first to include it in the box below, or just use Copy config which always copies the real token." />
-            <TextBox Header="{x:Bind ViewModel.McpConfigLabel, Mode=OneWay}"
-                     Text="{x:Bind ViewModel.McpConfigJson, Mode=OneWay}"
-                     IsReadOnly="True" IsSpellCheckEnabled="False"
-                     AcceptsReturn="True" TextWrapping="NoWrap"
-                     FontFamily="Consolas" FontSize="12"
-                     Height="240" Width="520"
-                     HorizontalAlignment="Left"
-                     ScrollViewer.HorizontalScrollBarVisibility="Auto"
-                     ScrollViewer.VerticalScrollBarVisibility="Auto" />
-            <Button Content="Copy config"
-                    HorizontalAlignment="Left"
-                    Command="{x:Bind ViewModel.CopyMcpConfigCommand}" />
-        </StackPanel>
-    </ScrollViewer>
+            <!-- Updates -->
+            <TabViewItem Header="Updates" IsClosable="False">
+                <ScrollViewer Style="{StaticResource TabContentScrollStyle}">
+                    <StackPanel Style="{StaticResource TabContentPanelStyle}">
+                        <TextBlock Text="{x:Bind ViewModel.Update.CurrentVersionText, Mode=OneWay}"
+                                   Style="{StaticResource BodyTextBlockStyle}" />
+                        <TextBlock Text="{x:Bind ViewModel.Update.LastCheckText, Mode=OneWay}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Opacity="0.6" />
+                        <ToggleSwitch Header="Automatically check for updates on startup"
+                                      IsOn="{x:Bind ViewModel.AutoCheckForUpdates, Mode=TwoWay}" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Content="Check now"
+                                    Command="{x:Bind ViewModel.Update.CheckNowCommand}"
+                                    IsEnabled="{x:Bind ViewModel.Update.IsBusy, Mode=OneWay, Converter={StaticResource InverseBoolConverter}, FallbackValue=True}" />
+                            <Button Content="Install update"
+                                    Command="{x:Bind ViewModel.Update.InstallCommand}"
+                                    Visibility="{x:Bind ViewModel.Update.IsUpdateAvailable, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                            <Button Content="View release notes"
+                                    Command="{x:Bind ViewModel.Update.OpenReleasePageCommand}"
+                                    Visibility="{x:Bind ViewModel.Update.IsUpdateAvailable, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                            <ProgressRing IsActive="{x:Bind ViewModel.Update.IsBusy, Mode=OneWay}"
+                                          Width="20" Height="20" />
+                        </StackPanel>
+                        <TextBlock Text="{x:Bind ViewModel.Update.Status, Mode=OneWay}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Opacity="0.7" />
+                        <ProgressBar Minimum="0" Maximum="1"
+                                     Value="{x:Bind ViewModel.Update.DownloadProgress, Mode=OneWay}"
+                                     Visibility="{x:Bind ViewModel.Update.IsBusy, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                    </StackPanel>
+                </ScrollViewer>
+            </TabViewItem>
+
+            <!-- Backup & Restore -->
+            <TabViewItem Header="Backup &amp; Restore" IsClosable="False">
+                <ScrollViewer Style="{StaticResource TabContentScrollStyle}">
+                    <StackPanel Style="{StaticResource TabContentPanelStyle}">
+                        <TextBlock TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}">
+                            Export your connections, credentials, SSH keys, and VPN tunnels to a JSON file,
+                            or restore a backup taken from another installation. Existing items with the
+                            same ID are kept; the import never overwrites.
+                        </TextBlock>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Content="Export backup..."
+                                    Command="{x:Bind ViewModel.ExportBackupCommand}" />
+                            <Button Content="Import backup..."
+                                    Command="{x:Bind ViewModel.ImportBackupCommand}" />
+                        </StackPanel>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabViewItem>
+
+            <!-- AI agent control (MCP server) -->
+            <TabViewItem Header="AI Agent (MCP)" IsClosable="False">
+                <ScrollViewer Style="{StaticResource TabContentScrollStyle}">
+                    <StackPanel Style="{StaticResource TabContentPanelStyle}">
+                        <TextBlock TextWrapping="Wrap" Style="{StaticResource BodyTextBlockStyle}">
+                            Run a local MCP server so an AI agent (e.g. Claude) can control your already-open
+                            SSH sessions — list them, run commands, type input, and read the terminal. The
+                            server listens on localhost only and requires the bearer token below. The first
+                            time an agent touches a session, Wormhole asks you to approve it.
+                        </TextBlock>
+                        <ToggleSwitch Header="Enable MCP server"
+                                      IsOn="{x:Bind ViewModel.EnableMcpServer, Mode=TwoWay}" />
+                        <NumberBox Header="Port"
+                                   Value="{x:Bind ViewModel.McpServerPort, Mode=TwoWay}"
+                                   SpinButtonPlacementMode="Inline"
+                                   Minimum="1" Maximum="65535"
+                                   Width="200"
+                                   HorizontalAlignment="Left"
+                                   IsEnabled="{x:Bind ViewModel.EnableMcpServer, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
+                        <TextBlock Text="{x:Bind ViewModel.McpStatus, Mode=OneWay}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Opacity="0.7" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBox Header="Endpoint"
+                                     Text="{x:Bind ViewModel.McpEndpoint, Mode=OneWay}"
+                                     IsReadOnly="True" IsSpellCheckEnabled="False"
+                                     Width="300" />
+                            <Button Content="Copy" VerticalAlignment="Bottom"
+                                    Command="{x:Bind ViewModel.CopyMcpEndpointCommand}" />
+                        </StackPanel>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <TextBox Header="Bearer token"
+                                     Text="{x:Bind ViewModel.McpToken, Mode=OneWay}"
+                                     IsReadOnly="True" IsSpellCheckEnabled="False"
+                                     PlaceholderText="•••••••• (hidden — click Reveal)"
+                                     Width="380" />
+                            <Button Content="Reveal / hide" VerticalAlignment="Bottom"
+                                    Command="{x:Bind ViewModel.RevealMcpTokenCommand}" />
+                            <Button Content="Copy" VerticalAlignment="Bottom"
+                                    Command="{x:Bind ViewModel.CopyMcpTokenCommand}" />
+                            <Button Content="Regenerate" VerticalAlignment="Bottom"
+                                    Command="{x:Bind ViewModel.RegenerateMcpTokenCommand}" />
+                        </StackPanel>
+
+                        <ComboBox Header="Client"
+                                  SelectedIndex="{x:Bind ViewModel.McpClientIndex, Mode=TwoWay}"
+                                  Width="240" HorizontalAlignment="Left" Margin="0,4,0,0">
+                            <ComboBoxItem Content="Claude Code CLI" />
+                            <ComboBoxItem Content="Claude Desktop" />
+                            <ComboBoxItem Content="Codex" />
+                        </ComboBox>
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" TextWrapping="Wrap"
+                                   Text="{x:Bind ViewModel.McpConfigCaption, Mode=OneWay}" />
+                        <TextBlock Style="{StaticResource BodyTextBlockStyle}" TextWrapping="Wrap"
+                                   Text="Reveal the token first to include it in the box below, or just use Copy config which always copies the real token." />
+                        <TextBox Header="{x:Bind ViewModel.McpConfigLabel, Mode=OneWay}"
+                                 Text="{x:Bind ViewModel.McpConfigJson, Mode=OneWay}"
+                                 IsReadOnly="True" IsSpellCheckEnabled="False"
+                                 AcceptsReturn="True" TextWrapping="NoWrap"
+                                 FontFamily="Consolas" FontSize="12"
+                                 Height="240" Width="520"
+                                 HorizontalAlignment="Left"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                                 ScrollViewer.VerticalScrollBarVisibility="Auto" />
+                        <Button Content="Copy config"
+                                HorizontalAlignment="Left"
+                                Command="{x:Bind ViewModel.CopyMcpConfigCommand}" />
+                    </StackPanel>
+                </ScrollViewer>
+            </TabViewItem>
+        </TabView>
+    </Grid>
 </Page>
