@@ -218,18 +218,30 @@ public partial class SettingsViewModel : ObservableObject
     // Codex consumes HTTP natively but is configured in TOML.
     private static string BuildConfig(McpClient client, string endpoint, string token) => client switch
     {
-        // Claude Desktop: stdio only → mcp-remote bridge. mcp-remote header form is "Name:Value".
+        // Claude Desktop is stdio-only → mcp-remote bridge. Two Windows quirks to dodge:
+        //  1. A bare "npx" command is resolved by Claude Desktop to its spaced full path
+        //     (C:\Program Files\nodejs\npx.cmd) and run unquoted via cmd /C, which breaks at the
+        //     space ("'C:\Program' is not recognized"). Invoking through "cmd /c npx ..." sidesteps
+        //     it: cmd.exe has no spaces, and the inner cmd resolves the bare "npx" from PATH.
+        //  2. Spaces inside args also get mangled, so the bearer header goes through an env var —
+        //     mcp-remote substitutes ${WORMHOLE_MCP_TOKEN} and the space lives in the env value,
+        //     never on the command line. (mcp-remote's documented Windows workaround.)
         McpClient.ClaudeDesktop =>
             "{\n" +
             "  \"mcpServers\": {\n" +
             "    \"wormhole\": {\n" +
-            "      \"command\": \"npx\",\n" +
+            "      \"command\": \"cmd\",\n" +
             "      \"args\": [\n" +
+            "        \"/c\",\n" +
+            "        \"npx\",\n" +
             "        \"mcp-remote@latest\",\n" +
             $"        \"{endpoint}\",\n" +
             "        \"--header\",\n" +
-            $"        \"Authorization:Bearer {token}\"\n" +
-            "      ]\n" +
+            "        \"Authorization:${WORMHOLE_MCP_TOKEN}\"\n" +
+            "      ],\n" +
+            "      \"env\": {\n" +
+            $"        \"WORMHOLE_MCP_TOKEN\": \"Bearer {token}\"\n" +
+            "      }\n" +
             "    }\n" +
             "  }\n" +
             "}",
