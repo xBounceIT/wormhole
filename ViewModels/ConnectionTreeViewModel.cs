@@ -294,6 +294,24 @@ public partial class ConnectionTreeViewModel : ObservableObject
     }
 
     [RelayCommand]
+    private async Task Duplicate(TreeNodeViewModel? clicked)
+    {
+        if (clicked is null || clicked.Kind != NodeKind.Connection) return;
+
+        // Copy the node's OWN fields (not the inheritance-resolved profile) so the duplicate
+        // inherits from its parent exactly as the source does. CredentialId / RdpGatewayCredentialId /
+        // TunnelConfigId are re-used by design — credentials and tunnel configs are a shared pool
+        // referenced by id, so there are no secrets to copy.
+        var source = clicked.Node;
+        var copy = source.Clone();
+        copy.Id = Guid.NewGuid();
+        copy.Name = $"{source.Name} (copy)";
+        copy.SortOrder = NextSortOrder(source.ParentId);
+
+        await SafeAddAsync(copy);
+    }
+
+    [RelayCommand]
     private void ExpandAll() => SetExpandedRecursive(Roots, true);
 
     [RelayCommand]

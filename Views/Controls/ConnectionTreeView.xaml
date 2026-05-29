@@ -144,6 +144,13 @@
                                         <FontIcon Glyph="&#xE7B3;" />
                                     </MenuFlyoutItem.Icon>
                                 </MenuFlyoutItem>
+                                <MenuFlyoutItem Text="Duplicate connection"
+                                                Click="OnDuplicateItemClick"
+                                                Visibility="{x:Bind IsConnection, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE8C8;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
                                 <MenuFlyoutItem Text="Edit"
                                                 Click="OnEditItemClick">
                                     <MenuFlyoutItem.Icon>

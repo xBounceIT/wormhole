@@ -391,6 +391,70 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Duplicate_Connection_CopiesFieldsWithSuffix()
+    {
+        var credentialId = Guid.NewGuid();
+        var tunnelId = Guid.NewGuid();
+        var node = MakeConnectionDraft("prod-web", ProtocolType.Rdp, "host.example.com", 3389, "alice");
+        node.CredentialId = credentialId;
+        node.TunnelConfigId = tunnelId;
+        node.TunnelEnabled = true;
+        await _repo.AddAsync(node);
+
+        var vm = CreateVm();
+        await vm.RefreshAsync();
+
+        await vm.DuplicateCommand.ExecuteAsync(vm.Roots.Single());
+
+        var rows = await _repo.GetAllAsync();
+        Assert.Equal(2, rows.Count);
+        var copy = rows.Single(r => r.Id != node.Id);
+        Assert.Equal("prod-web (copy)", copy.Name);
+        Assert.Equal(node.ParentId, copy.ParentId);
+        Assert.Equal(ProtocolType.Rdp, copy.Protocol);
+        Assert.Equal("host.example.com", copy.Host);
+        Assert.Equal(3389, copy.Port);
+        Assert.Equal("alice", copy.Username);
+        Assert.Equal(credentialId, copy.CredentialId);
+        Assert.Equal(tunnelId, copy.TunnelConfigId);
+        Assert.True(copy.TunnelEnabled);
+        Assert.Equal(2, vm.Roots.Count);
+    }
+
+    [Fact]
+    public async Task Duplicate_NestedConnection_StaysInSameFolder()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Parent";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var folder = vm.Roots.Single();
+        dialog.EditConnectionResult = MakeConnectionDraft("leaf", ProtocolType.Ssh, "host", 22, "alice");
+        await vm.AddConnectionCommand.ExecuteAsync(folder);
+
+        await vm.DuplicateCommand.ExecuteAsync(folder.Children.Single());
+
+        var copy = (await _repo.GetAllAsync()).Single(n => n.Name == "leaf (copy)");
+        Assert.Equal(folder.Node.Id, copy.ParentId);
+        Assert.Equal(2, folder.Children.Count);
+    }
+
+    [Fact]
+    public async Task Duplicate_OnFolder_IsNoOp()
+    {
+        var dialog = new FakeDialogService { TextPromptResult = "Linux" };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+        await vm.AddFolderCommand.ExecuteAsync(null);
+
+        await vm.DuplicateCommand.ExecuteAsync(vm.Roots.Single());
+
+        Assert.Single(await _repo.GetAllAsync());
+    }
+
+    [Fact]
     public async Task AddConnection_NullPortAndUsername_StoredAsNull()
     {
         var dialog = new FakeDialogService
