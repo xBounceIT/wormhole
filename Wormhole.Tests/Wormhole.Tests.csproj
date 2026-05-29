@@ -123,7 +123,6 @@
     <Compile Include="..\ViewModels\Sessions\SessionTabViewModel.cs" Link="ViewModels\Sessions\SessionTabViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\SshSessionViewModel.cs" Link="ViewModels\Sessions\SshSessionViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\RdpSessionViewModel.cs" Link="ViewModels\Sessions\RdpSessionViewModel.cs" />
-    <Compile Include="..\ViewModels\Sessions\SftpSessionViewModel.cs" Link="ViewModels\Sessions\SftpSessionViewModel.cs" />
     <Compile Include="..\Services\IRdpSessionService.cs" Link="Services\IRdpSessionService.cs" />
     <Compile Include="..\Services\Rdp\IRdpCrashSentinelService.cs" Link="Services\Rdp\IRdpCrashSentinelService.cs" />
     <Compile Include="..\Services\Rdp\RdpCrashSentinelService.cs" Link="Services\Rdp\RdpCrashSentinelService.cs" />

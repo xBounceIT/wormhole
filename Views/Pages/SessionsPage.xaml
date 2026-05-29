@@ -33,7 +33,6 @@
         <sessionViews:SessionContentSelector x:Key="SessionContentSelector"
                                              SshTemplate="{StaticResource SshSessionTemplate}"
                                              RdpTemplate="{StaticResource RdpSessionTemplate}"
-                                             SftpTemplate="{StaticResource ProtocolPlaceholderTemplate}"
                                              PlaceholderTemplate="{StaticResource ProtocolPlaceholderTemplate}" />
     </Page.Resources>
 

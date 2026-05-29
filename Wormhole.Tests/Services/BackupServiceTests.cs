@@ -509,6 +509,39 @@ public sealed class BackupServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ImportAsync_NormalizesUnsupportedProtocolToSsh()
+    {
+        // A backup written by an older build serialized SFTP connections as protocol 2 (the enum
+        // value before SFTP was removed as a standalone session protocol). Migration 0009 repairs
+        // such rows in the live DB, but it runs at startup — before an on-demand import — so the
+        // import path must reclassify the value itself; otherwise the node imports as the undefined
+        // (ProtocolType)2 and throws "unknown protocol" when opened.
+        var dst = await CreateEnvAsync();
+        var docJson = $$"""
+            {
+              "schemaVersion": 1,
+              "encryption": "none",
+              "exportedAt": "{{DateTimeOffset.UtcNow:O}}",
+              "payload": {
+                "nodes": [
+                  { "id": "{{Guid.NewGuid()}}", "name": "legacy-sftp", "kind": 1, "sortOrder": 0, "protocol": 2, "host": "h", "port": 22, "createdAt": "{{DateTime.UtcNow:O}}", "updatedAt": "{{DateTime.UtcNow:O}}" }
+                ],
+                "credentials": [], "tunnels": [], "passwords": [], "privateKeys": [], "tunnelPayloads": []
+              }
+            }
+            """;
+        var path = Path.Combine(_scratchDir, "legacy-sftp-protocol.json");
+        await File.WriteAllTextAsync(path, docJson, Encoding.UTF8);
+
+        var result = await dst.Service.ImportAsync(path, null);
+
+        Assert.Equal(1, result.NodesImported);
+        Assert.Contains(result.Warnings, w => w.Contains("unsupported protocol", StringComparison.OrdinalIgnoreCase));
+        var node = (await dst.Connections.GetAllAsync()).Single();
+        Assert.Equal(ProtocolType.Ssh, node.Protocol);
+    }
+
+    [Fact]
     public async Task ImportAsync_BreaksParentChildCycleByRerooting()
     {
         // Two nodes A and B with A.ParentId=B and B.ParentId=A. The topological pass must

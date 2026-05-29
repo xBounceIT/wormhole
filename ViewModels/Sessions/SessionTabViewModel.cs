@@ -84,8 +84,7 @@ public abstract partial class SessionTabViewModel : ObservableObject
     /// <summary>
     /// Tear down all session-owned resources (sockets, ActiveX HWNDs, background pumps).
     /// Called from <c>SessionsPage.SessionTabs_TabCloseRequested</c> when the user closes the
-    /// tab. Default implementation is a no-op so trivial sessions (SFTP placeholder) don't
-    /// have to override.
+    /// tab. Default implementation is a no-op so trivial sessions don't have to override.
     /// </summary>
     public virtual ValueTask CloseAsync() => ValueTask.CompletedTask;
 

@@ -26,7 +26,6 @@ public sealed class SessionTabFactory : ISessionTabFactory
         {
             ProtocolType.Ssh => _serviceProvider.GetRequiredService<SshSessionViewModel>(),
             ProtocolType.Rdp => _serviceProvider.GetRequiredService<RdpSessionViewModel>(),
-            ProtocolType.Sftp => _serviceProvider.GetRequiredService<SftpSessionViewModel>(),
             _ => throw new ArgumentOutOfRangeException(nameof(profile),
                 $"Unknown protocol {profile.Protocol}.")
         };

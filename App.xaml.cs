@@ -237,7 +237,6 @@ public partial class App : Application
         services.AddTransient<FolderEditorViewModel>();
         services.AddTransient<SshSessionViewModel>();
         services.AddTransient<RdpSessionViewModel>();
-        services.AddTransient<SftpSessionViewModel>();
         services.AddTransient<MRemoteNgImportDialogViewModel>();
         services.AddTransient<BackupExportDialogViewModel>();
         services.AddTransient<BackupImportDialogViewModel>();

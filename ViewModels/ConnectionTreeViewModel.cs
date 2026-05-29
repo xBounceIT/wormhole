@@ -173,8 +173,8 @@ public partial class ConnectionTreeViewModel : ObservableObject
             }
 
             var profile = _inheritanceResolver.Resolve(node, _lastSnapshotById);
-            // Factory dispatches by protocol: SSH gets the real terminal, RDP/SFTP get
-            // placeholder tabs whose DataTemplate renders the "not implemented yet" notice.
+            // Factory dispatches by protocol to the matching session tab: the SSH terminal
+            // or the RDP surface.
             _tabFactory.Open(profile);
         }
         catch (Exception ex)
@@ -769,7 +769,6 @@ public sealed partial class TreeNodeViewModel : ObservableObject
         {
             ProtocolType.Ssh => Glyphs.Ssh,
             ProtocolType.Rdp => Glyphs.Rdp,
-            ProtocolType.Sftp => Glyphs.Sftp,
             _ => Glyphs.Generic,
         };
 

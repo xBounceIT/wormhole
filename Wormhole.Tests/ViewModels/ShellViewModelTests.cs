@@ -61,7 +61,7 @@ public class ShellViewModelTests
 
         public int CloseCount { get; private set; }
         public bool ThrowOnClose { get; init; }
-        public override ProtocolType Protocol => ProtocolType.Sftp;
+        public override ProtocolType Protocol => ProtocolType.Ssh;
 
         public override ValueTask CloseAsync()
         {

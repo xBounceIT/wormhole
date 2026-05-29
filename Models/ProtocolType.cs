@@ -4,5 +4,4 @@ public enum ProtocolType
 {
     Ssh,
     Rdp,
-    Sftp,
 }

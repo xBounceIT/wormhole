@@ -173,9 +173,9 @@ public sealed class SshSessionViewModelTests
     }
 
     [Fact]
-    public void CanReconnect_IsFalse_ForSftpSession()
+    public void CanReconnect_IsFalse_ByDefault()
     {
-        var vm = new SftpSessionViewModel();
+        var vm = new BareSessionTab();
 
         Assert.False(vm.CanReconnect);
         Assert.Null(vm.ReconnectCommand);
@@ -247,10 +247,17 @@ public sealed class SshSessionViewModelTests
     }
 
     [Fact]
-    public void CanOpenFileTransfer_IsFalse_ForSftpSession()
+    public void CanOpenFileTransfer_IsFalse_ByDefault()
     {
-        var vm = new SftpSessionViewModel();
+        var vm = new BareSessionTab();
         Assert.False(vm.CanOpenFileTransfer);
+    }
+
+    // Minimal concrete SessionTabViewModel that overrides nothing, so the base-class
+    // defaults (no reconnect command, no file-transfer entry) can be asserted directly.
+    private sealed class BareSessionTab : SessionTabViewModel
+    {
+        public override ProtocolType Protocol => ProtocolType.Ssh;
     }
 
     // === SFTP pre-warm =====================================================

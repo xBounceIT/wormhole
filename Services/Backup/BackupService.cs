@@ -824,6 +824,17 @@ public sealed class BackupService : IBackupService
         IReadOnlyDictionary<Guid, ConnectionNode> nodesById,
         BackupImportResult result)
     {
+        // A protocol value that isn't a defined ProtocolType member can only come from an older
+        // backup — SFTP was protocol 2 before it was removed as a standalone session protocol.
+        // Migration 0009 reclassifies such rows (2 -> Ssh) in the live DB, but it runs at startup,
+        // before an on-demand import, so legacy values would otherwise slip in here and later
+        // throw "unknown protocol" on open. Normalize to SSH to match the migration's intent.
+        if (node.Protocol is { } protocol && !Enum.IsDefined(protocol))
+        {
+            result.Warnings.Add(
+                $"Node '{node.Name}' uses an unsupported protocol ({(int)protocol}); imported as SSH.");
+            node.Protocol = ProtocolType.Ssh;
+        }
         if (node.CredentialId is Guid credId && !resolvableCredentialIds.Contains(credId))
         {
             result.Warnings.Add(

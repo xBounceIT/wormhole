@@ -49,9 +49,8 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     /// <summary>
     /// Filtered view over <see cref="_allCredentials"/> for the current <see cref="Protocol"/>:
-    /// SFTP connections show SSH credentials, SSH shows SSH, RDP shows RDP — and RDP excludes
-    /// <see cref="CredentialKind.SshKey"/> since the RDP host only consumes the password secret.
-    /// Rebuilt on load and whenever Protocol changes.
+    /// SSH shows SSH, RDP shows RDP — and RDP excludes <see cref="CredentialKind.SshKey"/> since
+    /// the RDP host only consumes the password secret. Rebuilt on load and whenever Protocol changes.
     /// </summary>
     public BulkObservableCollection<CredentialProfile> AvailableCredentials { get; } = new();
 
@@ -416,7 +415,6 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// </summary>
     private void RebuildAvailableCredentials()
     {
-        var credentialProtocol = CredentialProtocolFor(Protocol);
         var connectionIsRdp = Protocol == ProtocolType.Rdp;
 
         var available = new List<CredentialProfile>(_allCredentials.Count + 3)
@@ -425,7 +423,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
         };
         foreach (var c in _allCredentials)
         {
-            if (c.Protocol != credentialProtocol) continue;
+            if (c.Protocol != Protocol) continue;
             // RDP login only consumes the password secret — SSH-key credentials would force the
             // user into a misleading prompt path. Filter them out.
             if (connectionIsRdp && c.Kind == CredentialKind.SshKey) continue;
@@ -547,11 +545,6 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private static bool CredentialContains(string? haystack, string needle) =>
         haystack is not null && haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>SFTP connections reuse SSH credentials per the project's credential model
-    /// (the credential dialog doesn't even let users create SFTP-tagged credentials).</summary>
-    private static ProtocolType CredentialProtocolFor(ProtocolType connectionProtocol) =>
-        connectionProtocol == ProtocolType.Sftp ? ProtocolType.Ssh : connectionProtocol;
-
     partial void OnProtocolChanged(ProtocolType value)
     {
         // When the user explicitly switches the connection protocol, drop a previously-bound
@@ -559,9 +552,8 @@ public partial class ConnectionEditorViewModel : ObservableObject
         // a stale entry — would silently expose a protocol-incompatible binding on save.
         if (CredentialId is { } id && _allCredentialsById.TryGetValue(id, out var cred))
         {
-            var expectedProtocol = CredentialProtocolFor(value);
             var connectionIsRdp = value == ProtocolType.Rdp;
-            var stillCompatible = cred.Protocol == expectedProtocol
+            var stillCompatible = cred.Protocol == value
                 && (!connectionIsRdp || cred.Kind != CredentialKind.SshKey);
             if (!stillCompatible) CredentialId = null;
         }
