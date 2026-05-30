@@ -708,6 +708,44 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task PersistTreeStructure_MoveIntoFolderWithHost_RefreshesInheritedHostTooltip()
+    {
+        // Drag-drop mutates ParentId in place without reassigning Node, so the computed Host
+        // tooltip (one-way x:Bind) must be re-raised — including for descendants whose own
+        // ParentId is unchanged but whose inherited host changes because an ancestor moved.
+        var gateway = new ConnectionNode { Kind = NodeKind.Folder, Name = "gateway", Host = "g-host" };
+        await _repo.AddAsync(gateway);
+        var group = new ConnectionNode { Kind = NodeKind.Folder, Name = "group" };
+        await _repo.AddAsync(group);
+        var child = MakeConnectionDraft("web", ProtocolType.Ssh, "ignored", 22, "alice");
+        child.ParentId = group.Id;
+        child.Host = null;
+        await _repo.AddAsync(child);
+
+        var vm = CreateVm(new FakeDialogService());
+        await vm.RefreshAsync();
+
+        var gatewayVm = vm.Roots.Single(r => r.Name == "gateway");
+        var groupVm = vm.Roots.Single(r => r.Name == "group");
+        var childVm = groupVm.Children.Single();
+        Assert.Null(childVm.Host); // no host anywhere up the chain yet
+
+        var hostRaised = 0;
+        childVm.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(TreeNodeViewModel.Host)) hostRaised++;
+        };
+
+        // Move "group" (and its child) under "gateway", which carries the inherited host.
+        vm.Roots.Remove(groupVm);
+        gatewayVm.Children.Add(groupVm);
+        await vm.PersistTreeStructureAsync();
+
+        Assert.Equal("g-host", childVm.Host);
+        Assert.True(hostRaised > 0, "Host PropertyChanged should fire for the moved subtree.");
+    }
+
+    [Fact]
     public async Task PersistTreeStructure_ReorderSiblings_UpdatesSortOrder()
     {
         var dialog = new FakeDialogService();

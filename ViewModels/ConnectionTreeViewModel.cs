@@ -434,12 +434,27 @@ public partial class ConnectionTreeViewModel : ObservableObject
         {
             await _repository.UpdateManyAsync(updates);
             SetSnapshot(await _repository.GetAllAsync());
+            // A move re-parents the inheritance chain for the dropped node AND its whole
+            // subtree (a descendant's own ParentId is unchanged, yet its inherited host can
+            // change because an ancestor moved). This path mutates Node in place without
+            // reassigning it, so raise Host across the tree to refresh the one-way tooltip
+            // bindings instead of waiting for the next full reload.
+            NotifyHostForSubtree(Roots);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to persist drag-drop reorder");
             await _dialog.ShowMessageAsync("Couldn't save", ex.Message);
             await RefreshAsync();
+        }
+    }
+
+    private static void NotifyHostForSubtree(IEnumerable<TreeNodeViewModel> level)
+    {
+        foreach (var n in level)
+        {
+            n.NotifyHostChanged();
+            NotifyHostForSubtree(n.Children);
         }
     }
 
@@ -786,6 +801,11 @@ public sealed partial class TreeNodeViewModel : ObservableObject
     public string? Host => IsConnection
         ? (resolveEffectiveHost?.Invoke(Node) ?? Node.Host)
         : null;
+
+    // Re-evaluates the Host tooltip binding. Needed after a drag-drop changes the parent
+    // chain (which can change an inherited host) by mutating Node in place rather than
+    // reassigning it, so OnNodeChanged doesn't fire.
+    public void NotifyHostChanged() => OnPropertyChanged(nameof(Host));
 
     [ObservableProperty]
     private bool isExpanded;
