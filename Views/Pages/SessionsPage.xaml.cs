@@ -34,14 +34,45 @@ public sealed partial class SessionsPage : Page
 
     private async Task CloseTabAsync(SessionTabViewModel tab)
     {
-        try
+        // When the *active* tab is closed, move selection to its closest neighbour BEFORE
+        // removing it. Removing the selected item and letting TabView auto-pick a successor
+        // routes the new tab through a content-realization path that doesn't reliably
+        // re-Load its surface: the SSH session keeps running but the terminal's WebView2
+        // never rebinds, so it stays black until a full reconnect. Selecting the neighbour
+        // first drives the switch through the normal selection-change path (the same one a
+        // manual tab switch uses, which reattaches correctly), after which the closed tab is
+        // just a background tab whose removal no longer disturbs the visible surface.
+        // Only redirect when there's actually a neighbour to move to — closing the last
+        // tab leaves selection alone so removal can clear it (and show the empty state)
+        // without a transient blank-but-selected frame.
+        if (ReferenceEquals(ViewModel.SelectedTab, tab) && FindClosestTab(tab) is { } neighbour)
         {
-            await tab.CloseAsync();
+            ViewModel.SelectedTab = neighbour;
         }
-        finally
-        {
-            ViewModel.Tabs.Remove(tab);
-        }
+
+        // Remove the tab BEFORE awaiting its teardown. CloseAsync can take a noticeable
+        // amount of time (e.g. an SSH tab waiting on tunnel sidecar disposal), and while it
+        // runs the tab would otherwise linger in ViewModel.Tabs. A second close issued in
+        // that window could then redirect selection back onto this tab (or TabView could
+        // auto-select it), re-Loading its view after the session was nulled — which spins up
+        // an orphaned reconnection right before the tab is finally removed. Pulling it from
+        // the collection up front makes it unreachable for selection during teardown; the VM
+        // stays alive through the captured local, so CloseAsync still runs to completion.
+        ViewModel.Tabs.Remove(tab);
+        await tab.CloseAsync();
+    }
+
+    // The still-open tab nearest the one being closed: prefer the right neighbour, then the
+    // left, mirroring TabView's own "closest" heuristic. Null when <paramref name="tab"/> is
+    // the only tab, leaving the sessions surface empty.
+    private SessionTabViewModel? FindClosestTab(SessionTabViewModel tab)
+    {
+        var tabs = ViewModel.Tabs;
+        var index = tabs.IndexOf(tab);
+        if (index < 0) return null;
+        if (index + 1 < tabs.Count) return tabs[index + 1];
+        if (index - 1 >= 0) return tabs[index - 1];
+        return null;
     }
 
     private void OnTabDuplicateClick(object sender, RoutedEventArgs e)
