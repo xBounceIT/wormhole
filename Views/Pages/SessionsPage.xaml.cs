@@ -50,14 +50,16 @@ public sealed partial class SessionsPage : Page
             ViewModel.SelectedTab = neighbour;
         }
 
-        try
-        {
-            await tab.CloseAsync();
-        }
-        finally
-        {
-            ViewModel.Tabs.Remove(tab);
-        }
+        // Remove the tab BEFORE awaiting its teardown. CloseAsync can take a noticeable
+        // amount of time (e.g. an SSH tab waiting on tunnel sidecar disposal), and while it
+        // runs the tab would otherwise linger in ViewModel.Tabs. A second close issued in
+        // that window could then redirect selection back onto this tab (or TabView could
+        // auto-select it), re-Loading its view after the session was nulled — which spins up
+        // an orphaned reconnection right before the tab is finally removed. Pulling it from
+        // the collection up front makes it unreachable for selection during teardown; the VM
+        // stays alive through the captured local, so CloseAsync still runs to completion.
+        ViewModel.Tabs.Remove(tab);
+        await tab.CloseAsync();
     }
 
     // The still-open tab nearest the one being closed: prefer the right neighbour, then the
