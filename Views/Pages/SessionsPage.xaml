@@ -4,7 +4,8 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:sessions="using:Wormhole.ViewModels.Sessions"
-    xmlns:sessionViews="using:Wormhole.Views.Sessions">
+    xmlns:sessionViews="using:Wormhole.Views.Sessions"
+    NavigationCacheMode="Required">
 
     <Page.Resources>
         <DataTemplate x:Key="SshSessionTemplate" x:DataType="sessions:SshSessionViewModel">
