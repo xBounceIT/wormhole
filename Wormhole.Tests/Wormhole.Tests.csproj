@@ -91,6 +91,7 @@
     <Compile Include="..\Services\Ssh\SshCredentialResolver.cs" Link="Services\Ssh\SshCredentialResolver.cs" />
     <Compile Include="..\Services\Ssh\SshAutoSudoDriver.cs" Link="Services\Ssh\SshAutoSudoDriver.cs" />
     <Compile Include="..\Services\Ssh\ShellCommandRunner.cs" Link="Services\Ssh\ShellCommandRunner.cs" />
+    <Compile Include="..\Services\Ssh\ShellCommandPresentationFilter.cs" Link="Services\Ssh\ShellCommandPresentationFilter.cs" />
     <Compile Include="..\Services\Ssh\TerminalText.cs" Link="Services\Ssh\TerminalText.cs" />
     <Compile Include="..\Services\Ssh\IPrivateKeyInspector.cs" Link="Services\Ssh\IPrivateKeyInspector.cs" />
     <Compile Include="..\Services\ISessionTabFactory.cs" Link="Services\ISessionTabFactory.cs" />

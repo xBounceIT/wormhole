@@ -38,6 +38,9 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     private bool enableMcpServer;
 
+    [ObservableProperty]
+    private bool streamMcpCommandTyping;
+
     // double (not int) so it binds directly to NumberBox.Value.
     [ObservableProperty]
     private double mcpServerPort;
@@ -92,6 +95,7 @@ public partial class SettingsViewModel : ObservableObject
         autoCheckForUpdates = _settingsService.Current.AutoCheckForUpdates;
         autoCopyOnSelect = _settingsService.Current.AutoCopyOnSelect;
         enableMcpServer = _settingsService.Current.EnableMcpServer;
+        streamMcpCommandTyping = _settingsService.Current.StreamMcpCommandTyping;
         mcpServerPort = _settingsService.Current.McpServerPort;
         UpdateMcpStatus();
     }
@@ -117,6 +121,12 @@ public partial class SettingsViewModel : ObservableObject
     partial void OnAutoCopyOnSelectChanged(bool value)
     {
         _settingsService.Current.AutoCopyOnSelect = value;
+        _settingsService.Save();
+    }
+
+    partial void OnStreamMcpCommandTypingChanged(bool value)
+    {
+        _settingsService.Current.StreamMcpCommandTyping = value;
         _settingsService.Save();
     }
 

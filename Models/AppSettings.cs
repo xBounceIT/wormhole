@@ -18,6 +18,7 @@ public sealed class AppSettings
     // the bearer token is stored in Windows Credential Manager, not here.
     public bool EnableMcpServer { get; set; }
     public int McpServerPort { get; set; } = 8765;
+    public bool StreamMcpCommandTyping { get; set; } = true;
 }
 
 public enum ApplicationTheme

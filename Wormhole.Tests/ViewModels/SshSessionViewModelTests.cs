@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -626,6 +628,25 @@ public sealed class SshSessionViewModelTests
         Assert.Equal(1, dialog.ConfirmCount);
     }
 
+    [Fact]
+    public async Task RunCommandAsync_ReplayBufferShowsCleanCommandAndOutputWithoutMcpMarkers()
+    {
+        var (vm, session) = CreateConnectedVm();
+        session.EchoShellCommandWrites = true;
+        session.CommandOutput = "hello\r\n";
+
+        var result = await vm.RunCommandAsync("echo hello", TimeSpan.FromSeconds(5), CancellationToken.None);
+
+        Assert.Equal("hello", result.Output);
+        Assert.Equal(0, result.ExitCode);
+
+        var replay = Encoding.UTF8.GetString(vm.PeekReplayBufferForTesting());
+        Assert.Equal("echo hello\r\nhello\r\n", replay);
+        Assert.DoesNotContain("@@WHS", replay);
+        Assert.DoesNotContain("@@WHE", replay);
+        Assert.DoesNotContain("printf", replay);
+    }
+
     private static (SshSessionViewModel Vm, FakeSshSession Session) CreateConnectedVm()
     {
         var vm = CreateViewModel();
@@ -750,9 +771,14 @@ public sealed class SshSessionViewModelTests
 
     private sealed class FakeSshSession : ISshSession
     {
+        private static readonly Regex TokenRegex = new("[0-9a-f]{16}", RegexOptions.Compiled);
+
         public string? HostFingerprint { get; init; } = "SHA256:test";
 
         public int DisposeCount { get; private set; }
+        public bool EchoShellCommandWrites { get; set; }
+        public string CommandOutput { get; set; } = string.Empty;
+        public int CommandExitCode { get; set; }
 
         public event EventHandler<ReadOnlyMemory<byte>>? DataReceived;
         public event EventHandler? Closed;
@@ -761,14 +787,30 @@ public sealed class SshSessionViewModelTests
         {
         }
 
-        public Task WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default) =>
-            Task.CompletedTask;
+        public Task WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
+        {
+            if (!EchoShellCommandWrites) return Task.CompletedTask;
+
+            var payload = Encoding.UTF8.GetString(data.Span);
+            var match = TokenRegex.Match(payload);
+            if (!match.Success) return Task.CompletedTask;
+
+            var token = match.Value;
+            Emit(payload.Replace("\r", string.Empty) + "\r\n");
+            Emit($"@@WHS_{token}@@\r\n");
+            if (CommandOutput.Length > 0) Emit(CommandOutput);
+            Emit($"@@WHE_{token}_{CommandExitCode}@@\r\n");
+            return Task.CompletedTask;
+        }
 
         public Task ResizeAsync(uint columns, uint rows) =>
             Task.CompletedTask;
 
         public void RaiseData(params byte[] data) =>
             DataReceived?.Invoke(this, data);
+
+        private void Emit(string text) =>
+            DataReceived?.Invoke(this, Encoding.UTF8.GetBytes(text));
 
         public void RaiseClosed() =>
             Closed?.Invoke(this, EventArgs.Empty);

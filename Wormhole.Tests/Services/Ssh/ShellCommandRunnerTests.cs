@@ -107,6 +107,34 @@ public sealed class ShellCommandRunnerTests
         Assert.Equal(0, result.ExitCode);
     }
 
+    [Fact]
+    public async Task RunAsync_InvokesPresentationCallbackBeforeWritingPayload()
+    {
+        var session = new ScriptedSshSession { Output = "hi\r\n", ExitCode = 0 };
+        var runner = new ShellCommandRunner(session, NullLogger.Instance);
+        ShellCommandInvocation? seen = null;
+        Task BeforeWriteAsync(ShellCommandInvocation invocation, CancellationToken _)
+        {
+            seen = invocation;
+            Assert.Null(session.LastPayload);
+            return Task.CompletedTask;
+        }
+
+        var result = await runner.RunAsync(
+            "echo hi",
+            TimeSpan.FromSeconds(5),
+            1_000_000,
+            BeforeWriteAsync,
+            CancellationToken.None);
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.NotNull(seen);
+        Assert.Equal("echo hi", seen.Command);
+        Assert.Contains("eval 'echo hi'", seen.Payload);
+        Assert.StartsWith("@@WHS_", seen.StartMarker, StringComparison.Ordinal);
+        Assert.StartsWith("@@WHE_", seen.EndMarkerPrefix, StringComparison.Ordinal);
+    }
+
     /// <summary>
     /// Fake interactive shell: parses the runner's sentinel-wrapped payload, then replays a
     /// realistic terminal echo followed by the assembled start marker, the configured output,
