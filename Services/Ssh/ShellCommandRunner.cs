@@ -13,6 +13,12 @@ namespace Wormhole.Services.Ssh;
 /// </summary>
 public sealed record ShellCommandResult(string Output, int? ExitCode, bool TimedOut, bool Truncated);
 
+internal sealed record ShellCommandInvocation(
+    string Command,
+    string Payload,
+    string StartMarker,
+    string EndMarkerPrefix);
+
 /// <summary>
 /// "Option B": runs a command by driving an existing interactive <see cref="ISshSession"/> — the
 /// same shell the user sees — rather than opening a separate exec channel. Models the pattern of
@@ -56,10 +62,18 @@ internal sealed class ShellCommandRunner
         _logger = logger;
     }
 
+    public Task<ShellCommandResult> RunAsync(
+        string command,
+        TimeSpan timeout,
+        int maxCaptureChars,
+        CancellationToken cancellationToken)
+        => RunAsync(command, timeout, maxCaptureChars, beforeWriteAsync: null, cancellationToken);
+
     public async Task<ShellCommandResult> RunAsync(
         string command,
         TimeSpan timeout,
         int maxCaptureChars,
+        Func<ShellCommandInvocation, CancellationToken, Task>? beforeWriteAsync,
         CancellationToken cancellationToken)
     {
         _maxCapture = maxCaptureChars > 0 ? maxCaptureChars : DefaultMaxCaptureChars;
@@ -67,7 +81,8 @@ internal sealed class ShellCommandRunner
 
         var token = GenerateToken();
         var startMarker = $"@@WHS_{token}@@";
-        _endRegex = new Regex($@"@@WHE_{token}_(\d+)@@", RegexOptions.Compiled);
+        var endMarkerPrefix = $"@@WHE_{token}_";
+        _endRegex = new Regex($@"{Regex.Escape(endMarkerPrefix)}(\d+)@@\r?\n", RegexOptions.Compiled);
 
         // Run the command through `eval '<command>'` with POSIX single-quote escaping so the
         // marker bookkeeping that follows on the same physical line stays isolated from the
@@ -82,10 +97,16 @@ internal sealed class ShellCommandRunner
         var escapedCommand = command.Replace("'", "'\\''");
         var payload =
             $"printf '@@WHS_%s@@\\n' {token}; eval '{escapedCommand}'; __wh_rc=$?; printf '@@WHE_%s_%d@@\\n' {token} \"$__wh_rc\"\r";
+        var invocation = new ShellCommandInvocation(command, payload, startMarker, endMarkerPrefix);
 
         _session.DataReceived += OnDataReceived;
         try
         {
+            if (beforeWriteAsync is not null)
+            {
+                await beforeWriteAsync(invocation, cancellationToken).ConfigureAwait(false);
+            }
+
             await _session.WriteAsync(Encoding.UTF8.GetBytes(payload), cancellationToken).ConfigureAwait(false);
 
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);

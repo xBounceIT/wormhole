@@ -25,6 +25,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 #pragma warning restore CA1001
 {
     private static readonly TimeSpan RemoteOutputWaitDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan McpCommandTypingDelay = TimeSpan.FromMilliseconds(18);
+    private static readonly TimeSpan McpCommandTypingMaxDuration = TimeSpan.FromMilliseconds(2500);
 
     private readonly ISshSessionService _sshService;
     private readonly ISshCredentialResolver _credentialResolver;
@@ -52,6 +54,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private int _connectInFlight;
     private ITunnelInstance? _tunnel;
     private bool _reconnectRequestedWhileDetached;
+    private readonly object _mcpPresentationLock = new();
+    private ShellCommandPresentationFilter? _mcpPresentationFilter;
 
     // SFTP pre-warm: as soon as the shell session reaches Connected we open an SFTP
     // session in the background using the *same* creds the shell successfully used. The
@@ -510,7 +514,44 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         // MarkOutputReceived re-checks identity under the UI dispatcher.
         if (!ReferenceEquals(sourceSession, _session)) return;
 
+        var filtered = FilterMcpPresentation(data.Span);
+        if (filtered is null)
+        {
+            AppendVisibleTerminalData(data, sourceSession);
+        }
+        else if (filtered.Length > 0)
+        {
+            AppendVisibleTerminalData(filtered, sourceSession);
+        }
+    }
+
+    private byte[]? FilterMcpPresentation(ReadOnlySpan<byte> data)
+    {
+        lock (_mcpPresentationLock)
+        {
+            var filter = _mcpPresentationFilter;
+            if (filter is null) return null;
+
+            var visible = filter.Filter(data);
+            if (filter.IsComplete)
+            {
+                _mcpPresentationFilter = null;
+            }
+            return visible;
+        }
+    }
+
+    private void AppendVisibleTerminalText(string text, ISshSession? sourceSession = null)
+    {
+        if (string.IsNullOrEmpty(text)) return;
+        AppendVisibleTerminalData(System.Text.Encoding.UTF8.GetBytes(text), sourceSession);
+    }
+
+    private void AppendVisibleTerminalData(ReadOnlyMemory<byte> data, ISshSession? sourceSession = null)
+    {
+        if (data.Length == 0) return;
         _replayBuffer.Append(data.Span);
+        _bridge?.AppendOutput(data);
 
         if (HasReceivedOutput) return;
 
@@ -585,6 +626,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     {
         CancelRemoteOutputWaitTimer();
         IsWaitingForRemoteOutput = false;
+        ClearMcpCommandPresentation();
 
         // Tear the Auto sudo driver down first so it unsubscribes from DataReceived before the
         // session is disposed (and drops its in-memory copy of the password).
@@ -695,12 +737,68 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         try
         {
             var runner = new ShellCommandRunner(session, _loggerFactory.CreateLogger<ShellCommandRunner>());
-            return await runner.RunAsync(command, timeout, 1_000_000, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                return await runner.RunAsync(
+                    command,
+                    timeout,
+                    1_000_000,
+                    BeginMcpCommandPresentationAsync,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                ClearMcpCommandPresentation();
+            }
         }
         finally
         {
             _commandGate.Release();
         }
+    }
+
+    private async Task BeginMcpCommandPresentationAsync(
+        ShellCommandInvocation invocation,
+        CancellationToken cancellationToken)
+    {
+        await RenderMcpCommandAsync(invocation.Command, cancellationToken).ConfigureAwait(false);
+
+        lock (_mcpPresentationLock)
+        {
+            _mcpPresentationFilter = new ShellCommandPresentationFilter(
+                invocation.StartMarker,
+                invocation.EndMarkerPrefix);
+        }
+    }
+
+    private void ClearMcpCommandPresentation()
+    {
+        lock (_mcpPresentationLock)
+        {
+            _mcpPresentationFilter = null;
+        }
+    }
+
+    private async Task RenderMcpCommandAsync(string command, CancellationToken cancellationToken)
+    {
+        var lineEnding = "\r\n";
+        if (_bridge is null || !_settingsService.Current.StreamMcpCommandTyping || command.Length == 0)
+        {
+            AppendVisibleTerminalText(command + lineEnding, _session);
+            return;
+        }
+
+        var maxSteps = Math.Max(1, (int)(McpCommandTypingMaxDuration.TotalMilliseconds / McpCommandTypingDelay.TotalMilliseconds));
+        var chunkSize = Math.Max(1, (command.Length + maxSteps - 1) / maxSteps);
+        for (var offset = 0; offset < command.Length; offset += chunkSize)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var length = Math.Min(chunkSize, command.Length - offset);
+            AppendVisibleTerminalText(command.Substring(offset, length), _session);
+            await Task.Delay(McpCommandTypingDelay, cancellationToken).ConfigureAwait(false);
+        }
+
+        AppendVisibleTerminalText(lineEnding, _session);
     }
 
     /// <summary>Writes raw text to the live shell exactly as if the user had typed it.</summary>

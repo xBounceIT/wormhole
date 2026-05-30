@@ -48,11 +48,10 @@ public sealed class TerminalBridge : IDisposable
 
         _coalescer = new TerminalOutputCoalescer(PostCoalescedBytes, ArmCoalesceTimer);
 
-        _session.DataReceived += OnDataReceived;
         _webView.WebMessageReceived += OnWebMessageReceived;
     }
 
-    private void OnDataReceived(object? sender, ReadOnlyMemory<byte> data)
+    public void AppendOutput(ReadOnlyMemory<byte> data)
     {
         if (_disposed) return;
         if (!_firstOutputLogged && data.Length > 0)
@@ -336,7 +335,6 @@ public sealed class TerminalBridge : IDisposable
     public void Dispose()
     {
         if (_disposed) return;
-        _session.DataReceived -= OnDataReceived;
         _webView.WebMessageReceived -= OnWebMessageReceived;
         // Stop pending coalesce ticks first so a late timer doesn't fire concurrently
         // with the final drain below. Already-queued Tick handlers will see
