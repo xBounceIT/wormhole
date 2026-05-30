@@ -637,10 +637,28 @@ public partial class ConnectionTreeViewModel : ObservableObject
         }
     }
 
+    // Walks a connection node up through its ancestor folders (via the live snapshot),
+    // returning the first non-empty Host — the same host rule InheritanceResolver applies,
+    // but without throwing when none is set, so the tree tooltip can stay silent.
+    private string? ResolveEffectiveHost(ConnectionNode node)
+    {
+        HashSet<Guid>? seen = null;
+        var current = node;
+        while (true)
+        {
+            if (!string.IsNullOrWhiteSpace(current.Host)) return current.Host;
+            if (current.ParentId is not Guid parentId) return null;
+            if (!_lastSnapshotById.TryGetValue(parentId, out var parent)) return null;
+            seen ??= new HashSet<Guid> { current.Id };
+            if (!seen.Add(parent.Id)) return null; // cycle guard, mirrors InheritanceResolver
+            current = parent;
+        }
+    }
+
     // Mutates `current` in place to match `target` (and recursively each node's children),
     // reusing existing TreeNodeViewModel instances by Id so the TreeView's container
     // tree — and therefore selection, expansion, focus — survives the refresh.
-    private static void Reconcile(
+    private void Reconcile(
         BulkObservableCollection<TreeNodeViewModel> current,
         IReadOnlyList<ConnectionNode> target,
         IReadOnlyDictionary<Guid, List<ConnectionNode>> byParent)
@@ -652,7 +670,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
             var next = new List<TreeNodeViewModel>(target.Count);
             foreach (var node in target)
             {
-                var vm = new TreeNodeViewModel(node);
+                var vm = new TreeNodeViewModel(node, ResolveEffectiveHost);
                 byParent.TryGetValue(node.Id, out var children);
                 Reconcile(vm.Children, children ?? (IReadOnlyList<ConnectionNode>)Array.Empty<ConnectionNode>(), byParent);
                 next.Add(vm);
@@ -688,7 +706,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
             TreeNodeViewModel vm;
             if (!existingById.TryGetValue(node.Id, out var existing))
             {
-                vm = new TreeNodeViewModel(node);
+                vm = new TreeNodeViewModel(node, ResolveEffectiveHost);
                 current.Insert(i, vm);
                 existingById[node.Id] = vm;
                 RefreshIndexMap(current, currentIndexById, start: i, endInclusive: current.Count - 1);
@@ -742,9 +760,15 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
 public sealed partial class TreeNodeViewModel : ObservableObject
 {
-    public TreeNodeViewModel(ConnectionNode node)
+    // Resolves a connection's effective host through folder inheritance. Supplied by the
+    // owning ConnectionTreeViewModel; null in unit tests that construct nodes directly,
+    // where Host falls back to the node's own field.
+    private readonly Func<ConnectionNode, string?>? resolveEffectiveHost;
+
+    public TreeNodeViewModel(ConnectionNode node, Func<ConnectionNode, string?>? resolveEffectiveHost = null)
     {
         this.node = node;
+        this.resolveEffectiveHost = resolveEffectiveHost;
     }
 
     [ObservableProperty]
@@ -755,9 +779,13 @@ public sealed partial class TreeNodeViewModel : ObservableObject
     public NodeKind Kind => Node.Kind;
     public bool IsConnection => Kind == NodeKind.Connection;
 
-    // Host (IP or FQDN) shown as the row tooltip on hover. Null for folders and
-    // for connections without a host set, which suppresses the tooltip entirely.
-    public string? Host => IsConnection ? Node.Host : null;
+    // Effective host (IP or FQDN) shown as the row tooltip on hover, resolved through
+    // folder inheritance so a host set on an ancestor folder still surfaces. Null for
+    // folders and for connections with no host anywhere up the chain, which suppresses
+    // the tooltip entirely.
+    public string? Host => IsConnection
+        ? (resolveEffectiveHost?.Invoke(Node) ?? Node.Host)
+        : null;
 
     [ObservableProperty]
     private bool isExpanded;

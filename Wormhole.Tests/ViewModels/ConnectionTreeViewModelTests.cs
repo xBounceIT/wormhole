@@ -358,6 +358,51 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Host_ConnectionWithOwnHost_ReturnsOwnHost()
+    {
+        var node = MakeConnectionDraft("web", ProtocolType.Ssh, "10.0.0.5", 22, "alice");
+        await _repo.AddAsync(node);
+
+        var vm = CreateVm(new FakeDialogService());
+        await vm.RefreshAsync();
+
+        Assert.Equal("10.0.0.5", vm.Roots.Single().Host);
+    }
+
+    [Fact]
+    public async Task Host_ConnectionInheritsHostFromFolder_ResolvesInheritedHost()
+    {
+        // The hover tooltip must show the effective host, so a connection whose own Host is
+        // null but whose ancestor folder carries one (mRemoteNG import shape) still surfaces
+        // the host it would actually connect to — matching InheritanceResolver's host rule.
+        var folder = new ConnectionNode { Kind = NodeKind.Folder, Name = "prod", Host = "bastion.example.com" };
+        await _repo.AddAsync(folder);
+        var child = MakeConnectionDraft("web", ProtocolType.Ssh, "ignored", 22, "alice");
+        child.ParentId = folder.Id;
+        child.Host = null;
+        await _repo.AddAsync(child);
+
+        var vm = CreateVm(new FakeDialogService());
+        await vm.RefreshAsync();
+
+        var childVm = vm.Roots.Single().Children.Single();
+        Assert.Equal("bastion.example.com", childVm.Host);
+    }
+
+    [Fact]
+    public async Task Host_FolderNode_IsNull()
+    {
+        var folder = new ConnectionNode { Kind = NodeKind.Folder, Name = "prod", Host = "bastion.example.com" };
+        await _repo.AddAsync(folder);
+
+        var vm = CreateVm(new FakeDialogService());
+        await vm.RefreshAsync();
+
+        // Folders never show a host tooltip even when they carry a host for inheritance.
+        Assert.Null(vm.Roots.Single().Host);
+    }
+
+    [Fact]
     public async Task ShowCredentials_ConnectionWithoutCredential_DoesNotRevealSecret()
     {
         var node = MakeConnectionDraft("keyonly", ProtocolType.Ssh, "host", 22, "alice");
