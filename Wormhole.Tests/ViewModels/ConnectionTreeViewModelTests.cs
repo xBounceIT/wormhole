@@ -390,6 +390,26 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Host_ConnectionWithBlankOwnHost_IsNullDespiteAncestorHost()
+    {
+        // InheritanceResolver uses null-only inheritance (host ??= current.Host) then rejects
+        // a blank result, so a connection whose own Host is blank can't actually open even if
+        // an ancestor has one. The tooltip must mirror that and stay silent rather than
+        // advertise the ancestor's host.
+        var folder = new ConnectionNode { Kind = NodeKind.Folder, Name = "prod", Host = "bastion.example.com" };
+        await _repo.AddAsync(folder);
+        var child = MakeConnectionDraft("web", ProtocolType.Ssh, "ignored", 22, "alice");
+        child.ParentId = folder.Id;
+        child.Host = "   ";
+        await _repo.AddAsync(child);
+
+        var vm = CreateVm(new FakeDialogService());
+        await vm.RefreshAsync();
+
+        Assert.Null(vm.Roots.Single().Children.Single().Host);
+    }
+
+    [Fact]
     public async Task Host_FolderNode_IsNull()
     {
         var folder = new ConnectionNode { Kind = NodeKind.Folder, Name = "prod", Host = "bastion.example.com" };

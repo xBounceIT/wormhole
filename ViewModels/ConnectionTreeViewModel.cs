@@ -652,16 +652,22 @@ public partial class ConnectionTreeViewModel : ObservableObject
         }
     }
 
-    // Walks a connection node up through its ancestor folders (via the live snapshot),
-    // returning the first non-empty Host — the same host rule InheritanceResolver applies,
-    // but without throwing when none is set, so the tree tooltip can stay silent.
+    // Resolves a connection's effective host exactly as InheritanceResolver does, so the
+    // tooltip never advertises a host the session wouldn't actually use. That resolver does
+    // `host ??= current.Host` (null-only inheritance: the first NON-NULL host up the chain
+    // wins, even if blank) and then rejects a blank result as "no usable host". We mirror
+    // both: stop at the first non-null host, and return null for a blank one (suppressing
+    // the tooltip) rather than skipping past it to an ancestor.
     private string? ResolveEffectiveHost(ConnectionNode node)
     {
         HashSet<Guid>? seen = null;
         var current = node;
         while (true)
         {
-            if (!string.IsNullOrWhiteSpace(current.Host)) return current.Host;
+            if (current.Host is { } host)
+            {
+                return string.IsNullOrWhiteSpace(host) ? null : host;
+            }
             if (current.ParentId is not Guid parentId) return null;
             if (!_lastSnapshotById.TryGetValue(parentId, out var parent)) return null;
             seen ??= new HashSet<Guid> { current.Id };
@@ -796,10 +802,12 @@ public sealed partial class TreeNodeViewModel : ObservableObject
 
     // Effective host (IP or FQDN) shown as the row tooltip on hover, resolved through
     // folder inheritance so a host set on an ancestor folder still surfaces. Null for
-    // folders and for connections with no host anywhere up the chain, which suppresses
-    // the tooltip entirely.
+    // folders and for connections with no usable host anywhere up the chain, which
+    // suppresses the tooltip entirely. When a resolver is supplied its result is used
+    // verbatim — including null — so a deliberate suppression isn't overridden by the
+    // node's own raw Host; the bare-Node.Host path is only the no-resolver test fallback.
     public string? Host => IsConnection
-        ? (resolveEffectiveHost?.Invoke(Node) ?? Node.Host)
+        ? (resolveEffectiveHost is { } resolve ? resolve(Node) : Node.Host)
         : null;
 
     // Re-evaluates the Host tooltip binding. Needed after a drag-drop changes the parent
