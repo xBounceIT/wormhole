@@ -434,12 +434,27 @@ public partial class ConnectionTreeViewModel : ObservableObject
         {
             await _repository.UpdateManyAsync(updates);
             SetSnapshot(await _repository.GetAllAsync());
+            // A move re-parents the inheritance chain for the dropped node AND its whole
+            // subtree (a descendant's own ParentId is unchanged, yet its inherited host can
+            // change because an ancestor moved). This path mutates Node in place without
+            // reassigning it, so raise Host across the tree to refresh the one-way tooltip
+            // bindings instead of waiting for the next full reload.
+            NotifyHostForSubtree(Roots);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to persist drag-drop reorder");
             await _dialog.ShowMessageAsync("Couldn't save", ex.Message);
             await RefreshAsync();
+        }
+    }
+
+    private static void NotifyHostForSubtree(IEnumerable<TreeNodeViewModel> level)
+    {
+        foreach (var n in level)
+        {
+            n.NotifyHostChanged();
+            NotifyHostForSubtree(n.Children);
         }
     }
 
@@ -637,10 +652,34 @@ public partial class ConnectionTreeViewModel : ObservableObject
         }
     }
 
+    // Resolves a connection's effective host exactly as InheritanceResolver does, so the
+    // tooltip never advertises a host the session wouldn't actually use. That resolver does
+    // `host ??= current.Host` (null-only inheritance: the first NON-NULL host up the chain
+    // wins, even if blank) and then rejects a blank result as "no usable host". We mirror
+    // both: stop at the first non-null host, and return null for a blank one (suppressing
+    // the tooltip) rather than skipping past it to an ancestor.
+    private string? ResolveEffectiveHost(ConnectionNode node)
+    {
+        HashSet<Guid>? seen = null;
+        var current = node;
+        while (true)
+        {
+            if (current.Host is { } host)
+            {
+                return string.IsNullOrWhiteSpace(host) ? null : host;
+            }
+            if (current.ParentId is not Guid parentId) return null;
+            if (!_lastSnapshotById.TryGetValue(parentId, out var parent)) return null;
+            seen ??= new HashSet<Guid> { current.Id };
+            if (!seen.Add(parent.Id)) return null; // cycle guard, mirrors InheritanceResolver
+            current = parent;
+        }
+    }
+
     // Mutates `current` in place to match `target` (and recursively each node's children),
     // reusing existing TreeNodeViewModel instances by Id so the TreeView's container
     // tree — and therefore selection, expansion, focus — survives the refresh.
-    private static void Reconcile(
+    private void Reconcile(
         BulkObservableCollection<TreeNodeViewModel> current,
         IReadOnlyList<ConnectionNode> target,
         IReadOnlyDictionary<Guid, List<ConnectionNode>> byParent)
@@ -652,7 +691,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
             var next = new List<TreeNodeViewModel>(target.Count);
             foreach (var node in target)
             {
-                var vm = new TreeNodeViewModel(node);
+                var vm = new TreeNodeViewModel(node, ResolveEffectiveHost);
                 byParent.TryGetValue(node.Id, out var children);
                 Reconcile(vm.Children, children ?? (IReadOnlyList<ConnectionNode>)Array.Empty<ConnectionNode>(), byParent);
                 next.Add(vm);
@@ -688,7 +727,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
             TreeNodeViewModel vm;
             if (!existingById.TryGetValue(node.Id, out var existing))
             {
-                vm = new TreeNodeViewModel(node);
+                vm = new TreeNodeViewModel(node, ResolveEffectiveHost);
                 current.Insert(i, vm);
                 existingById[node.Id] = vm;
                 RefreshIndexMap(current, currentIndexById, start: i, endInclusive: current.Count - 1);
@@ -742,9 +781,15 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
 public sealed partial class TreeNodeViewModel : ObservableObject
 {
-    public TreeNodeViewModel(ConnectionNode node)
+    // Resolves a connection's effective host through folder inheritance. Supplied by the
+    // owning ConnectionTreeViewModel; null in unit tests that construct nodes directly,
+    // where Host falls back to the node's own field.
+    private readonly Func<ConnectionNode, string?>? resolveEffectiveHost;
+
+    public TreeNodeViewModel(ConnectionNode node, Func<ConnectionNode, string?>? resolveEffectiveHost = null)
     {
         this.node = node;
+        this.resolveEffectiveHost = resolveEffectiveHost;
     }
 
     [ObservableProperty]
@@ -754,6 +799,21 @@ public sealed partial class TreeNodeViewModel : ObservableObject
     public string Name => Node.Name;
     public NodeKind Kind => Node.Kind;
     public bool IsConnection => Kind == NodeKind.Connection;
+
+    // Effective host (IP or FQDN) shown as the row tooltip on hover, resolved through
+    // folder inheritance so a host set on an ancestor folder still surfaces. Null for
+    // folders and for connections with no usable host anywhere up the chain, which
+    // suppresses the tooltip entirely. When a resolver is supplied its result is used
+    // verbatim — including null — so a deliberate suppression isn't overridden by the
+    // node's own raw Host; the bare-Node.Host path is only the no-resolver test fallback.
+    public string? Host => IsConnection
+        ? (resolveEffectiveHost is { } resolve ? resolve(Node) : Node.Host)
+        : null;
+
+    // Re-evaluates the Host tooltip binding. Needed after a drag-drop changes the parent
+    // chain (which can change an inherited host) by mutating Node in place rather than
+    // reassigning it, so OnNodeChanged doesn't fire.
+    public void NotifyHostChanged() => OnPropertyChanged(nameof(Host));
 
     [ObservableProperty]
     private bool isExpanded;
@@ -777,6 +837,7 @@ public sealed partial class TreeNodeViewModel : ObservableObject
         OnPropertyChanged(nameof(Name));
         OnPropertyChanged(nameof(Kind));
         OnPropertyChanged(nameof(IsConnection));
+        OnPropertyChanged(nameof(Host));
         OnPropertyChanged(nameof(Glyph));
     }
 }

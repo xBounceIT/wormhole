@@ -358,6 +358,71 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Host_ConnectionWithOwnHost_ReturnsOwnHost()
+    {
+        var node = MakeConnectionDraft("web", ProtocolType.Ssh, "10.0.0.5", 22, "alice");
+        await _repo.AddAsync(node);
+
+        var vm = CreateVm(new FakeDialogService());
+        await vm.RefreshAsync();
+
+        Assert.Equal("10.0.0.5", vm.Roots.Single().Host);
+    }
+
+    [Fact]
+    public async Task Host_ConnectionInheritsHostFromFolder_ResolvesInheritedHost()
+    {
+        // The hover tooltip must show the effective host, so a connection whose own Host is
+        // null but whose ancestor folder carries one (mRemoteNG import shape) still surfaces
+        // the host it would actually connect to — matching InheritanceResolver's host rule.
+        var folder = new ConnectionNode { Kind = NodeKind.Folder, Name = "prod", Host = "bastion.example.com" };
+        await _repo.AddAsync(folder);
+        var child = MakeConnectionDraft("web", ProtocolType.Ssh, "ignored", 22, "alice");
+        child.ParentId = folder.Id;
+        child.Host = null;
+        await _repo.AddAsync(child);
+
+        var vm = CreateVm(new FakeDialogService());
+        await vm.RefreshAsync();
+
+        var childVm = vm.Roots.Single().Children.Single();
+        Assert.Equal("bastion.example.com", childVm.Host);
+    }
+
+    [Fact]
+    public async Task Host_ConnectionWithBlankOwnHost_IsNullDespiteAncestorHost()
+    {
+        // InheritanceResolver uses null-only inheritance (host ??= current.Host) then rejects
+        // a blank result, so a connection whose own Host is blank can't actually open even if
+        // an ancestor has one. The tooltip must mirror that and stay silent rather than
+        // advertise the ancestor's host.
+        var folder = new ConnectionNode { Kind = NodeKind.Folder, Name = "prod", Host = "bastion.example.com" };
+        await _repo.AddAsync(folder);
+        var child = MakeConnectionDraft("web", ProtocolType.Ssh, "ignored", 22, "alice");
+        child.ParentId = folder.Id;
+        child.Host = "   ";
+        await _repo.AddAsync(child);
+
+        var vm = CreateVm(new FakeDialogService());
+        await vm.RefreshAsync();
+
+        Assert.Null(vm.Roots.Single().Children.Single().Host);
+    }
+
+    [Fact]
+    public async Task Host_FolderNode_IsNull()
+    {
+        var folder = new ConnectionNode { Kind = NodeKind.Folder, Name = "prod", Host = "bastion.example.com" };
+        await _repo.AddAsync(folder);
+
+        var vm = CreateVm(new FakeDialogService());
+        await vm.RefreshAsync();
+
+        // Folders never show a host tooltip even when they carry a host for inheritance.
+        Assert.Null(vm.Roots.Single().Host);
+    }
+
+    [Fact]
     public async Task ShowCredentials_ConnectionWithoutCredential_DoesNotRevealSecret()
     {
         var node = MakeConnectionDraft("keyonly", ProtocolType.Ssh, "host", 22, "alice");
@@ -660,6 +725,44 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
 
         var bRow = (await _repo.GetAllAsync()).Single(r => r.Name == "B");
         Assert.Equal(a.Node.Id, bRow.ParentId);
+    }
+
+    [Fact]
+    public async Task PersistTreeStructure_MoveIntoFolderWithHost_RefreshesInheritedHostTooltip()
+    {
+        // Drag-drop mutates ParentId in place without reassigning Node, so the computed Host
+        // tooltip (one-way x:Bind) must be re-raised — including for descendants whose own
+        // ParentId is unchanged but whose inherited host changes because an ancestor moved.
+        var gateway = new ConnectionNode { Kind = NodeKind.Folder, Name = "gateway", Host = "g-host" };
+        await _repo.AddAsync(gateway);
+        var group = new ConnectionNode { Kind = NodeKind.Folder, Name = "group" };
+        await _repo.AddAsync(group);
+        var child = MakeConnectionDraft("web", ProtocolType.Ssh, "ignored", 22, "alice");
+        child.ParentId = group.Id;
+        child.Host = null;
+        await _repo.AddAsync(child);
+
+        var vm = CreateVm(new FakeDialogService());
+        await vm.RefreshAsync();
+
+        var gatewayVm = vm.Roots.Single(r => r.Name == "gateway");
+        var groupVm = vm.Roots.Single(r => r.Name == "group");
+        var childVm = groupVm.Children.Single();
+        Assert.Null(childVm.Host); // no host anywhere up the chain yet
+
+        var hostRaised = 0;
+        childVm.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(TreeNodeViewModel.Host)) hostRaised++;
+        };
+
+        // Move "group" (and its child) under "gateway", which carries the inherited host.
+        vm.Roots.Remove(groupVm);
+        gatewayVm.Children.Add(groupVm);
+        await vm.PersistTreeStructureAsync();
+
+        Assert.Equal("g-host", childVm.Host);
+        Assert.True(hostRaised > 0, "Host PropertyChanged should fire for the moved subtree.");
     }
 
     [Fact]

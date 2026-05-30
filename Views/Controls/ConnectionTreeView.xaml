@@ -119,6 +119,7 @@
                     <TreeViewItem ItemsSource="{x:Bind Children}"
                                   IsExpanded="{x:Bind IsExpanded, Mode=TwoWay}"
                                   Visibility="{x:Bind IsVisible, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
+                                  ToolTipService.ToolTip="{x:Bind Host, Mode=OneWay}"
                                   DoubleTapped="OnNodeDoubleTapped">
                         <TreeViewItem.ContextFlyout>
                             <!-- Click handlers (not Command bindings) because ElementName binding
