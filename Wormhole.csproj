@@ -18,7 +18,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <DefaultItemExcludes>$(DefaultItemExcludes);Wormhole.Tests\**;Wormhole.Tests.Integration\**;Assets\web\node_modules\**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);bin\**;obj\**;Wormhole.Tests\**;Wormhole.Tests.Integration\**;Assets\web\node_modules\**</DefaultItemExcludes>
     <NoWarn>$(NoWarn);MVVMTK0045</NoWarn>
     <DefaultLanguage>en-US</DefaultLanguage>
     <Version>0.2.0</Version>
