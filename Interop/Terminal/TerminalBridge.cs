@@ -46,7 +46,7 @@ public sealed class TerminalBridge : IDisposable
             ?? throw new InvalidOperationException(
                 "TerminalBridge must be constructed on a thread with a DispatcherQueue (the UI thread).");
 
-        _coalescer = new TerminalOutputCoalescer(PostCoalescedBytes, ArmCoalesceTimer);
+        _coalescer = new TerminalOutputCoalescer(PostCoalescedBytes, ArmCoalesceTimer, ArmImmediateFlush);
 
         _session.DataReceived += OnDataReceived;
         _webView.WebMessageReceived += OnWebMessageReceived;
@@ -61,10 +61,10 @@ public sealed class TerminalBridge : IDisposable
             _logger.LogInformation("First SSH shell output received: {ByteCount} bytes.", data.Length);
         }
 
-        // SSH read pump fires on a background thread. The coalescer buffers bytes here
-        // and arms a one-shot dispatcher timer (one trip to the UI thread per ~12 ms
-        // window) instead of one DispatcherQueue.TryEnqueue per chunk — see comment on
-        // CoalesceWindowMs above.
+        // SSH read pump fires on a background thread. The coalescer posts small prompt /
+        // echo-sized chunks on the next dispatcher turn and keeps bursty output behind a
+        // short timer, avoiding both the fixed 12 ms echo delay and the old one-marshal-per-
+        // SSH-packet flood.
         _coalescer.Append(data.Span);
     }
 
@@ -119,6 +119,15 @@ public sealed class TerminalBridge : IDisposable
             // future Appends so the SSH pump stops accumulating output for a dispatcher
             // that will never accept it.
             _logger.LogWarning("Failed to enqueue coalesce-timer arm; suspending coalescer (dispatcher unavailable).");
+            _coalescer.Suspend();
+        }
+    }
+
+    private void ArmImmediateFlush()
+    {
+        if (!_dispatcher.TryEnqueue(_coalescer.FlushImmediately))
+        {
+            _logger.LogWarning("Failed to enqueue immediate terminal flush; suspending coalescer (dispatcher unavailable).");
             _coalescer.Suspend();
         }
     }

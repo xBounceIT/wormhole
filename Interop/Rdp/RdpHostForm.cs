@@ -27,6 +27,11 @@ internal sealed class RdpHostForm : FormsForm
     private IConnectionPoint? _connectionPoint;
     private int _adviseCookie;
     private bool _connectStarted;
+    private bool _hasAppliedHostBounds;
+    private int _lastHostX;
+    private int _lastHostY;
+    private int _lastHostWidth;
+    private int _lastHostHeight;
 
     public event Action? Connected;
     public event Action? LoginComplete;
@@ -97,11 +102,9 @@ internal sealed class RdpHostForm : FormsForm
     }
 
     /// <summary>
-    /// Position the owned top-level overlay (in screen coordinates) and force the AxHost child
-    /// to fill the new client area. WinForms normally handles Dock=Fill during layout, but the
-    /// form is never shown through normal WinForms ownership; it is driven as an owned overlay
-    /// of the WinUI window. Explicitly sizing both layers avoids a valid top-level host rect
-    /// with a stale or unpainted ActiveX child.
+    /// Position the owned top-level overlay (in screen coordinates). Size changes also force
+    /// the AxHost child to fill the new client area; position-only moves avoid child layout
+    /// and forced redraw so the overlay can track WinUI window drags without repaint churn.
     /// </summary>
     internal bool SetHostBounds(int x, int y, int width, int height)
     {
@@ -109,13 +112,44 @@ internal sealed class RdpHostForm : FormsForm
         if (width < 1 || height < 1) return false;
 
         var hostHwnd = Hwnd;
+        var sizeChanged = !_hasAppliedHostBounds ||
+                          width != _lastHostWidth ||
+                          height != _lastHostHeight;
+        var positionChanged = !_hasAppliedHostBounds ||
+                              x != _lastHostX ||
+                              y != _lastHostY;
+        if (!sizeChanged && !positionChanged) return true;
+
         Marshal.SetLastSystemError(0);
-        if (!Win32Interop.MoveWindow(hostHwnd, x, y, width, height, bRepaint: true))
+        var flags = Win32Interop.SWP_NOACTIVATE;
+        if (sizeChanged)
+        {
+            flags |= Win32Interop.SWP_SHOWWINDOW;
+        }
+        else
+        {
+            flags |= Win32Interop.SWP_NOZORDER;
+        }
+
+        if (!Win32Interop.SetWindowPos(
+                hostHwnd,
+                sizeChanged ? Win32Interop.HWND_TOP : IntPtr.Zero,
+                x,
+                y,
+                width,
+                height,
+                flags))
         {
             _logger?.LogWarning(
-                "RDP host MoveWindow failed for x={X} y={Y} w={W} h={H} (Win32 error {Error}).",
+                "RDP host SetWindowPos failed for x={X} y={Y} w={W} h={H} (Win32 error {Error}).",
                 x, y, width, height, Marshal.GetLastWin32Error());
             return false;
+        }
+
+        if (!sizeChanged)
+        {
+            RecordAppliedHostBounds(x, y, width, height);
+            return true;
         }
 
         if (!_ax.IsHandleCreated) return false;
@@ -126,7 +160,6 @@ internal sealed class RdpHostForm : FormsForm
         {
             _ax.SetBounds(0, 0, width, height);
             PerformLayout();
-            TrySetOptional(() => ((dynamic)_ax.Ocx!).AdvancedSettings9.SmartSizing = true);
         }
         catch (Exception ex)
         {
@@ -145,7 +178,22 @@ internal sealed class RdpHostForm : FormsForm
         _ax.Invalidate();
         Invalidate(invalidateChildren: true);
         var visible = EnsureVisibleAndRedraw("bounds");
-        return childMoved && visible;
+        if (childMoved && visible)
+        {
+            RecordAppliedHostBounds(x, y, width, height);
+            return true;
+        }
+
+        return false;
+    }
+
+    private void RecordAppliedHostBounds(int x, int y, int width, int height)
+    {
+        _hasAppliedHostBounds = true;
+        _lastHostX = x;
+        _lastHostY = y;
+        _lastHostWidth = width;
+        _lastHostHeight = height;
     }
 
     internal void LogWindowDiagnostics(ILogger logger, string context)
