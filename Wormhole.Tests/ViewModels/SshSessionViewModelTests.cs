@@ -519,6 +519,41 @@ public sealed class SshSessionViewModelTests
     }
 
     [Fact]
+    public async Task RetryAsync_WhenSavedProtocolChanged_KeepsCachedProfile()
+    {
+        // The SSH tab's view is fixed to SSH; if the saved connection was switched to RDP while
+        // the tab is open, the resolved RDP profile is unusable here, so it must be ignored.
+        var stale = CreateProfile() with { Protocol = ProtocolType.Ssh };
+        var nowRdp = stale with { Protocol = ProtocolType.Rdp, Host = "elsewhere" };
+        var vm = CreateViewModel(profileResolver: new StubProfileResolver(nowRdp));
+        vm.Initialize(stale);
+
+        await vm.RetryAsync();
+
+        Assert.Equal(ProtocolType.Ssh, vm.Profile!.Protocol);
+        Assert.Equal(stale.Host, vm.Profile.Host);
+    }
+
+    [Fact]
+    public async Task RetryAsync_PreservesSessionPinnedHostKey_WhenRefreshedProfileHasNone()
+    {
+        // A host key pinned this session must not be silently dropped on retry just because the
+        // best-effort DB persist failed (so the re-resolved profile carries no fingerprint) —
+        // otherwise the reconnect would TOFU-accept whatever the server now presents.
+        var nodeId = Guid.NewGuid();
+        var pinned = CreateProfile() with { NodeId = nodeId, SshKnownHostFingerprint = "SHA256:pinned" };
+        // Resolver reflects a DB row with no pin, but the user also disabled the tunnel.
+        var edited = pinned with { SshKnownHostFingerprint = null, TunnelEnabled = false };
+        var vm = CreateViewModel(profileResolver: new StubProfileResolver(edited));
+        vm.Initialize(pinned);
+
+        await vm.RetryAsync();
+
+        Assert.Equal("SHA256:pinned", vm.Profile!.SshKnownHostFingerprint);
+        Assert.False(vm.Profile.TunnelEnabled);
+    }
+
+    [Fact]
     public async Task DetachAsync_DisposesSessionAndIgnoresLateOutput()
     {
         var vm = CreateViewModel();

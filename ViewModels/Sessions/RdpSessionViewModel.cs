@@ -394,6 +394,11 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         var refreshed = await _profileResolver.ResolveAsync(current.NodeId).ConfigureAwait(true);
         if (refreshed is null) return;
 
+        // This tab's surface is fixed to its protocol at open time. If the saved connection's
+        // protocol was switched while the tab is open, the resolved profile is unusable here —
+        // keep the cached one rather than driving the RDP surface with a non-RDP profile.
+        if (refreshed.Protocol != Protocol) return;
+
         UpdateProfile(refreshed);
 
         // UpdateProfile only raises Profile; the tunnel-gated affordances ("Use external client")

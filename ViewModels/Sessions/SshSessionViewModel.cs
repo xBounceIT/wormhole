@@ -290,6 +290,11 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         var refreshed = await _profileResolver.ResolveAsync(current.NodeId).ConfigureAwait(true);
         if (refreshed is null) return;
 
+        // This tab's view is fixed to its protocol at open time. If the saved connection's
+        // protocol was switched (e.g. SSH→RDP) while the tab is open, the resolved profile is
+        // unusable here — keep the cached one rather than SSH-connecting to an RDP profile.
+        if (refreshed.Protocol != Protocol) return;
+
         // Never silently drop a host key we already pinned this session. The resolver reads the
         // DB, where a pin written by this tab's connect normally lives — but if that best-effort
         // write had failed, the refreshed copy would be empty and the retry would re-TOFU against
