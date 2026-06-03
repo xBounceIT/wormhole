@@ -35,21 +35,11 @@ public static class WatchguardProfileBuilder
         if (string.IsNullOrWhiteSpace(settings.ClientKeyPem))
             throw new InvalidOperationException("Client private key (PEM) is required.");
 
-        // Reject anything in Server / VerifyX509Name that would let the value inject extra
-        // OpenVPN directives via newline or quote. A real hostname / DN never legitimately
-        // contains these characters, so refusing them is a safe over-approximation.
-        RejectControlCharsOrQuotes(settings.Server, "Server");
-        if (!string.IsNullOrWhiteSpace(settings.VerifyX509Name))
-            RejectControlCharsOrQuotes(settings.VerifyX509Name, "verify-x509-name subject");
-
-        // PEM bodies are user-supplied content that we wrap in <ca>/<cert>/<key>. If they
-        // contain the literal closing tag, OpenVPN's inline-block parser ends the block early
-        // and treats whatever follows as more directives — same injection vector as Server.
-        // RFC 7468 PEM only contains base64 + the BEGIN/END armor lines, so a `</ca>` (or
-        // `</cert>`, `</key>`) inside the body is always either malformed or hostile.
-        RejectInlineTagClose(settings.CaPem, "CA certificate", "ca");
-        RejectInlineTagClose(settings.ClientCertPem, "Client certificate", "cert");
-        RejectInlineTagClose(settings.ClientKeyPem, "Client private key", "key");
+        // Reject anything that would let a user-supplied field inject extra OpenVPN directives
+        // into the synthesized profile (newline/quote in Server or the verify-x509-name subject;
+        // an inline </ca> etc. that closes a PEM block early). Shared with the save-time gate so
+        // the persistence layer rejects the identical inputs — see ValidateFieldSafety.
+        ValidateFieldSafety(settings);
 
         var sb = new StringBuilder(EstimateProfileLength(settings));
         // Use \n explicitly (not Environment.NewLine) so the synthesized profile is byte-identical
@@ -84,6 +74,37 @@ public static class WatchguardProfileBuilder
         AppendPemBlock(sb, "key", settings.ClientKeyPem);
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Rejects user-supplied field content that could inject extra OpenVPN directives into the
+    /// synthesized profile: control characters or quotes in <see cref="WatchguardSettings.Server"/>
+    /// or <see cref="WatchguardSettings.VerifyX509Name"/> (inlined into the <c>remote</c> /
+    /// <c>verify-x509-name</c> directives), and angle brackets in any PEM body (which would let a
+    /// literal <c>&lt;/ca&gt;</c> close an inline block early). Throws
+    /// <see cref="InvalidOperationException"/> on the first violation.
+    ///
+    /// Exposed as <c>internal</c> so <c>TunnelConfigsViewModel.ValidateWatchguard</c> can run the
+    /// exact same checks at Save time — otherwise a hand-edited / imported value containing one of
+    /// these characters passes the dialog and the save-time validator only to fail later inside
+    /// <see cref="Build"/> at connect time, after the bad value is already persisted to disk.
+    /// Callers that also require the fields to be present (e.g. <see cref="Build"/>) should run
+    /// their presence checks first; this method assumes Server and the PEM bodies are non-empty
+    /// where it inspects them and simply finds no forbidden characters in an empty string.
+    /// </summary>
+    internal static void ValidateFieldSafety(WatchguardSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        RejectControlCharsOrQuotes(settings.Server, "Server");
+        if (!string.IsNullOrWhiteSpace(settings.VerifyX509Name))
+            RejectControlCharsOrQuotes(settings.VerifyX509Name, "verify-x509-name subject");
+        // PEM bodies are user-supplied content we wrap in <ca>/<cert>/<key>. If they contain a
+        // literal closing tag, OpenVPN's inline-block parser ends the block early and treats
+        // whatever follows as more directives. RFC 7468 PEM is only base64 + BEGIN/END armor,
+        // so any '<' or '>' is always either malformed or hostile.
+        RejectInlineTagClose(settings.CaPem, "CA certificate", "ca");
+        RejectInlineTagClose(settings.ClientCertPem, "Client certificate", "cert");
+        RejectInlineTagClose(settings.ClientKeyPem, "Client private key", "key");
     }
 
     private static void RejectControlCharsOrQuotes(string value, string fieldName)

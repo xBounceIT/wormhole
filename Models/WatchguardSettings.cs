@@ -46,14 +46,21 @@ public sealed class WatchguardSettings
     public string VerifyX509Name { get; set; } = DefaultVerifyX509Name;
 
     /// <summary>
-    /// Skip ALL TLS certificate verification on the pre-auth HTTPS POST (the credential /
-    /// OTP exchange) and additionally omit the OpenVPN <c>verify-x509-name</c> subject pin
-    /// in the synthesized .ovpn profile. Off by default.
+    /// Skip TLS certificate verification on the pre-auth HTTPS POST (the credential / OTP
+    /// exchange) and additionally omit the OpenVPN <c>verify-x509-name</c> subject pin in the
+    /// synthesized .ovpn profile. Off by default.
+    ///
+    /// This does NOT relax the VPN tunnel itself: <see cref="CaPem"/> is still required and the
+    /// synthesized profile still carries <c>remote-cert-tls server</c> + the inline
+    /// <c>&lt;ca&gt;</c> block, so the data channel is still validated against the CA you supply.
+    /// Enabling this is therefore not a CA-less path — it only loosens the pre-auth leg and the
+    /// server-cert-subject pin.
     ///
     /// Security note: enabling this means the pre-auth POST accepts any server certificate,
     /// including a MITM, so the username / password / OTP can be intercepted in flight on
-    /// hostile or captive networks. Only enable on a fully trusted network when the operator
-    /// has no copy of the Firebox CA. Mirrors the official client's "Always trust this server"
+    /// hostile or captive networks. Only enable on a fully trusted network — e.g. when the
+    /// Firebox presents a self-signed cert whose subject doesn't match the stock pin and you
+    /// accept the pre-auth exposure. Mirrors the official client's "Always trust this server"
     /// toggle. The Fortinet provider has an equivalent field for parity.
     /// </summary>
     [JsonPropertyName("TrustServerCertificate")] public bool TrustServerCertificate { get; set; }

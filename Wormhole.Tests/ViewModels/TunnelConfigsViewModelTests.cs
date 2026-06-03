@@ -159,7 +159,11 @@ public class TunnelConfigsViewModelTests
 
         Assert.Equal(3, vm.FilteredConfigs.Count);
 
-        await Task.Delay(90);
+        // The 40ms debounce applies on a thread-pool continuation; under CI load that can land
+        // after a fixed wait, which made racing a single Task.Delay(90) flaky. Poll for the
+        // settled state — the debounce collapsing to the LATEST query ("fort") — instead, with a
+        // generous ceiling so a slow runner passes while a fast one returns in ~40ms.
+        await WaitForFilteredCountAsync(vm, expected: 1, timeout: TimeSpan.FromSeconds(5));
 
         Assert.Single(vm.FilteredConfigs);
         Assert.Equal("gamma", vm.FilteredConfigs[0].Name);
@@ -709,6 +713,144 @@ public class TunnelConfigsViewModelTests
         Assert.Equal("match", vm.FilteredConfigs[0].Name);
     }
 
+    [Fact]
+    public async Task AddTunnel_WatchguardKind_CommitsRowAndSecret()
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        dialog.TunnelPromptResult = NewWatchguardDraft("corp-wgg");
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        var stored = Assert.Single(repo.Configs.Values);
+        Assert.Equal(TunnelKind.Watchguard, stored.Kind);
+        Assert.True(creds.TunnelConfigs.ContainsKey(stored.Id));
+        var roundTrip = JsonSerializer.Deserialize<WatchguardSettings>(creds.TunnelConfigs[stored.Id])!;
+        Assert.Equal("firebox.example.com", roundTrip.Server);
+        Assert.Equal(443, roundTrip.Port);
+        Assert.Equal("alice", roundTrip.Username);
+        Assert.Equal("s3cret", roundTrip.Password);
+        Assert.Equal("Firebox-DB", roundTrip.Domain);
+        Assert.Contains("FAKECA", roundTrip.CaPem);
+        Assert.Contains("FAKECERT", roundTrip.ClientCertPem);
+        Assert.Contains("FAKEKEY", roundTrip.ClientKeyPem);
+    }
+
+    [Fact]
+    public async Task AddTunnel_WatchguardKind_MissingCerts_RejectsBeforePersist()
+    {
+        // Direct regression guard for the reported symptom: a draft with every VISIBLE field
+        // (Server/Port/Username/Password) populated but the three certificate PEMs blank — the
+        // exact state of a user who filled the form without importing a .wgssl or expanding the
+        // Certificates section — must be rejected before any row/secret is written.
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        dialog.TunnelPromptResult = new TunnelDraft(
+            "corp-wgg",
+            TunnelKind.Watchguard,
+            WireGuard: null,
+            OpenVpn: null,
+            Fortinet: null,
+            Watchguard: new WatchguardSettings
+            {
+                Server = "firebox.example.com",
+                Port = 443,
+                Username = "alice",
+                Password = "s3cret",
+                CaPem = "",
+                ClientCertPem = "",
+                ClientKeyPem = "",
+            });
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        Assert.Empty(repo.Configs);
+        Assert.Empty(creds.TunnelConfigs);
+        Assert.Contains(dialog.Messages, m => m.title == "Tunnel settings incomplete");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(65536)]
+    public async Task AddTunnel_WatchguardKind_RejectsOutOfRangePort(int port)
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        var draft = NewWatchguardDraft("corp-wgg");
+        draft.Watchguard!.Port = port;
+        dialog.TunnelPromptResult = draft;
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        Assert.Empty(repo.Configs);
+        Assert.Empty(creds.TunnelConfigs);
+        Assert.Contains(dialog.Messages, m => m.title == "Tunnel settings incomplete");
+    }
+
+    [Fact]
+    public async Task AddTunnel_WatchguardKind_RejectsPemWithAngleBrackets()
+    {
+        // Hoisted-from-the-builder injection check (ValidateWatchguard -> ValidateFieldSafety):
+        // a PEM body containing '<' / '>' would let a literal </ca> close the inline block early
+        // and inject directives. Must be rejected at Save, not deferred to a connect-time throw.
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        var draft = NewWatchguardDraft("corp-wgg");
+        draft.Watchguard!.CaPem = "-----BEGIN CERTIFICATE-----\n</ca>\nup /tmp/pwn\n-----END CERTIFICATE-----";
+        dialog.TunnelPromptResult = draft;
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        Assert.Empty(repo.Configs);
+        Assert.Empty(creds.TunnelConfigs);
+        Assert.Contains(dialog.Messages, m => m.title == "Tunnel settings incomplete");
+    }
+
+    [Fact]
+    public async Task AddTunnel_WatchguardKind_RejectsVerifyX509NameWithControlChars()
+    {
+        // Same hoisted check for the verify-x509-name subject, which is inlined between quotes
+        // in the profile: a newline would let the value inject extra OpenVPN directives.
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        var draft = NewWatchguardDraft("corp-wgg");
+        draft.Watchguard!.VerifyX509Name = "subject\nup /tmp/pwn";
+        dialog.TunnelPromptResult = draft;
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        Assert.Empty(repo.Configs);
+        Assert.Empty(creds.TunnelConfigs);
+        Assert.Contains(dialog.Messages, m => m.title == "Tunnel settings incomplete");
+    }
+
+    [Fact]
+    public async Task EditTunnel_WatchguardKind_RoundTripsSecret()
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        var id = Guid.NewGuid();
+        repo.Configs[id] = new TunnelConfig { Id = id, Name = "corp-wgg", Kind = TunnelKind.Watchguard };
+        creds.TunnelConfigs[id] = JsonSerializer.SerializeToUtf8Bytes(new WatchguardSettings
+        {
+            Server = "old.example.com",
+            Port = 443,
+            Username = "alice",
+            Password = "old",
+            CaPem = "-----BEGIN CERTIFICATE-----\nOLDCA\n-----END CERTIFICATE-----",
+            ClientCertPem = "-----BEGIN CERTIFICATE-----\nOLDCERT\n-----END CERTIFICATE-----",
+            ClientKeyPem = "-----BEGIN PRIVATE KEY-----\nOLDKEY\n-----END PRIVATE KEY-----",
+        });
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        var updated = NewWatchguardDraft("corp-wgg");
+        updated.Watchguard!.Server = "new.example.com";
+        updated.Watchguard.Port = 6443;
+        updated.Watchguard.Password = "new";
+        dialog.TunnelPromptResult = updated;
+
+        await vm.EditTunnelCommand.ExecuteAsync(vm.Configs[0]);
+
+        var stored = JsonSerializer.Deserialize<WatchguardSettings>(creds.TunnelConfigs[id])!;
+        Assert.Equal("new.example.com", stored.Server);
+        Assert.Equal(6443, stored.Port);
+        Assert.Equal("new", stored.Password);
+    }
+
     private static TunnelDraft NewWireGuardDraft(string name) =>
         new(name, TunnelKind.WireGuard, new WireGuardSettings
         {
@@ -735,8 +877,34 @@ public class TunnelConfigsViewModelTests
             Password = "s3cret",
         });
 
+    private static TunnelDraft NewWatchguardDraft(string name) =>
+        new(name, TunnelKind.Watchguard, WireGuard: null, OpenVpn: null, Fortinet: null, Watchguard: new WatchguardSettings
+        {
+            Server = "firebox.example.com",
+            Port = 443,
+            Username = "alice",
+            Password = "s3cret",
+            Domain = "Firebox-DB",
+            CaPem = "-----BEGIN CERTIFICATE-----\nFAKECA\n-----END CERTIFICATE-----",
+            ClientCertPem = "-----BEGIN CERTIFICATE-----\nFAKECERT\n-----END CERTIFICATE-----",
+            ClientKeyPem = "-----BEGIN PRIVATE KEY-----\nFAKEKEY\n-----END PRIVATE KEY-----",
+        });
+
     private static TunnelKind OtherKind(TunnelKind kind) =>
         kind == TunnelKind.WireGuard ? TunnelKind.OpenVpn : TunnelKind.WireGuard;
+
+    // Polls until the view-model's debounced filter settles to the expected count or the
+    // timeout elapses, then returns. Avoids racing a fixed Task.Delay against a thread-pool
+    // continuation (flaky on loaded CI runners) while staying fast on a healthy runner; if the
+    // count never settles, the caller's assertion still fires with the actual value.
+    private static async Task WaitForFilteredCountAsync(TunnelConfigsViewModel vm, int expected, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (vm.FilteredConfigs.Count != expected && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
+    }
 
     private static (
         TunnelConfigsViewModel Vm,
