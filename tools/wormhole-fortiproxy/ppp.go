@@ -362,11 +362,14 @@ func (s *pppState) injectIPv4(packet []byte) {
 	pkt.DecRef()
 }
 
-func (s *pppState) sendPPP(proto uint16, payload []byte, control bool) {
+// sendPPP enqueues a frame onto the control- or data-plane channel. Returns true if the frame
+// was enqueued, false if it was dropped (oversized, or the channel was full). Negotiation code
+// uses the result to avoid latching "sent" state on a dropped control frame.
+func (s *pppState) sendPPP(proto uint16, payload []byte, control bool) bool {
 	frame, err := buildEncapFrame(proto, payload)
 	if err != nil {
 		logf("ppp sendPPP: dropping oversized frame (proto=%#x control=%v): %v", proto, control, err)
-		return
+		return false
 	}
 	ch := s.dataFrame
 	if control {
@@ -376,8 +379,10 @@ func (s *pppState) sendPPP(proto uint16, payload []byte, control bool) {
 	// caller (which is usually the read loop dispatching a control reply).
 	select {
 	case ch <- frame:
+		return true
 	default:
 		logf("ppp frame queue full (control=%v); dropping", control)
+		return false
 	}
 }
 
@@ -460,18 +465,24 @@ func (s *pppState) handleIPCP(payload []byte) {
 	}
 	switch code {
 	case lcpConfigureRequest:
-		// The gateway's CR carries the gateway's own address; record it for diagnostics and
-		// Ack the request verbatim (an acceptable option set — RFC 1661 §4.4 action sca).
+		// The gateway's CR carries the gateway's own address; record it for diagnostics.
 		if peer, ok := extractIPCPAddress(body); ok && peer.IsValid() {
 			s.peerIPCPAddr = peer
 		}
-		s.sendIPCP(lcpConfigureAck, id, body)
-		s.peerAckSent = true
-		// Drive our half: (re)send our own Configure-Request until the gateway Acks it. The
-		// gateway retransmits its CR until it sees our Ack, so this naturally retransmits ours
-		// too and converges in a few round-trips.
+		// Drive our half: (re)send our own Configure-Request until the gateway Acks it. Send it
+		// BEFORE the Ack — both go through the non-blocking control queue, which drops frames
+		// under sustained writer backpressure, and request-first guarantees our request is
+		// never the lone casualty. If only one queue slot is free, the request takes it and the
+		// Ack is dropped; the gateway then keeps retransmitting its request (it never saw our
+		// Ack), re-driving this path so the Ack is retried. The reverse order could drop our
+		// request while the Ack lands, making the gateway stop retransmitting with our half
+		// never opened. The gateway's own retransmits thus give our request retransmission for
+		// free, with no timer and all state on the readLoop goroutine.
 		if !s.ourAckReceived {
 			s.sendOurIPCPRequest()
+		}
+		if s.sendIPCP(lcpConfigureAck, id, body) {
+			s.peerAckSent = true
 		}
 		s.maybeIPCPOpened()
 	case lcpConfigureAck:
@@ -504,10 +515,6 @@ func (s *pppState) handleIPCP(payload []byte) {
 // assigned address. The id is allocated once on the first call and reused on every re-send,
 // so the gateway's Configure-Ack always matches our outstanding request.
 func (s *pppState) sendOurIPCPRequest() {
-	if !s.ourIPCPSent {
-		s.ourIPCPID = s.allocID()
-		s.ourIPCPSent = true
-	}
 	opts, err := buildIPCPAddressOption(s.assignedIP)
 	if err != nil {
 		// Unreachable in practice: parseTunnelConfigXML already rejected non-IPv4 addresses.
@@ -516,7 +523,23 @@ func (s *pppState) sendOurIPCPRequest() {
 		s.cancel()
 		return
 	}
-	s.sendIPCP(lcpConfigureRequest, s.ourIPCPID, opts)
+	// Use a fresh id until one of our requests actually reaches the control queue; once a
+	// request is enqueued we lock that id and reuse it for every retransmit so the gateway's
+	// Ack matches. Latch ourIPCPSent ONLY on a successful enqueue — a request dropped by a full
+	// control queue must not look "sent," or the id-matched Ack/Nak guards and the missing
+	// retransmit could wedge our half. handleIPCP sends this before the Ack, so a full queue
+	// drops the Ack too and the gateway keeps retransmitting, re-driving this path until the
+	// request is actually enqueued.
+	id := s.ourIPCPID
+	if !s.ourIPCPSent {
+		id = s.allocID()
+	}
+	if s.sendIPCP(lcpConfigureRequest, id, opts) {
+		s.ourIPCPID = id
+		s.ourIPCPSent = true
+		return
+	}
+	logf("ppp IPCP control queue full; deferring our Configure-Request to the gateway's next request")
 }
 
 // maybeIPCPOpened latches and logs once both halves of IPCP are up (we Ack'd the gateway's
@@ -542,14 +565,14 @@ func buildIPCPAddressOption(addr netip.Addr) ([]byte, error) {
 	return out, nil
 }
 
-func (s *pppState) sendLCP(code byte, id byte, body []byte) {
+func (s *pppState) sendLCP(code byte, id byte, body []byte) bool {
 	frame := buildCPFrame(code, id, body)
-	s.sendPPP(pppProtoLCP, frame, true)
+	return s.sendPPP(pppProtoLCP, frame, true)
 }
 
-func (s *pppState) sendIPCP(code byte, id byte, body []byte) {
+func (s *pppState) sendIPCP(code byte, id byte, body []byte) bool {
 	frame := buildCPFrame(code, id, body)
-	s.sendPPP(pppProtoIPCP, frame, true)
+	return s.sendPPP(pppProtoIPCP, frame, true)
 }
 
 func buildCPFrame(code, id byte, body []byte) []byte {
