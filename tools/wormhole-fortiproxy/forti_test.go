@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"reflect"
+	"strings"
+	"testing"
+)
 
 // Both FortiGate XML layouts are seen in the wild. A previous parser that bound the
 // assigned IP exclusively to the attribute form silently failed on the nested-element
@@ -241,5 +245,55 @@ func TestStripHostBrackets(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("stripHostBrackets(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestClassifyLoginBody(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"empty", ``, nil},
+		{"login-page", `<html><body><form action="/remote/logincheck" method="post">` +
+			`<input type="text" name="username"/>` +
+			`<input type="password" name="credential"/></form></body></html>`,
+			[]string{"login-page"}},
+		{"saml", `<html><body><form action="https://idp.example.com/sso" method="post">` +
+			`<input type="hidden" name="SAMLRequest" value="b64"/></form></body></html>`,
+			[]string{"saml"}},
+		{"ret-success", `ret=1,redir=/remote/portal`, []string{"ret=1"}},
+		{"ret-fail", `ret=0,error=permission denied`, []string{"ret=0", "auth-error"}},
+		{"challenge", `ret=2,reqid=1,polid=2,magic=abc`, []string{"ret=2", "has-magic"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyLoginBody([]byte(tc.body))
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("classifyLoginBody(%q) = %v, want %v", tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRedactBody_ScrubsCredentials(t *testing.T) {
+	cfg := config{Username: "alice", Password: "s3cr3t-pw"}
+	body := "Hello alice, the password s3cr3t-pw is wrong\n\n   please retry"
+	got := redactBody([]byte(body), cfg)
+	if strings.Contains(got, "alice") {
+		t.Errorf("username leaked into excerpt: %q", got)
+	}
+	if strings.Contains(got, "s3cr3t-pw") {
+		t.Errorf("password leaked into excerpt: %q", got)
+	}
+	if strings.Contains(got, "\n") {
+		t.Errorf("whitespace not collapsed: %q", got)
+	}
+}
+
+func TestRedactBody_Caps(t *testing.T) {
+	got := redactBody([]byte(strings.Repeat("a", 1000)), config{})
+	if r := []rune(got); len(r) > 256+len([]rune("…(truncated)")) {
+		t.Errorf("excerpt not capped: %d runes", len(r))
 	}
 }
