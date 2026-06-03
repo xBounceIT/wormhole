@@ -58,9 +58,17 @@ func logf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, format+"\n", args...)
 }
 
+// debugLog enables verbose, secret-redacted logging of FortiGate HTTP responses during the
+// login flow. Off by default so normal logs never carry any response-body bytes; the parent
+// opts in for a one-shot diagnostic capture by setting WORMHOLE_FORTIPROXY_DEBUG in Wormhole's
+// environment, which this child process inherits.
+var debugLog bool
+
 func main() {
 	mock := flag.Bool("mock", false, "skip Fortinet handshake; dial via OS sockets (CI / tests only)")
 	flag.Parse()
+
+	debugLog = os.Getenv("WORMHOLE_FORTIPROXY_DEBUG") != ""
 
 	if err := run(*mock); err != nil {
 		logf("fatal: %v", err)

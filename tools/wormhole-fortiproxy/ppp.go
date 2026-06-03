@@ -134,6 +134,17 @@ type pppState struct {
 	// back to us indicate a loopback per RFC 1661 §6.4 and are rejected.
 	ourMagic atomic.Uint32
 
+	// IPCP negotiation state (RFC 1332). Touched ONLY by handleIPCP, which is dispatched
+	// synchronously from the single readLoop goroutine — so these need no synchronization. We
+	// drive our own half of IPCP reactively off the gateway's Configure-Request retransmits
+	// (see handleIPCP) rather than a startup send + timer.
+	ourIPCPID      byte       // id of our outstanding IPCP Configure-Request (stable across re-sends)
+	ourIPCPSent    bool       // we have allocated ourIPCPID and sent our Configure-Request at least once
+	ourAckReceived bool       // the gateway Ack'd our Configure-Request (our half is up)
+	peerAckSent    bool       // we Ack'd the gateway's Configure-Request (peer half is up)
+	ipcpOpened     bool       // latched once both halves complete, so the "opened" log fires once
+	peerIPCPAddr   netip.Addr // the gateway's announced endpoint address; diagnostics only
+
 	// Separate channels for control- vs data-plane frames so a stalled bulk IPv4 write
 	// can't delay an LCP Echo-Reply past the gateway's dead-peer-detection window. The
 	// single writerLoop is the only goroutine that touches s.conn for writes — no mutex
@@ -351,11 +362,14 @@ func (s *pppState) injectIPv4(packet []byte) {
 	pkt.DecRef()
 }
 
-func (s *pppState) sendPPP(proto uint16, payload []byte, control bool) {
+// sendPPP enqueues a frame onto the control- or data-plane channel. Returns true if the frame
+// was enqueued, false if it was dropped (oversized, or the channel was full). Negotiation code
+// uses the result to avoid latching "sent" state on a dropped control frame.
+func (s *pppState) sendPPP(proto uint16, payload []byte, control bool) bool {
 	frame, err := buildEncapFrame(proto, payload)
 	if err != nil {
 		logf("ppp sendPPP: dropping oversized frame (proto=%#x control=%v): %v", proto, control, err)
-		return
+		return false
 	}
 	ch := s.dataFrame
 	if control {
@@ -365,8 +379,10 @@ func (s *pppState) sendPPP(proto uint16, payload []byte, control bool) {
 	// caller (which is usually the read loop dispatching a control reply).
 	select {
 	case ch <- frame:
+		return true
 	default:
 		logf("ppp frame queue full (control=%v); dropping", control)
+		return false
 	}
 }
 
@@ -424,13 +440,24 @@ func (s *pppState) handleLCP(payload []byte) {
 	}
 }
 
-// handleIPCP brings up the network layer. The gateway's Configure-Request announces the IP
-// address it wants the client to use; we compare to the address we already bound at the
-// channel.Endpoint (from the XML config). A mismatch means the gateway changed its mind
-// after the XML — Ack'ing would leave the netstack bound to the XML IP while the gateway
-// thinks we accepted a different one, and every outbound packet would carry the wrong
-// source. Per RFC 1332 §3.3 the correct response is Configure-Nak with our preferred
-// address; the gateway will then either re-issue with our value or Reject and we tear down.
+// handleIPCP brings up the network layer (IPCP, RFC 1332). IPCP is bidirectional and only
+// reaches Opened once BOTH halves complete: we must Ack the gateway's Configure-Request AND
+// the gateway must Ack ours.
+//
+// The IP-Address option (type 3) in the gateway's Configure-Request is the GATEWAY's OWN
+// endpoint address (RFC 1332 §3.3 — "the desired local address of the sender"), not a value
+// the client should adopt. It is legitimately different from our assigned address, so we Ack
+// it verbatim and never Nak it with ours. (The old code Nak'd with our address on mismatch,
+// a guaranteed non-convergent loop: a Configure-Nak directs the SENDER to change ITS address
+// to the value we offer, which the gateway cannot do — so it re-requested its real address
+// forever, ~1000x, and IPCP never opened.)
+//
+// We drive our own half reactively: on each gateway Configure-Request we (re)send our own
+// Configure-Request advertising the XML-assigned address, reusing a stable id, until the
+// gateway Acks it. Reacting to the gateway's CR (rather than sending one proactively at
+// startup) guarantees LCP has already Opened — otherwise a conformant gateway phase-discards
+// a premature IPCP frame — and the gateway's own CR retransmits give us retransmission for
+// free, with no timer and all state confined to the readLoop goroutine.
 func (s *pppState) handleIPCP(payload []byte) {
 	code, id, body, ok := parseCPFrame(payload)
 	if !ok {
@@ -438,33 +465,91 @@ func (s *pppState) handleIPCP(payload []byte) {
 	}
 	switch code {
 	case lcpConfigureRequest:
-		if announced, ok := extractIPCPAddress(body); ok && announced.IsValid() && announced != s.assignedIP {
-			// Log the mismatch BEFORE attempting to build the Nak, so operators see the
-			// peer/netstack disagreement context regardless of whether the build path
-			// errors. (Previously this log only fired on the success path, so a defensive
-			// fallback would have hidden the cause.)
-			logf("ppp IPCP peer announced IP-Address=%s but netstack is bound to %s (XML)",
-				announced, s.assignedIP)
-			// Build a Nak body containing the IP-Address option with OUR address. Per RFC 1332
-			// §3.3 a Nak preserves option order; we only carry the one option we disagree on.
-			nak, err := buildIPCPAddressOption(s.assignedIP)
-			if err != nil {
-				// Should be unreachable because parseTunnelConfigXML rejects non-v4 addresses,
-				// but if it ever IS reached, Ack'ing into a known-broken state (gateway thinks
-				// we accepted its IP; our netstack stays bound to ours; outbound source IP
-				// wrong; replies silently dropped) is worse than tearing down. Hard-fail.
-				logf("ppp IPCP cannot build Nak for assignedIP=%s (%v); tearing down rather than Ack'ing into a broken state",
-					s.assignedIP, err)
-				s.cancel()
-				return
-			}
-			logf("ppp IPCP replying Configure-Nak with our address")
-			s.sendIPCP(lcpConfigureNak, id, nak)
-			return
+		// The gateway's CR carries the gateway's own address; record it for diagnostics.
+		if peer, ok := extractIPCPAddress(body); ok && peer.IsValid() {
+			s.peerIPCPAddr = peer
 		}
-		s.sendIPCP(lcpConfigureAck, id, body)
-	case lcpConfigureAck, lcpConfigureNak, lcpConfigureReject:
-		// no-op
+		// Drive our half: (re)send our own Configure-Request until the gateway Acks it. Send it
+		// BEFORE the Ack — both go through the non-blocking control queue, which drops frames
+		// under sustained writer backpressure, and request-first guarantees our request is
+		// never the lone casualty. If only one queue slot is free, the request takes it and the
+		// Ack is dropped; the gateway then keeps retransmitting its request (it never saw our
+		// Ack), re-driving this path so the Ack is retried. The reverse order could drop our
+		// request while the Ack lands, making the gateway stop retransmitting with our half
+		// never opened. The gateway's own retransmits thus give our request retransmission for
+		// free, with no timer and all state on the readLoop goroutine.
+		if !s.ourAckReceived {
+			s.sendOurIPCPRequest()
+		}
+		if s.sendIPCP(lcpConfigureAck, id, body) {
+			s.peerAckSent = true
+		}
+		s.maybeIPCPOpened()
+	case lcpConfigureAck:
+		// The gateway Ack'd our Configure-Request — our half is up. Match our stable id so a
+		// stale or duplicate Ack can't flip state for a request we never sent.
+		if s.ourIPCPSent && id == s.ourIPCPID {
+			s.ourAckReceived = true
+			s.maybeIPCPOpened()
+		}
+	case lcpConfigureNak:
+		// The gateway wants us to use a different client address. This sidecar bound the
+		// XML-assigned address into the gVisor netstack and the dialer at startup and cannot
+		// re-home them, so adopting a new address would just blackhole traffic while we logged
+		// success. Fail loudly instead. (A well-behaved FortiGate Acks the address it handed
+		// us in the tunnel XML, so this branch is defensive.)
+		if s.ourIPCPSent && id == s.ourIPCPID {
+			logf("ppp IPCP gateway Nak'd our address %s (offering a different one); this sidecar cannot rebind, tearing down", s.assignedIP)
+			s.cancel()
+		}
+	case lcpConfigureReject:
+		// The gateway rejected our IP-Address option outright — no usable IPv4.
+		if s.ourIPCPSent && id == s.ourIPCPID {
+			logf("ppp IPCP gateway rejected our IP-Address option; cannot bring up IPv4, tearing down")
+			s.cancel()
+		}
+	}
+}
+
+// sendOurIPCPRequest sends (or re-sends) the client's IPCP Configure-Request advertising the
+// assigned address. The id is allocated once on the first call and reused on every re-send,
+// so the gateway's Configure-Ack always matches our outstanding request.
+func (s *pppState) sendOurIPCPRequest() {
+	opts, err := buildIPCPAddressOption(s.assignedIP)
+	if err != nil {
+		// Unreachable in practice: parseTunnelConfigXML already rejected non-IPv4 addresses.
+		// But if it ever fires, hanging with no IPv4 is worse than a clean teardown.
+		logf("ppp IPCP cannot build our Configure-Request for assignedIP=%s (%v); tearing down", s.assignedIP, err)
+		s.cancel()
+		return
+	}
+	// Use a fresh id until one of our requests actually reaches the control queue; once a
+	// request is enqueued we lock that id and reuse it for every retransmit so the gateway's
+	// Ack matches. Latch ourIPCPSent ONLY on a successful enqueue — a request dropped by a full
+	// control queue must not look "sent," or the id-matched Ack/Nak guards and the missing
+	// retransmit could wedge our half. handleIPCP sends this before the Ack, so a full queue
+	// drops the Ack too and the gateway keeps retransmitting, re-driving this path until the
+	// request is actually enqueued.
+	id := s.ourIPCPID
+	if !s.ourIPCPSent {
+		id = s.allocID()
+	}
+	if s.sendIPCP(lcpConfigureRequest, id, opts) {
+		s.ourIPCPID = id
+		s.ourIPCPSent = true
+		return
+	}
+	logf("ppp IPCP control queue full; deferring our Configure-Request to the gateway's next request")
+}
+
+// maybeIPCPOpened latches and logs once both halves of IPCP are up (we Ack'd the gateway's
+// Configure-Request AND the gateway Ack'd ours). It gates nothing — injectIPv4/dataLoop
+// forward frames unconditionally — but gives operators one clear "opened" line to tell
+// "IPCP never came up" apart from "IPCP up but the app-layer dial failed" in bug reports.
+func (s *pppState) maybeIPCPOpened() {
+	if s.peerAckSent && s.ourAckReceived && !s.ipcpOpened {
+		s.ipcpOpened = true
+		logf("ppp IPCP opened (gateway %s, assigned %s); IPv4 now flows", s.peerIPCPAddr, s.assignedIP)
 	}
 }
 
@@ -480,14 +565,14 @@ func buildIPCPAddressOption(addr netip.Addr) ([]byte, error) {
 	return out, nil
 }
 
-func (s *pppState) sendLCP(code byte, id byte, body []byte) {
+func (s *pppState) sendLCP(code byte, id byte, body []byte) bool {
 	frame := buildCPFrame(code, id, body)
-	s.sendPPP(pppProtoLCP, frame, true)
+	return s.sendPPP(pppProtoLCP, frame, true)
 }
 
-func (s *pppState) sendIPCP(code byte, id byte, body []byte) {
+func (s *pppState) sendIPCP(code byte, id byte, body []byte) bool {
 	frame := buildCPFrame(code, id, body)
-	s.sendPPP(pppProtoIPCP, frame, true)
+	return s.sendPPP(pppProtoIPCP, frame, true)
 }
 
 func buildCPFrame(code, id byte, body []byte) []byte {

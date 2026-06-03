@@ -90,7 +90,7 @@ func fortiLogin(ctx context.Context, cfg config) (*session, error) {
 	if cfg.Realm != nil && *cfg.Realm != "" {
 		form.Set("realm", *cfg.Realm)
 	}
-	body, err := postForm(authCtx, client, baseURL.JoinPath("remote", "logincheck").String(), form)
+	body, err := postForm(authCtx, client, "logincheck", baseURL.JoinPath("remote", "logincheck").String(), form, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("logincheck POST: %w", err)
 	}
@@ -105,7 +105,7 @@ func fortiLogin(ctx context.Context, cfg config) (*session, error) {
 			return nil, fmt.Errorf("generate TOTP code: %w", err)
 		}
 		challenge.respond(code, cfg)
-		body, err = postForm(authCtx, client, baseURL.JoinPath("remote", "logincheck").String(), challenge.form)
+		body, err = postForm(authCtx, client, "logincheck-2fa", baseURL.JoinPath("remote", "logincheck").String(), challenge.form, cfg)
 		if err != nil {
 			return nil, fmt.Errorf("logincheck challenge POST: %w", err)
 		}
@@ -118,11 +118,20 @@ func fortiLogin(ctx context.Context, cfg config) (*session, error) {
 	// the cookie for, so check it there.
 	tunnelURL := baseURL.JoinPath("remote", "sslvpn-tunnel")
 	if !hasSvpnCookie(jar, tunnelURL) {
-		return nil, fmt.Errorf("login did not yield an SVPNCOOKIE (server returned %d bytes without a recognized challenge)", len(body))
+		// Surface enough to diagnose WHY the cookie is missing without a packet capture: the
+		// body classification and which cookie NAMES (never values) the jar holds, both at the
+		// tunnel path and the root. Per-response status/body lines were already logged above.
+		tags := strings.Join(classifyLoginBody(body), ",")
+		tunnelCookies := strings.Join(cookieNames(jar, tunnelURL), ",")
+		logf("login failed: SVPNCOOKIE absent. body=[%s] jar(tunnel-path)=[%s] jar(root)=[%s]",
+			tags, tunnelCookies, strings.Join(cookieNames(jar, baseURL), ","))
+		return nil, fmt.Errorf(
+			"login did not yield an SVPNCOOKIE (server returned %d bytes, body=[%s], cookies=[%s] without a recognized challenge)",
+			len(body), tags, tunnelCookies)
 	}
 
 	// Step 3: fetch the tunnel config XML (assigned IP, DNS, MTU).
-	xmlBytes, err := httpGet(authCtx, client, baseURL.JoinPath("remote", "fortisslvpn_xml").String())
+	xmlBytes, err := httpGet(authCtx, client, "config-xml", baseURL.JoinPath("remote", "fortisslvpn_xml").String(), cfg)
 	if err != nil {
 		return nil, fmt.Errorf("config XML: %w", err)
 	}
@@ -219,7 +228,7 @@ func bytesEqual(a, b []byte) bool {
 // attempt to wedge us into a misclassified-auth state by padding the body past parseChallenge.
 const maxResponseBody = 1 << 20
 
-func postForm(ctx context.Context, client *http.Client, url string, form url.Values) ([]byte, error) {
+func postForm(ctx context.Context, client *http.Client, label, url string, form url.Values, cfg config) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, err
@@ -231,10 +240,15 @@ func postForm(ctx context.Context, client *http.Client, url string, form url.Val
 		return nil, err
 	}
 	defer resp.Body.Close()
-	return readBoundedBody(resp.Body, url)
+	body, err := readBoundedBody(resp.Body, url)
+	if err != nil {
+		return nil, err
+	}
+	logResponseDiagnostics(label, resp, body, cfg)
+	return body, nil
 }
 
-func httpGet(ctx context.Context, client *http.Client, url string) ([]byte, error) {
+func httpGet(ctx context.Context, client *http.Client, label, url string, cfg config) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -245,10 +259,16 @@ func httpGet(ctx context.Context, client *http.Client, url string) ([]byte, erro
 		return nil, err
 	}
 	defer resp.Body.Close()
+	body, err := readBoundedBody(resp.Body, url)
+	if err != nil {
+		return nil, err
+	}
+	// Classify before the status gate so a non-2xx error page is still logged.
+	logResponseDiagnostics(label, resp, body, cfg)
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	return readBoundedBody(resp.Body, url)
+	return body, nil
 }
 
 // readBoundedBody reads up to maxResponseBody bytes. Unlike io.ReadAll(io.LimitReader(...)),
@@ -301,6 +321,114 @@ func hasSvpnCookie(jar *cookiejar.Jar, u *url.URL) bool {
 		}
 	}
 	return false
+}
+
+// cookieNames returns the names (never values) of cookies the jar would send to u. Diagnostics
+// only — used on the login-failure path to show whether SVPNCOOKIE was set under an unexpected
+// path versus not set at all.
+func cookieNames(jar *cookiejar.Jar, u *url.URL) []string {
+	var names []string
+	for _, c := range jar.Cookies(u) {
+		names = append(names, c.Name)
+	}
+	return names
+}
+
+// retCodeRE captures FortiGate's ajax/text result code, e.g. "ret=1" or "ret=2,reqid=...".
+var retCodeRE = regexp.MustCompile(`(?i)\bret=(-?\d+)`)
+
+// wsRE collapses any run of whitespace to a single space for one-line log excerpts.
+var wsRE = regexp.MustCompile(`\s+`)
+
+// sensitiveKVRE matches the VALUES of challenge/session keys in FortiGate's ajax/url-encoded
+// responses (magic, reqid, SAMLResponse, …) so redactBody can strip them. Keys are ordered
+// longest-first where one prefixes another (grpid before grp) for an unambiguous match.
+var sensitiveKVRE = regexp.MustCompile(`(?i)\b(magic|reqid|polid|grpid|grp|portal|peer|tokeninfo|credential|svpncookie|samlrequest|samlresponse)=([^,&\s'"<>]+)`)
+
+// htmlValueAttrRE matches any HTML value="…" attribute. redactBody masks ALL of them: in a
+// FortiGate challenge/SAML page the value attributes carry the live tokens, and name↔value
+// can't be reliably paired with a single regex across arbitrary attribute order. Field names,
+// input types and tag structure stay visible — all the excerpt needs for shape diagnosis.
+var htmlValueAttrRE = regexp.MustCompile(`(?is)(\bvalue\s*=\s*)(?:"[^"]*"|'[^']*'|[^\s>]+)`)
+
+// classifyLoginBody returns small, secret-free tags describing a FortiGate login/logincheck
+// response, for diagnostics only. It echoes no body data beyond a matched numeric ret= code.
+func classifyLoginBody(body []byte) []string {
+	s := string(body)
+	lower := strings.ToLower(s)
+	var tags []string
+	if strings.Contains(lower, "/remote/saml/") || strings.Contains(s, "SAMLRequest") ||
+		strings.Contains(lower, "saml_request") {
+		tags = append(tags, "saml")
+	}
+	if m := retCodeRE.FindStringSubmatch(s); m != nil {
+		tags = append(tags, "ret="+m[1])
+	}
+	if strings.Contains(lower, "<form") &&
+		(strings.Contains(lower, `name="username"`) || strings.Contains(lower, "name='username'") ||
+			strings.Contains(lower, `name="credential"`)) {
+		tags = append(tags, "login-page")
+	}
+	if strings.Contains(lower, `name="magic"`) || strings.Contains(lower, "name='magic'") ||
+		strings.Contains(lower, "magic=") {
+		tags = append(tags, "has-magic")
+	}
+	if strings.Contains(lower, "tokeninfo") || strings.Contains(lower, "chal_msg") ||
+		strings.Contains(lower, "ftm_push") || strings.Contains(lower, "fortitoken") {
+		tags = append(tags, "2fa-hint")
+	}
+	if strings.Contains(lower, "permission denied") || strings.Contains(lower, "login failed") ||
+		strings.Contains(lower, "invalid") || strings.Contains(lower, "locked") ||
+		strings.Contains(lower, "too many") {
+		tags = append(tags, "auth-error")
+	}
+	return tags
+}
+
+// redactBody renders a single-line, length-capped, secret-scrubbed excerpt of a response body
+// for the debug-only verbose log. Whitespace is collapsed; the configured username/password AND
+// any challenge/session tokens (magic, reqid, SAMLResponse, every HTML value="…" attribute) are
+// masked. Only reached when debugLog is set (operator opted in for a capture).
+func redactBody(body []byte, cfg config) string {
+	s := strings.TrimSpace(wsRE.ReplaceAllString(string(body), " "))
+	// Structural redaction FIRST, while the markup is intact: strip the live challenge/session
+	// material the gateway includes in 2FA/SAML responses — magic, reqid, SAMLResponse, etc. —
+	// by masking the VALUES of sensitive keys and every HTML value="…" attribute. Only values
+	// go; field names stay (useful, non-secret) for shape diagnosis. This must precede the
+	// literal credential scrub below: a short username/password that is a substring of
+	// "value"/"input"/etc. would otherwise corrupt the markup and defeat the attribute match,
+	// leaking the token it was meant to hide.
+	s = sensitiveKVRE.ReplaceAllString(s, "${1}=<redacted>")
+	s = htmlValueAttrRE.ReplaceAllString(s, `${1}"<redacted>"`)
+	// Then scrub the configured credentials wherever they still appear in plaintext.
+	if cfg.Username != "" {
+		s = strings.ReplaceAll(s, cfg.Username, "<user>")
+	}
+	if cfg.Password != "" {
+		s = strings.ReplaceAll(s, cfg.Password, "<redacted>")
+	}
+	const limit = 256
+	if r := []rune(s); len(r) > limit {
+		s = string(r[:limit]) + "…(truncated)"
+	}
+	return s
+}
+
+// logResponseDiagnostics emits one secret-free line summarizing a FortiGate HTTP response so a
+// failed login is diagnosable from the parent's [fortiproxy] log without a packet capture:
+// status, body length, the NAMES of any Set-Cookie headers (never their values), and a coarse
+// body classification. With debugLog set it adds a redacted, capped body excerpt.
+func logResponseDiagnostics(label string, resp *http.Response, body []byte, cfg config) {
+	var names []string
+	for _, c := range resp.Cookies() {
+		names = append(names, c.Name)
+	}
+	logf("%s: status=%d bodyLen=%d set-cookie=[%s] body=[%s]",
+		label, resp.StatusCode, len(body),
+		strings.Join(names, ","), strings.Join(classifyLoginBody(body), ","))
+	if debugLog {
+		logf("%s body-excerpt: %s", label, redactBody(body, cfg))
+	}
 }
 
 // challenge represents a FortiGate 2FA prompt parsed from the logincheck response body.

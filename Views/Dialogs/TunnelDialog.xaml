@@ -22,6 +22,17 @@
                   HorizontalScrollBarVisibility="Disabled"
                   MaxHeight="520">
     <StackPanel Spacing="14" Padding="0,0,12,0">
+        <!-- Live "why is Create disabled" hint. A ContentDialog only exposes a boolean
+             IsPrimaryButtonEnabled (DialogService binds it to IDraftForm.IsValid), so without
+             this the disabled Create button is a silent dead-end — most acute for Watchguard,
+             whose required CA / client-cert / client-key fields live in the collapsed expander
+             below. UpdateValidationHint() keeps this in sync with the per-kind required-field
+             set on every edit. IsClosable=False: it is guidance, not a dismissible error, and
+             auto-hides the moment the form is valid. -->
+        <InfoBar x:Name="ValidationHintBar"
+                 IsOpen="False"
+                 IsClosable="False"
+                 Severity="Informational" />
         <!-- Top row: Name and VPN type on a single horizontal line. -->
         <Grid ColumnSpacing="12">
             <Grid.ColumnDefinitions>
@@ -160,6 +171,14 @@
                     Content="Import from .wgssl…"
                     Click="OnWatchguardImportClicked"
                     HorizontalAlignment="Left" />
+            <!-- Points users at the intended happy path: a Firebox emits a .wgssl bundle that
+                 carries the (mandatory) CA + client certificate + client key. Importing fills
+                 those three plus the server/port; the user then adds username + password. The
+                 alternative is pasting the PEMs by hand in the Certificates section below. -->
+            <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"
+                       Text="WatchGuard provides a .wgssl profile containing the required CA and client certificates. Import it, then enter your username and password — or fill in the Certificates section below by hand." />
             <!-- Inline status bar for .wgssl import outcomes. We can't `ContentDialog.ShowAsync`
                  an error from here because the TunnelDialog itself is already a ContentDialog and
                  WinUI 3 only allows one ContentDialog per XamlRoot — the second ShowAsync would
@@ -201,7 +220,8 @@
                 </StackPanel>
             </Grid>
 
-            <Expander Header="Certificates &amp; advanced"
+            <Expander x:Name="WatchguardCertsExpander"
+                      Header="Certificates &amp; advanced"
                       HorizontalAlignment="Stretch"
                       HorizontalContentAlignment="Stretch">
                 <StackPanel Spacing="10">
@@ -240,7 +260,8 @@
                              FontFamily="Consolas"
                              PlaceholderText="leave default unless the Firebox uses a custom server cert" />
                     <CheckBox x:Name="WatchguardTrustCertCheck"
-                              Content="Trust server certificate (skip ALL TLS checks — pre-auth credentials and OTP travel unverified)" />
+                              Content="Trust the server certificate on the pre-auth login (skips its HTTPS check and the cert-subject pin)"
+                              ToolTipService.ToolTip="Relaxes only the pre-authentication HTTPS exchange (where your credentials and OTP travel) and the verify-x509-name subject pin. The CA certificate you provide above is still required and still validates the VPN tunnel itself — enabling this does not allow a CA-less connection." />
                 </StackPanel>
             </Expander>
         </StackPanel>

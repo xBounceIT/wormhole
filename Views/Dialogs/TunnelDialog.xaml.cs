@@ -39,47 +39,95 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
     private StormshieldConnectionMode StormshieldSelectedMode =>
         StormshieldModeBox.SelectedIndex == 1 ? StormshieldConnectionMode.Import : StormshieldConnectionMode.Automatic;
 
-    public bool IsValid =>
-        !string.IsNullOrWhiteSpace(NameBox.Text) &&
-        SelectedKind switch
+    // IsValid is derived from the same per-kind required-field scan that powers the live
+    // "what's still missing" hint (UpdateValidationHint), so the disabled-Create gate and the
+    // explanation the user reads can never drift apart. The button is enabled iff nothing is
+    // outstanding.
+    public bool IsValid => CollectMissingRequiredFields().Count == 0;
+
+    // Returns the human-readable labels of the required fields not yet satisfied for the
+    // selected kind (empty when the form is ready to save). Labels intentionally match the
+    // server-side messages in TunnelConfigsViewModel.Validate* so the dialog hint and the
+    // post-save error speak the same language.
+    private List<string> CollectMissingRequiredFields()
+    {
+        var missing = new List<string>();
+        if (string.IsNullOrWhiteSpace(NameBox.Text)) missing.Add("Name");
+        switch (SelectedKind)
         {
-            TunnelKind.WireGuard =>
-                !string.IsNullOrWhiteSpace(InterfacePrivateKeyBox.Text) &&
-                !string.IsNullOrWhiteSpace(InterfaceAddressBox.Text) &&
-                !string.IsNullOrWhiteSpace(PeerPublicKeyBox.Text) &&
-                !string.IsNullOrWhiteSpace(PeerEndpointBox.Text),
-            TunnelKind.OpenVpn =>
-                !string.IsNullOrWhiteSpace(ProfileOvpnBox.Text),
-            TunnelKind.Fortinet =>
-                !string.IsNullOrWhiteSpace(FortinetHostBox.Text) &&
-                IsValidPort(FortinetPortBox.Text) &&
-                !string.IsNullOrWhiteSpace(FortinetUsernameBox.Text) &&
+            case TunnelKind.WireGuard:
+                if (string.IsNullOrWhiteSpace(InterfacePrivateKeyBox.Text)) missing.Add("Interface private key");
+                if (string.IsNullOrWhiteSpace(InterfaceAddressBox.Text)) missing.Add("Interface address");
+                if (string.IsNullOrWhiteSpace(PeerPublicKeyBox.Text)) missing.Add("Peer public key");
+                if (string.IsNullOrWhiteSpace(PeerEndpointBox.Text)) missing.Add("Peer endpoint");
+                break;
+            case TunnelKind.OpenVpn:
+                if (string.IsNullOrWhiteSpace(ProfileOvpnBox.Text)) missing.Add("OpenVPN profile");
+                break;
+            case TunnelKind.Fortinet:
+                if (string.IsNullOrWhiteSpace(FortinetHostBox.Text)) missing.Add("Host");
+                if (!IsValidPort(FortinetPortBox.Text)) missing.Add("Port (1-65535)");
+                if (string.IsNullOrWhiteSpace(FortinetUsernameBox.Text)) missing.Add("Username");
                 // IsNullOrWhiteSpace mirrors the server-side ValidateFortinet check; an
                 // all-whitespace password would otherwise pass the dialog gate and fail at the
                 // gateway with a generic 'invalid credentials' message.
-                !string.IsNullOrWhiteSpace(FortinetPasswordBox.Password),
-            TunnelKind.Watchguard =>
-                !string.IsNullOrWhiteSpace(WatchguardServerBox.Text) &&
-                IsValidPort(WatchguardPortBox.Text) &&
-                !string.IsNullOrWhiteSpace(WatchguardUsernameBox.Text) &&
-                !string.IsNullOrWhiteSpace(WatchguardPasswordBox.Password) &&
-                !string.IsNullOrWhiteSpace(WatchguardCaPemBox.Text) &&
-                !string.IsNullOrWhiteSpace(WatchguardClientCertPemBox.Text) &&
-                !string.IsNullOrWhiteSpace(WatchguardClientKeyPemBox.Text),
-            TunnelKind.Stormshield =>
-                StormshieldSelectedMode == StormshieldConnectionMode.Import
-                    // Import mode: the pasted .ovpn carries its own remote, so a profile is all that's
-                    // required — Server/Port are unused here (auth-user-pass is also optional).
-                    ? !string.IsNullOrWhiteSpace(StormshieldProfileOvpnBox.Text)
-                    // Automatic mode: a reachable server + port, plus username + password (SSO would
-                    // replace the credentials, but it's disabled/not-yet-supported).
-                    : !string.IsNullOrWhiteSpace(StormshieldServerBox.Text)
-                        && IsValidPort(StormshieldPortBox.Text)
-                        && (StormshieldSsoCheck.IsChecked == true
-                            || (!string.IsNullOrWhiteSpace(StormshieldUsernameBox.Text)
-                                && !string.IsNullOrWhiteSpace(StormshieldPasswordBox.Password))),
-            _ => false,
-        };
+                if (string.IsNullOrWhiteSpace(FortinetPasswordBox.Password)) missing.Add("Password");
+                break;
+            case TunnelKind.Watchguard:
+                if (string.IsNullOrWhiteSpace(WatchguardServerBox.Text)) missing.Add("Server");
+                if (!IsValidPort(WatchguardPortBox.Text)) missing.Add("Port (1-65535)");
+                if (string.IsNullOrWhiteSpace(WatchguardUsernameBox.Text)) missing.Add("Username");
+                if (string.IsNullOrWhiteSpace(WatchguardPasswordBox.Password)) missing.Add("Password");
+                // These three live in the collapsed "Certificates & advanced" expander and are
+                // mandatory: the WatchGuard SSL tunnel is OpenVPN-with-client-cert and the
+                // synthesized profile can't be built without them (WatchguardProfileBuilder).
+                // UpdateKindPanels auto-expands that section while any is empty so they're on
+                // screen rather than a hidden reason Create stays disabled.
+                if (string.IsNullOrWhiteSpace(WatchguardCaPemBox.Text)) missing.Add("CA certificate (PEM)");
+                if (string.IsNullOrWhiteSpace(WatchguardClientCertPemBox.Text)) missing.Add("Client certificate (PEM)");
+                if (string.IsNullOrWhiteSpace(WatchguardClientKeyPemBox.Text)) missing.Add("Client private key (PEM)");
+                break;
+            case TunnelKind.Stormshield:
+                if (StormshieldSelectedMode == StormshieldConnectionMode.Import)
+                {
+                    // Import mode: the pasted .ovpn carries its own remote, so only the profile is
+                    // required (Server/Port unused here; auth-user-pass optional).
+                    if (string.IsNullOrWhiteSpace(StormshieldProfileOvpnBox.Text)) missing.Add("OpenVPN profile");
+                }
+                else
+                {
+                    // Automatic mode: a reachable server + port, plus username + password unless SSO
+                    // is used (SSO is disabled/not-yet-supported but kept here for symmetry).
+                    if (string.IsNullOrWhiteSpace(StormshieldServerBox.Text)) missing.Add("Server");
+                    if (!IsValidPort(StormshieldPortBox.Text)) missing.Add("Port (1-65535)");
+                    if (StormshieldSsoCheck.IsChecked != true)
+                    {
+                        if (string.IsNullOrWhiteSpace(StormshieldUsernameBox.Text)) missing.Add("Username");
+                        if (string.IsNullOrWhiteSpace(StormshieldPasswordBox.Password)) missing.Add("Password");
+                    }
+                }
+                break;
+            default:
+                missing.Add("a supported VPN type");
+                break;
+        }
+        return missing;
+    }
+
+    // Reflects the outstanding required fields into the inline InfoBar so a disabled Create
+    // button always explains itself. Hidden once the form is valid. Called from everywhere
+    // ValidityChanged fires plus UpdateKindPanels (which covers initial load and kind switches).
+    private void UpdateValidationHint()
+    {
+        var missing = CollectMissingRequiredFields();
+        if (missing.Count == 0)
+        {
+            ValidationHintBar.IsOpen = false;
+            return;
+        }
+        ValidationHintBar.Message = "To save this tunnel, fill in: " + string.Join(", ", missing) + ".";
+        ValidationHintBar.IsOpen = true;
+    }
 
     private static bool IsValidPort(string text) =>
         int.TryParse(text, out var p) && p is >= 1 and <= 65535;
@@ -282,6 +330,12 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
             WatchguardCaPemBox.Text = imported.CaPem;
             WatchguardClientCertPemBox.Text = imported.ClientCertPem;
             WatchguardClientKeyPemBox.Text = imported.ClientKeyPem;
+            // Reveal the certs the import just loaded (they land inside the expander) and refresh
+            // the missing-fields hint now that the three PEMs are populated. Setting each box's
+            // Text already fired OnFieldChanged -> UpdateValidationHint, so this is belt-and-
+            // suspenders for the hint and the meaningful change for the expander state.
+            WatchguardCertsExpander.IsExpanded = true;
+            UpdateValidationHint();
             ValidityChanged?.Invoke(this, EventArgs.Empty);
 
             WatchguardImportStatus.Severity = InfoBarSeverity.Success;
@@ -352,6 +406,7 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
 
     private void OnFieldChanged(object sender, TextChangedEventArgs e)
     {
+        UpdateValidationHint();
         ValidityChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -362,6 +417,7 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
     // user touches a TextBox.
     private void OnPasswordFieldChanged(object sender, RoutedEventArgs e)
     {
+        UpdateValidationHint();
         ValidityChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -409,7 +465,9 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
     private void OnStormshieldModeChanged(object sender, SelectionChangedEventArgs e)
     {
         UpdateStormshieldModePanels();
-        // Required fields differ between modes (profile vs username/password), so re-evaluate Save.
+        // Required fields differ between modes (profile vs username/password), so refresh both the
+        // missing-fields hint and the Save gate — same pairing as OnFieldChanged.
+        UpdateValidationHint();
         ValidityChanged?.Invoke(this, EventArgs.Empty);
     }
 
@@ -484,10 +542,24 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         StormshieldPanel.Visibility = SelectedKind == TunnelKind.Stormshield
             ? Visibility.Visible
             : Visibility.Collapsed;
+        // The three mandatory PEM fields live inside the "Certificates & advanced" expander.
+        // Auto-expand it for Watchguard whenever any is still empty so the required inputs are
+        // on screen — a collapsed-by-default expander hiding required fields is exactly what
+        // made Create look permanently disabled. Once all three are set, leave the state to the
+        // user (this only runs on load / kind switch, not on every keystroke, so it won't snap
+        // shut mid-typing).
+        if (SelectedKind == TunnelKind.Watchguard)
+        {
+            WatchguardCertsExpander.IsExpanded =
+                string.IsNullOrWhiteSpace(WatchguardCaPemBox.Text) ||
+                string.IsNullOrWhiteSpace(WatchguardClientCertPemBox.Text) ||
+                string.IsNullOrWhiteSpace(WatchguardClientKeyPemBox.Text);
+        }
         // Stale import-error bars from a previous session would otherwise re-surface when the user
         // toggles Kind away and back. They're panel-specific, so reset them on any panel change.
         OvpnImportErrorBar.IsOpen = false;
         StormshieldImportErrorBar.IsOpen = false;
+        UpdateValidationHint();
     }
 
     private static List<string> SplitCsv(string s)
