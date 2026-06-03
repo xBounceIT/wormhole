@@ -22,6 +22,33 @@ public class StormshieldProfileNormalizerTests
         Assert.Contains("remote fw.example.com 443 tcp", result);
     }
 
+    [Theory]
+    [InlineData("AES-128-CBC")]
+    [InlineData("AES-192-CBC")]
+    public void Normalize_DerivesDataCiphersFromProfileCipher(string profileCipher)
+    {
+        // Smaller Stormshield appliances use AES-128-CBC; the injected negotiation list AND the
+        // fallback must offer the profile's actual cipher, not assume AES-256-CBC.
+        var ovpn = $"client\ndev tun\nremote fw 443\ncipher {profileCipher}\n";
+
+        var result = StormshieldProfileNormalizer.Normalize(ovpn);
+
+        Assert.Contains($"data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305:{profileCipher}", result);
+        Assert.Contains($"data-ciphers-fallback {profileCipher}", result);
+    }
+
+    [Fact]
+    public void Normalize_DoesNotDuplicateAeadProfileCipher()
+    {
+        // A GCM profile cipher is already in the AEAD list — it must not be appended a second time.
+        var ovpn = "client\ncipher AES-256-GCM\n";
+
+        var result = StormshieldProfileNormalizer.Normalize(ovpn);
+
+        Assert.Contains("data-ciphers AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305\n", result);
+        Assert.Contains("data-ciphers-fallback AES-256-GCM", result);
+    }
+
     [Fact]
     public void Normalize_DoesNotInjectDataCiphers_WhenAlreadyPresent()
     {

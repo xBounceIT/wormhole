@@ -30,8 +30,12 @@ namespace Wormhole.Services.Tunneling.Stormshield;
 /// </summary>
 public static class StormshieldProfileNormalizer
 {
-    private const string DataCiphersList = "AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305:AES-256-CBC";
-    private const string DataCiphersFallback = "AES-256-CBC";
+    // The modern AEAD suites we always offer first. The profile's OWN declared cipher is then
+    // appended to this list and used as the data-ciphers-fallback, so negotiation also succeeds
+    // against legacy CBC-only gateways — including the small Stormshield appliances that use
+    // AES-128-CBC (and AES-192-CBC), not just AES-256-CBC.
+    private const string AeadDataCiphers = "AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305";
+    private const string DefaultCbcCipher = "AES-256-CBC";
 
     public static string Normalize(string ovpn)
     {
@@ -41,6 +45,9 @@ public static class StormshieldProfileNormalizer
         var sb = new StringBuilder(ovpn.Length + 160);
         var hasCipher = false;
         var hasDataCiphers = false;
+        // The value of the profile's `cipher` directive (e.g. "AES-128-CBC"), used to derive the
+        // data-ciphers fallback so it matches the gateway's actual cipher rather than assuming 256.
+        string? profileCipher = null;
         // Name of the inline block we're currently inside (e.g. "ca"), or null when outside one.
         string? openBlock = null;
 
@@ -71,17 +78,25 @@ public static class StormshieldProfileNormalizer
             if (Eq(firstToken, "compress") || Eq(firstToken, "comp-lzo") || Eq(firstToken, "comp-noadapt"))
                 continue;
 
-            if (Eq(firstToken, "cipher")) hasCipher = true;
+            if (Eq(firstToken, "cipher"))
+            {
+                hasCipher = true;
+                // Capture the declared cipher (last one wins, matching OpenVPN directive semantics).
+                profileCipher = ParseDirectiveValue(trimmed, "cipher") ?? profileCipher;
+            }
             if (Eq(firstToken, "data-ciphers")) hasDataCiphers = true;
 
             sb.Append(rawLine).Append('\n');
         }
 
         // Legacy single-cipher profile without an NCP list → add one so modern OpenVPN negotiates.
+        // Derive the fallback (and ensure it's offered) from the profile's own cipher so AES-128/192
+        // -CBC gateways negotiate too, not just AES-256-CBC.
         if (hasCipher && !hasDataCiphers)
         {
-            sb.Append("data-ciphers ").Append(DataCiphersList).Append('\n');
-            sb.Append("data-ciphers-fallback ").Append(DataCiphersFallback).Append('\n');
+            var fallback = string.IsNullOrEmpty(profileCipher) ? DefaultCbcCipher : profileCipher!;
+            sb.Append("data-ciphers ").Append(BuildDataCiphersList(fallback)).Append('\n');
+            sb.Append("data-ciphers-fallback ").Append(fallback).Append('\n');
         }
 
         return sb.ToString();
@@ -121,4 +136,30 @@ public static class StormshieldProfileNormalizer
     }
 
     private static bool Eq(string a, string b) => a.Equals(b, StringComparison.OrdinalIgnoreCase);
+
+    // Reads the first argument of a directive from an already-trimmed line whose first token is
+    // <paramref name="directive"/> (e.g. "AES-128-CBC" from "cipher AES-128-CBC"). Returns null when
+    // the directive has no argument.
+    private static string? ParseDirectiveValue(string trimmedLine, string directive)
+    {
+        if (trimmedLine.Length <= directive.Length) return null;
+        var rest = trimmedLine[directive.Length..];
+        var start = 0;
+        while (start < rest.Length && (rest[start] == ' ' || rest[start] == '\t')) start++;
+        var end = start;
+        while (end < rest.Length && rest[end] != ' ' && rest[end] != '\t') end++;
+        return end > start ? rest[start..end] : null;
+    }
+
+    // The negotiation list: the modern AEAD suites plus the profile's own cipher (so a CBC-only
+    // gateway can still match). Skips appending the profile cipher when it's already one of the AEAD
+    // suites, to avoid a duplicate entry.
+    private static string BuildDataCiphersList(string profileCipher)
+    {
+        if (IsAeadSuite(profileCipher)) return AeadDataCiphers;
+        return AeadDataCiphers + ":" + profileCipher;
+    }
+
+    private static bool IsAeadSuite(string cipher) =>
+        Eq(cipher, "AES-256-GCM") || Eq(cipher, "AES-128-GCM") || Eq(cipher, "CHACHA20-POLY1305");
 }
