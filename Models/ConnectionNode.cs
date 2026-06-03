@@ -14,6 +14,25 @@ public class ConnectionNode
     public string? Username { get; set; }
     public Guid? CredentialId { get; set; }
 
+    /// <summary>
+    /// When true, the connection authenticates with an inline, per-connection password the
+    /// user typed in the editor rather than a saved <see cref="CredentialId"/> or a
+    /// connect-time prompt. The password is stored in Windows Credential Manager keyed by
+    /// <see cref="Id"/> (NOT in this row); this flag only records that such a secret exists.
+    /// SSH-only today; mutually exclusive with <see cref="CredentialId"/>. Null/false means
+    /// "no inline password". Not inherited from folders (resolved from the leaf node only).
+    /// </summary>
+    public bool? UseInlinePassword { get; set; }
+
+    /// <summary>
+    /// Transient (NEVER persisted) hand-off of the inline login password from the connection
+    /// editor to <c>ConnectionTreeViewModel</c>, which writes it to Credential Manager keyed by
+    /// <see cref="Id"/> AFTER the DB row commits. Deliberately absent from
+    /// <c>ConnectionRepository.Columns</c> so it is never written to or projected from SQLite,
+    /// and cleared once the secret has been stored. Never logged.
+    /// </summary>
+    public string? PendingInlinePassword { get; set; }
+
     public string? RdpDomain { get; set; }
     public string? RdpScreenSize { get; set; }
     public bool? RdpFullScreen { get; set; }
@@ -102,6 +121,7 @@ public class ConnectionNode
         Port = Port,
         Username = Username,
         CredentialId = CredentialId,
+        UseInlinePassword = UseInlinePassword,
         RdpDomain = RdpDomain,
         RdpScreenSize = RdpScreenSize,
         RdpFullScreen = RdpFullScreen,
@@ -157,6 +177,10 @@ public class ConnectionNode
         var copy = Clone();
         copy.Id = Guid.NewGuid();
         copy.SshKnownHostFingerprint = null;
+        // Inline passwords are stored in Credential Manager keyed by Id, so they're scoped to
+        // this identity exactly like host-key pinning. A fresh Id has no stored secret — drop
+        // the flag so the duplicate doesn't claim an inline password it can't resolve.
+        copy.UseInlinePassword = false;
         return copy;
     }
 }

@@ -76,6 +76,10 @@ public class FakeDialogService : IDialogService
         output.Port = src.Port;
         output.Username = src.Username;
         output.CredentialId = src.CredentialId;
+        output.UseInlinePassword = src.UseInlinePassword;
+        // Transient plaintext the tree VM stores in Credential Manager after the row commits —
+        // mirror it so inline-password tree tests can seed a password through the fake editor.
+        output.PendingInlinePassword = src.PendingInlinePassword;
         output.RdpDomain = src.RdpDomain;
         output.RdpScreenSize = src.RdpScreenSize;
         output.RdpFullScreen = src.RdpFullScreen;

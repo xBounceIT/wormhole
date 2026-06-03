@@ -27,6 +27,7 @@ public sealed class BackupServiceTests : IDisposable
             Port                     INTEGER  NULL,
             Username                 TEXT     NULL,
             CredentialId             TEXT     NULL,
+            UseInlinePassword        INTEGER  NULL,
             RdpDomain                TEXT     NULL,
             RdpScreenSize            TEXT     NULL,
             RdpFullScreen            INTEGER  NULL,

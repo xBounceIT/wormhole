@@ -187,6 +187,38 @@ public class SshCredentialResolverTests
         Assert.Equal("guessed-pwd", creds.Password);
     }
 
+    [Fact]
+    public async Task Resolve_InlinePassword_Stored_ReturnsItWithoutPrompt()
+    {
+        var nodeId = Guid.NewGuid();
+        var dialogs = new FakeDialogService();
+        var resolver = NewResolver(
+            dialogs,
+            creds: new FakeCredentialService(passwords: new() { [nodeId] = "inline-pwd" }));
+
+        var creds = await resolver.ResolveAsync(
+            MakeProfile(credentialId: null, useInlinePassword: true, nodeId: nodeId));
+
+        Assert.Equal("inline-pwd", creds.Password);
+        Assert.Null(creds.PrivateKey);
+        Assert.Equal(0, dialogs.PasswordPromptCount);
+    }
+
+    [Fact]
+    public async Task Resolve_InlinePassword_SecretMissing_FallsBackToPrompt()
+    {
+        // Flag set but no Credential Manager entry (e.g. DB restored without the local secret) —
+        // prompt rather than failing the connect opaquely.
+        var dialogs = new FakeDialogService { PasswordPromptResult = "typed-pwd" };
+        var resolver = NewResolver(dialogs);
+
+        var creds = await resolver.ResolveAsync(
+            MakeProfile(credentialId: null, useInlinePassword: true, nodeId: Guid.NewGuid()));
+
+        Assert.Equal("typed-pwd", creds.Password);
+        Assert.Equal(1, dialogs.PasswordPromptCount);
+    }
+
     private static SshCredentialResolver NewResolver(
         FakeDialogService dialogs,
         FakeCredentialRepository? repo = null,
@@ -198,16 +230,17 @@ public class SshCredentialResolverTests
             dialogs,
             inspector ?? new FakePrivateKeyInspector());
 
-    private static ConnectionProfile MakeProfile(Guid? credentialId)
+    private static ConnectionProfile MakeProfile(Guid? credentialId, bool useInlinePassword = false, Guid? nodeId = null)
         => new()
         {
-            NodeId = Guid.NewGuid(),
+            NodeId = nodeId ?? Guid.NewGuid(),
             Name = "test",
             Protocol = ProtocolType.Ssh,
             Host = "host.example",
             Port = 22,
             Username = "alice",
             CredentialId = credentialId,
+            UseInlinePassword = useInlinePassword,
         };
 
     private sealed class FakeCredentialRepository : ICredentialRepository

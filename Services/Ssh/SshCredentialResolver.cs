@@ -44,6 +44,21 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
 
     public async Task<SshCredentials> ResolveAsync(ConnectionProfile profile, CancellationToken cancellationToken = default)
     {
+        // Inline per-connection password (the editor forces CredentialId null when this is on,
+        // so the two are mutually exclusive). The secret lives in Credential Manager keyed by
+        // the node Id. A missing entry — e.g. a DB restored onto a machine without the secret —
+        // falls back to a prompt rather than failing the connect opaquely.
+        if (profile.UseInlinePassword)
+        {
+            var inline = await _credentialService.ReadPasswordAsync(profile.NodeId).ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (inline is not null)
+            {
+                return new SshCredentials(inline, null, null);
+            }
+            return await PromptForPasswordAsync(profile, cancellationToken).ConfigureAwait(true);
+        }
+
         if (profile.CredentialId is null)
         {
             return await PromptForPasswordAsync(profile, cancellationToken).ConfigureAwait(true);

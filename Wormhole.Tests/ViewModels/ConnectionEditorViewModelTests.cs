@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
+using Wormhole.Tests.Fakes;
 using Wormhole.ViewModels;
 using Xunit;
 
@@ -315,7 +316,7 @@ public class ConnectionEditorViewModelTests
             Protocol = ProtocolType.Ssh,
         };
         var repo = new SingleCredentialRepository(credential);
-        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         vm.Name = "n";
@@ -336,7 +337,7 @@ public class ConnectionEditorViewModelTests
         var sshCred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
         var repo = new MultiCredentialRepository(sshCred, rdpCred);
-        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         // AvailableCredentials always leads with the "(None)" sentinel for "prompt every
@@ -360,7 +361,7 @@ public class ConnectionEditorViewModelTests
         var rdpPwd = new CredentialProfile { Name = "rdp-pwd", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
         var rdpKey = new CredentialProfile { Name = "rdp-key", Protocol = ProtocolType.Rdp, Kind = CredentialKind.SshKey };
         var repo = new MultiCredentialRepository(rdpPwd, rdpKey);
-        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo(), new FakeCredentialService());
         vm.Protocol = ProtocolType.Rdp;
         await vm.LoadCredentialsAsync();
 
@@ -375,7 +376,7 @@ public class ConnectionEditorViewModelTests
     {
         var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var repo = new MultiCredentialRepository(cred);
-        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         vm.SelectedCredential = cred;
@@ -397,7 +398,7 @@ public class ConnectionEditorViewModelTests
         var sshCred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
         var repo = new MultiCredentialRepository(sshCred, rdpCred);
-        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         vm.SelectedCredential = sshCred;
@@ -420,7 +421,7 @@ public class ConnectionEditorViewModelTests
         // the existing CredentialId on save.
         var staleCred = new CredentialProfile { Name = "old-ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var repo = new MultiCredentialRepository(staleCred);
-        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         var node = new ConnectionNode
@@ -443,7 +444,7 @@ public class ConnectionEditorViewModelTests
         var sshA = new CredentialProfile { Name = "alpha", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var sshB = new CredentialProfile { Name = "bravo", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var repo = new MultiCredentialRepository(sshA, sshB);
-        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         var all = vm.FilterCredentials("");
@@ -462,7 +463,7 @@ public class ConnectionEditorViewModelTests
         var byUser = new CredentialProfile { Name = "svc", Username = "deployer", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var byDomain = new CredentialProfile { Name = "corp", Domain = "EXAMPLE", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var repo = new MultiCredentialRepository(byName, byUser, byDomain);
-        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         Assert.Contains(vm.FilterCredentials("prod"), c => c.Name == "Prod-Web");
@@ -478,7 +479,7 @@ public class ConnectionEditorViewModelTests
     {
         var cred = new CredentialProfile { Name = "Prod-Web", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var repo = new MultiCredentialRepository(cred);
-        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         Assert.Same(cred, vm.ResolveCredentialByText("prod-web"));
@@ -496,7 +497,7 @@ public class ConnectionEditorViewModelTests
         var prod = new CredentialProfile { Name = "prod", Username = "root", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var prodWeb = new CredentialProfile { Name = "prod-web", Username = "deployer", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var repo = new MultiCredentialRepository(prod, prodWeb);
-        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         // Exact name beats the fact that "prod" is also a substring of "prod-web".
@@ -518,7 +519,7 @@ public class ConnectionEditorViewModelTests
         var a = new CredentialProfile { Name = "web-a", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var b = new CredentialProfile { Name = "web-b", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var repo = new MultiCredentialRepository(a, b);
-        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         // "web" matches both — no unambiguous commit.
@@ -532,7 +533,7 @@ public class ConnectionEditorViewModelTests
         // the setter must map that back to CredentialId == null (prompt every time).
         var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var repo = new MultiCredentialRepository(cred);
-        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         vm.SelectedCredential = cred;
@@ -556,7 +557,7 @@ public class ConnectionEditorViewModelTests
             Protocol = ProtocolType.Ssh,
         };
         var repo = new SingleCredentialRepository(credential);
-        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         vm.Name = "n";
@@ -574,7 +575,7 @@ public class ConnectionEditorViewModelTests
     public async Task CanUseSshAutoSudo_ShownForSshIncludingPromptEveryTimeAndSavedPassword()
     {
         var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
-        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         // "Prompt every time" (no saved credential) still gets a password at runtime — and a
@@ -591,7 +592,7 @@ public class ConnectionEditorViewModelTests
     {
         var sshCred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
-        var vm = new ConnectionEditorViewModel(new MultiCredentialRepository(sshCred, rdpCred), EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(new MultiCredentialRepository(sshCred, rdpCred), EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         vm.SelectedCredential = sshCred;
@@ -606,7 +607,7 @@ public class ConnectionEditorViewModelTests
     {
         var pwd = new CredentialProfile { Name = "ssh-pwd", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var key = new CredentialProfile { Name = "ssh-key", Protocol = ProtocolType.Ssh, Kind = CredentialKind.SshKey };
-        var vm = new ConnectionEditorViewModel(new MultiCredentialRepository(pwd, key), EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(new MultiCredentialRepository(pwd, key), EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
         vm.Name = "n";
         vm.Host = "h";
@@ -630,7 +631,7 @@ public class ConnectionEditorViewModelTests
     public async Task LoadFrom_AutoSudo_RoundTripsOn()
     {
         var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
-        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         var source = new ConnectionNode
@@ -659,7 +660,7 @@ public class ConnectionEditorViewModelTests
         // so Auto sudo would be a silent no-op. The control must stay hidden, and with nothing
         // loaded WriteTo persists null.
         var keyCred = new CredentialProfile { Name = "ssh-key", Protocol = ProtocolType.Ssh, Kind = CredentialKind.SshKey };
-        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(keyCred), EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(keyCred), EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
         vm.Name = "n";
         vm.Host = "h";
@@ -679,7 +680,7 @@ public class ConnectionEditorViewModelTests
         // inheriting after an unrelated edit such as a rename — saving must not bake in an
         // explicit value that severs inheritance from future folder changes.
         var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
-        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         var source = new ConnectionNode
@@ -706,7 +707,7 @@ public class ConnectionEditorViewModelTests
     public async Task WriteTo_AutoSudo_ExplicitOnOverridesInheritedNull()
     {
         var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
-        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         var source = new ConnectionNode
@@ -734,7 +735,7 @@ public class ConnectionEditorViewModelTests
         // off for just that connection. A plain checkbox couldn't express this (off was
         // indistinguishable from inherit); the tri-state writes an explicit false.
         var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
-        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         var source = new ConnectionNode
@@ -764,7 +765,7 @@ public class ConnectionEditorViewModelTests
         // that case so a folder/imported default can't force Auto sudo on with no way to opt out —
         // the user can select Off to write an explicit false.
         var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
-        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         var source = new ConnectionNode
@@ -794,7 +795,7 @@ public class ConnectionEditorViewModelTests
         // explicit SshAutoSudo=true already on the node must be preserved on save, not clobbered —
         // it becomes effective again if the credential later changes to a password.
         var key = new CredentialProfile { Name = "ssh-key", Protocol = ProtocolType.Ssh, Kind = CredentialKind.SshKey };
-        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(key), EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(key), EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         var source = new ConnectionNode
@@ -830,7 +831,7 @@ public class ConnectionEditorViewModelTests
             Protocol = ProtocolType.Rdp,
             Kind = CredentialKind.Password,
         };
-        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(aad), EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(aad), EmptyTunnelRepo(), new FakeCredentialService());
         vm.Protocol = ProtocolType.Rdp;
         await vm.LoadCredentialsAsync();
 
@@ -856,7 +857,7 @@ public class ConnectionEditorViewModelTests
             Protocol = ProtocolType.Rdp,
             Kind = CredentialKind.Password,
         };
-        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(nonAad), EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(nonAad), EmptyTunnelRepo(), new FakeCredentialService());
         vm.Protocol = ProtocolType.Rdp;
         await vm.LoadCredentialsAsync();
 
@@ -880,7 +881,7 @@ public class ConnectionEditorViewModelTests
             Protocol = ProtocolType.Rdp,
             Kind = CredentialKind.Password,
         };
-        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(aad), EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(aad), EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
         var node = new ConnectionNode
@@ -1069,7 +1070,7 @@ public class ConnectionEditorViewModelTests
             Protocol = ProtocolType.Rdp,
             Kind = CredentialKind.Password,
         };
-        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(aad), EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(aad), EmptyTunnelRepo(), new FakeCredentialService());
         vm.Protocol = ProtocolType.Rdp;
         await vm.LoadCredentialsAsync();
 
@@ -1129,7 +1130,7 @@ public class ConnectionEditorViewModelTests
         var wg = new TunnelConfig { Id = Guid.NewGuid(), Name = "office-wg", Kind = TunnelKind.WireGuard };
         var vm = new ConnectionEditorViewModel(
             new EmptyCredentialRepository(),
-            new MultiTunnelConfigRepository(wg));
+            new MultiTunnelConfigRepository(wg), new FakeCredentialService());
         await vm.TunnelPicker.LoadAsync();
 
         vm.TunnelPicker.SelectedTunnel = wg;
@@ -1174,7 +1175,7 @@ public class ConnectionEditorViewModelTests
         var wg = new TunnelConfig { Id = Guid.NewGuid(), Name = "office-wg", Kind = TunnelKind.WireGuard };
         var vm = new ConnectionEditorViewModel(
             new EmptyCredentialRepository(),
-            new MultiTunnelConfigRepository(wg));
+            new MultiTunnelConfigRepository(wg), new FakeCredentialService());
         await vm.TunnelPicker.LoadAsync();
 
         var node = new ConnectionNode
@@ -1238,7 +1239,7 @@ public class ConnectionEditorViewModelTests
         var wg = new TunnelConfig { Id = Guid.NewGuid(), Name = "child-override", Kind = TunnelKind.WireGuard };
         var vm = new ConnectionEditorViewModel(
             new EmptyCredentialRepository(),
-            new MultiTunnelConfigRepository(wg));
+            new MultiTunnelConfigRepository(wg), new FakeCredentialService());
         await vm.TunnelPicker.LoadAsync();
 
         var node = new ConnectionNode
@@ -1300,7 +1301,7 @@ public class ConnectionEditorViewModelTests
         // entry in AvailableTunnelConfigs, the getter must return null (no selection) so the
         // UI surfaces the inconsistency. Falling back to InheritTunnel here would silently
         // mask a real "(true, id)" persisted state behind a misleading "(Inherit)" display.
-        var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository(), EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository(), EmptyTunnelRepo(), new FakeCredentialService());
 
         // Force the invalid intermediate state directly via the SelectedTunnel setter and
         // then yank the id via the public backing setter — simulating a race where the
@@ -1318,7 +1319,7 @@ public class ConnectionEditorViewModelTests
         var wg = new TunnelConfig { Id = Guid.NewGuid(), Name = "wg-1", Kind = TunnelKind.WireGuard };
         var vm = new ConnectionEditorViewModel(
             new EmptyCredentialRepository(),
-            new MultiTunnelConfigRepository(wg));
+            new MultiTunnelConfigRepository(wg), new FakeCredentialService());
         await vm.TunnelPicker.LoadAsync();
 
         Assert.Equal(3, vm.TunnelPicker.AvailableTunnelConfigs.Count);
@@ -1327,9 +1328,179 @@ public class ConnectionEditorViewModelTests
         Assert.Equal("wg-1", vm.TunnelPicker.AvailableTunnelConfigs[2].Name);
     }
 
+    [Fact]
+    public async Task WriteTo_InlinePassword_SetsFlagPendingAndNullsCredentialId()
+    {
+        var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository(), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        vm.Protocol = ProtocolType.Ssh;
+        vm.Name = "n";
+        vm.Host = "h";
+        vm.UseSavedCredentials = false;
+        vm.Username = "root";
+        vm.InlinePassword = "hunter2";
+
+        var node = new ConnectionNode();
+        vm.WriteTo(node);
+
+        // Inline mode: flag on, plaintext handed off via the transient property, saved
+        // credential cleared (the two are mutually exclusive), inline username persisted.
+        Assert.True(node.UseInlinePassword);
+        Assert.Equal("hunter2", node.PendingInlinePassword);
+        Assert.Null(node.CredentialId);
+        Assert.Equal("root", node.Username);
+    }
+
+    [Fact]
+    public async Task WriteTo_SavedCredentials_KeepsCredentialIdAndLeavesInlineOff()
+    {
+        var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        vm.Protocol = ProtocolType.Ssh;
+        vm.Name = "n";
+        vm.Host = "h";
+        vm.UseSavedCredentials = true;
+        vm.SelectedCredential = cred;
+
+        var node = new ConnectionNode();
+        vm.WriteTo(node);
+
+        Assert.False(node.UseInlinePassword);
+        Assert.Null(node.PendingInlinePassword);
+        Assert.Equal(cred.Id, node.CredentialId);
+    }
+
+    [Fact]
+    public async Task WriteTo_Rdp_UncheckedSavedCredentials_NeverUsesInlineAndClearsCredential()
+    {
+        // The inline Password control is SSH-only (ShowInlinePassword gates on IsSsh), so an RDP
+        // connection with "Use saved credentials" unchecked must not persist an inline secret —
+        // and it must still drop the previously-picked saved credential (don't silently keep auth).
+        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(rdpCred), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        vm.Protocol = ProtocolType.Rdp;
+        vm.Name = "n";
+        vm.Host = "h";
+        vm.SelectedCredential = rdpCred;
+        vm.UseSavedCredentials = false;
+        vm.InlinePassword = "ignored-for-rdp";
+
+        var node = new ConnectionNode();
+        vm.WriteTo(node);
+
+        Assert.False(node.UseInlinePassword);
+        Assert.Null(node.PendingInlinePassword);
+        Assert.Null(node.CredentialId);
+        Assert.False(vm.ShowInlinePassword);
+    }
+
+    [Fact]
+    public async Task LoadFrom_InlinePassword_SetsUseSavedCredentialsFalse()
+    {
+        var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository(), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        var source = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Ssh,
+            Kind = NodeKind.Connection,
+            UseInlinePassword = true,
+        };
+
+        vm.LoadFrom(source);
+
+        Assert.False(vm.UseSavedCredentials);
+        Assert.True(vm.ShowInlinePassword);
+    }
+
+    [Fact]
+    public async Task LoadInlineSecretAsync_PopulatesInlinePasswordFromStore()
+    {
+        var nodeId = Guid.NewGuid();
+        var creds = new FakeCredentialService();
+        creds.Passwords[nodeId] = "stored-pw";
+        var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository(), EmptyTunnelRepo(), creds);
+        await vm.LoadCredentialsAsync();
+        var source = new ConnectionNode
+        {
+            Id = nodeId,
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Ssh,
+            Kind = NodeKind.Connection,
+            UseInlinePassword = true,
+        };
+        vm.LoadFrom(source);
+
+        await vm.LoadInlineSecretAsync();
+
+        Assert.Equal("stored-pw", vm.InlinePassword);
+    }
+
+    [Fact]
+    public async Task LoadInlineSecretAsync_NoOp_WhenConnectionIsNotInline()
+    {
+        var nodeId = Guid.NewGuid();
+        var creds = new FakeCredentialService();
+        creds.Passwords[nodeId] = "should-not-load";
+        var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository(), EmptyTunnelRepo(), creds);
+        await vm.LoadCredentialsAsync();
+        var source = new ConnectionNode
+        {
+            Id = nodeId,
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Ssh,
+            Kind = NodeKind.Connection,
+        };
+        vm.LoadFrom(source);
+
+        await vm.LoadInlineSecretAsync();
+
+        Assert.Equal(string.Empty, vm.InlinePassword);
+    }
+
+    [Fact]
+    public async Task ShowInlinePassword_TrueOnlyForSshWithoutSavedCredentials()
+    {
+        var vm = await NewEditorAsync();
+        vm.Protocol = ProtocolType.Ssh;
+
+        vm.UseSavedCredentials = true;
+        Assert.False(vm.ShowInlinePassword);
+
+        vm.UseSavedCredentials = false;
+        Assert.True(vm.ShowInlinePassword);
+
+        vm.Protocol = ProtocolType.Rdp;
+        Assert.False(vm.ShowInlinePassword);
+    }
+
+    [Fact]
+    public async Task SshAutoSudoDescription_VariesByMode()
+    {
+        var vm = await NewEditorAsync();
+
+        vm.SshAutoSudoMode = ConnectionEditorViewModel.SshAutoSudoOn;
+        var on = vm.SshAutoSudoDescription;
+        vm.SshAutoSudoMode = ConnectionEditorViewModel.SshAutoSudoOff;
+        var off = vm.SshAutoSudoDescription;
+        vm.SshAutoSudoMode = ConnectionEditorViewModel.SshAutoSudoInherit;
+        var inherit = vm.SshAutoSudoDescription;
+
+        Assert.NotEqual(on, off);
+        Assert.NotEqual(on, inherit);
+        Assert.NotEqual(off, inherit);
+        // The "on" copy must keep the load-bearing caveat about sudo.
+        Assert.Contains("sudo", on, StringComparison.OrdinalIgnoreCase);
+    }
+
     private static async Task<ConnectionEditorViewModel> NewEditorAsync()
     {
-        var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository(), EmptyTunnelRepo());
+        var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository(), EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
         return vm;
     }

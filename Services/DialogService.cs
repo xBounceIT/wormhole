@@ -84,6 +84,7 @@ public sealed class DialogService : IDialogService
         var form = new NewConnectionDialog();
         await form.LoadAsync(initial);
 
+        var xamlRoot = RequireXamlRoot();
         var dialog = new ContentDialog
         {
             Title = isNew ? "New connection" : "Edit connection",
@@ -91,9 +92,21 @@ public sealed class DialogService : IDialogService
             PrimaryButtonText = isNew ? "Create" : "Save",
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Primary,
-            XamlRoot = RequireXamlRoot(),
+            XamlRoot = xamlRoot,
             IsPrimaryButtonEnabled = form.IsValid,
         };
+
+        // ContentDialog's default ContentDialogMaxWidth theme resource (~548 px) clips the
+        // editor's wider fields (the single Protocol+Host+Port row and the help captions) with
+        // no horizontal scrollbar. Lock Min == Max to a wider value so the layout has room and
+        // doesn't oscillate as the user types. This path doesn't use ShowFormDialogAsync, so the
+        // width is set here directly (mirroring that helper). Clamp to the host so the dialog
+        // stays inside a narrow window.
+        const double preferredWidth = 640;
+        var hostWidth = xamlRoot.Size.Width;
+        var targetWidth = hostWidth > 0 ? Math.Min(preferredWidth, hostWidth) : preferredWidth;
+        dialog.Resources["ContentDialogMinWidth"] = targetWidth;
+        dialog.Resources["ContentDialogMaxWidth"] = targetWidth;
 
         form.ValidityChanged += (_, _) => dialog.IsPrimaryButtonEnabled = form.IsValid;
         dialog.Opened += (_, _) => form.FocusNameField();

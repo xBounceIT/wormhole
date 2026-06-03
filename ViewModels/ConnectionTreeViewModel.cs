@@ -366,6 +366,17 @@ public partial class ConnectionTreeViewModel : ObservableObject
         try
         {
             await _repository.DeleteAsync(node.Id);
+            // Purge inline per-connection secrets (Credential Manager, keyed by node Id) for every
+            // connection in the deleted subtree. The DB rows cascade via ON DELETE CASCADE, but the
+            // out-of-band secrets do not — so deleting a FOLDER must also walk its descendant
+            // connections, not just purge the clicked node. Best-effort: DeletePasswordAsync
+            // self-swallows a missing entry, so it's a no-op for connections that never used an
+            // inline password. Saved-credential secrets are intentionally left alone — they're keyed
+            // by CredentialProfile.Id (a shared pool), not by node Id.
+            foreach (var connectionId in CollectConnectionNodeIds(clicked))
+            {
+                await _credentialService.DeletePasswordAsync(connectionId);
+            }
             await RefreshAsync();
         }
         catch (Exception ex)
@@ -380,6 +391,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
         try
         {
             await _repository.UpdateAsync(node);
+            await ApplyInlineSecretAsync(node);
             await RefreshAsync();
         }
         catch (Exception ex)
@@ -404,6 +416,24 @@ public partial class ConnectionTreeViewModel : ObservableObject
             count += CountDescendants(child);
         }
         return count;
+    }
+
+    // Node Ids of every connection in the subtree rooted at `root` (including the root itself
+    // when it is a connection). Drives inline-secret cleanup on delete: a folder delete cascades
+    // the DB rows but not the Credential Manager entries keyed by each connection's node Id.
+    private static IEnumerable<Guid> CollectConnectionNodeIds(TreeNodeViewModel root)
+    {
+        if (root.Kind == NodeKind.Connection)
+        {
+            yield return root.Node.Id;
+        }
+        foreach (var child in root.Children)
+        {
+            foreach (var id in CollectConnectionNodeIds(child))
+            {
+                yield return id;
+            }
+        }
     }
 
     public async Task PersistTreeStructureAsync()
@@ -516,12 +546,44 @@ public partial class ConnectionTreeViewModel : ObservableObject
         try
         {
             await _repository.AddAsync(node);
+            await ApplyInlineSecretAsync(node);
             await RefreshAsync();
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to add {Kind} '{Name}'", node.Kind, node.Name);
             await _dialog.ShowMessageAsync("Couldn't save", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Persist (or purge) a connection's inline per-connection password in Credential Manager,
+    /// keyed by the node Id, AFTER its DB row has committed — mirroring how CredentialsViewModel
+    /// writes a credential's secret after inserting the row. The plaintext arrives on the
+    /// transient <see cref="ConnectionNode.PendingInlinePassword"/> set by the editor's WriteTo;
+    /// it's cleared here so the live tree snapshot never retains it. Never logged.
+    /// </summary>
+    private async Task ApplyInlineSecretAsync(ConnectionNode node)
+    {
+        if (node.Kind != NodeKind.Connection) return;
+        try
+        {
+            if (node.UseInlinePassword == true)
+            {
+                await _credentialService.StorePasswordAsync(node.Id, node.PendingInlinePassword ?? string.Empty);
+            }
+            else
+            {
+                // Idempotent purge: when the connection isn't using an inline password (new saved
+                // credential, prompt-every-time, or the user just switched inline off), drop any
+                // stale secret. Keyed by node Id, so it never touches a saved credential's secret
+                // (those are keyed by credential Id). DeletePasswordAsync self-swallows not-found.
+                await _credentialService.DeletePasswordAsync(node.Id);
+            }
+        }
+        finally
+        {
+            node.PendingInlinePassword = null;
         }
     }
 

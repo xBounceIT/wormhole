@@ -10,6 +10,13 @@ public sealed record ConnectionProfile
     public string? Username { get; init; }
     public Guid? CredentialId { get; init; }
 
+    /// <summary>
+    /// When true, the SSH login password is read from Credential Manager keyed by
+    /// <see cref="NodeId"/> rather than a saved credential or a prompt. Resolved from the
+    /// leaf node only — inline passwords never inherit from a folder.
+    /// </summary>
+    public bool UseInlinePassword { get; init; }
+
     public string? RdpDomain { get; init; }
     public string? RdpScreenSize { get; init; }
     public bool RdpFullScreen { get; init; }
