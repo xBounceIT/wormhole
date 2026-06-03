@@ -267,6 +267,14 @@ class WormholeClient final : public OpenVPNClient {
   void external_pki_sign_request(ExternalPKISignRequest&) override {}
   void clock_tick() override {}
 
+  // The core calls this as a connection nears timeout. Returning false lets it
+  // disconnect with a CONNECTION_TIMEOUT event (surfaced to our state machine
+  // via event()); we don't want to park the client in an indefinite PAUSE state.
+  bool pause_on_connection_timeout() override { return false; }
+
+  // App custom control channel messages are unused by the sidecar — no-op.
+  void acc_event(const AppCustomControlMessageEvent&) override {}
+
   // --- Embedder lifecycle -------------------------------------------------
   int load(const std::string& ovpn) {
     Config cfg;
@@ -286,7 +294,11 @@ class WormholeClient final : public OpenVPNClient {
   void set_credentials(const std::string& user, const std::string& pass) {
     creds_.username = user;
     creds_.password = pass;
-    creds_.replacePasswordWithSessionID = true;
+    // Older OpenVPN3 ClientAPI exposed ProvideCreds::replacePasswordWithSessionID
+    // to swap the password for the server-issued auth-token (session ID) on
+    // renegotiation/reconnect. That field was removed; modern OpenVPN3 does this
+    // automatically whenever the server returns an auth-token, so there is nothing
+    // to opt into here.
   }
 
   int connect_async() {
