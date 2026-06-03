@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Services.Tunneling.Watchguard;
 
 namespace Wormhole.ViewModels;
 
@@ -571,6 +572,14 @@ public partial class TunnelConfigsViewModel : ObservableObject
         if (string.IsNullOrWhiteSpace(wg.ClientCertPem)) AppendValidationError(ref sb, "Client certificate (PEM) is required.");
         if (string.IsNullOrWhiteSpace(wg.ClientKeyPem)) AppendValidationError(ref sb, "Client private key (PEM) is required.");
         ThrowValidationErrors(sb);
+
+        // Required fields are all present — now apply the SAME injection-safety checks the
+        // profile builder enforces (control chars / quotes in Server or the verify-x509-name
+        // subject; angle brackets in a PEM body). Without this, a hand-edited or imported value
+        // carrying one of those characters passes Save and only fails at connect time inside
+        // WatchguardProfileBuilder.Build, after the bad value is already on disk. Run it after
+        // the required-field check so Server / the PEMs are guaranteed non-empty here.
+        WatchguardProfileBuilder.ValidateFieldSafety(wg);
     }
 
     private static void AppendValidationError(ref StringBuilder? sb, string message) =>
