@@ -23,21 +23,26 @@ package main
 // Win32 system libs that OpenVPN3's add_core_dependencies() attaches to the target), but
 // a bare `-lovpn_shim` CGO link never sees a static library's link interface, so the
 // closure has to be spelled out here or the final go-build link fails with hundreds of
-// undefined references. These paths/libs are Windows + x64-mingw-static specific — the
-// only arch that builds -tags ovpn3; the Linux CI best-effort build supplies its own via
-// $CGO_LDFLAGS. mbedTLS libs come from the submodule build tree; lz4 and jsoncpp from
-// vcpkg. -ljsoncpp mirrors CMake's add_json_library(ovpn_shim): the openvpn3 code paths
-// compiled here don't currently pull Json:: symbols, but linking it keeps the closure
-// honest against config drift (and ld ignores an unreferenced static archive). Order
-// matters for single-pass ld: dependents (ovpn_shim) before dependencies (mbedTLS, lz4,
-// jsoncpp), before the Win32 import libs they call into.
+// undefined references. These libs are Windows-specific — the Linux CI best-effort build
+// supplies its own via $CGO_LDFLAGS. mbedTLS libs come from the submodule build tree (an
+// arch-independent dir); lz4 and jsoncpp from vcpkg, whose lib dir is triplet-specific, so
+// the -L for it is keyed off GOARCH below (x64- vs arm64-mingw-static). Today only x64
+// builds -tags ovpn3 (arm64 ships the mock stub — no submodules/toolchain on that runner),
+// but selecting the vcpkg path by GOARCH avoids silently linking x64 archives into an
+// arm64 sidecar if that ever changes. -ljsoncpp mirrors CMake's add_json_library(ovpn_shim):
+// the openvpn3 code paths compiled here don't currently pull Json:: symbols, but linking it
+// keeps the closure honest against config drift (and ld ignores an unreferenced static
+// archive). Order matters for single-pass ld: dependents (ovpn_shim) before dependencies
+// (mbedTLS, lz4, jsoncpp), before the Win32 import libs they call into.
 // Statically link the MinGW C++/runtime libs so the shipped sidecar is self-contained.
 // Without this the .exe imports libstdc++-6.dll + libwinpthread-1.dll, which don't exist
 // on a clean end-user machine — the sidecar would fail to start (and the release verify
 // gate, which only looks for "binding not linked", would not catch the DLL-load failure).
 // System DLLs (kernel32, ws2_32, bcrypt, UCRT) stay dynamic, as they must.
 #cgo windows LDFLAGS: -static -static-libgcc -static-libstdc++
-#cgo windows LDFLAGS: -L${SRCDIR}/ovpn_shim/build/third_party_mbedtls/library -L${SRCDIR}/ovpn_shim/build/vcpkg_installed/x64-mingw-static/lib
+#cgo windows LDFLAGS: -L${SRCDIR}/ovpn_shim/build/third_party_mbedtls/library
+#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/vcpkg_installed/x64-mingw-static/lib
+#cgo windows,arm64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/vcpkg_installed/arm64-mingw-static/lib
 #cgo windows LDFLAGS: -lmbedtls -lmbedx509 -lmbedcrypto -llz4 -ljsoncpp
 // -lbcrypt resolves BCryptGenRandom, which mbedTLS 3.6's entropy_poll.c uses for the
 // Windows entropy source (modern mbedTLS prefers CNG/bcrypt over the legacy advapi32
