@@ -188,6 +188,93 @@ public class StormshieldPortalClientTests
         Assert.Throws<ArgumentNullException>(() => new StormshieldPortalClient(http, null!));
     }
 
+    // ----- DownloadProfileAsync: the profile is returned by the command response (Format raw) -----
+
+    [Fact]
+    public async Task DownloadProfileAsync_ReadsProfileFromCommandResponse_WithoutTmpFile()
+    {
+        // CONFIG OPENVPN DOWNLOAD returns the .ovpn inline — the profile must come from the command
+        // response, and tmp.file must not be required.
+        const string ovpn = "client\ndev tun\nremote rpv.example.com 443 tcp\n<ca>\nMIIB\n</ca>\n";
+        var tmpFileHit = false;
+        var handler = new RoutingHandler(req =>
+        {
+            var path = req.RequestUri!.AbsolutePath;
+            if (path.EndsWith("/api/auth/login", StringComparison.Ordinal)) return (HttpStatusCode.OK, "<nws code=\"100\"><sessionid>abc123</sessionid></nws>", "application/xml");
+            if (path.EndsWith("/api/command", StringComparison.Ordinal)) return (HttpStatusCode.OK, ovpn, "text/plain");
+            if (path.EndsWith("/api/download/tmp.file", StringComparison.Ordinal)) { tmpFileHit = true; return (HttpStatusCode.NotFound, "missing", "text/plain"); }
+            return (HttpStatusCode.OK, string.Empty, "text/plain");
+        });
+        using var http = new HttpClient(handler);
+        using var client = new StormshieldPortalClient(http, new Uri("https://fw.example.com/"));
+
+        var profile = await client.DownloadProfileAsync("sslclient", CancellationToken.None);
+
+        Assert.Contains("remote rpv.example.com 443 tcp", profile);
+        Assert.False(tmpFileHit, "tmp.file must not be needed when the command returns the profile inline");
+    }
+
+    [Fact]
+    public async Task DownloadProfileAsync_ExtractsProfileFromXmlEnvelope()
+    {
+        // When the raw output is wrapped in the serverd XML envelope, the profile is recovered from
+        // the data node and the envelope markup is stripped.
+        const string ovpn = "client\ndev tun\nremote rpv.example.com 443 tcp\n";
+        var enveloped = "<nws code=\"100\"><data format=\"raw\"><![CDATA[" + ovpn + "]]></data></nws>";
+        var handler = new RoutingHandler(req =>
+        {
+            var path = req.RequestUri!.AbsolutePath;
+            if (path.EndsWith("/api/auth/login", StringComparison.Ordinal)) return (HttpStatusCode.OK, "<nws><sessionid>s1</sessionid></nws>", "application/xml");
+            if (path.EndsWith("/api/command", StringComparison.Ordinal)) return (HttpStatusCode.OK, enveloped, "application/xml");
+            return (HttpStatusCode.OK, "irrelevant", "text/plain");
+        });
+        using var http = new HttpClient(handler);
+        using var client = new StormshieldPortalClient(http, new Uri("https://fw.example.com/"));
+
+        var profile = await client.DownloadProfileAsync("sslclient", CancellationToken.None);
+
+        Assert.Contains("remote rpv.example.com 443 tcp", profile);
+        Assert.DoesNotContain("nws", profile, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task DownloadProfileAsync_NoProfileAnywhere_ThrowsActionableImportHint()
+    {
+        // No inline profile and no staged file (e.g. the account lacks API privilege) → an actionable
+        // error pointing at Import mode, not a silent failure.
+        var handler = new RoutingHandler(req =>
+        {
+            var path = req.RequestUri!.AbsolutePath;
+            if (path.EndsWith("/api/auth/login", StringComparison.Ordinal)) return (HttpStatusCode.OK, "<nws><sessionid>s1</sessionid></nws>", "application/xml");
+            if (path.EndsWith("/api/command", StringComparison.Ordinal)) return (HttpStatusCode.OK, "<html>403 Forbidden</html>", "text/html");
+            if (path.EndsWith("/api/download/tmp.file", StringComparison.Ordinal)) return (HttpStatusCode.NotFound, "nope", "text/plain");
+            return (HttpStatusCode.OK, string.Empty, "text/plain");
+        });
+        using var http = new HttpClient(handler);
+        using var client = new StormshieldPortalClient(http, new Uri("https://fw.example.com/"));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.DownloadProfileAsync("sslclient", CancellationToken.None));
+        Assert.Contains("Import", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Test-only handler that routes responses by request (path), used to script the
+    /// multi-request DownloadProfileAsync flow.</summary>
+    private sealed class RoutingHandler : HttpMessageHandler
+    {
+        private readonly Func<HttpRequestMessage, (HttpStatusCode, string, string)> _route;
+        public RoutingHandler(Func<HttpRequestMessage, (HttpStatusCode, string, string)> route) { _route = route; }
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var (status, body, mediaType) = _route(request);
+            return Task.FromResult(new HttpResponseMessage(status)
+            {
+                Content = new StringContent(body, Encoding.UTF8, mediaType),
+            });
+        }
+    }
+
     /// <summary>
     /// Test-only handler that returns a canned body and records the last request's path + form
     /// fields. Mirrors WatchguardPreAuthClientTests.CapturingHandler — avoids HttpListener URLACL

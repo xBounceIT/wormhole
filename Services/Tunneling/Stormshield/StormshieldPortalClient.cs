@@ -212,8 +212,12 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
         var sid = Uri.EscapeDataString(sessionId);
         try
         {
-            // Documented since firmware 2.0.0: stages the OpenVPN client config as a temp file.
+            // CONFIG OPENVPN DOWNLOAD is a "Format raw" serverd command (per the command reference),
+            // so the OpenVPN profile is returned in the command RESPONSE itself — either as raw text
+            // or wrapped in the serverd XML envelope — NOT staged for a separate download. Read the
+            // response and extract the profile from it.
             var cmd = Uri.EscapeDataString("CONFIG OPENVPN DOWNLOAD");
+            string commandBody;
             using (var cmdResponse = await _http
                 .GetAsync(new Uri(_baseUri, $"api/command?sessionid={sid}&cmd={cmd}"), cancellationToken)
                 .ConfigureAwait(false))
@@ -221,27 +225,35 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
                 if (!cmdResponse.IsSuccessStatusCode)
                     throw new InvalidOperationException(
                         $"Stormshield 'CONFIG OPENVPN DOWNLOAD' returned HTTP {(int)cmdResponse.StatusCode}.");
+                // Capped by HttpClient.MaxResponseContentBufferSize on the production client.
+                commandBody = await cmdResponse.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             }
 
-            using var dlResponse = await _http
+            var profile = ExtractProfile(commandBody);
+            if (profile is not null) return profile;
+
+            // Fallback: should the firmware instead stage the file for a separate download, try the
+            // staged-file endpoint before giving up. (The inline command response above is the
+            // documented path; this just keeps an older/edge firmware working.)
+            using (var dlResponse = await _http
                 .GetAsync(new Uri(_baseUri, $"api/download/tmp.file?sessionid={sid}"),
                     HttpCompletionOption.ResponseHeadersRead, cancellationToken)
-                .ConfigureAwait(false);
-            if (!dlResponse.IsSuccessStatusCode)
-                throw new InvalidOperationException(
-                    $"Stormshield profile download returned HTTP {(int)dlResponse.StatusCode}.");
-
-            var profile = await ReadCappedStringAsync(dlResponse, MaxProfileBytes, cancellationToken).ConfigureAwait(false);
-            if (!LooksLikeOpenVpnProfile(profile))
+                .ConfigureAwait(false))
             {
-                // Most likely cause: the account lacks serverd/API privilege, so the firewall served
-                // an error/HTML page instead of the .ovpn. Point the user at the working fallback.
-                throw new InvalidOperationException(
-                    "Stormshield did not return an OpenVPN profile from the firewall. The account may lack "
-                    + "configuration-API privilege for automatic retrieval — download the .ovpn from the "
-                    + "firewall's /auth \"Personal data\" page and use Import (OpenVPN) mode instead.");
+                if (dlResponse.IsSuccessStatusCode)
+                {
+                    var staged = await ReadCappedStringAsync(dlResponse, MaxProfileBytes, cancellationToken).ConfigureAwait(false);
+                    var stagedProfile = ExtractProfile(staged);
+                    if (stagedProfile is not null) return stagedProfile;
+                }
             }
-            return profile;
+
+            // Most likely cause: the account lacks serverd/API privilege, so the firewall served an
+            // error/HTML page instead of the .ovpn. Point the user at the working fallback.
+            throw new InvalidOperationException(
+                "Stormshield did not return an OpenVPN profile from the firewall. The account may lack "
+                + "configuration-API privilege for automatic retrieval — download the .ovpn from the "
+                + "firewall's /auth \"Personal data\" page and use Import (OpenVPN) mode instead.");
         }
         finally
         {
@@ -340,6 +352,52 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
             || text.Contains("dev tap", StringComparison.OrdinalIgnoreCase)
             || text.Contains("<ca>", StringComparison.OrdinalIgnoreCase);
         return hasRemote && hasDeviceOrCa;
+    }
+
+    /// <summary>
+    /// Pulls the OpenVPN profile out of a serverd <c>CONFIG OPENVPN DOWNLOAD</c> response. As a
+    /// "Format raw" command it may return the profile as the raw body or wrapped in the serverd XML
+    /// envelope. Returns the profile text, or <c>null</c> when the body doesn't contain one (e.g. an
+    /// error / HTML page). For the XML case the tightest element whose text content looks like a
+    /// profile is chosen, so envelope metadata isn't spliced into the result — the profile's own
+    /// inline <c>&lt;ca&gt;</c>/<c>&lt;cert&gt;</c>/<c>&lt;key&gt;</c> tags survive because they
+    /// arrive entity-encoded or inside CDATA and are recovered by InnerText.
+    /// </summary>
+    private static string? ExtractProfile(string body)
+    {
+        if (string.IsNullOrWhiteSpace(body)) return null;
+        // Try the XML envelope FIRST: a raw .ovpn is not well-formed XML (leading text plus several
+        // root-level <ca>/<cert>/<key> blocks), so it throws and falls through to the raw branch.
+        // An enveloped profile, by contrast, parses — and a raw-first check would wrongly return the
+        // whole envelope because the profile's markers appear as substrings inside it.
+        try
+        {
+            var doc = LoadHardenedXml(body);
+            var nodes = doc.SelectNodes("//*");
+            string? best = null;
+            if (nodes is not null)
+            {
+                foreach (XmlNode node in nodes)
+                {
+                    var text = node.InnerText?.Trim();
+                    // Pick the tightest (shortest) element whose text looks like a profile — that's
+                    // the data leaf, not the envelope whose text also carries metadata.
+                    if (!string.IsNullOrEmpty(text)
+                        && LooksLikeOpenVpnProfile(text)
+                        && (best is null || text!.Length < best.Length))
+                    {
+                        best = text;
+                    }
+                }
+            }
+            return best;
+        }
+        catch (XmlException)
+        {
+            // Not XML — treat the body as a raw profile.
+            var raw = body.Trim();
+            return LooksLikeOpenVpnProfile(raw) ? raw : null;
+        }
     }
 
     /// <summary>
