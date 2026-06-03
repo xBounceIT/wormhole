@@ -500,8 +500,9 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
             };
             picker.FileTypeFilter.Add(".ovpn");
             picker.FileTypeFilter.Add(".conf");
-            // "*" lets users pick a profile saved without an extension (some portals serve it bare).
-            picker.FileTypeFilter.Add("*");
+            // Deliberately NOT adding a "*" wildcard: mixing it with explicit extensions makes
+            // FileOpenPicker.PickSingleFileAsync throw on some Win11 builds (the Watchguard importer
+            // avoids it for the same reason). A user whose profile has no extension can paste it.
             WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
 
             var file = await picker.PickSingleFileAsync();
