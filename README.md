@@ -74,10 +74,12 @@ than shipping their own binary:
 | OpenVPN, WatchGuard, Stormshield | `wormhole-ovpnproxy.exe` |
 | Fortinet | `wormhole-fortiproxy.exe` |
 
-Interactive 2FA / OTP is supported where the provider needs it: Fortinet via a
-stored TOTP secret, WatchGuard via a pre-auth challenge loop, and Stormshield as
-part of the portal config download — all prompted through a single in-app OTP
-dialog.
+2FA / OTP is supported where the provider needs it, but the mechanism differs.
+Fortinet is **not** interactive: it generates codes from a TOTP secret you store
+on the tunnel up front, and a gateway that prompts for a one-time code fails
+unless that secret is configured. WatchGuard (pre-auth challenge loop) and
+Stormshield (portal config download) instead prompt for the code at connect time
+through a single in-app OTP dialog.
 
 SSH terminal sessions and SFTP file-transfer dialogs route through the sidecar's
 loopback SOCKS5 endpoint. RDP cannot speak SOCKS5 directly, so the embedded
