@@ -34,6 +34,11 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
     private TunnelKind SelectedKind =>
         KindBox.SelectedItem is TunnelKind k ? k : TunnelKind.WireGuard;
 
+    // Index 1 == Import in the StormshieldModeBox ComboBox; everything else (incl. index 0 and the
+    // not-yet-selected -1 on a fresh dialog) means Automatic.
+    private StormshieldConnectionMode StormshieldSelectedMode =>
+        StormshieldModeBox.SelectedIndex == 1 ? StormshieldConnectionMode.Import : StormshieldConnectionMode.Automatic;
+
     // IsValid is derived from the same per-kind required-field scan that powers the live
     // "what's still missing" hint (UpdateValidationHint), so the disabled-Create gate and the
     // explanation the user reads can never drift apart. The button is enabled iff nothing is
@@ -81,6 +86,26 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
                 if (string.IsNullOrWhiteSpace(WatchguardCaPemBox.Text)) missing.Add("CA certificate (PEM)");
                 if (string.IsNullOrWhiteSpace(WatchguardClientCertPemBox.Text)) missing.Add("Client certificate (PEM)");
                 if (string.IsNullOrWhiteSpace(WatchguardClientKeyPemBox.Text)) missing.Add("Client private key (PEM)");
+                break;
+            case TunnelKind.Stormshield:
+                if (StormshieldSelectedMode == StormshieldConnectionMode.Import)
+                {
+                    // Import mode: the pasted .ovpn carries its own remote, so only the profile is
+                    // required (Server/Port unused here; auth-user-pass optional).
+                    if (string.IsNullOrWhiteSpace(StormshieldProfileOvpnBox.Text)) missing.Add("OpenVPN profile");
+                }
+                else
+                {
+                    // Automatic mode: a reachable server + port, plus username + password unless SSO
+                    // is used (SSO is disabled/not-yet-supported but kept here for symmetry).
+                    if (string.IsNullOrWhiteSpace(StormshieldServerBox.Text)) missing.Add("Server");
+                    if (!IsValidPort(StormshieldPortBox.Text)) missing.Add("Port (1-65535)");
+                    if (StormshieldSsoCheck.IsChecked != true)
+                    {
+                        if (string.IsNullOrWhiteSpace(StormshieldUsernameBox.Text)) missing.Add("Username");
+                        if (string.IsNullOrWhiteSpace(StormshieldPasswordBox.Password)) missing.Add("Password");
+                    }
+                }
                 break;
             default:
                 missing.Add("a supported VPN type");
@@ -157,6 +182,24 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         WatchguardVerifyX509NameBox.Text = wgg.VerifyX509Name ?? string.Empty;
         WatchguardTrustCertCheck.IsChecked = wgg.TrustServerCertificate;
 
+        // Coalesce defensively (same reasoning as the Watchguard block: System.Text.Json can assign
+        // null to a non-nullable string property when the on-disk JSON has the key explicitly null,
+        // and TextBox.Text = null throws).
+        var ss = initial.Stormshield ?? new StormshieldSettings();
+        StormshieldModeBox.SelectedIndex = ss.Mode == StormshieldConnectionMode.Import ? 1 : 0;
+        StormshieldServerBox.Text = ss.Server ?? string.Empty;
+        StormshieldPortBox.Text = (ss.Port is >= 1 and <= 65535 ? ss.Port : 443).ToString();
+        StormshieldDescriptionBox.Text = ss.Description ?? string.Empty;
+        StormshieldSsoCheck.IsChecked = ss.UseSingleSignOn;
+        StormshieldUsernameBox.Text = ss.Username ?? string.Empty;
+        StormshieldPasswordBox.Password = ss.Password ?? string.Empty;
+        StormshieldUseOtpCheck.IsChecked = ss.UseOtp;
+        StormshieldProfileOvpnBox.Text = ss.ProfileOvpn ?? string.Empty;
+        StormshieldCaPemBox.Text = ss.CaPem ?? string.Empty;
+        StormshieldTrustCertCheck.IsChecked = ss.TrustServerCertificate;
+        StormshieldAppTokenBox.Text = string.IsNullOrWhiteSpace(ss.AppToken) ? StormshieldSettings.DefaultAppToken : ss.AppToken;
+        UpdateStormshieldModePanels();
+
         UpdateKindPanels();
     }
 
@@ -170,9 +213,32 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
             TunnelKind.OpenVpn => new TunnelDraft(name, kind, WireGuard: null, BuildOpenVpn(), Fortinet: null),
             TunnelKind.Fortinet => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, BuildFortinet()),
             TunnelKind.Watchguard => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, Fortinet: null, Watchguard: BuildWatchguard()),
+            TunnelKind.Stormshield => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, Fortinet: null, Watchguard: null, Stormshield: BuildStormshield()),
             _ => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, Fortinet: null),
         };
     }
+
+    private StormshieldSettings BuildStormshield() => new()
+    {
+        Server = StormshieldServerBox.Text.Trim(),
+        Port = TryParseInt(StormshieldPortBox.Text) ?? 443,
+        Description = string.IsNullOrWhiteSpace(StormshieldDescriptionBox.Text) ? null : StormshieldDescriptionBox.Text.Trim(),
+        Mode = StormshieldSelectedMode,
+        UseSingleSignOn = StormshieldSsoCheck.IsChecked == true,
+        Username = StormshieldUsernameBox.Text.Trim(),
+        // Strip only trailing CR/LF (paste artifacts the user can't see in a PasswordBox) — leave
+        // every other character intact so legitimate whitespace in a password survives. Same
+        // treatment as the Fortinet/Watchguard password fields.
+        Password = StormshieldPasswordBox.Password?.TrimEnd('\r', '\n') ?? string.Empty,
+        UseOtp = StormshieldUseOtpCheck.IsChecked == true,
+        // Do NOT trim the profile blob — inline <ca>/<cert>/<key> blocks rely on internal newlines.
+        ProfileOvpn = StormshieldProfileOvpnBox.Text,
+        CaPem = string.IsNullOrWhiteSpace(StormshieldCaPemBox.Text) ? null : StormshieldCaPemBox.Text,
+        TrustServerCertificate = StormshieldTrustCertCheck.IsChecked == true,
+        AppToken = string.IsNullOrWhiteSpace(StormshieldAppTokenBox.Text)
+            ? StormshieldSettings.DefaultAppToken
+            : StormshieldAppTokenBox.Text.Trim(),
+    };
 
     private WireGuardSettings BuildWireGuard() => new()
     {
@@ -396,6 +462,64 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         }
     }
 
+    private void OnStormshieldModeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        UpdateStormshieldModePanels();
+        // Required fields differ between modes (profile vs username/password), so refresh both the
+        // missing-fields hint and the Save gate — same pairing as OnFieldChanged.
+        UpdateValidationHint();
+        ValidityChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void UpdateStormshieldModePanels()
+    {
+        var isImport = StormshieldSelectedMode == StormshieldConnectionMode.Import;
+        StormshieldImportPanel.Visibility = isImport ? Visibility.Visible : Visibility.Collapsed;
+        // Clear a stale import error when leaving Import mode so it doesn't reappear on return.
+        if (!isImport) StormshieldImportErrorBar.IsOpen = false;
+    }
+
+    private async void OnStormshieldImportOvpnFile(object sender, RoutedEventArgs e)
+    {
+        // async void + COM-backed FileOpenPicker: any throw would otherwise hit
+        // App.UnhandledException with the host dialog frozen, so the whole body is guarded and
+        // failures surface through the inline InfoBar (a nested ContentDialog is impossible here —
+        // TunnelDialog is itself hosted in a ContentDialog).
+        try
+        {
+            StormshieldImportErrorBar.IsOpen = false;
+
+            var mainWindow = App.Current.MainWindow
+                ?? throw new InvalidOperationException("Main window is not available.");
+            var hwnd = mainWindow.GetHwnd();
+
+            var picker = new FileOpenPicker
+            {
+                ViewMode = PickerViewMode.List,
+                SuggestedStartLocation = PickerLocationId.DocumentsLibrary,
+            };
+            picker.FileTypeFilter.Add(".ovpn");
+            picker.FileTypeFilter.Add(".conf");
+            // Deliberately NOT adding a "*" wildcard: mixing it with explicit extensions makes
+            // FileOpenPicker.PickSingleFileAsync throw on some Win11 builds (the Watchguard importer
+            // avoids it for the same reason). A user whose profile has no extension can paste it.
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+
+            var file = await picker.PickSingleFileAsync();
+            if (file is null) return;
+
+            // No trim: inline <ca>/<cert>/<key> blocks rely on internal newlines.
+            StormshieldProfileOvpnBox.Text = await File.ReadAllTextAsync(file.Path);
+            ValidityChanged?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception ex)
+        {
+            StormshieldImportErrorBar.Title = "Couldn't read file";
+            StormshieldImportErrorBar.Message = ex.Message;
+            StormshieldImportErrorBar.IsOpen = true;
+        }
+    }
+
     private void OnKindChanged(object sender, SelectionChangedEventArgs e)
     {
         UpdateKindPanels();
@@ -416,6 +540,9 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         WatchguardPanel.Visibility = SelectedKind == TunnelKind.Watchguard
             ? Visibility.Visible
             : Visibility.Collapsed;
+        StormshieldPanel.Visibility = SelectedKind == TunnelKind.Stormshield
+            ? Visibility.Visible
+            : Visibility.Collapsed;
         // The three mandatory PEM fields live inside the "Certificates & advanced" expander.
         // Auto-expand it for Watchguard whenever any is still empty so the required inputs are
         // on screen — a collapsed-by-default expander hiding required fields is exactly what
@@ -429,10 +556,10 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
                 string.IsNullOrWhiteSpace(WatchguardClientCertPemBox.Text) ||
                 string.IsNullOrWhiteSpace(WatchguardClientKeyPemBox.Text);
         }
-        // Stale import-error from a previous OpenVPN session would otherwise re-surface when
-        // the user toggles Kind away and back. The InfoBar is OpenVPN-specific, so reset it
-        // whenever the active panel changes.
+        // Stale import-error bars from a previous session would otherwise re-surface when the user
+        // toggles Kind away and back. They're panel-specific, so reset them on any panel change.
         OvpnImportErrorBar.IsOpen = false;
+        StormshieldImportErrorBar.IsOpen = false;
         UpdateValidationHint();
     }
 

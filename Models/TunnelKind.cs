@@ -6,4 +6,5 @@ public enum TunnelKind
     OpenVpn = 1,
     Fortinet = 2,
     Watchguard = 3,
+    Stormshield = 4,
 }

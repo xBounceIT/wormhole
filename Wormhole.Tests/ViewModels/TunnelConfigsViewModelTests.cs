@@ -589,6 +589,152 @@ public class TunnelConfigsViewModelTests
     }
 
     [Fact]
+    public async Task AddTunnel_StormshieldKind_CommitsRowAndSecret()
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        dialog.TunnelPromptResult = NewStormshieldDraft("corp-storm");
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        var stored = Assert.Single(repo.Configs.Values);
+        Assert.Equal(TunnelKind.Stormshield, stored.Kind);
+        Assert.True(creds.TunnelConfigs.ContainsKey(stored.Id));
+        var roundTrip = JsonSerializer.Deserialize<StormshieldSettings>(creds.TunnelConfigs[stored.Id])!;
+        Assert.Equal("rpv.example.com", roundTrip.Server);
+        Assert.Equal(StormshieldConnectionMode.Automatic, roundTrip.Mode);
+        Assert.Equal("alice", roundTrip.Username);
+        Assert.Equal("s3cret", roundTrip.Password);
+    }
+
+    [Fact]
+    public async Task AddTunnel_StormshieldKind_AutomaticMissingCredentials_RejectsBeforePersist()
+    {
+        // Automatic mode (no SSO) requires username + password — ValidateStormshield must reject
+        // before any row or secret is written.
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        dialog.TunnelPromptResult = new TunnelDraft(
+            "corp-storm",
+            TunnelKind.Stormshield,
+            WireGuard: null,
+            OpenVpn: null,
+            Fortinet: null,
+            Watchguard: null,
+            new StormshieldSettings
+            {
+                Server = "rpv.example.com",
+                Port = 443,
+                Mode = StormshieldConnectionMode.Automatic,
+                Username = "",
+                Password = "",
+            });
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        Assert.Empty(repo.Configs);
+        Assert.Empty(creds.TunnelConfigs);
+        Assert.Contains(dialog.Messages, m => m.title == "Tunnel settings incomplete");
+    }
+
+    [Fact]
+    public async Task AddTunnel_StormshieldKind_ImportMissingProfile_RejectsBeforePersist()
+    {
+        // Import mode requires a profile — an empty ProfileOvpn must be rejected before persist.
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        dialog.TunnelPromptResult = new TunnelDraft(
+            "corp-storm",
+            TunnelKind.Stormshield,
+            WireGuard: null,
+            OpenVpn: null,
+            Fortinet: null,
+            Watchguard: null,
+            new StormshieldSettings
+            {
+                Server = "rpv.example.com",
+                Port = 443,
+                Mode = StormshieldConnectionMode.Import,
+                ProfileOvpn = "",
+            });
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        Assert.Empty(repo.Configs);
+        Assert.Empty(creds.TunnelConfigs);
+        Assert.Contains(dialog.Messages, m => m.title == "Tunnel settings incomplete");
+    }
+
+    [Fact]
+    public async Task AddTunnel_StormshieldKind_ImportModeWithoutServer_Persists()
+    {
+        // Import mode uses the pasted profile's own `remote`, so Server is not required — a user
+        // who only has the downloaded .ovpn must be able to save without inventing a gateway value.
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        dialog.TunnelPromptResult = new TunnelDraft(
+            "corp-storm-import",
+            TunnelKind.Stormshield,
+            WireGuard: null,
+            OpenVpn: null,
+            Fortinet: null,
+            Watchguard: null,
+            new StormshieldSettings
+            {
+                Server = "",
+                Mode = StormshieldConnectionMode.Import,
+                ProfileOvpn = "client\ndev tun\nremote vpn.example.com 443 tcp\n",
+            });
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        var stored = Assert.Single(repo.Configs.Values);
+        Assert.Equal(TunnelKind.Stormshield, stored.Kind);
+        Assert.True(creds.TunnelConfigs.ContainsKey(stored.Id));
+        var roundTrip = JsonSerializer.Deserialize<StormshieldSettings>(creds.TunnelConfigs[stored.Id])!;
+        Assert.Equal(StormshieldConnectionMode.Import, roundTrip.Mode);
+        Assert.Equal(string.Empty, roundTrip.Server);
+    }
+
+    [Fact]
+    public async Task EditTunnel_StormshieldKind_RoundTripsSecret()
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        var id = Guid.NewGuid();
+        repo.Configs[id] = new TunnelConfig { Id = id, Name = "corp-storm", Kind = TunnelKind.Stormshield };
+        creds.TunnelConfigs[id] = JsonSerializer.SerializeToUtf8Bytes(new StormshieldSettings
+        {
+            Server = "rpv.old.com",
+            Port = 443,
+            Mode = StormshieldConnectionMode.Automatic,
+            Username = "alice",
+            Password = "old",
+        });
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        dialog.TunnelPromptResult = new TunnelDraft(
+            "corp-storm",
+            TunnelKind.Stormshield,
+            WireGuard: null,
+            OpenVpn: null,
+            Fortinet: null,
+            Watchguard: null,
+            new StormshieldSettings
+            {
+                Server = "rpv.new.com",
+                Port = 8443,
+                Mode = StormshieldConnectionMode.Automatic,
+                Username = "alice",
+                Password = "new",
+                UseOtp = true,
+            });
+
+        await vm.EditTunnelCommand.ExecuteAsync(vm.Configs[0]);
+
+        var stored = JsonSerializer.Deserialize<StormshieldSettings>(creds.TunnelConfigs[id])!;
+        Assert.Equal("rpv.new.com", stored.Server);
+        Assert.Equal(8443, stored.Port);
+        Assert.Equal("new", stored.Password);
+        Assert.True(stored.UseOtp);
+    }
+
+    [Fact]
     public async Task EditTunnel_OpenVpn_RoundTripsProfileAndCredentials()
     {
         var (vm, repo, _, creds, dialog) = CreateVm();
@@ -700,6 +846,7 @@ public class TunnelConfigsViewModelTests
     [InlineData(TunnelKind.OpenVpn, "openv")]
     [InlineData(TunnelKind.Fortinet, "fort")]
     [InlineData(TunnelKind.Watchguard, "watch")]
+    [InlineData(TunnelKind.Stormshield, "storm")]
     public async Task Filter_MatchesAllTunnelKindNames(TunnelKind kind, string query)
     {
         var (vm, repo, _, _, _) = CreateVm();
@@ -876,6 +1023,17 @@ public class TunnelConfigsViewModelTests
             Username = "alice",
             Password = "s3cret",
         });
+
+    private static TunnelDraft NewStormshieldDraft(string name) =>
+        new(name, TunnelKind.Stormshield, WireGuard: null, OpenVpn: null, Fortinet: null, Watchguard: null,
+            new StormshieldSettings
+            {
+                Server = "rpv.example.com",
+                Port = 443,
+                Mode = StormshieldConnectionMode.Automatic,
+                Username = "alice",
+                Password = "s3cret",
+            });
 
     private static TunnelDraft NewWatchguardDraft(string name) =>
         new(name, TunnelKind.Watchguard, WireGuard: null, OpenVpn: null, Fortinet: null, Watchguard: new WatchguardSettings

@@ -457,6 +457,13 @@ public partial class TunnelConfigsViewModel : ObservableObject
                 OpenVpn: null,
                 Fortinet: null,
                 Watchguard: DeserializeOrEmpty<WatchguardSettings>(secret, config, ref loadFailure)),
+            TunnelKind.Stormshield => new TunnelDraft(
+                config.Name,
+                config.Kind,
+                WireGuard: null,
+                OpenVpn: null,
+                Fortinet: null,
+                Stormshield: DeserializeOrEmpty<StormshieldSettings>(secret, config, ref loadFailure)),
             _ => new TunnelDraft(config.Name, config.Kind, WireGuard: null, OpenVpn: null, Fortinet: null),
         };
         return (draft, loadFailure);
@@ -493,6 +500,8 @@ public partial class TunnelConfigsViewModel : ObservableObject
             draft.Fortinet ?? throw new InvalidOperationException("Fortinet settings are missing for a Fortinet draft.")),
         TunnelKind.Watchguard => JsonSerializer.SerializeToUtf8Bytes(
             draft.Watchguard ?? throw new InvalidOperationException("Watchguard settings are missing for a Watchguard draft.")),
+        TunnelKind.Stormshield => JsonSerializer.SerializeToUtf8Bytes(
+            draft.Stormshield ?? throw new InvalidOperationException("Stormshield settings are missing for a Stormshield draft.")),
         _ => throw new InvalidOperationException($"Unsupported tunnel kind '{draft.Kind}'."),
     };
 
@@ -518,6 +527,9 @@ public partial class TunnelConfigsViewModel : ObservableObject
                 return;
             case TunnelKind.Watchguard:
                 ValidateWatchguard(draft.Watchguard);
+                return;
+            case TunnelKind.Stormshield:
+                ValidateStormshield(draft.Stormshield);
                 return;
             default:
                 throw new InvalidOperationException($"Unsupported tunnel kind '{draft.Kind}'.");
@@ -582,6 +594,34 @@ public partial class TunnelConfigsViewModel : ObservableObject
         WatchguardProfileBuilder.ValidateFieldSafety(wg);
     }
 
+    private static void ValidateStormshield(StormshieldSettings? ss)
+    {
+        if (ss is null)
+            throw new InvalidOperationException("Stormshield settings are required for a Stormshield tunnel.");
+        StringBuilder? sb = null;
+        if (ss.Mode == StormshieldConnectionMode.Import)
+        {
+            // Import mode uses the pasted .ovpn's own `remote` endpoint, so Server/Port are not
+            // required here (and aren't used by the provider) — only the profile is.
+            if (string.IsNullOrWhiteSpace(ss.ProfileOvpn))
+                AppendValidationError(ref sb, "OpenVPN profile (.ovpn contents) is required for Import mode.");
+        }
+        else
+        {
+            // Automatic mode authenticates to the firewall captive portal, so Server + Port are
+            // required. Username/password are required unless SSO is used (SSO is handled/rejected
+            // separately by the provider as not-yet-supported).
+            if (string.IsNullOrWhiteSpace(ss.Server)) AppendValidationError(ref sb, "Server is required.");
+            if (ss.Port is < 1 or > 65535) AppendValidationError(ref sb, "Port must be between 1 and 65535.");
+            if (!ss.UseSingleSignOn)
+            {
+                if (string.IsNullOrWhiteSpace(ss.Username)) AppendValidationError(ref sb, "Username is required.");
+                if (string.IsNullOrWhiteSpace(ss.Password)) AppendValidationError(ref sb, "Password is required.");
+            }
+        }
+        ThrowValidationErrors(sb);
+    }
+
     private static void AppendValidationError(ref StringBuilder? sb, string message) =>
         (sb ??= new StringBuilder()).AppendLine(message);
 
@@ -623,6 +663,7 @@ public partial class TunnelConfigsViewModel : ObservableObject
             TunnelKind.OpenVpn => nameof(TunnelKind.OpenVpn),
             TunnelKind.Fortinet => nameof(TunnelKind.Fortinet),
             TunnelKind.Watchguard => nameof(TunnelKind.Watchguard),
+            TunnelKind.Stormshield => nameof(TunnelKind.Stormshield),
             _ => null,
         };
         return Contains(name, needle);
