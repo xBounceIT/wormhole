@@ -3,11 +3,12 @@
 A modern, tabbed, multi-protocol connection manager for Windows and a
 philosophical sequel to [mRemoteNG](https://mremoteng.org).
 
-> **Status:** Active development. The WinUI shell, persisted connection
-> tree, connection editor, credential store, mRemoteNG import, SSH terminal,
-> embedded/external RDP, SFTP file transfer, installer packaging, update checks,
-> and per-connection VPN configuration are implemented. The standalone SFTP tab
-> and RDP-over-VPN runtime path are still in progress.
+> **Status:** Active development (current version 0.2.5). The WinUI shell,
+> persisted connection tree, connection editor, credential store, mRemoteNG
+> import, SSH terminal, embedded/external RDP, SFTP file transfer, per-connection
+> VPN across five providers (including RDP over VPN), an opt-in MCP server for
+> AI-driven SSH control, installer packaging, and in-app update checks are all
+> implemented.
 
 ## Why
 
@@ -21,23 +22,28 @@ everything else.
 ## What works today
 
 - Connection tree with folders, search, and drag-reorder.
-- **Folder-level inheritance** — set a credential on a folder, every child inherits.
-- Tabbed workspace.
-- SSH terminal (xterm.js in WebView2, driven by SSH.NET).
+- **Folder-level inheritance** — set a credential (or VPN tunnel, or any RDP
+  setting) on a folder and every child inherits it.
+- Tabbed workspace for SSH and RDP sessions.
+- SSH terminal (xterm.js in WebView2, driven by SSH.NET), with either a saved
+  credential reference or an inline per-connection username/password.
 - Embedded RDP session via the `mstscax` ActiveX control, with an external
   `mstsc.exe` fallback for Azure AD / WAM-sensitive targets.
-- SFTP dual-pane file-transfer dialog from connected SSH tabs.
+- SFTP dual-pane file-transfer dialog from connected SSH tabs. The SFTP session
+  is pre-warmed in the background as soon as the shell connects, so the dialog
+  opens instantly.
 - DPAPI / Credential Manager-backed credential store.
 - SQLite-backed connection store with a versioned schema.
 - mRemoteNG `confCons.xml` import.
-- Per-connection userspace VPN tunnel configs for WireGuard, OpenVPN, and
-  Fortinet SSL VPN.
+- Per-connection userspace VPN tunnels for **WireGuard, OpenVPN, Fortinet SSL
+  VPN, WatchGuard Mobile VPN with SSL, and Stormshield Network SSL VPN** — used
+  by SSH, SFTP, and RDP sessions.
+- Opt-in **MCP server** that lets AI agents drive your already-open SSH sessions
+  over an authenticated loopback endpoint.
 - Modern WinUI 3 shell: Mica backdrop, dark mode, per-monitor DPI.
 
 ## Planned
 
-- Standalone SFTP session tab.
-- RDP routing through per-connection VPN tunnels.
 - VNC and Telnet protocols.
 - External Tools with `{host}` / `{user}` templating.
 - Port scan → "add as connection."
@@ -48,20 +54,38 @@ everything else.
 ## Per-connection VPN
 
 VPN tunnels are stored independently from connections and attached from the
-connection editor. A folder can provide a tunnel for all descendants, a child
+connection editor. A folder can provide a tunnel for all descendants; a child
 connection can inherit it, choose a different tunnel, or explicitly disable
-tunneling with "No tunnel".
+tunneling with "No tunnel" (`TunnelEnabled` is tri-state: inherit / off / on).
 
 Tunnel rows live in SQLite; the provider-specific secret payload is
 DPAPI-encrypted under `%LOCALAPPDATA%\Wormhole\tunnels\`. At connect time the
 resolved profile decides whether a tunnel is needed. Tunnel providers launch a
-userspace sidecar (`wormhole-wgproxy.exe`, `wormhole-ovpnproxy.exe`, or
-`wormhole-fortiproxy.exe`) and consume the local SOCKS5 endpoint it reports.
-No OS routes, adapters, DNS settings, or admin privileges are required.
+userspace sidecar and consume the local SOCKS5 endpoint it reports. **No OS
+routes, adapters, DNS settings, or admin privileges are required.**
 
-Current runtime routing uses the tunnel for SSH terminal sessions and SFTP file
-transfer. The RDP local-forwarder abstraction exists, but `RdpSessionViewModel`
-does not yet wire it into the ActiveX/external-client path.
+Three sidecars cover all five providers — WatchGuard and Stormshield synthesize
+an OpenVPN profile in managed code and reuse the shared OpenVPN sidecar rather
+than shipping their own binary:
+
+| Provider | Sidecar |
+|---|---|
+| WireGuard | `wormhole-wgproxy.exe` |
+| OpenVPN, WatchGuard, Stormshield | `wormhole-ovpnproxy.exe` |
+| Fortinet | `wormhole-fortiproxy.exe` |
+
+Interactive 2FA / OTP is supported where the provider needs it: Fortinet via a
+stored TOTP secret, WatchGuard via a pre-auth challenge loop, and Stormshield as
+part of the portal config download — all prompted through a single in-app OTP
+dialog.
+
+SSH terminal sessions and SFTP file-transfer dialogs route through the sidecar's
+loopback SOCKS5 endpoint. RDP cannot speak SOCKS5 directly, so the embedded
+ActiveX client routes through `ITunnelInstance.BindLocalForwarderAsync`, which
+binds a `127.0.0.1` listener that bridges to the real target through the tunnel.
+Three RDP + tunnel combinations are rejected because the loopback bridge can't
+safely handle them: the external `mstsc.exe` client, RD Gateway, and strict
+server authentication.
 
 ```mermaid
 flowchart TD
@@ -71,36 +95,74 @@ flowchart TD
     C -- "Yes" --> E["TunnelManager loads TunnelConfig row"]
     E --> F["Read DPAPI-encrypted tunnel secret"]
     F --> G{"Tunnel kind"}
-    G -- "WireGuard" --> H["Launch wormhole-wgproxy.exe"]
-    G -- "OpenVPN" --> I["Launch wormhole-ovpnproxy.exe"]
-    G -- "Fortinet" --> J["Launch wormhole-fortiproxy.exe"]
+    G -- "WireGuard" --> H["wormhole-wgproxy.exe"]
+    G -- "OpenVPN / WatchGuard / Stormshield" --> I["wormhole-ovpnproxy.exe"]
+    G -- "Fortinet" --> J["wormhole-fortiproxy.exe"]
     H --> K["Sidecar prints READY with loopback SOCKS5 port"]
     I --> K
     J --> K
     K --> L{"Protocol path"}
     L -- "SSH" --> M["SSH.NET connects through SOCKS5"]
     L -- "SFTP file transfer" --> N["SftpClient connects through SOCKS5"]
-    L -- "RDP" --> O["Direct today; local forwarder hook is not wired yet"]
+    L -- "RDP" --> O["BindLocalForwarderAsync binds a 127.0.0.1 listener; ActiveX connects to it"]
     M --> P["Session owns tunnel lifetime"]
     N --> P
+    O --> P
     P --> Q["Close tab/dialog -> dispose tunnel sidecar"]
 ```
 
+## AI agent control (MCP)
+
+Wormhole embeds an opt-in [Model Context Protocol](https://modelcontextprotocol.io)
+server so AI agents can drive your **already-open** SSH sessions. It is off by
+default; enable it in Settings to start a loopback-only HTTP endpoint
+(`http://127.0.0.1:8765` by default), protected by a bearer token stored in
+Windows Credential Manager and regenerable from Settings.
+
+The tool surface is intentionally narrow and limited to sessions you already
+have open:
+
+- `list_sessions` — enumerate connected SSH sessions.
+- `run_command` — run one shell command and capture its output and exit code.
+- `send_text` — type raw text / control sequences into a session.
+- `read_terminal` — read recent scrollback (ANSI stripped).
+
+There is **no** tool to open a connection or read saved credentials, and the
+first agent action on any session prompts you to approve AI control.
+
 ## Requirements
 
+Running a release build:
+
 - Windows 10 19041 (20H1) or later, on x64 or arm64.
-- .NET 10 SDK to build.
-- [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (evergreen; installed by default on modern Windows).
+- [WebView2 runtime](https://developer.microsoft.com/microsoft-edge/webview2/)
+  (evergreen; installed by default on modern Windows).
+- No separate .NET install — release builds are self-contained.
+
+Building from source additionally requires the **.NET 10 SDK**.
 
 ## Build from source
 
 ```powershell
+git submodule update --init --recursive   # vendored OpenVPN3 sources (see below)
 dotnet restore
 dotnet build Wormhole.csproj -c Debug -p:Platform=x64
 dotnet test  Wormhole.Tests/Wormhole.Tests.csproj
 ```
 
 Then run `bin\x64\Debug\net10.0-windows10.0.19041.0\Wormhole.exe`.
+
+The real userspace OpenVPN sidecar (and the WatchGuard / Stormshield providers
+that reuse it) needs the vendored OpenVPN3 sources plus a C++ toolchain. Without
+them the build still succeeds, but the OpenVPN sidecar is a stub and OpenVPN-based
+tunnels fail at runtime. Released x64 builds ship the real sidecar; arm64 ships
+the stub.
+
+The installer is built with [Inno Setup](https://jrsoftware.org/isinfo.php) 6:
+
+```powershell
+scripts/Build-Installer.ps1 -Configuration Release -Architecture x64
+```
 
 VPN integration tests require Linux/WSL2 and Docker:
 
@@ -116,19 +178,20 @@ dotnet test Wormhole.Tests.Integration/Wormhole.Tests.Integration.csproj
 
 | Concern | Choice |
 |---|---|
-| UI framework | WinUI 3 (Windows App SDK 1.8.x) |
+| UI framework | WinUI 3 (Windows App SDK 2.1.x) |
 | MVVM | CommunityToolkit.Mvvm |
 | DI | Microsoft.Extensions.DependencyInjection |
 | Logging | Serilog → Microsoft.Extensions.Logging |
 | SSH + SFTP | SSH.NET |
 | Terminal renderer | xterm.js inside WebView2 |
-| RDP | `mstscax` ActiveX (in-box) hosted via WinForms reparenting |
-| VPN tunnels | Userspace WireGuard / OpenVPN / Fortinet sidecars exposing loopback SOCKS5 |
+| RDP | `mstscax` ActiveX (in-box) hosted via WinForms |
+| VPN tunnels | Userspace WireGuard / OpenVPN / Fortinet / WatchGuard / Stormshield sidecars exposing loopback SOCKS5 |
+| AI control | ModelContextProtocol.AspNetCore (loopback MCP server over Kestrel) |
 | Credentials | Meziantou.Framework.Win32.CredentialManager + DPAPI |
 | Database | SQLite via Microsoft.Data.Sqlite + Dapper |
 | Import | mRemoteNG XML importer with BouncyCastle for legacy AES-GCM shape |
 
-See [AGENTS.md](AGENTS.md) for architecture notes and conventions.
+See [CLAUDE.md](CLAUDE.md) for architecture notes and conventions.
 
 ## License
 
