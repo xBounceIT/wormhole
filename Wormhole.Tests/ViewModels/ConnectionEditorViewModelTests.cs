@@ -1480,6 +1480,25 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task CanUseSshAutoSudo_InlineMode_VisibleEvenWithSshKeyCredentialSelected()
+    {
+        var key = new CredentialProfile { Name = "ssh-key", Protocol = ProtocolType.Ssh, Kind = CredentialKind.SshKey };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(key), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        vm.Protocol = ProtocolType.Ssh;
+        vm.SelectedCredential = key;
+
+        // Saved-credential mode with a key credential → no login password → Auto sudo hidden.
+        vm.UseSavedCredentials = true;
+        Assert.False(vm.CanUseSshAutoSudo);
+
+        // Switching to inline-password mode supplies a password → Auto sudo becomes usable even
+        // though the now-unused selected credential is still an SSH key (must not stay hidden).
+        vm.UseSavedCredentials = false;
+        Assert.True(vm.CanUseSshAutoSudo);
+    }
+
+    [Fact]
     public async Task SshAutoSudoDescription_VariesByMode()
     {
         var vm = await NewEditorAsync();

@@ -568,16 +568,19 @@ public partial class ConnectionTreeViewModel : ObservableObject
         if (node.Kind != NodeKind.Connection) return;
         try
         {
-            if (node.UseInlinePassword == true)
+            if (node.UseInlinePassword == true && !string.IsNullOrEmpty(node.PendingInlinePassword))
             {
-                await _credentialService.StorePasswordAsync(node.Id, node.PendingInlinePassword ?? string.Empty);
+                await _credentialService.StorePasswordAsync(node.Id, node.PendingInlinePassword);
             }
             else
             {
-                // Idempotent purge: when the connection isn't using an inline password (new saved
-                // credential, prompt-every-time, or the user just switched inline off), drop any
-                // stale secret. Keyed by node Id, so it never touches a saved credential's secret
-                // (those are keyed by credential Id). DeletePasswordAsync self-swallows not-found.
+                // Delete (never store an empty entry) when there's no usable inline password — the
+                // connection switched to a saved credential / prompt-every-time, OR it's inline mode
+                // with a blank password. An empty Credential Manager entry reads back as a real ""
+                // password that yields no SSH auth method and fails the connect; deleting it instead
+                // lets SshCredentialResolver fall back to prompting. Keyed by node Id, so it never
+                // touches a saved credential's secret (those are keyed by credential Id).
+                // DeletePasswordAsync self-swallows not-found, so this is also the idempotent purge.
                 await _credentialService.DeletePasswordAsync(node.Id);
             }
         }

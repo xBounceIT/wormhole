@@ -101,7 +101,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// Maps to <see cref="ConnectionNode.UseInlinePassword"/> (inverted) in WriteTo.
     /// </summary>
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(ShowInlinePassword))]
+    [NotifyPropertyChangedFor(nameof(ShowInlinePassword), nameof(CanUseSshAutoSudo))]
     private bool useSavedCredentials = true;
 
     /// <summary>The inline login password (bound to the editor's PasswordBox). SSH-only,
@@ -163,8 +163,15 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// "prompt every time" (the resolver prompts and captures a password). Hiding only the
     /// definitely-no-password case lets a child override an inherited Auto sudo on/off; when hidden,
     /// WriteTo leaves the loaded value untouched rather than clobbering it.
+    /// <para>
+    /// In inline-password mode (<see cref="UseSavedCredentials"/> false) the saved credential is
+    /// irrelevant — the inline password (or a connect-time prompt) supplies a usable password — so
+    /// the control is shown regardless of any now-unused selected credential, even an SSH key. This
+    /// keys off <see cref="UseSavedCredentials"/> (not the stale <see cref="CredentialId"/>) so
+    /// switching an SSH-key connection to an inline password reveals Auto sudo immediately.
+    /// </para>
     /// </summary>
-    public bool CanUseSshAutoSudo => IsSsh && SelectedCredential?.Kind != CredentialKind.SshKey;
+    public bool CanUseSshAutoSudo => IsSsh && (!UseSavedCredentials || SelectedCredential?.Kind != CredentialKind.SshKey);
 
     /// <summary>Sentinel for "no credential — prompt every time". ComboBox.PlaceholderText
     /// isn't selectable, so the picker needs a real item to round-trip to. Both selection

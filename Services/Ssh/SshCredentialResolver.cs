@@ -46,13 +46,15 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
     {
         // Inline per-connection password (the editor forces CredentialId null when this is on,
         // so the two are mutually exclusive). The secret lives in Credential Manager keyed by
-        // the node Id. A missing entry — e.g. a DB restored onto a machine without the secret —
-        // falls back to a prompt rather than failing the connect opaquely.
+        // the node Id. A missing OR empty entry — e.g. a DB restored onto a machine without the
+        // secret, or an inline connection saved with a blank password — falls back to a prompt
+        // rather than failing the connect opaquely. (An empty Password yields no auth method, so
+        // treat it like the no-credential path, matching the saved-credential branch below.)
         if (profile.UseInlinePassword)
         {
             var inline = await _credentialService.ReadPasswordAsync(profile.NodeId).ConfigureAwait(true);
             cancellationToken.ThrowIfCancellationRequested();
-            if (inline is not null)
+            if (!string.IsNullOrEmpty(inline))
             {
                 return new SshCredentials(inline, null, null);
             }

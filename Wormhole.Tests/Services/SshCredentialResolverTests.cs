@@ -219,6 +219,24 @@ public class SshCredentialResolverTests
         Assert.Equal(1, dialogs.PasswordPromptCount);
     }
 
+    [Fact]
+    public async Task Resolve_InlinePassword_EmptyStored_FallsBackToPrompt()
+    {
+        // An empty stored secret must be treated like a missing one (it yields no auth method),
+        // matching the saved-credential password branch — prompt rather than fail the connect.
+        var nodeId = Guid.NewGuid();
+        var dialogs = new FakeDialogService { PasswordPromptResult = "typed-pwd" };
+        var resolver = NewResolver(
+            dialogs,
+            creds: new FakeCredentialService(passwords: new() { [nodeId] = "" }));
+
+        var creds = await resolver.ResolveAsync(
+            MakeProfile(credentialId: null, useInlinePassword: true, nodeId: nodeId));
+
+        Assert.Equal("typed-pwd", creds.Password);
+        Assert.Equal(1, dialogs.PasswordPromptCount);
+    }
+
     private static SshCredentialResolver NewResolver(
         FakeDialogService dialogs,
         FakeCredentialRepository? repo = null,
