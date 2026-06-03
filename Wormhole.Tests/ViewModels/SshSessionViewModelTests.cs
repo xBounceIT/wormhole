@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Wormhole.Data;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
@@ -113,6 +114,7 @@ public sealed class SshSessionViewModelTests
             new Fakes.FakeCredentialService(),
             new NullCredentialRepository(),
             CreateTunnelManager(),
+            NoopProfileResolver(),
             new Fakes.FakeDialogService(),
             new Fakes.FakeRdpCrashSentinelService(),
             NullLoggerFactory.Instance);
@@ -129,6 +131,7 @@ public sealed class SshSessionViewModelTests
             new Fakes.FakeCredentialService(),
             new NullCredentialRepository(),
             CreateTunnelManager(),
+            NoopProfileResolver(),
             new Fakes.FakeDialogService(),
             new Fakes.FakeRdpCrashSentinelService(),
             NullLoggerFactory.Instance);
@@ -241,6 +244,7 @@ public sealed class SshSessionViewModelTests
             new Fakes.FakeCredentialService(),
             new NullCredentialRepository(),
             CreateTunnelManager(),
+            NoopProfileResolver(),
             new Fakes.FakeDialogService(),
             new Fakes.FakeRdpCrashSentinelService(),
             NullLoggerFactory.Instance);
@@ -488,6 +492,33 @@ public sealed class SshSessionViewModelTests
     }
 
     [Fact]
+    public async Task RetryAsync_ReResolvesProfileFromRepository_PicksUpTunnelDisabledAfterOpen()
+    {
+        // Repro for "retry still uses the earlier tunnel after editing it out": the tab cached the
+        // profile resolved at open time, and ConnectAsync re-establishes the tunnel from it.
+        var nodeId = Guid.NewGuid();
+        var stale = CreateProfile() with
+        {
+            NodeId = nodeId,
+            TunnelEnabled = true,
+            TunnelConfigId = Guid.NewGuid(),
+        };
+        // The user has since edited the connection to drop the tunnel; the resolver reflects the DB.
+        var edited = stale with { TunnelEnabled = false, TunnelConfigId = null };
+        var resolver = new StubProfileResolver(edited);
+        var vm = CreateViewModel(profileResolver: resolver);
+        vm.Initialize(stale);
+
+        // Detached view (background tab): RetryAsync refreshes the profile before stashing the
+        // deferred reconnect intent, so the next AttachAsync→ConnectAsync establishes no tunnel.
+        await vm.RetryAsync();
+
+        Assert.Equal(nodeId, resolver.RequestedNodeId);
+        Assert.False(vm.Profile!.TunnelEnabled);
+        Assert.Null(vm.Profile.TunnelConfigId);
+    }
+
+    [Fact]
     public async Task DetachAsync_DisposesSessionAndIgnoresLateOutput()
     {
         var vm = CreateViewModel();
@@ -656,7 +687,9 @@ public sealed class SshSessionViewModelTests
         return (vm, session);
     }
 
-    private static SshSessionViewModel CreateViewModel(FakeSftpService? sftp = null)
+    private static SshSessionViewModel CreateViewModel(
+        FakeSftpService? sftp = null,
+        IConnectionProfileResolver? profileResolver = null)
     {
         var credService = new FakeCredentialService();
         var configs = new FakeTunnelConfigRepository();
@@ -671,9 +704,19 @@ public sealed class SshSessionViewModelTests
             new FakeConnectionRepository(),
             new FakeAppSettingsService(),
             tunnels,
+            profileResolver ?? NoopProfileResolver(),
             sftp ?? new FakeSftpService(),
             NullLoggerFactory.Instance);
     }
+
+    // Default resolver for tests that don't exercise profile-refresh-on-retry: backed by an empty
+    // repository, so ResolveAsync returns null and RetryAsync keeps the tab's cached profile —
+    // i.e. behavior identical to before the refresh hook existed.
+    private static ConnectionProfileResolver NoopProfileResolver() =>
+        new(
+            new FakeConnectionRepository(),
+            new InheritanceResolver(),
+            NullLoggerFactory.Instance.CreateLogger<ConnectionProfileResolver>());
 
     private static ConnectionProfile CreateProfile() =>
         new()
@@ -710,6 +753,21 @@ public sealed class SshSessionViewModelTests
         public AppSettings Current { get; } = new();
         public event EventHandler? SettingsChanged { add { } remove { } }
         public void Save() { }
+    }
+
+    // Returns a fixed profile (or null) from ResolveAsync and records the node id requested, so a
+    // test can assert RetryAsync re-resolved the right connection before reconnecting.
+    private sealed class StubProfileResolver : IConnectionProfileResolver
+    {
+        private readonly ConnectionProfile? _result;
+        public Guid? RequestedNodeId { get; private set; }
+        public StubProfileResolver(ConnectionProfile? result) => _result = result;
+
+        public Task<ConnectionProfile?> ResolveAsync(Guid nodeId, CancellationToken cancellationToken = default)
+        {
+            RequestedNodeId = nodeId;
+            return Task.FromResult(_result);
+        }
     }
 
     private sealed class FakeConnectionRepository : IConnectionRepository

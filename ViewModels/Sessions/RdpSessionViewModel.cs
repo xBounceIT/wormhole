@@ -33,6 +33,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     private readonly ICredentialService _credentialService;
     private readonly ICredentialRepository _credentialRepository;
     private readonly TunnelManager _tunnels;
+    private readonly IConnectionProfileResolver _profileResolver;
     private readonly IDialogService _dialog;
     private readonly IRdpCrashSentinelService _crashSentinel;
     private readonly ILogger<RdpSessionViewModel> _logger;
@@ -64,6 +65,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         ICredentialService credentialService,
         ICredentialRepository credentialRepository,
         TunnelManager tunnels,
+        IConnectionProfileResolver profileResolver,
         IDialogService dialog,
         IRdpCrashSentinelService crashSentinel,
         ILoggerFactory loggerFactory)
@@ -72,6 +74,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         _credentialService = credentialService;
         _credentialRepository = credentialRepository;
         _tunnels = tunnels;
+        _profileResolver = profileResolver;
         _dialog = dialog;
         _crashSentinel = crashSentinel;
         _logger = loggerFactory.CreateLogger<RdpSessionViewModel>();
@@ -354,6 +357,12 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         if (Volatile.Read(ref _connectInFlight) != 0) return;
         if (HasLiveExternalProcess(Profile)) return;
 
+        // Re-read the connection's current saved settings before reconnecting. The tab caches the
+        // profile resolved at open time, and PrepareConnectProfileAsync re-establishes the VPN
+        // tunnel from it — so without this, disabling the tunnel (or any other edit) after the tab
+        // was opened would be ignored on Retry and it would route through the earlier tunnel.
+        await RefreshProfileFromRepositoryAsync().ConfigureAwait(true);
+
         var forcePrompt = FailedDueToCredentials;
         await FullTeardownAsync(fastTunnelTeardown: true).ConfigureAwait(true);
 
@@ -370,6 +379,30 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         Status != SessionStatus.Connecting &&
         !IsExternalClientActive &&
         Volatile.Read(ref _connectInFlight) == 0;
+
+    /// <summary>
+    /// Re-resolve <see cref="SessionTabViewModel.Profile"/> from the repository (through folder
+    /// inheritance) so a reconnect honors edits made after the tab was opened. Keeps the cached
+    /// profile when the node was deleted or can't be resolved. Runs on the UI thread (RetryAsync
+    /// is a UI-invoked command).
+    /// </summary>
+    private async Task RefreshProfileFromRepositoryAsync()
+    {
+        var current = Profile;
+        if (current is null) return;
+
+        var refreshed = await _profileResolver.ResolveAsync(current.NodeId).ConfigureAwait(true);
+        if (refreshed is null) return;
+
+        UpdateProfile(refreshed);
+
+        // UpdateProfile only raises Profile; the tunnel-gated affordances ("Use external client")
+        // derive from Profile.TunnelEnabled and aren't re-broadcast on Status changes, so refresh
+        // them explicitly — otherwise disabling the tunnel wouldn't re-enable the menu entry.
+        OnPropertyChanged(nameof(CanUseExternalClient));
+        OnPropertyChanged(nameof(CanTabUseExternalClient));
+        UseExternalClientCommand.NotifyCanExecuteChanged();
+    }
 
     public override async ValueTask CloseAsync()
     {

@@ -100,6 +100,8 @@
     <Compile Include="..\Services\Ssh\TerminalText.cs" Link="Services\Ssh\TerminalText.cs" />
     <Compile Include="..\Services\Ssh\IPrivateKeyInspector.cs" Link="Services\Ssh\IPrivateKeyInspector.cs" />
     <Compile Include="..\Services\ISessionTabFactory.cs" Link="Services\ISessionTabFactory.cs" />
+    <Compile Include="..\Services\IConnectionProfileResolver.cs" Link="Services\IConnectionProfileResolver.cs" />
+    <Compile Include="..\Services\ConnectionProfileResolver.cs" Link="Services\ConnectionProfileResolver.cs" />
     <Compile Include="..\Data\InheritanceResolver.cs" Link="Data\InheritanceResolver.cs" />
     <Compile Include="..\Data\Repositories\ICredentialRepository.cs" Link="Data\Repositories\ICredentialRepository.cs" />
     <Compile Include="..\Data\Repositories\IConnectionRepository.cs" Link="Data\Repositories\IConnectionRepository.cs" />

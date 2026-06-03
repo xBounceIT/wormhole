@@ -33,6 +33,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private readonly IConnectionRepository _connectionRepo;
     private readonly IAppSettingsService _settingsService;
     private readonly TunnelManager _tunnels;
+    private readonly IConnectionProfileResolver _profileResolver;
     private readonly ISftpService _sftpService;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<SshSessionViewModel> _logger;
@@ -85,6 +86,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         IConnectionRepository connectionRepo,
         IAppSettingsService settingsService,
         TunnelManager tunnels,
+        IConnectionProfileResolver profileResolver,
         ISftpService sftpService,
         ILoggerFactory loggerFactory)
     {
@@ -93,6 +95,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         _connectionRepo = connectionRepo;
         _settingsService = settingsService;
         _tunnels = tunnels;
+        _profileResolver = profileResolver;
         _sftpService = sftpService;
         _loggerFactory = loggerFactory;
         _logger = loggerFactory.CreateLogger<SshSessionViewModel>();
@@ -229,6 +232,14 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     {
         ErrorMessage = null;
         ResetOutputState();
+
+        // Re-read the connection's current saved settings before reconnecting. The tab caches
+        // the profile resolved at open time, and ConnectAsync re-establishes the VPN tunnel from
+        // it — so without this, disabling the tunnel (or any other edit) after the tab was opened
+        // would be ignored on Retry. Done before the detached-view branch below so the deferred
+        // background-tab reconnect path (AttachAsync) also uses the refreshed profile.
+        await RefreshProfileFromRepositoryAsync().ConfigureAwait(true);
+
         if (_webView is null)
         {
             // A null handler means the view is unloaded (background tab): OnUnloaded
@@ -264,6 +275,34 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
     // While Connecting, an in-flight ConnectAsync still holds _connectInFlight; a second one from RetryAsync would silently no-op.
     private bool CanRetry() => Status != SessionStatus.Connecting;
+
+    /// <summary>
+    /// Re-resolve <see cref="SessionTabViewModel.Profile"/> from the repository (through folder
+    /// inheritance) so a reconnect honors edits made after the tab was opened. Keeps the cached
+    /// profile when the node was deleted or can't be resolved. Runs on the UI thread (RetryAsync
+    /// is a UI-invoked command), so <see cref="SessionTabViewModel.UpdateProfile"/> is safe here.
+    /// </summary>
+    private async Task RefreshProfileFromRepositoryAsync()
+    {
+        var current = Profile;
+        if (current is null) return;
+
+        var refreshed = await _profileResolver.ResolveAsync(current.NodeId).ConfigureAwait(true);
+        if (refreshed is null) return;
+
+        // Never silently drop a host key we already pinned this session. The resolver reads the
+        // DB, where a pin written by this tab's connect normally lives — but if that best-effort
+        // write had failed, the refreshed copy would be empty and the retry would re-TOFU against
+        // whatever the server now presents. Carry the in-memory pin forward in that case.
+        if (string.IsNullOrEmpty(refreshed.SshKnownHostFingerprint) &&
+            !string.IsNullOrEmpty(current.SshKnownHostFingerprint))
+        {
+            refreshed = refreshed with { SshKnownHostFingerprint = current.SshKnownHostFingerprint };
+        }
+
+        UpdateProfile(refreshed);
+        _initialKnownFingerprint = refreshed.SshKnownHostFingerprint;
+    }
 
     [RelayCommand]
     public Task DisconnectAsync() => DetachAsync();
