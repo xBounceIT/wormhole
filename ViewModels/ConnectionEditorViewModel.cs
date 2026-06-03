@@ -6,6 +6,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Models;
+using Wormhole.Services;
 
 namespace Wormhole.ViewModels;
 
@@ -18,6 +19,7 @@ namespace Wormhole.ViewModels;
 public partial class ConnectionEditorViewModel : ObservableObject
 {
     private readonly ICredentialRepository _credentialRepository;
+    private readonly ICredentialService _credentialService;
     private readonly List<CredentialProfile> _allCredentials = new();
     private readonly Dictionary<Guid, CredentialProfile> _allCredentialsById = new();
     private readonly Dictionary<Guid, CredentialProfile> _availableCredentialsById = new();
@@ -33,12 +35,20 @@ public partial class ConnectionEditorViewModel : ObservableObject
     // (false) back over an inherited value — otherwise merely renaming an inheriting connection
     // would sever its inheritance. Null for a brand-new connection (LoadFrom never ran).
     private bool? _loadedSshAutoSudo;
+    // The node being edited, captured in LoadFrom so the dialog can read this connection's
+    // inline password (keyed by node Id) for an edit. Guid.Empty for a brand-new connection.
+    private Guid _editingNodeId;
+    // The node's own UseInlinePassword as loaded, so LoadInlineSecretAsync only reads a secret
+    // for a connection that actually has one.
+    private bool _loadedUseInlinePassword;
 
     public ConnectionEditorViewModel(
         ICredentialRepository credentialRepository,
-        ITunnelConfigRepository tunnelConfigRepository)
+        ITunnelConfigRepository tunnelConfigRepository,
+        ICredentialService credentialService)
     {
         _credentialRepository = credentialRepository;
+        _credentialService = credentialService;
         TunnelPicker = new TunnelPickerViewModel(tunnelConfigRepository);
     }
 
@@ -61,7 +71,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private string name = string.Empty;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsRdp), nameof(IsSsh), nameof(IsValid), nameof(CanUseSshAutoSudo))]
+    [NotifyPropertyChangedFor(nameof(IsRdp), nameof(IsSsh), nameof(IsValid), nameof(CanUseSshAutoSudo), nameof(ShowInlinePassword))]
     private ProtocolType protocol = ProtocolType.Ssh;
 
     [ObservableProperty]
@@ -85,6 +95,26 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private Guid? credentialId;
 
     /// <summary>
+    /// Drives the credential mode toggle. When true (default), the connection uses a saved
+    /// credential (the picker is shown, the inline Username/Password hidden). When false, the
+    /// user supplies an inline Username and — for SSH — an inline <see cref="InlinePassword"/>.
+    /// Maps to <see cref="ConnectionNode.UseInlinePassword"/> (inverted) in WriteTo.
+    /// </summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowInlinePassword), nameof(CanUseSshAutoSudo))]
+    private bool useSavedCredentials = true;
+
+    /// <summary>The inline login password (bound to the editor's PasswordBox). SSH-only,
+    /// persisted to Credential Manager keyed by the node Id. Never logged.</summary>
+    [ObservableProperty]
+    private string inlinePassword = string.Empty;
+
+    /// <summary>The inline Password field is shown only for an SSH connection that isn't using a
+    /// saved credential. RDP keeps its existing behavior (saved credential or connect-time
+    /// prompt), so no inline password control is surfaced for it.</summary>
+    public bool ShowInlinePassword => IsSsh && !UseSavedCredentials;
+
+    /// <summary>
     /// Tri-state Auto sudo selection: "inherit" (null — follow the folder default), "on" (true —
     /// run "sudo su" and send the saved password on connect), or "off" (false — explicit override).
     /// Modelled as a string to reuse the editor's existing radio/combo binding style; mapped to a
@@ -94,6 +124,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// setting.
     /// </summary>
     [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SshAutoSudoDescription))]
     private string sshAutoSudoMode = SshAutoSudoInherit;
 
     internal const string SshAutoSudoInherit = "inherit";
@@ -103,8 +134,22 @@ public partial class ConnectionEditorViewModel : ObservableObject
     public IReadOnlyList<KeyValuePair<string, string>> SshAutoSudoChoices { get; } = new[]
     {
         new KeyValuePair<string, string>(SshAutoSudoInherit, "Inherit from folder"),
-        new KeyValuePair<string, string>(SshAutoSudoOn, "On — run “sudo su” and send the saved password"),
+        new KeyValuePair<string, string>(SshAutoSudoOn, "On"),
         new KeyValuePair<string, string>(SshAutoSudoOff, "Off"),
+    };
+
+    /// <summary>
+    /// Short, value-specific help for the Auto sudo control, shown under the picker and updated
+    /// as the selection changes (vs. the old single static paragraph covering all three values).
+    /// The "on" text keeps the load-bearing caveat that the password isn't sent when sudo
+    /// doesn't actually prompt.
+    /// </summary>
+    public string SshAutoSudoDescription => SshAutoSudoMode switch
+    {
+        SshAutoSudoOn => "Runs “sudo su” on connect and sends the saved password at the prompt. " +
+                         "If sudo doesn’t prompt (NOPASSWD or cached), nothing is sent.",
+        SshAutoSudoOff => "Never runs sudo automatically on connect.",
+        _ => "Follows the parent folder’s Auto sudo setting.",
     };
 
     /// <summary>
@@ -118,8 +163,15 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// "prompt every time" (the resolver prompts and captures a password). Hiding only the
     /// definitely-no-password case lets a child override an inherited Auto sudo on/off; when hidden,
     /// WriteTo leaves the loaded value untouched rather than clobbering it.
+    /// <para>
+    /// In inline-password mode (<see cref="UseSavedCredentials"/> false) the saved credential is
+    /// irrelevant — the inline password (or a connect-time prompt) supplies a usable password — so
+    /// the control is shown regardless of any now-unused selected credential, even an SSH key. This
+    /// keys off <see cref="UseSavedCredentials"/> (not the stale <see cref="CredentialId"/>) so
+    /// switching an SSH-key connection to an inline password reveals Auto sudo immediately.
+    /// </para>
     /// </summary>
-    public bool CanUseSshAutoSudo => IsSsh && SelectedCredential?.Kind != CredentialKind.SshKey;
+    public bool CanUseSshAutoSudo => IsSsh && (!UseSavedCredentials || SelectedCredential?.Kind != CredentialKind.SshKey);
 
     /// <summary>Sentinel for "no credential — prompt every time". ComboBox.PlaceholderText
     /// isn't selectable, so the picker needs a real item to round-trip to. Both selection
@@ -408,6 +460,20 @@ public partial class ConnectionEditorViewModel : ObservableObject
     }
 
     /// <summary>
+    /// Populate <see cref="InlinePassword"/> from Credential Manager when editing a connection
+    /// that already uses an inline password, so the field reflects the stored secret. Called by
+    /// the dialog's LoadAsync after <see cref="LoadFrom"/> (which can't read the secret because
+    /// it's synchronous). A no-op for new connections and for saved-credential connections.
+    /// </summary>
+    public async Task LoadInlineSecretAsync()
+    {
+        if (_loadedUseInlinePassword && _editingNodeId != Guid.Empty)
+        {
+            InlinePassword = await _credentialService.ReadPasswordAsync(_editingNodeId).ConfigureAwait(true) ?? string.Empty;
+        }
+    }
+
+    /// <summary>
     /// Rebuild <see cref="AvailableCredentials"/> from <see cref="_allCredentials"/> using the
     /// current Protocol. A currently-selected credential whose protocol no longer matches the
     /// filter is preserved as a "stale" entry so edit-round-tripping doesn't silently drop the
@@ -645,6 +711,12 @@ public partial class ConnectionEditorViewModel : ObservableObject
             Username = node.Username ?? string.Empty;
             RdpDomain = node.RdpDomain ?? string.Empty;
             CredentialId = node.CredentialId;
+            _editingNodeId = node.Id;
+            _loadedUseInlinePassword = node.UseInlinePassword ?? false;
+            UseSavedCredentials = !_loadedUseInlinePassword;
+            // The plaintext is fetched lazily from Credential Manager by LoadInlineSecretAsync
+            // (an async call the synchronous LoadFrom can't make); start blank.
+            InlinePassword = string.Empty;
             _loadedSshAutoSudo = node.SshAutoSudo;
             SshAutoSudoMode = node.SshAutoSudo switch
             {
@@ -742,7 +814,27 @@ public partial class ConnectionEditorViewModel : ObservableObject
         {
             node.Username = null;
         }
-        node.CredentialId = CredentialId;
+
+        // Credential mode. "Use saved credentials" unchecked means "don't use a saved credential"
+        // for BOTH protocols, so the picked CredentialId is always cleared in that case (else an
+        // RDP connection would silently keep authenticating with the now-hidden saved credential).
+        // SSH additionally gets an inline per-connection password: the plaintext is handed to the
+        // tree VM via the transient PendingInlinePassword (it writes Credential Manager after the
+        // row commits). RDP unchecked falls back to a connect-time prompt (CredentialId null,
+        // no inline). When checked, persist the picked credential and clear any inline state so
+        // switching off purges the stale secret (see ConnectionTreeViewModel.ApplyInlineSecretAsync).
+        if (!UseSavedCredentials)
+        {
+            node.CredentialId = null;
+            node.UseInlinePassword = IsSsh;
+            node.PendingInlinePassword = IsSsh ? InlinePassword : null; // never logged
+        }
+        else
+        {
+            node.UseInlinePassword = false;
+            node.PendingInlinePassword = null;
+            node.CredentialId = CredentialId;
+        }
 
         // Persist the tri-state Auto sudo choice (inherit→null / on→true / off→false) only when the
         // control was actually usable. When it's hidden — non-SSH, no credential, a key-only

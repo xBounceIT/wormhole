@@ -14,7 +14,7 @@ public sealed class ConnectionRepository : IConnectionRepository
     private static readonly string[] Columns =
     {
         "Id", "ParentId", "Name", "Kind", "SortOrder",
-        "Protocol", "Host", "Port", "Username", "CredentialId",
+        "Protocol", "Host", "Port", "Username", "CredentialId", "UseInlinePassword",
         "RdpDomain", "RdpScreenSize", "RdpFullScreen",
         "RdpColorDepth", "RdpUseAllMonitors",
         "RdpAudioMode", "RdpAudioCaptureMode", "RdpKeyboardHookMode",

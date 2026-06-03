@@ -138,6 +138,9 @@ public sealed class InheritanceResolver
             Port = port ?? DefaultPortFor(protocol.Value),
             Username = username,
             CredentialId = credentialId,
+            // Inline password is strictly per-connection — read from the leaf `node`, never
+            // inherited up the folder chain (unlike CredentialId above).
+            UseInlinePassword = node.UseInlinePassword ?? false,
             RdpDomain = rdpDomain,
             RdpScreenSize = rdpScreenSize,
             RdpFullScreen = rdpFullScreen ?? false,

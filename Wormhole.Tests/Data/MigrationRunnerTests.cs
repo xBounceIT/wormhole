@@ -52,6 +52,25 @@ public sealed class MigrationRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task RunAsync_AddsUseInlinePasswordColumnToNodes()
+    {
+        // Mirrors Data/Migrations/0010_inline_password.sql (the embedded .sql isn't available to
+        // the test project, so the ALTER is inlined to validate its shape against real SQLite).
+        var migrations = new List<Migration>
+        {
+            new("0001_initial", "CREATE TABLE Nodes (Id TEXT PRIMARY KEY NOT NULL);"),
+            new("0010_inline_password", "ALTER TABLE Nodes ADD COLUMN UseInlinePassword INTEGER NULL;"),
+        };
+        var runner = new MigrationRunner(_factory, NullLogger<MigrationRunner>.Instance, migrations);
+
+        await runner.RunAsync();
+
+        using var conn = _factory.Open();
+        var columns = (await conn.QueryAsync<string>("SELECT name FROM pragma_table_info('Nodes');")).ToList();
+        Assert.Contains("UseInlinePassword", columns);
+    }
+
+    [Fact]
     public async Task RunAsync_IsIdempotent_DoesNotReapplyMigrations()
     {
         var migrations = new List<Migration>

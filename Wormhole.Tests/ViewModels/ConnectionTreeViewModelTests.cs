@@ -33,6 +33,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
             Port                     INTEGER  NULL,
             Username                 TEXT     NULL,
             CredentialId             TEXT     NULL,
+            UseInlinePassword        INTEGER  NULL,
             RdpDomain                TEXT     NULL,
             RdpScreenSize            TEXT     NULL,
             RdpFullScreen            INTEGER  NULL,
@@ -284,6 +285,148 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
 
         var row = (await _repo.GetAllAsync()).Single();
         Assert.Equal(credentialId, row.CredentialId);
+    }
+
+    [Fact]
+    public async Task AddConnection_InlinePassword_StoresSecretUnderNodeId()
+    {
+        var draft = MakeConnectionDraft("inline", ProtocolType.Ssh, "host", 22, "root");
+        draft.UseInlinePassword = true;
+        draft.PendingInlinePassword = "s3cret";
+        var dialog = new FakeDialogService { EditConnectionResult = draft };
+        var creds = new FakeCredentialService();
+        var vm = CreateVm(dialog, creds);
+        await vm.RefreshAsync();
+
+        await vm.AddConnectionCommand.ExecuteAsync(null);
+
+        // The DB row carries only the flag; the secret lives in Credential Manager keyed by the
+        // node Id (here the in-memory FakeCredentialService).
+        var row = Assert.Single(await _repo.GetAllAsync());
+        Assert.True(row.UseInlinePassword);
+        Assert.Equal("s3cret", creds.Passwords[row.Id]);
+    }
+
+    [Fact]
+    public async Task AddConnection_InlinePasswordBlank_DoesNotStoreEmptySecret()
+    {
+        // Inline mode with a blank password: the flag persists, but no empty Credential Manager
+        // entry is written (an empty secret would yield no SSH auth method and fail the connect;
+        // SshCredentialResolver instead prompts when the secret is absent).
+        var draft = MakeConnectionDraft("inline", ProtocolType.Ssh, "host", 22, "root");
+        draft.UseInlinePassword = true;
+        draft.PendingInlinePassword = "";
+        var dialog = new FakeDialogService { EditConnectionResult = draft };
+        var creds = new FakeCredentialService();
+        var vm = CreateVm(dialog, creds);
+        await vm.RefreshAsync();
+
+        await vm.AddConnectionCommand.ExecuteAsync(null);
+
+        var row = Assert.Single(await _repo.GetAllAsync());
+        Assert.True(row.UseInlinePassword);
+        Assert.False(creds.Passwords.ContainsKey(row.Id));
+    }
+
+    [Fact]
+    public async Task Edit_InlinePasswordCleared_PurgesStoredSecret()
+    {
+        var draft = MakeConnectionDraft("inline", ProtocolType.Ssh, "host", 22, "root");
+        draft.UseInlinePassword = true;
+        draft.PendingInlinePassword = "s3cret";
+        var dialog = new FakeDialogService { EditConnectionResult = draft };
+        var creds = new FakeCredentialService();
+        var vm = CreateVm(dialog, creds);
+        await vm.RefreshAsync();
+        await vm.AddConnectionCommand.ExecuteAsync(null);
+        var row = Assert.Single(await _repo.GetAllAsync());
+        Assert.Equal("s3cret", creds.Passwords[row.Id]);
+
+        // Still inline, but the password field was cleared → the stale secret must be removed.
+        var next = MakeConnectionDraft("inline", ProtocolType.Ssh, "host", 22, "root");
+        next.UseInlinePassword = true;
+        next.PendingInlinePassword = "";
+        dialog.EditConnectionResult = next;
+        await vm.EditCommand.ExecuteAsync(vm.Roots.Single());
+
+        Assert.False(creds.Passwords.ContainsKey(row.Id));
+    }
+
+    [Fact]
+    public async Task Edit_SwitchingInlineOff_DeletesStoredSecret()
+    {
+        var draft = MakeConnectionDraft("inline", ProtocolType.Ssh, "host", 22, "root");
+        draft.UseInlinePassword = true;
+        draft.PendingInlinePassword = "s3cret";
+        var dialog = new FakeDialogService { EditConnectionResult = draft };
+        var creds = new FakeCredentialService();
+        var vm = CreateVm(dialog, creds);
+        await vm.RefreshAsync();
+        await vm.AddConnectionCommand.ExecuteAsync(null);
+        var row = Assert.Single(await _repo.GetAllAsync());
+        Assert.Equal("s3cret", creds.Passwords[row.Id]);
+
+        // Re-edit, switching to a saved credential (inline off) — the stale secret must be purged.
+        var credId = Guid.NewGuid();
+        var next = MakeConnectionDraft("inline", ProtocolType.Ssh, "host", 22, "root");
+        next.CredentialId = credId;
+        dialog.EditConnectionResult = next;
+        await vm.EditCommand.ExecuteAsync(vm.Roots.Single());
+
+        Assert.False(creds.Passwords.ContainsKey(row.Id));
+        var updated = Assert.Single(await _repo.GetAllAsync());
+        Assert.False(updated.UseInlinePassword ?? false);
+        Assert.Equal(credId, updated.CredentialId);
+    }
+
+    [Fact]
+    public async Task Delete_Connection_PurgesInlineSecret()
+    {
+        var draft = MakeConnectionDraft("inline", ProtocolType.Ssh, "host", 22, "root");
+        draft.UseInlinePassword = true;
+        draft.PendingInlinePassword = "s3cret";
+        var dialog = new FakeDialogService { EditConnectionResult = draft };
+        var creds = new FakeCredentialService();
+        var vm = CreateVm(dialog, creds);
+        await vm.RefreshAsync();
+        await vm.AddConnectionCommand.ExecuteAsync(null);
+        var row = Assert.Single(await _repo.GetAllAsync());
+        Assert.True(creds.Passwords.ContainsKey(row.Id));
+
+        await vm.DeleteCommand.ExecuteAsync(vm.Roots.Single());
+
+        Assert.Empty(await _repo.GetAllAsync());
+        Assert.False(creds.Passwords.ContainsKey(row.Id));
+    }
+
+    [Fact]
+    public async Task Delete_Folder_PurgesNestedConnectionInlineSecret()
+    {
+        var dialog = new FakeDialogService();
+        var creds = new FakeCredentialService();
+        var vm = CreateVm(dialog, creds);
+        await vm.RefreshAsync();
+
+        // A folder containing an inline-password connection.
+        dialog.TextPromptResult = "Parent";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var parentVm = vm.Roots.Single();
+
+        var draft = MakeConnectionDraft("leaf", ProtocolType.Ssh, "host", 22, "root");
+        draft.UseInlinePassword = true;
+        draft.PendingInlinePassword = "s3cret";
+        dialog.EditConnectionResult = draft;
+        await vm.AddConnectionCommand.ExecuteAsync(parentVm);
+
+        var connection = (await _repo.GetAllAsync()).Single(n => n.Kind == NodeKind.Connection);
+        Assert.Equal("s3cret", creds.Passwords[connection.Id]);
+
+        // Deleting the FOLDER cascades the DB rows; it must ALSO purge the descendant connection's
+        // inline secret (keyed by the connection's node Id), not just the clicked node.
+        await vm.DeleteCommand.ExecuteAsync(vm.Roots.Single());
+
+        Assert.Empty(await _repo.GetAllAsync());
+        Assert.False(creds.Passwords.ContainsKey(connection.Id));
     }
 
     [Fact]

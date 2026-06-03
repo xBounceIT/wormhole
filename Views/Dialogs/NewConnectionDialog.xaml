@@ -35,40 +35,53 @@
                                  PlaceholderText="prod-web"
                                  Text="{x:Bind ViewModel.Name, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
 
-                        <ComboBox x:Name="ProtocolBox"
-                                  Header="Protocol"
-                                  ItemsSource="{x:Bind Protocols}"
-                                  SelectedItem="{x:Bind ViewModel.Protocol, Mode=TwoWay}"
-                                  HorizontalAlignment="Stretch">
-                            <ComboBox.ItemTemplate>
-                                <DataTemplate x:DataType="models:ProtocolType">
-                                    <TextBlock Text="{x:Bind Converter={StaticResource ToUpperConverter}}" />
-                                </DataTemplate>
-                            </ComboBox.ItemTemplate>
-                        </ComboBox>
+                        <!-- Protocol, Host and Port share one row to keep the form compact. -->
+                        <Grid ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
 
-                        <TextBox x:Name="HostBox"
-                                 Header="Host"
-                                 PlaceholderText="example.com"
-                                 Text="{x:Bind ViewModel.Host, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                            <ComboBox x:Name="ProtocolBox"
+                                      Grid.Column="0"
+                                      Header="Protocol"
+                                      MinWidth="110"
+                                      ItemsSource="{x:Bind Protocols}"
+                                      SelectedItem="{x:Bind ViewModel.Protocol, Mode=TwoWay}"
+                                      HorizontalAlignment="Stretch">
+                                <ComboBox.ItemTemplate>
+                                    <DataTemplate x:DataType="models:ProtocolType">
+                                        <TextBlock Text="{x:Bind Converter={StaticResource ToUpperConverter}}" />
+                                    </DataTemplate>
+                                </ComboBox.ItemTemplate>
+                            </ComboBox>
 
-                        <NumberBox Header="Port"
-                                   PlaceholderText="Default for protocol"
-                                   Minimum="1"
-                                   Maximum="65535"
-                                   SpinButtonPlacementMode="Hidden"
-                                   Value="{x:Bind PortBindable, Mode=TwoWay, FallbackValue=NaN}" />
+                            <TextBox x:Name="HostBox"
+                                     Grid.Column="1"
+                                     Header="Host"
+                                     PlaceholderText="example.com"
+                                     Text="{x:Bind ViewModel.Host, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
 
-                        <TextBox Header="Username"
-                                 PlaceholderText="(optional)"
-                                 Text="{x:Bind ViewModel.Username, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                            <NumberBox Grid.Column="2"
+                                       Header="Port"
+                                       MinWidth="96"
+                                       PlaceholderText="Default"
+                                       Minimum="1"
+                                       Maximum="65535"
+                                       SpinButtonPlacementMode="Hidden"
+                                       Value="{x:Bind PortBindable, Mode=TwoWay, FallbackValue=NaN}" />
+                        </Grid>
 
-                        <TextBox Header="Domain"
-                                 PlaceholderText="WORKGROUP"
-                                 Text="{x:Bind ViewModel.RdpDomain, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                 Visibility="{x:Bind ViewModel.IsRdp, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                        <!-- Credential mode toggle: a saved credential (checked) OR an inline
+                             username + password (unchecked). Pure x:Bind drives both panels'
+                             visibility, so there is no code-behind toggle handler (which would
+                             risk the WinUI init-event NRE on later-declared x:Name elements). -->
+                        <CheckBox Content="Use saved credentials"
+                                  IsChecked="{x:Bind ViewModel.UseSavedCredentials, Mode=TwoWay}" />
 
-                        <StackPanel Spacing="4">
+                        <StackPanel Spacing="4"
+                                    Visibility="{x:Bind ViewModel.UseSavedCredentials, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
                             <TextBlock Text="Saved credentials"
                                        Style="{StaticResource CaptionTextBlockStyle}" />
                             <AutoSuggestBox x:Name="CredentialBox"
@@ -83,11 +96,32 @@
                                             LostFocus="OnCredentialLostFocus" />
                         </StackPanel>
 
+                        <TextBox Header="Username"
+                                 PlaceholderText="(optional)"
+                                 Text="{x:Bind ViewModel.Username, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 Visibility="{x:Bind ViewModel.UseSavedCredentials, Mode=OneWay, Converter={StaticResource InverseBoolToVisibilityConverter}}" />
+
+                        <!-- Inline password is SSH-only (ShowInlinePassword = IsSsh AND not using a
+                             saved credential). Stored in Credential Manager keyed by the node Id.
+                             PasswordBox.Password isn't x:Bind-able, so it syncs via a code-behind
+                             PasswordChanged handler. -->
+                        <PasswordBox x:Name="InlinePasswordBox"
+                                     Header="Password"
+                                     PlaceholderText="(optional)"
+                                     PasswordChanged="OnInlinePasswordChanged"
+                                     Visibility="{x:Bind ViewModel.ShowInlinePassword, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+
+                        <TextBox Header="Domain"
+                                 PlaceholderText="WORKGROUP"
+                                 Text="{x:Bind ViewModel.RdpDomain, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 Visibility="{x:Bind ViewModel.IsRdp, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+
                         <StackPanel Spacing="4"
                                     Visibility="{x:Bind ViewModel.CanUseSshAutoSudo, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
                             <TextBlock Text="Auto sudo"
                                        Style="{StaticResource CaptionTextBlockStyle}" />
-                            <ComboBox HorizontalAlignment="Stretch"
+                            <ComboBox HorizontalAlignment="Left"
+                                      MinWidth="240"
                                       ItemsSource="{x:Bind ViewModel.SshAutoSudoChoices}"
                                       SelectedValuePath="Key"
                                       DisplayMemberPath="Value"
@@ -95,7 +129,7 @@
                             <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                                        Opacity="0.7"
                                        TextWrapping="Wrap"
-                                       Text="When on, runs &quot;sudo su&quot; on connect and sends the saved password at the sudo prompt. If sudo doesn't prompt (e.g. NOPASSWD or cached), the password is not sent. &quot;Inherit from folder&quot; follows the parent folder's setting." />
+                                       Text="{x:Bind ViewModel.SshAutoSudoDescription, Mode=OneWay}" />
                         </StackPanel>
 
                         <StackPanel Spacing="4">

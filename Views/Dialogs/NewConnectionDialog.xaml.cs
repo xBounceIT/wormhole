@@ -54,6 +54,10 @@ public sealed partial class NewConnectionDialog : UserControl
         var tunnels = ViewModel.TunnelPicker.LoadAsync();
         await Task.WhenAll(credentials, tunnels);
         ViewModel.LoadFrom(initial);
+        // Pull the existing inline password (if any) from Credential Manager so an edit shows it.
+        // Done after LoadFrom because reading the secret is async and LoadFrom is synchronous.
+        await ViewModel.LoadInlineSecretAsync();
+        InlinePasswordBox.Password = ViewModel.InlinePassword;
     }
 
     /// <summary>Copy field values back into the supplied node. Caller is responsible for the
@@ -65,6 +69,13 @@ public sealed partial class NewConnectionDialog : UserControl
         NameBox.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
         NameBox.SelectAll();
     }
+
+    // PasswordBox.Password has no x:Bind-able dependency property, so mirror it into the VM here.
+    // This is a content-change handler (safe), not the literal-IsChecked-plus-handler pattern that
+    // can NRE during InitializeComponent. ViewModel is assigned before InitializeComponent, and
+    // this only touches a simple VM property — never a later-declared x:Name element.
+    private void OnInlinePasswordChanged(object sender, RoutedEventArgs e) =>
+        ViewModel.InlinePassword = ((PasswordBox)sender).Password;
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
