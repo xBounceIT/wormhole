@@ -18,6 +18,14 @@ internal sealed class SshSession : ISshSession
     private int _disposed;
     private int _started;
 
+    // Terminal flow-control gate. The read pump awaits this before each read; a *completed* gate
+    // (the default) means "reading allowed". PauseReading swaps in an uncompleted TCS to park the
+    // pump so the SSH channel window fills and back-pressures the remote producer; ResumeReading
+    // completes the TCS to release it. Guarded by _readGateLock. See ISshSession.PauseReading.
+    private readonly object _readGateLock = new();
+    private TaskCompletionSource _readGate = CreateOpenGate();
+    private bool _readingPaused;
+
     public SshSession(SshClient client, ShellStream stream, string hostFingerprint, ILogger<SshSession> logger)
     {
         _client = client;
@@ -86,6 +94,42 @@ internal sealed class SshSession : ISshSession
         return Task.CompletedTask;
     }
 
+    private static TaskCompletionSource CreateOpenGate()
+    {
+        // RunContinuationsAsynchronously: the pump's awaiter must not run inline on whichever
+        // thread completes the gate (ResumeReading runs on the UI thread) — that would hijack the
+        // UI thread to run the SSH read loop.
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        tcs.SetResult();
+        return tcs;
+    }
+
+    public void PauseReading()
+    {
+        if (IsDisposed) return;
+        lock (_readGateLock)
+        {
+            if (_readingPaused) return;
+            _readingPaused = true;
+            // Install a fresh uncompleted gate only when the current one is open (completed); if a
+            // prior pause already swapped in an uncompleted gate we keep parking on it.
+            if (_readGate.Task.IsCompleted)
+            {
+                _readGate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+        }
+    }
+
+    public void ResumeReading()
+    {
+        lock (_readGateLock)
+        {
+            if (!_readingPaused) return;
+            _readingPaused = false;
+            _readGate.TrySetResult();
+        }
+    }
+
     private async Task ReadPumpAsync()
     {
         var ct = _cts.Token;
@@ -95,6 +139,18 @@ internal sealed class SshSession : ISshSession
         {
             while (!ct.IsCancellationRequested)
             {
+                // Flow control: a consumer (TerminalBridge) parks the pump here when xterm.js falls
+                // behind, so the SSH channel window — and thus the remote producer — is throttled
+                // instead of xterm buffering unboundedly to its discard limit. Released by
+                // ResumeReading, or by cancellation on teardown (WaitAsync observes ct).
+                Task gate;
+                lock (_readGateLock) gate = _readGate.Task;
+                if (!gate.IsCompleted)
+                {
+                    try { await gate.WaitAsync(ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { return; }
+                }
+
                 int n;
                 try
                 {
@@ -154,6 +210,10 @@ internal sealed class SshSession : ISshSession
         // alone takes 100-500 ms to propagate through SSH.NET's internal polling,
         // which the user perceives as lag on tab-context-menu Reconnect.
         try { _cts.Cancel(); } catch { /* already disposed */ }
+        // Release a pump parked on the flow-control gate so it observes cancellation immediately.
+        // WaitAsync(ct) would also throw on cancel, but completing the gate avoids depending solely
+        // on that and is harmless (TrySetResult no-ops) when the pump isn't parked.
+        lock (_readGateLock) { _readingPaused = false; _readGate.TrySetResult(); }
         try { _stream.Close(); } catch { /* socket may already be torn down */ }
         try { _stream.Dispose(); } catch { /* idempotent */ }
 

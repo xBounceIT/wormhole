@@ -7,6 +7,7 @@
 //   C# -> JS: "paste:" + base64(utf8(text))       (clipboard text in reply to a "p:" request)
 //   JS -> C#: "d:" + utf8(typed-input)            (user keystrokes; C# does Encoding.UTF8.GetBytes)
 //   JS -> C#: "b:" + base64(raw-input-bytes)      (non-UTF-8 terminal input)
+//   JS -> C#: "a:N"                              (flow-control ack: xterm parsed N output bytes)
 //   JS -> C#: "r:COLSxROWS"                      (geometry after ready)
 //   JS -> C#: "c:" + base64(utf8(selection))     (selection changed; C# decides whether to copy)
 //   JS -> C#: "p:"                               (right-click paste request)
@@ -174,6 +175,61 @@
       post("p:");
     });
 
+    // --- Renderer self-heal -------------------------------------------------
+    // After a high-throughput burst (e.g. a tcpdump flood) the xterm.js WebGL renderer can leave
+    // the on-screen canvas desynced from the (correct) text buffer — stale glyphs that persist
+    // until a full repaint, which is why a manual CTRL+L appears to "fix" it. The byte stream
+    // itself is intact (verified end-to-end through the C# pipe), so a pure display-layer repaint
+    // restores the view without touching any logical state. We force that repaint once output
+    // settles (the "stop tcpdump, then edit" moment the user hits) and — for output that never
+    // pauses — at a capped maximum interval. clearTextureAtlas() purges the WebGL glyph atlas +
+    // render model (a documented cure for atlas corruption; a no-op on the DOM renderer); refresh()
+    // then re-renders every visible row from the buffer on either renderer. Neither writes to the
+    // terminal, so the cursor / parser / buffer are untouched — safe to call at any time.
+    var SELF_HEAL_MIN_BURST_BYTES = 4096; // ignore interactive echo; only large coalesced bursts arm it
+    var SELF_HEAL_SETTLE_MS = 180;        // repaint this long after the last burst chunk
+    var SELF_HEAL_MAX_MS = 1000;          // ...but at least this often while output keeps streaming
+    var selfHealSettleTimer = 0;
+    var selfHealMaxTimer = 0;
+
+    function selfHealRenderer(rebuildAtlas) {
+      try {
+        // clearTextureAtlas() purges the WebGL glyph atlas + render model (the strongest cure, the
+        // CTRL+L equivalent) — reserve it for when output has STOPPED, so we never churn the atlas
+        // mid-render during a live flood. A bare refresh() re-renders visible rows from the buffer
+        // on either renderer and is cheap enough to run periodically while output is still flowing.
+        if (rebuildAtlas && typeof term.clearTextureAtlas === "function") {
+          term.clearTextureAtlas();
+        }
+        term.refresh(0, term.rows - 1);
+      } catch (err) {
+        console.warn("Terminal self-heal repaint failed:", err);
+      }
+    }
+
+    function clearSelfHealTimers() {
+      if (selfHealSettleTimer) { window.clearTimeout(selfHealSettleTimer); selfHealSettleTimer = 0; }
+      if (selfHealMaxTimer) { window.clearTimeout(selfHealMaxTimer); selfHealMaxTimer = 0; }
+    }
+
+    function scheduleSelfHeal() {
+      // Trailing edge: fires once output goes quiet — exactly when the user starts editing. Output
+      // has stopped, so do the full atlas-rebuild repaint.
+      if (selfHealSettleTimer) window.clearTimeout(selfHealSettleTimer);
+      selfHealSettleTimer = window.setTimeout(function () {
+        clearSelfHealTimers();
+        selfHealRenderer(true);
+      }, SELF_HEAL_SETTLE_MS);
+      // Max-wait: a continuously streaming flood never goes quiet, so guarantee a periodic repaint —
+      // a cheap refresh only (no atlas churn) since output is still in flight.
+      if (!selfHealMaxTimer) {
+        selfHealMaxTimer = window.setTimeout(function () {
+          selfHealMaxTimer = 0;
+          selfHealRenderer(false);
+        }, SELF_HEAL_MAX_MS);
+      }
+    }
+
     let readySent = false;
     let readyTimer = 0;
     let resizeTimer = 0;
@@ -275,10 +331,36 @@
           return;
         }
         if (msg.startsWith("d:")) {
+          let outBytes;
           try {
-            term.write(base64ToUint8Array(msg.slice(2)));
+            outBytes = base64ToUint8Array(msg.slice(2));
           } catch (err) {
             console.error("Failed to decode shell output:", err);
+            return;
+          }
+          try {
+            // Pass a callback so xterm reports how many bytes it has parsed: that drives the C#
+            // flow-control window (the "a:" ack), which pauses the SSH read pump when xterm falls
+            // behind so a torrential producer can't overrun xterm's internal write buffer. Keep in
+            // sync with TerminalBridge's "a:" handler / TerminalFlowController.
+            term.write(outBytes, function () {
+              post("a:" + outBytes.length);
+            });
+          } catch (err) {
+            // term.write throws only if xterm's write buffer blew past its hard ~50MB discard
+            // limit — flow control should prevent that, but if it ever happens the chunk is
+            // dropped and the parser may be left mid-sequence. Surface it distinctly (not the
+            // misleading "decode failed"), return the flow-control credit so the read pump can't
+            // deadlock, and force a repaint. We deliberately do NOT term.reset() here: that wipes
+            // scrollback on every hiccup — a worse regression than a one-off repaint.
+            console.warn("xterm write discarded (buffer overflow); repainting to recover.", err);
+            post("a:" + outBytes.length);
+            selfHealRenderer(true);
+          }
+          // A large coalesced chunk means a burst is in progress; arm the post-burst self-heal so
+          // the renderer is repainted once it settles (or periodically if it never does).
+          if (outBytes.length >= SELF_HEAL_MIN_BURST_BYTES) {
+            scheduleSelfHeal();
           }
           return;
         }

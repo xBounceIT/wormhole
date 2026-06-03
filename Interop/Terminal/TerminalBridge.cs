@@ -17,12 +17,25 @@ public sealed class TerminalBridge : IDisposable
     // WebView2 PostWebMessageAsString. ~12 ms ≈ 80 fps cap on terminal updates.
     private const int CoalesceWindowMs = 12;
 
+    // Flow-control watermarks (bytes posted to xterm.js but not yet acked as parsed). xterm parses
+    // at only ~5-35 MB/s and silently DISCARDS writes once its internal buffer passes a hard ~50 MB
+    // limit — which strands the parser mid-escape-sequence and corrupts the session until a full
+    // reset (the "big tcpdump output then everything breaks until CTRL+L" bug). We pause the SSH
+    // read pump well before that so the SSH channel window back-pressures the remote producer. The
+    // high/low hysteresis avoids pause/resume flapping. 512 KB high keeps xterm's peak buffer to a
+    // couple MB even counting in-flight coalesced bytes — two orders of magnitude under the discard
+    // limit — while sitting far above interactive echo sizes, so the low-latency echo path never
+    // trips it. See https://xtermjs.org/docs/guides/flowcontrol/.
+    private const int HighWatermarkBytes = 512 * 1024;
+    private const int LowWatermarkBytes = 128 * 1024;
+
     private readonly CoreWebView2 _webView;
     private readonly ISshSession _session;
     private readonly ILogger<TerminalBridge> _logger;
     private readonly IAppSettingsService _settingsService;
     private readonly DispatcherQueue _dispatcher;
     private readonly TerminalOutputCoalescer _coalescer;
+    private readonly TerminalFlowController _flowController = new(HighWatermarkBytes, LowWatermarkBytes);
     private DispatcherQueueTimer? _coalesceTimer;
     private bool _disposed;
     private bool _firstOutputLogged;
@@ -164,21 +177,24 @@ public sealed class TerminalBridge : IDisposable
         PostStringToWebView("f:", "requesting terminal focus");
     }
 
-    private void PostStringToWebView(string message, string operation)
+    private bool PostStringToWebView(string message, string operation)
     {
-        if (_disposed) return;
+        if (_disposed) return false;
         try
         {
             _webView.PostWebMessageAsString(message);
+            return true;
         }
         catch (ObjectDisposedException ex)
         {
             _logger.LogDebug(ex, "PostWebMessageAsString raced with WebView disposal while {Operation}.", operation);
+            return false;
         }
         catch (InvalidOperationException ex)
         {
             // WebView2 throws this when the CoreWebView2 has been closed.
             _logger.LogWarning(ex, "PostWebMessageAsString rejected while {Operation}.", operation);
+            return false;
         }
     }
 
@@ -197,7 +213,14 @@ public sealed class TerminalBridge : IDisposable
                 throw new FormatException("Failed to encode terminal output for WebView.");
             }
         });
-        PostStringToWebView(message, operation);
+        // Only count bytes that actually reached xterm against the flow-control window: a post that
+        // raced WebView teardown is never acked, so counting it would leak the window upward and
+        // eventually park the read pump forever. xterm acks every "d:" message (live output AND
+        // replay) via its term.write callback, so the accounting stays balanced.
+        if (PostStringToWebView(message, operation) && _flowController.OnPosted(data.Length))
+        {
+            _session.PauseReading();
+        }
     }
 
     private async void OnWebMessageReceived(CoreWebView2 sender, CoreWebView2WebMessageReceivedEventArgs args)
@@ -208,6 +231,19 @@ public sealed class TerminalBridge : IDisposable
         {
             var msg = args.TryGetWebMessageAsString();
             if (string.IsNullOrEmpty(msg)) return;
+
+            if (msg.StartsWith("a:", StringComparison.Ordinal))
+            {
+                // Flow-control ack: xterm finished parsing N output bytes. Decrement the outstanding
+                // window; if we'd paused the read pump and it has now drained below the low mark,
+                // resume it. Runs on the UI thread (WebView2 is thread-affine) — same thread the
+                // posts increment on — so _flowController needs no locking.
+                if (long.TryParse(msg.AsSpan(2), out var acked) && _flowController.OnAcked(acked))
+                {
+                    _session.ResumeReading();
+                }
+                return;
+            }
 
             if (msg.StartsWith("d:", StringComparison.Ordinal))
             {
@@ -363,5 +399,14 @@ public sealed class TerminalBridge : IDisposable
         catch (Exception ex) { _logger.LogWarning(ex, "Final coalescer flush during Dispose failed."); }
         _disposed = true;
         _coalescer.Dispose();
+        // If we'd paused the read pump for flow control, release it now. On a view-only detach
+        // (background tab) the SSH session keeps running, so a pump left parked on the pause gate
+        // would never resume and the session would look frozen on the next reattach. Harmless when
+        // the session is also being disposed (ResumeReading is a no-op on a torn-down session).
+        if (_flowController.Reset())
+        {
+            try { _session.ResumeReading(); }
+            catch (Exception ex) { _logger.LogDebug(ex, "ResumeReading during bridge Dispose failed."); }
+        }
     }
 }

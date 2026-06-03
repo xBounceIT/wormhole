@@ -45,4 +45,19 @@ public interface ISshSession : IAsyncDisposable
     void Start();
     Task WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default);
     Task ResizeAsync(uint columns, uint rows);
+
+    /// <summary>
+    /// Pauses the background read pump: it holds before the next read until <see cref="ResumeReading"/>
+    /// is called. Used for terminal flow control so a torrential remote producer (e.g. a flooding
+    /// <c>tcpdump</c>) can't outrun xterm.js and overflow its write buffer — not reading lets the SSH
+    /// channel window fill, which back-pressures the remote. Writes (keystrokes) are unaffected, so the
+    /// user can still send Ctrl+C to stop the flood. Idempotent and safe to call from any thread.
+    /// </summary>
+    void PauseReading();
+
+    /// <summary>
+    /// Resumes a pump previously parked by <see cref="PauseReading"/>. Idempotent and safe to call
+    /// from any thread; a no-op if the pump is not paused.
+    /// </summary>
+    void ResumeReading();
 }

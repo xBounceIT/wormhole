@@ -161,6 +161,9 @@ public sealed class ShellCommandRunnerTests
 
         public Task ResizeAsync(uint columns, uint rows) => Task.CompletedTask;
 
+        public void PauseReading() { }
+        public void ResumeReading() { }
+
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
 
         public Task WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
