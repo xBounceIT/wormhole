@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text;
 
 namespace Wormhole.Services.Tunneling.Stormshield;
@@ -101,6 +102,112 @@ public static class StormshieldProfileNormalizer
 
         return sb.ToString();
     }
+
+    /// <summary>
+    /// Inlines file-referenced key material into an OpenVPN profile: a directive such as
+    /// <c>ca "CA.cert.pem"</c> / <c>cert "x.pem"</c> / <c>key "y.pem"</c> (also <c>tls-crypt</c> /
+    /// <c>tls-auth</c> / <c>tls-crypt-v2</c> / <c>extra-certs</c>) is replaced with the equivalent
+    /// inline <c>&lt;ca&gt;…&lt;/ca&gt;</c> block, reading the referenced file's text via
+    /// <paramref name="resolveFile"/>. This is needed for the Stormshield v5 native flow, whose
+    /// <c>auth/config.html</c> download returns an <c>openvpn_client.zip</c> bundle that ships the
+    /// <c>.ovpn</c> and its PEMs as <em>separate</em> files referenced by name — the OpenVPN sidecar
+    /// wants a self-contained profile. A directive whose file can't be resolved (or that is already an
+    /// inline block) is left untouched. Conservative and line-oriented, mirroring <see cref="Normalize"/>:
+    /// bytes inside an existing inline block are never reinterpreted as directives. Pure — the caller
+    /// supplies the file lookup, so this stays IO-free and deterministically testable.
+    /// </summary>
+    public static string InlineFileReferences(string ovpn, Func<string, string?> resolveFile)
+        => InlineFileReferences(ovpn, resolveFile, out _);
+
+    /// <summary>
+    /// Overload that also reports any file-referenced directive whose file could NOT be resolved (left
+    /// as a dangling reference). The v5 bundle assembler treats a non-empty list as a fatal "incomplete
+    /// bundle", so a truncated / renamed bundle fails with an actionable message instead of silently
+    /// producing a profile the OpenVPN sidecar can't load.
+    /// </summary>
+    public static string InlineFileReferences(
+        string ovpn, Func<string, string?> resolveFile, out IReadOnlyList<string> unresolvedReferences)
+    {
+        ArgumentNullException.ThrowIfNull(resolveFile);
+        unresolvedReferences = Array.Empty<string>();
+        if (string.IsNullOrEmpty(ovpn)) return ovpn;
+
+        var unresolved = new List<string>();
+        var sb = new StringBuilder(ovpn.Length + 256);
+        string? openBlock = null;
+
+        foreach (var rawLine in EnumerateLines(ovpn))
+        {
+            var trimmed = rawLine.Trim();
+
+            if (openBlock is not null)
+            {
+                sb.Append(rawLine).Append('\n');
+                if (IsCloseTag(trimmed, openBlock)) openBlock = null;
+                continue;
+            }
+            if (TryReadOpenTag(trimmed, out var blockName))
+            {
+                openBlock = blockName;
+                sb.Append(rawLine).Append('\n');
+                continue;
+            }
+
+            var directive = FirstToken(trimmed);
+            if (IsInlinable(directive))
+            {
+                // The firewall quotes the filename (cert "openvpnclient.cert.pem"); a quoted name may
+                // legitimately contain spaces, so parse it quote-aware rather than splitting on space.
+                var fileName = ParseFileArgument(trimmed, directive);
+                if (!string.IsNullOrEmpty(fileName))
+                {
+                    var content = resolveFile(fileName!);
+                    if (!string.IsNullOrEmpty(content))
+                    {
+                        var tag = directive.ToLowerInvariant();
+                        sb.Append('<').Append(tag).Append(">\n");
+                        sb.Append(content!.Replace("\r\n", "\n").Replace('\r', '\n').TrimEnd('\n')).Append('\n');
+                        sb.Append("</").Append(tag).Append(">\n");
+                        continue;
+                    }
+                    // Referenced a file the bundle didn't provide — record it; leave the line untouched.
+                    unresolved.Add(fileName!);
+                }
+            }
+
+            sb.Append(rawLine).Append('\n');
+        }
+
+        unresolvedReferences = unresolved;
+        return sb.ToString();
+    }
+
+    // Reads a directive's filename argument quote-aware: a leading double-quote captures everything up
+    // to the closing quote (OpenVPN filenames may contain spaces); otherwise the first whitespace-
+    // delimited token. Distinct from ParseDirectiveValue (the cipher path), which always splits on space.
+    private static string? ParseFileArgument(string trimmedLine, string directive)
+    {
+        if (trimmedLine.Length <= directive.Length) return null;
+        var rest = trimmedLine.AsSpan(directive.Length);
+        var i = 0;
+        while (i < rest.Length && (rest[i] == ' ' || rest[i] == '\t')) i++;
+        if (i >= rest.Length) return null;
+        if (rest[i] == '"')
+        {
+            i++;
+            var start = i;
+            while (i < rest.Length && rest[i] != '"') i++;
+            return rest[start..i].ToString();
+        }
+        var tokenStart = i;
+        while (i < rest.Length && rest[i] != ' ' && rest[i] != '\t') i++;
+        return rest[tokenStart..i].ToString();
+    }
+
+    private static bool IsInlinable(string directive) =>
+        Eq(directive, "ca") || Eq(directive, "cert") || Eq(directive, "key")
+        || Eq(directive, "tls-crypt") || Eq(directive, "tls-auth")
+        || Eq(directive, "tls-crypt-v2") || Eq(directive, "extra-certs");
 
     // Split on LF after collapsing CRLF/CR to LF, so the normalized profile is byte-stable
     // regardless of where the input was pasted from (Windows clipboard, Unix file, HTTP body).

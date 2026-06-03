@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
 using System.Net.Security;
@@ -70,6 +71,11 @@ internal interface IStormshieldPortal : IDisposable
 internal sealed class StormshieldPortalClient : IStormshieldPortal
 {
     private const int MaxProfileBytes = 1 * 1024 * 1024; // a real .ovpn with inline PEMs is ~10 KiB
+    // Zip-bomb defence for the v5 application/zip bundle: a real bundle is ~5 small files. Cap the
+    // entry count and each entry's DECOMPRESSED size (the compressed download is already capped at
+    // MaxProfileBytes, which does not bound inflation). Mirrors WatchguardWgsslImporter.
+    private const int MaxZipEntryBytes = 1 * 1024 * 1024;
+    private const int MaxZipEntryCount = 32;
     // Cap for buffered responses (the auth POST + serverd login/command, which are small XML docs).
     // The profile download streams instead (ResponseHeadersRead + ReadCappedStringAsync), so it is
     // exempt from this buffer cap and keeps its own MaxProfileBytes limit.
@@ -270,6 +276,190 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
         }
     }
 
+    /// <summary>
+    /// Downloads the per-user OpenVPN bundle using the native <b>v5</b> "SN SSL VPN Client" flow,
+    /// reverse-engineered from the client's <c>SSLVPNService.SNS.SnsVpnConfiguration.DownloadConfig</c>:
+    /// <c>POST auth/config.html?version=1&amp;type=openvpn</c>, form-urlencoded <c>user</c> / <c>pass</c>.
+    ///
+    /// <para>Unlike the legacy <c>/auth/admin.html</c> serverd path, this is the low-privilege,
+    /// user-facing surface — no administration/serverd privilege, no <c>app</c> token, no SSO. The
+    /// single-use OTP, when used, is <b>concatenated directly onto the password</b> (no separator) and
+    /// spent here, on the HTTPS config download; the OpenVPN <c>auth-user-pass</c> still uses the real
+    /// password. A <c>200 application/zip</c> carries the bundle (<c>.ovpn</c> + CA/cert/key PEMs,
+    /// referenced by filename); a <c>200 text/xml</c> carries a <c>&lt;ret code/msg&gt;</c> firewall
+    /// error. The bundle's file references are inlined into a self-contained profile for the sidecar.</para>
+    /// </summary>
+    public async Task<string> DownloadProfileV5Async(
+        string username, string password, string? otp, CancellationToken cancellationToken)
+    {
+        var pass = string.IsNullOrEmpty(otp) ? password : password + otp;
+        var form = new Dictionary<string, string> { ["user"] = username, ["pass"] = pass };
+        using var content = new FormUrlEncodedContent(form);
+
+        using var response = await _http
+            .PostAsync(new Uri(_baseUri, "auth/config.html?version=1&type=openvpn"), content, cancellationToken)
+            .ConfigureAwait(false);
+
+        var mediaType = response.Content.Headers.ContentType?.MediaType;
+
+        // The firewall delivers an authentication/authorization error as 200 + text/xml — surface its
+        // message before the status check (the native client parses this envelope on 200 too).
+        if (IsXmlMediaType(mediaType))
+        {
+            var xml = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            throw new InvalidOperationException(DescribeV5Error(xml));
+        }
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException(
+                $"Stormshield configuration download returned HTTP {(int)response.StatusCode} {response.ReasonPhrase}"
+                + (string.IsNullOrEmpty(mediaType) ? "." : $" ({mediaType})."));
+        if (!string.Equals(mediaType, "application/zip", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"Stormshield configuration download returned unexpected content type '{mediaType ?? "none"}' "
+                + "(expected an application/zip OpenVPN bundle). The configured host may not be a Stormshield SSL VPN portal, "
+                + "or this firmware may predate the v5 SSL VPN API — in that case use Import (OpenVPN) mode.");
+
+        var zipBytes = await ReadCappedBytesAsync(response, MaxProfileBytes, cancellationToken).ConfigureAwait(false);
+        return AssembleProfileFromZip(zipBytes);
+    }
+
+    /// <summary>
+    /// Turns the v5 <c>openvpn_client.zip</c> bundle into a single self-contained <c>.ovpn</c> by
+    /// inlining its separate CA/cert/key PEM files (referenced by name from the profile) as inline
+    /// blocks. The OpenVPN sidecar receives one profile, no loose files.
+    /// </summary>
+    internal static string AssembleProfileFromZip(byte[] zipBytes)
+    {
+        using var ms = new MemoryStream(zipBytes, writable: false);
+        ZipArchive archive;
+        try
+        {
+            archive = new ZipArchive(ms, ZipArchiveMode.Read);
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new InvalidOperationException("Stormshield returned a configuration bundle that is not a valid zip archive.", ex);
+        }
+        using (archive)
+        {
+            if (archive.Entries.Count > MaxZipEntryCount)
+                throw new InvalidOperationException(
+                    $"Stormshield configuration bundle has too many entries ({archive.Entries.Count} > {MaxZipEntryCount}).");
+
+            ZipArchiveEntry? ovpnEntry = null;
+            var byName = new Dictionary<string, ZipArchiveEntry>(StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in archive.Entries)
+            {
+                byName[entry.Name] = entry;
+                if (ovpnEntry is null && entry.Name.EndsWith(".ovpn", StringComparison.OrdinalIgnoreCase))
+                    ovpnEntry = entry;
+            }
+            if (ovpnEntry is null)
+                throw new InvalidOperationException("Stormshield configuration bundle did not contain an OpenVPN (.ovpn) profile.");
+
+            var ovpn = ReadZipEntryText(ovpnEntry);
+            var assembled = StormshieldProfileNormalizer.InlineFileReferences(
+                ovpn,
+                name => byName.TryGetValue(name, out var entry) ? ReadZipEntryText(entry) : null,
+                out var unresolved);
+
+            // A truncated/renamed bundle (a ca/cert/key file referenced but not present) would otherwise
+            // pass through as a dangling reference and fail deep inside OpenVPN with an opaque "cannot
+            // load certificate". Fail fast with an actionable, named error instead.
+            if (unresolved.Count > 0)
+                throw new InvalidOperationException(
+                    "Stormshield configuration bundle was missing referenced key material: "
+                    + string.Join(", ", unresolved)
+                    + ". The downloaded bundle is incomplete — retry, or download the .ovpn from the firewall's "
+                    + "/auth \"Personal data\" page and use Import (OpenVPN) mode.");
+            if (!LooksLikeOpenVpnProfile(assembled))
+                throw new InvalidOperationException("Stormshield configuration bundle did not yield a usable OpenVPN profile.");
+            return assembled;
+        }
+    }
+
+    // Reads a zip entry as UTF-8 text with a decompressed-size cap (zip-bomb defence — do NOT trust
+    // entry.Length, which is attacker-controlled metadata; the streamed total is authoritative).
+    private static string ReadZipEntryText(ZipArchiveEntry entry)
+    {
+        using var stream = entry.Open();
+        using var ms = new MemoryStream();
+        var buffer = new byte[8192];
+        int read;
+        long total = 0;
+        while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            total += read;
+            if (total > MaxZipEntryBytes)
+                throw new InvalidOperationException(
+                    $"Stormshield configuration bundle entry '{entry.Name}' exceeded the {MaxZipEntryBytes}-byte safety cap.");
+            ms.Write(buffer, 0, read);
+        }
+        return Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
+    }
+
+    private static bool IsXmlMediaType(string? mediaType) =>
+        string.Equals(mediaType, "text/xml", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(mediaType, "application/xml", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Renders the firewall's <c>text/xml</c> config-download error into an actionable message. The
+    /// envelope shape is read defensively (any <c>code</c>/<c>msg</c> attribute or element) so a
+    /// firmware-specific layout still yields the human-readable reason the firewall provided.
+    /// </summary>
+    internal static string DescribeV5Error(string xmlBody)
+    {
+        string? code = null;
+        string? msg = null;
+        try
+        {
+            var doc = LoadHardenedXml(xmlBody);
+            msg = doc.SelectSingleNode("//*[@msg]")?.Attributes?["msg"]?.Value
+                ?? doc.SelectSingleNode("//ret")?.InnerText
+                ?? doc.SelectSingleNode("//msg")?.InnerText;
+            code = doc.SelectSingleNode("//*[@code]")?.Attributes?["code"]?.Value
+                ?? doc.SelectSingleNode("//code")?.InnerText;
+        }
+        catch (XmlException) { /* fall through to the no-detail message */ }
+
+        msg = string.IsNullOrWhiteSpace(msg) ? null : msg!.Trim();
+        code = string.IsNullOrWhiteSpace(code) ? null : code!.Trim();
+
+        // Only assert a definitive "rejected" when the firewall gave a human-readable reason; a
+        // code-only or empty envelope (e.g. an internal/file error, native FirewallErrorCode Internal=7
+        // / FileNotFound=11) is reported neutrally, and the credential hint is attached only when there
+        // is something to act on rather than blamed on every error.
+        var reason = (code, msg) switch
+        {
+            (not null, not null) => $"the firewall rejected the configuration request (code {code}): {msg}",
+            (null, not null) => $"the firewall rejected the configuration request: {msg}",
+            (not null, null) => $"the firewall returned an unexpected response while downloading the configuration (code {code}).",
+            _ => "the firewall returned an unexpected response while downloading the configuration.",
+        };
+        var hint = (code is not null || msg is not null)
+            ? " If this is an authentication problem, check the username and password and use a fresh one-time code (a single-use OTP cannot be reused)."
+            : string.Empty;
+        return "Stormshield configuration download failed: " + reason + hint;
+    }
+
+    private static async Task<byte[]> ReadCappedBytesAsync(HttpResponseMessage response, int capBytes, CancellationToken ct)
+    {
+        await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var ms = new MemoryStream();
+        var buffer = new byte[8192];
+        int read;
+        long total = 0;
+        while ((read = await stream.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+        {
+            total += read;
+            if (total > capBytes)
+                throw new InvalidOperationException(
+                    $"Stormshield configuration bundle exceeded the {capBytes}-byte safety cap.");
+            ms.Write(buffer, 0, read);
+        }
+        return ms.ToArray();
+    }
+
     private async Task<string> OpenServerdSessionAsync(string app, CancellationToken cancellationToken)
     {
         var form = new Dictionary<string, string> { ["app"] = app, ["id"] = "0" };
@@ -336,6 +526,20 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
             "NEED_TOTP_AUTH" => new StormshieldAuthOutcome.NeedOtp(),
             "ERR_BRUTEFORCE" => new StormshieldAuthOutcome.Bruteforce(int.TryParse(delay, out var d) ? d : 0),
             "AUTH_FAILED" => new StormshieldAuthOutcome.Failure("Authentication failed — check the username and password."),
+            // ACCESS_DENIED is an AUTHORIZATION refusal, not a credential failure: the firewall accepted the
+            // username/password/OTP (a wrong password is AUTH_FAILED) but would not let this account through.
+            // The usual trigger is that Automatic mode authenticates against the firewall's management/serverd
+            // configuration API (auth/admin.html, app "sslclient" — the surface python-SNS-API uses), which a
+            // normal SSL VPN user is not entitled to open; the documented working path for such a user is the
+            // captive-portal .ovpn + Import mode. ACCESS_DENIED is not in python-SNS-API's status set, so it
+            // formerly fell to the "_" arm and surfaced as an opaque "unexpected authentication status".
+            "ACCESS_DENIED" => new StormshieldAuthOutcome.Failure(
+                "the firewall accepted the username, password and OTP but denied this account access. Automatic mode "
+                + "signs in to the firewall's configuration API (auth/admin.html), which standard SSL VPN users are "
+                + "usually not authorized to use. Download the .ovpn from the firewall portal's \"Personal data\" page "
+                + "(open the firewall's /auth page in a browser and sign in), then switch this tunnel to Import (OpenVPN) "
+                + "mode and paste it — that path needs only SSL VPN access, no administrator rights. To keep using "
+                + "Automatic mode, the firewall administrator must grant this account firewall-administration/serverd privilege."),
             null => new StormshieldAuthOutcome.Failure("Portal response did not contain an authentication status."),
             _ => new StormshieldAuthOutcome.Failure($"Portal returned an unexpected authentication status '{msg}'."),
         };
