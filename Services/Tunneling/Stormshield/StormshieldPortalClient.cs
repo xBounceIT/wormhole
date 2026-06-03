@@ -336,6 +336,20 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
             "NEED_TOTP_AUTH" => new StormshieldAuthOutcome.NeedOtp(),
             "ERR_BRUTEFORCE" => new StormshieldAuthOutcome.Bruteforce(int.TryParse(delay, out var d) ? d : 0),
             "AUTH_FAILED" => new StormshieldAuthOutcome.Failure("Authentication failed — check the username and password."),
+            // ACCESS_DENIED is an AUTHORIZATION refusal, not a credential failure: the firewall accepted the
+            // username/password/OTP (a wrong password is AUTH_FAILED) but would not let this account through.
+            // The usual trigger is that Automatic mode authenticates against the firewall's management/serverd
+            // configuration API (auth/admin.html, app "sslclient" — the surface python-SNS-API uses), which a
+            // normal SSL VPN user is not entitled to open; the documented working path for such a user is the
+            // captive-portal .ovpn + Import mode. ACCESS_DENIED is not in python-SNS-API's status set, so it
+            // formerly fell to the "_" arm and surfaced as an opaque "unexpected authentication status".
+            "ACCESS_DENIED" => new StormshieldAuthOutcome.Failure(
+                "the firewall accepted the username, password and OTP but denied this account access. Automatic mode "
+                + "signs in to the firewall's configuration API (auth/admin.html), which standard SSL VPN users are "
+                + "usually not authorized to use. Download the .ovpn from the firewall portal's \"Personal data\" page "
+                + "(open the firewall's /auth page in a browser and sign in), then switch this tunnel to Import (OpenVPN) "
+                + "mode and paste it — that path needs only SSL VPN access, no administrator rights. To keep using "
+                + "Automatic mode, the firewall administrator must grant this account firewall-administration/serverd privilege."),
             null => new StormshieldAuthOutcome.Failure("Portal response did not contain an authentication status."),
             _ => new StormshieldAuthOutcome.Failure($"Portal returned an unexpected authentication status '{msg}'."),
         };

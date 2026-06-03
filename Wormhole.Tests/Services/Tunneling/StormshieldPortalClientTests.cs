@@ -97,6 +97,19 @@ public class StormshieldPortalClientTests
         Assert.IsType<StormshieldAuthOutcome.Failure>(outcome);
     }
 
+    [Fact]
+    public void ParseAuthResponse_AccessDenied_MapsToActionableImportGuidance()
+    {
+        // ACCESS_DENIED is an authorization refusal (credentials accepted, but the account is not entitled to
+        // the Automatic-mode admin/serverd surface), distinct from AUTH_FAILED. It must get a dedicated,
+        // actionable message — NOT fall through to the generic "unexpected authentication status" arm — and
+        // steer the user to Import mode.
+        var outcome = StormshieldPortalClient.ParseAuthResponse("<auth msg=\"ACCESS_DENIED\"/>");
+        var failure = Assert.IsType<StormshieldAuthOutcome.Failure>(outcome);
+        Assert.DoesNotContain("unexpected authentication status", failure.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Import", failure.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Theory]
     [InlineData("")]
     [InlineData("<auth msg=\"SOMETHING_NEW\"/>")] // unknown status
