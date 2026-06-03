@@ -159,7 +159,11 @@ public class TunnelConfigsViewModelTests
 
         Assert.Equal(3, vm.FilteredConfigs.Count);
 
-        await Task.Delay(90);
+        // The 40ms debounce applies on a thread-pool continuation; under CI load that can land
+        // after a fixed wait, which made racing a single Task.Delay(90) flaky. Poll for the
+        // settled state — the debounce collapsing to the LATEST query ("fort") — instead, with a
+        // generous ceiling so a slow runner passes while a fast one returns in ~40ms.
+        await WaitForFilteredCountAsync(vm, expected: 1, timeout: TimeSpan.FromSeconds(5));
 
         Assert.Single(vm.FilteredConfigs);
         Assert.Equal("gamma", vm.FilteredConfigs[0].Name);
@@ -888,6 +892,19 @@ public class TunnelConfigsViewModelTests
 
     private static TunnelKind OtherKind(TunnelKind kind) =>
         kind == TunnelKind.WireGuard ? TunnelKind.OpenVpn : TunnelKind.WireGuard;
+
+    // Polls until the view-model's debounced filter settles to the expected count or the
+    // timeout elapses, then returns. Avoids racing a fixed Task.Delay against a thread-pool
+    // continuation (flaky on loaded CI runners) while staying fast on a healthy runner; if the
+    // count never settles, the caller's assertion still fires with the actual value.
+    private static async Task WaitForFilteredCountAsync(TunnelConfigsViewModel vm, int expected, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (vm.FilteredConfigs.Count != expected && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
+    }
 
     private static (
         TunnelConfigsViewModel Vm,
