@@ -473,6 +473,16 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
 
     private void UpdateStormshieldModePanels()
     {
+        // StormshieldModeBox declares inline ComboBoxItems plus SelectedIndex="0", so the XAML
+        // parser raises SelectionChanged (-> OnStormshieldModeChanged -> here) partway through
+        // InitializeComponent, before StormshieldImportPanel — declared later in the XAML — has
+        // been created and assigned to its backing field. (KindBox dodges this only because its
+        // items come from an x:Bind ItemsSource that is still empty when its SelectedIndex is
+        // applied.) Bail until the field graph exists: the XAML default already collapses
+        // StormshieldImportPanel, which matches the default Automatic mode, and any later user
+        // or LoadDraft selection re-runs this with every field present.
+        if (StormshieldImportPanel is null) return;
+
         var isImport = StormshieldSelectedMode == StormshieldConnectionMode.Import;
         StormshieldImportPanel.Visibility = isImport ? Visibility.Visible : Visibility.Collapsed;
         // Clear a stale import error when leaving Import mode so it doesn't reappear on return.
