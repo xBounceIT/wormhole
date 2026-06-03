@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using Wormhole.Services.Tunneling.Stormshield;
 using Xunit;
 
@@ -20,6 +22,64 @@ public class StormshieldProfileNormalizerTests
         // Original directives are preserved untouched.
         Assert.Contains("cipher AES-256-CBC", result);
         Assert.Contains("remote fw.example.com 443 tcp", result);
+    }
+
+    [Fact]
+    public void InlineFileReferences_InlinesReferencedFiles_AndReportsUnresolved()
+    {
+        const string ovpn = "client\nca \"CA.cert.pem\"\ncert \"client.pem\"\nkey \"missing.pem\"\n";
+        var files = new Dictionary<string, string>
+        {
+            ["CA.cert.pem"] = "-----BEGIN CERTIFICATE-----\nCA\n-----END CERTIFICATE-----",
+            ["client.pem"] = "-----BEGIN CERTIFICATE-----\nCERT\n-----END CERTIFICATE-----",
+        };
+
+        var result = StormshieldProfileNormalizer.InlineFileReferences(
+            ovpn, name => files.TryGetValue(name, out var c) ? c : null, out var unresolved);
+
+        Assert.Contains("<ca>", result);
+        Assert.Contains("<cert>", result);
+        Assert.DoesNotContain("ca \"CA.cert.pem\"", result);
+        // The missing key is left as a dangling reference AND reported to the caller.
+        Assert.Equal("missing.pem", Assert.Single(unresolved));
+        Assert.Contains("key \"missing.pem\"", result);
+    }
+
+    [Fact]
+    public void InlineFileReferences_HandlesQuotedFilenameWithSpaces()
+    {
+        const string ovpn = "client\nca \"My CA.pem\"\n";
+
+        var result = StormshieldProfileNormalizer.InlineFileReferences(
+            ovpn, name => name == "My CA.pem" ? "PEMBODY" : null, out var unresolved);
+
+        Assert.Empty(unresolved);
+        Assert.Contains("<ca>\nPEMBODY\n</ca>", result);
+    }
+
+    [Fact]
+    public void Normalize_PreservesExistingDataCiphers_OnRealV5Profile()
+    {
+        // The confirmed-live v5 bundle already declares `data-ciphers AES-256-CBC`; the normalizer must
+        // NOT add a second data-ciphers / data-ciphers-fallback, and must preserve the control-channel
+        // and auth directives verbatim (the sidecar is OpenVPN3 + mbedTLS — no @SECLEVEL gate).
+        const string ovpn =
+            "client\ndev tun\ncipher AES-256-CBC\ndata-ciphers AES-256-CBC\n"
+            + "tls-cipher TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA256\nauth SHA256\n"
+            + "remote 151.84.99.155 1194 udp\nremote 151.84.99.155 443 tcp\n"
+            + "<ca>\nINLINE-CA\n</ca>\nverb 0\nauth-user-pass\nauth-retry interact\nauth-nocache\nreneg-sec 0\n";
+
+        var result = StormshieldProfileNormalizer.Normalize(ovpn);
+
+        var dataCiphersLines = result.Split('\n').Count(l => l.TrimStart().StartsWith("data-ciphers ", StringComparison.Ordinal));
+        Assert.Equal(1, dataCiphersLines);
+        Assert.Contains("data-ciphers AES-256-CBC", result);
+        Assert.DoesNotContain("data-ciphers-fallback", result);
+        Assert.Contains("tls-cipher TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA256", result);
+        Assert.Contains("auth-retry interact", result);
+        Assert.Contains("auth-nocache", result);
+        Assert.Contains("reneg-sec 0", result);
+        Assert.Contains("<ca>\nINLINE-CA\n</ca>", result);
     }
 
     [Theory]

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text;
 
 namespace Wormhole.Services.Tunneling.Stormshield;
@@ -116,10 +117,22 @@ public static class StormshieldProfileNormalizer
     /// supplies the file lookup, so this stays IO-free and deterministically testable.
     /// </summary>
     public static string InlineFileReferences(string ovpn, Func<string, string?> resolveFile)
+        => InlineFileReferences(ovpn, resolveFile, out _);
+
+    /// <summary>
+    /// Overload that also reports any file-referenced directive whose file could NOT be resolved (left
+    /// as a dangling reference). The v5 bundle assembler treats a non-empty list as a fatal "incomplete
+    /// bundle", so a truncated / renamed bundle fails with an actionable message instead of silently
+    /// producing a profile the OpenVPN sidecar can't load.
+    /// </summary>
+    public static string InlineFileReferences(
+        string ovpn, Func<string, string?> resolveFile, out IReadOnlyList<string> unresolvedReferences)
     {
         ArgumentNullException.ThrowIfNull(resolveFile);
+        unresolvedReferences = Array.Empty<string>();
         if (string.IsNullOrEmpty(ovpn)) return ovpn;
 
+        var unresolved = new List<string>();
         var sb = new StringBuilder(ovpn.Length + 256);
         string? openBlock = null;
 
@@ -143,23 +156,52 @@ public static class StormshieldProfileNormalizer
             var directive = FirstToken(trimmed);
             if (IsInlinable(directive))
             {
-                // The firewall quotes the filename (cert "openvpnclient.cert.pem"); strip the quotes.
-                var fileName = ParseDirectiveValue(trimmed, directive)?.Trim('"');
-                var content = string.IsNullOrEmpty(fileName) ? null : resolveFile(fileName!);
-                if (!string.IsNullOrEmpty(content))
+                // The firewall quotes the filename (cert "openvpnclient.cert.pem"); a quoted name may
+                // legitimately contain spaces, so parse it quote-aware rather than splitting on space.
+                var fileName = ParseFileArgument(trimmed, directive);
+                if (!string.IsNullOrEmpty(fileName))
                 {
-                    var tag = directive.ToLowerInvariant();
-                    sb.Append('<').Append(tag).Append(">\n");
-                    sb.Append(content!.Replace("\r\n", "\n").Replace('\r', '\n').TrimEnd('\n')).Append('\n');
-                    sb.Append("</").Append(tag).Append(">\n");
-                    continue;
+                    var content = resolveFile(fileName!);
+                    if (!string.IsNullOrEmpty(content))
+                    {
+                        var tag = directive.ToLowerInvariant();
+                        sb.Append('<').Append(tag).Append(">\n");
+                        sb.Append(content!.Replace("\r\n", "\n").Replace('\r', '\n').TrimEnd('\n')).Append('\n');
+                        sb.Append("</").Append(tag).Append(">\n");
+                        continue;
+                    }
+                    // Referenced a file the bundle didn't provide — record it; leave the line untouched.
+                    unresolved.Add(fileName!);
                 }
             }
 
             sb.Append(rawLine).Append('\n');
         }
 
+        unresolvedReferences = unresolved;
         return sb.ToString();
+    }
+
+    // Reads a directive's filename argument quote-aware: a leading double-quote captures everything up
+    // to the closing quote (OpenVPN filenames may contain spaces); otherwise the first whitespace-
+    // delimited token. Distinct from ParseDirectiveValue (the cipher path), which always splits on space.
+    private static string? ParseFileArgument(string trimmedLine, string directive)
+    {
+        if (trimmedLine.Length <= directive.Length) return null;
+        var rest = trimmedLine.AsSpan(directive.Length);
+        var i = 0;
+        while (i < rest.Length && (rest[i] == ' ' || rest[i] == '\t')) i++;
+        if (i >= rest.Length) return null;
+        if (rest[i] == '"')
+        {
+            i++;
+            var start = i;
+            while (i < rest.Length && rest[i] != '"') i++;
+            return rest[start..i].ToString();
+        }
+        var tokenStart = i;
+        while (i < rest.Length && rest[i] != ' ' && rest[i] != '\t') i++;
+        return rest[tokenStart..i].ToString();
     }
 
     private static bool IsInlinable(string directive) =>

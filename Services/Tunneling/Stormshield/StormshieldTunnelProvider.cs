@@ -155,10 +155,11 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
 
         // Native v5 "SN SSL VPN Client" flow: POST auth/config.html?version=1&type=openvpn with the
         // user's credentials and download the OpenVPN bundle. When an OTP is used it is collected up
-        // front and concatenated onto the password for the download; the OpenVPN auth-user-pass still
-        // uses the real password. This is the low-privilege, user-facing surface — no administration/
-        // serverd privilege, which is exactly what the legacy /auth/admin.html path required (and why a
-        // normal SSL VPN user got ACCESS_DENIED there).
+        // front and concatenated onto the password for the DOWNLOAD; the OpenVPN auth-user-pass on the
+        // data plane then uses the real password (see StormshieldSettings.UseOtp for the OTP-data-plane
+        // caveat on firewalls that also enforce the OTP suffix on the tunnel). This is the low-privilege,
+        // user-facing surface — no administration/serverd privilege, which is exactly what the legacy
+        // /auth/admin.html path required (and why a normal SSL VPN user got ACCESS_DENIED there).
         string? otp = null;
         if (settings.UseOtp)
             otp = await PromptOtpAsync(_otpPrompt, config.Name, cancellationToken).ConfigureAwait(false);

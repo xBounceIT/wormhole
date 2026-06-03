@@ -335,18 +335,87 @@ public class StormshieldPortalClientTests
     }
 
     [Fact]
-    public async Task DownloadProfileV5Async_XmlError_SurfacesFirewallMessage()
+    public async Task DownloadProfileV5Async_XmlError_SurfacesFirewallMessageAndCode()
     {
-        // A bad login/OTP is delivered as 200 + text/xml with a <ret> envelope; the firewall's own
-        // message must surface rather than a generic failure.
+        // A bad login/OTP is delivered as 200 + text/xml with the REAL <nws> envelope (XmlRoot "nws",
+        // <ret code/msg>, FirewallErrorCode BadLoginOrPassword=8). The firewall's own message + code
+        // must surface rather than a generic failure.
         var handler = new RoutingHandler(_ => (HttpStatusCode.OK,
-            "<config><ret code=\"1\" msg=\"Bad login or password\"/></config>", "text/xml"));
+            "<nws version=\"1\"><config user=\"daniel.dangeli\" type=\"openvpn\"/><ret code=\"8\" msg=\"Bad login or password\"/></nws>", "text/xml"));
         using var http = new HttpClient(handler);
         using var client = new StormshieldPortalClient(http, new Uri("https://rpv.example.com/"));
 
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             client.DownloadProfileV5Async("u", "p", otp: null, CancellationToken.None));
         Assert.Contains("Bad login or password", ex.Message);
+        Assert.Contains("(code 8)", ex.Message);
+    }
+
+    [Fact]
+    public async Task DownloadProfileV5Async_Non200_ThrowsWithStatus()
+    {
+        var handler = new RoutingHandler(_ => (HttpStatusCode.Forbidden, "<html>403</html>", "text/html"));
+        using var http = new HttpClient(handler);
+        using var client = new StormshieldPortalClient(http, new Uri("https://rpv.example.com/"));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.DownloadProfileV5Async("u", "p", otp: null, CancellationToken.None));
+        Assert.Contains("403", ex.Message);
+    }
+
+    [Fact]
+    public async Task DownloadProfileV5Async_200ButNotZip_ThrowsUnexpectedContentTypeWithImportHint()
+    {
+        // A captive-portal / WAF redirect or pre-v5 firmware can answer 200 with HTML; surface an
+        // actionable "unexpected content type" + Import hint, NOT a misleading zip-parse error.
+        var handler = new RoutingHandler(_ => (HttpStatusCode.OK, "<html><body>login</body></html>", "text/html"));
+        using var http = new HttpClient(handler);
+        using var client = new StormshieldPortalClient(http, new Uri("https://rpv.example.com/"));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.DownloadProfileV5Async("u", "p", otp: null, CancellationToken.None));
+        Assert.Contains("unexpected content type", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Import", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task DownloadProfileV5Async_OversizedBundle_TripsSafetyCap()
+    {
+        // The compressed-size cap trips before any zip parsing, so the bytes need not be a valid zip.
+        var oversized = new byte[1 * 1024 * 1024 + 1];
+        var handler = new BinaryCapturingHandler(oversized, "application/zip");
+        using var http = new HttpClient(handler);
+        using var client = new StormshieldPortalClient(http, new Uri("https://rpv.example.com/"));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.DownloadProfileV5Async("u", "p", otp: null, CancellationToken.None));
+        Assert.Contains("safety cap", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void AssembleProfileFromZip_MissingReferencedPem_ThrowsNamingTheMissingFile()
+    {
+        // A bundle with the .ovpn (referencing CA.cert.pem) but WITHOUT that file must fail fast and
+        // name the missing file — not silently produce a dangling-reference profile that fails deep
+        // inside OpenVPN.
+        var bundle = BuildBundleZip(
+            ("openvpn_client.ovpn", V5Ovpn),
+            ("openvpnclient.cert.pem", V5Cert),
+            ("openvpnclient.pkey.pem", V5Key)); // CA.cert.pem deliberately omitted
+        var ex = Assert.Throws<InvalidOperationException>(() => StormshieldPortalClient.AssembleProfileFromZip(bundle));
+        Assert.Contains("CA.cert.pem", ex.Message);
+        Assert.Contains("incomplete", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void AssembleProfileFromZip_NoOvpnEntry_Throws()
+    {
+        var bundle = BuildBundleZip(
+            ("CA.cert.pem", V5Ca),
+            ("openvpnclient.cert.pem", V5Cert),
+            ("openvpnclient.pkey.pem", V5Key)); // no .ovpn
+        var ex = Assert.Throws<InvalidOperationException>(() => StormshieldPortalClient.AssembleProfileFromZip(bundle));
+        Assert.Contains(".ovpn", ex.Message);
     }
 
     [Fact]

@@ -71,6 +71,11 @@ internal interface IStormshieldPortal : IDisposable
 internal sealed class StormshieldPortalClient : IStormshieldPortal
 {
     private const int MaxProfileBytes = 1 * 1024 * 1024; // a real .ovpn with inline PEMs is ~10 KiB
+    // Zip-bomb defence for the v5 application/zip bundle: a real bundle is ~5 small files. Cap the
+    // entry count and each entry's DECOMPRESSED size (the compressed download is already capped at
+    // MaxProfileBytes, which does not bound inflation). Mirrors WatchguardWgsslImporter.
+    private const int MaxZipEntryBytes = 1 * 1024 * 1024;
+    private const int MaxZipEntryCount = 32;
     // Cap for buffered responses (the auth POST + serverd login/command, which are small XML docs).
     // The profile download streams instead (ResponseHeadersRead + ReadCappedStringAsync), so it is
     // exempt from this buffer cap and keeps its own MaxProfileBytes limit.
@@ -337,6 +342,10 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
         }
         using (archive)
         {
+            if (archive.Entries.Count > MaxZipEntryCount)
+                throw new InvalidOperationException(
+                    $"Stormshield configuration bundle has too many entries ({archive.Entries.Count} > {MaxZipEntryCount}).");
+
             ZipArchiveEntry? ovpnEntry = null;
             var byName = new Dictionary<string, ZipArchiveEntry>(StringComparer.OrdinalIgnoreCase);
             foreach (var entry in archive.Entries)
@@ -350,19 +359,43 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
 
             var ovpn = ReadZipEntryText(ovpnEntry);
             var assembled = StormshieldProfileNormalizer.InlineFileReferences(
-                ovpn, name => byName.TryGetValue(name, out var entry) ? ReadZipEntryText(entry) : null);
+                ovpn,
+                name => byName.TryGetValue(name, out var entry) ? ReadZipEntryText(entry) : null,
+                out var unresolved);
 
+            // A truncated/renamed bundle (a ca/cert/key file referenced but not present) would otherwise
+            // pass through as a dangling reference and fail deep inside OpenVPN with an opaque "cannot
+            // load certificate". Fail fast with an actionable, named error instead.
+            if (unresolved.Count > 0)
+                throw new InvalidOperationException(
+                    "Stormshield configuration bundle was missing referenced key material: "
+                    + string.Join(", ", unresolved)
+                    + ". The downloaded bundle is incomplete — retry, or download the .ovpn from the firewall's "
+                    + "/auth \"Personal data\" page and use Import (OpenVPN) mode.");
             if (!LooksLikeOpenVpnProfile(assembled))
                 throw new InvalidOperationException("Stormshield configuration bundle did not yield a usable OpenVPN profile.");
             return assembled;
         }
     }
 
+    // Reads a zip entry as UTF-8 text with a decompressed-size cap (zip-bomb defence — do NOT trust
+    // entry.Length, which is attacker-controlled metadata; the streamed total is authoritative).
     private static string ReadZipEntryText(ZipArchiveEntry entry)
     {
         using var stream = entry.Open();
-        using var reader = new StreamReader(stream, Encoding.UTF8);
-        return reader.ReadToEnd();
+        using var ms = new MemoryStream();
+        var buffer = new byte[8192];
+        int read;
+        long total = 0;
+        while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            total += read;
+            if (total > MaxZipEntryBytes)
+                throw new InvalidOperationException(
+                    $"Stormshield configuration bundle entry '{entry.Name}' exceeded the {MaxZipEntryBytes}-byte safety cap.");
+            ms.Write(buffer, 0, read);
+        }
+        return Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
     }
 
     private static bool IsXmlMediaType(string? mediaType) =>
@@ -391,15 +424,22 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
 
         msg = string.IsNullOrWhiteSpace(msg) ? null : msg!.Trim();
         code = string.IsNullOrWhiteSpace(code) ? null : code!.Trim();
+
+        // Only assert a definitive "rejected" when the firewall gave a human-readable reason; a
+        // code-only or empty envelope (e.g. an internal/file error, native FirewallErrorCode Internal=7
+        // / FileNotFound=11) is reported neutrally, and the credential hint is attached only when there
+        // is something to act on rather than blamed on every error.
         var reason = (code, msg) switch
         {
             (not null, not null) => $"the firewall rejected the configuration request (code {code}): {msg}",
             (null, not null) => $"the firewall rejected the configuration request: {msg}",
-            (not null, null) => $"the firewall rejected the configuration request (code {code}).",
-            _ => "the firewall rejected the configuration request and returned an error with no readable message.",
+            (not null, null) => $"the firewall returned an unexpected response while downloading the configuration (code {code}).",
+            _ => "the firewall returned an unexpected response while downloading the configuration.",
         };
-        return "Stormshield configuration download failed: " + reason
-            + " Check the username, password and one-time code; if you use an OTP, make sure it is current and has not already been used.";
+        var hint = (code is not null || msg is not null)
+            ? " If this is an authentication problem, check the username and password and use a fresh one-time code (a single-use OTP cannot be reused)."
+            : string.Empty;
+        return "Stormshield configuration download failed: " + reason + hint;
     }
 
     private static async Task<byte[]> ReadCappedBytesAsync(HttpResponseMessage response, int capBytes, CancellationToken ct)

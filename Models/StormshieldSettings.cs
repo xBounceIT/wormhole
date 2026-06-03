@@ -15,11 +15,12 @@ namespace Wormhole.Models;
 /// </para>
 ///
 /// <list type="number">
-///   <item><see cref="StormshieldConnectionMode.Automatic"/>: the provider authenticates to the
-///   firewall captive portal at <c>https://{Server}:{Port}/auth/admin.html</c> (base64
-///   <c>uid</c>/<c>pswd</c>[/<c>totp</c>], cookie session — the exact contract used by Stormshield's
-///   own open-source <c>python-SNS-API</c> client) and then downloads the per-user <c>.ovpn</c>
-///   over that session.</item>
+///   <item><see cref="StormshieldConnectionMode.Automatic"/>: the provider replicates the native v5
+///   "SN SSL VPN Client" download — <c>POST https://{Server}:{Port}/auth/config.html?version=1&amp;type=openvpn</c>
+///   with form <c>user</c> + <c>pass</c> (a single-use OTP, when enabled, is concatenated onto the
+///   password) — and inlines the returned <c>openvpn_client.zip</c> bundle into one self-contained
+///   <c>.ovpn</c>. No administration/serverd privilege required; the OpenVPN <c>auth-user-pass</c> uses
+///   the real <see cref="Password"/>.</item>
 ///   <item><see cref="StormshieldConnectionMode.Import"/>: the user pastes the static <c>.ovpn</c>
 ///   downloaded from the portal "Personal data" page. The profile already embeds the CA, client
 ///   cert and (plaintext) client key, so no HTTPS pre-auth is needed.</item>
@@ -65,11 +66,15 @@ public sealed class StormshieldSettings
     [JsonPropertyName("Password")] public string Password { get; set; } = string.Empty;
 
     /// <summary>
-    /// Maps to the client's "Use an OTP" checkbox. When set, the provider prompts for a single-use
-    /// code at connect time and sends it as <c>totp=base64(otp)</c> on the portal auth POST. Unlike
-    /// WatchGuard, the OTP is NOT reused as the OpenVPN password — the OpenVPN auth-user-pass
-    /// password is the user's real <see cref="Password"/>; the OTP is a one-shot factor spent on the
-    /// HTTPS auth/config-retrieval step.
+    /// Maps to the client's "Use an OTP" checkbox. When set, the provider prompts for a single-use code
+    /// at connect time and concatenates it onto the password (no separator) for the v5 config download
+    /// (<c>pass = password + otp</c>). The code is spent on that HTTPS download, so the OpenVPN
+    /// <c>auth-user-pass</c> on the data plane uses the real <see cref="Password"/> alone.
+    /// <para>Caveat (known limitation): the native client, on a cached-config reconnect, instead appends
+    /// the OTP to the OpenVPN data-plane password. A firewall that ALSO enforces the OTP-as-password
+    /// suffix on the SSL VPN data plane would reject Wormhole's password-only data-plane auth. Closing
+    /// that gap needs the native hash-cache gate (download — and spend the OTP — only on a config change);
+    /// cert+password deployments are unaffected.</para>
     /// </summary>
     [JsonPropertyName("UseOtp")] public bool UseOtp { get; set; }
 
