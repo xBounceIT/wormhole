@@ -806,6 +806,12 @@ public sealed class SshSessionViewModelTests
         public Task ResizeAsync(uint columns, uint rows) =>
             Task.CompletedTask;
 
+        public int PauseReadingCount { get; private set; }
+        public int ResumeReadingCount { get; private set; }
+
+        public void PauseReading() => PauseReadingCount++;
+        public void ResumeReading() => ResumeReadingCount++;
+
         public void RaiseData(params byte[] data) =>
             DataReceived?.Invoke(this, data);
 
