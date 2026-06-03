@@ -12,4 +12,5 @@ public sealed record TunnelDraft(
     WireGuardSettings? WireGuard,
     OpenVpnSettings? OpenVpn,
     FortinetSettings? Fortinet,
-    WatchguardSettings? Watchguard = null);
+    WatchguardSettings? Watchguard = null,
+    StormshieldSettings? Stormshield = null);

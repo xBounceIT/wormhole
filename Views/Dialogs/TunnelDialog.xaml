@@ -298,6 +298,115 @@
                 </StackPanel>
             </Expander>
         </StackPanel>
+
+        <!-- Stormshield (SN SSL VPN) fields: OpenVPN over TLS with a Stormshield-native HTTPS
+             handshake. Automatic mode authenticates to the firewall captive portal and fetches the
+             per-user .ovpn; Import mode uses a static .ovpn downloaded from /auth "Personal data". -->
+        <StackPanel x:Name="StormshieldPanel" Spacing="10" Visibility="Collapsed">
+            <ComboBox x:Name="StormshieldModeBox"
+                      Header="Connection mode"
+                      HorizontalAlignment="Stretch"
+                      SelectedIndex="0"
+                      SelectionChanged="OnStormshieldModeChanged">
+                <ComboBoxItem Content="Automatic — authenticate &amp; fetch config (Stormshield mode)" />
+                <ComboBoxItem Content="Import — paste a downloaded .ovpn (OpenVPN mode)" />
+            </ComboBox>
+
+            <Grid ColumnSpacing="16">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Spacing="10">
+                    <TextBlock Text="Gateway" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+                    <TextBox x:Name="StormshieldServerBox"
+                             Header="Server"
+                             PlaceholderText="rpv.example.com"
+                             TextChanged="OnFieldChanged" />
+                    <TextBox x:Name="StormshieldPortBox"
+                             Header="Port"
+                             Text="443"
+                             TextChanged="OnFieldChanged" />
+                    <TextBox x:Name="StormshieldDescriptionBox"
+                             Header="Description (optional)" />
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Spacing="10">
+                    <TextBlock Text="Authentication" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+                    <CheckBox x:Name="StormshieldSsoCheck"
+                              Content="Connect with single sign-on"
+                              IsEnabled="False"
+                              ToolTipService.ToolTip="Single sign-on (browser/OIDC) is not yet supported — use username/password or import a profile." />
+                    <TextBox x:Name="StormshieldUsernameBox"
+                             Header="Username"
+                             TextChanged="OnFieldChanged" />
+                    <PasswordBox x:Name="StormshieldPasswordBox"
+                                 Header="Password"
+                                 PasswordChanged="OnPasswordFieldChanged" />
+                    <CheckBox x:Name="StormshieldUseOtpCheck"
+                              Content="Use an OTP"
+                              ToolTipService.ToolTip="Prompt for a one-time code at connect time (single-use)." />
+                </StackPanel>
+            </Grid>
+
+            <!-- Import mode only: the static .ovpn (inline ca/cert/key). -->
+            <StackPanel x:Name="StormshieldImportPanel" Spacing="10" Visibility="Collapsed">
+                <Grid Margin="0,4,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0"
+                               Text="Profile"
+                               Style="{StaticResource BodyStrongTextBlockStyle}"
+                               VerticalAlignment="Center" />
+                    <Button Grid.Column="1"
+                            Content="Import from file…"
+                            ToolTipService.ToolTip="Load a .ovpn downloaded from the firewall's /auth Personal data page"
+                            Click="OnStormshieldImportOvpnFile" />
+                </Grid>
+                <InfoBar x:Name="StormshieldImportErrorBar"
+                         IsOpen="False"
+                         IsClosable="True"
+                         Severity="Error"
+                         Title="Couldn't read file" />
+                <TextBox x:Name="StormshieldProfileOvpnBox"
+                         Header="OpenVPN profile (.ovpn contents)"
+                         PlaceholderText="client&#x0a;dev tun&#x0a;remote rpv.example.com 443 tcp&#x0a;..."
+                         AcceptsReturn="True"
+                         TextWrapping="NoWrap"
+                         FontFamily="Consolas"
+                         MinHeight="160"
+                         MaxHeight="280"
+                         ScrollViewer.VerticalScrollBarVisibility="Auto"
+                         ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                         TextChanged="OnFieldChanged" />
+            </StackPanel>
+
+            <Expander Header="Certificates &amp; advanced"
+                      HorizontalAlignment="Stretch"
+                      HorizontalContentAlignment="Stretch">
+                <StackPanel Spacing="10">
+                    <TextBox x:Name="StormshieldCaPemBox"
+                             Header="Firewall CA certificate (PEM, for automatic mode)"
+                             AcceptsReturn="True"
+                             TextWrapping="NoWrap"
+                             FontFamily="Consolas"
+                             MinHeight="80"
+                             MaxHeight="140"
+                             PlaceholderText="paste the SNS portal CA so its TLS cert validates (CN = appliance serial)"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto"
+                             ScrollViewer.HorizontalScrollBarVisibility="Auto" />
+                    <CheckBox x:Name="StormshieldTrustCertCheck"
+                              Content="Trust server certificate (skip ALL TLS checks — pre-auth credentials and OTP travel unverified)" />
+                    <TextBox x:Name="StormshieldAppTokenBox"
+                             Header="Portal app token (advanced)"
+                             FontFamily="Consolas"
+                             PlaceholderText="sslclient" />
+                </StackPanel>
+            </Expander>
+        </StackPanel>
     </StackPanel>
     </ScrollViewer>
 </UserControl>
