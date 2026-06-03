@@ -98,9 +98,28 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         var sidecarPath = AppPaths.GetOvpnProxyExecutablePath();
         _logger.LogDebug("Launching OpenVPN sidecar (Stormshield provider) at {Path}.", sidecarPath);
 
-        var host = await OpenVpnProcessHost.StartAsync(
-            sidecarPath, sidecar, _loggerFactory.CreateLogger<OpenVpnProcessHost>(), cancellationToken)
-            .ConfigureAwait(false);
+        OpenVpnProcessHost host;
+        try
+        {
+            host = await OpenVpnProcessHost.StartAsync(
+                sidecarPath, sidecar, _loggerFactory.CreateLogger<OpenVpnProcessHost>(), cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex) when (
+            ex is not OperationCanceledException
+            && settings.Mode == StormshieldConnectionMode.Automatic
+            && settings.UseOtp)
+        {
+            // Reaching here means the HTTPS config download above already succeeded — which is
+            // exactly where the single-use OTP was spent. The failure is the LOCAL OpenVPN
+            // transport (e.g. the sidecar reporting "OpenVPN3 binding not linked"), not auth.
+            // Say so, so the user doesn't blindly Retry with the now-stale code: the firewall
+            // would reject the reused OTP and the real (transport) cause would be lost.
+            throw new InvalidOperationException(
+                "The Stormshield VPN authenticated and downloaded its configuration successfully, but the local "
+                + $"OpenVPN transport failed to start: {ex.Message} The one-time code was already used for this "
+                + "attempt — if you retry, enter a NEW one-time code.", ex);
+        }
 
         // Wrap-after-start: once StartAsync returns the sidecar is alive, so a construction-time
         // failure must tear it down. Same pattern as the other providers.

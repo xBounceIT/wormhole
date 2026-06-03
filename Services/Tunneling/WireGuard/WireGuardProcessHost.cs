@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
@@ -18,10 +19,15 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
 {
     private static readonly TimeSpan ReadyTimeout = TimeSpan.FromSeconds(15);
     private static readonly byte[] s_newline = new byte[] { (byte)'\n' };
+    // Bounded so a misbehaving sidecar that floods stderr can't bloat the failure message.
+    private const int MaxStderrTailLines = 20;
 
     private readonly ILogger _logger;
     private readonly Process _process;
     private readonly Task _stderrPump;
+    // Last few stderr lines, kept so an early-exit failure surfaces the sidecar's own
+    // diagnostic instead of an opaque pipe error.
+    private readonly ConcurrentQueue<string> _stderrTail = new();
     private int _disposedFlag;
     private int _socksPort;
 
@@ -98,6 +104,14 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
                 throw new TimeoutException(
                     $"WireGuard sidecar did not accept its configuration on stdin within {ReadyTimeout.TotalSeconds:F0}s.");
             }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            {
+                // The sidecar exited and closed its stdin mid-write, so the OS pipe write throws
+                // a raw "the pipe is being closed" IOException. Surface the sidecar's captured
+                // stderr instead of that opaque message.
+                throw await host.BuildEarlyExitExceptionAsync(
+                    "closed its stdin before accepting the configuration", ex).ConfigureAwait(false);
+            }
             // Do NOT close stdin: the sidecar treats EOF as a shutdown signal.
 
             string? line;
@@ -114,7 +128,8 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
                 throw new TimeoutException(
                     $"WireGuard sidecar did not produce a READY line within {ReadyTimeout.TotalSeconds:F0}s.");
             }
-            if (line is null) throw new IOException("WireGuard sidecar exited before becoming ready.");
+            if (line is null)
+                throw await host.BuildEarlyExitExceptionAsync("exited before becoming ready", null).ConfigureAwait(false);
 
             // Expected: "READY <port>"
             if (!line.StartsWith("READY ", StringComparison.Ordinal) ||
@@ -143,12 +158,44 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
             {
                 if (line.Length == 0) continue;
                 _logger.LogInformation("[wgproxy] {Line}", line);
+                _stderrTail.Enqueue(line);
+                while (_stderrTail.Count > MaxStderrTailLines && _stderrTail.TryDequeue(out _)) { }
             }
         }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Stderr pump for WireGuard sidecar ended.");
         }
+    }
+
+    /// <summary>
+    /// Builds an actionable exception for an early sidecar exit, folding in the sidecar's
+    /// captured stderr tail and exit code, so a closed-pipe IOException or a null READY line
+    /// surfaces what the sidecar actually printed rather than an opaque pipe error. Waits
+    /// briefly for the process to exit and the stderr pump to drain; only runs on the failure
+    /// path, inside <see cref="ReadyTimeout"/>.
+    /// </summary>
+    private async Task<Exception> BuildEarlyExitExceptionAsync(string what, Exception? inner)
+    {
+        try
+        {
+            using var exitCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            await _process.WaitForExitAsync(exitCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { /* still running — report what we have */ }
+        catch (InvalidOperationException) { /* no associated process / already gone */ }
+
+        try { await Task.WhenAny(_stderrPump, Task.Delay(TimeSpan.FromMilliseconds(500))).ConfigureAwait(false); }
+        catch { /* pump faults are logged inside PumpStderrAsync */ }
+
+        int? exitCode = null;
+        try { if (_process.HasExited) exitCode = _process.ExitCode; }
+        catch { /* best effort */ }
+
+        var tail = string.Join(" / ", _stderrTail.ToArray());
+        var detail = string.IsNullOrWhiteSpace(tail) ? "no diagnostic output was captured" : tail;
+        var code = exitCode is { } c ? $" (exit code {c})" : string.Empty;
+        return new IOException($"WireGuard sidecar {what}{code}. Sidecar reported: {detail}", inner);
     }
 
     public async ValueTask DisposeAsync()

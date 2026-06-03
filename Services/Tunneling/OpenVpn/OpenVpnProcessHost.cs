@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
@@ -29,10 +30,16 @@ public sealed class OpenVpnProcessHost : IAsyncDisposable
     // user-perceived handshake budget.
     private static readonly TimeSpan ReadyTimeout = TimeSpan.FromSeconds(45);
     private static readonly byte[] s_newline = new byte[] { (byte)'\n' };
+    // Bounded so a misbehaving sidecar that floods stderr can't bloat the failure message;
+    // the fatal line is almost always among the last few, so a small tail suffices.
+    private const int MaxStderrTailLines = 20;
 
     private readonly ILogger _logger;
     private readonly Process _process;
     private readonly Task _stderrPump;
+    // Last few stderr lines, kept so an early-exit failure can surface the sidecar's own
+    // diagnostic (e.g. "OpenVPN3 binding not linked") instead of an opaque pipe error.
+    private readonly ConcurrentQueue<string> _stderrTail = new();
     private int _disposedFlag;
     private int _socksPort;
 
@@ -109,6 +116,15 @@ public sealed class OpenVpnProcessHost : IAsyncDisposable
                 throw new TimeoutException(
                     $"OpenVPN sidecar did not accept its configuration on stdin within {ReadyTimeout.TotalSeconds:F0}s.");
             }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            {
+                // The sidecar exited (e.g. the mock-only build fataling "OpenVPN3 binding not
+                // linked") and closed its stdin mid-write, so the OS pipe write throws a raw
+                // "the pipe is being closed" IOException. Surface the sidecar's captured stderr
+                // instead of that opaque message.
+                throw await host.BuildEarlyExitExceptionAsync(
+                    "closed its stdin before accepting the configuration", ex).ConfigureAwait(false);
+            }
 
             string? line;
             try
@@ -123,7 +139,8 @@ public sealed class OpenVpnProcessHost : IAsyncDisposable
                 throw new TimeoutException(
                     $"OpenVPN sidecar did not produce a READY line within {ReadyTimeout.TotalSeconds:F0}s.");
             }
-            if (line is null) throw new IOException("OpenVPN sidecar exited before becoming ready.");
+            if (line is null)
+                throw await host.BuildEarlyExitExceptionAsync("exited before becoming ready", null).ConfigureAwait(false);
 
             if (!line.StartsWith("READY ", StringComparison.Ordinal) ||
                 !int.TryParse(line.AsSpan(6), out var port) ||
@@ -151,12 +168,47 @@ public sealed class OpenVpnProcessHost : IAsyncDisposable
             {
                 if (line.Length == 0) continue;
                 _logger.LogInformation("[ovpnproxy] {Line}", line);
+                _stderrTail.Enqueue(line);
+                while (_stderrTail.Count > MaxStderrTailLines && _stderrTail.TryDequeue(out _)) { }
             }
         }
         catch (Exception ex)
         {
             _logger.LogDebug(ex, "Stderr pump for OpenVPN sidecar ended.");
         }
+    }
+
+    /// <summary>
+    /// Builds an actionable exception for an early sidecar exit, folding in the sidecar's
+    /// captured stderr tail and exit code. The raw failures — a closed-pipe IOException on the
+    /// stdin write, or a null READY line — otherwise reach the UI as an opaque "the pipe is
+    /// being closed" / "exited before becoming ready" with the sidecar's real diagnostic (e.g.
+    /// "OpenVPN3 binding not linked") stranded in the log. Waits briefly for the process to
+    /// finish exiting and the stderr pump to drain so the message carries what the sidecar
+    /// actually printed. Only runs on the failure path, well inside <see cref="ReadyTimeout"/>.
+    /// </summary>
+    private async Task<Exception> BuildEarlyExitExceptionAsync(string what, Exception? inner)
+    {
+        try
+        {
+            using var exitCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            await _process.WaitForExitAsync(exitCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { /* still running — report what we have */ }
+        catch (InvalidOperationException) { /* no associated process / already gone */ }
+
+        // Let the stderr pump flush the final lines (the fatal message is usually last).
+        try { await Task.WhenAny(_stderrPump, Task.Delay(TimeSpan.FromMilliseconds(500))).ConfigureAwait(false); }
+        catch { /* pump faults are logged inside PumpStderrAsync */ }
+
+        int? exitCode = null;
+        try { if (_process.HasExited) exitCode = _process.ExitCode; }
+        catch { /* best effort */ }
+
+        var tail = string.Join(" / ", _stderrTail.ToArray());
+        var detail = string.IsNullOrWhiteSpace(tail) ? "no diagnostic output was captured" : tail;
+        var code = exitCode is { } c ? $" (exit code {c})" : string.Empty;
+        return new IOException($"OpenVPN sidecar {what}{code}. Sidecar reported: {detail}", inner);
     }
 
     public async ValueTask DisposeAsync()
