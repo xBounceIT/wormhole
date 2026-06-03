@@ -155,6 +155,12 @@ if ($cmake -and $haveOvpn3Src) {
 
 # If we're going to enable ovpn3, build the shim static lib first.
 $shimBuilt = $false
+# Collect every line of cmake output so we can surface it if the build fails. Under
+# -Quiet (how the MSBuild FetchOvpnProxy target always invokes this script) Write-Info
+# is a no-op, which previously meant a real compiler/linker error was invisible in CI —
+# the build just silently fell back to the mock-only stub. We record it here and dump
+# the tail on failure regardless of -Quiet (see the fallback block below).
+$shimOutput = [System.Collections.Generic.List[string]]::new()
 if ($buildTag -eq "ovpn3") {
     # Optional: use vcpkg manifest mode if VCPKG_ROOT is set. This pulls asio, jsoncpp,
     # lz4, and xxhash automatically from ovpn_shim/vcpkg.json. Without vcpkg, the user
@@ -194,10 +200,10 @@ if ($buildTag -eq "ovpn3") {
         $prevPref = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
         try {
-            & $cmake @cmakeArgs 2>&1 | ForEach-Object { Write-Info $_.ToString() }
+            & $cmake @cmakeArgs 2>&1 | ForEach-Object { $line = $_.ToString(); $shimOutput.Add($line); Write-Info $line }
             $cfgExit = $LASTEXITCODE
             if ($cfgExit -eq 0) {
-                & $cmake --build $shimBuild --config Release 2>&1 | ForEach-Object { Write-Info $_.ToString() }
+                & $cmake --build $shimBuild --config Release 2>&1 | ForEach-Object { $line = $_.ToString(); $shimOutput.Add($line); Write-Info $line }
                 $shimBuilt = ($LASTEXITCODE -eq 0)
             }
         }
@@ -213,6 +219,13 @@ if ($buildTag -eq "ovpn3") {
     }
     if (-not $shimBuilt) {
         Write-Warning "ovpn_shim build failed; falling back to mock-only sidecar (no -tags ovpn3). See tools/wormhole-ovpnproxy/README.md for the full toolchain requirements."
+        # Surface the real cmake/compiler/linker error even under -Quiet so the failure is
+        # diagnosable straight from CI logs instead of silently shipping the stub.
+        if ($shimOutput.Count -gt 0) {
+            Write-Warning "---- last 60 lines of ovpn_shim build output ----"
+            foreach ($line in ($shimOutput | Select-Object -Last 60)) { Write-Host $line }
+            Write-Warning "---- end ovpn_shim build output ----"
+        }
         $buildTag = ""
     }
 }
@@ -223,7 +236,10 @@ $env:GOARCH = if ($Arch -eq "arm64") { "arm64" } else { "amd64" }
 if ($shimBuilt) {
     $env:CGO_ENABLED = "1"
     $env:CGO_CFLAGS = "-I$shimDir"
-    $env:CGO_LDFLAGS = "-L$shimBuild -lovpn_shim"
+    # NB: the full link line (libovpn_shim + mbedTLS + lz4 + the Win32 system libs that
+    # OpenVPN3 needs) lives in ovpn_cgo.go's `#cgo windows LDFLAGS` directives so it stays
+    # version-controlled with the binding and platform-scoped. Don't set CGO_LDFLAGS here
+    # — it would only duplicate -lovpn_shim and obscure where the real link spec lives.
 } else {
     $env:CGO_ENABLED = "0"
 }
