@@ -340,6 +340,17 @@ var retCodeRE = regexp.MustCompile(`(?i)\bret=(-?\d+)`)
 // wsRE collapses any run of whitespace to a single space for one-line log excerpts.
 var wsRE = regexp.MustCompile(`\s+`)
 
+// sensitiveKVRE matches the VALUES of challenge/session keys in FortiGate's ajax/url-encoded
+// responses (magic, reqid, SAMLResponse, …) so redactBody can strip them. Keys are ordered
+// longest-first where one prefixes another (grpid before grp) for an unambiguous match.
+var sensitiveKVRE = regexp.MustCompile(`(?i)\b(magic|reqid|polid|grpid|grp|portal|peer|tokeninfo|credential|svpncookie|samlrequest|samlresponse)=([^,&\s'"<>]+)`)
+
+// htmlValueAttrRE matches any HTML value="…" attribute. redactBody masks ALL of them: in a
+// FortiGate challenge/SAML page the value attributes carry the live tokens, and name↔value
+// can't be reliably paired with a single regex across arbitrary attribute order. Field names,
+// input types and tag structure stay visible — all the excerpt needs for shape diagnosis.
+var htmlValueAttrRE = regexp.MustCompile(`(?is)(\bvalue\s*=\s*)(?:"[^"]*"|'[^']*'|[^\s>]+)`)
+
 // classifyLoginBody returns small, secret-free tags describing a FortiGate login/logincheck
 // response, for diagnostics only. It echoes no body data beyond a matched numeric ret= code.
 func classifyLoginBody(body []byte) []string {
@@ -375,10 +386,21 @@ func classifyLoginBody(body []byte) []string {
 }
 
 // redactBody renders a single-line, length-capped, secret-scrubbed excerpt of a response body
-// for the debug-only verbose log. Whitespace is collapsed and the configured username/password
-// are masked. Only reached when debugLog is set (operator opted in for a capture).
+// for the debug-only verbose log. Whitespace is collapsed; the configured username/password AND
+// any challenge/session tokens (magic, reqid, SAMLResponse, every HTML value="…" attribute) are
+// masked. Only reached when debugLog is set (operator opted in for a capture).
 func redactBody(body []byte, cfg config) string {
 	s := strings.TrimSpace(wsRE.ReplaceAllString(string(body), " "))
+	// Structural redaction FIRST, while the markup is intact: strip the live challenge/session
+	// material the gateway includes in 2FA/SAML responses — magic, reqid, SAMLResponse, etc. —
+	// by masking the VALUES of sensitive keys and every HTML value="…" attribute. Only values
+	// go; field names stay (useful, non-secret) for shape diagnosis. This must precede the
+	// literal credential scrub below: a short username/password that is a substring of
+	// "value"/"input"/etc. would otherwise corrupt the markup and defeat the attribute match,
+	// leaking the token it was meant to hide.
+	s = sensitiveKVRE.ReplaceAllString(s, "${1}=<redacted>")
+	s = htmlValueAttrRE.ReplaceAllString(s, `${1}"<redacted>"`)
+	// Then scrub the configured credentials wherever they still appear in plaintext.
 	if cfg.Username != "" {
 		s = strings.ReplaceAll(s, cfg.Username, "<user>")
 	}

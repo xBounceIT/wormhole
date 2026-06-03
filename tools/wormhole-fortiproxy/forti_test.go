@@ -297,3 +297,38 @@ func TestRedactBody_Caps(t *testing.T) {
 		t.Errorf("excerpt not capped: %d runes", len(r))
 	}
 }
+
+func TestRedactBody_ScrubsChallengeTokens(t *testing.T) {
+	cfg := config{Username: "alice", Password: "s3cr3tpw"}
+	// AJAX/text challenge tokens, an HTML hidden magic input, and a SAML blob — none of these
+	// may survive into the excerpt even though they aren't the configured username/password.
+	body := `ret=2,reqid=1234,magic=SECRET_MAGIC,tokeninfo=TInfo ` +
+		`<input type="hidden" name="magic" value="HTML_MAGIC"/> ` +
+		`<input type="hidden" name="SAMLResponse" value="BASE64SAML=="/> ` +
+		`welcome alice your pw s3cr3tpw`
+	got := redactBody([]byte(body), cfg)
+	for _, leak := range []string{"SECRET_MAGIC", "TInfo", "HTML_MAGIC", "BASE64SAML", "alice", "s3cr3tpw"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("secret %q leaked into excerpt: %q", leak, got)
+		}
+	}
+	// Non-secret structure stays visible for diagnosis.
+	if !strings.Contains(got, "ret=2") {
+		t.Errorf("ret code should remain visible: %q", got)
+	}
+	if !strings.Contains(got, `name="magic"`) {
+		t.Errorf("field name should remain visible: %q", got)
+	}
+}
+
+func TestRedactBody_StructuralRedactionRunsBeforeCredScrub(t *testing.T) {
+	// A credential that is a substring of HTML markup ("value", "name") must not corrupt the
+	// markup before the structural value="…" redaction runs — otherwise the token leaks. Locks
+	// the redaction ordering inside redactBody against a future reorder.
+	cfg := config{Username: "value", Password: "name"}
+	body := `<input type="hidden" name="magic" value="LIVE_TOKEN"/>`
+	got := redactBody([]byte(body), cfg)
+	if strings.Contains(got, "LIVE_TOKEN") {
+		t.Errorf("token leaked when a credential overlaps markup: %q", got)
+	}
+}
