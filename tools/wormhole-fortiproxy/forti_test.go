@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"reflect"
+	"strings"
+	"testing"
+)
 
 // Both FortiGate XML layouts are seen in the wild. A previous parser that bound the
 // assigned IP exclusively to the attribute form silently failed on the nested-element
@@ -241,5 +245,90 @@ func TestStripHostBrackets(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("stripHostBrackets(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestClassifyLoginBody(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"empty", ``, nil},
+		{"login-page", `<html><body><form action="/remote/logincheck" method="post">` +
+			`<input type="text" name="username"/>` +
+			`<input type="password" name="credential"/></form></body></html>`,
+			[]string{"login-page"}},
+		{"saml", `<html><body><form action="https://idp.example.com/sso" method="post">` +
+			`<input type="hidden" name="SAMLRequest" value="b64"/></form></body></html>`,
+			[]string{"saml"}},
+		{"ret-success", `ret=1,redir=/remote/portal`, []string{"ret=1"}},
+		{"ret-fail", `ret=0,error=permission denied`, []string{"ret=0", "auth-error"}},
+		{"challenge", `ret=2,reqid=1,polid=2,magic=abc`, []string{"ret=2", "has-magic"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyLoginBody([]byte(tc.body))
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("classifyLoginBody(%q) = %v, want %v", tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRedactBody_ScrubsCredentials(t *testing.T) {
+	cfg := config{Username: "alice", Password: "s3cr3t-pw"}
+	body := "Hello alice, the password s3cr3t-pw is wrong\n\n   please retry"
+	got := redactBody([]byte(body), cfg)
+	if strings.Contains(got, "alice") {
+		t.Errorf("username leaked into excerpt: %q", got)
+	}
+	if strings.Contains(got, "s3cr3t-pw") {
+		t.Errorf("password leaked into excerpt: %q", got)
+	}
+	if strings.Contains(got, "\n") {
+		t.Errorf("whitespace not collapsed: %q", got)
+	}
+}
+
+func TestRedactBody_Caps(t *testing.T) {
+	got := redactBody([]byte(strings.Repeat("a", 1000)), config{})
+	if r := []rune(got); len(r) > 256+len([]rune("…(truncated)")) {
+		t.Errorf("excerpt not capped: %d runes", len(r))
+	}
+}
+
+func TestRedactBody_ScrubsChallengeTokens(t *testing.T) {
+	cfg := config{Username: "alice", Password: "s3cr3tpw"}
+	// AJAX/text challenge tokens, an HTML hidden magic input, and a SAML blob — none of these
+	// may survive into the excerpt even though they aren't the configured username/password.
+	body := `ret=2,reqid=1234,magic=SECRET_MAGIC,tokeninfo=TInfo ` +
+		`<input type="hidden" name="magic" value="HTML_MAGIC"/> ` +
+		`<input type="hidden" name="SAMLResponse" value="BASE64SAML=="/> ` +
+		`welcome alice your pw s3cr3tpw`
+	got := redactBody([]byte(body), cfg)
+	for _, leak := range []string{"SECRET_MAGIC", "TInfo", "HTML_MAGIC", "BASE64SAML", "alice", "s3cr3tpw"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("secret %q leaked into excerpt: %q", leak, got)
+		}
+	}
+	// Non-secret structure stays visible for diagnosis.
+	if !strings.Contains(got, "ret=2") {
+		t.Errorf("ret code should remain visible: %q", got)
+	}
+	if !strings.Contains(got, `name="magic"`) {
+		t.Errorf("field name should remain visible: %q", got)
+	}
+}
+
+func TestRedactBody_StructuralRedactionRunsBeforeCredScrub(t *testing.T) {
+	// A credential that is a substring of HTML markup ("value", "name") must not corrupt the
+	// markup before the structural value="…" redaction runs — otherwise the token leaks. Locks
+	// the redaction ordering inside redactBody against a future reorder.
+	cfg := config{Username: "value", Password: "name"}
+	body := `<input type="hidden" name="magic" value="LIVE_TOKEN"/>`
+	got := redactBody([]byte(body), cfg)
+	if strings.Contains(got, "LIVE_TOKEN") {
+		t.Errorf("token leaked when a credential overlaps markup: %q", got)
 	}
 }
