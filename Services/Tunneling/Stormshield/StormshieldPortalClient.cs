@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Http;
 using System.Net.Security;
@@ -268,6 +269,155 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
             }
             catch { /* best effort */ }
         }
+    }
+
+    /// <summary>
+    /// Downloads the per-user OpenVPN bundle using the native <b>v5</b> "SN SSL VPN Client" flow,
+    /// reverse-engineered from the client's <c>SSLVPNService.SNS.SnsVpnConfiguration.DownloadConfig</c>:
+    /// <c>POST auth/config.html?version=1&amp;type=openvpn</c>, form-urlencoded <c>user</c> / <c>pass</c>.
+    ///
+    /// <para>Unlike the legacy <c>/auth/admin.html</c> serverd path, this is the low-privilege,
+    /// user-facing surface — no administration/serverd privilege, no <c>app</c> token, no SSO. The
+    /// single-use OTP, when used, is <b>concatenated directly onto the password</b> (no separator) and
+    /// spent here, on the HTTPS config download; the OpenVPN <c>auth-user-pass</c> still uses the real
+    /// password. A <c>200 application/zip</c> carries the bundle (<c>.ovpn</c> + CA/cert/key PEMs,
+    /// referenced by filename); a <c>200 text/xml</c> carries a <c>&lt;ret code/msg&gt;</c> firewall
+    /// error. The bundle's file references are inlined into a self-contained profile for the sidecar.</para>
+    /// </summary>
+    public async Task<string> DownloadProfileV5Async(
+        string username, string password, string? otp, CancellationToken cancellationToken)
+    {
+        var pass = string.IsNullOrEmpty(otp) ? password : password + otp;
+        var form = new Dictionary<string, string> { ["user"] = username, ["pass"] = pass };
+        using var content = new FormUrlEncodedContent(form);
+
+        using var response = await _http
+            .PostAsync(new Uri(_baseUri, "auth/config.html?version=1&type=openvpn"), content, cancellationToken)
+            .ConfigureAwait(false);
+
+        var mediaType = response.Content.Headers.ContentType?.MediaType;
+
+        // The firewall delivers an authentication/authorization error as 200 + text/xml — surface its
+        // message before the status check (the native client parses this envelope on 200 too).
+        if (IsXmlMediaType(mediaType))
+        {
+            var xml = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            throw new InvalidOperationException(DescribeV5Error(xml));
+        }
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException(
+                $"Stormshield configuration download returned HTTP {(int)response.StatusCode} {response.ReasonPhrase}"
+                + (string.IsNullOrEmpty(mediaType) ? "." : $" ({mediaType})."));
+        if (!string.Equals(mediaType, "application/zip", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"Stormshield configuration download returned unexpected content type '{mediaType ?? "none"}' "
+                + "(expected an application/zip OpenVPN bundle). The configured host may not be a Stormshield SSL VPN portal, "
+                + "or this firmware may predate the v5 SSL VPN API — in that case use Import (OpenVPN) mode.");
+
+        var zipBytes = await ReadCappedBytesAsync(response, MaxProfileBytes, cancellationToken).ConfigureAwait(false);
+        return AssembleProfileFromZip(zipBytes);
+    }
+
+    /// <summary>
+    /// Turns the v5 <c>openvpn_client.zip</c> bundle into a single self-contained <c>.ovpn</c> by
+    /// inlining its separate CA/cert/key PEM files (referenced by name from the profile) as inline
+    /// blocks. The OpenVPN sidecar receives one profile, no loose files.
+    /// </summary>
+    internal static string AssembleProfileFromZip(byte[] zipBytes)
+    {
+        using var ms = new MemoryStream(zipBytes, writable: false);
+        ZipArchive archive;
+        try
+        {
+            archive = new ZipArchive(ms, ZipArchiveMode.Read);
+        }
+        catch (InvalidDataException ex)
+        {
+            throw new InvalidOperationException("Stormshield returned a configuration bundle that is not a valid zip archive.", ex);
+        }
+        using (archive)
+        {
+            ZipArchiveEntry? ovpnEntry = null;
+            var byName = new Dictionary<string, ZipArchiveEntry>(StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in archive.Entries)
+            {
+                byName[entry.Name] = entry;
+                if (ovpnEntry is null && entry.Name.EndsWith(".ovpn", StringComparison.OrdinalIgnoreCase))
+                    ovpnEntry = entry;
+            }
+            if (ovpnEntry is null)
+                throw new InvalidOperationException("Stormshield configuration bundle did not contain an OpenVPN (.ovpn) profile.");
+
+            var ovpn = ReadZipEntryText(ovpnEntry);
+            var assembled = StormshieldProfileNormalizer.InlineFileReferences(
+                ovpn, name => byName.TryGetValue(name, out var entry) ? ReadZipEntryText(entry) : null);
+
+            if (!LooksLikeOpenVpnProfile(assembled))
+                throw new InvalidOperationException("Stormshield configuration bundle did not yield a usable OpenVPN profile.");
+            return assembled;
+        }
+    }
+
+    private static string ReadZipEntryText(ZipArchiveEntry entry)
+    {
+        using var stream = entry.Open();
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+        return reader.ReadToEnd();
+    }
+
+    private static bool IsXmlMediaType(string? mediaType) =>
+        string.Equals(mediaType, "text/xml", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(mediaType, "application/xml", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Renders the firewall's <c>text/xml</c> config-download error into an actionable message. The
+    /// envelope shape is read defensively (any <c>code</c>/<c>msg</c> attribute or element) so a
+    /// firmware-specific layout still yields the human-readable reason the firewall provided.
+    /// </summary>
+    internal static string DescribeV5Error(string xmlBody)
+    {
+        string? code = null;
+        string? msg = null;
+        try
+        {
+            var doc = LoadHardenedXml(xmlBody);
+            msg = doc.SelectSingleNode("//*[@msg]")?.Attributes?["msg"]?.Value
+                ?? doc.SelectSingleNode("//ret")?.InnerText
+                ?? doc.SelectSingleNode("//msg")?.InnerText;
+            code = doc.SelectSingleNode("//*[@code]")?.Attributes?["code"]?.Value
+                ?? doc.SelectSingleNode("//code")?.InnerText;
+        }
+        catch (XmlException) { /* fall through to the no-detail message */ }
+
+        msg = string.IsNullOrWhiteSpace(msg) ? null : msg!.Trim();
+        code = string.IsNullOrWhiteSpace(code) ? null : code!.Trim();
+        var reason = (code, msg) switch
+        {
+            (not null, not null) => $"the firewall rejected the configuration request (code {code}): {msg}",
+            (null, not null) => $"the firewall rejected the configuration request: {msg}",
+            (not null, null) => $"the firewall rejected the configuration request (code {code}).",
+            _ => "the firewall rejected the configuration request and returned an error with no readable message.",
+        };
+        return "Stormshield configuration download failed: " + reason
+            + " Check the username, password and one-time code; if you use an OTP, make sure it is current and has not already been used.";
+    }
+
+    private static async Task<byte[]> ReadCappedBytesAsync(HttpResponseMessage response, int capBytes, CancellationToken ct)
+    {
+        await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        using var ms = new MemoryStream();
+        var buffer = new byte[8192];
+        int read;
+        long total = 0;
+        while ((read = await stream.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
+        {
+            total += read;
+            if (total > capBytes)
+                throw new InvalidOperationException(
+                    $"Stormshield configuration bundle exceeded the {capBytes}-byte safety cap.");
+            ms.Write(buffer, 0, read);
+        }
+        return ms.ToArray();
     }
 
     private async Task<string> OpenServerdSessionAsync(string app, CancellationToken cancellationToken)

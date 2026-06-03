@@ -146,36 +146,42 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
                 $"Tunnel config '{config.Name}' is in Automatic mode but is missing a username or password.");
         }
 
-        var app = string.IsNullOrWhiteSpace(settings.AppToken) ? StormshieldSettings.DefaultAppToken : settings.AppToken;
-
         using var portal = new StormshieldPortalClient(
             settings.Server, settings.Port, settings.TrustServerCertificate, settings.CaPem);
 
         _logger.LogDebug(
-            "Stormshield pre-auth to {Server}:{Port} for '{Name}' (OTP={UseOtp}).",
+            "Stormshield v5 config download from {Server}:{Port} for '{Name}' (OTP={UseOtp}).",
             settings.Server, settings.Port, config.Name, settings.UseOtp);
 
-        await RunAuthLoopAsync(portal, _otpPrompt, _logger, config.Name, settings, cancellationToken).ConfigureAwait(false);
-
-        _logger.LogDebug("Stormshield auth succeeded for '{Name}'; downloading OpenVPN profile.", config.Name);
+        // Native v5 "SN SSL VPN Client" flow: POST auth/config.html?version=1&type=openvpn with the
+        // user's credentials and download the OpenVPN bundle. When an OTP is used it is collected up
+        // front and concatenated onto the password for the download; the OpenVPN auth-user-pass still
+        // uses the real password. This is the low-privilege, user-facing surface — no administration/
+        // serverd privilege, which is exactly what the legacy /auth/admin.html path required (and why a
+        // normal SSL VPN user got ACCESS_DENIED there).
+        string? otp = null;
+        if (settings.UseOtp)
+            otp = await PromptOtpAsync(_otpPrompt, config.Name, cancellationToken).ConfigureAwait(false);
 
         string rawProfile;
         try
         {
-            rawProfile = await portal.DownloadProfileAsync(app, cancellationToken).ConfigureAwait(false);
+            rawProfile = await portal.DownloadProfileV5Async(settings.Username, settings.Password, otp, cancellationToken)
+                .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch (HttpRequestException ex)
         {
             throw new InvalidOperationException(
-                $"Stormshield profile download could not reach '{settings.Server}:{settings.Port}': {ex.Message}", ex);
+                $"Stormshield configuration download could not reach '{settings.Server}:{settings.Port}': {ex.Message}", ex);
         }
         catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
             throw new InvalidOperationException(
-                $"Stormshield profile download timed out talking to '{settings.Server}:{settings.Port}'.", ex);
+                $"Stormshield configuration download timed out talking to '{settings.Server}:{settings.Port}'.", ex);
         }
 
+        _logger.LogDebug("Stormshield configuration retrieved for '{Name}'; normalizing profile.", config.Name);
         return StormshieldProfileNormalizer.Normalize(rawProfile);
     }
 
