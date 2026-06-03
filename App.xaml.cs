@@ -184,6 +184,7 @@ public partial class App : Application
         services.AddSingleton<ICredentialRepository, CredentialRepository>();
         services.AddSingleton<ITunnelConfigRepository, TunnelConfigRepository>();
         services.AddSingleton<InheritanceResolver>();
+        services.AddSingleton<IConnectionProfileResolver, ConnectionProfileResolver>();
 
         services.AddSingleton<ITunnelProvider, WireGuardTunnelProvider>();
         services.AddSingleton<ITunnelProvider, OpenVpnTunnelProvider>();

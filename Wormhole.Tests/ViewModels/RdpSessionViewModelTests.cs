@@ -7,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Wormhole.Data;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
@@ -1138,6 +1139,62 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public async Task RetryAsync_AfterTunnelDisabled_ReconnectsWithoutTheEarlierTunnel()
+    {
+        // Repro: a tab is opened with a VPN tunnel, the user edits the connection to drop the
+        // tunnel, then hits Retry on the failure warning — the reconnect must NOT route through
+        // the earlier tunnel, because RetryAsync re-resolves the connection's current settings.
+        var configId = Guid.NewGuid();
+        var nodeId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        var provider = new FakeTunnelProvider();
+        tunnelRepo.Configs[configId] = new TunnelConfig { Id = configId, Name = "corp", Kind = TunnelKind.WireGuard };
+
+        // The saved connection now has the tunnel disabled (the post-open edit the resolver reads).
+        var connectionRepo = new StubConnectionRepository(new ConnectionNode
+        {
+            Id = nodeId,
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Rdp,
+            Host = "host",
+            Port = 3389,
+            Username = "rdp-user",
+            TunnelEnabled = false,
+        });
+
+        var (vm, svc, creds, dlg, _) = CreateVm(
+            tunnelRepo: tunnelRepo,
+            tunnelProviders: new ITunnelProvider[] { provider },
+            connectionRepository: connectionRepo);
+        creds.TunnelConfigs[configId] = new byte[] { 1, 2, 3 };
+        dlg.PasswordPromptResult = "password";
+        var firstSession = new FakeRdpSession();
+        svc.NextSession = firstSession;
+
+        // Tab opened while the tunnel was still enabled (the cached snapshot).
+        vm.Initialize(MakeProfile() with { NodeId = nodeId, TunnelEnabled = true, TunnelConfigId = configId });
+        var ownerHwnd = (IntPtr)0x1234;
+        await vm.AttachAsync(ownerHwnd, HostBounds.Seed);
+
+        // First attempt used the tunnel and routed through the loopback forwarder.
+        Assert.Equal(1, provider.EstablishCount);
+        Assert.Equal(IPAddress.Loopback.ToString(), svc.LastProfile?.Host);
+
+        // Connection drops; the user retries after editing out the tunnel.
+        firstSession.RaiseDisconnected(new RdpDisconnectInfo(516, 0, "Could not reach the server.", IsClean: false));
+        svc.NextSession = new FakeRdpSession();
+        await vm.RetryAsync();
+
+        // Retry re-resolved the profile: no second tunnel, and it connects straight to the host.
+        Assert.Equal(2, svc.ConnectCount);
+        Assert.Equal(1, provider.EstablishCount);
+        Assert.Equal("host", svc.LastProfile?.Host);
+        Assert.Equal(3389, svc.LastProfile?.Port);
+        Assert.False(vm.Profile!.TunnelEnabled);
+        Assert.Null(vm.Profile.TunnelConfigId);
+    }
+
+    [Fact]
     public async Task AttachAsync_TunnelEnabled_ExternalClientFailsClosed()
     {
         var provider = new FakeTunnelProvider();
@@ -1468,7 +1525,8 @@ public class RdpSessionViewModelTests
         FakeDialogService? dlg = null,
         FakeRdpCrashSentinelService? sentinel = null,
         FakeTunnelConfigRepository? tunnelRepo = null,
-        IEnumerable<ITunnelProvider>? tunnelProviders = null)
+        IEnumerable<ITunnelProvider>? tunnelProviders = null,
+        IConnectionRepository? connectionRepository = null)
     {
         var svc = new FakeRdpSessionService();
         creds ??= new FakeCredentialService();
@@ -1480,6 +1538,7 @@ public class RdpSessionViewModelTests
             creds,
             repo,
             BuildTunnelManager(creds, tunnelRepo, tunnelProviders),
+            BuildProfileResolver(connectionRepository),
             dlg,
             sentinel,
             NullLoggerFactory.Instance);
@@ -1496,6 +1555,7 @@ public class RdpSessionViewModelTests
             creds,
             credentialRepository,
             BuildTunnelManager(creds),
+            BuildProfileResolver(),
             new FakeDialogService(),
             sentinel ?? new FakeRdpCrashSentinelService(),
             NullLoggerFactory.Instance);
@@ -1510,6 +1570,15 @@ public class RdpSessionViewModelTests
             repo ?? new FakeTunnelConfigRepository(),
             credentials,
             NullLoggerFactory.Instance.CreateLogger<TunnelManager>());
+
+    // Resolver over the supplied connection repo (empty by default → ResolveAsync returns null,
+    // so RetryAsync keeps the tab's cached profile — pre-refresh behavior). Tests that exercise
+    // an edit-then-retry pass a StubConnectionRepository holding the edited node.
+    private static ConnectionProfileResolver BuildProfileResolver(IConnectionRepository? connectionRepository = null)
+        => new(
+            connectionRepository ?? new StubConnectionRepository(),
+            new InheritanceResolver(),
+            NullLoggerFactory.Instance.CreateLogger<ConnectionProfileResolver>());
 
     private sealed class FakeRdpSessionService : IRdpSessionService
     {
@@ -1625,6 +1694,35 @@ public class RdpSessionViewModelTests
                 await ReleaseDispose.Task.ConfigureAwait(false);
             }
         }
+    }
+
+    // Minimal IConnectionRepository returning a fixed node set, for re-resolving a profile on
+    // retry. Only GetAllAsync/GetByIdAsync are meaningful; writes are no-ops.
+    private sealed class StubConnectionRepository : IConnectionRepository
+    {
+        private readonly ConnectionNode[] _nodes;
+        public StubConnectionRepository(params ConnectionNode[] nodes) => _nodes = nodes;
+
+        public Task<IReadOnlyList<ConnectionNode>> GetAllAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<ConnectionNode>>(_nodes);
+
+        public Task<ConnectionNode?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
+        {
+            foreach (var n in _nodes)
+            {
+                if (n.Id == id) return Task.FromResult<ConnectionNode?>(n);
+            }
+            return Task.FromResult<ConnectionNode?>(null);
+        }
+
+        public Task<IReadOnlyList<(Guid Id, string Name)>> GetByTunnelConfigIdAsync(Guid tunnelConfigId, int limit, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<(Guid, string)>>(Array.Empty<(Guid, string)>());
+
+        public Task AddAsync(ConnectionNode node, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task UpdateAsync(ConnectionNode node, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task UpdateManyAsync(IReadOnlyCollection<ConnectionNode> nodes, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task UpdateHostFingerprintAsync(Guid nodeId, string fingerprint, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task DeleteAsync(Guid id, CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 
     private sealed class EmptyCredentialRepository : Wormhole.Data.Repositories.ICredentialRepository
