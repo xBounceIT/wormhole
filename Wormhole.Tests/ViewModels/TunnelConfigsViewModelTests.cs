@@ -659,6 +659,36 @@ public class TunnelConfigsViewModelTests
     }
 
     [Fact]
+    public async Task AddTunnel_StormshieldKind_ImportModeWithoutServer_Persists()
+    {
+        // Import mode uses the pasted profile's own `remote`, so Server is not required — a user
+        // who only has the downloaded .ovpn must be able to save without inventing a gateway value.
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        dialog.TunnelPromptResult = new TunnelDraft(
+            "corp-storm-import",
+            TunnelKind.Stormshield,
+            WireGuard: null,
+            OpenVpn: null,
+            Fortinet: null,
+            Watchguard: null,
+            new StormshieldSettings
+            {
+                Server = "",
+                Mode = StormshieldConnectionMode.Import,
+                ProfileOvpn = "client\ndev tun\nremote vpn.example.com 443 tcp\n",
+            });
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        var stored = Assert.Single(repo.Configs.Values);
+        Assert.Equal(TunnelKind.Stormshield, stored.Kind);
+        Assert.True(creds.TunnelConfigs.ContainsKey(stored.Id));
+        var roundTrip = JsonSerializer.Deserialize<StormshieldSettings>(creds.TunnelConfigs[stored.Id])!;
+        Assert.Equal(StormshieldConnectionMode.Import, roundTrip.Mode);
+        Assert.Equal(string.Empty, roundTrip.Server);
+    }
+
+    [Fact]
     public async Task EditTunnel_StormshieldKind_RoundTripsSecret()
     {
         var (vm, repo, _, creds, dialog) = CreateVm();

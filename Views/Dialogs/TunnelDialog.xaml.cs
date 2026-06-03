@@ -67,15 +67,17 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
                 !string.IsNullOrWhiteSpace(WatchguardClientCertPemBox.Text) &&
                 !string.IsNullOrWhiteSpace(WatchguardClientKeyPemBox.Text),
             TunnelKind.Stormshield =>
-                !string.IsNullOrWhiteSpace(StormshieldServerBox.Text) &&
-                IsValidPort(StormshieldPortBox.Text) &&
-                (StormshieldSelectedMode == StormshieldConnectionMode.Import
-                    // Import mode: a pasted profile is all that's required (auth-user-pass is optional).
+                StormshieldSelectedMode == StormshieldConnectionMode.Import
+                    // Import mode: the pasted .ovpn carries its own remote, so a profile is all that's
+                    // required — Server/Port are unused here (auth-user-pass is also optional).
                     ? !string.IsNullOrWhiteSpace(StormshieldProfileOvpnBox.Text)
-                    // Automatic mode: username + password (SSO would replace them, but it's disabled).
-                    : StormshieldSsoCheck.IsChecked == true
-                        || (!string.IsNullOrWhiteSpace(StormshieldUsernameBox.Text)
-                            && !string.IsNullOrWhiteSpace(StormshieldPasswordBox.Password))),
+                    // Automatic mode: a reachable server + port, plus username + password (SSO would
+                    // replace the credentials, but it's disabled/not-yet-supported).
+                    : !string.IsNullOrWhiteSpace(StormshieldServerBox.Text)
+                        && IsValidPort(StormshieldPortBox.Text)
+                        && (StormshieldSsoCheck.IsChecked == true
+                            || (!string.IsNullOrWhiteSpace(StormshieldUsernameBox.Text)
+                                && !string.IsNullOrWhiteSpace(StormshieldPasswordBox.Password))),
             _ => false,
         };
 

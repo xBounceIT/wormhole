@@ -590,19 +590,25 @@ public partial class TunnelConfigsViewModel : ObservableObject
         if (ss is null)
             throw new InvalidOperationException("Stormshield settings are required for a Stormshield tunnel.");
         StringBuilder? sb = null;
-        if (string.IsNullOrWhiteSpace(ss.Server)) AppendValidationError(ref sb, "Server is required.");
-        if (ss.Port is < 1 or > 65535) AppendValidationError(ref sb, "Port must be between 1 and 65535.");
         if (ss.Mode == StormshieldConnectionMode.Import)
         {
+            // Import mode uses the pasted .ovpn's own `remote` endpoint, so Server/Port are not
+            // required here (and aren't used by the provider) — only the profile is.
             if (string.IsNullOrWhiteSpace(ss.ProfileOvpn))
                 AppendValidationError(ref sb, "OpenVPN profile (.ovpn contents) is required for Import mode.");
         }
-        else if (!ss.UseSingleSignOn)
+        else
         {
-            // Automatic mode with username/password (SSO hides these and is validated/handled
-            // separately — the provider rejects it as not-yet-supported).
-            if (string.IsNullOrWhiteSpace(ss.Username)) AppendValidationError(ref sb, "Username is required.");
-            if (string.IsNullOrWhiteSpace(ss.Password)) AppendValidationError(ref sb, "Password is required.");
+            // Automatic mode authenticates to the firewall captive portal, so Server + Port are
+            // required. Username/password are required unless SSO is used (SSO is handled/rejected
+            // separately by the provider as not-yet-supported).
+            if (string.IsNullOrWhiteSpace(ss.Server)) AppendValidationError(ref sb, "Server is required.");
+            if (ss.Port is < 1 or > 65535) AppendValidationError(ref sb, "Port must be between 1 and 65535.");
+            if (!ss.UseSingleSignOn)
+            {
+                if (string.IsNullOrWhiteSpace(ss.Username)) AppendValidationError(ref sb, "Username is required.");
+                if (string.IsNullOrWhiteSpace(ss.Password)) AppendValidationError(ref sb, "Password is required.");
+            }
         }
         ThrowValidationErrors(sb);
     }
