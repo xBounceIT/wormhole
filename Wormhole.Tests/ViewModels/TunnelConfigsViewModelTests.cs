@@ -1076,7 +1076,7 @@ public class TunnelConfigsViewModelTests
         var creds = new FakeCredentialService();
         var dialog = new FakeDialog();
         var vm = new TunnelConfigsViewModel(
-            repo, conns, creds, dialog,
+            repo, conns, creds, new FakeStormshieldConfigCache(), dialog,
             NullLogger<TunnelConfigsViewModel>.Instance);
         vm.SearchDebounceDelay = TimeSpan.Zero;
         return (vm, repo, conns, creds, dialog);

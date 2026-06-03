@@ -190,6 +190,7 @@ public partial class App : Application
         services.AddSingleton<ITunnelProvider, OpenVpnTunnelProvider>();
         services.AddSingleton<ITunnelProvider, FortinetTunnelProvider>();
         services.AddSingleton<ITunnelProvider, WatchguardTunnelProvider>();
+        services.AddSingleton<IStormshieldConfigCache, StormshieldConfigCache>();
         services.AddSingleton<ITunnelProvider, StormshieldTunnelProvider>();
         services.AddSingleton<IOtpPromptService, DialogOtpPromptService>();
         services.AddSingleton<TunnelManager>();

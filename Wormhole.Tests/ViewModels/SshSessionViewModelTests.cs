@@ -13,6 +13,7 @@ using Wormhole.Services;
 using Wormhole.Services.Ssh;
 using Wormhole.Services.Tunneling;
 using Wormhole.Tests.Fakes;
+using Wormhole.Tests.Services.Tunneling;
 using Wormhole.ViewModels.Sessions;
 using Xunit;
 
@@ -287,6 +288,33 @@ public sealed class SshSessionViewModelTests
         await WaitForAsync(() => vm.HasPrewarmedSftpForTesting());
         Assert.Equal(1, sftp.ConnectCallCount);
         Assert.Same(creds, sftp.LastCredentials);
+    }
+
+    [Fact]
+    public async Task Prewarm_BorrowsSessionTunnel_AndDoesNotDisposeIt()
+    {
+        // Regression: prewarm must NOT establish a second tunnel (which, for an OTP-interactive VPN, would
+        // pop a surprise second OTP prompt and burn the code). It borrows the shell's tunnel instead, and
+        // disposing the borrow must leave the real tunnel — owned by the SSH session — alive.
+        var sftp = new FakeSftpService();
+        ITunnelInstance? handedToSftp = null;
+        sftp.ConnectImpl = (_, _, tunnel, _) =>
+        {
+            handedToSftp = tunnel;
+            return Task.FromResult<ISftpSession>(new FakeSftpSession());
+        };
+        var vm = CreateViewModel(sftp);
+        vm.Initialize(CreateProfile());
+        vm.PrimeCredentialsForTesting(new SshCredentials("pwd", null, null));
+
+        var shellTunnel = new BorrowedTunnelInstanceTests.RecordingTunnel();
+        vm.AttachConnectedSessionForTesting(new FakeSshSession(), shellTunnel);
+
+        await WaitForAsync(() => vm.HasPrewarmedSftpForTesting());
+
+        var borrowed = Assert.IsType<BorrowedTunnelInstance>(handedToSftp);
+        await borrowed.DisposeAsync();
+        Assert.Equal(0, shellTunnel.DisposeCount); // the borrow never tears down the session's tunnel
     }
 
     [Fact]

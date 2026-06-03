@@ -11,6 +11,7 @@ internal static class AppPaths
     private static readonly string LogsDirectory = Path.Combine(AppDataDirectory, "logs");
     private static readonly string KeysDirectory = Path.Combine(AppDataDirectory, "keys");
     private static readonly string TunnelConfigsDirectory = Path.Combine(AppDataDirectory, "tunnels");
+    private static readonly string StormshieldCacheDirectory = Path.Combine(AppDataDirectory, "stormshield-cache");
     private static readonly string UpdateCacheDirectory = Path.Combine(AppDataDirectory, "cache", "updates");
     private static readonly string WebView2UserDataDirectory = Path.Combine(AppDataDirectory, "webview2");
     private static readonly string WebAssetsDirectory = Path.Combine(AppContext.BaseDirectory, "Assets", "web");
@@ -29,6 +30,11 @@ internal static class AppPaths
     public static string GetKeysDirectory() => KeysDirectory;
 
     public static string GetTunnelConfigsDirectory() => TunnelConfigsDirectory;
+
+    // Per-tunnel DPAPI-encrypted cache of downloaded Stormshield Automatic-mode OpenVPN profiles, so a
+    // reconnect can reuse the profile instead of re-downloading it (which would spend the single-use
+    // OTP on the HTTPS step rather than the OpenVPN data-plane password). See StormshieldConfigCache.
+    public static string GetStormshieldCacheDirectory() => StormshieldCacheDirectory;
 
     public static string GetUpdateCacheDirectory() => UpdateCacheDirectory;
 

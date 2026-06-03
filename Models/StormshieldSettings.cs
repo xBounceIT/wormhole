@@ -66,15 +66,20 @@ public sealed class StormshieldSettings
     [JsonPropertyName("Password")] public string Password { get; set; } = string.Empty;
 
     /// <summary>
-    /// Maps to the client's "Use an OTP" checkbox. When set, the provider prompts for a single-use code
-    /// at connect time and concatenates it onto the password (no separator) for the v5 config download
-    /// (<c>pass = password + otp</c>). The code is spent on that HTTPS download, so the OpenVPN
-    /// <c>auth-user-pass</c> on the data plane uses the real <see cref="Password"/> alone.
-    /// <para>Caveat (known limitation): the native client, on a cached-config reconnect, instead appends
-    /// the OTP to the OpenVPN data-plane password. A firewall that ALSO enforces the OTP-as-password
-    /// suffix on the SSL VPN data plane would reject Wormhole's password-only data-plane auth. Closing
-    /// that gap needs the native hash-cache gate (download — and spend the OTP — only on a config change);
-    /// cert+password deployments are unaffected.</para>
+    /// Maps to the client's "Use an OTP" checkbox. When set, the provider prompts for a single-use code at
+    /// connect time and spends it in <b>exactly one</b> place — never both — mirroring the native v5 client:
+    /// <list type="bullet">
+    ///   <item>On a <b>cache hit</b> (the firewall reports its SSL VPN config unchanged, or the change-check
+    ///   is unavailable but a cached profile exists) the cached profile is reused with no download, and the
+    ///   code is appended to the OpenVPN data-plane password (<c>auth-user-pass = password + otp</c>). This
+    ///   is the steady-state path and is what brings the tunnel up on firewalls that enforce the OTP suffix
+    ///   on the SSL VPN data plane.</item>
+    ///   <item>On a <b>cache miss</b> (first connect, or the firewall's config changed) a fresh profile is
+    ///   downloaded — which spends the code on the HTTPS step (<c>pass = password + otp</c>) — cached, and
+    ///   the connect stops with a "reconnect with a new code" message; the next connect is a cache hit.</item>
+    /// </list>
+    /// Change-detection uses the native <c>auth/v1/sslvpn/hash</c> endpoint; the per-tunnel cache lives in
+    /// <c>StormshieldConfigCache</c>. The OTP itself is never persisted — it is prompted for at connect time.
     /// </summary>
     [JsonPropertyName("UseOtp")] public bool UseOtp { get; set; }
 

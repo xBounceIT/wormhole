@@ -39,23 +39,19 @@ namespace Wormhole.Services.Tunneling.Stormshield;
 /// </summary>
 public sealed class StormshieldTunnelProvider : ITunnelProvider
 {
-    /// <summary>
-    /// Cap on OTP prompt rounds. A healthy flow needs one code; a couple of retries cover a
-    /// mistyped/expired code. Beyond this the gateway is almost certainly misbehaving and we stop
-    /// rather than trap the user in an endless prompt loop. (Same rationale as WatchGuard.)
-    /// </summary>
-    private const int MaxOtpRounds = 3;
-
     private readonly IOtpPromptService _otpPrompt;
+    private readonly IStormshieldConfigCache _configCache;
     private readonly ILogger<StormshieldTunnelProvider> _logger;
     private readonly ILoggerFactory _loggerFactory;
 
     public StormshieldTunnelProvider(
         IOtpPromptService otpPrompt,
+        IStormshieldConfigCache configCache,
         ILogger<StormshieldTunnelProvider> logger,
         ILoggerFactory loggerFactory)
     {
         _otpPrompt = otpPrompt;
+        _configCache = configCache;
         _logger = logger;
         _loggerFactory = loggerFactory;
     }
@@ -77,21 +73,25 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
                 + "Use username/password (optionally with an OTP), or switch to Import (OpenVPN) mode.");
         }
 
-        var profile = settings.Mode switch
+        // Each mode yields BOTH the profile and the password the OpenVPN data plane should authenticate
+        // with. For Automatic + OTP that password may be `password + otp`: when a current cached profile
+        // lets us skip the download, the single-use code is routed to the data plane instead of being
+        // spent on the HTTPS download (see ResolveAutomaticCoreAsync / the class remarks).
+        var (profile, dataPlanePassword, optimisticCacheHit) = settings.Mode switch
         {
-            StormshieldConnectionMode.Import => BuildImportProfile(config, settings),
-            StormshieldConnectionMode.Automatic => await FetchAutomaticProfileAsync(config, settings, cancellationToken).ConfigureAwait(false),
+            StormshieldConnectionMode.Import => (BuildImportProfile(config, settings), settings.Password, false),
+            StormshieldConnectionMode.Automatic => await ResolveAutomaticAsync(config, settings, cancellationToken).ConfigureAwait(false),
             _ => throw new InvalidOperationException($"Tunnel config '{config.Name}' has an unsupported Stormshield mode '{settings.Mode}'."),
         };
 
         var sidecar = new OpenVpnSidecarConfig
         {
             ProfileOvpn = profile,
-            // The OpenVPN auth-user-pass credentials are the user's real username/password. Empty in
-            // pure cert-only Import profiles, which is fine — the sidecar only uses them if the
-            // profile declares auth-user-pass.
+            // The OpenVPN auth-user-pass credentials are the user's real username/password (with the OTP
+            // appended on an Automatic cache-hit). Empty in pure cert-only Import profiles, which is fine —
+            // the sidecar only uses them if the profile declares auth-user-pass.
             Username = string.IsNullOrEmpty(settings.Username) ? null : settings.Username,
-            Password = string.IsNullOrEmpty(settings.Password) ? null : settings.Password,
+            Password = string.IsNullOrEmpty(dataPlanePassword) ? null : dataPlanePassword,
             Mock = false,
         };
 
@@ -110,15 +110,24 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             && settings.Mode == StormshieldConnectionMode.Automatic
             && settings.UseOtp)
         {
-            // Reaching here means the HTTPS config download above already succeeded — which is
-            // exactly where the single-use OTP was spent. The failure is the LOCAL OpenVPN
-            // transport (e.g. the sidecar reporting "OpenVPN3 binding not linked"), not auth.
-            // Say so, so the user doesn't blindly Retry with the now-stale code: the firewall
-            // would reject the reused OTP and the real (transport) cause would be lost.
+            // With OTP enabled, reaching the sidecar means we took the cache-hit path and routed the
+            // one-time code to the OpenVPN data-plane password (a cache MISS aborts earlier, before the
+            // sidecar starts). So the code was consumed by THIS connection attempt — whether the sidecar
+            // failed to start (transport) or the firewall rejected the data-plane auth. Either way a blind
+            // Retry would reuse a now-spent code, so tell the user to enter a fresh one.
+
+            // If the profile was reused WITHOUT confirming it against the firewall's current hash (the
+            // change-check was unavailable), the failure may mean the cached profile is stale. Drop it so
+            // the next connect re-downloads a fresh one rather than looping forever on the same stale
+            // profile. A hash-CONFIRMED hit that fails is almost certainly a mistyped/expired code, so we
+            // keep that cache for a cheap re-prompt. Best-effort; DeleteAsync never throws.
+            if (optimisticCacheHit)
+                await _configCache.DeleteAsync(config.Id, CancellationToken.None).ConfigureAwait(false);
+
             throw new InvalidOperationException(
-                "The Stormshield VPN authenticated and downloaded its configuration successfully, but the local "
-                + $"OpenVPN transport failed to start: {ex.Message} The one-time code was already used for this "
-                + "attempt — if you retry, enter a NEW one-time code.", ex);
+                "The Stormshield VPN prepared its configuration, but bringing up the OpenVPN tunnel failed: "
+                + $"{ex.Message} Your one-time code was used for this connection attempt — if you retry, enter a "
+                + "NEW one-time code.", ex);
         }
 
         // Wrap-after-start: once StartAsync returns the sidecar is alive, so a construction-time
@@ -148,7 +157,7 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         return StormshieldProfileNormalizer.Normalize(settings.ProfileOvpn);
     }
 
-    private async Task<string> FetchAutomaticProfileAsync(
+    private async Task<(string Profile, string DataPlanePassword, bool OptimisticCacheHit)> ResolveAutomaticAsync(
         TunnelConfig config, StormshieldSettings settings, CancellationToken cancellationToken)
     {
         // Pre-flight mirrors TunnelConfigsViewModel.ValidateStormshield so a kind/blob mismatch or
@@ -169,24 +178,114 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             settings.Server, settings.Port, settings.TrustServerCertificate, settings.CaPem);
 
         _logger.LogDebug(
-            "Stormshield v5 config download from {Server}:{Port} for '{Name}' (OTP={UseOtp}).",
+            "Stormshield v5 config resolve from {Server}:{Port} for '{Name}' (OTP={UseOtp}).",
             settings.Server, settings.Port, config.Name, settings.UseOtp);
 
-        // Native v5 "SN SSL VPN Client" flow: POST auth/config.html?version=1&type=openvpn with the
-        // user's credentials and download the OpenVPN bundle. When an OTP is used it is collected up
-        // front and concatenated onto the password for the DOWNLOAD; the OpenVPN auth-user-pass on the
-        // data plane then uses the real password (see StormshieldSettings.UseOtp for the OTP-data-plane
-        // caveat on firewalls that also enforce the OTP suffix on the tunnel). This is the low-privilege,
-        // user-facing surface — no administration/serverd privilege, which is exactly what the legacy
-        // /auth/admin.html path required (and why a normal SSL VPN user got ACCESS_DENIED there).
-        string? otp = null;
-        if (settings.UseOtp)
-            otp = await PromptOtpAsync(_otpPrompt, config.Name, cancellationToken).ConfigureAwait(false);
+        return await ResolveAutomaticCoreAsync(
+            portal, _configCache, _otpPrompt, _logger, config.Id, config.Name, settings, cancellationToken)
+            .ConfigureAwait(false);
+    }
 
-        string rawProfile;
+    /// <summary>
+    /// Core Automatic-mode resolution: returns the OpenVPN profile plus the password the data plane should
+    /// authenticate with, applying the OTP-routing / config-cache gate. Static and dependency-injected so it
+    /// is unit-testable with a fake <see cref="IStormshieldPortal"/> + <see cref="IStormshieldConfigCache"/>
+    /// (no live firewall or sidecar).
+    ///
+    /// <para>The single-use OTP is spent in exactly one place, mirroring the native v5 client
+    /// (<c>SnsService.SetupSns</c> + <c>VpnService</c>):</para>
+    /// <list type="bullet">
+    ///   <item><b>No OTP</b>: download a fresh profile; the data plane uses the real password.</item>
+    ///   <item><b>OTP, cache HIT</b> (firewall reports its config unchanged, or the change-check is
+    ///   unavailable but a cached profile exists): reuse the cached profile and route the OTP to the data
+    ///   plane (<c>password + otp</c>). This is the steady-state path that brings the tunnel up.</item>
+    ///   <item><b>OTP, cache MISS</b> (no or stale cache): download a fresh profile — which spends the OTP
+    ///   on the HTTPS step — persist it, then abort with <see cref="StormshieldConfigRefreshedException"/>.
+    ///   The code is now used; the next connect finds the cached profile and routes a fresh code to the data
+    ///   plane. (Native: RetrieveConfig → OK_OTP_USED → SetupSns NOK_TOTP_USED → abort/reconnect.)</item>
+    /// </list>
+    /// </summary>
+    internal static async Task<(string Profile, string DataPlanePassword, bool OptimisticCacheHit)> ResolveAutomaticCoreAsync(
+        IStormshieldPortal portal,
+        IStormshieldConfigCache cache,
+        IOtpPromptService otpPrompt,
+        ILogger logger,
+        Guid tunnelId,
+        string configName,
+        StormshieldSettings settings,
+        CancellationToken cancellationToken)
+    {
+        if (!settings.UseOtp)
+        {
+            // No single-use factor to conserve — download fresh every time, real password on the data
+            // plane. (Unchanged behavior for non-OTP firewalls; nothing is cached.)
+            var profileNoOtp = await DownloadProfileV5WrappedAsync(portal, settings, otp: null, cancellationToken).ConfigureAwait(false);
+            return (StormshieldProfileNormalizer.Normalize(profileNoOtp), settings.Password, false);
+        }
+
+        var otp = await PromptOtpAsync(otpPrompt, configName, cancellationToken).ConfigureAwait(false);
+
+        // Ask the firewall whether its SSL VPN config changed (unauthenticated; null when the endpoint is
+        // unsupported or unreachable), and look up any current cached profile for this tunnel.
+        var serverHash = await portal.GetConfigHashAsync(cancellationToken).ConfigureAwait(false);
+        var cached = await cache.TryReadAsync(tunnelId, settings, cancellationToken).ConfigureAwait(false);
+
+        var hashMatches = cached is not null && serverHash is not null
+            && string.Equals(serverHash, cached.ConfigHash, StringComparison.OrdinalIgnoreCase);
+        // Change-check unavailable but a cached profile exists: trust the cache rather than re-downloading
+        // (and re-spending the OTP). Deliberate improvement over the native client, which re-downloads when
+        // the hash check fails — that would loop forever on firmware that lacks the endpoint.
+        var optimistic = cached is not null && serverHash is null;
+
+        if (hashMatches || optimistic)
+        {
+            logger.LogInformation(
+                "Stormshield '{Name}': reusing the cached configuration ({Reason}); routing the one-time code to the OpenVPN data plane.",
+                configName, hashMatches ? "firewall reports config unchanged" : "change-check unavailable, cached profile present");
+            // optimistic == true only when we could NOT confirm the cache against the firewall's current
+            // hash; the caller drops the cache if this (unconfirmed) profile then fails the data-plane auth.
+            return (cached!.ProfileOvpn, settings.Password + otp, optimistic);
+        }
+
+        // Cache MISS: download (spends the OTP on the HTTPS step), persist for next time, then stop.
+        logger.LogInformation(
+            "Stormshield '{Name}': {Reason}; downloading a fresh configuration (this uses the one-time code).",
+            configName, cached is null ? "no cached configuration" : "firewall config changed");
+        var rawProfile = await DownloadProfileV5WrappedAsync(portal, settings, otp, cancellationToken).ConfigureAwait(false);
+        var normalized = StormshieldProfileNormalizer.Normalize(rawProfile);
+
+        // Best-effort persist. The OTP is ALREADY spent on the download above, so a failed cache write
+        // must NOT propagate: if it did, the user would get a generic error instead of the "reconnect with
+        // a new code" guidance, and — worse — the next connect would be another miss that spends another
+        // code, looping forever. Swallow the write failure (logged loudly so the loop is diagnosable) and
+        // still surface the reconnect message; the next connect simply re-downloads (one wasted code) rather
+        // than looping. (OperationCanceledException is a genuine user/token cancel — let it through.)
         try
         {
-            rawProfile = await portal.DownloadProfileV5Async(settings.Username, settings.Password, otp, cancellationToken)
+            await cache.WriteAsync(tunnelId, settings, serverHash ?? string.Empty, normalized, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Stormshield '{Name}': downloaded a fresh configuration but failed to cache it. The reconnect will "
+                + "re-download (and require another one-time code) until the cache can be written.", configName);
+        }
+
+        throw new StormshieldConfigRefreshedException(
+            $"Stormshield downloaded an updated configuration for '{configName}', which used your one-time code. "
+            + "Reconnect and enter a NEW one-time code to bring up the VPN tunnel.");
+    }
+
+    private static async Task<string> DownloadProfileV5WrappedAsync(
+        IStormshieldPortal portal, StormshieldSettings settings, string? otp, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await portal.DownloadProfileV5Async(settings.Username, settings.Password, otp, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
@@ -199,104 +298,6 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         {
             throw new InvalidOperationException(
                 $"Stormshield configuration download timed out talking to '{settings.Server}:{settings.Port}'.", ex);
-        }
-
-        _logger.LogDebug("Stormshield configuration retrieved for '{Name}'; normalizing profile.", config.Name);
-        return StormshieldProfileNormalizer.Normalize(rawProfile);
-    }
-
-    /// <summary>
-    /// Drives the Stormshield captive-portal authentication to success, prompting for an OTP when the
-    /// user opted in or the firewall demands one (<c>NEED_TOTP_AUTH</c>). On return the
-    /// <paramref name="portal"/> holds an authenticated session ready for the profile download.
-    /// Wraps raw HttpRequestException / timeout into actionable InvalidOperationException so the
-    /// session UI shows a Stormshield-specific error.
-    ///
-    /// Static helper taking everything as parameters so it's directly unit-testable with a fake
-    /// <see cref="IStormshieldPortal"/> + <see cref="IOtpPromptService"/>.
-    /// </summary>
-    internal static async Task RunAuthLoopAsync(
-        IStormshieldPortal portal,
-        IOtpPromptService otpPrompt,
-        ILogger logger,
-        string configName,
-        StormshieldSettings settings,
-        CancellationToken cancellationToken)
-    {
-        var app = string.IsNullOrWhiteSpace(settings.AppToken) ? StormshieldSettings.DefaultAppToken : settings.AppToken;
-
-        var otpPrompts = 0;
-        string? otp = null;
-        // If the user checked "Use an OTP", collect the code before the first POST — the official
-        // client surfaces the OTP field at connect time and sends it with the initial credentials.
-        if (settings.UseOtp)
-        {
-            otp = await PromptOtpAsync(otpPrompt, configName, cancellationToken).ConfigureAwait(false);
-            otpPrompts++;
-        }
-
-        var outcome = await AuthenticateWrappedAsync(
-            portal, settings.Username, settings.Password, otp, app, settings, cancellationToken).ConfigureAwait(false);
-
-        while (true)
-        {
-            switch (outcome)
-            {
-                case StormshieldAuthOutcome.Ok:
-                    logger.LogDebug("Stormshield portal accepted credentials for '{Name}'.", configName);
-                    return;
-
-                case StormshieldAuthOutcome.NeedOtp:
-                    if (otpPrompts >= MaxOtpRounds)
-                    {
-                        throw new InvalidOperationException(
-                            $"Stormshield 2FA exceeded {MaxOtpRounds} attempts — the code may be wrong or the gateway misconfigured.");
-                    }
-                    logger.LogInformation("Stormshield gateway requested an OTP for '{Name}' (attempt {Round}).", configName, otpPrompts + 1);
-                    otp = await PromptOtpAsync(otpPrompt, configName, cancellationToken).ConfigureAwait(false);
-                    otpPrompts++;
-                    outcome = await AuthenticateWrappedAsync(
-                        portal, settings.Username, settings.Password, otp, app, settings, cancellationToken).ConfigureAwait(false);
-                    continue;
-
-                case StormshieldAuthOutcome.Bruteforce bruteforce:
-                    // The firewall throttled the account after repeated failures. Surface the wait so
-                    // the user doesn't keep hammering it.
-                    var wait = bruteforce.DelaySeconds > 0 ? $" Try again in {bruteforce.DelaySeconds}s." : string.Empty;
-                    throw new InvalidOperationException(
-                        $"Stormshield temporarily blocked authentication for '{configName}' after too many failed attempts.{wait}");
-
-                case StormshieldAuthOutcome.Failure failure:
-                    throw new InvalidOperationException($"Stormshield authentication failed: {failure.Reason}");
-
-                default:
-                    throw new InvalidOperationException(
-                        $"Stormshield auth produced an unexpected outcome type: {outcome?.GetType().Name ?? "null"}.");
-            }
-        }
-    }
-
-    private static async Task<StormshieldAuthOutcome> AuthenticateWrappedAsync(
-        IStormshieldPortal portal, string username, string password, string? otp, string app,
-        StormshieldSettings settings, CancellationToken cancellationToken)
-    {
-        try
-        {
-            return await portal.AuthenticateAsync(username, password, otp, app, cancellationToken).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (HttpRequestException ex)
-        {
-            throw new InvalidOperationException(
-                $"Stormshield pre-auth could not reach '{settings.Server}:{settings.Port}': {ex.Message}", ex);
-        }
-        catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
-        {
-            throw new InvalidOperationException(
-                $"Stormshield pre-auth timed out talking to '{settings.Server}:{settings.Port}'.", ex);
         }
     }
 
@@ -319,4 +320,23 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             throw new InvalidOperationException("Stormshield OTP prompt returned an empty code.");
         return otp;
     }
+}
+
+/// <summary>
+/// Thrown by the Automatic + OTP flow when a fresh configuration had to be downloaded (because none was
+/// cached, or the firewall's config changed) — which consumes the single-use one-time code on the HTTPS
+/// download. The freshly-downloaded profile is now cached, so the connection is deliberately NOT brought
+/// up on this attempt: the user must reconnect with a NEW code, which the next connect routes to the
+/// OpenVPN data plane.
+///
+/// <para>Its <see cref="Exception.Message"/> is user-facing (surfaced by the session view-models like any
+/// other connect failure) and already states the "reconnect with a new code" guidance. It derives from
+/// <see cref="InvalidOperationException"/> rather than being a bare one so this expected outcome can be
+/// distinguished from a genuine transport/auth failure — the provider's own tests assert on the type, and
+/// a future caller could special-case it (e.g. present a re-prompt instead of a red error). No caller
+/// special-cases it today; the clear message carries the UX.</para>
+/// </summary>
+internal sealed class StormshieldConfigRefreshedException : InvalidOperationException
+{
+    public StormshieldConfigRefreshedException(string message) : base(message) { }
 }

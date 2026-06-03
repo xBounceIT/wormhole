@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Security;
@@ -15,50 +16,40 @@ using System.Xml;
 namespace Wormhole.Services.Tunneling.Stormshield;
 
 /// <summary>
-/// Seam for testing <see cref="StormshieldTunnelProvider.RunAuthLoopAsync"/> without a live SNS
-/// firewall. Production callers use the real <see cref="StormshieldPortalClient"/>; tests inject a
-/// fake that scripts the auth outcomes and the downloaded profile.
+/// Seam for testing <see cref="StormshieldTunnelProvider.ResolveAutomaticCoreAsync"/> without a live SNS
+/// firewall. Production callers use the real <see cref="StormshieldPortalClient"/>; tests inject a fake
+/// that scripts the config-change hash and the downloaded profile.
 /// </summary>
 internal interface IStormshieldPortal : IDisposable
 {
-    /// <summary>POST username/password (+optional OTP) to the captive-portal auth endpoint.</summary>
-    Task<StormshieldAuthOutcome> AuthenticateAsync(
-        string username, string password, string? otp, string app, CancellationToken cancellationToken);
+    /// <summary>
+    /// Native v5 download: <c>POST auth/config.html?version=1&amp;type=openvpn</c>, returning the assembled,
+    /// self-contained <c>.ovpn</c>. The single-use OTP, when supplied, is concatenated onto the password.
+    /// </summary>
+    Task<string> DownloadProfileV5Async(string username, string password, string? otp, CancellationToken cancellationToken);
 
     /// <summary>
-    /// After a successful auth, download the per-user OpenVPN profile over the authenticated session.
-    /// Returns the raw <c>.ovpn</c> text.
+    /// Native v5 change-check: <c>GET auth/v1/sslvpn/hash</c>, returning the firewall's current SSL VPN
+    /// config hash (an opaque token) or <c>null</c> when the firewall doesn't support the endpoint / it
+    /// is unreachable. Used to decide whether a cached profile is still current.
     /// </summary>
-    Task<string> DownloadProfileAsync(string app, CancellationToken cancellationToken);
+    Task<string?> GetConfigHashAsync(CancellationToken cancellationToken);
 }
 
 /// <summary>
-/// Talks to the Stormshield SNS firewall captive/authentication portal over HTTPS. The protocol is
-/// the one Stormshield publishes in its own open-source client
-/// (<c>github.com/stormshield/python-SNS-API</c>, module <c>stormshield.sns.sslclient</c>):
+/// Talks to the Stormshield SNS firewall's native <b>v5</b> "SN SSL VPN Client" surface over HTTPS,
+/// reverse-engineered from the vendor's shipping client (<c>SSLVPNService.SNS.SnsVpnConfiguration</c>):
 ///
 /// <list type="bullet">
-///   <item><b>Auth</b>: <c>POST /auth/admin.html</c>, form-urlencoded
-///   <c>uid=base64(user)</c>, <c>pswd=base64(pass)</c>, <c>app=&lt;app&gt;</c>, and
-///   <c>totp=base64(otp)</c> when an OTP is used. The response is XML whose root carries a
-///   <c>msg</c> attribute ∈ {<c>AUTH_SUCCESS</c>, <c>AUTH_FAILED</c>, <c>NEED_TOTP_AUTH</c>,
-///   <c>ERR_BRUTEFORCE</c> (+ <c>delay</c>)}. The session lives in a cookie carried forward.</item>
-///   <item><b>Config download</b>: open a serverd API session
-///   (<c>POST /api/auth/login</c> → <c>sessionid</c>), run the documented
-///   <c>GET /api/command?sessionid=…&amp;cmd=CONFIG OPENVPN DOWNLOAD</c> command (available since
-///   firmware 2.0.0), then stream the produced file from
-///   <c>GET /api/download/tmp.file?sessionid=…</c>, and <c>GET /api/auth/logout?sessionid=…</c>.</item>
+///   <item><b>Config download</b>: <c>POST auth/config.html?version=1&amp;type=openvpn</c>, form-urlencoded
+///   <c>user</c> / <c>pass</c> (the single-use OTP, when used, is concatenated onto the password). A
+///   <c>200 application/zip</c> carries the per-user OpenVPN bundle (<c>.ovpn</c> + CA/cert/key PEMs);
+///   a <c>200 text/xml</c> carries a <c>&lt;ret code/msg&gt;</c> firewall error. This is the low-privilege,
+///   user-facing surface — no administration/serverd privilege required (see <see cref="DownloadProfileV5Async"/>).</item>
+///   <item><b>Change check</b>: <c>GET auth/v1/sslvpn/hash</c> (unauthenticated) returns the firewall's
+///   current SSL VPN config hash, used to decide whether a cached profile is still current
+///   (see <see cref="GetConfigHashAsync"/>).</item>
 /// </list>
-///
-/// <para>
-/// CONFIDENCE: the <c>/auth/admin.html</c> auth contract is verified first-hand against the vendor's
-/// own source. The serverd download endpoints are likewise from that source, but they require the
-/// account to have serverd/API privilege — a low-privilege VPN user normally retrieves the profile
-/// from the captive-portal "Personal data" page instead, whose literal href is undocumented and
-/// would need a packet capture to pin. The download is therefore centralized in one method so that
-/// alternative can be slotted in without touching the provider; users without API privilege should
-/// use Import ("OpenVPN") mode in the meantime.
-/// </para>
 ///
 /// <para>
 /// TLS: SNS factory certificates put the appliance serial number in the certificate CN (no matching
@@ -76,9 +67,8 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
     // MaxProfileBytes, which does not bound inflation). Mirrors WatchguardWgsslImporter.
     private const int MaxZipEntryBytes = 1 * 1024 * 1024;
     private const int MaxZipEntryCount = 32;
-    // Cap for buffered responses (the auth POST + serverd login/command, which are small XML docs).
-    // The profile download streams instead (ResponseHeadersRead + ReadCappedStringAsync), so it is
-    // exempt from this buffer cap and keeps its own MaxProfileBytes limit.
+    // Cap for buffered responses (the config-change hash GET + a text/xml download error, both small).
+    // The zip bundle download streams instead (ReadCappedBytesAsync) under its own MaxProfileBytes limit.
     private const int MaxBufferedResponseBytes = 4 * 1024 * 1024;
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
 
@@ -182,100 +172,6 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
         _pinnedCaCerts = null;
     }
 
-    public async Task<StormshieldAuthOutcome> AuthenticateAsync(
-        string username, string password, string? otp, string app, CancellationToken cancellationToken)
-    {
-        var form = new Dictionary<string, string>
-        {
-            // Field names + base64 encoding mirror python-SNS-API's password-auth request verbatim.
-            ["uid"] = Base64Utf8(username),
-            ["pswd"] = Base64Utf8(password),
-            ["app"] = app,
-        };
-        if (!string.IsNullOrEmpty(otp))
-            form["totp"] = Base64Utf8(otp);
-
-        using var content = new FormUrlEncodedContent(form);
-        using var response = await _http.PostAsync(new Uri(_baseUri, "auth/admin.html"), content, cancellationToken)
-            .ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
-            return new StormshieldAuthOutcome.Failure($"Portal returned HTTP {(int)response.StatusCode} {response.ReasonPhrase}.");
-        if (IsNonXmlContent(response, out var mediaType))
-            return new StormshieldAuthOutcome.Failure(
-                $"Stormshield portal returned non-XML content ({mediaType}). The configured host may not be a Stormshield SSL VPN portal.");
-
-        var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        return ParseAuthResponse(body);
-    }
-
-    public async Task<string> DownloadProfileAsync(string app, CancellationToken cancellationToken)
-    {
-        // Open a serverd API session over the same cookie session established by AuthenticateAsync.
-        var sessionId = await OpenServerdSessionAsync(app, cancellationToken).ConfigureAwait(false);
-        // The session id comes from the firewall's own XML, but escape it before interpolating into
-        // the query string anyway — keeps it consistent with the escaped `cmd` below and removes any
-        // chance of a malformed value altering the request shape.
-        var sid = Uri.EscapeDataString(sessionId);
-        try
-        {
-            // CONFIG OPENVPN DOWNLOAD is a "Format raw" serverd command (per the command reference),
-            // so the OpenVPN profile is returned in the command RESPONSE itself — either as raw text
-            // or wrapped in the serverd XML envelope — NOT staged for a separate download. Read the
-            // response and extract the profile from it.
-            var cmd = Uri.EscapeDataString("CONFIG OPENVPN DOWNLOAD");
-            string commandBody;
-            using (var cmdResponse = await _http
-                .GetAsync(new Uri(_baseUri, $"api/command?sessionid={sid}&cmd={cmd}"), cancellationToken)
-                .ConfigureAwait(false))
-            {
-                if (!cmdResponse.IsSuccessStatusCode)
-                    throw new InvalidOperationException(
-                        $"Stormshield 'CONFIG OPENVPN DOWNLOAD' returned HTTP {(int)cmdResponse.StatusCode}.");
-                // Capped by HttpClient.MaxResponseContentBufferSize on the production client.
-                commandBody = await cmdResponse.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            }
-
-            var profile = ExtractProfile(commandBody);
-            if (profile is not null) return profile;
-
-            // Fallback: should the firmware instead stage the file for a separate download, try the
-            // staged-file endpoint before giving up. (The inline command response above is the
-            // documented path; this just keeps an older/edge firmware working.)
-            using (var dlResponse = await _http
-                .GetAsync(new Uri(_baseUri, $"api/download/tmp.file?sessionid={sid}"),
-                    HttpCompletionOption.ResponseHeadersRead, cancellationToken)
-                .ConfigureAwait(false))
-            {
-                if (dlResponse.IsSuccessStatusCode)
-                {
-                    var staged = await ReadCappedStringAsync(dlResponse, MaxProfileBytes, cancellationToken).ConfigureAwait(false);
-                    var stagedProfile = ExtractProfile(staged);
-                    if (stagedProfile is not null) return stagedProfile;
-                }
-            }
-
-            // Most likely cause: the account lacks serverd/API privilege, so the firewall served an
-            // error/HTML page instead of the .ovpn. Point the user at the working fallback.
-            throw new InvalidOperationException(
-                "Stormshield did not return an OpenVPN profile from the firewall. The account may lack "
-                + "configuration-API privilege for automatic retrieval — download the .ovpn from the "
-                + "firewall's /auth \"Personal data\" page and use Import (OpenVPN) mode instead.");
-        }
-        finally
-        {
-            // Best-effort logout — never mask the primary outcome.
-            try
-            {
-                using var ct = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                ct.CancelAfter(TimeSpan.FromSeconds(5));
-                using var _ = await _http
-                    .GetAsync(new Uri(_baseUri, $"api/auth/logout?sessionid={sid}"), ct.Token)
-                    .ConfigureAwait(false);
-            }
-            catch { /* best effort */ }
-        }
-    }
-
     /// <summary>
     /// Downloads the per-user OpenVPN bundle using the native <b>v5</b> "SN SSL VPN Client" flow,
     /// reverse-engineered from the client's <c>SSLVPNService.SNS.SnsVpnConfiguration.DownloadConfig</c>:
@@ -321,6 +217,47 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
 
         var zipBytes = await ReadCappedBytesAsync(response, MaxProfileBytes, cancellationToken).ConfigureAwait(false);
         return AssembleProfileFromZip(zipBytes);
+    }
+
+    /// <summary>
+    /// Fetches the firewall's current SSL VPN configuration hash via the native v5 change-check endpoint
+    /// (<c>GET auth/v1/sslvpn/hash</c>), mirroring <c>SnsVpnConfiguration.GetSnsConfigHash</c>. The endpoint
+    /// is unauthenticated (the pinned server certificate is the only trust check) and returns a quoted
+    /// SHA-256; this strips the quotes and upper-cases the value for a stable, case-insensitive comparison.
+    ///
+    /// <para>Returns <c>null</c> — never throws (except on genuine caller cancellation) — when the firewall
+    /// doesn't expose the endpoint, is unreachable, times out, or answers with something that isn't a hash
+    /// (e.g. an HTML error page). The caller treats a null as "change-check unavailable" and falls back to
+    /// the cache-presence heuristic, so a missing endpoint degrades gracefully rather than failing the connect.</para>
+    /// </summary>
+    public async Task<string?> GetConfigHashAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, new Uri(_baseUri, "auth/v1/sslvpn/hash"));
+            // Mirror the native client's Accept headers (it asks for text/html, text/plain).
+            request.Headers.Accept.ParseAdd("text/html");
+            request.Headers.Accept.ParseAdd("text/plain");
+            using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode) return null;
+
+            var hash = (await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false)).Trim().Trim('"');
+            // The native client returns a 66-char quoted SHA-256, i.e. exactly 64 hex chars once the quotes
+            // are stripped. Require exactly that: anything else (an HTML page, an XML envelope, a truncated
+            // body) is "not a hash" → null → the caller degrades gracefully (cache-presence heuristic). Being
+            // strict here matters because this value gates HIT vs MISS — and a MISS spends the OTP.
+            if (hash.Length != 64 || !hash.All(char.IsAsciiHexDigit)) return null;
+            return hash.ToUpperInvariant();
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception)
+        {
+            // HttpRequestException, a non-cancellation TaskCanceledException (timeout), etc. → unavailable.
+            return null;
+        }
     }
 
     /// <summary>
@@ -460,27 +397,6 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
         return ms.ToArray();
     }
 
-    private async Task<string> OpenServerdSessionAsync(string app, CancellationToken cancellationToken)
-    {
-        var form = new Dictionary<string, string> { ["app"] = app, ["id"] = "0" };
-        using var content = new FormUrlEncodedContent(form);
-        using var response = await _http.PostAsync(new Uri(_baseUri, "api/auth/login"), content, cancellationToken)
-            .ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
-            throw new InvalidOperationException(
-                $"Stormshield serverd login returned HTTP {(int)response.StatusCode}.");
-        if (IsNonXmlContent(response, out var mediaType))
-            throw new InvalidOperationException(
-                $"Stormshield serverd login returned non-XML content ({mediaType}) — the host may not be a Stormshield SSL VPN portal.");
-
-        var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        var sessionId = SelectText(body, "sessionid");
-        if (string.IsNullOrWhiteSpace(sessionId))
-            throw new InvalidOperationException(
-                "Stormshield serverd login did not return a session id (the account may lack API privilege).");
-        return sessionId!;
-    }
-
     /// <summary>
     /// Builds the portal base URI safely: validates <paramref name="server"/> as a bare host
     /// (rejecting inputs that would smuggle userinfo / path / query into the parser) and assigns
@@ -495,54 +411,8 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
         if (Uri.CheckHostName(server) == UriHostNameType.Unknown)
             throw new InvalidOperationException($"Server '{server}' is not a valid hostname, IPv4, or IPv6 address.");
 
-        // Trailing slash so relative Uris ("auth/admin.html") resolve under the host root.
+        // Trailing slash so relative Uris ("auth/config.html") resolve under the host root.
         return new UriBuilder { Scheme = Uri.UriSchemeHttps, Host = server, Port = port, Path = "/" }.Uri;
-    }
-
-    internal static StormshieldAuthOutcome ParseAuthResponse(string xmlBody)
-    {
-        if (string.IsNullOrWhiteSpace(xmlBody))
-            return new StormshieldAuthOutcome.Failure("Portal returned an empty response body.");
-
-        string? msg;
-        string? delay;
-        try
-        {
-            var doc = LoadHardenedXml(xmlBody);
-            // The status lives on whichever element carries a `msg` attribute (the response root in
-            // practice); search by attribute so we don't depend on the exact element name.
-            var node = doc.SelectSingleNode("//*[@msg]");
-            msg = node?.Attributes?["msg"]?.Value;
-            delay = node?.Attributes?["delay"]?.Value;
-        }
-        catch (XmlException ex)
-        {
-            return new StormshieldAuthOutcome.Failure($"Portal returned malformed XML: {ex.Message}");
-        }
-
-        return msg switch
-        {
-            "AUTH_SUCCESS" => new StormshieldAuthOutcome.Ok(),
-            "NEED_TOTP_AUTH" => new StormshieldAuthOutcome.NeedOtp(),
-            "ERR_BRUTEFORCE" => new StormshieldAuthOutcome.Bruteforce(int.TryParse(delay, out var d) ? d : 0),
-            "AUTH_FAILED" => new StormshieldAuthOutcome.Failure("Authentication failed — check the username and password."),
-            // ACCESS_DENIED is an AUTHORIZATION refusal, not a credential failure: the firewall accepted the
-            // username/password/OTP (a wrong password is AUTH_FAILED) but would not let this account through.
-            // The usual trigger is that Automatic mode authenticates against the firewall's management/serverd
-            // configuration API (auth/admin.html, app "sslclient" — the surface python-SNS-API uses), which a
-            // normal SSL VPN user is not entitled to open; the documented working path for such a user is the
-            // captive-portal .ovpn + Import mode. ACCESS_DENIED is not in python-SNS-API's status set, so it
-            // formerly fell to the "_" arm and surfaced as an opaque "unexpected authentication status".
-            "ACCESS_DENIED" => new StormshieldAuthOutcome.Failure(
-                "the firewall accepted the username, password and OTP but denied this account access. Automatic mode "
-                + "signs in to the firewall's configuration API (auth/admin.html), which standard SSL VPN users are "
-                + "usually not authorized to use. Download the .ovpn from the firewall portal's \"Personal data\" page "
-                + "(open the firewall's /auth page in a browser and sign in), then switch this tunnel to Import (OpenVPN) "
-                + "mode and paste it — that path needs only SSL VPN access, no administrator rights. To keep using "
-                + "Automatic mode, the firewall administrator must grant this account firewall-administration/serverd privilege."),
-            null => new StormshieldAuthOutcome.Failure("Portal response did not contain an authentication status."),
-            _ => new StormshieldAuthOutcome.Failure($"Portal returned an unexpected authentication status '{msg}'."),
-        };
     }
 
     internal static bool LooksLikeOpenVpnProfile(string text)
@@ -558,67 +428,6 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
         return hasRemote && hasDeviceOrCa;
     }
 
-    /// <summary>
-    /// Pulls the OpenVPN profile out of a serverd <c>CONFIG OPENVPN DOWNLOAD</c> response. As a
-    /// "Format raw" command it may return the profile as the raw body or wrapped in the serverd XML
-    /// envelope. Returns the profile text, or <c>null</c> when the body doesn't contain one (e.g. an
-    /// error / HTML page). For the XML case the tightest element whose text content looks like a
-    /// profile is chosen, so envelope metadata isn't spliced into the result — the profile's own
-    /// inline <c>&lt;ca&gt;</c>/<c>&lt;cert&gt;</c>/<c>&lt;key&gt;</c> tags survive because they
-    /// arrive entity-encoded or inside CDATA and are recovered by InnerText.
-    /// </summary>
-    private static string? ExtractProfile(string body)
-    {
-        if (string.IsNullOrWhiteSpace(body)) return null;
-        // Try the XML envelope FIRST: a raw .ovpn is not well-formed XML (leading text plus several
-        // root-level <ca>/<cert>/<key> blocks), so it throws and falls through to the raw branch.
-        // An enveloped profile, by contrast, parses — and a raw-first check would wrongly return the
-        // whole envelope because the profile's markers appear as substrings inside it.
-        try
-        {
-            var doc = LoadHardenedXml(body);
-            var nodes = doc.SelectNodes("//*");
-            string? best = null;
-            if (nodes is not null)
-            {
-                foreach (XmlNode node in nodes)
-                {
-                    var text = node.InnerText?.Trim();
-                    // Pick the tightest (shortest) element whose text looks like a profile — that's
-                    // the data leaf, not the envelope whose text also carries metadata.
-                    if (!string.IsNullOrEmpty(text)
-                        && LooksLikeOpenVpnProfile(text)
-                        && (best is null || text!.Length < best.Length))
-                    {
-                        best = text;
-                    }
-                }
-            }
-            return best;
-        }
-        catch (XmlException)
-        {
-            // Not XML — treat the body as a raw profile.
-            var raw = body.Trim();
-            return LooksLikeOpenVpnProfile(raw) ? raw : null;
-        }
-    }
-
-    /// <summary>
-    /// True when the response declares a Content-Type that is present and is neither application/xml
-    /// nor text/xml. A captive portal / WAF / wrong host can answer 200 OK with HTML, which would
-    /// otherwise slip past the status check and surface later as a misleading "malformed XML" error;
-    /// surfacing the media type tells the operator the host isn't a Stormshield portal. Mirrors the
-    /// guard in WatchguardPreAuthClient.PostFormAsync.
-    /// </summary>
-    private static bool IsNonXmlContent(HttpResponseMessage response, out string? mediaType)
-    {
-        mediaType = response.Content.Headers.ContentType?.MediaType;
-        return !string.IsNullOrEmpty(mediaType)
-            && !mediaType.Equals("application/xml", StringComparison.OrdinalIgnoreCase)
-            && !mediaType.Equals("text/xml", StringComparison.OrdinalIgnoreCase);
-    }
-
     private static XmlDocument LoadHardenedXml(string xml)
     {
         // DTD prohibited + no resolver: defends against XXE and entity-expansion DoS from a hostile
@@ -630,39 +439,6 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
         doc.Load(xmlReader);
         return doc;
     }
-
-    private static string? SelectText(string xmlBody, string nodeName)
-    {
-        try
-        {
-            var doc = LoadHardenedXml(xmlBody);
-            return doc.SelectSingleNode($"//{nodeName}")?.InnerText;
-        }
-        catch (XmlException)
-        {
-            return null;
-        }
-    }
-
-    private static async Task<string> ReadCappedStringAsync(HttpResponseMessage response, int capBytes, CancellationToken ct)
-    {
-        await using var stream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
-        using var ms = new MemoryStream();
-        var buffer = new byte[8192];
-        int read;
-        long total = 0;
-        while ((read = await stream.ReadAsync(buffer, ct).ConfigureAwait(false)) > 0)
-        {
-            total += read;
-            if (total > capBytes)
-                throw new InvalidOperationException(
-                    $"Stormshield profile download exceeded the {capBytes}-byte safety cap.");
-            ms.Write(buffer, 0, read);
-        }
-        return Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
-    }
-
-    private static string Base64Utf8(string value) => Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
 
     private static void DisposeCerts(X509Certificate2Collection? certs)
     {
@@ -678,13 +454,4 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
         if (_ownsHttpClient) _http.Dispose();
         DisposeCerts(_pinnedCaCerts);
     }
-}
-
-/// <summary>Outcome of a Stormshield portal authentication POST. Discriminated via type test.</summary>
-internal abstract record StormshieldAuthOutcome
-{
-    public sealed record Ok : StormshieldAuthOutcome;
-    public sealed record NeedOtp : StormshieldAuthOutcome;
-    public sealed record Bruteforce(int DelaySeconds) : StormshieldAuthOutcome;
-    public sealed record Failure(string Reason) : StormshieldAuthOutcome;
 }

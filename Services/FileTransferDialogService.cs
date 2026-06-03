@@ -106,7 +106,16 @@ public sealed class FileTransferDialogService : IFileTransferDialogService
                     return;
                 }
 
-                tunnel = await _tunnels.EstablishAsync(profile, CancellationToken.None).ConfigureAwait(true);
+                // Reuse the live shell's tunnel (a non-owning borrow) rather than establishing a second
+                // one: for an OTP-interactive VPN a second establish would re-prompt for / burn another
+                // one-time code, and it is a redundant VPN connection for any tunnel. The SSH session owns
+                // disposal of the real instance. If there is no live shell tunnel to borrow — a non-SSH
+                // source tab, or an SSH session that has since disconnected and torn its tunnel down — fall
+                // back to establishing one. That keeps a VPN-required transfer ON the VPN (rather than
+                // silently connecting direct) at the cost of re-establishing it; and for a no-VPN profile
+                // EstablishAsync returns null → direct SFTP, unchanged.
+                var borrowed = (sourceTab as SshSessionViewModel)?.BorrowTunnelForSftp();
+                tunnel = borrowed ?? await _tunnels.EstablishAsync(profile, CancellationToken.None).ConfigureAwait(true);
                 session = await _sftp.ConnectAsync(profile, creds, tunnel, CancellationToken.None).ConfigureAwait(true);
 
                 profile = await PinHostFingerprintIfNeededAsync(sourceTab, profile, session).ConfigureAwait(true);

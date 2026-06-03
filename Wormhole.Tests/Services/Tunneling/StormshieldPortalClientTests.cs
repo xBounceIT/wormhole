@@ -14,122 +14,6 @@ namespace Wormhole.Tests.Services.Tunneling;
 
 public class StormshieldPortalClientTests
 {
-    private static string B64(string s) => Convert.ToBase64String(Encoding.UTF8.GetBytes(s));
-
-    // ----- AuthenticateAsync wire format -----
-    //
-    // Regression-locks the request shape against Stormshield's own python-SNS-API client:
-    // POST /auth/admin.html with base64(uid)/base64(pswd)/app[/base64(totp)].
-
-    [Fact]
-    public async Task AuthenticateAsync_PostsBase64CredentialsToAdminHtml()
-    {
-        var captured = new CapturingHandler(canned: "<auth msg=\"AUTH_SUCCESS\"/>");
-        using var http = new HttpClient(captured);
-        using var client = new StormshieldPortalClient(http, new Uri("https://fw.example.com/"));
-
-        await client.AuthenticateAsync("alice", "p4ss", otp: null, app: "sslclient", CancellationToken.None);
-
-        Assert.Equal("/auth/admin.html", captured.LastPath);
-        var form = captured.LastForm;
-        Assert.Equal(B64("alice"), form["uid"]);
-        Assert.Equal(B64("p4ss"), form["pswd"]);
-        Assert.Equal("sslclient", form["app"]);
-        // No OTP supplied → no totp field at all.
-        Assert.DoesNotContain("totp", form.AllKeys);
-    }
-
-    [Fact]
-    public async Task AuthenticateAsync_IncludesBase64Totp_WhenOtpSupplied()
-    {
-        var captured = new CapturingHandler(canned: "<auth msg=\"AUTH_SUCCESS\"/>");
-        using var http = new HttpClient(captured);
-        using var client = new StormshieldPortalClient(http, new Uri("https://fw.example.com/"));
-
-        await client.AuthenticateAsync("alice", "p4ss", otp: "123456", app: "sslclient", CancellationToken.None);
-
-        Assert.Equal(B64("123456"), captured.LastForm["totp"]);
-    }
-
-    [Fact]
-    public async Task AuthenticateAsync_NonXmlContent_FailsNamingContentTypeNotMalformedXml()
-    {
-        // A captive portal / WAF / wrong host answering 200 OK + HTML must produce a "non-XML
-        // content" failure that names the type — NOT a misleading "malformed XML" parse error.
-        var handler = new CapturingHandler(canned: "<html><body>login</body></html>", mediaType: "text/html");
-        using var http = new HttpClient(handler);
-        using var client = new StormshieldPortalClient(http, new Uri("https://fw.example.com/"));
-
-        var outcome = await client.AuthenticateAsync("alice", "p4ss", otp: null, app: "sslclient", CancellationToken.None);
-
-        var failure = Assert.IsType<StormshieldAuthOutcome.Failure>(outcome);
-        Assert.Contains("non-XML", failure.Reason, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("text/html", failure.Reason, StringComparison.OrdinalIgnoreCase);
-        Assert.DoesNotContain("malformed", failure.Reason, StringComparison.OrdinalIgnoreCase);
-    }
-
-    // ----- ParseAuthResponse status mapping -----
-
-    [Fact]
-    public void ParseAuthResponse_AuthSuccess_MapsToOk()
-    {
-        var outcome = StormshieldPortalClient.ParseAuthResponse("<auth msg=\"AUTH_SUCCESS\"/>");
-        Assert.IsType<StormshieldAuthOutcome.Ok>(outcome);
-    }
-
-    [Fact]
-    public void ParseAuthResponse_NeedTotp_MapsToNeedOtp()
-    {
-        var outcome = StormshieldPortalClient.ParseAuthResponse("<auth msg=\"NEED_TOTP_AUTH\"/>");
-        Assert.IsType<StormshieldAuthOutcome.NeedOtp>(outcome);
-    }
-
-    [Fact]
-    public void ParseAuthResponse_Bruteforce_CarriesDelay()
-    {
-        var outcome = StormshieldPortalClient.ParseAuthResponse("<auth msg=\"ERR_BRUTEFORCE\" delay=\"30\"/>");
-        var bf = Assert.IsType<StormshieldAuthOutcome.Bruteforce>(outcome);
-        Assert.Equal(30, bf.DelaySeconds);
-    }
-
-    [Fact]
-    public void ParseAuthResponse_AuthFailed_MapsToFailure()
-    {
-        var outcome = StormshieldPortalClient.ParseAuthResponse("<auth msg=\"AUTH_FAILED\"/>");
-        Assert.IsType<StormshieldAuthOutcome.Failure>(outcome);
-    }
-
-    [Fact]
-    public void ParseAuthResponse_AccessDenied_MapsToActionableImportGuidance()
-    {
-        // ACCESS_DENIED is an authorization refusal (credentials accepted, but the account is not entitled to
-        // the Automatic-mode admin/serverd surface), distinct from AUTH_FAILED. It must get a dedicated,
-        // actionable message — NOT fall through to the generic "unexpected authentication status" arm — and
-        // steer the user to Import mode.
-        var outcome = StormshieldPortalClient.ParseAuthResponse("<auth msg=\"ACCESS_DENIED\"/>");
-        var failure = Assert.IsType<StormshieldAuthOutcome.Failure>(outcome);
-        Assert.DoesNotContain("unexpected authentication status", failure.Reason, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("Import", failure.Reason, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Theory]
-    [InlineData("")]
-    [InlineData("<auth msg=\"SOMETHING_NEW\"/>")] // unknown status
-    [InlineData("<auth status=\"ok\"/>")]          // no msg attribute at all
-    [InlineData("<auth msg=\"AUTH_SUCCESS\"")]     // malformed XML
-    public void ParseAuthResponse_BadOrUnknown_MapsToFailure(string xml)
-    {
-        Assert.IsType<StormshieldAuthOutcome.Failure>(StormshieldPortalClient.ParseAuthResponse(xml));
-    }
-
-    [Fact]
-    public void ParseAuthResponse_RejectsXmlWithDtd()
-    {
-        // Billion-laughs / entity-expansion DoS protection (DtdProcessing.Prohibit).
-        const string xml = "<!DOCTYPE r [<!ENTITY x \"y\">]><auth msg=\"AUTH_SUCCESS\"/>";
-        Assert.IsType<StormshieldAuthOutcome.Failure>(StormshieldPortalClient.ParseAuthResponse(xml));
-    }
-
     // ----- LooksLikeOpenVpnProfile -----
 
     [Fact]
@@ -201,76 +85,6 @@ public class StormshieldPortalClientTests
         Assert.Throws<ArgumentNullException>(() => new StormshieldPortalClient(null!, new Uri("https://fw/")));
         using var http = new HttpClient(new CapturingHandler("<auth msg=\"AUTH_SUCCESS\"/>"));
         Assert.Throws<ArgumentNullException>(() => new StormshieldPortalClient(http, null!));
-    }
-
-    // ----- DownloadProfileAsync: the profile is returned by the command response (Format raw) -----
-
-    [Fact]
-    public async Task DownloadProfileAsync_ReadsProfileFromCommandResponse_WithoutTmpFile()
-    {
-        // CONFIG OPENVPN DOWNLOAD returns the .ovpn inline — the profile must come from the command
-        // response, and tmp.file must not be required.
-        const string ovpn = "client\ndev tun\nremote rpv.example.com 443 tcp\n<ca>\nMIIB\n</ca>\n";
-        var tmpFileHit = false;
-        var handler = new RoutingHandler(req =>
-        {
-            var path = req.RequestUri!.AbsolutePath;
-            if (path.EndsWith("/api/auth/login", StringComparison.Ordinal)) return (HttpStatusCode.OK, "<nws code=\"100\"><sessionid>abc123</sessionid></nws>", "application/xml");
-            if (path.EndsWith("/api/command", StringComparison.Ordinal)) return (HttpStatusCode.OK, ovpn, "text/plain");
-            if (path.EndsWith("/api/download/tmp.file", StringComparison.Ordinal)) { tmpFileHit = true; return (HttpStatusCode.NotFound, "missing", "text/plain"); }
-            return (HttpStatusCode.OK, string.Empty, "text/plain");
-        });
-        using var http = new HttpClient(handler);
-        using var client = new StormshieldPortalClient(http, new Uri("https://fw.example.com/"));
-
-        var profile = await client.DownloadProfileAsync("sslclient", CancellationToken.None);
-
-        Assert.Contains("remote rpv.example.com 443 tcp", profile);
-        Assert.False(tmpFileHit, "tmp.file must not be needed when the command returns the profile inline");
-    }
-
-    [Fact]
-    public async Task DownloadProfileAsync_ExtractsProfileFromXmlEnvelope()
-    {
-        // When the raw output is wrapped in the serverd XML envelope, the profile is recovered from
-        // the data node and the envelope markup is stripped.
-        const string ovpn = "client\ndev tun\nremote rpv.example.com 443 tcp\n";
-        var enveloped = "<nws code=\"100\"><data format=\"raw\"><![CDATA[" + ovpn + "]]></data></nws>";
-        var handler = new RoutingHandler(req =>
-        {
-            var path = req.RequestUri!.AbsolutePath;
-            if (path.EndsWith("/api/auth/login", StringComparison.Ordinal)) return (HttpStatusCode.OK, "<nws><sessionid>s1</sessionid></nws>", "application/xml");
-            if (path.EndsWith("/api/command", StringComparison.Ordinal)) return (HttpStatusCode.OK, enveloped, "application/xml");
-            return (HttpStatusCode.OK, "irrelevant", "text/plain");
-        });
-        using var http = new HttpClient(handler);
-        using var client = new StormshieldPortalClient(http, new Uri("https://fw.example.com/"));
-
-        var profile = await client.DownloadProfileAsync("sslclient", CancellationToken.None);
-
-        Assert.Contains("remote rpv.example.com 443 tcp", profile);
-        Assert.DoesNotContain("nws", profile, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public async Task DownloadProfileAsync_NoProfileAnywhere_ThrowsActionableImportHint()
-    {
-        // No inline profile and no staged file (e.g. the account lacks API privilege) → an actionable
-        // error pointing at Import mode, not a silent failure.
-        var handler = new RoutingHandler(req =>
-        {
-            var path = req.RequestUri!.AbsolutePath;
-            if (path.EndsWith("/api/auth/login", StringComparison.Ordinal)) return (HttpStatusCode.OK, "<nws><sessionid>s1</sessionid></nws>", "application/xml");
-            if (path.EndsWith("/api/command", StringComparison.Ordinal)) return (HttpStatusCode.OK, "<html>403 Forbidden</html>", "text/html");
-            if (path.EndsWith("/api/download/tmp.file", StringComparison.Ordinal)) return (HttpStatusCode.NotFound, "nope", "text/plain");
-            return (HttpStatusCode.OK, string.Empty, "text/plain");
-        });
-        using var http = new HttpClient(handler);
-        using var client = new StormshieldPortalClient(http, new Uri("https://fw.example.com/"));
-
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            client.DownloadProfileAsync("sslclient", CancellationToken.None));
-        Assert.Contains("Import", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     // ----- DownloadProfileV5Async: native v5 SN SSL VPN Client flow -----
@@ -393,6 +207,24 @@ public class StormshieldPortalClientTests
     }
 
     [Fact]
+    public async Task DownloadProfileV5Async_XmlErrorWithDtd_DoesNotExpandEntities()
+    {
+        // The firewall's text/xml error is parsed by the hardened XML reader (DtdProcessing.Prohibit +
+        // no resolver). A malicious DOCTYPE/ENTITY must NOT be expanded (XXE / billion-laughs defence).
+        // This pins that hardening on the surviving v5 error path (DescribeV5Error -> LoadHardenedXml).
+        const string xxe = "<!DOCTYPE r [<!ENTITY x \"XXE_EXPANDED_SECRET\">]>"
+            + "<nws version=\"1\"><config user=\"u\" type=\"openvpn\"/><ret code=\"8\" msg=\"&x;\"/></nws>";
+        var handler = new RoutingHandler(_ => (HttpStatusCode.OK, xxe, "text/xml"));
+        using var http = new HttpClient(handler);
+        using var client = new StormshieldPortalClient(http, new Uri("https://rpv.example.com/"));
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.DownloadProfileV5Async("u", "p", otp: null, CancellationToken.None));
+        // The DTD is rejected, so the entity is never expanded into the surfaced message.
+        Assert.DoesNotContain("XXE_EXPANDED_SECRET", ex.Message);
+    }
+
+    [Fact]
     public void AssembleProfileFromZip_MissingReferencedPem_ThrowsNamingTheMissingFile()
     {
         // A bundle with the .ovpn (referencing CA.cert.pem) but WITHOUT that file must fail fast and
@@ -435,6 +267,76 @@ public class StormshieldPortalClientTests
             StormshieldPortalClient.AssembleProfileFromZip(Encoding.UTF8.GetBytes("not a zip")));
     }
 
+    // ----- GetConfigHashAsync: native v5 change-check (GET auth/v1/sslvpn/hash) -----
+
+    [Fact]
+    public async Task GetConfigHashAsync_GetsHashEndpoint_ReturnsTrimmedUppercasedToken()
+    {
+        HttpMethod? method = null;
+        string? path = null;
+        var hex = new string('a', 64); // SHA-256 hex
+        var handler = new RoutingHandler(req =>
+        {
+            method = req.Method;
+            path = req.RequestUri?.AbsolutePath;
+            return (HttpStatusCode.OK, "\"" + hex + "\"", "text/plain"); // quoted, as the firewall returns
+        });
+        using var http = new HttpClient(handler);
+        using var client = new StormshieldPortalClient(http, new Uri("https://rpv.example.com/"));
+
+        var hash = await client.GetConfigHashAsync(CancellationToken.None);
+
+        Assert.Equal(HttpMethod.Get, method);
+        Assert.Equal("/auth/v1/sslvpn/hash", path);
+        Assert.Equal(hex.ToUpperInvariant(), hash); // surrounding quotes trimmed, upper-cased for comparison
+    }
+
+    [Fact]
+    public async Task GetConfigHashAsync_Non200_ReturnsNull()
+    {
+        // Endpoint unsupported (older firmware) → null so the caller falls back to the cache-presence heuristic.
+        var handler = new RoutingHandler(_ => (HttpStatusCode.NotFound, "not found", "text/plain"));
+        using var http = new HttpClient(handler);
+        using var client = new StormshieldPortalClient(http, new Uri("https://rpv.example.com/"));
+
+        Assert.Null(await client.GetConfigHashAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task GetConfigHashAsync_NonHashBody_ReturnsNull()
+    {
+        // A captive portal / WAF answering 200 + HTML must NOT be mistaken for a hash.
+        var handler = new RoutingHandler(_ => (HttpStatusCode.OK, "<html><body>login</body></html>", "text/html"));
+        using var http = new HttpClient(handler);
+        using var client = new StormshieldPortalClient(http, new Uri("https://rpv.example.com/"));
+
+        Assert.Null(await client.GetConfigHashAsync(CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData(63)]  // one short of SHA-256
+    [InlineData(65)]  // one over
+    [InlineData(32)]  // a different digest length must NOT be accepted (gates OTP-spending HIT/MISS)
+    public async Task GetConfigHashAsync_WrongLengthHex_ReturnsNull(int len)
+    {
+        var handler = new RoutingHandler(_ => (HttpStatusCode.OK, "\"" + new string('a', len) + "\"", "text/plain"));
+        using var http = new HttpClient(handler);
+        using var client = new StormshieldPortalClient(http, new Uri("https://rpv.example.com/"));
+
+        Assert.Null(await client.GetConfigHashAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task GetConfigHashAsync_64NonHexChars_ReturnsNull()
+    {
+        // Right length, but not hex (e.g. a 64-char error token) → not a hash.
+        var handler = new RoutingHandler(_ => (HttpStatusCode.OK, new string('z', 64), "text/plain"));
+        using var http = new HttpClient(handler);
+        using var client = new StormshieldPortalClient(http, new Uri("https://rpv.example.com/"));
+
+        Assert.Null(await client.GetConfigHashAsync(CancellationToken.None));
+    }
+
     private static byte[] BuildBundleZip(params (string Name, string Content)[] files)
     {
         using var ms = new MemoryStream();
@@ -450,8 +352,8 @@ public class StormshieldPortalClientTests
         return ms.ToArray();
     }
 
-    /// <summary>Test-only handler that routes responses by request (path), used to script the
-    /// multi-request DownloadProfileAsync flow.</summary>
+    /// <summary>Test-only handler that returns a chosen (status, body, content-type) computed from the
+    /// request — used to drive the v5 download error branches and the config-hash change-check.</summary>
     private sealed class RoutingHandler : HttpMessageHandler
     {
         private readonly Func<HttpRequestMessage, (HttpStatusCode, string, string)> _route;
