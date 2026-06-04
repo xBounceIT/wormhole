@@ -595,19 +595,15 @@ public partial class TunnelConfigsViewModel : ObservableObject
         StringBuilder? sb = null;
         if (string.IsNullOrWhiteSpace(wg.Server)) AppendValidationError(ref sb, "Server is required.");
         if (wg.Port is < 1 or > 65535) AppendValidationError(ref sb, "Port must be between 1 and 65535.");
-        if (string.IsNullOrWhiteSpace(wg.Username)) AppendValidationError(ref sb, "Username is required.");
-        if (string.IsNullOrWhiteSpace(wg.Password)) AppendValidationError(ref sb, "Password is required.");
-        if (string.IsNullOrWhiteSpace(wg.CaPem)) AppendValidationError(ref sb, "CA certificate (PEM) is required.");
-        if (string.IsNullOrWhiteSpace(wg.ClientCertPem)) AppendValidationError(ref sb, "Client certificate (PEM) is required.");
-        if (string.IsNullOrWhiteSpace(wg.ClientKeyPem)) AppendValidationError(ref sb, "Client private key (PEM) is required.");
+        if (wg.AuthMode == WatchguardAuthMode.UsernamePassword)
+        {
+            if (string.IsNullOrWhiteSpace(wg.Username)) AppendValidationError(ref sb, "Username is required.");
+            if (string.IsNullOrWhiteSpace(wg.Password)) AppendValidationError(ref sb, "Password is required.");
+        }
         ThrowValidationErrors(sb);
 
-        // Required fields are all present — now apply the SAME injection-safety checks the
-        // profile builder enforces (control chars / quotes in Server or the verify-x509-name
-        // subject; angle brackets in a PEM body). Without this, a hand-edited or imported value
-        // carrying one of those characters passes Save and only fails at connect time inside
-        // WatchguardProfileBuilder.Build, after the bad value is already on disk. Run it after
-        // the required-field check so Server / the PEMs are guaranteed non-empty here.
+        // PEM fields are optional now because the native-style path downloads client.wgssl on
+        // connect, but any supplied directive-bearing fields must still be injection-safe.
         WatchguardProfileBuilder.ValidateFieldSafety(wg);
     }
 

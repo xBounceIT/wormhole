@@ -19,6 +19,7 @@ public class WatchguardTunnelProviderTests
     {
         var provider = new WatchguardTunnelProvider(
             new NullOtpPromptService(),
+            new NullSamlAuthService(),
             NullLogger<WatchguardTunnelProvider>.Instance,
             NullLoggerFactory.Instance);
 
@@ -30,6 +31,7 @@ public class WatchguardTunnelProviderTests
     {
         var provider = new WatchguardTunnelProvider(
             new NullOtpPromptService(),
+            new NullSamlAuthService(),
             NullLogger<WatchguardTunnelProvider>.Instance,
             NullLoggerFactory.Instance);
         var cfg = new TunnelConfig { Id = Guid.NewGuid(), Name = "x", Kind = TunnelKind.Watchguard };
@@ -46,6 +48,7 @@ public class WatchguardTunnelProviderTests
         // catches this and surfaces a "re-enter settings" error before any network IO.
         var provider = new WatchguardTunnelProvider(
             new NullOtpPromptService(),
+            new NullSamlAuthService(),
             NullLogger<WatchguardTunnelProvider>.Instance,
             NullLoggerFactory.Instance);
         var cfg = new TunnelConfig { Id = Guid.NewGuid(), Name = "x", Kind = TunnelKind.Watchguard };
@@ -54,6 +57,66 @@ public class WatchguardTunnelProviderTests
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             provider.EstablishAsync(cfg, emptyJson, CancellationToken.None));
         Assert.Contains("Server", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task EstablishAsync_UsernamePasswordManualFallback_ValidatesProfileBeforePreAuth()
+    {
+        var provider = new WatchguardTunnelProvider(
+            new NullOtpPromptService(),
+            new NullSamlAuthService(),
+            NullLogger<WatchguardTunnelProvider>.Instance,
+            NullLoggerFactory.Instance);
+        var cfg = new TunnelConfig { Id = Guid.NewGuid(), Name = "x", Kind = TunnelKind.Watchguard };
+        var settings = new WatchguardSettings
+        {
+            Server = "127.0.0.1",
+            Port = 443,
+            AuthMode = WatchguardAuthMode.UsernamePassword,
+            Username = "alice",
+            Password = "stored-password",
+            TrustServerCertificate = true,
+            CaPem = "-----BEGIN CERTIFICATE-----\nBAD<CA\n-----END CERTIFICATE-----",
+            ClientCertPem = "-----BEGIN CERTIFICATE-----\nCERT\n-----END CERTIFICATE-----",
+            ClientKeyPem = "-----BEGIN PRIVATE KEY-----\nKEY\n-----END PRIVATE KEY-----",
+        };
+        var secret = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(settings);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            provider.EstablishAsync(cfg, secret, CancellationToken.None));
+
+        Assert.Contains("angle bracket", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ResolveAutomaticAuthMode_SamlStatusWithSavedCredentials_UsesUsernamePassword()
+    {
+        var settings = ValidSettings();
+        settings.AuthMode = WatchguardAuthMode.Automatic;
+        var status = new WatchguardGatewayStatus(
+            SamlEnabled: true,
+            SamlIdentityProviderName: "Entra ID",
+            AuthDomains: Array.Empty<string>());
+
+        var mode = WatchguardTunnelProvider.ResolveAutomaticAuthMode(settings, status);
+
+        Assert.Equal(WatchguardAuthMode.UsernamePassword, mode);
+    }
+
+    [Fact]
+    public void ResolveAutomaticAuthMode_SamlStatusWithoutSavedPassword_UsesSaml()
+    {
+        var settings = ValidSettings();
+        settings.AuthMode = WatchguardAuthMode.Automatic;
+        settings.Password = "";
+        var status = new WatchguardGatewayStatus(
+            SamlEnabled: true,
+            SamlIdentityProviderName: "Entra ID",
+            AuthDomains: Array.Empty<string>());
+
+        var mode = WatchguardTunnelProvider.ResolveAutomaticAuthMode(settings, status);
+
+        Assert.Equal(WatchguardAuthMode.Saml, mode);
     }
 
     // ----- Multi-stage 2FA loop tests -----
@@ -105,6 +168,23 @@ public class WatchguardTunnelProviderTests
         // The challenge response leg must POST the OTP and the LogonId from the first leg.
         Assert.Equal("session-1", pre.LastChallengeLogonId);
         Assert.Equal("123456", pre.LastOtp);
+    }
+
+    [Fact]
+    public async Task RunPreAuthLoop_PushChoiceThenOk_ReturnsPushChoice()
+    {
+        var pre = new ScriptedPreAuth();
+        pre.Queue(new PreAuthOutcome.Challenge("session-1", "enter code or p"));
+        pre.Queue(new PreAuthOutcome.Ok());
+        var otp = new ScriptedOtpPrompt("p");
+
+        var result = await WatchguardTunnelProvider.RunPreAuthLoopAsync(
+            pre, otp, NullLogger<WatchguardTunnelProvider>.Instance, "cfg", ValidSettings(), CancellationToken.None);
+
+        Assert.Equal("p", result);
+        Assert.Equal("session-1", pre.LastMfaChoiceLogonId);
+        Assert.Equal("p", pre.LastMfaChoice);
+        Assert.Null(pre.LastOtp);
     }
 
     [Fact]
@@ -249,6 +329,15 @@ public class WatchguardTunnelProviderTests
             Task.FromResult<string?>(null);
     }
 
+    private sealed class NullSamlAuthService : IWatchguardSamlAuthService
+    {
+        public Task<WatchguardSamlAuthResult> AuthenticateAsync(
+            WatchguardSettings settings,
+            string configName,
+            CancellationToken cancellationToken) =>
+            Task.FromException<WatchguardSamlAuthResult>(new InvalidOperationException("not scripted"));
+    }
+
     /// <summary>
     /// Scripted IWatchguardPreAuth fake. Each LogonAsync or RespondToChallengeAsync dequeues the
     /// next pre-queued outcome (or throws the next pre-queued exception). Records the most
@@ -259,6 +348,8 @@ public class WatchguardTunnelProviderTests
         private readonly Queue<object> _script = new();
         public string? LastChallengeLogonId { get; private set; }
         public string? LastOtp { get; private set; }
+        public string? LastMfaChoiceLogonId { get; private set; }
+        public string? LastMfaChoice { get; private set; }
 
         public void Queue(PreAuthOutcome outcome) => _script.Enqueue(outcome);
         public void QueueThrow(Exception ex) => _script.Enqueue(ex);
@@ -270,6 +361,13 @@ public class WatchguardTunnelProviderTests
         {
             LastChallengeLogonId = logonId;
             LastOtp = otpCode;
+            return DequeueOrThrow();
+        }
+
+        public Task<PreAuthOutcome> RespondToMfaChoiceAsync(string server, int port, string logonId, string choice, CancellationToken cancellationToken)
+        {
+            LastMfaChoiceLogonId = logonId;
+            LastMfaChoice = choice;
             return DequeueOrThrow();
         }
 

@@ -883,12 +883,10 @@ public class TunnelConfigsViewModelTests
     }
 
     [Fact]
-    public async Task AddTunnel_WatchguardKind_MissingCerts_RejectsBeforePersist()
+    public async Task AddTunnel_WatchguardKind_MissingCerts_PersistsForNativeDownload()
     {
-        // Direct regression guard for the reported symptom: a draft with every VISIBLE field
-        // (Server/Port/Username/Password) populated but the three certificate PEMs blank — the
-        // exact state of a user who filled the form without importing a .wgssl or expanding the
-        // Certificates section — must be rejected before any row/secret is written.
+        // WatchGuard now follows the native client shape: cert/key material is downloaded from
+        // client.wgssl during connect, so a save with only gateway + credentials is valid.
         var (vm, repo, _, creds, dialog) = CreateVm();
         dialog.TunnelPromptResult = new TunnelDraft(
             "corp-wgg",
@@ -909,9 +907,69 @@ public class TunnelConfigsViewModelTests
 
         await vm.AddTunnelCommand.ExecuteAsync(null);
 
-        Assert.Empty(repo.Configs);
-        Assert.Empty(creds.TunnelConfigs);
-        Assert.Contains(dialog.Messages, m => m.title == "Tunnel settings incomplete");
+        var stored = Assert.Single(repo.Configs.Values);
+        Assert.Equal(TunnelKind.Watchguard, stored.Kind);
+        Assert.True(creds.TunnelConfigs.ContainsKey(stored.Id));
+        var roundTrip = JsonSerializer.Deserialize<WatchguardSettings>(creds.TunnelConfigs[stored.Id])!;
+        Assert.Equal("firebox.example.com", roundTrip.Server);
+        Assert.Equal(string.Empty, roundTrip.CaPem);
+        Assert.Empty(dialog.Messages);
+    }
+
+    [Fact]
+    public async Task AddTunnel_WatchguardKind_SamlMode_AllowsEmptyPassword()
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        dialog.TunnelPromptResult = new TunnelDraft(
+            "corp-wgg",
+            TunnelKind.Watchguard,
+            WireGuard: null,
+            OpenVpn: null,
+            Fortinet: null,
+            Watchguard: new WatchguardSettings
+            {
+                Server = "firebox.example.com",
+                Port = 443,
+                AuthMode = WatchguardAuthMode.Saml,
+                Username = "",
+                Password = "",
+            });
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        var stored = Assert.Single(repo.Configs.Values);
+        var roundTrip = JsonSerializer.Deserialize<WatchguardSettings>(creds.TunnelConfigs[stored.Id])!;
+        Assert.Equal(WatchguardAuthMode.Saml, roundTrip.AuthMode);
+        Assert.Equal(string.Empty, roundTrip.Password);
+    }
+
+    [Fact]
+    public async Task AddTunnel_WatchguardKind_AutomaticMode_AllowsEmptyPasswordForSamlDiscovery()
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        dialog.TunnelPromptResult = new TunnelDraft(
+            "corp-wgg",
+            TunnelKind.Watchguard,
+            WireGuard: null,
+            OpenVpn: null,
+            Fortinet: null,
+            Watchguard: new WatchguardSettings
+            {
+                Server = "firebox.example.com",
+                Port = 443,
+                AuthMode = WatchguardAuthMode.Automatic,
+                Username = "",
+                Password = "",
+            });
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        var stored = Assert.Single(repo.Configs.Values);
+        var roundTrip = JsonSerializer.Deserialize<WatchguardSettings>(creds.TunnelConfigs[stored.Id])!;
+        Assert.Equal(WatchguardAuthMode.Automatic, roundTrip.AuthMode);
+        Assert.Equal(string.Empty, roundTrip.Username);
+        Assert.Equal(string.Empty, roundTrip.Password);
+        Assert.Empty(dialog.Messages);
     }
 
     [Theory]
@@ -988,6 +1046,7 @@ public class TunnelConfigsViewModelTests
         updated.Watchguard!.Server = "new.example.com";
         updated.Watchguard.Port = 6443;
         updated.Watchguard.Password = "new";
+        updated.Watchguard.ProfileOvpn = "client\nremote imported.example.com 443\ncipher AES-256-CBC\n";
         dialog.TunnelPromptResult = updated;
 
         await vm.EditTunnelCommand.ExecuteAsync(vm.Configs[0]);
@@ -996,6 +1055,7 @@ public class TunnelConfigsViewModelTests
         Assert.Equal("new.example.com", stored.Server);
         Assert.Equal(6443, stored.Port);
         Assert.Equal("new", stored.Password);
+        Assert.Contains("remote imported.example.com 443", stored.ProfileOvpn);
     }
 
     private static TunnelDraft NewWireGuardDraft(string name) =>

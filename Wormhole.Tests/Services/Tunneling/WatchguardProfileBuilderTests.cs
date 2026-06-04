@@ -74,6 +74,31 @@ public class WatchguardProfileBuilderTests
         Assert.Contains("-----BEGIN CERTIFICATE-----\nFAKECA\n-----END CERTIFICATE-----", profile);
     }
 
+    [Fact]
+    public void Build_DownloadedProfile_InlinesRelativeBundleReferences()
+    {
+        var settings = ValidSample();
+        settings.ProfileOvpn =
+            "client\n"
+            + "dev tun\n"
+            + "proto tcp-client\n"
+            + "remote firebox.example.com 443\n"
+            + "cipher AES-256-CBC\n"
+            + "ca \"./ca.crt\"\n"
+            + "cert \"profile/client.crt\"\n"
+            + "key \"..\\client.pem\"\n";
+
+        var profile = WatchguardProfileBuilder.Build(settings);
+
+        Assert.DoesNotContain("ca \"./ca.crt\"", profile);
+        Assert.DoesNotContain("cert \"profile/client.crt\"", profile);
+        Assert.DoesNotContain("key \"..\\client.pem\"", profile);
+        Assert.Contains("<ca>\n-----BEGIN CERTIFICATE-----\nFAKECA\n-----END CERTIFICATE-----\n</ca>", profile);
+        Assert.Contains("<cert>\n-----BEGIN CERTIFICATE-----\nFAKECERT\n-----END CERTIFICATE-----\n</cert>", profile);
+        Assert.Contains("<key>\n-----BEGIN PRIVATE KEY-----\nFAKEKEY\n-----END PRIVATE KEY-----\n</key>", profile);
+        Assert.Contains("remote firebox.example.com 443\n", profile);
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(65536)]

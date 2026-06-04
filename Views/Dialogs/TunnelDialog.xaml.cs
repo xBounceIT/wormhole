@@ -13,6 +13,7 @@ namespace Wormhole.Views.Dialogs;
 public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
 {
     public event EventHandler? ValidityChanged;
+    private string _watchguardProfileOvpn = string.Empty;
 
     public TunnelDialog()
     {
@@ -25,6 +26,7 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
     }
 
     public TunnelKind[] Kinds { get; } = Enum.GetValues<TunnelKind>();
+    public WatchguardAuthMode[] WatchguardAuthModes { get; } = Enum.GetValues<WatchguardAuthMode>();
 
     // The horizontal 2-column layout in the XAML needs ~760 px of dialog width to render
     // without clipping — overrides the ContentDialog ~548 px theme cap. DialogService
@@ -38,6 +40,9 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
     // not-yet-selected -1 on a fresh dialog) means Automatic.
     private StormshieldConnectionMode StormshieldSelectedMode =>
         StormshieldModeBox.SelectedIndex == 1 ? StormshieldConnectionMode.Import : StormshieldConnectionMode.Automatic;
+
+    private WatchguardAuthMode WatchguardSelectedAuthMode =>
+        WatchguardAuthModeBox.SelectedItem is WatchguardAuthMode mode ? mode : WatchguardAuthMode.Automatic;
 
     // IsValid is derived from the same per-kind required-field scan that powers the live
     // "what's still missing" hint (UpdateValidationHint), so the disabled-Create gate and the
@@ -76,16 +81,11 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
             case TunnelKind.Watchguard:
                 if (string.IsNullOrWhiteSpace(WatchguardServerBox.Text)) missing.Add("Server");
                 if (!IsValidPort(WatchguardPortBox.Text)) missing.Add("Port (1-65535)");
-                if (string.IsNullOrWhiteSpace(WatchguardUsernameBox.Text)) missing.Add("Username");
-                if (string.IsNullOrWhiteSpace(WatchguardPasswordBox.Password)) missing.Add("Password");
-                // These three live in the collapsed "Certificates & advanced" expander and are
-                // mandatory: the WatchGuard SSL tunnel is OpenVPN-with-client-cert and the
-                // synthesized profile can't be built without them (WatchguardProfileBuilder).
-                // UpdateKindPanels auto-expands that section while any is empty so they're on
-                // screen rather than a hidden reason Create stays disabled.
-                if (string.IsNullOrWhiteSpace(WatchguardCaPemBox.Text)) missing.Add("CA certificate (PEM)");
-                if (string.IsNullOrWhiteSpace(WatchguardClientCertPemBox.Text)) missing.Add("Client certificate (PEM)");
-                if (string.IsNullOrWhiteSpace(WatchguardClientKeyPemBox.Text)) missing.Add("Client private key (PEM)");
+                if (WatchguardSelectedAuthMode == WatchguardAuthMode.UsernamePassword)
+                {
+                    if (string.IsNullOrWhiteSpace(WatchguardUsernameBox.Text)) missing.Add("Username");
+                    if (string.IsNullOrWhiteSpace(WatchguardPasswordBox.Password)) missing.Add("Password");
+                }
                 break;
             case TunnelKind.Stormshield:
                 if (StormshieldSelectedMode == StormshieldConnectionMode.Import)
@@ -173,12 +173,14 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         // the model but the deserializer's behavior makes that a weak guarantee at the boundary.
         WatchguardServerBox.Text = wgg.Server ?? string.Empty;
         WatchguardPortBox.Text = (wgg.Port is >= 1 and <= 65535 ? wgg.Port : 443).ToString();
+        WatchguardAuthModeBox.SelectedItem = wgg.AuthMode;
         WatchguardUsernameBox.Text = wgg.Username ?? string.Empty;
         WatchguardPasswordBox.Password = wgg.Password ?? string.Empty;
         WatchguardDomainBox.Text = string.IsNullOrEmpty(wgg.Domain) ? "Firebox-DB" : wgg.Domain;
         WatchguardCaPemBox.Text = wgg.CaPem ?? string.Empty;
         WatchguardClientCertPemBox.Text = wgg.ClientCertPem ?? string.Empty;
         WatchguardClientKeyPemBox.Text = wgg.ClientKeyPem ?? string.Empty;
+        _watchguardProfileOvpn = wgg.ProfileOvpn ?? string.Empty;
         WatchguardVerifyX509NameBox.Text = wgg.VerifyX509Name ?? string.Empty;
         WatchguardTrustCertCheck.IsChecked = wgg.TrustServerCertificate;
 
@@ -270,6 +272,7 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         {
             Server = WatchguardServerBox.Text.Trim(),
             Port = TryParseInt(WatchguardPortBox.Text) ?? 443,
+            AuthMode = WatchguardSelectedAuthMode,
             Username = WatchguardUsernameBox.Text.Trim(),
             // Same reasoning as Fortinet: strip only trailing CR/LF (paste artifacts) — leave
             // every other character intact so legitimate whitespace in a password survives.
@@ -278,6 +281,7 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
             CaPem = WatchguardCaPemBox.Text,
             ClientCertPem = WatchguardClientCertPemBox.Text,
             ClientKeyPem = WatchguardClientKeyPemBox.Text,
+            ProfileOvpn = _watchguardProfileOvpn,
             VerifyX509Name = string.IsNullOrWhiteSpace(WatchguardVerifyX509NameBox.Text)
                 ? WatchguardSettings.DefaultVerifyX509Name
                 : WatchguardVerifyX509NameBox.Text.Trim(),
@@ -330,6 +334,7 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
             WatchguardCaPemBox.Text = imported.CaPem;
             WatchguardClientCertPemBox.Text = imported.ClientCertPem;
             WatchguardClientKeyPemBox.Text = imported.ClientKeyPem;
+            _watchguardProfileOvpn = imported.ProfileOvpn;
             // Reveal the certs the import just loaded (they land inside the expander) and refresh
             // the missing-fields hint now that the three PEMs are populated. Setting each box's
             // Text already fired OnFieldChanged -> UpdateValidationHint, so this is belt-and-
@@ -471,6 +476,13 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         ValidityChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    private void OnWatchguardAuthModeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (WatchguardServerBox is null) return;
+        UpdateValidationHint();
+        ValidityChanged?.Invoke(this, EventArgs.Empty);
+    }
+
     private void UpdateStormshieldModePanels()
     {
         // StormshieldModeBox declares inline ComboBoxItems plus SelectedIndex="0", so the XAML
@@ -553,18 +565,12 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         StormshieldPanel.Visibility = SelectedKind == TunnelKind.Stormshield
             ? Visibility.Visible
             : Visibility.Collapsed;
-        // The three mandatory PEM fields live inside the "Certificates & advanced" expander.
-        // Auto-expand it for Watchguard whenever any is still empty so the required inputs are
-        // on screen — a collapsed-by-default expander hiding required fields is exactly what
-        // made Create look permanently disabled. Once all three are set, leave the state to the
-        // user (this only runs on load / kind switch, not on every keystroke, so it won't snap
-        // shut mid-typing).
         if (SelectedKind == TunnelKind.Watchguard)
         {
             WatchguardCertsExpander.IsExpanded =
-                string.IsNullOrWhiteSpace(WatchguardCaPemBox.Text) ||
-                string.IsNullOrWhiteSpace(WatchguardClientCertPemBox.Text) ||
-                string.IsNullOrWhiteSpace(WatchguardClientKeyPemBox.Text);
+                !string.IsNullOrWhiteSpace(WatchguardCaPemBox.Text) ||
+                !string.IsNullOrWhiteSpace(WatchguardClientCertPemBox.Text) ||
+                !string.IsNullOrWhiteSpace(WatchguardClientKeyPemBox.Text);
         }
         // Stale import-error bars from a previous session would otherwise re-surface when the user
         // toggles Kind away and back. They're panel-specific, so reset them on any panel change.

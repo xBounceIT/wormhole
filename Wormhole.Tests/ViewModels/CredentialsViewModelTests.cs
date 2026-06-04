@@ -603,7 +603,7 @@ public class CredentialsViewModelTests
 
         Assert.Equal(3, vm.FilteredCredentials.Count);
 
-        await Task.Delay(90);
+        await WaitForFilteredCountAsync(vm, expected: 1, timeout: TimeSpan.FromSeconds(5));
 
         Assert.Single(vm.FilteredCredentials);
         Assert.Equal("gamma", vm.FilteredCredentials[0].Name);
@@ -637,6 +637,15 @@ public class CredentialsViewModelTests
             NullLogger<CredentialsViewModel>.Instance);
         vm.SearchDebounceDelay = TimeSpan.Zero;
         return vm;
+    }
+
+    private static async Task WaitForFilteredCountAsync(CredentialsViewModel vm, int expected, TimeSpan timeout)
+    {
+        var deadline = DateTime.UtcNow + timeout;
+        while (vm.FilteredCredentials.Count != expected && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
     }
 
     private sealed class FakeCredentialRepository : ICredentialRepository

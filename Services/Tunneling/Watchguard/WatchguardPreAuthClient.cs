@@ -21,6 +21,7 @@ internal interface IWatchguardPreAuth
 {
     Task<PreAuthOutcome> LogonAsync(string server, int port, string username, string password, string domain, CancellationToken cancellationToken);
     Task<PreAuthOutcome> RespondToChallengeAsync(string server, int port, string logonId, string otpCode, CancellationToken cancellationToken);
+    Task<PreAuthOutcome> RespondToMfaChoiceAsync(string server, int port, string logonId, string choice, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -206,6 +207,23 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
             ["fw_logon_type"] = "response",
             ["fw_logon_id"] = logonId,
             ["response"] = otpCode,
+        };
+        return await PostFormAsync(uri, form, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<PreAuthOutcome> RespondToMfaChoiceAsync(
+        string server, int port, string logonId, string choice, CancellationToken cancellationToken)
+    {
+        var uri = BuildLogonUri(server, port);
+        var form = new Dictionary<string, string>
+        {
+            // WatchGuard native 2026.2 sends AuthPoint push choices through this distinct
+            // endpoint shape: `fw_logon_type=mfa_response&mfa_choice=p`.
+            ["action"] = "sslvpn_logon",
+            ["style"] = "fw_logon_progress.xsl",
+            ["fw_logon_type"] = "mfa_response",
+            ["fw_logon_id"] = logonId,
+            ["mfa_choice"] = choice,
         };
         return await PostFormAsync(uri, form, cancellationToken).ConfigureAwait(false);
     }
