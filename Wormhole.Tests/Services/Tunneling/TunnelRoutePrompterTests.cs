@@ -140,6 +140,40 @@ public sealed class TunnelRoutePrompterTests
         Assert.Equal("the configured VPN tunnel", dialog.LastTunnelRouteName);
     }
 
+    [Fact]
+    public async Task SettingOn_NameLookupCancelled_PropagatesAndDoesNotPrompt()
+    {
+        // A Disconnect during the token-aware name lookup must abort the connect, not be swallowed
+        // into a generic name that still opens a stale route dialog.
+        var dialog = new FakeDialogService();
+        var settings = new FakeAppSettingsService();
+        settings.Current.PromptBeforeTunnelConnect = true;
+        var prompter = new TunnelRoutePrompter(
+            settings,
+            dialog,
+            new CancellingTunnelConfigRepository(),
+            NullLoggerFactory.Instance.CreateLogger<TunnelRoutePrompter>());
+        var profile = Profile(tunnelEnabled: true, configId: Guid.NewGuid());
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => prompter.ResolveRouteAsync(profile, CancellationToken.None));
+        Assert.Equal(0, dialog.TunnelRoutePromptCount);
+    }
+
+    [Fact]
+    public async Task SettingOn_AlreadyCancelledToken_AbortsBeforePrompting()
+    {
+        var (prompter, dialog, _, settings) = Create();
+        settings.Current.PromptBeforeTunnelConnect = true;
+        var profile = Profile(tunnelEnabled: true, configId: Guid.NewGuid());
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => prompter.ResolveRouteAsync(profile, cts.Token));
+        Assert.Equal(0, dialog.TunnelRoutePromptCount);
+    }
+
     private static (TunnelRoutePrompter prompter, FakeDialogService dialog, FakeTunnelConfigRepository configs, FakeAppSettingsService settings) Create()
     {
         var dialog = new FakeDialogService();
@@ -178,6 +212,17 @@ public sealed class TunnelRoutePrompterTests
             throw new InvalidOperationException("repository unavailable");
         public Task<TunnelConfig?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
             throw new InvalidOperationException("repository unavailable");
+        public Task AddAsync(TunnelConfig config, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task UpdateAsync(TunnelConfig config, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task DeleteAsync(Guid id, CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    private sealed class CancellingTunnelConfigRepository : ITunnelConfigRepository
+    {
+        public Task<IReadOnlyList<TunnelConfig>> GetAllAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<TunnelConfig>>(Array.Empty<TunnelConfig>());
+        public Task<TunnelConfig?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
+            throw new OperationCanceledException();
         public Task AddAsync(TunnelConfig config, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task UpdateAsync(TunnelConfig config, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task DeleteAsync(Guid id, CancellationToken cancellationToken = default) => Task.CompletedTask;
