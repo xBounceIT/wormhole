@@ -362,8 +362,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
     /// <summary>
     /// Seed the connecting stepper for this attempt. Tunneled connections get numbered phases
-    /// (credentials → VPN tunnel → connect); direct connections clear the steps so the overlay
-    /// falls back to its plain spinner.
+    /// (VPN tunnel → connect); direct connections clear the steps so the overlay falls back to its
+    /// plain spinner.
     /// </summary>
     private void InitializeProgress(ConnectionProfile profile)
     {
@@ -384,6 +384,29 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     // Runs on the UI thread (CreateUiProgress marshals the provider's background-thread report).
     private void OnTunnelProgress(TunnelProgress progress) =>
         Progress.Detail = ConnectionProgress.DescribeTunnelPhase(progress);
+
+    /// <summary>
+    /// Surface the connecting spinner while the view (re)initializes its WebView2 ahead of the
+    /// first connect. A freshly-opened tab whose view is unloaded mid-init — e.g. the user opens a
+    /// second connection back-to-back and selection moves to it before this tab's xterm.js "ready"
+    /// handshake fires — sits in <see cref="SessionStatus.Disconnected"/> behind the opaque base
+    /// cover: a featureless black screen with no spinner and no Retry, until the tab is brought
+    /// forward again and the deferred connect lands. Flipping to Connecting here makes that recovery
+    /// window legible (and removes the illusion that a keystroke is what "reconnects" it).
+    /// <para>
+    /// Strictly Disconnected → Connecting with no live/in-flight session, so it never disturbs a
+    /// connected session's Sessions↔Settings nav-back rebind (Status stays Connected) nor a Failed
+    /// tab's Retry overlay. Called from <c>SshTerminalView.InitializeWebViewAsync</c> on the UI
+    /// thread once that path has committed to navigating.
+    /// </para>
+    /// </summary>
+    public void MarkConnecting()
+    {
+        if (Status == SessionStatus.Disconnected && _session is null && _connectInFlight == 0)
+        {
+            Status = SessionStatus.Connecting;
+        }
+    }
 
     /// <summary>
     /// Called by the view on Unloaded — releases the WebView2 binding without tearing

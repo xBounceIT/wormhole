@@ -490,6 +490,49 @@ public sealed class SshSessionViewModelTests
     }
 
     [Fact]
+    public void MarkConnecting_FlipsDisconnectedToConnecting_WhenIdle()
+    {
+        // The back-to-back-open repro: a freshly-opened tab whose view was unloaded mid-init sits
+        // in Disconnected behind the opaque black base cover. The view's re-init calls MarkConnecting
+        // so the Connecting spinner shows during the deferred first connect instead of a dead screen.
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+
+        vm.MarkConnecting();
+
+        Assert.Equal(SessionStatus.Connecting, vm.Status);
+    }
+
+    [Fact]
+    public void MarkConnecting_NoOps_WhenSessionIsLive()
+    {
+        // Sessions↔Settings nav-back rebinds a still-Connected session through the same re-init
+        // path; MarkConnecting must not slap a phantom Connecting spinner over a live terminal.
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        vm.AttachConnectedSessionForTesting(new FakeSshSession());
+
+        vm.MarkConnecting();
+
+        Assert.Equal(SessionStatus.Connected, vm.Status);
+    }
+
+    [Fact]
+    public void MarkConnecting_NoOps_WhenFailed()
+    {
+        // A Failed tab shows the error + Retry overlay; MarkConnecting must leave it alone so the
+        // user keeps their recovery affordance rather than seeing it replaced by a spinner.
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        vm.Status = SessionStatus.Failed;
+
+        vm.MarkConnecting();
+
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+    }
+
+    [Fact]
     public async Task RetryAsync_WithDetachedViewAndNoSubscribers_PreservesSession()
     {
         var vm = CreateViewModel();
