@@ -91,6 +91,15 @@ public sealed partial class SshTerminalView : UserControl
 
         var vm = _viewModel;
         if (vm is null) { _initInProgress = 0; return; }
+
+        // Make the (re)init window legible instead of a featureless black cover. A tab that was
+        // unloaded mid-init (the user opened a second connection back-to-back before this tab's
+        // "ready" handshake fired) sits in Disconnected behind the opaque base cover until it's
+        // brought forward and this re-init drives the deferred first connect. Flip to the
+        // Connecting spinner now that we're past the re-entrancy guard and committed to navigating;
+        // MarkConnecting no-ops unless the tab is an idle, never-connected Disconnected, so a live
+        // session's rebind and a Failed tab's Retry overlay are untouched.
+        vm.MarkConnecting();
         // Pin WebView2's user-data folder under %LOCALAPPDATA%. The default location
         // is `{exe_dir}\{exe_name}.WebView2\`, which is unwritable when the app is
         // installed under Program Files — initialization then silently leaves
