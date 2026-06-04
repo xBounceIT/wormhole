@@ -7,9 +7,10 @@ namespace Wormhole.Tests.ViewModels;
 
 public sealed class ConnectionProgressTests
 {
+    // Mirrors what the session view-models build for a tunneled connection: VPN tunnel -> Connect.
+    // (Credential resolution is a local pre-tunnel step and deliberately not a phase.)
     private static readonly (ConnectionPhase Phase, string Label)[] TunnelSteps =
     {
-        (ConnectionPhase.Credentials, "Credentials"),
         (ConnectionPhase.Tunnel, "VPN tunnel"),
         (ConnectionPhase.Connect, "Connect"),
     };
@@ -27,24 +28,33 @@ public sealed class ConnectionProgressTests
         var p = TunneledProgress();
 
         Assert.True(p.IsActive);
-        Assert.Equal(3, p.Steps.Count);
-        Assert.Equal("1,2,3", string.Join(",", p.Steps.Select(s => s.Number)));
+        Assert.Equal(2, p.Steps.Count);
+        Assert.Equal("1,2", string.Join(",", p.Steps.Select(s => s.Number)));
         Assert.All(p.Steps, s => Assert.Equal(ConnectionStepState.Pending, s.State));
         Assert.False(p.Steps[0].IsLast);
-        Assert.False(p.Steps[1].IsLast);
-        Assert.True(p.Steps[2].IsLast);
+        Assert.True(p.Steps[1].IsLast);
     }
 
     [Fact]
-    public void Begin_MarksEarlierStepsCompleted_TargetActive_LaterPending()
+    public void Begin_FirstPhase_ActivatesIt_LeavesLaterPending()
     {
         var p = TunneledProgress();
 
         p.Begin(ConnectionPhase.Tunnel);
 
+        Assert.Equal(ConnectionStepState.Active, p.Steps[0].State);
+        Assert.Equal(ConnectionStepState.Pending, p.Steps[1].State);
+    }
+
+    [Fact]
+    public void Begin_LaterPhase_CompletesEarlier_ActivatesTarget()
+    {
+        var p = TunneledProgress();
+
+        p.Begin(ConnectionPhase.Connect);
+
         Assert.Equal(ConnectionStepState.Completed, p.Steps[0].State);
         Assert.Equal(ConnectionStepState.Active, p.Steps[1].State);
-        Assert.Equal(ConnectionStepState.Pending, p.Steps[2].State);
     }
 
     [Fact]
@@ -57,8 +67,8 @@ public sealed class ConnectionProgressTests
         p.Begin(ConnectionPhase.Connect);
 
         Assert.Null(p.Detail);
-        Assert.Equal(ConnectionStepState.Completed, p.Steps[1].State);
-        Assert.Equal(ConnectionStepState.Active, p.Steps[2].State);
+        Assert.Equal(ConnectionStepState.Completed, p.Steps[0].State);
+        Assert.Equal(ConnectionStepState.Active, p.Steps[1].State);
     }
 
     [Fact]
@@ -70,6 +80,19 @@ public sealed class ConnectionProgressTests
 
         Assert.False(p.IsActive);
         Assert.Empty(p.Steps);
+    }
+
+    [Fact]
+    public void Begin_PhaseNotInList_DoesNotCompleteOtherSteps()
+    {
+        // Regression guard for the hardened Begin: a phase absent from the list must be a true
+        // no-op, NOT silently mark every present step Completed.
+        var p = new ConnectionProgress();
+        p.Initialize(new[] { (ConnectionPhase.Connect, "Connect") });
+
+        p.Begin(ConnectionPhase.Tunnel); // Tunnel isn't in the list
+
+        Assert.Equal(ConnectionStepState.Pending, p.Steps[0].State);
     }
 
     [Fact]
@@ -86,21 +109,32 @@ public sealed class ConnectionProgressTests
     }
 
     [Fact]
-    public void Fail_MarksActiveStepFailed_LeavesCompletedAndPendingUntouched()
+    public void Fail_MarksActiveStepFailed_LeavesCompletedUntouched_FlagsAndClearsDetail()
     {
         var p = TunneledProgress();
-        p.Begin(ConnectionPhase.Tunnel); // step 0 completed, step 1 active, step 2 pending
-        p.Detail = "Bringing up the VPN tunnel…";
+        p.Begin(ConnectionPhase.Connect); // step 0 (tunnel) completed, step 1 (connect) active
+        p.Detail = "Connecting…";
 
         p.Fail();
 
         Assert.Equal(ConnectionStepState.Completed, p.Steps[0].State);
         Assert.Equal(ConnectionStepState.Failed, p.Steps[1].State);
-        Assert.Equal(ConnectionStepState.Pending, p.Steps[2].State);
         // A genuine mid-step failure surfaces the stepper in the failure overlay and drops the
         // now-misleading progressive detail line.
         Assert.True(p.HasFailedStep);
         Assert.Null(p.Detail);
+    }
+
+    [Fact]
+    public void Fail_MarksActiveStepFailed_LeavesLaterPendingUntouched()
+    {
+        var p = TunneledProgress();
+        p.Begin(ConnectionPhase.Tunnel); // step 0 active, step 1 pending
+
+        p.Fail();
+
+        Assert.Equal(ConnectionStepState.Failed, p.Steps[0].State);
+        Assert.Equal(ConnectionStepState.Pending, p.Steps[1].State);
     }
 
     [Fact]
@@ -141,13 +175,13 @@ public sealed class ConnectionProgressTests
     {
         // Defensive: a re-Begin after a failure must not flip a Failed step to Completed.
         var p = TunneledProgress();
-        p.Begin(ConnectionPhase.Credentials);
-        p.Fail(); // credentials failed
+        p.Begin(ConnectionPhase.Tunnel);
+        p.Fail(); // tunnel failed
 
         p.Begin(ConnectionPhase.Connect);
 
         Assert.Equal(ConnectionStepState.Failed, p.Steps[0].State);
-        Assert.Equal(ConnectionStepState.Active, p.Steps[2].State);
+        Assert.Equal(ConnectionStepState.Active, p.Steps[1].State);
     }
 
     [Fact]
@@ -167,7 +201,7 @@ public sealed class ConnectionProgressTests
     [Fact]
     public void Step_StateChange_RaisesDerivedFlagNotifications()
     {
-        var step = new ConnectionStep(ConnectionPhase.Tunnel, 2, "VPN tunnel", isLast: false);
+        var step = new ConnectionStep(ConnectionPhase.Tunnel, 1, "VPN tunnel", isLast: false);
         var raised = new System.Collections.Generic.List<string>();
         step.PropertyChanged += (_, e) => raised.Add(e.PropertyName!);
 

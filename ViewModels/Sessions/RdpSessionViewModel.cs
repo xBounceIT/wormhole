@@ -513,7 +513,9 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
             try
             {
-                Progress.Begin(ConnectionPhase.Credentials);
+                // Credential resolution runs before the tunnel and is deliberately NOT a stepper
+                // phase — target authentication happens later, in the Connect phase, through the
+                // tunnel (see ConnectionPhase). So no Progress.Begin here.
                 var resolved = await ResolveCredentialsAsync(profile, forcePromptForPassword, token).ConfigureAwait(true);
                 if (!IsAttemptCurrent(teardownGeneration)) return;
                 if (token.IsCancellationRequested)
@@ -1097,7 +1099,6 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         {
             Progress.Initialize(new (ConnectionPhase, string)[]
             {
-                (ConnectionPhase.Credentials, "Credentials"),
                 (ConnectionPhase.Tunnel, "VPN tunnel"),
                 (ConnectionPhase.Connect, "Connect"),
             });

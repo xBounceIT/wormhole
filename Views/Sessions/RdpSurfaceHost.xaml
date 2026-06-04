@@ -98,9 +98,11 @@
                         Spacing="16"
                         MaxWidth="480">
                 <!-- For a tunneled failure, show which numbered phase broke (red ✗). Hidden for
-                     direct connections and post-connect drops (no failed step). -->
+                     direct connections and post-connect drops (no failed step). Header is blanked
+                     so it doesn't say "Connecting…" above a "Connection failed" message. -->
                 <views:ConnectionProgressView
                     DataContext="{Binding Progress}"
+                    Header=""
                     Visibility="{Binding Progress.HasFailedStep, Converter={StaticResource BoolToVisibilityConverter}}" />
                 <FontIcon Glyph="&#xE783;" FontSize="32" HorizontalAlignment="Center" />
                 <TextBlock Text="Connection failed"

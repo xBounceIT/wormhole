@@ -371,7 +371,6 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         {
             Progress.Initialize(new (ConnectionPhase, string)[]
             {
-                (ConnectionPhase.Credentials, "Credentials"),
                 (ConnectionPhase.Tunnel, "VPN tunnel"),
                 (ConnectionPhase.Connect, "Connect"),
             });
@@ -484,7 +483,10 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
         try
         {
-            Progress.Begin(ConnectionPhase.Credentials);
+            // Credential resolution is a quick local step (load the stored secret, or prompt for a
+            // key passphrase) that runs before the tunnel — it is deliberately NOT a stepper phase,
+            // since a completed "Credentials" step would imply the target was authenticated before
+            // the tunnel was even up. Target auth happens in the Connect phase, through the tunnel.
             var creds = await _credentialResolver.ResolveAsync(profile, token).ConfigureAwait(true);
             if (!creds.HasAny)
             {

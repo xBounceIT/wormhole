@@ -13,9 +13,10 @@
                 Spacing="16"
                 MaxWidth="480"
                 Padding="24">
-        <TextBlock Text="Connecting…"
+        <TextBlock Text="{x:Bind Header, Mode=OneWay}"
                    Style="{StaticResource BodyStrongTextBlockStyle}"
-                   HorizontalAlignment="Center" />
+                   HorizontalAlignment="Center"
+                   Visibility="{x:Bind Header, Converter={StaticResource StringPresentVisibilityConverter}, Mode=OneWay}" />
 
         <ItemsControl ItemsSource="{Binding Steps}"
                       HorizontalAlignment="Center">

@@ -23,19 +23,20 @@ public enum ConnectionStepState
 }
 
 /// <summary>
-/// The well-known ordered phases a tunneled connection passes through. Kept abstract from any one
-/// protocol so both <see cref="SshSessionViewModel"/> and <see cref="RdpSessionViewModel"/> drive
-/// the same stepper.
+/// The well-known ordered network phases a tunneled connection passes through. Kept abstract from
+/// any one protocol so both <see cref="SshSessionViewModel"/> and <see cref="RdpSessionViewModel"/>
+/// drive the same stepper.
+/// <para>Note there is deliberately no "Credentials" phase: resolving the stored secret is a quick
+/// local step that happens BEFORE the tunnel, and showing it as a completed phase would wrongly
+/// imply the target was authenticated before the tunnel existed. Authentication to the target
+/// happens through the tunnel, as part of <see cref="Connect"/>.</para>
 /// </summary>
 public enum ConnectionPhase
 {
-    /// <summary>Resolving the credentials needed for the connection.</summary>
-    Credentials,
-
     /// <summary>Bringing up the per-connection VPN tunnel and routing through it.</summary>
     Tunnel,
 
-    /// <summary>The protocol handshake to the target host.</summary>
+    /// <summary>The protocol handshake to — and authentication against — the target host.</summary>
     Connect,
 }
 
@@ -140,6 +141,15 @@ public sealed partial class ConnectionProgress : ObservableObject
     /// </summary>
     public void Begin(ConnectionPhase phase)
     {
+        // Guard: if the phase isn't in the list, do nothing. Without this the loop below would mark
+        // every step Completed (it never sets `reached`), silently turning the whole bar green.
+        var hasPhase = false;
+        foreach (var step in Steps)
+        {
+            if (step.Phase == phase) { hasPhase = true; break; }
+        }
+        if (!hasPhase) return;
+
         var reached = false;
         foreach (var step in Steps)
         {
