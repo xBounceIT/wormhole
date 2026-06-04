@@ -3,7 +3,8 @@
     x:Class="Wormhole.Views.Sessions.RdpSurfaceHost"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:sessions="using:Wormhole.ViewModels.Sessions">
+    xmlns:sessions="using:Wormhole.ViewModels.Sessions"
+    xmlns:views="using:Wormhole.Views.Sessions">
 
     <Grid>
         <Grid.ContextFlyout>
@@ -61,11 +62,23 @@
             <StackPanel HorizontalAlignment="Center"
                         VerticalAlignment="Center"
                         Spacing="12"
-                        MaxWidth="320">
-                <ProgressRing IsActive="True" Width="32" Height="32" />
-                <TextBlock Text="Connecting…"
-                           Style="{StaticResource BodyStrongTextBlockStyle}"
-                           HorizontalAlignment="Center" />
+                        MaxWidth="480">
+                <!-- Tunneled connections: numbered, phased stepper. This element's DataContext IS the
+                     ConnectionProgress, so bind Visibility to its own IsActive (NOT Progress.IsActive,
+                     which would resolve against the progress object and silently fail). -->
+                <views:ConnectionProgressView
+                    DataContext="{Binding Progress}"
+                    Visibility="{Binding IsActive, Converter={StaticResource BoolToVisibilityConverter}}" />
+                <!-- Direct connections / auto-reconnect (no steps): plain spinner. -->
+                <StackPanel HorizontalAlignment="Center"
+                            Spacing="12"
+                            Visibility="{Binding Progress.IsActive, Converter={StaticResource BoolToVisibilityConverter}, ConverterParameter=Invert}">
+                    <ProgressRing IsActive="True" Width="32" Height="32" />
+                    <TextBlock Text="Connecting…"
+                               Style="{StaticResource BodyStrongTextBlockStyle}"
+                               HorizontalAlignment="Center" />
+                </StackPanel>
+                <!-- Auto-reconnect attempt banner (driven by code-behind; shown in either mode). -->
                 <TextBlock x:Name="ReconnectAttemptText"
                            Style="{StaticResource CaptionTextBlockStyle}"
                            HorizontalAlignment="Center"
@@ -85,7 +98,15 @@
             <StackPanel HorizontalAlignment="Center"
                         VerticalAlignment="Center"
                         Spacing="16"
-                        MaxWidth="420">
+                        MaxWidth="480">
+                <!-- For a tunneled failure, show which numbered phase broke (red ✗). Hidden for
+                     direct connections and post-connect drops (no failed step). Header is blanked
+                     so it doesn't say "Connecting…" above a "Connection failed" message. -->
+                <!-- DataContext is the ConnectionProgress; bind to its own HasFailedStep. -->
+                <views:ConnectionProgressView
+                    DataContext="{Binding Progress}"
+                    Header=""
+                    Visibility="{Binding HasFailedStep, Converter={StaticResource BoolToVisibilityConverter}}" />
                 <FontIcon Glyph="&#xE783;" FontSize="32" HorizontalAlignment="Center" />
                 <TextBlock Text="Connection failed"
                            Style="{StaticResource SubtitleTextBlockStyle}"

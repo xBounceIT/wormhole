@@ -506,6 +506,11 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             }
             profile = routed;
 
+            // Build the stepper from the routed decision: when the user chose "connect directly"
+            // routed.TunnelEnabled is false, so there are no tunnel steps (the overlay shows a plain
+            // spinner); otherwise the VPN tunnel + Connect steps show.
+            InitializeProgress(profile);
+
             // External-client routing: opt-in flag OR auto-detected Azure-AD signal (saved
             // credential, node Username, node RdpDomain). The embedded mstscax delay-loads
             // WAM broker DLLs during AAD auth, which our unpackaged WinUI process can't
@@ -579,6 +584,9 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
             try
             {
+                // Credential resolution runs before the tunnel and is deliberately NOT a stepper
+                // phase — target authentication happens later, in the Connect phase, through the
+                // tunnel (see ConnectionPhase). So no Progress.Begin here.
                 var resolved = await ResolveCredentialsAsync(profile, forcePromptForPassword, token).ConfigureAwait(true);
                 if (!IsAttemptCurrent(teardownGeneration)) return;
                 if (token.IsCancellationRequested)
@@ -640,7 +648,9 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
                 var (gwUser, gwPassword) = await ResolveGatewayCredentialsAsync(profile, token).ConfigureAwait(true);
                 if (!IsAttemptCurrent(teardownGeneration)) return;
-                var connectProfile = await PrepareConnectProfileAsync(profile, token).ConfigureAwait(true);
+                Progress.Begin(ConnectionPhase.Tunnel);
+                var connectProfile = await PrepareConnectProfileAsync(
+                    profile, token, CreateUiProgress<TunnelProgress>(OnTunnelProgress)).ConfigureAwait(true);
                 if (!IsAttemptCurrent(teardownGeneration)) return;
                 token.ThrowIfCancellationRequested();
 
@@ -665,6 +675,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 });
                 cts.CancelAfter(ConnectTimeout);
 
+                Progress.Begin(ConnectionPhase.Connect);
                 // Subscribe via the onSessionReady hook (not after the await) so the VM is ready
                 // to receive an immediate OnLogonError / OnDisconnected that the OCX may fire
                 // synchronously during the Connect() inside form.Start(). Subscribing after the
@@ -760,9 +771,10 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         }
     }
 
-    private async Task<ConnectionProfile> PrepareConnectProfileAsync(ConnectionProfile profile, CancellationToken token)
+    private async Task<ConnectionProfile> PrepareConnectProfileAsync(
+        ConnectionProfile profile, CancellationToken token, IProgress<TunnelProgress>? progress = null)
     {
-        var tunnel = await _tunnels.EstablishAsync(profile, token).ConfigureAwait(true);
+        var tunnel = await _tunnels.EstablishAsync(profile, token, progress).ConfigureAwait(true);
         if (tunnel is null) return profile;
         if (token.IsCancellationRequested)
         {
@@ -778,6 +790,9 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
         try
         {
+            // Still on the UI thread here (ConnectAsync awaits this with ConfigureAwait(true) and the
+            // EstablishAsync await above resumed on it), so updating the observable detail is safe.
+            Progress.Detail = "Routing the connection through the tunnel…";
             var localPort = await tunnel.BindLocalForwarderAsync(profile.Host, profile.Port, token).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             return profile with
@@ -1001,6 +1016,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             if (!ReferenceEquals(_session, sender)) return;
             ClearConnectWatchdog();
             ReconnectAttempt = 0;
+            Progress.CompleteAll();
             Status = SessionStatus.Connected;
             ErrorMessage = null;
             // Push Win32 focus into the embedded ActiveX HWND once the native RDP surface
@@ -1070,6 +1086,10 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         MarshalToUi(() =>
         {
             if (!ReferenceEquals(_session, sender)) return;
+            // Auto-reconnect isn't a fresh ConnectAsync, so the stepper's phases no longer apply —
+            // clear them so the overlay shows the plain spinner + "Reconnecting… (attempt N)" instead
+            // of a stale, all-completed stepper.
+            Progress.Reset();
             ReconnectAttempt = info.Attempt;
             Status = SessionStatus.Connecting;
         });
@@ -1123,6 +1143,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
     private void ReportFailure(string message, bool dueToCredentials)
     {
+        Progress.Fail();
         ErrorMessage = message;
         FailedDueToCredentials = dueToCredentials;
         IsExternalClientActive = false;
@@ -1133,9 +1154,35 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     {
         if (!ReferenceEquals(_cts, cts)) return;
         ClearConnectWatchdog(cts);
+        Progress.Reset();
         IsExternalClientActive = false;
         Status = SessionStatus.Disconnected;
     }
+
+    /// <summary>
+    /// Seed the connecting stepper for this attempt. Tunneled connections get numbered phases
+    /// (credentials → VPN tunnel → connect); direct connections clear the steps so the overlay
+    /// falls back to its plain spinner + reconnect-attempt banner.
+    /// </summary>
+    private void InitializeProgress(ConnectionProfile profile)
+    {
+        if (profile.TunnelEnabled)
+        {
+            Progress.Initialize(new (ConnectionPhase, string)[]
+            {
+                (ConnectionPhase.Tunnel, "VPN tunnel"),
+                (ConnectionPhase.Connect, "Connect"),
+            });
+        }
+        else
+        {
+            Progress.Reset();
+        }
+    }
+
+    // Runs on the UI thread (CreateUiProgress marshals the provider's background-thread report).
+    private void OnTunnelProgress(TunnelProgress progress) =>
+        Progress.Detail = ConnectionProgress.DescribeTunnelPhase(progress);
 
     private bool IsAttemptCurrent(int teardownGeneration) =>
         Volatile.Read(ref _teardownGeneration) == teardownGeneration;
@@ -1221,6 +1268,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         DisposeSessionSilently();
         DetachExternalProcess();
         ResetTitleToBaseProfile();
+        Progress.Reset();
         Status = SessionStatus.Disconnected;
         ErrorMessage = null;
         FailedDueToCredentials = false;
@@ -1318,6 +1366,9 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         ClearConnectWatchdog();
         ClearOwnedCrashSentinel();
 
+        // The external mstsc.exe path has no phased stepper — clear any steps left from a prior
+        // embedded attempt so the brief Connecting overlay shows the plain spinner.
+        Progress.Reset();
         Status = SessionStatus.Connecting;
         ErrorMessage = null;
         FailedDueToCredentials = false;

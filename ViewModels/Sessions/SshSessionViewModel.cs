@@ -189,6 +189,11 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             // through. Clear xterm.js now so it's empty by the time Connected
             // hides the overlay.
             Status = SessionStatus.Connecting;
+            // Blank the stepper now (synchronously, before the teardown await below) so the prior
+            // attempt's stale steps — a red Failed step, or an all-completed run — don't render in
+            // the connecting overlay during the (100s-of-ms) session/tunnel teardown. ConnectAsync's
+            // InitializeProgress rebuilds it fresh. Mirrors RDP's FullTeardownAsync, which resets first.
+            Progress.Reset();
             try
             {
                 webView.PostWebMessageAsString("clear:");
@@ -267,6 +272,10 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         // a brief phantom flash. Post the clear in the same sync chunk so xterm.js
         // is wiped while the overlay covers it, ready for the Connected handoff.
         Status = SessionStatus.Connecting;
+        // See the reconnect-while-detached branch in AttachAsync: reset the stepper before the
+        // teardown await so the failed/completed steps from the previous attempt don't linger in
+        // the connecting overlay while the old session + tunnel are torn down.
+        Progress.Reset();
         try
         {
             _webView.PostWebMessageAsString("clear:");
@@ -328,6 +337,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     public async Task DetachAsync()
     {
         await TearDownSessionAsync().ConfigureAwait(true);
+        Progress.Reset();
         Status = SessionStatus.Disconnected;
     }
 
@@ -353,9 +363,35 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     {
         CancelRemoteOutputWaitTimer();
         IsWaitingForRemoteOutput = false;
+        Progress.Fail();
         ErrorMessage = message;
         Status = SessionStatus.Failed;
     }
+
+    /// <summary>
+    /// Seed the connecting stepper for this attempt. Tunneled connections get numbered phases
+    /// (VPN tunnel → connect); direct connections clear the steps so the overlay falls back to its
+    /// plain spinner.
+    /// </summary>
+    private void InitializeProgress(ConnectionProfile profile)
+    {
+        if (profile.TunnelEnabled)
+        {
+            Progress.Initialize(new (ConnectionPhase, string)[]
+            {
+                (ConnectionPhase.Tunnel, "VPN tunnel"),
+                (ConnectionPhase.Connect, "Connect"),
+            });
+        }
+        else
+        {
+            Progress.Reset();
+        }
+    }
+
+    // Runs on the UI thread (CreateUiProgress marshals the provider's background-thread report).
+    private void OnTunnelProgress(TunnelProgress progress) =>
+        Progress.Detail = ConnectionProgress.DescribeTunnelPhase(progress);
 
     /// <summary>
     /// Surface the connecting spinner while the view (re)initializes its WebView2 ahead of the
@@ -498,6 +534,13 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             }
             _activeRoutedProfile = routed;
 
+            // Build the stepper from the ROUTED decision, not the saved profile: if the user chose
+            // "connect directly", routed.TunnelEnabled is false → no tunnel steps (plain spinner);
+            // otherwise the VPN tunnel + Connect steps show. Credential resolution below is a quick
+            // local step and deliberately NOT a phase — a completed "Credentials" step would imply
+            // the target was authenticated before the tunnel was up; target auth happens in Connect.
+            InitializeProgress(routed);
+
             var creds = await _credentialResolver.ResolveAsync(profile, token).ConfigureAwait(true);
             if (!creds.HasAny)
             {
@@ -510,10 +553,15 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             // passphrase or password and break the "instant click" UX.
             _capturedCredentials = creds;
 
+            Progress.Begin(ConnectionPhase.Tunnel);
             // Establish from the routed profile (TunnelEnabled forced off when the user chose
             // "connect directly"); the SSH service routes through the explicit _tunnel handle, so
-            // the rest of the connect keeps using the unmodified profile.
-            _tunnel = await _tunnels.EstablishAsync(routed, token).ConfigureAwait(true);
+            // the rest of the connect keeps using the unmodified profile. When routed has no tunnel,
+            // EstablishAsync returns null and the Begin calls are no-ops (the stepper is empty).
+            _tunnel = await _tunnels.EstablishAsync(
+                routed, token, CreateUiProgress<TunnelProgress>(OnTunnelProgress)).ConfigureAwait(true);
+
+            Progress.Begin(ConnectionPhase.Connect);
             _session = await _sshService.ConnectAsync(profile, creds, _initialSize, _tunnel, token).ConfigureAwait(true);
             // Re-read _webView after the awaits: if the user navigated away and back
             // during credential prompt / SSH connect, AttachAsync swapped _webView to the
@@ -573,6 +621,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             // it back to Connected and lie about a dead tab being active.
             if (_session is not null && Status == SessionStatus.Connecting)
             {
+                Progress.CompleteAll();
                 Status = SessionStatus.Connected;
                 _bridge?.RequestFocus();
                 StartRemoteOutputWaitTimer();
@@ -581,6 +630,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         catch (OperationCanceledException)
         {
             await SafeDisposeSessionAsync().ConfigureAwait(true);
+            Progress.Reset();
             Status = SessionStatus.Disconnected;
         }
         catch (SshHostKeyMismatchException ex)

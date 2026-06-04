@@ -50,6 +50,7 @@
     <Compile Include="..\Models\TunnelConfig.cs" Link="Models\TunnelConfig.cs" />
     <Compile Include="..\Models\TunnelKind.cs" Link="Models\TunnelKind.cs" />
     <Compile Include="..\Models\TunnelState.cs" Link="Models\TunnelState.cs" />
+    <Compile Include="..\Models\TunnelProgress.cs" Link="Models\TunnelProgress.cs" />
     <Compile Include="..\Models\TunnelDraft.cs" Link="Models\TunnelDraft.cs" />
     <Compile Include="..\Models\TunnelRouteChoice.cs" Link="Models\TunnelRouteChoice.cs" />
     <Compile Include="..\Models\WireGuardSettings.cs" Link="Models\WireGuardSettings.cs" />
@@ -140,6 +141,7 @@
     <Compile Include="..\ViewModels\UpdateViewModel.cs" Link="ViewModels\UpdateViewModel.cs" />
     <Compile Include="..\ViewModels\CredentialsViewModel.cs" Link="ViewModels\CredentialsViewModel.cs" />
     <Compile Include="..\ViewModels\TunnelConfigsViewModel.cs" Link="ViewModels\TunnelConfigsViewModel.cs" />
+    <Compile Include="..\ViewModels\Sessions\ConnectionProgress.cs" Link="ViewModels\Sessions\ConnectionProgress.cs" />
     <Compile Include="..\ViewModels\Sessions\SessionTabViewModel.cs" Link="ViewModels\Sessions\SessionTabViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\SshSessionViewModel.cs" Link="ViewModels\Sessions\SshSessionViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\RdpSessionViewModel.cs" Link="ViewModels\Sessions\RdpSessionViewModel.cs" />

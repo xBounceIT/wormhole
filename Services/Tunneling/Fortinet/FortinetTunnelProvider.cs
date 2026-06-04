@@ -21,7 +21,11 @@ public sealed class FortinetTunnelProvider : ITunnelProvider
 
     public TunnelKind Kind => TunnelKind.Fortinet;
 
-    public async Task<ITunnelInstance> EstablishAsync(TunnelConfig config, byte[] secretBlob, CancellationToken cancellationToken)
+    public async Task<ITunnelInstance> EstablishAsync(
+        TunnelConfig config,
+        byte[] secretBlob,
+        CancellationToken cancellationToken,
+        IProgress<TunnelProgress>? progress = null)
     {
         var settings = JsonSerializer.Deserialize<FortinetSettings>(secretBlob)
             ?? throw new InvalidOperationException($"Tunnel config '{config.Name}' has an empty/invalid Fortinet payload.");
@@ -54,6 +58,7 @@ public sealed class FortinetTunnelProvider : ITunnelProvider
         var sidecarPath = AppPaths.GetFortiProxyExecutablePath();
         _logger.LogDebug("Launching Fortinet sidecar at {Path}.", sidecarPath);
 
+        progress?.Report(new TunnelProgress(TunnelPhase.StartingTunnel));
         var host = await FortinetProcessHost.StartAsync(
             sidecarPath, sidecar, _loggerFactory.CreateLogger<FortinetProcessHost>(), cancellationToken)
             .ConfigureAwait(false);

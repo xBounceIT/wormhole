@@ -50,11 +50,20 @@ public sealed class TunnelManager
     /// <summary>
     /// Establishes a tunnel for the given profile, or returns <c>null</c> when the profile is
     /// not configured to use one. The caller owns the returned instance and must dispose it.
+    /// <paramref name="progress"/> (optional) is forwarded to the resolved provider so the
+    /// connecting overlay can surface the tunnel's establishment phases.
     /// </summary>
-    public async Task<ITunnelInstance?> EstablishAsync(ConnectionProfile profile, CancellationToken cancellationToken)
+    public async Task<ITunnelInstance?> EstablishAsync(
+        ConnectionProfile profile,
+        CancellationToken cancellationToken,
+        IProgress<TunnelProgress>? progress = null)
     {
         ArgumentNullException.ThrowIfNull(profile);
         if (!profile.TunnelEnabled) return null;
+
+        // The config + secret read below is fast, but reporting Preparing up front gives the
+        // overlay an immediate sub-status instead of an empty gap before the provider's first report.
+        progress?.Report(new TunnelProgress(TunnelPhase.Preparing));
         if (profile.TunnelConfigId is null)
         {
             throw new InvalidOperationException(
@@ -95,7 +104,7 @@ public sealed class TunnelManager
 
         _logger.LogInformation("Establishing {Kind} tunnel '{Name}'.", config.Kind, config.Name);
 
-        return await provider.EstablishAsync(config, secret, cancellationToken).ConfigureAwait(false);
+        return await provider.EstablishAsync(config, secret, cancellationToken, progress).ConfigureAwait(false);
     }
 
     private static async Task ObserveSilentlyAsync(Task task)

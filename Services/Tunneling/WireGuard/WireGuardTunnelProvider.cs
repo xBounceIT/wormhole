@@ -21,7 +21,11 @@ public sealed class WireGuardTunnelProvider : ITunnelProvider
 
     public TunnelKind Kind => TunnelKind.WireGuard;
 
-    public async Task<ITunnelInstance> EstablishAsync(TunnelConfig config, byte[] secretBlob, CancellationToken cancellationToken)
+    public async Task<ITunnelInstance> EstablishAsync(
+        TunnelConfig config,
+        byte[] secretBlob,
+        CancellationToken cancellationToken,
+        IProgress<TunnelProgress>? progress = null)
     {
         var settings = JsonSerializer.Deserialize<WireGuardSettings>(secretBlob)
             ?? throw new InvalidOperationException($"Tunnel config '{config.Name}' has an empty/invalid WireGuard payload.");
@@ -42,6 +46,7 @@ public sealed class WireGuardTunnelProvider : ITunnelProvider
         var sidecarPath = AppPaths.GetWgProxyExecutablePath();
         _logger.LogDebug("Launching WireGuard sidecar at {Path}.", sidecarPath);
 
+        progress?.Report(new TunnelProgress(TunnelPhase.StartingTunnel));
         var host = await WireGuardProcessHost.StartAsync(
             sidecarPath, sidecar, _loggerFactory.CreateLogger<WireGuardProcessHost>(), cancellationToken)
             .ConfigureAwait(false);

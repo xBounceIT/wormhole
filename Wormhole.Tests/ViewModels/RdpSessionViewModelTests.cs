@@ -1879,7 +1879,11 @@ public class RdpSessionViewModelTests
             _instance = instance;
         }
 
-        public Task<ITunnelInstance> EstablishAsync(TunnelConfig config, byte[] secretBlob, CancellationToken cancellationToken)
+        public Task<ITunnelInstance> EstablishAsync(
+            TunnelConfig config,
+            byte[] secretBlob,
+            CancellationToken cancellationToken,
+            IProgress<TunnelProgress>? progress = null)
         {
             EstablishCount++;
             LastInstance = _instance ?? new FakeTunnelInstance();
@@ -1894,7 +1898,11 @@ public class RdpSessionViewModelTests
         public FakeTunnelInstance? LastInstance { get; private set; }
         public TunnelKind Kind => TunnelKind.WireGuard;
 
-        public async Task<ITunnelInstance> EstablishAsync(TunnelConfig config, byte[] secretBlob, CancellationToken cancellationToken)
+        public async Task<ITunnelInstance> EstablishAsync(
+            TunnelConfig config,
+            byte[] secretBlob,
+            CancellationToken cancellationToken,
+            IProgress<TunnelProgress>? progress = null)
         {
             EstablishStarted.TrySetResult(null);
             await ReleaseEstablish.Task.ConfigureAwait(false);

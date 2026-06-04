@@ -18,6 +18,13 @@ public abstract partial class SessionTabViewModel : ObservableObject
 
     public ConnectionProfile? Profile { get; protected set; }
 
+    /// <summary>
+    /// Numbered, phased progress shown in the connecting overlay. Populated with steps by the
+    /// derived VM's connect path for tunneled connections (left empty for direct connections, which
+    /// fall back to a plain spinner). Stable instance — bindings subscribe to it for the tab's life.
+    /// </summary>
+    public ConnectionProgress Progress { get; } = new();
+
     public abstract ProtocolType Protocol { get; }
 
     /// <summary>
@@ -136,6 +143,29 @@ public abstract partial class SessionTabViewModel : ObservableObject
         {
             OnDispatchEnqueueFailed();
         }
+    }
+
+    /// <summary>
+    /// Build an <see cref="IProgress{T}"/> whose <c>Report</c> marshals <paramref name="onUi"/> onto
+    /// the captured UI dispatcher. Tunnel providers report from background threads (they await with
+    /// <c>ConfigureAwait(false)</c>), so the handler — which touches observable state on
+    /// <see cref="Progress"/> — must be hopped to the UI thread. Falls through to synchronous
+    /// execution when no dispatcher was captured (unit tests), same as <see cref="MarshalToUi(Action)"/>.
+    /// </summary>
+    protected IProgress<T> CreateUiProgress<T>(Action<T> onUi) => new DispatchedProgress<T>(this, onUi);
+
+    private sealed class DispatchedProgress<T> : IProgress<T>
+    {
+        private readonly SessionTabViewModel _owner;
+        private readonly Action<T> _onUi;
+
+        public DispatchedProgress(SessionTabViewModel owner, Action<T> onUi)
+        {
+            _owner = owner;
+            _onUi = onUi;
+        }
+
+        public void Report(T value) => _owner.MarshalToUi(() => _onUi(value));
     }
 
     private async Task RunSafe(Func<Task> action)

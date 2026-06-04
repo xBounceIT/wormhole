@@ -49,7 +49,11 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
 
     public TunnelKind Kind => TunnelKind.Watchguard;
 
-    public async Task<ITunnelInstance> EstablishAsync(TunnelConfig config, byte[] secretBlob, CancellationToken cancellationToken)
+    public async Task<ITunnelInstance> EstablishAsync(
+        TunnelConfig config,
+        byte[] secretBlob,
+        CancellationToken cancellationToken,
+        IProgress<TunnelProgress>? progress = null)
     {
         var settings = JsonSerializer.Deserialize<WatchguardSettings>(secretBlob)
             ?? throw new InvalidOperationException($"Tunnel config '{config.Name}' has an empty/invalid Watchguard payload.");
@@ -64,6 +68,10 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
                 "Open the tunnel editor to re-enter settings.");
         }
 
+        // Authenticating covers the whole credential-resolution step (status probe, SAML or
+        // username/password + any OTP, and config download) so the connecting stepper shows a live
+        // sub-status before the longer tunnel bring-up below.
+        progress?.Report(new TunnelProgress(TunnelPhase.Authenticating));
         var (profile, username, effectivePassword) = await ResolveProfileAndCredentialsAsync(config, settings, cancellationToken)
             .ConfigureAwait(false);
 
@@ -78,6 +86,7 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
         var sidecarPath = AppPaths.GetOvpnProxyExecutablePath();
         _logger.LogDebug("Launching OpenVPN sidecar (Watchguard provider) at {Path}.", sidecarPath);
 
+        progress?.Report(new TunnelProgress(TunnelPhase.StartingTunnel));
         var host = await OpenVpnProcessHost.StartAsync(
             sidecarPath, sidecar, _loggerFactory.CreateLogger<OpenVpnProcessHost>(), cancellationToken)
             .ConfigureAwait(false);
