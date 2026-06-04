@@ -51,6 +51,7 @@
     <Compile Include="..\Models\TunnelKind.cs" Link="Models\TunnelKind.cs" />
     <Compile Include="..\Models\TunnelState.cs" Link="Models\TunnelState.cs" />
     <Compile Include="..\Models\TunnelDraft.cs" Link="Models\TunnelDraft.cs" />
+    <Compile Include="..\Models\TunnelRouteChoice.cs" Link="Models\TunnelRouteChoice.cs" />
     <Compile Include="..\Models\WireGuardSettings.cs" Link="Models\WireGuardSettings.cs" />
     <Compile Include="..\Models\FortinetSettings.cs" Link="Models\FortinetSettings.cs" />
     <Compile Include="..\Models\OpenVpnSettings.cs" Link="Models\OpenVpnSettings.cs" />
@@ -64,6 +65,8 @@
     <Compile Include="..\Services\Tunneling\ITunnelProvider.cs" Link="Services\Tunneling\ITunnelProvider.cs" />
     <Compile Include="..\Services\Tunneling\ITunnelInstance.cs" Link="Services\Tunneling\ITunnelInstance.cs" />
     <Compile Include="..\Services\Tunneling\TunnelManager.cs" Link="Services\Tunneling\TunnelManager.cs" />
+    <Compile Include="..\Services\Tunneling\ITunnelRoutePrompter.cs" Link="Services\Tunneling\ITunnelRoutePrompter.cs" />
+    <Compile Include="..\Services\Tunneling\TunnelRoutePrompter.cs" Link="Services\Tunneling\TunnelRoutePrompter.cs" />
     <Compile Include="..\Services\Tunneling\SocksTunnelInstance.cs" Link="Services\Tunneling\SocksTunnelInstance.cs" />
     <Compile Include="..\Services\Tunneling\BorrowedTunnelInstance.cs" Link="Services\Tunneling\BorrowedTunnelInstance.cs" />
     <Compile Include="..\Services\Tunneling\Socks5Client.cs" Link="Services\Tunneling\Socks5Client.cs" />

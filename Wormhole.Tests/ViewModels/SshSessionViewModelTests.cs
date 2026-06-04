@@ -115,6 +115,7 @@ public sealed class SshSessionViewModelTests
             new Fakes.FakeCredentialService(),
             new NullCredentialRepository(),
             CreateTunnelManager(),
+            CreateTunnelRoutePrompter(),
             NoopProfileResolver(),
             new Fakes.FakeDialogService(),
             new Fakes.FakeRdpCrashSentinelService(),
@@ -132,6 +133,7 @@ public sealed class SshSessionViewModelTests
             new Fakes.FakeCredentialService(),
             new NullCredentialRepository(),
             CreateTunnelManager(),
+            CreateTunnelRoutePrompter(),
             NoopProfileResolver(),
             new Fakes.FakeDialogService(),
             new Fakes.FakeRdpCrashSentinelService(),
@@ -177,6 +179,16 @@ public sealed class SshSessionViewModelTests
             credentials,
             NullLoggerFactory.Instance.CreateLogger<TunnelManager>());
     }
+
+    // Default route prompter for tests that don't exercise the tunnel-routing prompt: the
+    // settings flag defaults off, so ResolveRouteAsync returns the profile unchanged (the
+    // tunnel is used as configured) without ever invoking the dialog.
+    private static TunnelRoutePrompter CreateTunnelRoutePrompter() =>
+        new(
+            new FakeAppSettingsService(),
+            new Fakes.FakeDialogService(),
+            new FakeTunnelConfigRepository(),
+            NullLoggerFactory.Instance.CreateLogger<TunnelRoutePrompter>());
 
     [Fact]
     public void CanReconnect_IsFalse_ByDefault()
@@ -237,6 +249,40 @@ public sealed class SshSessionViewModelTests
         Assert.Equal(2, notifications);
     }
 
+    // The SFTP on-demand fallback (FileTransferDialogService) establishes against
+    // RoutedProfileForSubsession when there's no live tunnel to borrow, so a terminal that went
+    // "direct" doesn't get a silently-tunneled file transfer. These pin that contract; the full
+    // ConnectAsync routing path itself is WebView2-bound and covered via TunnelRoutePrompter +
+    // the RDP integration tests.
+    [Fact]
+    public void RoutedProfileForSubsession_FallsBackToProfile_WhenNoRouteResolved()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+
+        // No connect has resolved a route yet → SFTP sub-sessions see the saved profile.
+        Assert.Same(vm.Profile, vm.RoutedProfileForSubsession);
+    }
+
+    [Fact]
+    public void RoutedProfileForSubsession_ReflectsDirectRoute_ThenFallsBackWhenCleared()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile() with { TunnelEnabled = true, TunnelConfigId = Guid.NewGuid() });
+
+        // Simulate a connect where the user chose "connect directly": TunnelEnabled forced off.
+        var direct = vm.Profile! with { TunnelEnabled = false };
+        vm.PrimeRoutedProfileForTesting(direct);
+        Assert.Same(direct, vm.RoutedProfileForSubsession);
+        Assert.False(vm.RoutedProfileForSubsession!.TunnelEnabled);
+
+        // Teardown clears the routed profile → fall back to the saved (tunnel-enabled) profile so a
+        // later VPN-required transfer stays on the VPN rather than silently going direct.
+        vm.PrimeRoutedProfileForTesting(null);
+        Assert.Same(vm.Profile, vm.RoutedProfileForSubsession);
+        Assert.True(vm.RoutedProfileForSubsession!.TunnelEnabled);
+    }
+
     [Fact]
     public void CanOpenFileTransfer_IsFalse_ForRdpSession()
     {
@@ -245,6 +291,7 @@ public sealed class SshSessionViewModelTests
             new Fakes.FakeCredentialService(),
             new NullCredentialRepository(),
             CreateTunnelManager(),
+            CreateTunnelRoutePrompter(),
             NoopProfileResolver(),
             new Fakes.FakeDialogService(),
             new Fakes.FakeRdpCrashSentinelService(),
@@ -795,21 +842,32 @@ public sealed class SshSessionViewModelTests
 
     private static SshSessionViewModel CreateViewModel(
         FakeSftpService? sftp = null,
-        IConnectionProfileResolver? profileResolver = null)
+        IConnectionProfileResolver? profileResolver = null,
+        FakeAppSettingsService? settings = null,
+        Fakes.FakeDialogService? dialog = null,
+        FakeTunnelConfigRepository? configs = null)
     {
         var credService = new FakeCredentialService();
-        var configs = new FakeTunnelConfigRepository();
+        configs ??= new FakeTunnelConfigRepository();
         var tunnels = new TunnelManager(
             Array.Empty<ITunnelProvider>(),
             configs,
             credService,
             NullLoggerFactory.Instance.CreateLogger<TunnelManager>());
+        settings ??= new FakeAppSettingsService();
+        dialog ??= new Fakes.FakeDialogService();
+        var prompter = new TunnelRoutePrompter(
+            settings,
+            dialog,
+            configs,
+            NullLoggerFactory.Instance.CreateLogger<TunnelRoutePrompter>());
         return new SshSessionViewModel(
             new FakeSshSessionService(),
             new FakeCredentialResolver(),
             new FakeConnectionRepository(),
-            new FakeAppSettingsService(),
+            settings,
             tunnels,
+            prompter,
             profileResolver ?? NoopProfileResolver(),
             sftp ?? new FakeSftpService(),
             NullLoggerFactory.Instance);

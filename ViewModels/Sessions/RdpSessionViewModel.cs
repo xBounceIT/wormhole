@@ -33,6 +33,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     private readonly ICredentialService _credentialService;
     private readonly ICredentialRepository _credentialRepository;
     private readonly TunnelManager _tunnels;
+    private readonly ITunnelRoutePrompter _tunnelPrompter;
     private readonly IConnectionProfileResolver _profileResolver;
     private readonly IDialogService _dialog;
     private readonly IRdpCrashSentinelService _crashSentinel;
@@ -65,6 +66,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         ICredentialService credentialService,
         ICredentialRepository credentialRepository,
         TunnelManager tunnels,
+        ITunnelRoutePrompter tunnelPrompter,
         IConnectionProfileResolver profileResolver,
         IDialogService dialog,
         IRdpCrashSentinelService crashSentinel,
@@ -74,6 +76,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         _credentialService = credentialService;
         _credentialRepository = credentialRepository;
         _tunnels = tunnels;
+        _tunnelPrompter = tunnelPrompter;
         _profileResolver = profileResolver;
         _dialog = dialog;
         _crashSentinel = crashSentinel;
@@ -483,6 +486,25 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             _hasLoggedOn = false;
             _lastLogonErrorCode = null;
             _teardownRequested = false;
+
+            // Per-connect tunnel routing: when the user has opted in (PromptBeforeTunnelConnect)
+            // and this profile is configured for a tunnel, ask whether to route through it or
+            // connect directly for THIS attempt. Done before the external-client / gateway /
+            // strict-auth guards below so that choosing "connect directly" relaxes those
+            // tunnel-incompatibility rejections (a direct connection has none of those
+            // constraints). A null result means the user cancelled — return silently to
+            // Disconnected. Decided per attempt (the Profile is left untouched) so Retry
+            // re-asks after a network change. CancellationToken.None: the connect CTS isn't
+            // created until after credential entry, and the IsAttemptCurrent guard below
+            // handles a Disconnect that lands while the prompt is open.
+            var routed = await _tunnelPrompter.ResolveRouteAsync(profile, CancellationToken.None).ConfigureAwait(true);
+            if (!IsAttemptCurrent(teardownGeneration)) return;
+            if (routed is null)
+            {
+                Status = SessionStatus.Disconnected;
+                return;
+            }
+            profile = routed;
 
             // External-client routing: opt-in flag OR auto-detected Azure-AD signal (saved
             // credential, node Username, node RdpDomain). The embedded mstscax delay-loads
