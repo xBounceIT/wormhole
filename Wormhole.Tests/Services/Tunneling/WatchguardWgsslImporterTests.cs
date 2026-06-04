@@ -38,6 +38,8 @@ public class WatchguardWgsslImporterTests
         Assert.Contains("CA", result.CaPem);
         Assert.Contains("CERT", result.ClientCertPem);
         Assert.Contains("KEY", result.ClientKeyPem);
+        Assert.Contains("remote firebox.example.com 4443", result.ProfileOvpn);
+        Assert.Contains("cipher AES-256-CBC", result.ProfileOvpn);
         // Username/Password are deliberately blank — the .wgssl format doesn't carry creds.
         Assert.Equal(string.Empty, result.Username);
         Assert.Equal(string.Empty, result.Password);

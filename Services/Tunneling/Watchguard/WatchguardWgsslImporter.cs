@@ -141,6 +141,7 @@ public static class WatchguardWgsslImporter
             CaPem = entries[CaEntry].Trim(),
             ClientCertPem = entries[CertEntry].Trim(),
             ClientKeyPem = entries[KeyEntry].Trim(),
+            ProfileOvpn = entries[ClientOvpnEntry].Trim(),
         };
     }
 

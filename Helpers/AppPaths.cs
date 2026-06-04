@@ -14,6 +14,7 @@ internal static class AppPaths
     private static readonly string StormshieldCacheDirectory = Path.Combine(AppDataDirectory, "stormshield-cache");
     private static readonly string UpdateCacheDirectory = Path.Combine(AppDataDirectory, "cache", "updates");
     private static readonly string WebView2UserDataDirectory = Path.Combine(AppDataDirectory, "webview2");
+    private static readonly string WatchguardSamlWebView2UserDataDirectory = Path.Combine(AppDataDirectory, "watchguard-saml-webview2");
     private static readonly string WebAssetsDirectory = Path.Combine(AppContext.BaseDirectory, "Assets", "web");
     private static readonly string WgProxyExecutablePath = Path.Combine(AppContext.BaseDirectory, "wormhole-wgproxy.exe");
     private static readonly string FortiProxyExecutablePath = Path.Combine(AppContext.BaseDirectory, "wormhole-fortiproxy.exe");
@@ -42,6 +43,8 @@ internal static class AppPaths
     // which the app cannot create when installed under Program Files without
     // elevation. Pin it under %LOCALAPPDATA%\Wormhole\ to match sibling state.
     public static string GetWebView2UserDataDirectory() => WebView2UserDataDirectory;
+
+    public static string GetWatchguardSamlWebView2UserDataDirectory() => WatchguardSamlWebView2UserDataDirectory;
 
     public static string GetWebAssetsDirectory() => WebAssetsDirectory;
 

@@ -65,6 +65,28 @@ public class WatchguardPreAuthClientTests
             "challenge response must not include fw_password (it expects `response` instead).");
     }
 
+    [Fact]
+    public async Task RespondToMfaChoiceAsync_PostsNativePushChoiceShape()
+    {
+        var captured = new CapturingHandler(canned: "<resp><logon_status>1</logon_status></resp>");
+        using var http = new HttpClient(captured);
+        using var client = new WatchguardPreAuthClient(http);
+
+        await client.RespondToMfaChoiceAsync(
+            server: "firebox.example.com", port: 443,
+            logonId: "session-abc-123", choice: "p",
+            cancellationToken: CancellationToken.None);
+
+        var form = captured.LastForm;
+        Assert.Equal("sslvpn_logon", form["action"]);
+        Assert.Equal("fw_logon_progress.xsl", form["style"]);
+        Assert.Equal("mfa_response", form["fw_logon_type"]);
+        Assert.Equal("session-abc-123", form["fw_logon_id"]);
+        Assert.Equal("p", form["mfa_choice"]);
+        Assert.False(form.AllKeys.Contains("response"));
+        Assert.False(form.AllKeys.Contains("fw_password"));
+    }
+
     /// <summary>
     /// Test-only HttpMessageHandler that returns a canned XML body and records the request's
     /// form fields for assertion. Mirrors what a stub Firebox listener would provide without
@@ -244,5 +266,50 @@ public class WatchguardPreAuthClientTests
         var outcome = WatchguardPreAuthClient.ParseLogonResponse("");
 
         Assert.IsType<PreAuthOutcome.Failure>(outcome);
+    }
+
+    [Fact]
+    public void ParseStatusResponse_MapsSamlAndDomains()
+    {
+        const string xml = """
+            <resp>
+                <saml_enabled>1</saml_enabled>
+                <saml_idp_name>Entra ID</saml_idp_name>
+                <auth-domain>Firebox-DB</auth-domain>
+                <auth-domain>FMS_EntraID_SAML</auth-domain>
+            </resp>
+            """;
+
+        var status = WatchguardConfigClient.ParseStatusResponse(xml);
+
+        Assert.True(status.SamlEnabled);
+        Assert.Equal("Entra ID", status.SamlIdentityProviderName);
+        Assert.Contains("Firebox-DB", status.AuthDomains);
+        Assert.Contains("FMS_EntraID_SAML", status.AuthDomains);
+    }
+
+    [Theory]
+    [InlineData("https://firebox.example.com/auth/saml/login?from=sslvpn_client", true)]
+    [InlineData("https://firebox.example.com:443/saml/login?from=sslvpn_client", true)]
+    [InlineData("https://login.microsoftonline.com/common/oauth2/v2.0/authorize", false)]
+    [InlineData("https://firebox.example.com:4443/auth/saml/login", false)]
+    [InlineData("http://firebox.example.com/auth/saml/login", false)]
+    [InlineData("not a uri", false)]
+    public void IsConfiguredFireboxHttpsUri_OnlyMatchesConfiguredGateway(string requestUri, bool expected)
+    {
+        var fireboxUri = WatchguardConfigClient.BuildUri("firebox.example.com", 443, "/");
+
+        Assert.Equal(expected, WatchguardConfigClient.IsConfiguredFireboxHttpsUri(fireboxUri, requestUri));
+    }
+
+    [Fact]
+    public void BuildSamlLoginUris_TriesDocumentedFireboxEntryPointFirst()
+    {
+        var uris = WatchguardConfigClient.BuildSamlLoginUris("firebox.example.com", 443);
+
+        Assert.Equal("/auth/saml", uris[0].AbsolutePath);
+        Assert.Equal("from=sslvpn_client", uris[0].Query.TrimStart('?'));
+        Assert.Equal("/auth/saml/login", uris[1].AbsolutePath);
+        Assert.Equal("/saml/login", uris[2].AbsolutePath);
     }
 }
