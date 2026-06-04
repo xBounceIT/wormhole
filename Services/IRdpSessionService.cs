@@ -63,6 +63,17 @@ public interface IRdpSession : IDisposable
     /// <summary>Position the embedded host inside the parent window's client area.</summary>
     void SetBounds(HostBounds bounds);
 
+    /// <summary>
+    /// Renegotiate the REMOTE desktop resolution to the given client pixel size — the
+    /// dynamic-resolution mechanism mstsc uses, so the remote OS re-lays-out at the new size
+    /// rather than scaling a fixed canvas. Best-effort: a server/build that doesn't support the
+    /// Display Control channel keeps the current SmartSizing-scaled surface. Implementations MUST
+    /// NOT throw or treat failure as a session error — unlike <see cref="SetBounds"/>, a failed
+    /// resolution change is non-fatal and must never tear the session down. Callers debounce this
+    /// to the end of a resize gesture (it triggers a server-side display-mode change).
+    /// </summary>
+    void UpdateRemoteResolution(int widthPx, int heightPx);
+
     /// <summary>Make the host window visible (e.g. on tab activation).</summary>
     void Show();
 

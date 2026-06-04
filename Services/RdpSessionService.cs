@@ -294,6 +294,17 @@ public sealed class RdpSessionService : IRdpSessionService
             }
         }
 
+        public void UpdateRemoteResolution(int widthPx, int heightPx)
+        {
+            // Best-effort: TryUpdateRemoteResolution already swallows the unsupported-build /
+            // unsupported-server / not-yet-connected cases and returns false. A false result is
+            // NOT a session failure (contrast SetBounds above, which throws on a genuine
+            // positioning failure so the VM surfaces the error overlay). Guard the call itself so
+            // a teardown race between a debounced resize tick and disposal can't surface here.
+            try { _form.TryUpdateRemoteResolution(widthPx, heightPx); }
+            catch (Exception ex) { _logger.LogDebug(ex, "RDP UpdateRemoteResolution suppressed."); }
+        }
+
         public void Show()
         {
             Win32Interop.ShowWindow(_form.Hwnd, Win32Interop.SW_SHOWNA);
