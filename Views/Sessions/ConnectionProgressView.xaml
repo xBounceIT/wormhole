@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Wormhole.Views.Sessions.ConnectionProgressView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:vm="using:Wormhole.ViewModels.Sessions">
+
+    <!-- DataContext is expected to be a ConnectionProgress. Renders the numbered, phased
+         stepper: a row of circles joined by connector lines that fill left-to-right as each
+         phase completes, with a live sub-status line beneath for the active step. -->
+    <StackPanel HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Spacing="16"
+                MaxWidth="480"
+                Padding="24">
+        <TextBlock Text="Connecting…"
+                   Style="{StaticResource BodyStrongTextBlockStyle}"
+                   HorizontalAlignment="Center" />
+
+        <ItemsControl ItemsSource="{Binding Steps}"
+                      HorizontalAlignment="Center">
+            <ItemsControl.ItemsPanel>
+                <ItemsPanelTemplate>
+                    <StackPanel Orientation="Horizontal" />
+                </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="vm:ConnectionStep">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="84" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="32" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <!-- Step circle -->
+                        <Border Grid.Row="0" Grid.Column="0"
+                                Width="32" Height="32"
+                                CornerRadius="16"
+                                BorderThickness="2"
+                                HorizontalAlignment="Center"
+                                VerticalAlignment="Center"
+                                Background="{x:Bind State, Converter={StaticResource ConnectionStepStateToBrushConverter}, ConverterParameter=Fill, Mode=OneWay}"
+                                BorderBrush="{x:Bind State, Converter={StaticResource ConnectionStepStateToBrushConverter}, ConverterParameter=Stroke, Mode=OneWay}">
+                            <Grid>
+                                <TextBlock Text="{x:Bind NumberText}"
+                                           FontSize="13"
+                                           Foreground="#FF9A9A9A"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"
+                                           Visibility="{x:Bind IsPending, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}" />
+                                <ProgressRing Width="18" Height="18"
+                                              IsActive="{x:Bind IsActive, Mode=OneWay}"
+                                              Visibility="{x:Bind IsActive, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}" />
+                                <FontIcon Glyph="&#xE73E;"
+                                          FontSize="14"
+                                          Foreground="White"
+                                          HorizontalAlignment="Center"
+                                          VerticalAlignment="Center"
+                                          Visibility="{x:Bind IsCompleted, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}" />
+                                <FontIcon Glyph="&#xE711;"
+                                          FontSize="13"
+                                          Foreground="White"
+                                          HorizontalAlignment="Center"
+                                          VerticalAlignment="Center"
+                                          Visibility="{x:Bind IsFailed, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}" />
+                            </Grid>
+                        </Border>
+
+                        <!-- Connector to the next step (hidden on the last step) -->
+                        <Rectangle Grid.Row="0" Grid.Column="1"
+                                   Width="40" Height="2"
+                                   VerticalAlignment="Center"
+                                   RadiusX="1" RadiusY="1"
+                                   Fill="{x:Bind State, Converter={StaticResource ConnectionStepStateToBrushConverter}, ConverterParameter=Connector, Mode=OneWay}"
+                                   Visibility="{x:Bind IsLast, Converter={StaticResource BoolToVisibilityConverter}, ConverterParameter=Invert, Mode=OneWay}" />
+
+                        <!-- Label beneath the circle -->
+                        <TextBlock Grid.Row="1" Grid.Column="0"
+                                   Text="{x:Bind Label}"
+                                   Width="84"
+                                   FontSize="12"
+                                   TextAlignment="Center"
+                                   TextTrimming="CharacterEllipsis"
+                                   Margin="0,6,0,0" />
+                    </Grid>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
+
+        <TextBlock Text="{Binding Detail}"
+                   HorizontalAlignment="Center"
+                   TextAlignment="Center"
+                   TextWrapping="Wrap"
+                   FontSize="12"
+                   Opacity="0.75"
+                   Visibility="{Binding Detail, Converter={StaticResource StringPresentVisibilityConverter}}" />
+    </StackPanel>
+</UserControl>

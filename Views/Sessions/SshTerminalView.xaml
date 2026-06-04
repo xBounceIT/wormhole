@@ -3,7 +3,8 @@
     x:Class="Wormhole.Views.Sessions.SshTerminalView"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:controls="using:Microsoft.UI.Xaml.Controls">
+    xmlns:controls="using:Microsoft.UI.Xaml.Controls"
+    xmlns:views="using:Wormhole.Views.Sessions">
 
     <Grid Background="#0c0c0c"
           HorizontalAlignment="Stretch"
@@ -31,12 +32,23 @@
 
         <Border Background="#0c0c0c"
                 Visibility="{Binding IsConnecting, Converter={StaticResource BoolToVisibilityConverter}}">
-            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12">
-                <ProgressRing IsActive="True" Width="32" Height="32" />
-                <TextBlock Text="Connecting..."
-                           HorizontalAlignment="Center"
-                           Foreground="#e0e0e0" />
-            </StackPanel>
+            <Grid>
+                <!-- Tunneled connections: numbered, phased stepper. Foreground is set explicitly
+                     because this overlay is always dark (#0c0c0c) regardless of the app theme, so
+                     the inherited default text color would be unreadable in light theme. -->
+                <views:ConnectionProgressView
+                    DataContext="{Binding Progress}"
+                    Foreground="#E0E0E0"
+                    Visibility="{Binding Progress.IsActive, Converter={StaticResource BoolToVisibilityConverter}}" />
+                <!-- Direct connections (no tunnel steps): plain spinner. -->
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12"
+                            Visibility="{Binding Progress.IsActive, Converter={StaticResource BoolToVisibilityConverter}, ConverterParameter=Invert}">
+                    <ProgressRing IsActive="True" Width="32" Height="32" />
+                    <TextBlock Text="Connecting..."
+                               HorizontalAlignment="Center"
+                               Foreground="#e0e0e0" />
+                </StackPanel>
+            </Grid>
         </Border>
 
         <Border Background="#CC20242f"
@@ -63,6 +75,13 @@
                         Spacing="12"
                         MaxWidth="480"
                         Padding="24">
+                <!-- For a tunneled failure, show which numbered phase broke (red ✗). Hidden for
+                     direct connections and post-connect drops (no failed step). -->
+                <views:ConnectionProgressView
+                    DataContext="{Binding Progress}"
+                    Foreground="#E0E0E0"
+                    Margin="0,0,0,4"
+                    Visibility="{Binding Progress.HasFailedStep, Converter={StaticResource BoolToVisibilityConverter}}" />
                 <FontIcon Glyph="&#xE783;" FontSize="32" Foreground="#FF6B6B"
                           HorizontalAlignment="Center" />
                 <TextBlock Text="Connection failed"

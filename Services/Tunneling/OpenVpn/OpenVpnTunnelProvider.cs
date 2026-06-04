@@ -28,7 +28,11 @@ public sealed class OpenVpnTunnelProvider : ITunnelProvider
 
     public TunnelKind Kind => TunnelKind.OpenVpn;
 
-    public async Task<ITunnelInstance> EstablishAsync(TunnelConfig config, byte[] secretBlob, CancellationToken cancellationToken)
+    public async Task<ITunnelInstance> EstablishAsync(
+        TunnelConfig config,
+        byte[] secretBlob,
+        CancellationToken cancellationToken,
+        IProgress<TunnelProgress>? progress = null)
     {
         var settings = JsonSerializer.Deserialize<OpenVpnSettings>(secretBlob)
             ?? throw new InvalidOperationException($"Tunnel config '{config.Name}' has an empty/invalid OpenVPN payload.");
@@ -47,6 +51,7 @@ public sealed class OpenVpnTunnelProvider : ITunnelProvider
         var sidecarPath = AppPaths.GetOvpnProxyExecutablePath();
         _logger.LogDebug("Launching OpenVPN sidecar at {Path}.", sidecarPath);
 
+        progress?.Report(new TunnelProgress(TunnelPhase.StartingTunnel));
         var host = await OpenVpnProcessHost.StartAsync(
             sidecarPath, sidecar, _loggerFactory.CreateLogger<OpenVpnProcessHost>(), cancellationToken)
             .ConfigureAwait(false);

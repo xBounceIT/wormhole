@@ -134,6 +134,48 @@ public class TunnelManagerTests
         await instance!.DisposeAsync();
     }
 
+    [Fact]
+    public async Task Establish_ReportsPreparing_ThenForwardsProviderProgress()
+    {
+        var provider = new FakeProvider();
+        var mgr = BuildManager(out var repo, out var creds, providers: new ITunnelProvider[] { provider });
+
+        var configId = Guid.NewGuid();
+        repo.Configs[configId] = new TunnelConfig { Id = configId, Name = "wg", Kind = TunnelKind.WireGuard };
+        creds.TunnelConfigs[configId] = new byte[] { 1 };
+        var profile = Profile(tunnelEnabled: true, tunnelConfigId: configId);
+
+        var reports = new List<TunnelPhase>();
+        var progress = new RecordingProgress(p => reports.Add(p.Phase));
+
+        var instance = await mgr.EstablishAsync(profile, CancellationToken.None, progress);
+        await instance!.DisposeAsync();
+
+        // Manager reports Preparing up front, then the provider's own report flows through the
+        // same IProgress in order.
+        Assert.Equal(new[] { TunnelPhase.Preparing, TunnelPhase.StartingTunnel }, reports);
+    }
+
+    [Fact]
+    public async Task Establish_TunnelDisabled_ReportsNothing()
+    {
+        var mgr = BuildManager(out _, out _);
+        var profile = Profile(tunnelEnabled: false, tunnelConfigId: null);
+
+        var reports = new List<TunnelPhase>();
+        var result = await mgr.EstablishAsync(profile, CancellationToken.None, new RecordingProgress(p => reports.Add(p.Phase)));
+
+        Assert.Null(result);
+        Assert.Empty(reports);
+    }
+
+    private sealed class RecordingProgress : IProgress<TunnelProgress>
+    {
+        private readonly Action<TunnelProgress> _onReport;
+        public RecordingProgress(Action<TunnelProgress> onReport) => _onReport = onReport;
+        public void Report(TunnelProgress value) => _onReport(value);
+    }
+
     private static TunnelManager BuildManager(
         out FakeTunnelConfigRepository repo,
         out FakeCredentialService credentials,
@@ -174,10 +216,17 @@ public class TunnelManagerTests
         public FakeProvider() : this(TunnelKind.WireGuard) { }
         public FakeProvider(TunnelKind kind) { Kind = kind; }
 
-        public Task<ITunnelInstance> EstablishAsync(TunnelConfig config, byte[] secretBlob, CancellationToken cancellationToken)
+        public Task<ITunnelInstance> EstablishAsync(
+            TunnelConfig config,
+            byte[] secretBlob,
+            CancellationToken cancellationToken,
+            IProgress<TunnelProgress>? progress = null)
         {
             EstablishCount++;
             LastSecret = secretBlob;
+            // Emit a representative provider-side report so a test can assert the manager forwards
+            // the IProgress to the resolved provider (and reports Preparing itself beforehand).
+            progress?.Report(new TunnelProgress(TunnelPhase.StartingTunnel));
             LastInstance = new FakeInstance();
             return Task.FromResult<ITunnelInstance>(LastInstance);
         }

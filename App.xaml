@@ -24,6 +24,7 @@
             <conv:TransferStateGlyphConverter x:Key="TransferStateGlyphConverter" />
             <conv:TransferStateTerminalVisibilityConverter x:Key="TransferStateTerminalVisibilityConverter" />
             <conv:TransferStateBrushConverter x:Key="TransferStateBrushConverter" />
+            <conv:ConnectionStepStateToBrushConverter x:Key="ConnectionStepStateToBrushConverter" />
 
             <Style x:Key="IconButtonStyle" TargetType="Button" BasedOn="{StaticResource DefaultButtonStyle}">
                 <Setter Property="Background" Value="Transparent" />

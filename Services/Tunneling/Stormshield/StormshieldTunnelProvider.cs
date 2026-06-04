@@ -58,7 +58,11 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
 
     public TunnelKind Kind => TunnelKind.Stormshield;
 
-    public async Task<ITunnelInstance> EstablishAsync(TunnelConfig config, byte[] secretBlob, CancellationToken cancellationToken)
+    public async Task<ITunnelInstance> EstablishAsync(
+        TunnelConfig config,
+        byte[] secretBlob,
+        CancellationToken cancellationToken,
+        IProgress<TunnelProgress>? progress = null)
     {
         var settings = JsonSerializer.Deserialize<StormshieldSettings>(secretBlob)
             ?? throw new InvalidOperationException($"Tunnel config '{config.Name}' has an empty/invalid Stormshield payload.");
@@ -80,7 +84,7 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         var (profile, dataPlanePassword, optimisticCacheHit) = settings.Mode switch
         {
             StormshieldConnectionMode.Import => (BuildImportProfile(config, settings), settings.Password, false),
-            StormshieldConnectionMode.Automatic => await ResolveAutomaticAsync(config, settings, cancellationToken).ConfigureAwait(false),
+            StormshieldConnectionMode.Automatic => await ResolveAutomaticAsync(config, settings, cancellationToken, progress).ConfigureAwait(false),
             _ => throw new InvalidOperationException($"Tunnel config '{config.Name}' has an unsupported Stormshield mode '{settings.Mode}'."),
         };
 
@@ -98,6 +102,7 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         var sidecarPath = AppPaths.GetOvpnProxyExecutablePath();
         _logger.LogDebug("Launching OpenVPN sidecar (Stormshield provider) at {Path}.", sidecarPath);
 
+        progress?.Report(new TunnelProgress(TunnelPhase.StartingTunnel));
         OpenVpnProcessHost host;
         try
         {
@@ -158,7 +163,7 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
     }
 
     private async Task<(string Profile, string DataPlanePassword, bool OptimisticCacheHit)> ResolveAutomaticAsync(
-        TunnelConfig config, StormshieldSettings settings, CancellationToken cancellationToken)
+        TunnelConfig config, StormshieldSettings settings, CancellationToken cancellationToken, IProgress<TunnelProgress>? progress = null)
     {
         // Pre-flight mirrors TunnelConfigsViewModel.ValidateStormshield so a kind/blob mismatch or
         // missing field fails fast with an actionable message instead of a confusing HTTP error.
@@ -182,7 +187,7 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             settings.Server, settings.Port, config.Name, settings.UseOtp);
 
         return await ResolveAutomaticCoreAsync(
-            portal, _configCache, _otpPrompt, _logger, config.Id, config.Name, settings, cancellationToken)
+            portal, _configCache, _otpPrompt, _logger, config.Id, config.Name, settings, cancellationToken, progress)
             .ConfigureAwait(false);
     }
 
@@ -213,12 +218,16 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         Guid tunnelId,
         string configName,
         StormshieldSettings settings,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IProgress<TunnelProgress>? progress = null)
     {
+        progress?.Report(new TunnelProgress(TunnelPhase.Authenticating));
+
         if (!settings.UseOtp)
         {
             // No single-use factor to conserve — download fresh every time, real password on the data
             // plane. (Unchanged behavior for non-OTP firewalls; nothing is cached.)
+            progress?.Report(new TunnelProgress(TunnelPhase.DownloadingConfiguration));
             var profileNoOtp = await DownloadProfileV5WrappedAsync(portal, settings, otp: null, cancellationToken).ConfigureAwait(false);
             return (StormshieldProfileNormalizer.Normalize(profileNoOtp), settings.Password, false);
         }
@@ -251,6 +260,7 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         logger.LogInformation(
             "Stormshield '{Name}': {Reason}; downloading a fresh configuration (this uses the one-time code).",
             configName, cached is null ? "no cached configuration" : "firewall config changed");
+        progress?.Report(new TunnelProgress(TunnelPhase.DownloadingConfiguration));
         var rawProfile = await DownloadProfileV5WrappedAsync(portal, settings, otp, cancellationToken).ConfigureAwait(false);
         var normalized = StormshieldProfileNormalizer.Normalize(rawProfile);
 

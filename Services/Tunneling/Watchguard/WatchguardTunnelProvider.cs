@@ -45,7 +45,11 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
 
     public TunnelKind Kind => TunnelKind.Watchguard;
 
-    public async Task<ITunnelInstance> EstablishAsync(TunnelConfig config, byte[] secretBlob, CancellationToken cancellationToken)
+    public async Task<ITunnelInstance> EstablishAsync(
+        TunnelConfig config,
+        byte[] secretBlob,
+        CancellationToken cancellationToken,
+        IProgress<TunnelProgress>? progress = null)
     {
         var settings = JsonSerializer.Deserialize<WatchguardSettings>(secretBlob)
             ?? throw new InvalidOperationException($"Tunnel config '{config.Name}' has an empty/invalid Watchguard payload.");
@@ -71,6 +75,7 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
         // official client does the same on every connect (no checkbox), and the round-trip is
         // fast (~100ms on a healthy Firebox).
         string effectivePassword;
+        progress?.Report(new TunnelProgress(TunnelPhase.Authenticating));
         // Pass the user-supplied CA to the pre-auth client so self-signed Firebox deployments
         // (where the OS trust store doesn't vouch for the cert) can still complete the HTTPS
         // pre-flight without TrustServerCertificate. The OpenVPN sidecar's downstream <ca>
@@ -92,6 +97,7 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
         var sidecarPath = AppPaths.GetOvpnProxyExecutablePath();
         _logger.LogDebug("Launching OpenVPN sidecar (Watchguard provider) at {Path}.", sidecarPath);
 
+        progress?.Report(new TunnelProgress(TunnelPhase.StartingTunnel));
         var host = await OpenVpnProcessHost.StartAsync(
             sidecarPath, sidecar, _loggerFactory.CreateLogger<OpenVpnProcessHost>(), cancellationToken)
             .ConfigureAwait(false);
