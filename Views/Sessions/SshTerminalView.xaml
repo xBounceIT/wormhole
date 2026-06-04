@@ -36,10 +36,13 @@
                 <!-- Tunneled connections: numbered, phased stepper. Foreground is set explicitly
                      because this overlay is always dark (#0c0c0c) regardless of the app theme, so
                      the inherited default text color would be unreadable in light theme. -->
+                <!-- This element's DataContext IS the ConnectionProgress, so bind Visibility to its
+                     own IsActive (NOT Progress.IsActive, which would resolve against the progress
+                     object and silently fail, leaving the control visible). -->
                 <views:ConnectionProgressView
                     DataContext="{Binding Progress}"
                     Foreground="#E0E0E0"
-                    Visibility="{Binding Progress.IsActive, Converter={StaticResource BoolToVisibilityConverter}}" />
+                    Visibility="{Binding IsActive, Converter={StaticResource BoolToVisibilityConverter}}" />
                 <!-- Direct connections (no tunnel steps): plain spinner. -->
                 <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12"
                             Visibility="{Binding Progress.IsActive, Converter={StaticResource BoolToVisibilityConverter}, ConverterParameter=Invert}">
@@ -78,12 +81,14 @@
                 <!-- For a tunneled failure, show which numbered phase broke (red ✗). Hidden for
                      direct connections and post-connect drops (no failed step). Header is blanked
                      so it doesn't say "Connecting…" above a "Connection failed" message. -->
+                <!-- DataContext is the ConnectionProgress; bind to its own HasFailedStep, not
+                     Progress.HasFailedStep (see the connecting overlay above). -->
                 <views:ConnectionProgressView
                     DataContext="{Binding Progress}"
                     Foreground="#E0E0E0"
                     Header=""
                     Margin="0,0,0,4"
-                    Visibility="{Binding Progress.HasFailedStep, Converter={StaticResource BoolToVisibilityConverter}}" />
+                    Visibility="{Binding HasFailedStep, Converter={StaticResource BoolToVisibilityConverter}}" />
                 <FontIcon Glyph="&#xE783;" FontSize="32" Foreground="#FF6B6B"
                           HorizontalAlignment="Center" />
                 <TextBlock Text="Connection failed"
