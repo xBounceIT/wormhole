@@ -166,6 +166,7 @@
   <ItemGroup>
     <None Include="..\Assets\web\bridge.js" Link="Assets\web\bridge.js" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Assets\web\terminal.html" Link="Assets\web\terminal.html" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\scripts\Fetch-WebAssets.ps1" Link="scripts\Fetch-WebAssets.ps1" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

@@ -29,6 +29,13 @@ $assets = @(
     }
 )
 
+$retiredAssets = @(
+    [pscustomobject]@{
+        Relative       = "addon-webgl"
+        ManifestPrefix = "addon-webgl\"
+    }
+)
+
 function Write-Info($message) {
     if (-not $Quiet) { Write-Host $message }
 }
@@ -69,6 +76,31 @@ if ((Test-Path $integrityPath) -and -not $Force) {
         $parsed = $raw | ConvertFrom-Json
         foreach ($prop in $parsed.PSObject.Properties) {
             $integrity[$prop.Name] = $prop.Value
+        }
+    }
+}
+
+foreach ($retired in $retiredAssets) {
+    $retiredPath = Join-Path $vendorRoot $retired.Relative
+    if (Test-Path $retiredPath) {
+        $resolvedVendor = [System.IO.Path]::GetFullPath($vendorRoot).TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar)
+        $resolvedRetired = [System.IO.Path]::GetFullPath($retiredPath)
+        if (-not $resolvedRetired.StartsWith(
+                $resolvedVendor + [System.IO.Path]::DirectorySeparatorChar,
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to remove retired web asset outside vendor root: $resolvedRetired"
+        }
+
+        Remove-Item -LiteralPath $retiredPath -Recurse -Force
+        Write-Info "PRUNE $($retired.Relative)"
+    }
+
+    foreach ($key in @($integrity.Keys)) {
+        if ($key -eq $retired.Relative -or
+            $key.StartsWith($retired.ManifestPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $integrity.Remove($key)
         }
     }
 }

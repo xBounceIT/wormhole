@@ -48,6 +48,16 @@ public sealed class TerminalBridgeAssetTests
         Assert.DoesNotContain("new Webgl", js, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void WebAssetFetch_PrunesRetiredWebglAddon()
+    {
+        var script = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "scripts", "Fetch-WebAssets.ps1"));
+
+        Assert.DoesNotContain("cdn.jsdelivr.net/npm/@xterm/addon-webgl", script, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("ManifestPrefix = \"addon-webgl\\\"", script, StringComparison.Ordinal);
+        Assert.Contains("Remove-Item -LiteralPath $retiredPath -Recurse -Force", script, StringComparison.Ordinal);
+    }
+
     private static string ReadBridge()
     {
         var path = Path.Combine(AppContext.BaseDirectory, "Assets", "web", "bridge.js");
