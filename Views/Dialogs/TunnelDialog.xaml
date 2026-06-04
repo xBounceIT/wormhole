@@ -171,14 +171,10 @@
                     Content="Import from .wgssl…"
                     Click="OnWatchguardImportClicked"
                     HorizontalAlignment="Left" />
-            <!-- Points users at the intended happy path: a Firebox emits a .wgssl bundle that
-                 carries the (mandatory) CA + client certificate + client key. Importing fills
-                 those three plus the server/port; the user then adds username + password. The
-                 alternative is pasting the PEMs by hand in the Certificates section below. -->
             <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                        TextWrapping="Wrap"
-                       Text="WatchGuard provides a .wgssl profile containing the required CA and client certificates. Import it, then enter your username and password — or fill in the Certificates section below by hand." />
+                       Text="Wormhole downloads the WatchGuard SSL VPN profile on connect. Importing a .wgssl profile is only needed as an advanced offline fallback." />
             <!-- Inline status bar for .wgssl import outcomes. We can't `ContentDialog.ShowAsync`
                  an error from here because the TunnelDialog itself is already a ContentDialog and
                  WinUI 3 only allows one ContentDialog per XamlRoot — the second ShowAsync would
@@ -196,6 +192,18 @@
 
                 <StackPanel Grid.Column="0" Spacing="10">
                     <TextBlock Text="Gateway" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+                    <ComboBox x:Name="WatchguardAuthModeBox"
+                              Header="Authentication mode"
+                              ItemsSource="{x:Bind WatchguardAuthModes}"
+                              SelectedIndex="0"
+                              SelectionChanged="OnWatchguardAuthModeChanged"
+                              HorizontalAlignment="Stretch">
+                        <ComboBox.ItemTemplate>
+                            <DataTemplate x:DataType="models:WatchguardAuthMode">
+                                <TextBlock Text="{x:Bind}" />
+                            </DataTemplate>
+                        </ComboBox.ItemTemplate>
+                    </ComboBox>
                     <TextBox x:Name="WatchguardServerBox"
                              Header="Server"
                              PlaceholderText="firebox.example.com"
@@ -216,12 +224,13 @@
                              TextChanged="OnFieldChanged" />
                     <PasswordBox x:Name="WatchguardPasswordBox"
                                  Header="Password"
+                                 PlaceholderText="not required for SAML"
                                  PasswordChanged="OnPasswordFieldChanged" />
                 </StackPanel>
             </Grid>
 
             <Expander x:Name="WatchguardCertsExpander"
-                      Header="Certificates &amp; advanced"
+                      Header="Manual profile fallback &amp; advanced"
                       HorizontalAlignment="Stretch"
                       HorizontalContentAlignment="Stretch">
                 <StackPanel Spacing="10">

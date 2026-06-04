@@ -1,6 +1,7 @@
 using System;
 using System.Text;
 using Wormhole.Models;
+using Wormhole.Services.Tunneling.Stormshield;
 
 namespace Wormhole.Services.Tunneling.Watchguard;
 
@@ -24,6 +25,9 @@ public static class WatchguardProfileBuilder
     public static string Build(WatchguardSettings settings)
     {
         ArgumentNullException.ThrowIfNull(settings);
+        if (!string.IsNullOrWhiteSpace(settings.ProfileOvpn))
+            return BuildFromDownloadedProfile(settings);
+
         if (string.IsNullOrWhiteSpace(settings.Server))
             throw new InvalidOperationException("Server is required.");
         if (settings.Port is < 1 or > 65535)
@@ -74,6 +78,47 @@ public static class WatchguardProfileBuilder
         AppendPemBlock(sb, "key", settings.ClientKeyPem);
 
         return sb.ToString();
+    }
+
+    private static string BuildFromDownloadedProfile(WatchguardSettings settings)
+    {
+        if (string.IsNullOrWhiteSpace(settings.CaPem))
+            throw new InvalidOperationException("CA certificate (PEM) is required.");
+        if (string.IsNullOrWhiteSpace(settings.ClientCertPem))
+            throw new InvalidOperationException("Client certificate (PEM) is required.");
+        if (string.IsNullOrWhiteSpace(settings.ClientKeyPem))
+            throw new InvalidOperationException("Client private key (PEM) is required.");
+
+        ValidateFieldSafety(settings);
+        var inlined = StormshieldProfileNormalizer.InlineFileReferences(
+            settings.ProfileOvpn,
+            name => ResolveWatchguardProfileFile(settings, name),
+            out var unresolved);
+        if (unresolved.Count > 0)
+        {
+            throw new InvalidOperationException(
+                "Watchguard profile bundle was missing referenced key material: "
+                + string.Join(", ", unresolved)
+                + ". Re-download the Mobile VPN with SSL profile from the Firebox.");
+        }
+
+        return StormshieldProfileNormalizer.Normalize(inlined);
+    }
+
+    private static string? ResolveWatchguardProfileFile(WatchguardSettings settings, string name)
+    {
+        var fileName = GetProfileFileName(name);
+        return fileName.Equals("ca.crt", StringComparison.OrdinalIgnoreCase) ? settings.CaPem
+            : fileName.Equals("client.crt", StringComparison.OrdinalIgnoreCase) ? settings.ClientCertPem
+            : fileName.Equals("client.pem", StringComparison.OrdinalIgnoreCase) ? settings.ClientKeyPem
+            : null;
+    }
+
+    private static string GetProfileFileName(string name)
+    {
+        var normalized = name.Replace('\\', '/');
+        var lastSlash = normalized.LastIndexOf('/');
+        return lastSlash >= 0 ? normalized[(lastSlash + 1)..] : normalized;
     }
 
     /// <summary>
