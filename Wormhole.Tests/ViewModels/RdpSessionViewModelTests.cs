@@ -1283,6 +1283,153 @@ public class RdpSessionViewModelTests
         Assert.Equal(2, svc.LastProfile?.RdpServerAuthentication);
     }
 
+    // --- Per-connect tunnel routing prompt (PromptBeforeTunnelConnect) --------------------
+
+    [Fact]
+    public async Task AttachAsync_PromptOn_UseTunnel_RoutesThroughLoopbackForwarder()
+    {
+        var configId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        var provider = new FakeTunnelProvider();
+        tunnelRepo.Configs[configId] = new TunnelConfig { Id = configId, Name = "corp", Kind = TunnelKind.WireGuard };
+
+        var settings = new FakeAppSettingsService();
+        settings.Current.PromptBeforeTunnelConnect = true;
+        var (vm, svc, creds, dlg, _) = CreateVm(
+            tunnelRepo: tunnelRepo,
+            tunnelProviders: new ITunnelProvider[] { provider },
+            settings: settings);
+        dlg.TunnelRouteResult = TunnelRouteChoice.UseTunnel;
+        creds.TunnelConfigs[configId] = new byte[] { 1, 2, 3 };
+        dlg.PasswordPromptResult = "password";
+        svc.NextSession = new FakeRdpSession();
+        vm.Initialize(MakeProfile() with { TunnelEnabled = true, TunnelConfigId = configId });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(1, dlg.TunnelRoutePromptCount);
+        Assert.Equal("corp", dlg.LastTunnelRouteName);
+        Assert.Equal(1, provider.EstablishCount);
+        Assert.Equal(IPAddress.Loopback.ToString(), svc.LastProfile?.Host);
+    }
+
+    [Fact]
+    public async Task AttachAsync_PromptOn_Direct_ConnectsWithoutTunnel()
+    {
+        var configId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        var provider = new FakeTunnelProvider();
+        tunnelRepo.Configs[configId] = new TunnelConfig { Id = configId, Name = "corp", Kind = TunnelKind.WireGuard };
+
+        var settings = new FakeAppSettingsService();
+        settings.Current.PromptBeforeTunnelConnect = true;
+        var (vm, svc, creds, dlg, _) = CreateVm(
+            tunnelRepo: tunnelRepo,
+            tunnelProviders: new ITunnelProvider[] { provider },
+            settings: settings);
+        dlg.TunnelRouteResult = TunnelRouteChoice.Direct;
+        creds.TunnelConfigs[configId] = new byte[] { 1, 2, 3 };
+        dlg.PasswordPromptResult = "password";
+        svc.NextSession = new FakeRdpSession();
+        vm.Initialize(MakeProfile() with { TunnelEnabled = true, TunnelConfigId = configId });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(1, dlg.TunnelRoutePromptCount);
+        // No tunnel established, and the RDP service connected straight to the real target.
+        Assert.Equal(0, provider.EstablishCount);
+        Assert.Equal(1, svc.ConnectCount);
+        Assert.Equal("host", svc.LastProfile?.Host);
+        Assert.Equal(3389, svc.LastProfile?.Port);
+    }
+
+    [Fact]
+    public async Task AttachAsync_PromptOn_Cancel_StaysDisconnectedWithoutConnecting()
+    {
+        var configId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        var provider = new FakeTunnelProvider();
+        tunnelRepo.Configs[configId] = new TunnelConfig { Id = configId, Name = "corp", Kind = TunnelKind.WireGuard };
+
+        var settings = new FakeAppSettingsService();
+        settings.Current.PromptBeforeTunnelConnect = true;
+        var (vm, svc, _, dlg, _) = CreateVm(
+            tunnelRepo: tunnelRepo,
+            tunnelProviders: new ITunnelProvider[] { provider },
+            settings: settings);
+        dlg.TunnelRouteResult = TunnelRouteChoice.Cancel;
+        svc.NextSession = new FakeRdpSession();
+        vm.Initialize(MakeProfile() with { TunnelEnabled = true, TunnelConfigId = configId });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(1, dlg.TunnelRoutePromptCount);
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.Null(vm.ErrorMessage);
+        Assert.Equal(0, svc.ConnectCount);
+        Assert.Equal(0, provider.EstablishCount);
+    }
+
+    [Fact]
+    public async Task AttachAsync_PromptOff_TunnelEnabled_DoesNotPrompt_UsesTunnel()
+    {
+        var configId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        var provider = new FakeTunnelProvider();
+        tunnelRepo.Configs[configId] = new TunnelConfig { Id = configId, Name = "corp", Kind = TunnelKind.WireGuard };
+
+        // Default settings: PromptBeforeTunnelConnect is off.
+        var (vm, svc, creds, dlg, _) = CreateVm(
+            tunnelRepo: tunnelRepo,
+            tunnelProviders: new ITunnelProvider[] { provider });
+        creds.TunnelConfigs[configId] = new byte[] { 1, 2, 3 };
+        dlg.PasswordPromptResult = "password";
+        svc.NextSession = new FakeRdpSession();
+        vm.Initialize(MakeProfile() with { TunnelEnabled = true, TunnelConfigId = configId });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(0, dlg.TunnelRoutePromptCount);
+        Assert.Equal(1, provider.EstablishCount);
+        Assert.Equal(IPAddress.Loopback.ToString(), svc.LastProfile?.Host);
+    }
+
+    [Fact]
+    public async Task AttachAsync_PromptOn_Direct_RelaxesStrictServerAuthRejection()
+    {
+        // Strict server auth is normally rejected with a tunnel (the OCX validates the loopback
+        // forwarder name). Choosing "connect directly" drops the tunnel for this attempt, so the
+        // rejection no longer applies and the connection proceeds straight to the target.
+        var configId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        var provider = new FakeTunnelProvider();
+        tunnelRepo.Configs[configId] = new TunnelConfig { Id = configId, Name = "corp", Kind = TunnelKind.WireGuard };
+
+        var settings = new FakeAppSettingsService();
+        settings.Current.PromptBeforeTunnelConnect = true;
+        var (vm, svc, _, dlg, _) = CreateVm(
+            tunnelRepo: tunnelRepo,
+            tunnelProviders: new ITunnelProvider[] { provider },
+            settings: settings);
+        dlg.TunnelRouteResult = TunnelRouteChoice.Direct;
+        dlg.PasswordPromptResult = "password";
+        svc.NextSession = new FakeRdpSession();
+        vm.Initialize(MakeProfile() with
+        {
+            TunnelEnabled = true,
+            TunnelConfigId = configId,
+            RdpServerAuthentication = 1,
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.NotEqual(SessionStatus.Failed, vm.Status);
+        Assert.Equal(0, provider.EstablishCount);
+        Assert.Equal(1, svc.ConnectCount);
+        Assert.Equal("host", svc.LastProfile?.Host);
+        Assert.Equal(1, svc.LastProfile?.RdpServerAuthentication);
+    }
+
     [Fact]
     public async Task Disconnected_WithTunnel_ShowsFailureBeforeTunnelDisposeCompletes()
     {
@@ -1526,18 +1673,27 @@ public class RdpSessionViewModelTests
         FakeRdpCrashSentinelService? sentinel = null,
         FakeTunnelConfigRepository? tunnelRepo = null,
         IEnumerable<ITunnelProvider>? tunnelProviders = null,
-        IConnectionRepository? connectionRepository = null)
+        IConnectionRepository? connectionRepository = null,
+        FakeAppSettingsService? settings = null)
     {
         var svc = new FakeRdpSessionService();
         creds ??= new FakeCredentialService();
         dlg ??= new FakeDialogService();
+        tunnelRepo ??= new FakeTunnelConfigRepository();
         var repo = credentialRepository ?? new EmptyCredentialRepository();
         sentinel ??= new FakeRdpCrashSentinelService();
+        settings ??= new FakeAppSettingsService();
+        var prompter = new TunnelRoutePrompter(
+            settings,
+            dlg,
+            tunnelRepo,
+            NullLoggerFactory.Instance.CreateLogger<TunnelRoutePrompter>());
         var vm = new RdpSessionViewModel(
             svc,
             creds,
             repo,
             BuildTunnelManager(creds, tunnelRepo, tunnelProviders),
+            prompter,
             BuildProfileResolver(connectionRepository),
             dlg,
             sentinel,
@@ -1550,15 +1706,32 @@ public class RdpSessionViewModelTests
         IRdpCrashSentinelService? sentinel = null)
     {
         var creds = new FakeCredentialService();
+        var dlg = new FakeDialogService();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        var prompter = new TunnelRoutePrompter(
+            new FakeAppSettingsService(),
+            dlg,
+            tunnelRepo,
+            NullLoggerFactory.Instance.CreateLogger<TunnelRoutePrompter>());
         return new RdpSessionViewModel(
             new FakeRdpSessionService(),
             creds,
             credentialRepository,
-            BuildTunnelManager(creds),
+            BuildTunnelManager(creds, tunnelRepo),
+            prompter,
             BuildProfileResolver(),
-            new FakeDialogService(),
+            dlg,
             sentinel ?? new FakeRdpCrashSentinelService(),
             NullLoggerFactory.Instance);
+    }
+
+    // Minimal IAppSettingsService double for the route-prompter dependency. Backed by a real
+    // AppSettings so a test can flip PromptBeforeTunnelConnect before driving a connect.
+    private sealed class FakeAppSettingsService : IAppSettingsService
+    {
+        public AppSettings Current { get; } = new();
+        public event EventHandler? SettingsChanged { add { } remove { } }
+        public void Save() { }
     }
 
     private static TunnelManager BuildTunnelManager(

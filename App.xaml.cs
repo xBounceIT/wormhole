@@ -194,6 +194,7 @@ public partial class App : Application
         services.AddSingleton<ITunnelProvider, StormshieldTunnelProvider>();
         services.AddSingleton<IOtpPromptService, DialogOtpPromptService>();
         services.AddSingleton<TunnelManager>();
+        services.AddSingleton<ITunnelRoutePrompter, TunnelRoutePrompter>();
         services.AddSingleton<INavigationService, NavigationService>();
         services.AddSingleton<IDialogService, DialogService>();
         services.AddSingleton<ISshSessionService, SshSessionService>();

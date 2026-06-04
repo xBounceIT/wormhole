@@ -241,6 +241,34 @@ public sealed class DialogService : IDialogService
         return accepted ? passwordBox.Password : null;
     }
 
+    public async Task<TunnelRouteChoice> PromptTunnelRouteAsync(string connectionName, string tunnelName)
+    {
+        var dialog = new ContentDialog
+        {
+            Title = "VPN tunnel",
+            Content = new TextBlock
+            {
+                Text = $"“{connectionName}” is set to connect through the VPN tunnel " +
+                       $"“{tunnelName}”.\n\nStart the tunnel and connect through it, or " +
+                       "connect directly to the target?",
+                TextWrapping = TextWrapping.Wrap,
+            },
+            PrimaryButtonText = "Use tunnel",
+            SecondaryButtonText = "Connect directly",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = RequireXamlRoot(),
+        };
+
+        var result = await ShowDialogAsync(dialog);
+        return result switch
+        {
+            ContentDialogResult.Primary => TunnelRouteChoice.UseTunnel,
+            ContentDialogResult.Secondary => TunnelRouteChoice.Direct,
+            _ => TunnelRouteChoice.Cancel,
+        };
+    }
+
     public Task ShowCredentialsAsync(string title, string username, string secretLabel, string secret)
     {
         var panel = new StackPanel { Spacing = 8, MinWidth = 320 };

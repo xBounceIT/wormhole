@@ -114,8 +114,14 @@ public sealed class FileTransferDialogService : IFileTransferDialogService
                 // back to establishing one. That keeps a VPN-required transfer ON the VPN (rather than
                 // silently connecting direct) at the cost of re-establishing it; and for a no-VPN profile
                 // EstablishAsync returns null → direct SFTP, unchanged.
-                var borrowed = (sourceTab as SshSessionViewModel)?.BorrowTunnelForSftp();
-                tunnel = borrowed ?? await _tunnels.EstablishAsync(profile, CancellationToken.None).ConfigureAwait(true);
+                var sshSource = sourceTab as SshSessionViewModel;
+                var borrowed = sshSource?.BorrowTunnelForSftp();
+                // When there's no live tunnel to borrow, establish against the terminal's routed
+                // profile rather than the saved one: if the user chose "connect directly" for the
+                // shell, RoutedProfileForSubsession has TunnelEnabled=false → EstablishAsync
+                // returns null → direct SFTP, instead of silently bringing up the declined VPN.
+                var establishProfile = sshSource?.RoutedProfileForSubsession ?? profile;
+                tunnel = borrowed ?? await _tunnels.EstablishAsync(establishProfile, CancellationToken.None).ConfigureAwait(true);
                 session = await _sftp.ConnectAsync(profile, creds, tunnel, CancellationToken.None).ConfigureAwait(true);
 
                 profile = await PinHostFingerprintIfNeededAsync(sourceTab, profile, session).ConfigureAwait(true);
