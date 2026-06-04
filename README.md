@@ -3,7 +3,7 @@
 A modern, tabbed, multi-protocol connection manager for Windows and a
 philosophical sequel to [mRemoteNG](https://mremoteng.org).
 
-> **Status:** Active development (current version 0.2.5). The WinUI shell,
+> **Status:** Active development, UNSTABLE. The WinUI shell,
 > persisted connection tree, connection editor, credential store, mRemoteNG
 > import, SSH terminal, embedded/external RDP, SFTP file transfer, per-connection
 > VPN across five providers (including RDP over VPN), an opt-in MCP server for
