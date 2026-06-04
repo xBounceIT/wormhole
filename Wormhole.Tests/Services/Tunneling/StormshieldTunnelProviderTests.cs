@@ -8,6 +8,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Models;
 using Wormhole.Services.Tunneling;
 using Wormhole.Services.Tunneling.Stormshield;
+using Wormhole.Tests.Fakes;
 using Xunit;
 
 namespace Wormhole.Tests.Services.Tunneling;
@@ -16,6 +17,7 @@ public class StormshieldTunnelProviderTests
 {
     private static StormshieldTunnelProvider NewProvider(IOtpPromptService? otp = null) =>
         new(otp ?? new NullOtpPromptService(),
+            new FakeStormshieldConfigCache(),
             NullLogger<StormshieldTunnelProvider>.Instance,
             NullLoggerFactory.Instance);
 
@@ -82,8 +84,7 @@ public class StormshieldTunnelProviderTests
         Assert.Contains("profile", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
-    // ----- RunAuthLoopAsync state machine -----
-
+    // Shared valid Automatic-mode settings for the ResolveAutomaticCoreAsync tests below.
     private static StormshieldSettings ValidSettings(bool useOtp = false) => new()
     {
         Server = "rpv.example.com",
@@ -95,144 +96,129 @@ public class StormshieldTunnelProviderTests
         AppToken = "sslclient",
     };
 
+    // ----- ResolveAutomaticCoreAsync: OTP routing + config-cache gate -----
+    //
+    // The single-use OTP must be spent in exactly one place: the HTTPS download OR the OpenVPN data-plane
+    // password, never both. Which one is chosen by whether a current cached profile lets us skip the download.
+
     [Fact]
-    public async Task RunAuthLoop_NoOtp_SucceedsWithoutPrompting()
+    public async Task ResolveAutomatic_NoOtp_DownloadsFresh_UsesRealPassword_NoCache()
     {
         var portal = new ScriptedPortal();
-        portal.Queue(new StormshieldAuthOutcome.Ok());
-        var otp = new ScriptedOtpPrompt(/* never called */);
+        var cache = new FakeStormshieldConfigCache();
+        var otp = new ScriptedOtpPrompt(/* never prompted */);
+        var id = Guid.NewGuid();
 
-        await StormshieldTunnelProvider.RunAuthLoopAsync(
-            portal, otp, NullLogger.Instance, "cfg", ValidSettings(), CancellationToken.None);
+        var (profile, password, optimistic) = await StormshieldTunnelProvider.ResolveAutomaticCoreAsync(
+            portal, cache, otp, NullLogger.Instance, id, "cfg", ValidSettings(useOtp: false), CancellationToken.None);
 
+        Assert.Equal(1, portal.DownloadV5Calls);
+        Assert.Null(portal.LastDownloadV5Otp);            // no OTP on the download
+        Assert.Equal("stored-password", password);        // real password on the data plane (today's behavior)
+        Assert.Contains("remote fw 443", profile);
+        Assert.False(optimistic);                         // fresh download, not an unconfirmed cache reuse
         Assert.Equal(0, otp.PromptCount);
-        Assert.Equal(1, portal.AuthCalls);
-        Assert.Null(portal.LastOtp);
+        Assert.Equal(0, cache.WriteCalls);                // the no-OTP path never caches
+        Assert.Equal(0, portal.ConfigHashCalls);
     }
 
     [Fact]
-    public async Task RunAuthLoop_UseOtp_PromptsUpFrontAndSendsCode()
+    public async Task ResolveAutomatic_Otp_CacheHit_ReusesProfile_AppendsOtpToDataPlane()
     {
-        // "Use an OTP" is checked → the code is collected before the first POST and sent with it.
-        var portal = new ScriptedPortal();
-        portal.Queue(new StormshieldAuthOutcome.Ok());
-        var otp = new ScriptedOtpPrompt("123456");
+        // Server hash matches the cached hash (case-insensitively) → reuse the cached profile, no download,
+        // and route the one-time code to the OpenVPN data-plane password. This is the fix for the user's bug.
+        var portal = new ScriptedPortal { ConfigHashResult = "abc123" };
+        var cache = new FakeStormshieldConfigCache();
+        var id = Guid.NewGuid();
+        cache.Seed(id, configHash: "ABC123", profileOvpn: "client\ndev tun\nremote fw 443\n<ca>cached</ca>\n");
+        var otp = new ScriptedOtpPrompt("999111");
 
-        await StormshieldTunnelProvider.RunAuthLoopAsync(
-            portal, otp, NullLogger.Instance, "cfg", ValidSettings(useOtp: true), CancellationToken.None);
+        var (profile, password, optimistic) = await StormshieldTunnelProvider.ResolveAutomaticCoreAsync(
+            portal, cache, otp, NullLogger.Instance, id, "cfg", ValidSettings(useOtp: true), CancellationToken.None);
 
+        Assert.Equal(0, portal.DownloadV5Calls);          // cache hit → NO download
+        Assert.Equal("stored-password999111", password);  // OTP appended to the data-plane password
+        Assert.Contains("cached", profile);               // the cached profile was reused verbatim
+        Assert.False(optimistic);                         // hash-CONFIRMED hit → cache kept on a later failure
+        Assert.Equal(0, cache.WriteCalls);
         Assert.Equal(1, otp.PromptCount);
-        Assert.Equal(1, portal.AuthCalls);
-        Assert.Equal("123456", portal.LastOtp);
     }
 
     [Fact]
-    public async Task RunAuthLoop_ServerDemandsOtp_PromptsAndRetries()
+    public async Task ResolveAutomatic_Otp_CacheMiss_NoCache_Downloads_Caches_ThrowsReconnect()
     {
-        // UseOtp not set, but the firewall returns NEED_TOTP_AUTH → prompt, then re-POST with code.
-        var portal = new ScriptedPortal();
-        portal.Queue(new StormshieldAuthOutcome.NeedOtp());
-        portal.Queue(new StormshieldAuthOutcome.Ok());
-        var otp = new ScriptedOtpPrompt("654321");
+        var portal = new ScriptedPortal
+        {
+            ConfigHashResult = "NEWHASH",
+            DownloadV5Result = "client\ndev tun\nremote fw 443\n<ca>fresh</ca>\n",
+        };
+        var cache = new FakeStormshieldConfigCache();
+        var id = Guid.NewGuid();
+        var otp = new ScriptedOtpPrompt("424242");
 
-        await StormshieldTunnelProvider.RunAuthLoopAsync(
-            portal, otp, NullLogger.Instance, "cfg", ValidSettings(), CancellationToken.None);
+        await Assert.ThrowsAsync<StormshieldConfigRefreshedException>(() =>
+            StormshieldTunnelProvider.ResolveAutomaticCoreAsync(
+                portal, cache, otp, NullLogger.Instance, id, "cfg", ValidSettings(useOtp: true), CancellationToken.None));
 
-        Assert.Equal(1, otp.PromptCount);
-        Assert.Equal(2, portal.AuthCalls);
-        Assert.Equal("654321", portal.LastOtp);
+        Assert.Equal(1, portal.DownloadV5Calls);
+        Assert.Equal("424242", portal.LastDownloadV5Otp);   // OTP spent on the download
+        Assert.Equal(1, cache.WriteCalls);                  // the fresh profile is cached for next time
+        Assert.Equal("NEWHASH", cache.LastWritten!.ConfigHash);
+        Assert.Contains("fresh", cache.LastWritten!.ProfileOvpn);
     }
 
     [Fact]
-    public async Task RunAuthLoop_RepeatedNeedOtp_ExceedsCap()
+    public async Task ResolveAutomatic_Otp_HashDiffersFromCache_Downloads_ThrowsReconnect()
     {
-        var portal = new ScriptedPortal();
-        for (var i = 0; i < 10; i++) portal.Queue(new StormshieldAuthOutcome.NeedOtp());
-        var otp = new ScriptedOtpPrompt("1", "2", "3", "4", "5");
+        var portal = new ScriptedPortal { ConfigHashResult = "NEW" };
+        var cache = new FakeStormshieldConfigCache();
+        var id = Guid.NewGuid();
+        cache.Seed(id, configHash: "OLD", profileOvpn: "client\ndev tun\nremote fw 443\n");
+        var otp = new ScriptedOtpPrompt("123123");
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            StormshieldTunnelProvider.RunAuthLoopAsync(
-                portal, otp, NullLogger.Instance, "cfg", ValidSettings(), CancellationToken.None));
+        await Assert.ThrowsAsync<StormshieldConfigRefreshedException>(() =>
+            StormshieldTunnelProvider.ResolveAutomaticCoreAsync(
+                portal, cache, otp, NullLogger.Instance, id, "cfg", ValidSettings(useOtp: true), CancellationToken.None));
 
-        Assert.Contains("exceeded", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, portal.DownloadV5Calls);            // changed config → re-download
+        Assert.Equal("NEW", cache.LastWritten!.ConfigHash);
     }
 
     [Fact]
-    public async Task RunAuthLoop_UserCancelsOtp_ThrowsInvalidOperation()
+    public async Task ResolveAutomatic_Otp_HashUnavailable_WithCache_OptimisticHit_NoDownload()
     {
-        var portal = new ScriptedPortal();
-        portal.Queue(new StormshieldAuthOutcome.NeedOtp());
-        var otp = new ScriptedOtpPrompt(/* null = user dismissed */);
+        // Change-check unreachable/unsupported but we hold a cached profile → trust it (don't re-spend the
+        // OTP). This is the deliberate improvement over the native client (which would re-download).
+        var portal = new ScriptedPortal { ConfigHashResult = null };
+        var cache = new FakeStormshieldConfigCache();
+        var id = Guid.NewGuid();
+        cache.Seed(id, configHash: "WHATEVER", profileOvpn: "client\ndev tun\nremote fw 443\n<ca>cached</ca>\n");
+        var otp = new ScriptedOtpPrompt("707070");
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            StormshieldTunnelProvider.RunAuthLoopAsync(
-                portal, otp, NullLogger.Instance, "cfg", ValidSettings(), CancellationToken.None));
+        var (profile, password, optimistic) = await StormshieldTunnelProvider.ResolveAutomaticCoreAsync(
+            portal, cache, otp, NullLogger.Instance, id, "cfg", ValidSettings(useOtp: true), CancellationToken.None);
 
-        Assert.Contains("cancelled", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, portal.DownloadV5Calls);
+        Assert.Equal("stored-password707070", password);
+        Assert.Contains("cached", profile);
+        Assert.True(optimistic);                          // change-check unavailable → unconfirmed reuse
     }
 
     [Fact]
-    public async Task RunAuthLoop_EmptyOtpAfterTrim_Throws()
+    public async Task ResolveAutomatic_Otp_HashUnavailable_NoCache_Downloads_ThrowsReconnect()
     {
-        var otp = new ScriptedOtpPrompt("   ");
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            StormshieldTunnelProvider.RunAuthLoopAsync(
-                new ScriptedPortal(), otp, NullLogger.Instance, "cfg", ValidSettings(useOtp: true), CancellationToken.None));
+        var portal = new ScriptedPortal { ConfigHashResult = null };
+        var cache = new FakeStormshieldConfigCache();
+        var id = Guid.NewGuid();
+        var otp = new ScriptedOtpPrompt("313131");
 
-        Assert.Contains("empty", ex.Message, StringComparison.OrdinalIgnoreCase);
-    }
+        await Assert.ThrowsAsync<StormshieldConfigRefreshedException>(() =>
+            StormshieldTunnelProvider.ResolveAutomaticCoreAsync(
+                portal, cache, otp, NullLogger.Instance, id, "cfg", ValidSettings(useOtp: true), CancellationToken.None));
 
-    [Fact]
-    public async Task RunAuthLoop_AuthFailed_Throws()
-    {
-        var portal = new ScriptedPortal();
-        portal.Queue(new StormshieldAuthOutcome.Failure("bad credentials"));
-
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            StormshieldTunnelProvider.RunAuthLoopAsync(
-                portal, new ScriptedOtpPrompt(), NullLogger.Instance, "cfg", ValidSettings(), CancellationToken.None));
-
-        Assert.Contains("bad credentials", ex.Message);
-    }
-
-    [Fact]
-    public async Task RunAuthLoop_Bruteforce_SurfacesDelay()
-    {
-        var portal = new ScriptedPortal();
-        portal.Queue(new StormshieldAuthOutcome.Bruteforce(45));
-
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            StormshieldTunnelProvider.RunAuthLoopAsync(
-                portal, new ScriptedOtpPrompt(), NullLogger.Instance, "cfg", ValidSettings(), CancellationToken.None));
-
-        Assert.Contains("45", ex.Message);
-    }
-
-    [Fact]
-    public async Task RunAuthLoop_NetworkError_WrappedNotRawHttpRequestException()
-    {
-        var portal = new ScriptedPortal();
-        portal.QueueThrow(new HttpRequestException("connection refused"));
-
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            StormshieldTunnelProvider.RunAuthLoopAsync(
-                portal, new ScriptedOtpPrompt(), NullLogger.Instance, "cfg", ValidSettings(), CancellationToken.None));
-
-        Assert.Contains("could not reach", ex.Message, StringComparison.OrdinalIgnoreCase);
-        Assert.IsType<HttpRequestException>(ex.InnerException);
-    }
-
-    [Fact]
-    public async Task RunAuthLoop_TokenCancellation_BubblesUnwrapped()
-    {
-        var portal = new ScriptedPortal();
-        portal.QueueThrow(new TaskCanceledException("cancelled"));
-        using var cts = new CancellationTokenSource();
-        cts.Cancel();
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
-            StormshieldTunnelProvider.RunAuthLoopAsync(
-                portal, new ScriptedOtpPrompt(), NullLogger.Instance, "cfg", ValidSettings(), cts.Token));
+        Assert.Equal(1, portal.DownloadV5Calls);
+        Assert.Equal(1, cache.WriteCalls);
+        Assert.Equal(string.Empty, cache.LastWritten!.ConfigHash);  // no hash was available to store
     }
 
     private sealed class NullOtpPromptService : IOtpPromptService
@@ -242,33 +228,31 @@ public class StormshieldTunnelProviderTests
     }
 
     /// <summary>
-    /// Scripted <see cref="IStormshieldPortal"/> fake: each AuthenticateAsync dequeues the next
-    /// outcome (or throws the next queued exception) and records the OTP it was handed.
+    /// Scripted <see cref="IStormshieldPortal"/> fake for the ResolveAutomaticCoreAsync tests: returns a
+    /// canned config-change hash and a canned downloaded profile, and records what it was asked for so the
+    /// tests can assert whether a download happened (and with which OTP) vs. a cache hit.
     /// </summary>
     private sealed class ScriptedPortal : IStormshieldPortal
     {
-        private readonly Queue<object> _script = new();
-        public string? LastOtp { get; private set; }
-        public int AuthCalls { get; private set; }
+        public string? ConfigHashResult { get; set; }
+        public int ConfigHashCalls { get; private set; }
+        public string DownloadV5Result { get; set; } = "client\ndev tun\nremote fw 443\n<ca>x</ca>\n";
+        public int DownloadV5Calls { get; private set; }
+        public string? LastDownloadV5Otp { get; private set; }
 
-        public void Queue(StormshieldAuthOutcome outcome) => _script.Enqueue(outcome);
-        public void QueueThrow(Exception ex) => _script.Enqueue(ex);
-
-        public Task<StormshieldAuthOutcome> AuthenticateAsync(
-            string username, string password, string? otp, string app, CancellationToken cancellationToken)
+        public Task<string> DownloadProfileV5Async(
+            string username, string password, string? otp, CancellationToken cancellationToken)
         {
-            AuthCalls++;
-            LastOtp = otp;
-            if (_script.Count == 0)
-                throw new InvalidOperationException("ScriptedPortal: script exhausted.");
-            var next = _script.Dequeue();
-            return next is Exception ex
-                ? Task.FromException<StormshieldAuthOutcome>(ex)
-                : Task.FromResult((StormshieldAuthOutcome)next);
+            DownloadV5Calls++;
+            LastDownloadV5Otp = otp;
+            return Task.FromResult(DownloadV5Result);
         }
 
-        public Task<string> DownloadProfileAsync(string app, CancellationToken cancellationToken) =>
-            Task.FromResult("client\ndev tun\nremote fw 443\n");
+        public Task<string?> GetConfigHashAsync(CancellationToken cancellationToken)
+        {
+            ConfigHashCalls++;
+            return Task.FromResult(ConfigHashResult);
+        }
 
         public void Dispose() { }
     }

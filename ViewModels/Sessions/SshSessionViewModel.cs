@@ -367,7 +367,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         _webView = null;
     }
 
-    internal void AttachConnectedSessionForTesting(ISshSession session)
+    internal void AttachConnectedSessionForTesting(ISshSession session, ITunnelInstance? tunnel = null)
     {
         ResetOutputState();
         _replayBuffer.Clear();
@@ -377,6 +377,9 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             _session.Closed -= OnSessionClosed;
         }
 
+        // Lets a test exercise the SFTP-borrows-the-session-tunnel path (BorrowTunnelForSftp), which the
+        // real ConnectAsync would normally populate.
+        _tunnel = tunnel;
         _session = session;
         _session.DataReceived += OnSessionDataReceived;
         _session.Closed += OnSessionClosed;
@@ -908,7 +911,11 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         ISftpSession? session = null;
         try
         {
-            tunnel = await _tunnels.EstablishAsync(profile, ct).ConfigureAwait(false);
+            // Reuse the shell's already-established tunnel (as a non-owning borrow) rather than
+            // establishing a SECOND one. A second establish re-runs the tunnel provider — which, for an
+            // OTP-interactive VPN (e.g. Stormshield Automatic+OTP), would pop a surprise second OTP prompt
+            // and burn the code. Null when the profile uses no tunnel (direct SFTP, unchanged).
+            tunnel = BorrowTunnelForSftp();
             session = await _sftpService.ConnectAsync(profile, creds, tunnel, ct).ConfigureAwait(false);
 
             bool stash;
@@ -952,6 +959,15 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             ClearOwnCtsIfCurrent(cts);
         }
     }
+
+    /// <summary>
+    /// Lends this session's live tunnel to a sibling SFTP session (pre-warm or the on-demand file-transfer
+    /// path) as a non-owning <see cref="BorrowedTunnelInstance"/>, so SFTP routes through the same VPN
+    /// without establishing a second tunnel (which would re-prompt for / burn another OTP on an interactive
+    /// tunnel). Returns <c>null</c> when the session has no tunnel (direct connection). The borrow must NOT
+    /// be disposed by the borrower — this session owns and disposes the real instance on disconnect.
+    /// </summary>
+    internal ITunnelInstance? BorrowTunnelForSftp() => _tunnel is null ? null : new BorrowedTunnelInstance(_tunnel);
 
     private void ClearOwnCtsIfCurrent(CancellationTokenSource cts)
     {

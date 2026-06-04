@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Services.Tunneling.Stormshield;
 using Wormhole.Services.Tunneling.Watchguard;
 
 namespace Wormhole.ViewModels;
@@ -18,6 +19,7 @@ public partial class TunnelConfigsViewModel : ObservableObject
     private readonly ITunnelConfigRepository _repo;
     private readonly IConnectionRepository _connectionRepo;
     private readonly ICredentialService _credentials;
+    private readonly IStormshieldConfigCache _stormshieldCache;
     private readonly IDialogService _dialog;
     private readonly ILogger<TunnelConfigsViewModel> _logger;
     private bool _hasLoaded;
@@ -26,12 +28,14 @@ public partial class TunnelConfigsViewModel : ObservableObject
         ITunnelConfigRepository repo,
         IConnectionRepository connectionRepo,
         ICredentialService credentials,
+        IStormshieldConfigCache stormshieldCache,
         IDialogService dialog,
         ILogger<TunnelConfigsViewModel> logger)
     {
         _repo = repo;
         _connectionRepo = connectionRepo;
         _credentials = credentials;
+        _stormshieldCache = stormshieldCache;
         _dialog = dialog;
         _logger = logger;
         Configs.CollectionChanged += (_, _) =>
@@ -323,6 +327,16 @@ public partial class TunnelConfigsViewModel : ObservableObject
             config.Name = draft.Name;
             config.Kind = draft.Kind;
             ApplyFilter(SearchText);
+
+            // If the saved tunnel will no longer use the Stormshield OTP profile cache (Kind changed
+            // away from Stormshield, Mode switched off Automatic, or "Use an OTP" turned off), drop any
+            // cached profile — it holds a plaintext private key and would otherwise linger orphaned.
+            // (A still-Automatic-OTP edit that only changes Server/Username is handled by the cache's
+            // own site-identity check, so we keep the cache in that case to avoid a needless re-download.)
+            var usesOtpCache = draft.Kind == TunnelKind.Stormshield
+                && draft.Stormshield is { Mode: StormshieldConnectionMode.Automatic, UseOtp: true };
+            if (!usesOtpCache)
+                await _stormshieldCache.DeleteAsync(config.Id, System.Threading.CancellationToken.None);
         }
         catch (Exception ex)
         {
@@ -379,6 +393,9 @@ public partial class TunnelConfigsViewModel : ObservableObject
         {
             await _repo.DeleteAsync(config.Id);
             await _credentials.DeleteTunnelConfigAsync(config.Id);
+            // Best-effort: drop any cached Stormshield profile (which holds a private key) for this tunnel.
+            // A no-op for non-Stormshield tunnels (the cache file simply won't exist).
+            await _stormshieldCache.DeleteAsync(config.Id, System.Threading.CancellationToken.None);
             Configs.Remove(config);
         }
         catch (Exception ex)
