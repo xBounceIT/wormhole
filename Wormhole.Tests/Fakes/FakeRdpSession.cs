@@ -15,6 +15,12 @@ public sealed class FakeRdpSession : IRdpSession
     public bool Disposed { get; private set; }
     public bool ThrowOnSetBounds { get; set; }
     public bool ThrowOnShow { get; set; }
+    public bool ThrowOnUpdateRemoteResolution { get; set; }
+
+    /// <summary>Number of times <see cref="UpdateRemoteResolution"/> was called, and the last
+    /// pixel size passed. Lets tests assert the VM renegotiates the remote resolution on resize.</summary>
+    public int ResolutionUpdateCount { get; private set; }
+    public (int Width, int Height)? LastResolution { get; private set; }
 
     /// <summary>Number of times <see cref="Focus"/> was called. Lets tests verify that the
     /// VM pushes Win32 focus into the ActiveX HWND when the session reaches Connected
@@ -40,6 +46,13 @@ public sealed class FakeRdpSession : IRdpSession
     public void SetBounds(HostBounds bounds)
     {
         if (ThrowOnSetBounds) throw new InvalidOperationException("simulated SetBounds failure");
+    }
+
+    public void UpdateRemoteResolution(int widthPx, int heightPx)
+    {
+        if (ThrowOnUpdateRemoteResolution) throw new InvalidOperationException("simulated UpdateRemoteResolution failure");
+        ResolutionUpdateCount++;
+        LastResolution = (widthPx, heightPx);
     }
 
     public void Show()

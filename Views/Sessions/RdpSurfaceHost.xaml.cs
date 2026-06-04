@@ -27,9 +27,23 @@ namespace Wormhole.Views.Sessions;
 public sealed partial class RdpSurfaceHost : UserControl
 {
     private const double LayoutCoalesceMs = 16;
+    // The overlay window tracks the tab on every 16ms layout tick (LayoutCoalesceMs), but the
+    // REMOTE desktop resolution must only be renegotiated at the END of a resize gesture: each
+    // UpdateSessionDisplaySettings triggers a server-side display-mode change, so firing it per
+    // frame during a drag would flood the Display Control channel and flicker. This longer
+    // trailing debounce coalesces a drag/maximize burst into a single renegotiation.
+    private const double ResolutionDebounceMs = 250;
 
     private RdpSessionViewModel? _viewModel;
     private DispatcherQueueTimer? _layoutTimer;
+    // Separate trailing-edge timer for the remote-resolution renegotiation (see ResolutionDebounceMs).
+    // Distinct from _layoutTimer so the per-frame overlay-move cadence is never slowed.
+    private DispatcherQueueTimer? _resolutionTimer;
+    // Last surface size (physical px) we asked the OCX to renegotiate to. Guards against re-sending
+    // on pure window moves (size unchanged) and against the 1x1 activation seed. Reset to 0 on the
+    // Connected transition so a cold connect / in-place auto-reconnect always re-negotiates once.
+    private int _lastNegotiatedWidthPx;
+    private int _lastNegotiatedHeightPx;
     private IntPtr _ownerHwnd;
     private bool _attached;
     private double _lastRasterScale = 1.0;
@@ -236,6 +250,16 @@ public sealed partial class RdpSurfaceHost : UserControl
             _layoutTimer.Stop();
             _layoutTimer = null;
         }
+
+        // Same teardown for the resolution-debounce timer so a pending tick can't fire
+        // UpdateRemoteResolution into a detached VM after Unloaded.
+        if (_resolutionTimer is not null)
+        {
+            _resolutionTimer.Stop();
+            _resolutionTimer = null;
+        }
+        _lastNegotiatedWidthPx = 0;
+        _lastNegotiatedHeightPx = 0;
     }
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e)
@@ -262,7 +286,15 @@ public sealed partial class RdpSurfaceHost : UserControl
         {
             if (sender.IsVisible)
             {
-                if (!_overlaySuppressed) ViewModel.ResumeSurfaceForOverlay(ComputeBoundsScreenPx());
+                if (!_overlaySuppressed)
+                {
+                    ViewModel.ResumeSurfaceForOverlay(ComputeBoundsScreenPx());
+                    // ApplyLayout was suppressed while hidden, so a size change that happened
+                    // off-screen (e.g. a monitor/DPI reconfig) never scheduled a renegotiation —
+                    // do it now that the cache is fresh. ApplyResolution dedups, so it's a no-op
+                    // when the size is unchanged.
+                    ScheduleResolutionRefresh();
+                }
             }
             else
             {
@@ -291,6 +323,11 @@ public sealed partial class RdpSurfaceHost : UserControl
             // Don't resume while the owner is minimized (a dialog dismissed during minimize) —
             // the AppWindow restore handler re-shows it when the window comes back.
             ViewModel.ResumeSurfaceForOverlay(ComputeBoundsScreenPx());
+            // The window can be resized while a modal dialog covers the tab (window chrome stays
+            // interactive). ApplyLayout no-ops while suppressed, so the resolution would stay stale
+            // until the next unrelated layout tick — renegotiate now that the dialog is gone and
+            // the cache is refreshed. ApplyResolution dedups, so an unchanged size is a no-op.
+            ScheduleResolutionRefresh();
         }
     }
 
@@ -330,6 +367,52 @@ public sealed partial class RdpSurfaceHost : UserControl
         // SetBounds on the session adapter caches the last-applied bounds and skips the
         // MoveWindow call when unchanged, so repeated equal ticks are free.
         ViewModel.SetBounds(bounds);
+
+        // Renegotiate the remote desktop resolution to match the new surface — debounced to the
+        // end of the resize so a drag doesn't flood the Display Control channel. The per-tick
+        // overlay move above is untouched; only the (rare) resolution change is deferred.
+        // ApplyResolution dedups on size, so this is a no-op for pure window moves.
+        ScheduleResolutionRefresh();
+    }
+
+    private void ScheduleResolutionRefresh()
+    {
+        if (!_attached || ViewModel is null) return;
+
+        if (_resolutionTimer is null)
+        {
+            _resolutionTimer = DispatcherQueue.GetForCurrentThread().CreateTimer();
+            _resolutionTimer.Interval = TimeSpan.FromMilliseconds(ResolutionDebounceMs);
+            _resolutionTimer.IsRepeating = false;
+            _resolutionTimer.Tick += (_, _) => ApplyResolution();
+        }
+        _resolutionTimer.Stop();
+        _resolutionTimer.Start();
+    }
+
+    private void ApplyResolution()
+    {
+        // Mirror ApplyLayout's guards — the 250ms debounce is long enough for the overlay to be
+        // suppressed by a dialog, minimized, or torn down between scheduling and firing.
+        if (!_attached || ViewModel is null) return;
+        if (_overlaySuppressed) return;
+        if (_trackedAppWindow is { IsVisible: false }) return;
+        // Use the physical-px element size cached by the last non-degenerate ComputeBoundsScreenPx;
+        // without a valid cache there is no real size to negotiate.
+        if (!_cacheValid) return;
+
+        var widthPx = _cachedWidthPx;
+        var heightPx = _cachedHeightPx;
+        if (widthPx < 1 || heightPx < 1) return;
+
+        // Renegotiate only on an actual size change. Pure moves (new origin, same size) and the
+        // 1x1 activation seed must never trigger a server-side display-mode change.
+        if (widthPx == _lastNegotiatedWidthPx && heightPx == _lastNegotiatedHeightPx) return;
+        _lastNegotiatedWidthPx = widthPx;
+        _lastNegotiatedHeightPx = heightPx;
+
+        // Non-fatal in the VM: a server without dynamic-resolution support keeps SmartSizing scaling.
+        ViewModel.UpdateRemoteResolution(widthPx, heightPx);
     }
 
     /// <summary>
@@ -481,6 +564,14 @@ public sealed partial class RdpSurfaceHost : UserControl
         {
             if (ViewModel is { IsConnected: true })
             {
+                // Force the next resolution tick to renegotiate. A cold connect may have happened
+                // after the window was resized during the spinner (so the OCX's connect-time
+                // resolution is already stale), and an in-place auto-reconnect re-establishes the
+                // OCX at its ORIGINAL connect-time resolution — both leave _lastNegotiated stale.
+                // The ApplyLayout enqueued below reschedules ApplyResolution, which now fires.
+                _lastNegotiatedWidthPx = 0;
+                _lastNegotiatedHeightPx = 0;
+
                 // Push WinUI focus first so the Win32 SetFocus inside ResumeSurfaceForOverlay
                 // (and OnSessionConnected) wins last, landing keyboard focus on the OCX.
                 if (!_focusPushed && TryFocusHost())

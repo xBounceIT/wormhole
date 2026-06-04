@@ -256,6 +256,51 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         }
     }
 
+    /// <summary>
+    /// Renegotiate the remote desktop resolution to the current surface pixel size after the
+    /// window was resized (mstsc-style dynamic resolution). Gated on Connected, and deliberately
+    /// NON-fatal: unlike <see cref="SetBounds"/>, a failure here must not tear the session down —
+    /// servers/builds without Display Control support simply keep the SmartSizing-scaled surface,
+    /// so the worst case is "stays scaled like before", never a dropped connection. The surface
+    /// host debounces the call to the end of a resize gesture.
+    /// </summary>
+    public void UpdateRemoteResolution(int widthPx, int heightPx)
+    {
+        var session = _session;
+        if (session is null) return;
+        if (Status != SessionStatus.Connected) return;
+        if (widthPx < 1 || heightPx < 1) return;
+        // Only renegotiate in "fill the tab" mode — the same condition RdpDesktopSizeResolver uses
+        // to size the desktop from the surface at connect time. A user who pinned a FIXED preset
+        // (e.g. 1024x768) wants it kept; dynamic-resizing it to the tab would silently defeat that
+        // choice. For fixed presets the SmartSizing scaling (re-asserted on every resize) fills the
+        // tab instead.
+        if (!UsesDynamicRemoteResolution(Profile)) return;
+
+        try
+        {
+            session.UpdateRemoteResolution(widthPx, heightPx);
+        }
+        catch (Exception ex)
+        {
+            // Log only — never DisposeAndTransition. A resolution renegotiation failing is
+            // expected on servers that don't support dynamic resolution and must stay invisible
+            // to the user beyond the unchanged (scaled) surface.
+            _logger.LogWarning(ex, "RDP remote-resolution update failed (non-fatal).");
+        }
+    }
+
+    /// <summary>
+    /// True when the profile's desktop size tracks the embedded surface ("fill the tab" / Full
+    /// screen / unset), i.e. exactly when <see cref="Helpers.RdpDesktopSizeResolver"/> derives the
+    /// connect-time resolution from the surface. A fixed preset ("1024x768") returns false so the
+    /// resolution stays pinned and is scaled by SmartSizing rather than dynamically renegotiated.
+    /// </summary>
+    private static bool UsesDynamicRemoteResolution(ConnectionProfile? profile) =>
+        profile is not null &&
+        (string.IsNullOrWhiteSpace(profile.RdpScreenSize) ||
+         string.Equals(profile.RdpScreenSize, RdpScreenSizes.FullScreenSentinel, StringComparison.OrdinalIgnoreCase));
+
     public void DetachView()
     {
         // Hide rather than tear down — the VM survives navigation. ShowWindow(SW_HIDE) is

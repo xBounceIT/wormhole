@@ -361,6 +361,82 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public void UpdateRemoteResolution_WhenConnected_ForwardsPixelSizeToSession()
+    {
+        var (vm, _, _, _, _) = CreateVm();
+        vm.Initialize(MakeProfile());
+        var fake = new FakeRdpSession();
+        vm.AttachConnectedSessionForTesting(fake);
+
+        vm.UpdateRemoteResolution(2560, 1440);
+
+        Assert.Equal(1, fake.ResolutionUpdateCount);
+        Assert.Equal((2560, 1440), fake.LastResolution);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("Full screen")]
+    [InlineData("FULL SCREEN")] // locks in the OrdinalIgnoreCase match (mirrors connect-time ResolveDesktopSize)
+    public void UpdateRemoteResolution_FillTheTabProfile_RenegotiatesResolution(string? screenSize)
+    {
+        var (vm, _, _, _, _) = CreateVm();
+        vm.Initialize(MakeProfile() with { RdpScreenSize = screenSize });
+        var fake = new FakeRdpSession();
+        vm.AttachConnectedSessionForTesting(fake);
+
+        vm.UpdateRemoteResolution(2560, 1440);
+
+        Assert.Equal(1, fake.ResolutionUpdateCount);
+        Assert.Equal((2560, 1440), fake.LastResolution);
+    }
+
+    [Fact]
+    public void UpdateRemoteResolution_FixedScreenSizeProfile_DoesNotRenegotiate()
+    {
+        // A user who pinned a fixed resolution preset wants it kept — dynamic resolution must not
+        // silently override it. SmartSizing (re-asserted on resize) scales the fixed canvas instead.
+        var (vm, _, _, _, _) = CreateVm();
+        vm.Initialize(MakeProfile() with { RdpScreenSize = "1024x768" });
+        var fake = new FakeRdpSession();
+        vm.AttachConnectedSessionForTesting(fake);
+
+        vm.UpdateRemoteResolution(2560, 1440);
+
+        Assert.Equal(0, fake.ResolutionUpdateCount);
+        Assert.Equal(SessionStatus.Connected, vm.Status);
+    }
+
+    [Fact]
+    public void UpdateRemoteResolution_WhenNotConnected_DoesNothing()
+    {
+        var (vm, _, _, _, _) = CreateVm();
+        vm.Initialize(MakeProfile());
+        // No session attached → Disconnected. The VM must not blow up or forward anything.
+        vm.UpdateRemoteResolution(1920, 1080);
+
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+    }
+
+    [Fact]
+    public void UpdateRemoteResolution_WhenSessionThrows_IsNonFatalAndKeepsSessionConnected()
+    {
+        // A resolution renegotiation failing (server without Display Control support) must NOT
+        // tear the session down — contrast SetBounds_WhenLiveSessionResizeThrows_SurfacesFailure.
+        var (vm, _, _, _, _) = CreateVm();
+        vm.Initialize(MakeProfile());
+        var fake = new FakeRdpSession { ThrowOnUpdateRemoteResolution = true };
+        vm.AttachConnectedSessionForTesting(fake);
+
+        vm.UpdateRemoteResolution(1920, 1080);
+
+        Assert.Equal(SessionStatus.Connected, vm.Status);
+        Assert.Null(vm.ErrorMessage);
+        Assert.False(fake.Disposed);
+    }
+
+    [Fact]
     public void AutoReconnected_RestoresConnectedStatusAndClearsReconnectBanner()
     {
         // Without forwarding OnAutoReconnected, AutoReconnecting drove Status to Connecting

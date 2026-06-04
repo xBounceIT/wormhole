@@ -175,6 +175,30 @@ internal sealed class RdpHostForm : FormsForm
                 width, height, Marshal.GetLastWin32Error());
         }
 
+        // Best-effort re-assert of SmartSizing after the externally-driven MoveWindow. SmartSizing
+        // is already enabled at Configure time; the real resize mechanism is the preceding
+        // _ax.SetBounds/MoveWindow (which retriggers the OCX's own fit) plus, for fill/full-screen
+        // profiles, dynamic resolution via TryUpdateRemoteResolution — this is just a cheap safety
+        // net for the unsupported-server fallback, NOT the primary path. It MUST sit in its own
+        // broad catch rather than TrySetOptional: TrySetOptional only swallows
+        // DISP_E_UNKNOWNNAME/MEMBERNOTFOUND, but a resize racing a disconnect can surface
+        // RPC_E_DISCONNECTED / CO_E_OBJNOTCONNECTED / InvalidComObjectException on the OCX RCW, and
+        // an escape here would propagate through SetHostBounds → adapter → RdpSessionViewModel.SetBounds
+        // and tear the session down — which a resize must never do.
+        try
+        {
+            if (TryGetOcx() is { } ocxObj)
+            {
+                dynamic ocx = ocxObj;
+                ocx.AdvancedSettings9.SmartSizing = true;
+            }
+        }
+        catch (Exception ex) when (
+            ex is COMException or RuntimeBinderException or InvalidOperationException or InvalidComObjectException)
+        {
+            _logger?.LogDebug(ex, "RDP SmartSizing re-assert skipped during resize (teardown race or unsupported property).");
+        }
+
         _ax.Invalidate();
         Invalidate(invalidateChildren: true);
         var visible = EnsureVisibleAndRedraw("bounds");
@@ -194,6 +218,61 @@ internal sealed class RdpHostForm : FormsForm
         _lastHostY = y;
         _lastHostWidth = width;
         _lastHostHeight = height;
+    }
+
+    /// <summary>
+    /// Renegotiate the REMOTE desktop resolution to the given client pixel size via
+    /// <c>IMsRdpClient9::UpdateSessionDisplaySettings</c> — the RDP Display Control channel
+    /// (MS-RDPEDISP) that mstsc.exe uses for "dynamic resolution". This makes the remote OS
+    /// actually re-lay-out at the new size (crisp, fills the tab) instead of relying on the
+    /// client-side <c>SmartSizing</c> rescale of a fixed-resolution canvas.
+    /// <para>
+    /// Best-effort and never throws into the caller: returns <c>false</c> (changing nothing) when
+    /// the OCX isn't realised yet, the session isn't established (the call is only valid once
+    /// <c>Connected==1</c>), the mstscax build predates <c>IMsRdpClient9</c>, or the server/secure
+    /// desktop doesn't support the Display Control channel (RDP &lt; 8.1). In every such case the
+    /// existing SmartSizing scaling remains the active fill behaviour — a resize must not be able
+    /// to fail the session. Callers MUST debounce this to the end of a resize gesture; it triggers
+    /// a server-side display-mode change and is not meant to fire per layout tick.
+    /// </para>
+    /// </summary>
+    internal bool TryUpdateRemoteResolution(int widthPx, int heightPx)
+    {
+        EnsureStaThread();
+        if (widthPx < 1 || heightPx < 1) return false;
+        if (TryGetOcx() is not { } ocxObj) return false;
+
+        var (w, h) = RdpDesktopSizeResolver.ClampDynamicResolution(widthPx, heightPx);
+        try
+        {
+            dynamic ocx = ocxObj;
+
+            // Only valid on an established session; during the handshake the call throws or is
+            // ignored. Connected: 0 = disconnected, 1 = connected, 2 = connecting.
+            int state = 0;
+            try { state = (int)ocx.Connected; }
+            catch (RuntimeBinderException) { }
+            catch (COMException) { }
+            if (state != 1) return false;
+
+            // Physical size omitted (0 ⇒ ignored per spec, so the server doesn't infer a DPI from
+            // millimetres); no rotation; 100/100 scale factors — a guaranteed-valid pair we use to
+            // request full resolution at no remote DPI scaling. Per MS-RDPEDISP DesktopScaleFactor
+            // accepts 100..500 and DeviceScaleFactor {100,140,180}; a mismatched pair is silently
+            // dropped by the server, so 100/100 is the safe choice. Width/height are already clamped
+            // to 200..8192 with an even width by ClampDynamicResolution.
+            ocx.UpdateSessionDisplaySettings((uint)w, (uint)h, 0u, 0u, 0u, 100u, 100u);
+            _logger?.LogDebug("RDP UpdateSessionDisplaySettings applied {Width}x{Height}.", w, h);
+            return true;
+        }
+        catch (Exception ex) when (ex is COMException or RuntimeBinderException or InvalidOperationException)
+        {
+            // Older mstscax without IMsRdpClient9 (RuntimeBinderException / DISP_E_*), a parameter
+            // mismatch on a divergent build (DISP_E_BADPARAMCOUNT), or a server/secure-desktop that
+            // doesn't support the Display Control VC (failure HRESULT). Keep SmartSizing scaling.
+            _logger?.LogDebug(ex, "RDP UpdateSessionDisplaySettings unavailable for {Width}x{Height}; keeping SmartSizing scaling.", w, h);
+            return false;
+        }
     }
 
     internal void LogWindowDiagnostics(ILogger logger, string context)
