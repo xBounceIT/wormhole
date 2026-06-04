@@ -247,34 +247,26 @@ public sealed class TerminalBridge : IDisposable
 
             if (msg.StartsWith("d:", StringComparison.Ordinal))
             {
-                var payload = EncodeUtf8(msg.AsSpan(2));
+                var payload = TerminalBridgeMessages.EncodeUtf8(msg.AsSpan(2));
                 await _session.WriteAsync(payload);
             }
             else if (msg.StartsWith("b:", StringComparison.Ordinal))
             {
-                // xterm's onBinary path (e.g. legacy mouse reports): payload is raw bytes
-                // base64-encoded by JS, NOT UTF-8 text. Decode and forward verbatim.
-                var payload = DecodeBase64Bytes(msg.AsSpan(2));
+                // xterm input is base64-encoded raw bytes by JS, not embedded directly
+                // in the WebView string. This keeps control keys (Ctrl+O, Enter, Ctrl+L)
+                // and legacy mouse reports out of the message framing layer.
+                var payload = TerminalBridgeMessages.DecodeBase64Bytes(msg.AsSpan(2));
                 await _session.WriteAsync(payload);
             }
             else if (msg.StartsWith("r:", StringComparison.Ordinal))
             {
-                var size = msg.AsSpan(2);
-                var separator = size.IndexOf('x');
-                if (separator > 0 &&
-                    separator < size.Length - 1 &&
-                    uint.TryParse(size[..separator], out var cols) &&
-                    uint.TryParse(size[(separator + 1)..], out var rows))
+                if (TerminalBridgeMessages.TryParseGeometry(
+                    msg.AsSpan(),
+                    MinimumUsableColumns,
+                    MinimumUsableRows,
+                    out var cols,
+                    out var rows))
                 {
-                    if (cols < MinimumUsableColumns || rows < MinimumUsableRows)
-                    {
-                        _logger.LogInformation(
-                            "Ignoring collapsed terminal resize request: {Columns}x{Rows}.",
-                            cols,
-                            rows);
-                        return;
-                    }
-
                     if (cols != _lastColumns || rows != _lastRows)
                     {
                         _lastColumns = cols;
@@ -295,7 +287,7 @@ public sealed class TerminalBridge : IDisposable
                 if (!_settingsService.Current.AutoCopyOnSelect) return;
                 try
                 {
-                    var text = Encoding.UTF8.GetString(DecodeBase64Bytes(msg.AsSpan(2)));
+                    var text = Encoding.UTF8.GetString(TerminalBridgeMessages.DecodeBase64Bytes(msg.AsSpan(2)));
                     if (string.IsNullOrEmpty(text)) return;
                     var pkg = new DataPackage();
                     pkg.SetText(text);
@@ -337,44 +329,6 @@ public sealed class TerminalBridge : IDisposable
         {
             _logger.LogError(ex, "TerminalBridge: failed to handle a WebView2 message.");
         }
-    }
-
-    private static byte[] EncodeUtf8(ReadOnlySpan<char> text)
-    {
-        var payload = new byte[Encoding.UTF8.GetByteCount(text)];
-        Encoding.UTF8.GetBytes(text, payload);
-        return payload;
-    }
-
-    private static byte[] DecodeBase64Bytes(ReadOnlySpan<char> encoded)
-    {
-        if (encoded.IsEmpty) return Array.Empty<byte>();
-
-        var decodedLength = GetBase64DecodedLength(encoded);
-        if (decodedLength < 0)
-        {
-            throw new FormatException("Invalid base64 payload from terminal WebView.");
-        }
-
-        var buffer = new byte[decodedLength];
-        if (!Convert.TryFromBase64Chars(encoded, buffer, out var bytesWritten) ||
-            bytesWritten != decodedLength)
-        {
-            throw new FormatException("Invalid base64 payload from terminal WebView.");
-        }
-
-        return buffer;
-    }
-
-    private static int GetBase64DecodedLength(ReadOnlySpan<char> encoded)
-    {
-        if (encoded.Length % 4 != 0) return -1;
-
-        var padding = 0;
-        if (encoded[^1] == '=') padding++;
-        if (encoded.Length > 1 && encoded[^2] == '=') padding++;
-
-        return (encoded.Length / 4 * 3) - padding;
     }
 
     public void Dispose()

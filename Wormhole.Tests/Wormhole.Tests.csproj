@@ -143,6 +143,7 @@
     <Compile Include="..\Services\Rdp\RdpCrashSentinelService.cs" Link="Services\Rdp\RdpCrashSentinelService.cs" />
     <Compile Include="..\Interop\Rdp\MsTscAxEventsSink.cs" Link="Interop\Rdp\MsTscAxEventsSink.cs" />
     <Compile Include="..\Interop\Terminal\TerminalBridge.cs" Link="Interop\Terminal\TerminalBridge.cs" />
+    <Compile Include="..\Interop\Terminal\TerminalBridgeMessages.cs" Link="Interop\Terminal\TerminalBridgeMessages.cs" />
     <Compile Include="..\Interop\Terminal\TerminalReplayBuffer.cs" Link="Interop\Terminal\TerminalReplayBuffer.cs" />
     <Compile Include="..\Interop\Terminal\TerminalOutputCoalescer.cs" Link="Interop\Terminal\TerminalOutputCoalescer.cs" />
     <Compile Include="..\Interop\Terminal\TerminalFlowController.cs" Link="Interop\Terminal\TerminalFlowController.cs" />
@@ -160,6 +161,11 @@
     <Compile Include="..\ViewModels\Sessions\Transfer\LocalFilePaneViewModel.cs" Link="ViewModels\Sessions\Transfer\LocalFilePaneViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\Transfer\RemoteFilePaneViewModel.cs" Link="ViewModels\Sessions\Transfer\RemoteFilePaneViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\Transfer\FileTransferViewModel.cs" Link="ViewModels\Sessions\Transfer\FileTransferViewModel.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\Assets\web\bridge.js" Link="Assets\web\bridge.js" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Assets\web\terminal.html" Link="Assets\web\terminal.html" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
