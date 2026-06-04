@@ -76,4 +76,33 @@ public class RdpDesktopSizeResolverTests
 
         Assert.Equal((RdpDesktopSizeResolver.DefaultWidth, RdpDesktopSizeResolver.DefaultHeight), size);
     }
+
+    [Fact]
+    public void ClampDynamicResolution_PassesThroughEvenInRangeSize()
+    {
+        Assert.Equal((1600, 900), RdpDesktopSizeResolver.ClampDynamicResolution(1600, 900));
+    }
+
+    [Theory]
+    [InlineData(1365, 1364)] // odd → previous even
+    [InlineData(1601, 1600)]
+    [InlineData(201, 200)]
+    public void ClampDynamicResolution_ForcesEvenWidth(int widthPx, int expectedWidth)
+    {
+        var (w, _) = RdpDesktopSizeResolver.ClampDynamicResolution(widthPx, 1080);
+        Assert.Equal(expectedWidth, w);
+        Assert.Equal(0, w & 1);
+    }
+
+    [Theory]
+    [InlineData(10, 10, RdpDesktopSizeResolver.DynamicResizeMinDimension, RdpDesktopSizeResolver.DynamicResizeMinDimension)]
+    [InlineData(100000, 100000, RdpDesktopSizeResolver.DynamicResizeMaxDimension, RdpDesktopSizeResolver.DynamicResizeMaxDimension)]
+    public void ClampDynamicResolution_ClampsToChannelRange(int widthPx, int heightPx, int expectedWidth, int expectedHeight)
+    {
+        var (w, h) = RdpDesktopSizeResolver.ClampDynamicResolution(widthPx, heightPx);
+        Assert.Equal(expectedWidth, w);
+        Assert.Equal(expectedHeight, h);
+        // Max dimension (8192) is even, so the even-width rule never pushes below it.
+        Assert.Equal(0, w & 1);
+    }
 }

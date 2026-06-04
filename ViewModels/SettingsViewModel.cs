@@ -36,6 +36,9 @@ public partial class SettingsViewModel : ObservableObject
     private bool autoCopyOnSelect;
 
     [ObservableProperty]
+    private bool promptBeforeTunnelConnect;
+
+    [ObservableProperty]
     private bool enableMcpServer;
 
     [ObservableProperty]
@@ -94,6 +97,7 @@ public partial class SettingsViewModel : ObservableObject
         confirmOnTabClose = _settingsService.Current.ConfirmOnTabClose;
         autoCheckForUpdates = _settingsService.Current.AutoCheckForUpdates;
         autoCopyOnSelect = _settingsService.Current.AutoCopyOnSelect;
+        promptBeforeTunnelConnect = _settingsService.Current.PromptBeforeTunnelConnect;
         enableMcpServer = _settingsService.Current.EnableMcpServer;
         streamMcpCommandTyping = _settingsService.Current.StreamMcpCommandTyping;
         mcpServerPort = _settingsService.Current.McpServerPort;
@@ -121,6 +125,12 @@ public partial class SettingsViewModel : ObservableObject
     partial void OnAutoCopyOnSelectChanged(bool value)
     {
         _settingsService.Current.AutoCopyOnSelect = value;
+        _settingsService.Save();
+    }
+
+    partial void OnPromptBeforeTunnelConnectChanged(bool value)
+    {
+        _settingsService.Current.PromptBeforeTunnelConnect = value;
         _settingsService.Save();
     }
 

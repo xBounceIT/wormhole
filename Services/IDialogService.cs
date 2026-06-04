@@ -32,6 +32,16 @@ public interface IDialogService
     Task<string?> PromptPasswordAsync(string title, string message);
 
     /// <summary>
+    /// Ask whether to route a tunnel-configured connection through its VPN tunnel or connect
+    /// directly. Shown only when the user has enabled
+    /// <see cref="Models.AppSettings.PromptBeforeTunnelConnect"/> and the profile is configured
+    /// for a tunnel. <paramref name="connectionName"/> and <paramref name="tunnelName"/> are
+    /// display-only. Returns <see cref="Models.TunnelRouteChoice.Cancel"/> if the user dismisses
+    /// the dialog.
+    /// </summary>
+    Task<TunnelRouteChoice> PromptTunnelRouteAsync(string connectionName, string tunnelName);
+
+    /// <summary>
     /// Reveal stored credentials read-only. Shows the (optional) username and the secret
     /// (<paramref name="secretLabel"/> is the field caption — e.g. "Password" or "Key
     /// passphrase") as selectable plaintext plus a button to copy the secret to the clipboard.

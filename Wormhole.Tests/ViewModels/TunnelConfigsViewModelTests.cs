@@ -1182,6 +1182,9 @@ public class TunnelConfigsViewModelTests
         public Task<bool> ConfirmAsync(string title, string message, string primaryText = "Yes", string closeText = "No") =>
             Task.FromResult(ConfirmResult);
 
+        public Task<TunnelRouteChoice> PromptTunnelRouteAsync(string connectionName, string tunnelName) =>
+            Task.FromResult(TunnelRouteChoice.UseTunnel);
+
         public Task<string?> PromptForTextAsync(string title, string label, string defaultValue = "") =>
             Task.FromResult<string?>(null);
 

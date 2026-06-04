@@ -33,6 +33,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     private readonly ICredentialService _credentialService;
     private readonly ICredentialRepository _credentialRepository;
     private readonly TunnelManager _tunnels;
+    private readonly ITunnelRoutePrompter _tunnelPrompter;
     private readonly IConnectionProfileResolver _profileResolver;
     private readonly IDialogService _dialog;
     private readonly IRdpCrashSentinelService _crashSentinel;
@@ -65,6 +66,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         ICredentialService credentialService,
         ICredentialRepository credentialRepository,
         TunnelManager tunnels,
+        ITunnelRoutePrompter tunnelPrompter,
         IConnectionProfileResolver profileResolver,
         IDialogService dialog,
         IRdpCrashSentinelService crashSentinel,
@@ -74,6 +76,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         _credentialService = credentialService;
         _credentialRepository = credentialRepository;
         _tunnels = tunnels;
+        _tunnelPrompter = tunnelPrompter;
         _profileResolver = profileResolver;
         _dialog = dialog;
         _crashSentinel = crashSentinel;
@@ -255,6 +258,51 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             MarshalToUi(() => DisposeAndTransitionAsync("RDP surface resize failed: " + ex.Message, dueToCredentials: false));
         }
     }
+
+    /// <summary>
+    /// Renegotiate the remote desktop resolution to the current surface pixel size after the
+    /// window was resized (mstsc-style dynamic resolution). Gated on Connected, and deliberately
+    /// NON-fatal: unlike <see cref="SetBounds"/>, a failure here must not tear the session down —
+    /// servers/builds without Display Control support simply keep the SmartSizing-scaled surface,
+    /// so the worst case is "stays scaled like before", never a dropped connection. The surface
+    /// host debounces the call to the end of a resize gesture.
+    /// </summary>
+    public void UpdateRemoteResolution(int widthPx, int heightPx)
+    {
+        var session = _session;
+        if (session is null) return;
+        if (Status != SessionStatus.Connected) return;
+        if (widthPx < 1 || heightPx < 1) return;
+        // Only renegotiate in "fill the tab" mode — the same condition RdpDesktopSizeResolver uses
+        // to size the desktop from the surface at connect time. A user who pinned a FIXED preset
+        // (e.g. 1024x768) wants it kept; dynamic-resizing it to the tab would silently defeat that
+        // choice. For fixed presets the SmartSizing scaling (re-asserted on every resize) fills the
+        // tab instead.
+        if (!UsesDynamicRemoteResolution(Profile)) return;
+
+        try
+        {
+            session.UpdateRemoteResolution(widthPx, heightPx);
+        }
+        catch (Exception ex)
+        {
+            // Log only — never DisposeAndTransition. A resolution renegotiation failing is
+            // expected on servers that don't support dynamic resolution and must stay invisible
+            // to the user beyond the unchanged (scaled) surface.
+            _logger.LogWarning(ex, "RDP remote-resolution update failed (non-fatal).");
+        }
+    }
+
+    /// <summary>
+    /// True when the profile's desktop size tracks the embedded surface ("fill the tab" / Full
+    /// screen / unset), i.e. exactly when <see cref="Helpers.RdpDesktopSizeResolver"/> derives the
+    /// connect-time resolution from the surface. A fixed preset ("1024x768") returns false so the
+    /// resolution stays pinned and is scaled by SmartSizing rather than dynamically renegotiated.
+    /// </summary>
+    private static bool UsesDynamicRemoteResolution(ConnectionProfile? profile) =>
+        profile is not null &&
+        (string.IsNullOrWhiteSpace(profile.RdpScreenSize) ||
+         string.Equals(profile.RdpScreenSize, RdpScreenSizes.FullScreenSentinel, StringComparison.OrdinalIgnoreCase));
 
     public void DetachView()
     {
@@ -438,6 +486,29 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             _hasLoggedOn = false;
             _lastLogonErrorCode = null;
             _teardownRequested = false;
+
+            // Per-connect tunnel routing: when the user has opted in (PromptBeforeTunnelConnect)
+            // and this profile is configured for a tunnel, ask whether to route through it or
+            // connect directly for THIS attempt. Done before the external-client / gateway /
+            // strict-auth guards below so that choosing "connect directly" relaxes those
+            // tunnel-incompatibility rejections (a direct connection has none of those
+            // constraints). A null result means the user cancelled — return silently to
+            // Disconnected. Decided per attempt (the Profile is left untouched) so Retry
+            // re-asks after a network change. CancellationToken.None: the connect CTS isn't
+            // created until after credential entry, and the IsAttemptCurrent guard below
+            // handles a Disconnect that lands while the prompt is open.
+            var routed = await _tunnelPrompter.ResolveRouteAsync(profile, CancellationToken.None).ConfigureAwait(true);
+            if (!IsAttemptCurrent(teardownGeneration)) return;
+            if (routed is null)
+            {
+                Status = SessionStatus.Disconnected;
+                return;
+            }
+            profile = routed;
+
+            // Build the stepper from the routed decision: when the user chose "connect directly"
+            // routed.TunnelEnabled is false, so there are no tunnel steps (the overlay shows a plain
+            // spinner); otherwise the VPN tunnel + Connect steps show.
             InitializeProgress(profile);
 
             // External-client routing: opt-in flag OR auto-detected Azure-AD signal (saved

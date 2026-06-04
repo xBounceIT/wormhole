@@ -163,6 +163,22 @@ public class FakeDialogService : IDialogService
         return Task.FromResult(PasswordPromptResult);
     }
 
+    /// <summary>Drives <see cref="PromptTunnelRouteAsync"/>. Defaults to
+    /// <see cref="TunnelRouteChoice.UseTunnel"/> so a test that enables the prompt without
+    /// configuring an answer keeps the pre-feature behavior (use the tunnel).</summary>
+    public TunnelRouteChoice TunnelRouteResult { get; set; } = TunnelRouteChoice.UseTunnel;
+    public int TunnelRoutePromptCount { get; private set; }
+    public string? LastTunnelRouteName { get; private set; }
+    public string? LastTunnelRouteConnectionName { get; private set; }
+
+    public virtual Task<TunnelRouteChoice> PromptTunnelRouteAsync(string connectionName, string tunnelName)
+    {
+        TunnelRoutePromptCount++;
+        LastTunnelRouteConnectionName = connectionName;
+        LastTunnelRouteName = tunnelName;
+        return Task.FromResult(TunnelRouteResult);
+    }
+
     public virtual Task ShowCredentialsAsync(string title, string username, string secretLabel, string secret)
     {
         ShowCredentialsCount++;

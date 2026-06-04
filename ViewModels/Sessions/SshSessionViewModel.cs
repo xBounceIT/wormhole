@@ -33,6 +33,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private readonly IConnectionRepository _connectionRepo;
     private readonly IAppSettingsService _settingsService;
     private readonly TunnelManager _tunnels;
+    private readonly ITunnelRoutePrompter _tunnelPrompter;
     private readonly IConnectionProfileResolver _profileResolver;
     private readonly ISftpService _sftpService;
     private readonly ILoggerFactory _loggerFactory;
@@ -54,6 +55,11 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private CancellationTokenSource? _outputWaitCts;
     private int _connectInFlight;
     private ITunnelInstance? _tunnel;
+    // The profile actually used for the live connection's tunnel routing. TunnelEnabled reflects
+    // the user's per-connect "use tunnel / go direct" choice; SFTP sub-sessions read it (via
+    // RoutedProfileForSubsession) so a terminal that went direct doesn't get a silently-tunneled
+    // file transfer. Null until a connect resolves a route; cleared on teardown.
+    private ConnectionProfile? _activeRoutedProfile;
     private bool _reconnectRequestedWhileDetached;
     private readonly object _mcpPresentationLock = new();
     private ShellCommandPresentationFilter? _mcpPresentationFilter;
@@ -86,6 +92,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         IConnectionRepository connectionRepo,
         IAppSettingsService settingsService,
         TunnelManager tunnels,
+        ITunnelRoutePrompter tunnelPrompter,
         IConnectionProfileResolver profileResolver,
         ISftpService sftpService,
         ILoggerFactory loggerFactory)
@@ -95,6 +102,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         _connectionRepo = connectionRepo;
         _settingsService = settingsService;
         _tunnels = tunnels;
+        _tunnelPrompter = tunnelPrompter;
         _profileResolver = profileResolver;
         _sftpService = sftpService;
         _loggerFactory = loggerFactory;
@@ -499,17 +507,40 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         Status = SessionStatus.Connecting;
         ErrorMessage = null;
         ResetOutputState();
-        InitializeProgress(profile);
         var cts = new CancellationTokenSource();
         _cts = cts;
         var token = cts.Token;
 
         try
         {
-            // Credential resolution is a quick local step (load the stored secret, or prompt for a
-            // key passphrase) that runs before the tunnel — it is deliberately NOT a stepper phase,
-            // since a completed "Credentials" step would imply the target was authenticated before
-            // the tunnel was even up. Target auth happens in the Connect phase, through the tunnel.
+            // Per-connect tunnel routing: when the user has opted in (PromptBeforeTunnelConnect)
+            // and this profile is configured for a tunnel, ask whether to route through it or
+            // connect directly for THIS attempt. Done before credential resolution so a "Cancel"
+            // doesn't make the user enter a password first. A null result means the user
+            // cancelled — return silently to Disconnected (no error overlay). Only the tunnel
+            // establish below consults `routed`; `profile` itself stays pristine so the
+            // host-fingerprint pin doesn't persist the per-attempt choice (Retry re-resolves the
+            // saved tunnel setting and re-asks after a network change).
+            var routed = await _tunnelPrompter.ResolveRouteAsync(profile, token).ConfigureAwait(true);
+            if (routed is null)
+            {
+                // User dismissed the route prompt. Surface a recoverable Failed state rather than
+                // Disconnected: the SSH terminal view only renders an in-pane Retry button on
+                // Failed (Disconnected leaves a blank pane), and this mirrors SSH's existing
+                // cancelled-prompt convention — a dismissed credential prompt also reports failure.
+                // Retry re-opens the route prompt.
+                ReportFailure("Connection cancelled.");
+                return;
+            }
+            _activeRoutedProfile = routed;
+
+            // Build the stepper from the ROUTED decision, not the saved profile: if the user chose
+            // "connect directly", routed.TunnelEnabled is false → no tunnel steps (plain spinner);
+            // otherwise the VPN tunnel + Connect steps show. Credential resolution below is a quick
+            // local step and deliberately NOT a phase — a completed "Credentials" step would imply
+            // the target was authenticated before the tunnel was up; target auth happens in Connect.
+            InitializeProgress(routed);
+
             var creds = await _credentialResolver.ResolveAsync(profile, token).ConfigureAwait(true);
             if (!creds.HasAny)
             {
@@ -523,8 +554,12 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             _capturedCredentials = creds;
 
             Progress.Begin(ConnectionPhase.Tunnel);
+            // Establish from the routed profile (TunnelEnabled forced off when the user chose
+            // "connect directly"); the SSH service routes through the explicit _tunnel handle, so
+            // the rest of the connect keeps using the unmodified profile. When routed has no tunnel,
+            // EstablishAsync returns null and the Begin calls are no-ops (the stepper is empty).
             _tunnel = await _tunnels.EstablishAsync(
-                profile, token, CreateUiProgress<TunnelProgress>(OnTunnelProgress)).ConfigureAwait(true);
+                routed, token, CreateUiProgress<TunnelProgress>(OnTunnelProgress)).ConfigureAwait(true);
 
             Progress.Begin(ConnectionPhase.Connect);
             _session = await _sshService.ConnectAsync(profile, creds, _initialSize, _tunnel, token).ConfigureAwait(true);
@@ -786,6 +821,11 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         // a rotated password / removed key / revoked credential doesn't get silently
         // reused by a prewarm kicked off after the next Connected transition.
         _capturedCredentials = null;
+
+        // Forget this connection's routing choice; the next connect re-resolves it (and a
+        // file transfer attempted between teardown and reconnect falls back to the saved
+        // profile, which keeps a VPN-required transfer on the VPN).
+        _activeRoutedProfile = null;
     }
 
     // === MCP (AI agent) control ============================================
@@ -1039,6 +1079,16 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     /// </summary>
     internal ITunnelInstance? BorrowTunnelForSftp() => _tunnel is null ? null : new BorrowedTunnelInstance(_tunnel);
 
+    /// <summary>
+    /// The profile a sibling SFTP session should use when it has to establish its own tunnel
+    /// (the on-demand fallback when there's no live tunnel to borrow). It carries this
+    /// connection's per-connect routing choice: if the terminal went direct, TunnelEnabled is
+    /// false here so the file transfer also goes direct instead of silently establishing — and
+    /// possibly OTP-prompting for — the VPN the user just declined. Falls back to the saved
+    /// profile before the first connect resolves a route.
+    /// </summary>
+    internal ConnectionProfile? RoutedProfileForSubsession => _activeRoutedProfile ?? Profile;
+
     private void ClearOwnCtsIfCurrent(CancellationTokenSource cts)
     {
         bool owned;
@@ -1146,6 +1196,13 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     {
         _capturedCredentials = credentials;
     }
+
+    /// <summary>
+    /// Test hook — sets the per-connect routed profile that <see cref="RoutedProfileForSubsession"/>
+    /// reports to the SFTP fallback, without driving the WebView2-bound <c>ConnectAsync</c>. Pass
+    /// null to simulate the post-teardown state (falls back to <see cref="SessionTabViewModel.Profile"/>).
+    /// </summary>
+    internal void PrimeRoutedProfileForTesting(ConnectionProfile? routed) => _activeRoutedProfile = routed;
 
     internal bool HasPrewarmedSftpForTesting()
     {

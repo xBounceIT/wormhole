@@ -50,6 +50,12 @@
                         <TextBlock Text="Terminal" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
                         <ToggleSwitch Header="Auto-copy selection to clipboard"
                                       IsOn="{x:Bind ViewModel.AutoCopyOnSelect, Mode=TwoWay}" />
+
+                        <TextBlock Text="VPN" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
+                        <ToggleSwitch Header="Ask whether to use the tunnel when connecting"
+                                      IsOn="{x:Bind ViewModel.PromptBeforeTunnelConnect, Mode=TwoWay}" />
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" TextWrapping="Wrap"
+                                   Text="When on, opening a connection that has a VPN tunnel configured asks whether to start the tunnel or connect directly. Useful for targets that are local on some networks and only reachable over the VPN on others — so you don't have to edit the connection each time you move networks." />
                     </StackPanel>
                 </ScrollViewer>
             </TabViewItem>
