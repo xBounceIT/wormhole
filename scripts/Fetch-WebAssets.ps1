@@ -26,15 +26,13 @@ $assets = @(
     [pscustomobject]@{
         Url      = "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.js"
         Relative = "addon-fit\addon-fit.js"
-    },
-    # WebGL renderer. 0.19.0 is the addon-webgl version released with @xterm/xterm 6.0.0
-    # (same monorepo release commit as addon-fit 0.11.0). xterm's default DOM renderer is
-    # CPU-bound; this moves glyph rendering onto the GPU so typing echo, cursor movement,
-    # and scrollback navigation feel smooth. bridge.js falls back to the DOM renderer if the
-    # addon is missing or WebGL is unavailable, so this asset is an enhancement, not a hard dep.
+    }
+)
+
+$retiredAssets = @(
     [pscustomobject]@{
-        Url      = "https://cdn.jsdelivr.net/npm/@xterm/addon-webgl@0.19.0/lib/addon-webgl.js"
-        Relative = "addon-webgl\addon-webgl.js"
+        Relative       = "addon-webgl"
+        ManifestPrefix = "addon-webgl\"
     }
 )
 
@@ -78,6 +76,31 @@ if ((Test-Path $integrityPath) -and -not $Force) {
         $parsed = $raw | ConvertFrom-Json
         foreach ($prop in $parsed.PSObject.Properties) {
             $integrity[$prop.Name] = $prop.Value
+        }
+    }
+}
+
+foreach ($retired in $retiredAssets) {
+    $retiredPath = Join-Path $vendorRoot $retired.Relative
+    if (Test-Path $retiredPath) {
+        $resolvedVendor = [System.IO.Path]::GetFullPath($vendorRoot).TrimEnd(
+            [System.IO.Path]::DirectorySeparatorChar,
+            [System.IO.Path]::AltDirectorySeparatorChar)
+        $resolvedRetired = [System.IO.Path]::GetFullPath($retiredPath)
+        if (-not $resolvedRetired.StartsWith(
+                $resolvedVendor + [System.IO.Path]::DirectorySeparatorChar,
+                [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "Refusing to remove retired web asset outside vendor root: $resolvedRetired"
+        }
+
+        Remove-Item -LiteralPath $retiredPath -Recurse -Force
+        Write-Info "PRUNE $($retired.Relative)"
+    }
+
+    foreach ($key in @($integrity.Keys)) {
+        if ($key -eq $retired.Relative -or
+            $key.StartsWith($retired.ManifestPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $integrity.Remove($key)
         }
     }
 }
