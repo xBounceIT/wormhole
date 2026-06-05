@@ -91,6 +91,12 @@
                                 DoubleTapped="OnCardDoubleTapped">
                             <Border.ContextFlyout>
                                 <MenuFlyout>
+                                    <MenuFlyoutItem Text="Test"
+                                                    Click="OnTestMenuItemClick">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE768;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
                                     <MenuFlyoutItem Text="Edit"
                                                     Click="OnEditMenuItemClick">
                                         <MenuFlyoutItem.Icon>
@@ -146,6 +152,12 @@
                                             Spacing="2"
                                             HorizontalAlignment="Right"
                                             VerticalAlignment="Bottom">
+                                    <Button Style="{StaticResource IconButtonStyle}"
+                                            Click="OnTestMenuItemClick"
+                                            ToolTipService.ToolTip="Test"
+                                            AutomationProperties.Name="Test">
+                                        <FontIcon FontSize="14" Glyph="&#xE768;" />
+                                    </Button>
                                     <Button Style="{StaticResource IconButtonStyle}"
                                             Click="OnEditMenuItemClick"
                                             ToolTipService.ToolTip="Edit"
