@@ -180,10 +180,11 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
     /// <para>Unlike the legacy <c>/auth/admin.html</c> serverd path, this is the low-privilege,
     /// user-facing surface — no administration/serverd privilege, no <c>app</c> token, no SSO. The
     /// single-use OTP, when used, is <b>concatenated directly onto the password</b> (no separator) and
-    /// spent here, on the HTTPS config download; the OpenVPN <c>auth-user-pass</c> still uses the real
-    /// password. A <c>200 application/zip</c> carries the bundle (<c>.ovpn</c> + CA/cert/key PEMs,
-    /// referenced by filename); a <c>200 text/xml</c> carries a <c>&lt;ret code/msg&gt;</c> firewall
-    /// error. The bundle's file references are inlined into a self-contained profile for the sidecar.</para>
+    /// spent here, on the HTTPS config download. If that happens, the caller deliberately stops and asks
+    /// the user to reconnect with a fresh OTP for the OpenVPN tunnel authentication. A <c>200
+    /// application/zip</c> carries the bundle (<c>.ovpn</c> + CA/cert/key PEMs, referenced by filename);
+    /// a <c>200 text/xml</c> carries a <c>&lt;ret code/msg&gt;</c> firewall error. The bundle's file
+    /// references are inlined into a self-contained profile for the sidecar.</para>
     /// </summary>
     public async Task<string> DownloadProfileV5Async(
         string username, string password, string? otp, CancellationToken cancellationToken)
