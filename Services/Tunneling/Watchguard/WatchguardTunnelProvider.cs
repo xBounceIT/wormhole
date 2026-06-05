@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -113,35 +114,55 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
         TunnelConfig config, WatchguardSettings settings, CancellationToken cancellationToken)
     {
         using var portal = new WatchguardConfigClient(settings.TrustServerCertificate, settings.CaPem);
-        var authMode = await ResolveAuthModeAsync(portal, settings, cancellationToken).ConfigureAwait(false);
+        var status = await ProbeGatewayStatusAsync(portal, settings, cancellationToken).ConfigureAwait(false);
+        ApplyEffectiveDomain(settings, status, config.Name);
+        var authMode = ResolveAuthMode(settings, status);
 
         return authMode == WatchguardAuthMode.Saml
             ? await ResolveSamlAsync(portal, config, settings, cancellationToken).ConfigureAwait(false)
             : await ResolveUsernamePasswordAsync(portal, config, settings, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<WatchguardAuthMode> ResolveAuthModeAsync(
+    private async Task<WatchguardGatewayStatus?> ProbeGatewayStatusAsync(
         WatchguardConfigClient portal, WatchguardSettings settings, CancellationToken cancellationToken)
     {
-        if (settings.AuthMode != WatchguardAuthMode.Automatic)
-            return settings.AuthMode;
+        if (settings.AuthMode != WatchguardAuthMode.Automatic
+            && !IsDefaultDomain(settings.Domain)
+            && !string.IsNullOrWhiteSpace(settings.Domain))
+        {
+            return null;
+        }
 
         try
         {
             var status = await portal.GetStatusAsync(settings.Server, settings.Port, cancellationToken).ConfigureAwait(false);
             _logger.LogDebug(
-                "Watchguard status from {Server}:{Port}: SAML={SamlEnabled}, IdP={Idp}.",
-                settings.Server, settings.Port, status.SamlEnabled, status.SamlIdentityProviderName);
-            return ResolveAutomaticAuthMode(settings, status);
+                "Watchguard status from {Server}:{Port}: SAML={SamlEnabled}, IdP={Idp}, Domains={Domains}.",
+                settings.Server,
+                settings.Port,
+                status.SamlEnabled,
+                status.SamlIdentityProviderName,
+                string.Join(", ", status.AuthDomains));
+            return status;
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogInformation(
                 ex,
-                "Watchguard status check failed for {Server}:{Port}; falling back to username/password auth.",
+                "Watchguard status check failed for {Server}:{Port}; using configured Watchguard authentication settings.",
                 settings.Server, settings.Port);
-            return WatchguardAuthMode.UsernamePassword;
+            return null;
         }
+    }
+
+    private static WatchguardAuthMode ResolveAuthMode(WatchguardSettings settings, WatchguardGatewayStatus? status)
+    {
+        if (settings.AuthMode != WatchguardAuthMode.Automatic)
+            return settings.AuthMode;
+
+        return status is null
+            ? WatchguardAuthMode.UsernamePassword
+            : ResolveAutomaticAuthMode(settings, status);
     }
 
     internal static WatchguardAuthMode ResolveAutomaticAuthMode(
@@ -153,6 +174,41 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
             return WatchguardAuthMode.UsernamePassword;
         return status.SamlEnabled ? WatchguardAuthMode.Saml : WatchguardAuthMode.UsernamePassword;
     }
+
+    internal static string ResolveEffectiveDomain(string? configuredDomain, WatchguardGatewayStatus? status)
+    {
+        var configured = string.IsNullOrWhiteSpace(configuredDomain)
+            ? WatchguardSettings.DefaultDomain
+            : configuredDomain.Trim();
+        if (!IsDefaultDomain(configured))
+            return configured;
+
+        var domains = status?.AuthDomains
+            .Where(domain => !string.IsNullOrWhiteSpace(domain))
+            .Select(domain => domain.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray() ?? [];
+        return domains.Length == 1 ? domains[0] : configured;
+    }
+
+    private void ApplyEffectiveDomain(WatchguardSettings settings, WatchguardGatewayStatus? status, string configName)
+    {
+        var configured = settings.Domain;
+        var effective = ResolveEffectiveDomain(configured, status);
+        settings.Domain = effective;
+        if (!string.Equals(
+                string.IsNullOrWhiteSpace(configured) ? WatchguardSettings.DefaultDomain : configured.Trim(),
+                effective,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogInformation(
+                "Watchguard '{Name}' using advertised authentication domain '{Domain}' instead of the built-in default '{DefaultDomain}'.",
+                configName, effective, WatchguardSettings.DefaultDomain);
+        }
+    }
+
+    private static bool IsDefaultDomain(string? domain) =>
+        string.Equals(domain?.Trim(), WatchguardSettings.DefaultDomain, StringComparison.OrdinalIgnoreCase);
 
     private async Task<(string Profile, string Username, string Password)> ResolveUsernamePasswordAsync(
         IWatchguardConfigClient portal,

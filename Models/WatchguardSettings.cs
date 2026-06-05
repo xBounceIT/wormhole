@@ -26,6 +26,8 @@ public enum WatchguardAuthMode
 /// </summary>
 public sealed class WatchguardSettings
 {
+    public const string DefaultDomain = "Firebox-DB";
+
     /// <summary>
     /// Stock Firebox SSL VPN server certificate subject. Exposed as a const so the dialog
     /// (TunnelDialog.BuildWatchguard) and the model both use the same canonical value;
@@ -40,9 +42,12 @@ public sealed class WatchguardSettings
     [JsonPropertyName("Username")] public string Username { get; set; } = string.Empty;
     [JsonPropertyName("Password")] public string Password { get; set; } = string.Empty;
 
-    /// <summary>WatchGuard auth domain. "Firebox-DB" is the local user database; AD / RADIUS
-    /// deployments name their own domain in the Mobile VPN with SSL configuration.</summary>
-    [JsonPropertyName("Domain")] public string Domain { get; set; } = "Firebox-DB";
+    /// <summary>
+    /// Optional WatchGuard auth domain override. Empty means the provider auto-detects the domain
+    /// from the Firebox status response and falls back to <see cref="DefaultDomain"/> when the
+    /// gateway does not advertise a single usable domain.
+    /// </summary>
+    [JsonPropertyName("Domain")] public string Domain { get; set; } = string.Empty;
 
     [JsonPropertyName("CaPem")] public string CaPem { get; set; } = string.Empty;
     [JsonPropertyName("ClientCertPem")] public string ClientCertPem { get; set; } = string.Empty;

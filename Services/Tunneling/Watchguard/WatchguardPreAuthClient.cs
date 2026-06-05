@@ -336,7 +336,7 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
             status = TryParseInt(SelectText(doc, "logon_status"));
             logonId = SelectText(doc, "logon_id");
             chaStr = SelectText(doc, "chaStr");
-            errorMessage = SelectText(doc, "message");
+            errorMessage = SelectText(doc, "message") ?? SelectText(doc, "errStr");
         }
         catch (XmlException ex)
         {

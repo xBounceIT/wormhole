@@ -876,7 +876,7 @@ public class TunnelConfigsViewModelTests
         Assert.Equal(443, roundTrip.Port);
         Assert.Equal("alice", roundTrip.Username);
         Assert.Equal("s3cret", roundTrip.Password);
-        Assert.Equal("Firebox-DB", roundTrip.Domain);
+        Assert.Equal(string.Empty, roundTrip.Domain);
         Assert.Contains("FAKECA", roundTrip.CaPem);
         Assert.Contains("FAKECERT", roundTrip.ClientCertPem);
         Assert.Contains("FAKEKEY", roundTrip.ClientKeyPem);
@@ -1102,7 +1102,6 @@ public class TunnelConfigsViewModelTests
             Port = 443,
             Username = "alice",
             Password = "s3cret",
-            Domain = "Firebox-DB",
             CaPem = "-----BEGIN CERTIFICATE-----\nFAKECA\n-----END CERTIFICATE-----",
             ClientCertPem = "-----BEGIN CERTIFICATE-----\nFAKECERT\n-----END CERTIFICATE-----",
             ClientKeyPem = "-----BEGIN PRIVATE KEY-----\nFAKEKEY\n-----END PRIVATE KEY-----",
