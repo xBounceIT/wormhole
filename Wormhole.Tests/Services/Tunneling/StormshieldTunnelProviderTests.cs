@@ -126,7 +126,7 @@ public class StormshieldTunnelProviderTests
     public async Task ResolveAutomatic_Otp_CacheHit_ReusesProfile_AppendsOtpToDataPlane()
     {
         // Server hash matches the cached hash (case-insensitively) → reuse the cached profile, no download,
-        // and route the one-time code to the OpenVPN data-plane password. This is the fix for the user's bug.
+        // and route the one-time code to the OpenVPN data-plane password.
         var portal = new ScriptedPortal { ConfigHashResult = "abc123" };
         var cache = new FakeStormshieldConfigCache();
         var id = Guid.NewGuid();
@@ -219,6 +219,26 @@ public class StormshieldTunnelProviderTests
         Assert.Equal(1, portal.DownloadV5Calls);
         Assert.Equal(1, cache.WriteCalls);
         Assert.Equal(string.Empty, cache.LastWritten!.ConfigHash);  // no hash was available to store
+    }
+
+    [Fact]
+    public void SummarizeOpenVpnRemotes_IncludesConnectionBlocks_SkipsInlineDataBlocks()
+    {
+        const string profile =
+            "client\n"
+            + "<connection>\n"
+            + "remote rpv.example.com 443 tcp\n"
+            + "</connection>\n"
+            + "<connection>\n"
+            + "remote rpv.example.com 8443 udp\n"
+            + "</connection>\n"
+            + "<ca>\n"
+            + "remote should-not-log 1194 udp\n"
+            + "</ca>\n";
+
+        var summary = StormshieldTunnelProvider.SummarizeOpenVpnRemotes(profile);
+
+        Assert.Equal("rpv.example.com:443/tcp, rpv.example.com:8443/udp", summary);
     }
 
     private sealed class NullOtpPromptService : IOtpPromptService

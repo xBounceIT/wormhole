@@ -14,9 +14,10 @@ namespace Wormhole.Tests.Integration.Services.Tunneling;
 public sealed class OpenVpnEndToEndTests
 {
     // OpenVPN's TLS handshake + push-reply exchange can run several seconds on a healthy
-    // server (the sidecar's own ready budget is 45s). Bump the test timeout above that so
-    // we attribute failures to the tunnel layer, not to an externally-clipped read.
-    private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(90);
+    // server, and some profiles need transport fallback attempts before becoming ready.
+    // Keep the test timeout above the sidecar host budget so failures are attributed to
+    // the tunnel layer, not to an externally-clipped read.
+    private static readonly TimeSpan TestTimeout = TimeSpan.FromSeconds(150);
 
     private readonly ITestOutputHelper _output;
 

@@ -20,15 +20,15 @@ namespace Wormhole.Services.Tunneling.OpenVpn;
 /// </summary>
 public sealed class OpenVpnProcessHost : IAsyncDisposable
 {
-    // Must strictly contain the sidecar's own ovpn_wait_connected budget (30s, see
+    // Must strictly contain the sidecar's own ovpn_wait_connected budget (90s, see
     // ovpn_cgo.go) plus the time we spend BEFORE that wait even begins: stdin JSON write,
     // ovpn_load_profile, ovpn_set_creds, ovpn_connect_async, SOCKS5 listener bind, and the
     // READY emit + read-back through the pipe. The parent timer starts at the top of
-    // StartAsync, so a healthy session that consumes the full 30s sidecar budget plus a
+    // StartAsync, so a healthy session that consumes the full sidecar budget plus a
     // couple of seconds of setup would otherwise be killed as a false timeout right as it
-    // succeeds. The 15s slack swallows AV-scan / cold-start jitter without changing the
-    // user-perceived handshake budget.
-    private static readonly TimeSpan ReadyTimeout = TimeSpan.FromSeconds(45);
+    // succeeds. The slack swallows AV-scan / cold-start jitter without clipping OpenVPN
+    // remote fallback attempts.
+    private static readonly TimeSpan ReadyTimeout = TimeSpan.FromSeconds(120);
     private static readonly byte[] s_newline = new byte[] { (byte)'\n' };
     // Bounded so a misbehaving sidecar that floods stderr can't bloat the failure message;
     // the fatal line is almost always among the last few, so a small tail suffices.

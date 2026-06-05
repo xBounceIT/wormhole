@@ -19,8 +19,9 @@ namespace Wormhole.Models;
 ///   "SN SSL VPN Client" download — <c>POST https://{Server}:{Port}/auth/config.html?version=1&amp;type=openvpn</c>
 ///   with form <c>user</c> + <c>pass</c> (a single-use OTP, when enabled, is concatenated onto the
 ///   password) — and inlines the returned <c>openvpn_client.zip</c> bundle into one self-contained
-///   <c>.ovpn</c>. No administration/serverd privilege required; the OpenVPN <c>auth-user-pass</c> uses
-///   the real <see cref="Password"/>.</item>
+///   <c>.ovpn</c>. No administration/serverd privilege required. With OTP enabled, a fresh/changed
+///   profile consumes the code on this download step and the next connection uses a new code for the
+///   OpenVPN tunnel authentication.</item>
 ///   <item><see cref="StormshieldConnectionMode.Import"/>: the user pastes the static <c>.ovpn</c>
 ///   downloaded from the portal "Personal data" page. The profile already embeds the CA, client
 ///   cert and (plaintext) client key, so no HTTPS pre-auth is needed.</item>
@@ -46,7 +47,7 @@ public sealed class StormshieldSettings
 
     /// <summary>HTTPS captive-portal port (443 by default — "the only port below 1024 usable").
     /// This is the config-retrieval port; the OpenVPN tunnel declares its own remote/proto inside
-    /// the fetched/imported profile (UDP/1194 preferred, TCP/443 fallback).</summary>
+    /// the fetched/imported profile.</summary>
     [JsonPropertyName("Port")] public int Port { get; set; } = 443;
 
     /// <summary>Free-text note (maps to the client's "Description" field). Pure UI metadata.</summary>

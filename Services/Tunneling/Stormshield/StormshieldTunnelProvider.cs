@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
@@ -21,10 +22,10 @@ namespace Wormhole.Services.Tunneling.Stormshield;
 /// <list type="bullet">
 ///   <item><see cref="StormshieldConnectionMode.Automatic"/> ("Stormshield mode"): authenticate to
 ///   the firewall captive portal over HTTPS (username/password [+ single-use OTP]), then download
-///   the per-user OpenVPN profile (inline CA / client cert / key) and feed it to the sidecar. The
-///   OpenVPN <c>auth-user-pass</c> password is the user's real password — NOT the OTP (the OTP is a
-///   one-shot factor spent on the HTTPS step; this is a real divergence from WatchGuard, whose OTP
-///   becomes the OpenVPN password).</item>
+///   the per-user OpenVPN profile (inline CA / client cert / key) and feed it to the sidecar. With
+///   OTP enabled, the official client authenticates twice when the profile is new or changed: once
+///   to retrieve the profile, then again to set up the OpenVPN tunnel with a fresh OTP. A cached,
+///   current profile skips the first authentication and routes the OTP to OpenVPN.</item>
 ///   <item><see cref="StormshieldConnectionMode.Import"/> ("OpenVPN mode"): use a static <c>.ovpn</c>
 ///   the user downloaded from the portal. No HTTPS pre-auth; OpenVPN does mutual TLS directly.</item>
 /// </list>
@@ -39,6 +40,8 @@ namespace Wormhole.Services.Tunneling.Stormshield;
 /// </summary>
 public sealed class StormshieldTunnelProvider : ITunnelProvider
 {
+    private static readonly char[] s_remoteDirectiveSeparators = new[] { ' ', '\t' };
+
     private readonly IOtpPromptService _otpPrompt;
     private readonly IStormshieldConfigCache _configCache;
     private readonly ILogger<StormshieldTunnelProvider> _logger;
@@ -100,6 +103,13 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         };
 
         var sidecarPath = AppPaths.GetOvpnProxyExecutablePath();
+        var remoteSummary = SummarizeOpenVpnRemotes(profile);
+        if (!string.IsNullOrEmpty(remoteSummary))
+        {
+            _logger.LogInformation(
+                "Stormshield '{Name}': OpenVPN profile remotes from the fetched/cached profile: {Remotes}.",
+                config.Name, remoteSummary);
+        }
         _logger.LogDebug("Launching OpenVPN sidecar (Stormshield provider) at {Path}.", sidecarPath);
 
         progress?.Report(new TunnelProgress(TunnelPhase.StartingTunnel));
@@ -117,9 +127,9 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         {
             // With OTP enabled, reaching the sidecar means we took the cache-hit path and routed the
             // one-time code to the OpenVPN data-plane password (a cache MISS aborts earlier, before the
-            // sidecar starts). So the code was consumed by THIS connection attempt — whether the sidecar
-            // failed to start (transport) or the firewall rejected the data-plane auth. Either way a blind
-            // Retry would reuse a now-spent code, so tell the user to enter a fresh one.
+            // sidecar starts). The code may have reached the firewall or simply expired while OpenVPN
+            // worked through transport fallbacks. Either way a blind Retry would reuse a stale code, so
+            // tell the user to enter a fresh one.
 
             // If the profile was reused WITHOUT confirming it against the firewall's current hash (the
             // change-check was unavailable), the failure may mean the cached profile is stale. Drop it so
@@ -131,8 +141,8 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
 
             throw new InvalidOperationException(
                 "The Stormshield VPN prepared its configuration, but bringing up the OpenVPN tunnel failed: "
-                + $"{ex.Message} Your one-time code was used for this connection attempt — if you retry, enter a "
-                + "NEW one-time code.", ex);
+                + $"{ex.Message} Your one-time code may have been used or expired during this connection attempt — "
+                + "if you retry, enter a NEW one-time code.", ex);
         }
 
         // Wrap-after-start: once StartAsync returns the sidecar is alive, so a construction-time
@@ -161,6 +171,70 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         }
         return StormshieldProfileNormalizer.Normalize(settings.ProfileOvpn);
     }
+
+    internal static string SummarizeOpenVpnRemotes(string profile)
+    {
+        var remotes = new List<string>();
+        string? openBlock = null;
+
+        foreach (var rawLine in profile.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
+        {
+            var trimmed = rawLine.Trim();
+            if (openBlock is not null)
+            {
+                if (IsCloseTag(trimmed, openBlock)) openBlock = null;
+                continue;
+            }
+            if (TryReadOpenTag(trimmed, out var blockName))
+            {
+                if (IsOpaqueInlineBlock(blockName))
+                    openBlock = blockName;
+                continue;
+            }
+            if (trimmed.Length == 0 || trimmed[0] == '#' || trimmed[0] == ';')
+                continue;
+
+            var parts = trimmed.Split(s_remoteDirectiveSeparators, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length < 2 || !parts[0].Equals("remote", StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            var summary = parts[1];
+            if (parts.Length >= 3) summary += ":" + parts[2];
+            if (parts.Length >= 4) summary += "/" + parts[3];
+            remotes.Add(summary);
+        }
+
+        return string.Join(", ", remotes);
+    }
+
+    private static bool TryReadOpenTag(string trimmed, out string name)
+    {
+        name = string.Empty;
+        if (trimmed.Length < 3 || trimmed[0] != '<' || trimmed[^1] != '>' || trimmed[1] == '/')
+            return false;
+        name = trimmed[1..^1];
+        foreach (var ch in name)
+        {
+            if (char.IsWhiteSpace(ch) || ch == '<' || ch == '>') return false;
+        }
+        return name.Length > 0;
+    }
+
+    private static bool IsOpaqueInlineBlock(string blockName) =>
+        blockName.Equals("ca", StringComparison.OrdinalIgnoreCase)
+        || blockName.Equals("cert", StringComparison.OrdinalIgnoreCase)
+        || blockName.Equals("key", StringComparison.OrdinalIgnoreCase)
+        || blockName.Equals("tls-auth", StringComparison.OrdinalIgnoreCase)
+        || blockName.Equals("tls-crypt", StringComparison.OrdinalIgnoreCase)
+        || blockName.Equals("tls-crypt-v2", StringComparison.OrdinalIgnoreCase)
+        || blockName.Equals("extra-certs", StringComparison.OrdinalIgnoreCase)
+        || blockName.Equals("pkcs12", StringComparison.OrdinalIgnoreCase)
+        || blockName.Equals("secret", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsCloseTag(string trimmed, string blockName) =>
+        trimmed.Length == blockName.Length + 3
+        && trimmed[0] == '<' && trimmed[1] == '/' && trimmed[^1] == '>'
+        && trimmed.AsSpan(2, blockName.Length).Equals(blockName, StringComparison.OrdinalIgnoreCase);
 
     private async Task<(string Profile, string DataPlanePassword, bool OptimisticCacheHit)> ResolveAutomaticAsync(
         TunnelConfig config, StormshieldSettings settings, CancellationToken cancellationToken, IProgress<TunnelProgress>? progress = null)
@@ -232,8 +306,6 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             return (StormshieldProfileNormalizer.Normalize(profileNoOtp), settings.Password, false);
         }
 
-        var otp = await PromptOtpAsync(otpPrompt, configName, cancellationToken).ConfigureAwait(false);
-
         // Ask the firewall whether its SSL VPN config changed (unauthenticated; null when the endpoint is
         // unsupported or unreachable), and look up any current cached profile for this tunnel.
         var serverHash = await portal.GetConfigHashAsync(cancellationToken).ConfigureAwait(false);
@@ -248,20 +320,24 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
 
         if (hashMatches || optimistic)
         {
+            // Prompt as late as possible so the TOTP window is not spent while the config hash/cache
+            // checks run. That matters when the profile's first remote times out before a TCP fallback.
+            var dataPlaneOtp = await PromptOtpAsync(otpPrompt, configName, cancellationToken).ConfigureAwait(false);
             logger.LogInformation(
                 "Stormshield '{Name}': reusing the cached configuration ({Reason}); routing the one-time code to the OpenVPN data plane.",
                 configName, hashMatches ? "firewall reports config unchanged" : "change-check unavailable, cached profile present");
             // optimistic == true only when we could NOT confirm the cache against the firewall's current
             // hash; the caller drops the cache if this (unconfirmed) profile then fails the data-plane auth.
-            return (cached!.ProfileOvpn, settings.Password + otp, optimistic);
+            return (cached!.ProfileOvpn, settings.Password + dataPlaneOtp, optimistic);
         }
 
         // Cache MISS: download (spends the OTP on the HTTPS step), persist for next time, then stop.
+        var downloadOtp = await PromptOtpAsync(otpPrompt, configName, cancellationToken).ConfigureAwait(false);
         logger.LogInformation(
             "Stormshield '{Name}': {Reason}; downloading a fresh configuration (this uses the one-time code).",
             configName, cached is null ? "no cached configuration" : "firewall config changed");
         progress?.Report(new TunnelProgress(TunnelPhase.DownloadingConfiguration));
-        var rawProfile = await DownloadProfileV5WrappedAsync(portal, settings, otp, cancellationToken).ConfigureAwait(false);
+        var rawProfile = await DownloadProfileV5WrappedAsync(portal, settings, downloadOtp, cancellationToken).ConfigureAwait(false);
         var normalized = StormshieldProfileNormalizer.Normalize(rawProfile);
 
         // Best-effort persist. The OTP is ALREADY spent on the download above, so a failed cache write
