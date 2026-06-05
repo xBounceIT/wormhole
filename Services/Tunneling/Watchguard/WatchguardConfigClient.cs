@@ -233,9 +233,9 @@ internal sealed class WatchguardConfigClient : IWatchguardConfigClient
                 || string.Equals(samlEnabledText, "yes", StringComparison.OrdinalIgnoreCase);
             var domains = doc.GetElementsByTagName("auth-domain")
                 .OfType<XmlNode>()
-                .Select(n => n.InnerText)
+                .Select(SelectAuthDomainName)
                 .Where(s => !string.IsNullOrWhiteSpace(s))
-                .Select(s => s.Trim())
+                .Select(s => s!.Trim())
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
             return new WatchguardGatewayStatus(samlEnabled, SelectText(doc, "saml_idp_name"), domains);
@@ -244,6 +244,12 @@ internal sealed class WatchguardConfigClient : IWatchguardConfigClient
         {
             throw new InvalidOperationException($"Firebox returned malformed status XML: {ex.Message}", ex);
         }
+    }
+
+    private static string? SelectAuthDomainName(XmlNode authDomain)
+    {
+        var name = authDomain.SelectSingleNode("name")?.InnerText;
+        return string.IsNullOrWhiteSpace(name) ? authDomain.InnerText : name;
     }
 
     internal static Uri BuildUri(string server, int port, string pathAndQuery)

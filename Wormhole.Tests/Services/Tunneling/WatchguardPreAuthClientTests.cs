@@ -368,6 +368,7 @@ public class WatchguardPreAuthClientTests
               <auth-domain-list>
                 <auth-domain>
                   <name>AuthPoint</name>
+                  <type>radius</type>
                 </auth-domain>
               </auth-domain-list>
             </resp>
