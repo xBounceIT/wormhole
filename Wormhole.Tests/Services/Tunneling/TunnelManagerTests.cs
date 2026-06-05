@@ -83,6 +83,26 @@ public class TunnelManagerTests
     }
 
     [Fact]
+    public async Task EstablishConfig_DispatchesToProvider_AndCallerDisposes()
+    {
+        var provider = new FakeProvider();
+        var mgr = BuildManager(out var repo, out var creds, providers: new ITunnelProvider[] { provider });
+
+        var configId = Guid.NewGuid();
+        var config = new TunnelConfig { Id = configId, Name = "wg", Kind = TunnelKind.WireGuard };
+        repo.Configs[configId] = config;
+        creds.TunnelConfigs[configId] = new byte[] { 4, 5, 6 };
+
+        var instance = await mgr.EstablishConfigAsync(config, CancellationToken.None);
+
+        Assert.Equal(1, provider.EstablishCount);
+        Assert.Equal(new byte[] { 4, 5, 6 }, provider.LastSecret);
+
+        await instance.DisposeAsync();
+        Assert.Equal(1, provider.LastInstance!.DisposeCount);
+    }
+
+    [Fact]
     public async Task Establish_DispatchesByKind_OpenVpn()
     {
         // With both providers registered, a config of Kind = OpenVpn must route to the OpenVPN

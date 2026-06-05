@@ -91,6 +91,34 @@ public sealed class TunnelManager
                 $"Tunnel config {configId} for connection '{profile.Name}' was not found.");
         }
 
+        return await EstablishResolvedAsync(config, secretTask, cancellationToken, progress).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Establishes a specific saved tunnel config without requiring a connection profile. Used by
+    /// settings-page diagnostics; the caller owns and must dispose the returned instance.
+    /// </summary>
+    public Task<ITunnelInstance> EstablishConfigAsync(
+        TunnelConfig config,
+        CancellationToken cancellationToken,
+        IProgress<TunnelProgress>? progress = null)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+
+        progress?.Report(new TunnelProgress(TunnelPhase.Preparing));
+        return EstablishResolvedAsync(
+            config,
+            _credentials.ReadTunnelConfigAsync(config.Id),
+            cancellationToken,
+            progress);
+    }
+
+    private async Task<ITunnelInstance> EstablishResolvedAsync(
+        TunnelConfig config,
+        Task<byte[]?> secretTask,
+        CancellationToken cancellationToken,
+        IProgress<TunnelProgress>? progress)
+    {
         if (!_providers.TryGetValue(config.Kind, out var provider))
         {
             await ObserveSilentlyAsync(secretTask).ConfigureAwait(false);
@@ -100,7 +128,7 @@ public sealed class TunnelManager
 
         var secret = await secretTask.ConfigureAwait(false)
             ?? throw new InvalidOperationException(
-                $"Tunnel secret blob for config {configId} is missing on disk.");
+                $"Tunnel secret blob for config {config.Id} is missing on disk.");
 
         _logger.LogInformation("Establishing {Kind} tunnel '{Name}'.", config.Kind, config.Name);
 

@@ -40,6 +40,15 @@ public sealed partial class TunnelConfigsPage : Page
         }
     }
 
+    private async void OnTestMenuItemClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is FrameworkElement { DataContext: TunnelConfig config } &&
+            ViewModel.TestTunnelCommand.CanExecute(config))
+        {
+            await ViewModel.TestTunnelCommand.ExecuteAsync(config);
+        }
+    }
+
     private void OnDeleteMenuItemClick(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement { DataContext: TunnelConfig config })
