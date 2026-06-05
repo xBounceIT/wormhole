@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Wormhole.Views.Dialogs.TunnelTestDialog"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Wormhole.Views.Dialogs">
+
+    <!-- Self-contained dialog chrome (title / body / footer) so it can be hosted in the shell's
+         modal-overlay layer instead of a ContentDialog — that leaves the single-ContentDialog slot
+         free for provider OTP / SAML prompts during the test. MaxHeight caps the card; the body
+         ScrollViewer handles overflow on short windows. -->
+    <Grid MinWidth="460" MaxWidth="600" MaxHeight="640">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0"
+                   Margin="24,24,24,12"
+                   Style="{StaticResource SubtitleTextBlockStyle}"
+                   Text="{x:Bind ViewModel.HeaderText, Mode=OneWay}"
+                   TextWrapping="Wrap" />
+
+        <ScrollViewer Grid.Row="1"
+                      Margin="24,0,24,0"
+                      VerticalScrollBarVisibility="Auto"
+                      VerticalScrollMode="Auto"
+                      HorizontalScrollMode="Disabled">
+            <Grid RowSpacing="12">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <!-- Live status: spinner + current phase + cancel (while running). -->
+                <Grid Grid.Row="0" ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <ProgressRing Grid.Column="0"
+                                  Width="20"
+                                  Height="20"
+                                  IsActive="{x:Bind ViewModel.IsBusy, Mode=OneWay}"
+                                  VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="1"
+                               Text="{x:Bind ViewModel.Status, Mode=OneWay}"
+                               TextWrapping="Wrap"
+                               VerticalAlignment="Center" />
+                    <Button Grid.Column="2"
+                            Content="Cancel"
+                            Command="{x:Bind ViewModel.CancelCommand}"
+                            VerticalAlignment="Center"
+                            Visibility="{x:Bind ViewModel.IsBusy, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                </Grid>
+
+                <!-- Streaming log. -->
+                <Border Grid.Row="1"
+                        CornerRadius="6"
+                        Background="{ThemeResource LayerFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1">
+                    <ListView x:Name="LogList"
+                              ItemsSource="{x:Bind ViewModel.Log, Mode=OneWay}"
+                              SelectionMode="None"
+                              IsItemClickEnabled="False"
+                              MaxHeight="260">
+                        <ListView.ItemContainerStyle>
+                            <Style TargetType="ListViewItem">
+                                <Setter Property="MinHeight" Value="0" />
+                                <Setter Property="Padding" Value="10,2,10,2" />
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            </Style>
+                        </ListView.ItemContainerStyle>
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="x:String">
+                                <TextBlock Text="{x:Bind}"
+                                           FontFamily="Consolas"
+                                           FontSize="12"
+                                           IsTextSelectionEnabled="True"
+                                           TextWrapping="Wrap" />
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </Border>
+
+                <!-- Eventual result. -->
+                <InfoBar Grid.Row="2"
+                         IsOpen="{x:Bind ViewModel.HasResult, Mode=OneWay}"
+                         IsClosable="False"
+                         Severity="{x:Bind local:TunnelTestDialog.ResultSeverity(ViewModel.IsSuccess, ViewModel.WasCancelled), Mode=OneWay}"
+                         Title="{x:Bind ViewModel.ResultTitle, Mode=OneWay}"
+                         Message="{x:Bind ViewModel.ResultMessage, Mode=OneWay}" />
+            </Grid>
+        </ScrollViewer>
+
+        <!-- Footer command bar. Close is disabled while the test runs (use Cancel to abort first),
+             matching the old ContentDialog gating without any close-defer plumbing. -->
+        <Border Grid.Row="2"
+                Margin="0,12,0,0"
+                Padding="24"
+                BorderThickness="0,1,0,0"
+                BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}">
+            <Button x:Name="CloseButton"
+                    Content="Close"
+                    HorizontalAlignment="Stretch"
+                    Style="{StaticResource AccentButtonStyle}"
+                    IsEnabled="{x:Bind ViewModel.CanClose, Mode=OneWay}"
+                    Click="OnCloseClick" />
+        </Border>
+    </Grid>
+</UserControl>

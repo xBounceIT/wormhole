@@ -461,45 +461,32 @@ public class TunnelConfigsViewModelTests
     }
 
     [Fact]
-    public async Task TestTunnel_EstablishesSelectedTunnelAndClosesIt()
+    public async Task TestTunnel_OpensTestDialogForSelectedConfig()
     {
-        var provider = new FakeTunnelProvider(TunnelKind.WireGuard);
-        var (vm, repo, _, creds, dialog) = CreateVm(new ITunnelProvider[] { provider });
+        // The establish-and-tear-down diagnostic now lives in the tunnel-test dialog (which streams
+        // live progress + logs). The page VM only routes the selected config to it and gates
+        // re-entrancy via IsTestingTunnel — see TunnelTestDialogViewModelTests for the run behavior.
+        var (vm, repo, _, _, dialog) = CreateVm();
         var id = Guid.NewGuid();
         repo.Configs[id] = new TunnelConfig { Id = id, Name = "alpha", Kind = TunnelKind.WireGuard };
-        creds.TunnelConfigs[id] = new byte[] { 1, 2, 3 };
         await vm.LoadCommand.ExecuteAsync(null);
 
         await vm.TestTunnelCommand.ExecuteAsync(vm.Configs[0]);
 
         Assert.False(vm.IsTestingTunnel);
-        Assert.Equal(1, provider.EstablishCount);
-        Assert.Equal(id, provider.LastConfig?.Id);
-        Assert.Equal(new byte[] { 1, 2, 3 }, provider.LastSecret);
-        Assert.Equal(1, provider.LastInstance!.DisposeCount);
-        Assert.Contains(dialog.Messages, m => m.title == "Tunnel test succeeded");
+        var tested = Assert.Single(dialog.TunnelTestConfigs);
+        Assert.Equal(id, tested.Id);
     }
 
     [Fact]
-    public async Task TestTunnel_WhenProviderFails_ShowsFailureMessage()
+    public async Task TestTunnel_NullConfig_DoesNotOpenDialog()
     {
-        var provider = new FakeTunnelProvider(TunnelKind.WireGuard)
-        {
-            EstablishFailure = new InvalidOperationException("simulated auth failure"),
-        };
-        var (vm, repo, _, creds, dialog) = CreateVm(new ITunnelProvider[] { provider });
-        var id = Guid.NewGuid();
-        repo.Configs[id] = new TunnelConfig { Id = id, Name = "alpha", Kind = TunnelKind.WireGuard };
-        creds.TunnelConfigs[id] = new byte[] { 1, 2, 3 };
-        await vm.LoadCommand.ExecuteAsync(null);
+        var (vm, _, _, _, dialog) = CreateVm();
 
-        await vm.TestTunnelCommand.ExecuteAsync(vm.Configs[0]);
+        await vm.TestTunnelCommand.ExecuteAsync(null);
 
+        Assert.Empty(dialog.TunnelTestConfigs);
         Assert.False(vm.IsTestingTunnel);
-        Assert.Equal(1, provider.EstablishCount);
-        var message = Assert.Single(dialog.Messages, m => m.title == "Tunnel test failed").message;
-        Assert.Contains("simulated auth failure", message);
-        Assert.Contains("Last step: starting tunnel.", message);
     }
 
     [Fact]
@@ -1173,19 +1160,14 @@ public class TunnelConfigsViewModelTests
         FakeTunnelConfigRepository Repo,
         FakeConnectionRepository Conns,
         FakeCredentialService Creds,
-        FakeDialog Dialog) CreateVm(IEnumerable<ITunnelProvider>? providers = null)
+        FakeDialog Dialog) CreateVm()
     {
         var repo = new FakeTunnelConfigRepository();
         var conns = new FakeConnectionRepository();
         var creds = new FakeCredentialService();
         var dialog = new FakeDialog();
-        var tunnelManager = new TunnelManager(
-            providers ?? Array.Empty<ITunnelProvider>(),
-            repo,
-            creds,
-            NullLogger<TunnelManager>.Instance);
         var vm = new TunnelConfigsViewModel(
-            repo, conns, creds, new FakeStormshieldConfigCache(), tunnelManager, dialog,
+            repo, conns, creds, new FakeStormshieldConfigCache(), dialog,
             NullLogger<TunnelConfigsViewModel>.Instance);
         vm.SearchDebounceDelay = TimeSpan.Zero;
         return (vm, repo, conns, creds, dialog);
@@ -1221,10 +1203,17 @@ public class TunnelConfigsViewModelTests
         public List<(string title, string message)> Messages { get; } = new();
         public bool ConfirmResult { get; set; } = true;
         public TunnelDraft? TunnelPromptResult { get; set; }
+        public List<TunnelConfig> TunnelTestConfigs { get; } = new();
 
         public Task ShowMessageAsync(string title, string message)
         {
             Messages.Add((title, message));
+            return Task.CompletedTask;
+        }
+
+        public Task ShowTunnelTestAsync(TunnelConfig config)
+        {
+            TunnelTestConfigs.Add(config);
             return Task.CompletedTask;
         }
 
@@ -1266,51 +1255,5 @@ public class TunnelConfigsViewModelTests
 
         public Task<Wormhole.Models.Backup.BackupImportResult?> PromptForBackupImportAsync() =>
             Task.FromResult<Wormhole.Models.Backup.BackupImportResult?>(null);
-    }
-
-    private sealed class FakeTunnelProvider : ITunnelProvider
-    {
-        public FakeTunnelProvider(TunnelKind kind) => Kind = kind;
-
-        public TunnelKind Kind { get; }
-        public int EstablishCount { get; private set; }
-        public TunnelConfig? LastConfig { get; private set; }
-        public byte[]? LastSecret { get; private set; }
-        public FakeTunnelInstance? LastInstance { get; private set; }
-        public Exception? EstablishFailure { get; set; }
-
-        public Task<ITunnelInstance> EstablishAsync(
-            TunnelConfig config,
-            byte[] secretBlob,
-            CancellationToken cancellationToken,
-            IProgress<TunnelProgress>? progress = null)
-        {
-            EstablishCount++;
-            LastConfig = config;
-            LastSecret = secretBlob;
-            progress?.Report(new TunnelProgress(TunnelPhase.StartingTunnel));
-            if (EstablishFailure is not null) throw EstablishFailure;
-            LastInstance = new FakeTunnelInstance();
-            return Task.FromResult<ITunnelInstance>(LastInstance);
-        }
-    }
-
-    private sealed class FakeTunnelInstance : ITunnelInstance
-    {
-        public int DisposeCount { get; private set; }
-        public TunnelState State { get; private set; } = TunnelState.Up;
-        public event EventHandler<TunnelStateChangedEventArgs>? StateChanged;
-        public IPEndPoint? Socks5Endpoint => new(IPAddress.Loopback, 0);
-        public Task<Stream> DialAsync(string host, int port, CancellationToken cancellationToken) =>
-            throw new NotSupportedException();
-        public Task<int> BindLocalForwarderAsync(string host, int port, CancellationToken cancellationToken) =>
-            throw new NotSupportedException();
-        public ValueTask DisposeAsync()
-        {
-            DisposeCount++;
-            State = TunnelState.Closed;
-            StateChanged?.Invoke(this, new TunnelStateChangedEventArgs(TunnelState.Closed));
-            return ValueTask.CompletedTask;
-        }
     }
 }
