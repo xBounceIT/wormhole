@@ -119,6 +119,48 @@ public class WatchguardTunnelProviderTests
         Assert.Equal(WatchguardAuthMode.Saml, mode);
     }
 
+    [Fact]
+    public void ResolveEffectiveDomain_DefaultDomainWithSingleAdvertisedDomain_UsesAdvertisedDomain()
+    {
+        var authDomains = new[] { "AuthPoint" };
+        var status = new WatchguardGatewayStatus(
+            SamlEnabled: false,
+            SamlIdentityProviderName: null,
+            AuthDomains: authDomains);
+
+        var domain = WatchguardTunnelProvider.ResolveEffectiveDomain(WatchguardSettings.DefaultDomain, status);
+
+        Assert.Equal("AuthPoint", domain);
+    }
+
+    [Fact]
+    public void ResolveEffectiveDomain_CustomConfiguredDomain_IsPreserved()
+    {
+        var authDomains = new[] { "AuthPoint" };
+        var status = new WatchguardGatewayStatus(
+            SamlEnabled: false,
+            SamlIdentityProviderName: null,
+            AuthDomains: authDomains);
+
+        var domain = WatchguardTunnelProvider.ResolveEffectiveDomain("RADIUS", status);
+
+        Assert.Equal("RADIUS", domain);
+    }
+
+    [Fact]
+    public void ResolveEffectiveDomain_MultipleAdvertisedDomains_KeepsDefault()
+    {
+        var authDomains = new[] { "Firebox-DB", "AuthPoint" };
+        var status = new WatchguardGatewayStatus(
+            SamlEnabled: false,
+            SamlIdentityProviderName: null,
+            AuthDomains: authDomains);
+
+        var domain = WatchguardTunnelProvider.ResolveEffectiveDomain(WatchguardSettings.DefaultDomain, status);
+
+        Assert.Equal(WatchguardSettings.DefaultDomain, domain);
+    }
+
     // ----- Multi-stage 2FA loop tests -----
     //
     // These exercise RunPreAuthLoopAsync directly via the IWatchguardPreAuth seam. The real

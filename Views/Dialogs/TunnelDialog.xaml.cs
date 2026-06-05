@@ -169,14 +169,14 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         // Coalesce every string field defensively: System.Text.Json happily assigns null to a
         // non-nullable string property if the on-disk JSON has the key explicitly null, and
         // TextBox.Text = null throws NRE. The Fortinet branch above does the same with `?? string.Empty`
-        // / `?? "Firebox-DB"` for its nullable fields; the Watchguard fields are non-nullable in
+        // / `?? string.Empty` for its nullable fields; the Watchguard fields are non-nullable in
         // the model but the deserializer's behavior makes that a weak guarantee at the boundary.
         WatchguardServerBox.Text = wgg.Server ?? string.Empty;
         WatchguardPortBox.Text = (wgg.Port is >= 1 and <= 65535 ? wgg.Port : 443).ToString();
         WatchguardAuthModeBox.SelectedItem = wgg.AuthMode;
         WatchguardUsernameBox.Text = wgg.Username ?? string.Empty;
         WatchguardPasswordBox.Password = wgg.Password ?? string.Empty;
-        WatchguardDomainBox.Text = string.IsNullOrEmpty(wgg.Domain) ? "Firebox-DB" : wgg.Domain;
+        WatchguardDomainBox.Text = wgg.Domain ?? string.Empty;
         WatchguardCaPemBox.Text = wgg.CaPem ?? string.Empty;
         WatchguardClientCertPemBox.Text = wgg.ClientCertPem ?? string.Empty;
         WatchguardClientKeyPemBox.Text = wgg.ClientKeyPem ?? string.Empty;
@@ -277,7 +277,7 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
             // Same reasoning as Fortinet: strip only trailing CR/LF (paste artifacts) — leave
             // every other character intact so legitimate whitespace in a password survives.
             Password = WatchguardPasswordBox.Password?.TrimEnd('\r', '\n') ?? string.Empty,
-            Domain = string.IsNullOrWhiteSpace(WatchguardDomainBox.Text) ? "Firebox-DB" : WatchguardDomainBox.Text.Trim(),
+            Domain = string.IsNullOrWhiteSpace(WatchguardDomainBox.Text) ? string.Empty : WatchguardDomainBox.Text.Trim(),
             CaPem = WatchguardCaPemBox.Text,
             ClientCertPem = WatchguardClientCertPemBox.Text,
             ClientKeyPem = WatchguardClientKeyPemBox.Text,
@@ -568,6 +568,7 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         if (SelectedKind == TunnelKind.Watchguard)
         {
             WatchguardCertsExpander.IsExpanded =
+                !string.IsNullOrWhiteSpace(WatchguardDomainBox.Text) ||
                 !string.IsNullOrWhiteSpace(WatchguardCaPemBox.Text) ||
                 !string.IsNullOrWhiteSpace(WatchguardClientCertPemBox.Text) ||
                 !string.IsNullOrWhiteSpace(WatchguardClientKeyPemBox.Text);

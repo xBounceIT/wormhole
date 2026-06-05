@@ -312,6 +312,16 @@ public class WatchguardPreAuthClientTests
     }
 
     [Fact]
+    public void ParseLogonResponse_UsesErrStrForFailureReason()
+    {
+        const string xml = "<resp><logon_status>8</logon_status><errStr>Wrong authentication domain</errStr></resp>";
+        var outcome = WatchguardPreAuthClient.ParseLogonResponse(xml);
+
+        var failure = Assert.IsType<PreAuthOutcome.Failure>(outcome);
+        Assert.Equal("Wrong authentication domain", failure.Reason);
+    }
+
+    [Fact]
     public void ParseLogonResponse_HandlesMalformedXml()
     {
         const string xml = "<resp><logon_status>1";
@@ -346,6 +356,27 @@ public class WatchguardPreAuthClientTests
         Assert.Equal("Entra ID", status.SamlIdentityProviderName);
         Assert.Contains("Firebox-DB", status.AuthDomains);
         Assert.Contains("FMS_EntraID_SAML", status.AuthDomains);
+    }
+
+    [Fact]
+    public void ParseStatusResponse_MapsNestedAuthDomainName()
+    {
+        const string xml = """
+            <resp>
+              <action>sslvpn_logon</action>
+              <logon_status>2</logon_status>
+              <auth-domain-list>
+                <auth-domain>
+                  <name>AuthPoint</name>
+                </auth-domain>
+              </auth-domain-list>
+            </resp>
+            """;
+
+        var status = WatchguardConfigClient.ParseStatusResponse(xml);
+
+        Assert.False(status.SamlEnabled);
+        Assert.Equal("AuthPoint", Assert.Single(status.AuthDomains));
     }
 
     [Theory]

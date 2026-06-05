@@ -164,8 +164,8 @@
         </StackPanel>
 
         <!-- Watchguard fields: Mobile VPN with SSL is OpenVPN over TCP/443 with a Firebox CA;
-             we collect server+credentials in the top grid, certs in the Advanced expander, and
-             expose an Import button to ingest the .wgssl bundle a Firebox emits. -->
+             server+credentials are the normal path, while domain/cert overrides live under
+             Advanced. -->
         <StackPanel x:Name="WatchguardPanel" Spacing="10" Visibility="Collapsed">
             <Button x:Name="WatchguardImportButton"
                     Content="Import from .wgssl…"
@@ -212,9 +212,6 @@
                              Header="Port"
                              Text="443"
                              TextChanged="OnFieldChanged" />
-                    <TextBox x:Name="WatchguardDomainBox"
-                             Header="Authentication domain"
-                             Text="Firebox-DB" />
                 </StackPanel>
 
                 <StackPanel Grid.Column="1" Spacing="10">
@@ -234,6 +231,9 @@
                       HorizontalAlignment="Stretch"
                       HorizontalContentAlignment="Stretch">
                 <StackPanel Spacing="10">
+                    <TextBox x:Name="WatchguardDomainBox"
+                             Header="Authentication domain override"
+                             PlaceholderText="auto-detect" />
                     <TextBox x:Name="WatchguardCaPemBox"
                              Header="CA certificate (PEM)"
                              AcceptsReturn="True"
