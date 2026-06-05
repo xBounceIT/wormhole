@@ -166,12 +166,17 @@ if ($buildTag -eq "ovpn3") {
     # ahead of (or instead of) bumping the pinned submodule. Idempotent: skip a patch that already
     # reverse-applies (already in the tree, e.g. a dev working copy). Applied with `git apply` against
     # the submodule worktree. A patch that neither applies nor reverse-applies means the submodule
-    # drifted from what the patch targets — warn but continue (the build then reflects upstream).
+    # drifted from what the patch targets, or the patch file was mangled (e.g. an EOL mismatch).
+    # These patches are LOAD-BEARING for the Stormshield/OpenVPN3 data path (cert verify, CBC PKCS#7
+    # padding, dyn-tls-crypt gating); building -tags ovpn3 without one would silently stage a "full"
+    # sidecar that's missing a required fix and regress the tunnel. So a failed patch FAILS the build
+    # loudly (vs the missing-toolchain case below, which legitimately falls back to the mock sidecar).
     $openvpn3Dir = Join-Path $sourceDir "third_party\openvpn3"
     $patchesDir  = Join-Path $sourceDir "patches"
     if (Test-Path $patchesDir) {
         $prevPrefPatch = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
+        $failedPatches = @()
         foreach ($patch in (Get-ChildItem -Path $patchesDir -Filter '*.patch' | Sort-Object Name)) {
             & git -C $openvpn3Dir apply --reverse --check $patch.FullName 2>$null
             if ($LASTEXITCODE -eq 0) {
@@ -184,10 +189,18 @@ if ($buildTag -eq "ovpn3") {
                 Write-Info "PATCH applied: $($patch.Name)"
             }
             else {
-                Write-Warning "PATCH does not apply cleanly (submodule drift?): $($patch.Name). Building without it."
+                $failedPatches += $patch.Name
             }
         }
         $ErrorActionPreference = $prevPrefPatch
+        if ($failedPatches.Count -gt 0) {
+            throw ("Required OpenVPN3 patch(es) failed to apply (neither apply nor reverse-apply): " +
+                   "$($failedPatches -join ', '). These patches are load-bearing for the Stormshield/" +
+                   "OpenVPN3 tunnel; building -tags ovpn3 without them would silently ship a regressed " +
+                   "sidecar. Fix the patch (submodule drift or an EOL mismatch on the .patch file) and " +
+                   "rebuild. To intentionally build the mock-only sidecar, deinit/empty the openvpn3 + " +
+                   "mbedtls submodules so the build takes the no-ovpn3 path instead.")
+        }
     }
 
     # Optional: use vcpkg manifest mode if VCPKG_ROOT is set. This pulls asio, jsoncpp,
