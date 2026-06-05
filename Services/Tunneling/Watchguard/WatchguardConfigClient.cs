@@ -161,7 +161,7 @@ internal sealed class WatchguardConfigClient : IWatchguardConfigClient
             ["fw_username"] = username,
             ["fw_password"] = password,
         };
-        return PostLogonFormAsync(server, port, form, cancellationToken);
+        return SendLogonRequestAsync(server, port, form, cancellationToken);
     }
 
     public Task<PreAuthOutcome> RespondToChallengeAsync(
@@ -175,7 +175,7 @@ internal sealed class WatchguardConfigClient : IWatchguardConfigClient
             ["fw_logon_id"] = logonId,
             ["response"] = otpCode,
         };
-        return PostLogonFormAsync(server, port, form, cancellationToken);
+        return SendLogonRequestAsync(server, port, form, cancellationToken);
     }
 
     public Task<PreAuthOutcome> RespondToMfaChoiceAsync(
@@ -189,10 +189,10 @@ internal sealed class WatchguardConfigClient : IWatchguardConfigClient
             ["fw_logon_id"] = logonId,
             ["mfa_choice"] = choice,
         };
-        return PostLogonFormAsync(server, port, form, cancellationToken, PushApprovalTimeout);
+        return SendLogonRequestAsync(server, port, form, cancellationToken, PushApprovalTimeout);
     }
 
-    private async Task<PreAuthOutcome> PostLogonFormAsync(
+    private async Task<PreAuthOutcome> SendLogonRequestAsync(
         string server,
         int port,
         Dictionary<string, string> form,
@@ -200,9 +200,8 @@ internal sealed class WatchguardConfigClient : IWatchguardConfigClient
         TimeSpan? requestTimeout = null)
     {
         var uri = BuildUri(server, port, "/" + BuildQuery(form));
-        using var content = new FormUrlEncodedContent(form);
         using var timeoutCts = CreateTimeoutCancellation(requestTimeout ?? RequestTimeout, cancellationToken);
-        using var response = await _http.PostAsync(uri, content, timeoutCts.Token).ConfigureAwait(false);
+        using var response = await _http.GetAsync(uri, timeoutCts.Token).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
             return new PreAuthOutcome.Failure($"Firebox returned HTTP {(int)response.StatusCode} {response.ReasonPhrase}.");
 
