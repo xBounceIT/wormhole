@@ -61,8 +61,10 @@ public class StormshieldProfileNormalizerTests
     public void Normalize_PreservesExistingDataCiphers_OnRealV5Profile()
     {
         // The confirmed-live v5 bundle already declares `data-ciphers AES-256-CBC`; the normalizer must
-        // NOT add a second data-ciphers / data-ciphers-fallback, and must preserve the control-channel
-        // and auth directives verbatim (the sidecar is OpenVPN3 + mbedTLS — no @SECLEVEL gate).
+        // NOT add a second data-ciphers / data-ciphers-fallback, and must preserve the auth directives
+        // verbatim (the sidecar is OpenVPN3 + mbedTLS — no @SECLEVEL gate). It MUST, however, strip the
+        // `tls-cipher` pin — the mbedTLS backend can't resolve that OpenSSL-named suite and the
+        // control-channel handshake then silently times out (confirmed live).
         const string ovpn =
             "client\ndev tun\ncipher AES-256-CBC\ndata-ciphers AES-256-CBC\n"
             + "tls-cipher TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA256\nauth SHA256\n"
@@ -75,11 +77,30 @@ public class StormshieldProfileNormalizerTests
         Assert.Equal(1, dataCiphersLines);
         Assert.Contains("data-ciphers AES-256-CBC", result);
         Assert.DoesNotContain("data-ciphers-fallback", result);
-        Assert.Contains("tls-cipher TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA256", result);
+        Assert.DoesNotContain("tls-cipher", result);
+        Assert.Contains("auth SHA256", result);
         Assert.Contains("auth-retry interact", result);
         Assert.Contains("auth-nocache", result);
         Assert.Contains("reneg-sec 0", result);
         Assert.Contains("<ca>\nINLINE-CA\n</ca>", result);
+    }
+
+    [Theory]
+    [InlineData("tls-cipher TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA256")]
+    [InlineData("tls-cipher DEFAULT")]
+    [InlineData("tls-ciphersuites TLS_AES_256_GCM_SHA384")]
+    public void Normalize_StripsTlsCipherPin(string tlsLine)
+    {
+        // The sidecar's mbedTLS backend can't negotiate from the firewall's pinned OpenSSL/IANA-named
+        // suite, so the directive must be removed to let mbedTLS use its default suite set. The rest of
+        // the profile (including the data-channel `cipher`) is untouched.
+        var ovpn = $"client\ndev tun\nremote fw 443\ncipher AES-256-CBC\n{tlsLine}\nauth SHA256\n";
+
+        var result = StormshieldProfileNormalizer.Normalize(ovpn);
+
+        Assert.DoesNotContain(tlsLine.Split(' ')[0], result); // neither tls-cipher nor tls-ciphersuites
+        Assert.Contains("cipher AES-256-CBC", result);
+        Assert.Contains("auth SHA256", result);
     }
 
     [Theory]

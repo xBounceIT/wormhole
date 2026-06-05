@@ -1,0 +1,22 @@
+diff --git a/openvpn/ssl/proto.hpp b/openvpn/ssl/proto.hpp
+index 40303a51..6bc420ed 100644
+--- a/openvpn/ssl/proto.hpp
++++ b/openvpn/ssl/proto.hpp
+@@ -1075,7 +1075,16 @@ class ProtoContext : public logging::LoggingMixin<OPENVPN_DEBUG_PROTO, logging::
+                                     | IV_PROTO_CC_EXIT_NOTIFY
+                                     | IV_PROTO_AUTH_FAIL_TEMP;
+ 
+-            if (CryptoAlgs::lookup("SHA256") != CryptoAlgs::NONE && CryptoAlgs::lookup("AES-256-CTR") != CryptoAlgs::NONE)
++            // Only advertise dynamic tls-crypt when the SSL backend can export keying
++            // material (RFC 5705): the dynamic key is derived via export_key_material()
++            // ("EXPORTER-OpenVPN-dynamic-tls-crypt"). Our mbedTLS backend returns false
++            // from support_key_material_export(), so advertising this bit makes the server
++            // enable dyn-tls-crypt and the FIRST renegotiation then throws
++            // KEY_EXPANSION_ERROR and drops the tunnel. Gate it exactly like
++            // IV_PROTO_TLS_KEY_EXPORT below. (OpenSSL builds keep advertising it.)
++            if (SSLLib::SSLAPI::support_key_material_export()
++                && CryptoAlgs::lookup("SHA256") != CryptoAlgs::NONE
++                && CryptoAlgs::lookup("AES-256-CTR") != CryptoAlgs::NONE)
+                 iv_proto |= IV_PROTO_DYN_TLS_CRYPT;
+ 
+             if (SSLLib::SSLAPI::support_key_material_export())

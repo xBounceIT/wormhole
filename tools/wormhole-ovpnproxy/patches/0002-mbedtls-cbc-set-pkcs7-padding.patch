@@ -1,0 +1,24 @@
+diff --git a/openvpn/mbedtls/crypto/cipher.hpp b/openvpn/mbedtls/crypto/cipher.hpp
+index 2ba93b17..be6a8c25 100644
+--- a/openvpn/mbedtls/crypto/cipher.hpp
++++ b/openvpn/mbedtls/crypto/cipher.hpp
+@@ -142,6 +142,19 @@ class CipherContext
+         if (mbedtls_cipher_setup(&ctx, ci) < 0)
+             throw mbedtls_cipher_error("mbedtls_cipher_setup");
+ 
++        // mbed TLS 3.x no longer installs a default CBC padding scheme in
++        // mbedtls_cipher_setup() — unlike the 2.x behavior this OpenVPN3 data-channel
++        // wrapper was written against. Without an explicit PKCS#7 padding mode,
++        // mbedtls_cipher_finish() returns MBEDTLS_ERR_CIPHER_BAD_INPUT_DATA (-0x6100)
++        // for every AES-*-CBC packet, so the entire CBC data channel silently fails to
++        // encrypt/decrypt (the TLS control channel is unaffected, so the session
++        // connects and then dies at the first keepalive-ping timeout). Set PKCS#7
++        // explicitly for CBC ciphers; stream/AEAD modes (CTR, GCM) don't pad and
++        // mbedtls_cipher_set_padding_mode() only applies to CBC, so we gate on the mode.
++        if (mbedtls_cipher_get_cipher_mode(&ctx) == MBEDTLS_MODE_CBC
++            && mbedtls_cipher_set_padding_mode(&ctx, MBEDTLS_PADDING_PKCS7) < 0)
++            throw mbedtls_cipher_error("mbedtls_cipher_set_padding_mode");
++
+         // set key and encrypt/decrypt mode
+         if (mbedtls_cipher_setkey(&ctx, key, mbedtls_cipher_get_key_bitlen(&ctx), (mbedtls_operation_t)mode) < 0)
+             throw mbedtls_cipher_error("mbedtls_cipher_setkey");

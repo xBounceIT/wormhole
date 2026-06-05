@@ -19,6 +19,14 @@ namespace Wormhole.Services.Tunneling.Stormshield;
 ///   <item><b>Compression.</b> Stormshield profiles historically carry <c>compress lz4</c>, but
 ///   Stormshield itself now recommends disabling compression because of the VORACLE class of attacks.
 ///   Any <c>compress</c> / <c>comp-lzo</c> / <c>comp-noadapt</c> directive is stripped.</item>
+///   <item><b>Control-channel cipher pin.</b> Some firewalls pin a single TLS cipher with an
+///   OpenSSL/IANA-style name, e.g. <c>tls-cipher TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA256</c>. OpenVPN's
+///   OpenSSL backend honors that, but the sidecar's <b>mbedTLS</b> backend can't resolve that name to
+///   a suite id, so it ends up offering an empty TLS 1.2 cipher list and the control-channel handshake
+///   silently fails (the connection just times out — confirmed live against firewall 10.10.148.50).
+///   The <c>tls-cipher</c> (and TLS 1.3 <c>tls-ciphersuites</c>) directive is stripped so mbedTLS
+///   negotiates from its default suite set, which includes the firewall's actual suite; the server
+///   still enforces its own minimum, so this is a negotiation fix, not a downgrade.</item>
 /// </list>
 ///
 /// <para>
@@ -77,6 +85,13 @@ public static class StormshieldProfileNormalizer
 
             // Drop compression directives (VORACLE — Stormshield recommends disabling).
             if (Eq(firstToken, "compress") || Eq(firstToken, "comp-lzo") || Eq(firstToken, "comp-noadapt"))
+                continue;
+
+            // Drop the control-channel TLS cipher pin (see class remarks): the sidecar's mbedTLS
+            // backend can't parse the OpenSSL/IANA-style suite name the firewall emits, so leaving it
+            // in makes the TLS handshake fail. Stripping it lets mbedTLS negotiate from its defaults
+            // (which include the firewall's suite); the server still enforces its own policy.
+            if (Eq(firstToken, "tls-cipher") || Eq(firstToken, "tls-ciphersuites"))
                 continue;
 
             if (Eq(firstToken, "cipher"))

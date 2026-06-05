@@ -17,8 +17,14 @@ namespace Wormhole.Services.Tunneling.Stormshield;
 /// </summary>
 public sealed class StormshieldCacheRecord
 {
-    /// <summary>Bumped if the persisted shape changes; a record with a different version reads as a miss.</summary>
-    public const int CurrentSchemaVersion = 1;
+    /// <summary>
+    /// Bumped if the persisted shape — or the normalization applied to <see cref="ProfileOvpn"/> — changes;
+    /// a record with a different version reads as a miss. v2: <see cref="StormshieldProfileNormalizer"/> now
+    /// strips the <c>tls-cipher</c> pin (the sidecar's mbedTLS backend can't negotiate the firewall's
+    /// OpenSSL-named suite), so a v1 cache holding a profile that still carries <c>tls-cipher</c> would keep
+    /// failing the TLS handshake on reconnect — invalidate it so the next connect re-downloads and re-normalizes.
+    /// </summary>
+    public const int CurrentSchemaVersion = 2;
 
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
 
