@@ -7,6 +7,7 @@ using System.Net.Http;
 using System.Net.Security;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
@@ -198,7 +199,7 @@ internal sealed class WatchguardConfigClient : IWatchguardConfigClient
         CancellationToken cancellationToken,
         TimeSpan? requestTimeout = null)
     {
-        var uri = BuildUri(server, port, "/");
+        var uri = BuildUri(server, port, "/" + BuildQuery(form));
         using var content = new FormUrlEncodedContent(form);
         using var timeoutCts = CreateTimeoutCancellation(requestTimeout ?? RequestTimeout, cancellationToken);
         using var response = await _http.PostAsync(uri, content, timeoutCts.Token).ConfigureAwait(false);
@@ -264,6 +265,19 @@ internal sealed class WatchguardConfigClient : IWatchguardConfigClient
         builder.Path = split[0].Length == 0 ? "/" : split[0];
         if (split.Length == 2) builder.Query = split[1];
         return builder.Uri;
+    }
+
+    private static string BuildQuery(IReadOnlyDictionary<string, string> values)
+    {
+        var sb = new StringBuilder("?");
+        foreach (var (key, value) in values)
+        {
+            if (sb.Length > 1) sb.Append('&');
+            sb.Append(Uri.EscapeDataString(key));
+            sb.Append('=');
+            sb.Append(Uri.EscapeDataString(value));
+        }
+        return sb.ToString();
     }
 
     internal static bool IsConfiguredFireboxHttpsUri(Uri fireboxBaseUri, string? requestUri)

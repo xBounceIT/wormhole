@@ -169,15 +169,12 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
     public async Task<PreAuthOutcome> LogonAsync(
         string server, int port, string username, string password, string domain, CancellationToken cancellationToken)
     {
-        var uri = BuildLogonUri(server, port);
         var form = new Dictionary<string, string>
         {
             // Field names + values mirror the official client's HTTP request capture as
             // reverse-engineered in tazjin/watchblob (urls.go templateChallengeTriggerUri).
-            // The Firebox is strict about case and ordering on older Fireware builds, and the
-            // `style` + `fw_logon_type=logon` fields are required for the initial logon leg
-            // to be routed to the challenge-aware code path; without them some firmware revs
-            // fall back to a legacy code path that never issues challenges.
+            // The Firebox routes this endpoint from the query string; keeping the same fields
+            // in the body preserves compatibility with firmware that also parses form posts.
             ["action"] = "sslvpn_logon",
             ["style"] = "fw_logon_progress.xsl",
             ["fw_logon_type"] = "logon",
@@ -185,13 +182,13 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
             ["fw_username"] = username,
             ["fw_password"] = password,
         };
+        var uri = BuildLogonUri(server, port, form);
         return await PostFormAsync(uri, form, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<PreAuthOutcome> RespondToChallengeAsync(
         string server, int port, string logonId, string otpCode, CancellationToken cancellationToken)
     {
-        var uri = BuildLogonUri(server, port);
         var form = new Dictionary<string, string>
         {
             // The challenge-response leg uses a DIFFERENT shape from the initial logon — the
@@ -208,13 +205,13 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
             ["fw_logon_id"] = logonId,
             ["response"] = otpCode,
         };
+        var uri = BuildLogonUri(server, port, form);
         return await PostFormAsync(uri, form, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<PreAuthOutcome> RespondToMfaChoiceAsync(
         string server, int port, string logonId, string choice, CancellationToken cancellationToken)
     {
-        var uri = BuildLogonUri(server, port);
         var form = new Dictionary<string, string>
         {
             // WatchGuard native 2026.2 sends AuthPoint push choices through this distinct
@@ -225,6 +222,7 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
             ["fw_logon_id"] = logonId,
             ["mfa_choice"] = choice,
         };
+        var uri = BuildLogonUri(server, port, form);
         return await PostFormAsync(uri, form, cancellationToken).ConfigureAwait(false);
     }
 
@@ -260,12 +258,21 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
     /// `#`, etc.) and uses UriBuilder so the scheme/host/port/path are assigned positionally
     /// rather than through string interpolation.
     /// </summary>
-    internal static Uri BuildLogonUri(string server, int port)
+    internal static Uri BuildLogonUri(string server, int port) =>
+        BuildLogonUri(server, port, new Dictionary<string, string>
+        {
+            ["action"] = "sslvpn_logon",
+            ["style"] = "fw_logon_progress.xsl",
+            ["fw_logon_type"] = "logon",
+        });
+
+    internal static Uri BuildLogonUri(string server, int port, IReadOnlyDictionary<string, string> query)
     {
         if (string.IsNullOrWhiteSpace(server))
             throw new InvalidOperationException("Server is required.");
         if (port is < 1 or > 65535)
             throw new InvalidOperationException("Port must be between 1 and 65535.");
+        ArgumentNullException.ThrowIfNull(query);
 
         // CheckHostName accepts DNS names, IPv4, IPv6 — and rejects strings containing reserved
         // URI characters (`@`, `/`, `?`, `#`, control chars, spaces). This is the same parser
@@ -282,8 +289,22 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
             Host = server,
             Port = port,
             Path = "/",
+            Query = BuildQuery(query),
         };
         return builder.Uri;
+    }
+
+    private static string BuildQuery(IReadOnlyDictionary<string, string> values)
+    {
+        var sb = new StringBuilder();
+        foreach (var (key, value) in values)
+        {
+            if (sb.Length > 0) sb.Append('&');
+            sb.Append(Uri.EscapeDataString(key));
+            sb.Append('=');
+            sb.Append(Uri.EscapeDataString(value));
+        }
+        return sb.ToString();
     }
 
     internal static PreAuthOutcome ParseLogonResponse(string xmlBody)

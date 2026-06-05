@@ -36,6 +36,14 @@ public class WatchguardPreAuthClientTests
         Assert.Equal("Firebox-DB", form["fw_domain"]);
         Assert.Equal("alice", form["fw_username"]);
         Assert.Equal("p4ss", form["fw_password"]);
+
+        var query = captured.LastQuery;
+        Assert.Equal("sslvpn_logon", query["action"]);
+        Assert.Equal("fw_logon_progress.xsl", query["style"]);
+        Assert.Equal("logon", query["fw_logon_type"]);
+        Assert.Equal("Firebox-DB", query["fw_domain"]);
+        Assert.Equal("alice", query["fw_username"]);
+        Assert.Equal("p4ss", query["fw_password"]);
     }
 
     [Fact]
@@ -63,6 +71,13 @@ public class WatchguardPreAuthClientTests
         // The OTP must NOT be sent in fw_password on the response leg — that was the bug.
         Assert.False(form.AllKeys.Contains("fw_password"),
             "challenge response must not include fw_password (it expects `response` instead).");
+
+        var query = captured.LastQuery;
+        Assert.Equal("sslvpn_logon", query["action"]);
+        Assert.Equal("fw_logon_progress.xsl", query["style"]);
+        Assert.Equal("response", query["fw_logon_type"]);
+        Assert.Equal("session-abc-123", query["fw_logon_id"]);
+        Assert.Equal("654321", query["response"]);
     }
 
     [Fact]
@@ -85,6 +100,43 @@ public class WatchguardPreAuthClientTests
         Assert.Equal("p", form["mfa_choice"]);
         Assert.False(form.AllKeys.Contains("response"));
         Assert.False(form.AllKeys.Contains("fw_password"));
+
+        var query = captured.LastQuery;
+        Assert.Equal("sslvpn_logon", query["action"]);
+        Assert.Equal("fw_logon_progress.xsl", query["style"]);
+        Assert.Equal("mfa_response", query["fw_logon_type"]);
+        Assert.Equal("session-abc-123", query["fw_logon_id"]);
+        Assert.Equal("p", query["mfa_choice"]);
+    }
+
+    [Fact]
+    public async Task ConfigClientLogonAsync_PostsToSslvpnLogonQueryRoute()
+    {
+        // Production uses WatchguardConfigClient, not WatchguardPreAuthClient. This locks the
+        // real tunnel path to the Firebox route shape; otherwise some gateways answer with the
+        // HTML portal page and the user sees "non-XML content (text/html)" before OpenVPN starts.
+        var captured = new CapturingHandler(canned: "<resp><logon_status>1</logon_status></resp>");
+        using var http = new HttpClient(captured);
+        using var client = new WatchguardConfigClient(http);
+
+        await client.LogonAsync(
+            server: "firebox.example.com", port: 6443,
+            username: "alice", password: "p4ss", domain: "Firebox-DB",
+            cancellationToken: CancellationToken.None);
+
+        var uri = Assert.IsAssignableFrom<Uri>(captured.LastRequestUri);
+        Assert.Equal("https", uri.Scheme);
+        Assert.Equal("firebox.example.com", uri.Host);
+        Assert.Equal(6443, uri.Port);
+        Assert.Equal("/", uri.AbsolutePath);
+
+        var query = captured.LastQuery;
+        Assert.Equal("sslvpn_logon", query["action"]);
+        Assert.Equal("fw_logon_progress.xsl", query["style"]);
+        Assert.Equal("logon", query["fw_logon_type"]);
+        Assert.Equal("Firebox-DB", query["fw_domain"]);
+        Assert.Equal("alice", query["fw_username"]);
+        Assert.Equal("p4ss", query["fw_password"]);
     }
 
     /// <summary>
@@ -96,11 +148,15 @@ public class WatchguardPreAuthClientTests
     {
         private readonly string _canned;
         public System.Collections.Specialized.NameValueCollection LastForm { get; private set; } = new();
+        public Uri? LastRequestUri { get; private set; }
+        public System.Collections.Specialized.NameValueCollection LastQuery =>
+            LastRequestUri is null ? new() : HttpUtility.ParseQueryString(LastRequestUri.Query);
 
         public CapturingHandler(string canned) { _canned = canned; }
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            LastRequestUri = request.RequestUri;
             var body = await request.Content!.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             LastForm = HttpUtility.ParseQueryString(body);
             return new HttpResponseMessage(HttpStatusCode.OK)
@@ -137,6 +193,10 @@ public class WatchguardPreAuthClientTests
         Assert.Equal("https", uri.Scheme);
         Assert.Equal(port, uri.Port);
         Assert.Equal("/", uri.AbsolutePath);
+        var query = HttpUtility.ParseQueryString(uri.Query);
+        Assert.Equal("sslvpn_logon", query["action"]);
+        Assert.Equal("fw_logon_progress.xsl", query["style"]);
+        Assert.Equal("logon", query["fw_logon_type"]);
     }
 
     [Fact]
