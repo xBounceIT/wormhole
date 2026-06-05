@@ -61,7 +61,7 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
 
         // Symmetric pre-flight with TunnelConfigsViewModel.ValidateWatchguard: catch the
         // kind/blob-mismatch case here too so the user gets an actionable error rather than a
-        // cryptic HTTP error from the pre-auth POST or a confused OpenVPN profile parse.
+        // cryptic HTTP error from the pre-auth request or a confused OpenVPN profile parse.
         if (string.IsNullOrWhiteSpace(settings.Server))
         {
             throw new InvalidOperationException(
@@ -317,7 +317,7 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
     {
         PreAuthOutcome outcome;
         logger.LogDebug(
-            "Watchguard pre-auth POST to {Server}:{Port} (domain {Domain}) for '{Name}'.",
+            "Watchguard pre-auth request to {Server}:{Port} (domain {Domain}) for '{Name}'.",
             settings.Server, settings.Port, settings.Domain, configName);
         try
         {
@@ -368,7 +368,7 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
                     {
                         // Bound the OTP-prompt count to keep a misconfigured / hostile gateway from
                         // looping the user forever. Hit only after MaxChallengeRounds successful
-                        // POSTs all came back as further Challenges; a final Ok is handled above
+                        // requests all came back as further Challenges; a final Ok is handled above
                         // before we get here.
                         throw new InvalidOperationException(
                             $"Watchguard 2FA exceeded {MaxChallengeRounds} challenge rounds — the gateway may be misconfigured.");
@@ -393,7 +393,7 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
                     }
                     // Trim defensively. Most prompt impls already do this, but a clipboard paste
                     // that includes a trailing newline would survive into the challenge response
-                    // POST and the (user, otp) tuple OpenVPN later presents — gateway behavior
+                    // request and the (user, otp) tuple OpenVPN later presents — gateway behavior
                     // around (user, "123456\n") is firmware-dependent.
                     otp = otp.Trim();
                     if (otp.Length == 0)

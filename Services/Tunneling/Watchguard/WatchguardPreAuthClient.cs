@@ -26,7 +26,7 @@ internal interface IWatchguardPreAuth
 
 /// <summary>
 /// Thin HttpClient wrapper over the Firebox `/?action=sslvpn_logon` endpoint. The official
-/// WatchGuard client POSTs there with form-urlencoded credentials, parses the XML response,
+/// WatchGuard client sends the logon fields in the query string, parses the XML response,
 /// and either proceeds with the original password (no 2FA) or prompts the user for an OTP
 /// (challenge) which then becomes the OpenVPN auth-user-pass password.
 ///
@@ -66,7 +66,7 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
                 // this server" toggle and the FortinetSettings.TrustServerCertificate path.
                 //
                 // Security note: this disables hostname, chain, and revocation checks for the
-                // pre-auth POST. Username / password / OTP would be visible to a MITM on a
+                // pre-auth request. Username / password / OTP would be visible to a MITM on a
                 // hostile network. The downstream OpenVPN sidecar still validates the tunnel
                 // with the inline <ca> block, but that's not a substitute for pre-auth TLS —
                 // credentials leave the client before the sidecar starts.
@@ -75,7 +75,7 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
             else if (!string.IsNullOrWhiteSpace(caPem))
             {
                 // For self-signed Firebox deployments the user supplies the CA via the dialog.
-                // Without this hook the pre-auth POST would always fail TLS chain validation
+                // Without this hook the pre-auth request would always fail TLS chain validation
                 // against the OS trust store even though OpenVPN's downstream <ca> block accepts
                 // it — surfacing as a confusing "RemoteCertificateChainErrors" before the sidecar
                 // ever launches. Load the PEM (one or more concatenated certs) and validate the
@@ -173,8 +173,8 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
         {
             // Field names + values mirror the official client's HTTP request capture as
             // reverse-engineered in tazjin/watchblob (urls.go templateChallengeTriggerUri).
-            // The Firebox routes this endpoint from the query string; keeping the same fields
-            // in the body preserves compatibility with firmware that also parses form posts.
+            // The Firebox routes this endpoint from the query string; the native client and
+            // watchblob both use a query-only request for this step.
             ["action"] = "sslvpn_logon",
             ["style"] = "fw_logon_progress.xsl",
             ["fw_logon_type"] = "logon",
@@ -183,7 +183,7 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
             ["fw_password"] = password,
         };
         var uri = BuildLogonUri(server, port, form);
-        return await PostFormAsync(uri, form, cancellationToken).ConfigureAwait(false);
+        return await SendLogonRequestAsync(uri, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<PreAuthOutcome> RespondToChallengeAsync(
@@ -206,7 +206,7 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
             ["response"] = otpCode,
         };
         var uri = BuildLogonUri(server, port, form);
-        return await PostFormAsync(uri, form, cancellationToken).ConfigureAwait(false);
+        return await SendLogonRequestAsync(uri, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<PreAuthOutcome> RespondToMfaChoiceAsync(
@@ -223,14 +223,12 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
             ["mfa_choice"] = choice,
         };
         var uri = BuildLogonUri(server, port, form);
-        return await PostFormAsync(uri, form, cancellationToken).ConfigureAwait(false);
+        return await SendLogonRequestAsync(uri, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<PreAuthOutcome> PostFormAsync(
-        Uri uri, Dictionary<string, string> form, CancellationToken cancellationToken)
+    private async Task<PreAuthOutcome> SendLogonRequestAsync(Uri uri, CancellationToken cancellationToken)
     {
-        using var content = new FormUrlEncodedContent(form);
-        using var response = await _http.PostAsync(uri, content, cancellationToken).ConfigureAwait(false);
+        using var response = await _http.GetAsync(uri, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
         {
             return new PreAuthOutcome.Failure($"Firebox returned HTTP {(int)response.StatusCode} {response.ReasonPhrase}.");
@@ -348,7 +346,7 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
             1 => new PreAuthOutcome.Ok(),
             // IsNullOrWhiteSpace (not IsNullOrEmpty): a `<logon_id>   </logon_id>` element from a
             // non-conforming firmware or proxy would otherwise look like a valid challenge and the
-            // user would type an OTP only to have the challenge response POST a whitespace ID.
+            // user would type an OTP only to have the challenge response send a whitespace ID.
             4 when !string.IsNullOrWhiteSpace(logonId) => new PreAuthOutcome.Challenge(logonId!, chaStr ?? string.Empty),
             4 => new PreAuthOutcome.Failure("Firebox requested a 2FA challenge but did not return a logon_id."),
             _ => new PreAuthOutcome.Failure(
@@ -376,7 +374,7 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
     }
 }
 
-/// <summary>Outcome of a Firebox logon POST. Discriminated via type test.</summary>
+/// <summary>Outcome of a Firebox logon request. Discriminated via type test.</summary>
 internal abstract record PreAuthOutcome
 {
     public sealed record Ok : PreAuthOutcome;

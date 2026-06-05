@@ -14,7 +14,7 @@ namespace Wormhole.Tests.Services.Tunneling;
 public class WatchguardPreAuthClientTests
 {
     [Fact]
-    public async Task LogonAsync_PostsExpectedFormFields()
+    public async Task LogonAsync_GetsExpectedQueryFieldsWithoutBody()
     {
         // Regression-locks the wire format of the initial logon leg against tazjin/watchblob's
         // urls.go templateChallengeTriggerUri. The `style` + `fw_logon_type=logon` fields are
@@ -29,14 +29,8 @@ public class WatchguardPreAuthClientTests
             username: "alice", password: "p4ss", domain: "Firebox-DB",
             cancellationToken: CancellationToken.None);
 
-        var form = captured.LastForm;
-        Assert.Equal("sslvpn_logon", form["action"]);
-        Assert.Equal("fw_logon_progress.xsl", form["style"]);
-        Assert.Equal("logon", form["fw_logon_type"]);
-        Assert.Equal("Firebox-DB", form["fw_domain"]);
-        Assert.Equal("alice", form["fw_username"]);
-        Assert.Equal("p4ss", form["fw_password"]);
-
+        Assert.Equal(HttpMethod.Get, captured.LastMethod);
+        Assert.True(string.IsNullOrEmpty(captured.LastBody));
         var query = captured.LastQuery;
         Assert.Equal("sslvpn_logon", query["action"]);
         Assert.Equal("fw_logon_progress.xsl", query["style"]);
@@ -47,7 +41,7 @@ public class WatchguardPreAuthClientTests
     }
 
     [Fact]
-    public async Task RespondToChallengeAsync_PostsResponseFieldNotFwPassword()
+    public async Task RespondToChallengeAsync_GetsResponseFieldNotFwPassword()
     {
         // Regression-locks the wire format of the challenge-response leg against
         // tazjin/watchblob's urls.go templateResponseUri. The OTP must go in `response`
@@ -62,26 +56,21 @@ public class WatchguardPreAuthClientTests
             logonId: "session-abc-123", otpCode: "654321",
             cancellationToken: CancellationToken.None);
 
-        var form = captured.LastForm;
-        Assert.Equal("sslvpn_logon", form["action"]);
-        Assert.Equal("fw_logon_progress.xsl", form["style"]);
-        Assert.Equal("response", form["fw_logon_type"]);
-        Assert.Equal("session-abc-123", form["fw_logon_id"]);
-        Assert.Equal("654321", form["response"]);
-        // The OTP must NOT be sent in fw_password on the response leg — that was the bug.
-        Assert.False(form.AllKeys.Contains("fw_password"),
-            "challenge response must not include fw_password (it expects `response` instead).");
-
+        Assert.Equal(HttpMethod.Get, captured.LastMethod);
+        Assert.True(string.IsNullOrEmpty(captured.LastBody));
         var query = captured.LastQuery;
         Assert.Equal("sslvpn_logon", query["action"]);
         Assert.Equal("fw_logon_progress.xsl", query["style"]);
         Assert.Equal("response", query["fw_logon_type"]);
         Assert.Equal("session-abc-123", query["fw_logon_id"]);
         Assert.Equal("654321", query["response"]);
+        // The OTP must NOT be sent in fw_password on the response leg — that was the bug.
+        Assert.False(query.AllKeys.Contains("fw_password"),
+            "challenge response must not include fw_password (it expects `response` instead).");
     }
 
     [Fact]
-    public async Task RespondToMfaChoiceAsync_PostsNativePushChoiceShape()
+    public async Task RespondToMfaChoiceAsync_GetsNativePushChoiceShape()
     {
         var captured = new CapturingHandler(canned: "<resp><logon_status>1</logon_status></resp>");
         using var http = new HttpClient(captured);
@@ -92,25 +81,20 @@ public class WatchguardPreAuthClientTests
             logonId: "session-abc-123", choice: "p",
             cancellationToken: CancellationToken.None);
 
-        var form = captured.LastForm;
-        Assert.Equal("sslvpn_logon", form["action"]);
-        Assert.Equal("fw_logon_progress.xsl", form["style"]);
-        Assert.Equal("mfa_response", form["fw_logon_type"]);
-        Assert.Equal("session-abc-123", form["fw_logon_id"]);
-        Assert.Equal("p", form["mfa_choice"]);
-        Assert.False(form.AllKeys.Contains("response"));
-        Assert.False(form.AllKeys.Contains("fw_password"));
-
+        Assert.Equal(HttpMethod.Get, captured.LastMethod);
+        Assert.True(string.IsNullOrEmpty(captured.LastBody));
         var query = captured.LastQuery;
         Assert.Equal("sslvpn_logon", query["action"]);
         Assert.Equal("fw_logon_progress.xsl", query["style"]);
         Assert.Equal("mfa_response", query["fw_logon_type"]);
         Assert.Equal("session-abc-123", query["fw_logon_id"]);
         Assert.Equal("p", query["mfa_choice"]);
+        Assert.False(query.AllKeys.Contains("response"));
+        Assert.False(query.AllKeys.Contains("fw_password"));
     }
 
     [Fact]
-    public async Task ConfigClientLogonAsync_PostsToSslvpnLogonQueryRoute()
+    public async Task ConfigClientLogonAsync_GetsSslvpnLogonQueryRoute()
     {
         // Production uses WatchguardConfigClient, not WatchguardPreAuthClient. This locks the
         // real tunnel path to the Firebox route shape; otherwise some gateways answer with the
@@ -125,6 +109,8 @@ public class WatchguardPreAuthClientTests
             cancellationToken: CancellationToken.None);
 
         var uri = Assert.IsAssignableFrom<Uri>(captured.LastRequestUri);
+        Assert.Equal(HttpMethod.Get, captured.LastMethod);
+        Assert.True(string.IsNullOrEmpty(captured.LastBody));
         Assert.Equal("https", uri.Scheme);
         Assert.Equal("firebox.example.com", uri.Host);
         Assert.Equal(6443, uri.Port);
@@ -140,14 +126,15 @@ public class WatchguardPreAuthClientTests
     }
 
     /// <summary>
-    /// Test-only HttpMessageHandler that returns a canned XML body and records the request's
-    /// form fields for assertion. Mirrors what a stub Firebox listener would provide without
+    /// Test-only HttpMessageHandler that returns a canned XML body and records the request for
+    /// assertion. Mirrors what a stub Firebox listener would provide without
     /// the ceremony (and HttpListener URLACL requirements on Windows).
     /// </summary>
     private sealed class CapturingHandler : HttpMessageHandler
     {
         private readonly string _canned;
-        public System.Collections.Specialized.NameValueCollection LastForm { get; private set; } = new();
+        public HttpMethod? LastMethod { get; private set; }
+        public string? LastBody { get; private set; }
         public Uri? LastRequestUri { get; private set; }
         public System.Collections.Specialized.NameValueCollection LastQuery =>
             LastRequestUri is null ? new() : HttpUtility.ParseQueryString(LastRequestUri.Query);
@@ -156,9 +143,11 @@ public class WatchguardPreAuthClientTests
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
+            LastMethod = request.Method;
             LastRequestUri = request.RequestUri;
-            var body = await request.Content!.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            LastForm = HttpUtility.ParseQueryString(body);
+            LastBody = request.Content is null
+                ? null
+                : await request.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent(_canned, Encoding.UTF8, "application/xml"),
@@ -177,7 +166,7 @@ public class WatchguardPreAuthClientTests
     public void BuildLogonUri_RejectsHostStringsThatSmuggleUriComponents(string server)
     {
         // Regression: previously `new Uri($"https://{server}:{port}/")` would silently accept
-        // these and POST credentials to whatever Uri parsed out. UriBuilder + CheckHostName
+        // these and send credentials to whatever Uri parsed out. UriBuilder + CheckHostName
         // closes that gap.
         Assert.Throws<InvalidOperationException>(() => WatchguardPreAuthClient.BuildLogonUri(server, 443));
     }
@@ -232,7 +221,7 @@ public class WatchguardPreAuthClientTests
     [Fact]
     public void Ctor_HttpClientSeam_ThrowsOnNull()
     {
-        // Test-seam ctor should reject null cleanly instead of NREing later in PostAsync.
+        // Test-seam ctor should reject null cleanly instead of NREing later in request dispatch.
         Assert.Throws<ArgumentNullException>(() => new WatchguardPreAuthClient((System.Net.Http.HttpClient)null!));
     }
 
@@ -258,7 +247,7 @@ public class WatchguardPreAuthClientTests
     public void ParseLogonResponse_RejectsWhitespaceOnlyLogonId()
     {
         // logon_id was IsNullOrEmpty-checked which let whitespace-only IDs slip through; the
-        // user would type an OTP and the challenge response POST would fail with a generic
+        // user would type an OTP and the challenge response request would fail with a generic
         // "Firebox rejected credentials" instead of an early "missing logon_id" error.
         const string xml = "<resp><logon_status>4</logon_status><logon_id>   </logon_id></resp>";
         var outcome = WatchguardPreAuthClient.ParseLogonResponse(xml);
