@@ -159,6 +159,69 @@ public sealed class DialogService : IDialogService
     public Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null) =>
         ShowFormDialogAsync(new TunnelDialog(), initial, "VPN tunnel");
 
+    public async Task ShowTunnelTestAsync(TunnelConfig config)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+
+        // Host the test in the shell's modal-overlay layer, NOT a ContentDialog. The Stormshield /
+        // WatchGuard establish path opens its own ContentDialog (the OTP / SAML prompt) on the main
+        // window's XamlRoot, and WinUI allows only one ContentDialog per XamlRoot — a ContentDialog
+        // host here would make that prompt throw "Only a single ContentDialog can be open at any
+        // time". The overlay is a plain XAML layer, so the provider prompt opens cleanly over it.
+        var mainWindow = App.Current.MainWindow
+            ?? throw new InvalidOperationException("No active window to host the tunnel test.");
+
+        var control = new TunnelTestDialog();
+        var vm = control.ViewModel;
+
+        // Completes when the overlay is actually dismissed, so callers can await this like the old
+        // ContentDialog did.
+        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Suppress the native RDP surface for the overlay's lifetime so an active RDP tab's
+        // top-level window (composited above WinUI content) doesn't paint over the centered card —
+        // the old ContentDialog path got this for free via ShowDialogAsync.
+        var suppression = RdpOverlayCoordinator.Suppress();
+        var torndown = false;
+
+        async void OnCloseRequested()
+        {
+            // The Close button is only enabled once the run has ended (CanClose == !IsBusy), so this
+            // normally fires with the test already finished. Guard defensively: if invoked while a
+            // run is somehow still live, cancel it and wait for it to unwind before tearing down so
+            // we never leave a diagnostic tunnel running.
+            if (torndown) return;
+            if (vm.IsBusy)
+            {
+                vm.RequestCancelForClose();
+                await vm.WaitForRunEnd();
+            }
+            torndown = true;
+            control.CloseRequested -= OnCloseRequested;
+            mainWindow.HideModalOverlay();
+            suppression.Dispose();
+            closed.TrySetResult();
+        }
+
+        control.CloseRequested += OnCloseRequested;
+        mainWindow.ShowModalOverlay(control);
+        // Kick the test off. RunAsync never throws — every outcome flows into the bound state — so
+        // fire-and-forget is safe. HeaderText is set synchronously at its start, before the first
+        // render, so the title shows immediately.
+        _ = vm.RunAsync(config);
+
+        try
+        {
+            await closed.Task;
+        }
+        finally
+        {
+            control.CloseRequested -= OnCloseRequested;
+            // Guard against a never-completed run (defensive — should never trip).
+            await vm.WaitForRunEnd();
+            vm.Dispose();
+        }
+    }
+
     private static async Task<TDraft?> ShowFormDialogAsync<TForm, TDraft>(TForm form, TDraft? initial, string entityName)
         where TForm : UserControl, IDraftForm<TDraft>
         where TDraft : class

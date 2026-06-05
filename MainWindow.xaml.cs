@@ -175,6 +175,26 @@ public sealed partial class MainWindow : Window
         ViewModel.Update.DismissCommand.Execute(null);
     }
 
+    /// <summary>
+    /// Show <paramref name="content"/> centered in the app-modal overlay layer. This is a plain XAML
+    /// layer rather than a <c>ContentDialog</c>, so provider-driven <c>ContentDialog</c>s (the OTP /
+    /// WatchGuard SAML prompts a tunnel test can trigger) can still open over it on the same
+    /// <c>XamlRoot</c>. Call <see cref="HideModalOverlay"/> to dismiss. UI thread only.
+    /// </summary>
+    public void ShowModalOverlay(UIElement content)
+    {
+        ModalOverlayContent.Content = content;
+        ModalOverlayHost.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>Hide the app-modal overlay and release its content so the hosted control (and its
+    /// view-model) can be collected.</summary>
+    public void HideModalOverlay()
+    {
+        ModalOverlayHost.Visibility = Visibility.Collapsed;
+        ModalOverlayContent.Content = null;
+    }
+
     private void NavView_ItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
     {
         if (args.InvokedItemContainer is not NavigationViewItem item) return;

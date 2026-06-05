@@ -246,6 +246,7 @@ public partial class App : Application
         services.AddTransient<MRemoteNgImportDialogViewModel>();
         services.AddTransient<BackupExportDialogViewModel>();
         services.AddTransient<BackupImportDialogViewModel>();
+        services.AddTransient<TunnelTestDialogViewModel>();
 
         services.AddSingleton<MainWindow>();
 

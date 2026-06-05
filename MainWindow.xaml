@@ -93,5 +93,29 @@
                 PointerReleased="SidebarResizer_PointerReleased"
                 PointerCaptureLost="SidebarResizer_PointerCaptureLost" />
         </Grid>
+
+        <!-- App-modal overlay host. A plain XAML layer (NOT a ContentDialog) so provider-driven
+             ContentDialogs (OTP / WatchGuard SAML prompts shown during a tunnel test) can still
+             open over it on the same XamlRoot — a second ContentDialog would otherwise throw
+             "Only a single ContentDialog can be open at any time". Spans all rows and dims the
+             whole window like a modal; the non-transparent scrim swallows pointer input so the
+             shell behind it is inert. ZIndex sits above the SidebarResizer (1). -->
+        <Grid x:Name="ModalOverlayHost"
+              Grid.RowSpan="3"
+              Canvas.ZIndex="10"
+              Background="{ThemeResource SmokeFillColorDefaultBrush}"
+              Visibility="Collapsed">
+            <Border MaxWidth="600"
+                    MinWidth="380"
+                    Margin="24"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Background="{ThemeResource ContentDialogBackground}"
+                    BorderBrush="{ThemeResource ContentDialogBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{ThemeResource OverlayCornerRadius}">
+                <ContentPresenter x:Name="ModalOverlayContent" />
+            </Border>
+        </Grid>
     </Grid>
 </Window>

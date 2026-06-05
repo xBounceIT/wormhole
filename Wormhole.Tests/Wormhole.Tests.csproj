@@ -141,6 +141,7 @@
     <Compile Include="..\ViewModels\UpdateViewModel.cs" Link="ViewModels\UpdateViewModel.cs" />
     <Compile Include="..\ViewModels\CredentialsViewModel.cs" Link="ViewModels\CredentialsViewModel.cs" />
     <Compile Include="..\ViewModels\TunnelConfigsViewModel.cs" Link="ViewModels\TunnelConfigsViewModel.cs" />
+    <Compile Include="..\ViewModels\TunnelTestDialogViewModel.cs" Link="ViewModels\TunnelTestDialogViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\ConnectionProgress.cs" Link="ViewModels\Sessions\ConnectionProgress.cs" />
     <Compile Include="..\ViewModels\Sessions\SessionTabViewModel.cs" Link="ViewModels\Sessions\SessionTabViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\SshSessionViewModel.cs" Link="ViewModels\Sessions\SshSessionViewModel.cs" />

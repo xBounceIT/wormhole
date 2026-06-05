@@ -9,7 +9,6 @@ using Microsoft.Extensions.Logging;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
-using Wormhole.Services.Tunneling;
 using Wormhole.Services.Tunneling.Stormshield;
 using Wormhole.Services.Tunneling.Watchguard;
 
@@ -21,7 +20,6 @@ public partial class TunnelConfigsViewModel : ObservableObject
     private readonly IConnectionRepository _connectionRepo;
     private readonly ICredentialService _credentials;
     private readonly IStormshieldConfigCache _stormshieldCache;
-    private readonly TunnelManager _tunnelManager;
     private readonly IDialogService _dialog;
     private readonly ILogger<TunnelConfigsViewModel> _logger;
     private bool _hasLoaded;
@@ -31,7 +29,6 @@ public partial class TunnelConfigsViewModel : ObservableObject
         IConnectionRepository connectionRepo,
         ICredentialService credentials,
         IStormshieldConfigCache stormshieldCache,
-        TunnelManager tunnelManager,
         IDialogService dialog,
         ILogger<TunnelConfigsViewModel> logger)
     {
@@ -39,7 +36,6 @@ public partial class TunnelConfigsViewModel : ObservableObject
         _connectionRepo = connectionRepo;
         _credentials = credentials;
         _stormshieldCache = stormshieldCache;
-        _tunnelManager = tunnelManager;
         _dialog = dialog;
         _logger = logger;
         Configs.CollectionChanged += (_, _) =>
@@ -361,30 +357,12 @@ public partial class TunnelConfigsViewModel : ObservableObject
     {
         if (config is null) return;
 
+        // The dialog owns the establish-and-tear-down diagnostic and streams live progress + logs.
+        // We only gate re-entrancy here (CanTestTunnel) while it's open.
         IsTestingTunnel = true;
-        var progress = new RecordingProgress<TunnelProgress>();
         try
         {
-            await using (await _tunnelManager.EstablishConfigAsync(
-                config,
-                System.Threading.CancellationToken.None,
-                progress).ConfigureAwait(true))
-            {
-                // EstablishConfigAsync returning is the success signal. Close immediately so the
-                // settings-page test never leaves a diagnostic tunnel running in the background.
-            }
-
-            await _dialog.ShowMessageAsync(
-                "Tunnel test succeeded",
-                $"'{config.Name}' started successfully. The test tunnel has been closed.");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Tunnel test failed for '{Name}'", config.Name);
-            var lastStep = DescribeLastProgress(progress.Last);
-            await _dialog.ShowMessageAsync(
-                "Tunnel test failed",
-                $"'{config.Name}' failed to start: {ex.Message}{lastStep}");
+            await _dialog.ShowTunnelTestAsync(config);
         }
         finally
         {
@@ -728,22 +706,6 @@ public partial class TunnelConfigsViewModel : ObservableObject
         return Contains(name, needle);
     }
 
-    private static string DescribeLastProgress(TunnelProgress? progress)
-    {
-        if (progress is null) return string.Empty;
-        var detail = string.IsNullOrWhiteSpace(progress.Detail)
-            ? progress.Phase switch
-            {
-                TunnelPhase.Preparing => "preparing tunnel",
-                TunnelPhase.Authenticating => "authenticating",
-                TunnelPhase.DownloadingConfiguration => "downloading configuration",
-                TunnelPhase.StartingTunnel => "starting tunnel",
-                _ => progress.Phase.ToString(),
-            }
-            : progress.Detail.Trim();
-        return $" Last step: {detail}.";
-    }
-
     private bool NameExists(string name, Guid? excludingId)
     {
         var hasExcludedId = excludingId.HasValue;
@@ -755,11 +717,5 @@ public partial class TunnelConfigsViewModel : ObservableObject
         }
 
         return false;
-    }
-
-    private sealed class RecordingProgress<T> : IProgress<T>
-    {
-        public T? Last { get; private set; }
-        public void Report(T value) => Last = value;
     }
 }

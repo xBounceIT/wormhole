@@ -732,6 +732,8 @@ public class CredentialsViewModelTests
         public Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null)
             => Task.FromResult<TunnelDraft?>(null);
 
+        public Task ShowTunnelTestAsync(TunnelConfig config) => Task.CompletedTask;
+
         public Task<string?> PromptPasswordAsync(string title, string message)
             => Task.FromResult<string?>(null);
 

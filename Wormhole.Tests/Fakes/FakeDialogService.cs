@@ -157,6 +157,18 @@ public class FakeDialogService : IDialogService
     public virtual Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null)
         => Task.FromResult<TunnelDraft?>(null);
 
+    /// <summary>Records calls to <see cref="ShowTunnelTestAsync"/> — the diagnostic dialog is
+    /// display-only, so tests only assert it was opened for the right config.</summary>
+    public int TunnelTestPromptCount { get; private set; }
+    public TunnelConfig? LastTunnelTestConfig { get; private set; }
+
+    public virtual Task ShowTunnelTestAsync(TunnelConfig config)
+    {
+        TunnelTestPromptCount++;
+        LastTunnelTestConfig = config;
+        return Task.CompletedTask;
+    }
+
     public virtual Task<string?> PromptPasswordAsync(string title, string message)
     {
         PasswordPromptCount++;

@@ -29,6 +29,14 @@ public interface IDialogService
 
     Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null);
     Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null);
+
+    /// <summary>
+    /// Show the tunnel-test dialog for <paramref name="config"/>: establishes the saved tunnel once
+    /// as a diagnostic, streaming live progress + a timestamped log, then closes it. Display-only —
+    /// there is no result to collect; the dialog surfaces success/failure itself.
+    /// </summary>
+    Task ShowTunnelTestAsync(TunnelConfig config);
+
     Task<string?> PromptPasswordAsync(string title, string message);
 
     /// <summary>
