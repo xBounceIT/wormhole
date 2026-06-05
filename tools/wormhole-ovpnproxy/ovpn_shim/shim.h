@@ -58,6 +58,12 @@ int ovpn_tun_send(ovpn_client_t* c, const char* buf, int buf_len);
 // returning -1 once the C++ event loop has unwound.
 void ovpn_stop(ovpn_client_t* c);
 
+// Copy the last fatal/disconnect reason (e.g. "CONNECTION_TIMEOUT", "AUTH_FAILED: ...",
+// "TRANSPORT_ERROR: ...") into out_buf (always NUL-terminated). Returns 0 on success,
+// 1 on bad args, 100 if built without OpenVPN3. Empty string when no terminating event
+// has fired. Lets the caller report WHY ovpn_wait_connected failed.
+int ovpn_last_error(ovpn_client_t* c, char* out_buf, int out_len);
+
 #ifdef __cplusplus
 }
 #endif

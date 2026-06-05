@@ -16,6 +16,12 @@
 *.mod    text eol=lf
 *.sum    text eol=lf
 
+# OpenVPN3/mbedTLS submodule patches are applied by Fetch-OvpnProxy.ps1 via a strict
+# `git apply` against the (LF) submodule sources. They MUST stay LF — under the default
+# `* eol=crlf` rule above they'd check out as CRLF, the apply --check would fail on the
+# EOL mismatch, and the build would silently drop the patch (broken sidecar).
+tools/wormhole-ovpnproxy/patches/*.patch text eol=lf
+
 # Binary file types this project may track
 *.png binary
 *.ico binary

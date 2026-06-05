@@ -34,6 +34,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <memory>
@@ -111,7 +112,19 @@ static PushedAddresses parse_pushed_addresses(const openvpn::OptionList& opt) {
       const auto& addr = ifc->ref(1);
       const auto& mask = ifc->ref(2);
       int prefix = v4_netmask_to_prefix(mask);
-      if (prefix >= 0) out.v4_cidr = addr + "/" + std::to_string(prefix);
+      if (prefix >= 0) {
+        // topology subnet: 2nd field is a dotted-quad netmask.
+        out.v4_cidr = addr + "/" + std::to_string(prefix);
+      } else {
+        // topology net30/p2p (Stormshield's default): the 2nd ifconfig field is the
+        // PEER address, not a netmask (e.g. "ifconfig 10.10.135.138 10.10.135.137").
+        // Treat the local address as point-to-point (/32). The userspace gVisor
+        // netstack routes all traffic out the single TUN via its default route, so the
+        // prefix only needs to install the local address. Without this fallback the
+        // CIDR is left empty and ovpn_wait_connected spins until its 90s deadline
+        // (a long hang) then fails with code 3 even though the tunnel is fully up.
+        out.v4_cidr = addr + "/32";
+      }
     }
   }
   if (const auto* ifc6 = opt.get_ptr("ifconfig-ipv6")) {
@@ -245,14 +258,32 @@ class WormholeClient final : public OpenVPNClient {
 
   // --- Event callbacks ----------------------------------------------------
   void event(const Event& ev) override {
+    // Mirror EVERY OpenVPN3 connection event to stderr (captured by the parent as
+    // "[ovpnproxy] ..." log lines). Without this the parent only ever sees the final
+    // "ovpn_wait_connected failed" with no reason — the progression (CONNECTING →
+    // WAIT → AUTH → GET_CONFIG, or TRANSPORT_ERROR / AUTH_FAILED / CONNECTION_TIMEOUT)
+    // is exactly what's needed to tell a blocked UDP remote apart from a TLS/auth
+    // failure. Cheap (one line per state transition) and safe for production.
+    std::fprintf(stderr, "[ovpn3-event] %s%s%s%s\n",
+                 ev.name.c_str(),
+                 ev.error ? " (error)" : "",
+                 ev.info.empty() ? "" : ": ",
+                 ev.info.c_str());
+    std::fflush(stderr);
+
     std::lock_guard<std::mutex> lk(state_m_);
     if (ev.name == "CONNECTED") {
       connected_ = true;
       terminated_ = false;
       last_error_.clear();
+      dump_ovpn3_stats("CONNECTED"); // baseline — error counters expected ~zero here
     } else if (ev.name == "DISCONNECTED" || ev.fatal) {
       terminated_ = true;
       last_error_ = ev.name + (ev.info.empty() ? "" : ": " + ev.info);
+      // DECISIVE: at KEEPALIVE_TIMEOUT this shows whether server data packets arrived
+      // (PACKETS_IN>0) and which crypto layer rejected them (HMAC_ERROR vs DECRYPT_ERROR
+      // vs REPLAY_ERROR) — i.e. exactly why the data channel never passed traffic.
+      dump_ovpn3_stats(ev.name.c_str());
       // Wake any blocked tun_recv waiters; the active TunClient may already be
       // gone by the time event() fires (stop happens before the dtor).
       auto* tc = current_tun_.load(std::memory_order_acquire);
@@ -261,8 +292,49 @@ class WormholeClient final : public OpenVPNClient {
     state_cv_.notify_all();
   }
   void log(const LogInfo& li) override {
+    // Forward OpenVPN3's internal log to stderr too. These lines carry the concrete
+    // TLS/transport diagnostics (e.g. mbedTLS "no shared cipher", cert verify errors,
+    // "Connecting to [host]:port") that the coarse event() stream doesn't. The parent
+    // tags them "[ovpnproxy]"; OpenVPN3 already rate/verbosity-limits its own output.
+    std::fprintf(stderr, "[ovpn3] %s", li.text.c_str());
+    if (li.text.empty() || li.text.back() != '\n') std::fputc('\n', stderr);
+    std::fflush(stderr);
     if (log_sink_) log_sink_(li.text);
   }
+
+  // Snapshot of the last fatal/disconnect reason (e.g. "CONNECTION_TIMEOUT", "AUTH_FAILED:
+  // ...", "TRANSPORT_ERROR: ..."). Empty until a terminating event fires. Lets the C ABI
+  // surface WHY ovpn_wait_connected failed instead of a bare code.
+  std::string last_error() {
+    std::lock_guard<std::mutex> lk(state_m_);
+    return last_error_;
+  }
+
+  // Dump every NON-ZERO OpenVPN3 stat/error counter to stderr (captured by the parent as
+  // "[ovpn3-stat] ..." lines). This is the decisive data-channel diagnostic: the per-error
+  // counters (HMAC_ERROR / DECRYPT_ERROR / REPLAY_ERROR / BUFFER_ERROR) pinpoint WHY no
+  // server data packet ever decrypts — the failure that drives a 10s KEEPALIVE_TIMEOUT
+  // (control TLS + auth succeed, then every data packet is dropped). PACKETS_IN vs
+  // TUN_PACKETS_IN distinguishes "received but undecryptable" from "never received".
+  //   - stats_n()/stats_name() are static; stats_value() is an instance const method that
+  //     reads the SAME SessionStats object proto.hpp increments via proto.stats->error(err).
+  //   - Safe from event(): foreign-thread stats access is enabled before events dispatch,
+  //     and reading the (volatile) counters touches neither state_m_ nor reactor state, and
+  //     runs on the same reactor thread that increments them.
+  void dump_ovpn3_stats(const char* why) const {
+    const int n = OpenVPNClient::stats_n();
+    std::fprintf(stderr, "[ovpn3-stat] --- counters at %s ---\n", why);
+    for (int i = 0; i < n; ++i) {
+      const long long val = this->stats_value(i);
+      if (val != 0) {
+        const std::string name = OpenVPNClient::stats_name(i);
+        std::fprintf(stderr, "[ovpn3-stat] %s=%lld\n", name.c_str(), val);
+      }
+    }
+    std::fprintf(stderr, "[ovpn3-stat] --- end counters ---\n");
+    std::fflush(stderr);
+  }
+
   void external_pki_cert_request(ExternalPKICertRequest&) override {}
   void external_pki_sign_request(ExternalPKISignRequest&) override {}
   void clock_tick() override {}
@@ -282,6 +354,14 @@ class WormholeClient final : public OpenVPNClient {
     cfg.connTimeout = 30;
     cfg.tunPersist = false; // we own the TUN, not OpenVPN3's persist layer
     cfg.googleDnsFallback = false;
+    // Offer non-AEAD data-channel ciphers (e.g. AES-256-CBC) in addition to the modern AEAD
+    // suites. OpenVPN core 3.7+ defaults to AEAD-only (AES-GCM / Chacha20-Poly1305) for DCO
+    // compatibility, which silently drops a profile's `data-ciphers AES-256-CBC` and makes the
+    // data-channel NCP fail with "no shared cipher" against firewalls configured for CBC only
+    // (e.g. Stormshield SSL VPN — confirmed live: TLS + auth succeed, then DC negotiation fails).
+    // Stock openvpn.exe (the native client) offers CBC, so we match it. CBC+HMAC-SHA256 is still
+    // a secure data channel; the VORACLE risk is from compression, which the profile normalizer strips.
+    cfg.enableNonPreferredDCAlgorithms = true;
     auto ev = eval_config(cfg);
     if (ev.error) {
       last_error_ = ev.message;
@@ -636,6 +716,19 @@ void ovpn_stop(ovpn_client_t* c) {
   reinterpret_cast<ClientWrapper*>(c)->client->stop_session();
 #else
   (void)c;
+#endif
+}
+
+int ovpn_last_error(ovpn_client_t* c, char* out_buf, int out_len) {
+#if HAVE_OPENVPN3
+  if (!c || !out_buf || out_len < 1) return 1;
+  const std::string err = reinterpret_cast<ClientWrapper*>(c)->client->last_error();
+  std::strncpy(out_buf, err.c_str(), out_len - 1);
+  out_buf[out_len - 1] = '\0';
+  return 0;
+#else
+  (void)c; (void)out_buf; (void)out_len;
+  return 100;
 #endif
 }
 

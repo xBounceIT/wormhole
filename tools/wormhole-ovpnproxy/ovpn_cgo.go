@@ -15,6 +15,14 @@
 
 package main
 
+// Build note: `go build` keys its cgo link cache on the Go sources + the `#cgo` directive
+// strings, NOT on the *content* of the external static archive (libovpn_shim.a) named via
+// `-lovpn_shim`. So rebuilding only the C++ shim/OpenVPN3 (changing the .a) does NOT relink
+// the Go binary — it silently reuses the previously linked exe. To force a fresh link exactly
+// when the archive changes, Fetch-OvpnProxy.ps1 stamps the archive's SHA-256 into a generated
+// shim_buildinfo.go (gitignored); a changed hash makes that source change, which busts the
+// link cache. If you build the shim by hand without that script, run `go clean -cache` first.
+
 /*
 #cgo CXXFLAGS: -std=c++17 -I${SRCDIR}/ovpn_shim
 #cgo LDFLAGS: -L${SRCDIR}/ovpn_shim/build -lovpn_shim -lstdc++
@@ -70,6 +78,21 @@ import (
 
 const waitConnectedTimeoutMs = 90000
 
+// lastError pulls the OpenVPN3 fatal/disconnect reason out of the shim so a failed
+// connect surfaces "CONNECTION_TIMEOUT" / "AUTH_FAILED" / "TRANSPORT_ERROR" instead of a
+// bare numeric code. Returns "" when the shim has no reason recorded.
+func lastError(client *C.ovpn_client_t) string {
+	buf := make([]byte, 256)
+	if rc := C.ovpn_last_error(client, (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))); rc != 0 {
+		return ""
+	}
+	end := 0
+	for end < len(buf) && buf[end] != 0 {
+		end++
+	}
+	return strings.TrimSpace(string(buf[:end]))
+}
+
 // startOpenVpn boots OpenVPN3 via the shim and returns a Dialer routed through a
 // wireguard-go netstack. The cleanup function tears down both — pump goroutines first,
 // then the C++ session, then the netstack, then the C++ client object — so no thread
@@ -115,8 +138,12 @@ func startOpenVpn(ctx context.Context, cfg config) (sockstun.Dialer, func(), err
 	//    can hand it to netstack.
 	cidrBuf := make([]byte, 64)
 	if rc := C.ovpn_wait_connected(client, (*C.char)(unsafe.Pointer(&cidrBuf[0])), C.int(len(cidrBuf)), C.int(waitConnectedTimeoutMs)); rc != 0 {
+		reason := lastError(client)
 		C.ovpn_stop(client)
 		cleanupClient()
+		if reason != "" {
+			return nil, nil, fmt.Errorf("ovpn_wait_connected failed (code %d): %s", int(rc), reason)
+		}
 		return nil, nil, fmt.Errorf("ovpn_wait_connected failed (code %d) — handshake/auth failure or timeout", int(rc))
 	}
 	end := 0
