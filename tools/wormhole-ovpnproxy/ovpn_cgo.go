@@ -194,11 +194,9 @@ func connectWithChallenge(cfg config) (*C.ovpn_client_t, netip.Prefix, error) {
 	if !isChallenge {
 		return nil, netip.Prefix{}, err
 	}
-	// The server wants an OpenVPN-layer 2FA response. Retry on a fresh client if we have one;
-	// otherwise return the sentinel so the parent can prompt for the factor and retry (main()
-	// maps it to a distinct exit code) rather than treating it as a flat auth failure.
+	// The server wants an OpenVPN-layer 2FA response. Retry on a fresh client if we have one.
 	if cfg.ChallengeResponse == "" {
-		return nil, netip.Prefix{}, errDynamicChallengeRequired
+		return nil, netip.Prefix{}, errors.New("server requires an OpenVPN dynamic-challenge response but none was provided")
 	}
 	logf("openvpn: server issued a dynamic challenge; retrying with the provided response")
 	client, pfx, isChallenge, _, err = attempt(cfg.ChallengeResponse, cookie)

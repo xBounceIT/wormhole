@@ -28,7 +28,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -39,20 +38,6 @@ import (
 
 	"github.com/xBounceIT/wormhole/tools/internal/sockstun"
 )
-
-// exitDynamicChallengeRequired is the process exit code the sidecar uses when the OpenVPN
-// server demanded a dynamic challenge (CRV1) that we had no response for. The parent
-// (OpenVpnProcessHost) maps it to a typed exception so the provider can prompt the user for
-// the second factor and retry, rather than treating it as a flat auth failure. Distinct from
-// the generic failure code (1) so a deferred-MFA prompt is only shown when MFA is truly
-// required — a server that authenticates on username/password alone never triggers it.
-const exitDynamicChallengeRequired = 3
-
-// errDynamicChallengeRequired is returned (through the connect path) when the server issued a
-// CRV1 dynamic challenge but cfg.ChallengeResponse was empty. main() checks for it via
-// errors.Is to select exitDynamicChallengeRequired. Defined here (always compiled) so the
-// non-ovpn3 stub build still links even though only ovpn_cgo.go returns it.
-var errDynamicChallengeRequired = errors.New("server requires an OpenVPN dynamic-challenge response but none was provided")
 
 // config is the wire shape passed in on stdin. Mirrors Wormhole.Services.Tunneling.OpenVpn
 // .OpenVpnSidecarConfig on the managed side; field names are lower_snake_case to match Go
@@ -84,12 +69,6 @@ func main() {
 
 	if err := run(*mock); err != nil {
 		logf("fatal: %v", err)
-		if errors.Is(err, errDynamicChallengeRequired) {
-			// The server wants an OpenVPN-layer second factor we weren't given. Signal the
-			// parent with a distinct code so it can prompt and retry instead of reporting a
-			// generic failure.
-			os.Exit(exitDynamicChallengeRequired)
-		}
 		os.Exit(1)
 	}
 }

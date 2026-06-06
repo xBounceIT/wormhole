@@ -93,11 +93,10 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
             ProfileOvpn = resolved.Profile,
             Username = resolved.Username,
             Password = resolved.Password,
-            // Deferred: start with NO challenge response. The sidecar tries username/password first;
-            // only if the server actually issues a CRV1 dynamic challenge do we prompt the user (see
-            // StartSidecarWithDeferredChallengeAsync). This keeps the 2FA dialog off the happy path
-            // for WatchGuard deployments whose OpenVPN auth needs no challenge.
-            ChallengeResponse = null,
+            // Carries the user's single second factor (OTP or "p") so the sidecar can answer an
+            // OpenVPN-layer dynamic challenge (CRV1) WITHOUT a second prompt. Null when 2FA was
+            // satisfied at the web portal (download fallback) or not required.
+            ChallengeResponse = resolved.ChallengeResponse,
             Mock = false,
         };
 
@@ -105,31 +104,19 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
         _logger.LogDebug("Launching OpenVPN sidecar (Watchguard provider) at {Path}.", sidecarPath);
 
         progress?.Report(new TunnelProgress(TunnelPhase.StartingTunnel));
-        var hostLogger = _loggerFactory.CreateLogger<OpenVpnProcessHost>();
         OpenVpnProcessHost host;
         try
         {
-            host = await StartSidecarWithDeferredChallengeAsync(
-                config, sidecar, resolved.CanPromptForChallenge, sidecarPath, hostLogger, cancellationToken)
+            host = await OpenVpnProcessHost.StartAsync(
+                sidecarPath, sidecar, _loggerFactory.CreateLogger<OpenVpnProcessHost>(), cancellationToken)
                 .ConfigureAwait(false);
-        }
-        catch (OpenVpnDynamicChallengeRequiredException ex)
-        {
-            // Reached only on the web-portal / SAML path (CanPromptForChallenge = false): the OpenVPN
-            // layer wants its own factor, which the single web/SAML factor already spent. The
-            // username/password path has cached the downloaded profile, so guide the user to reconnect
-            // — that reconnect takes the stored-profile path, which CAN answer the challenge with a
-            // single prompt.
-            throw new InvalidOperationException(
-                $"Watchguard '{config.Name}' needs a second factor at the VPN layer. Your profile has been "
-                + "saved — reconnect and you'll be prompted once for a one-time code or push.", ex);
         }
         catch (Exception ex) when (resolved.FromCache && ex is not OperationCanceledException)
         {
-            // A cached profile failed to bring up the tunnel via a REAL auth/transport failure (a
-            // dynamic challenge is handled above, not here) — the firewall may have rotated the
-            // client cert/key under an unchanged server/username. Drop it so the NEXT connect
-            // re-downloads a fresh profile via the web portal instead of looping on a stale one.
+            // A cached profile failed to bring up the tunnel — the firewall may have rotated the
+            // client cert/key under an unchanged server/username, or the cached profile is otherwise
+            // stale. Drop it so the NEXT connect re-downloads a fresh profile via the web portal (one
+            // re-provisioning 2FA) instead of looping on a profile that can't authenticate.
             _logger.LogWarning(ex,
                 "Watchguard '{Name}': the cached profile failed to start the tunnel; dropping it so the next connect re-downloads.",
                 config.Name);
@@ -156,45 +143,14 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
     }
 
     /// <summary>
-    /// Starts the OpenVPN sidecar, deferring the 2FA prompt until the server actually demands a
-    /// dynamic challenge (CRV1). The first attempt carries no challenge response, so a deployment
-    /// whose OpenVPN auth succeeds on username/password alone connects with NO prompt at all. Only
-    /// when the sidecar reports <see cref="OpenVpnDynamicChallengeRequiredException"/> AND this
-    /// connection can answer it (<paramref name="canPromptForChallenge"/> — a stored/cached profile,
-    /// not a spent web/SAML factor) do we prompt once and retry on the same profile.
-    /// </summary>
-    private async Task<OpenVpnProcessHost> StartSidecarWithDeferredChallengeAsync(
-        TunnelConfig config, OpenVpnSidecarConfig sidecar, bool canPromptForChallenge,
-        string sidecarPath, ILogger hostLogger, CancellationToken cancellationToken)
-    {
-        try
-        {
-            return await OpenVpnProcessHost.StartAsync(sidecarPath, sidecar, hostLogger, cancellationToken)
-                .ConfigureAwait(false);
-        }
-        catch (OpenVpnDynamicChallengeRequiredException) when (canPromptForChallenge)
-        {
-            _logger.LogInformation(
-                "Watchguard '{Name}': OpenVPN server issued a dynamic challenge; prompting once for the second factor.",
-                config.Name);
-            sidecar.ChallengeResponse = await PromptForSecondFactorAsync(config.Name, cancellationToken)
-                .ConfigureAwait(false);
-            return await OpenVpnProcessHost.StartAsync(sidecarPath, sidecar, hostLogger, cancellationToken)
-                .ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>
-    /// The resolved inputs for the OpenVPN sidecar: the synthesized profile and username/password.
-    /// <paramref name="CanPromptForChallenge"/> is true when this connection can answer an
-    /// OpenVPN-layer dynamic challenge (CRV1) by prompting the user — i.e. it came from a stored or
-    /// cached profile with no web logon spent. The web-portal / SAML paths set it false: their single
-    /// factor was already consumed at the portal, so the prompt is deferred to (and only shown on) a
-    /// reconnect via the stored-profile path. <paramref name="FromCache"/> marks a profile that came
-    /// from the per-tunnel cache, so a real (non-challenge) failure can drop the cache and re-download.
+    /// The resolved inputs for the OpenVPN sidecar: the synthesized profile, the username/password,
+    /// and an optional OpenVPN-layer 2FA response (CRV1) carried for the dynamic-challenge case.
+    /// <paramref name="FromCache"/> marks a profile that came from the per-tunnel cache (not a fresh
+    /// download or imported material), so a failed bring-up can drop the cache and re-download next
+    /// time rather than loop on a profile the firewall may have rotated.
     /// </summary>
     private sealed record ResolvedConnection(
-        string Profile, string Username, string Password, bool CanPromptForChallenge, bool FromCache = false);
+        string Profile, string Username, string Password, string? ChallengeResponse, bool FromCache = false);
 
     private async Task<ResolvedConnection> ResolveProfileAndCredentialsAsync(
         TunnelConfig config, WatchguardSettings settings, CancellationToken cancellationToken)
@@ -213,17 +169,17 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
         {
             if (HasCompleteManualProfile(settings))
             {
-                return ResolveViaStoredProfile(
+                return await ResolveViaStoredProfileAsync(
                     config, settings, WatchguardProfileBuilder.Build(settings),
-                    source: "imported profile", fromCache: false);
+                    source: "imported profile", fromCache: false, cancellationToken).ConfigureAwait(false);
             }
 
             var cachedProfile = await _profileCache.TryReadProfileAsync(config.Id, settings, cancellationToken).ConfigureAwait(false);
             if (!string.IsNullOrWhiteSpace(cachedProfile))
             {
-                return ResolveViaStoredProfile(
+                return await ResolveViaStoredProfileAsync(
                     config, settings, cachedProfile,
-                    source: "cached profile", fromCache: true);
+                    source: "cached profile", fromCache: true, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -240,20 +196,21 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
 
     /// <summary>
     /// Resolves the connection straight from a complete profile (imported .wgssl material OR a cached
-    /// download) with no web portal round-trip. Does NOT prompt: the first OpenVPN auth uses
-    /// username/password, and only if the Firebox issues its AuthPoint CRV1 challenge does the caller
-    /// prompt for the single factor and retry (see StartSidecarWithDeferredChallengeAsync). So the
-    /// user authorizes at most once, only when MFA is actually required, and no portal push fires.
+    /// download) with no web portal round-trip. Prompts ONCE for the second factor and hands it to
+    /// the sidecar as the OpenVPN dynamic-challenge response. The first OpenVPN auth uses
+    /// username/password; if the Firebox issues its AuthPoint CRV1 challenge the sidecar answers it
+    /// with this response — so the user authorizes a single time, and no portal push is triggered.
     /// </summary>
-    private ResolvedConnection ResolveViaStoredProfile(
-        TunnelConfig config, WatchguardSettings settings, string profile, string source, bool fromCache)
+    private async Task<ResolvedConnection> ResolveViaStoredProfileAsync(
+        TunnelConfig config, WatchguardSettings settings, string profile, string source, bool fromCache,
+        CancellationToken cancellationToken)
     {
         _logger.LogInformation(
-            "Watchguard '{Name}': connecting via the {Source} (no web logon); any 2FA is handled once at the OpenVPN layer.",
+            "Watchguard '{Name}': connecting via the {Source} (no web logon); 2FA handled once at the OpenVPN layer.",
             config.Name, source);
 
-        return new ResolvedConnection(
-            profile, settings.Username, settings.Password, CanPromptForChallenge: true, fromCache);
+        var challengeResponse = await PromptForSecondFactorAsync(config.Name, cancellationToken).ConfigureAwait(false);
+        return new ResolvedConnection(profile, settings.Username, settings.Password, challengeResponse, fromCache);
     }
 
     /// <summary>
@@ -444,11 +401,9 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
             await TryCacheProfileAsync(config.Id, settings, profile, cancellationToken).ConfigureAwait(false);
         }
 
-        // Web-portal download path: the single factor was already spent at the sslvpn_logon layer,
-        // so we can't answer a fresh OpenVPN-layer challenge here (CanPromptForChallenge = false). If
-        // the OpenVPN auth does challenge, EstablishAsync surfaces a "reconnect" message — and the
-        // profile is now cached, so that reconnect takes the single-factor stored-profile path.
-        return new ResolvedConnection(profile, settings.Username, password, CanPromptForChallenge: false);
+        // Web-portal download path: 2FA was already satisfied at the sslvpn_logon layer, so no
+        // OpenVPN-layer challenge response is carried (ChallengeResponse = null).
+        return new ResolvedConnection(profile, settings.Username, password, null);
     }
 
     /// <summary>
@@ -493,9 +448,7 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
                 manualFallbackProfile: null,
                 cancellationToken: cancellationToken)
             .ConfigureAwait(false);
-        // SAML carries a browser-obtained token as the OpenVPN password; there is no interactive
-        // second factor we could supply to an OpenVPN-layer challenge, so CanPromptForChallenge = false.
-        return new ResolvedConnection(profile, saml.Username, saml.Token, CanPromptForChallenge: false);
+        return new ResolvedConnection(profile, saml.Username, saml.Token, null);
     }
 
     private async Task<string> DownloadAndBuildProfileAsync(
