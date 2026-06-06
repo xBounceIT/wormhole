@@ -104,6 +104,12 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
         _logger.LogDebug("Launching OpenVPN sidecar (Watchguard provider) at {Path}.", sidecarPath);
 
         progress?.Report(new TunnelProgress(TunnelPhase.StartingTunnel));
+
+        // Tells a real one-time code apart from "p"/the web-portal path, so a gateway rejection of a
+        // typed code can be reframed with a code-specific hint (see the catch below).
+        var isOneTimeCode = !string.IsNullOrEmpty(resolved.ChallengeResponse)
+            && !resolved.ChallengeResponse.Equals("p", StringComparison.OrdinalIgnoreCase);
+
         OpenVpnProcessHost host;
         try
         {
@@ -111,17 +117,47 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
                 sidecarPath, sidecar, _loggerFactory.CreateLogger<OpenVpnProcessHost>(), cancellationToken)
                 .ConfigureAwait(false);
         }
-        catch (Exception ex) when (resolved.FromCache && ex is not OperationCanceledException)
+        catch (Exception ex) when (resolved.FromCache && ex is not OperationCanceledException
+            && !IsAuthOrChallengeFailure(ex) && !IsTransientTransportFailure(ex))
         {
-            // A cached profile failed to bring up the tunnel — the firewall may have rotated the
-            // client cert/key under an unchanged server/username, or the cached profile is otherwise
-            // stale. Drop it so the NEXT connect re-downloads a fresh profile via the web portal (one
-            // re-provisioning 2FA) instead of looping on a profile that can't authenticate.
+            // A cached profile failed for a reason that is NEITHER a 2FA/auth outcome NOR a transient
+            // transport/timeout — i.e. the kind of failure a STALE profile actually produces (the firewall
+            // rotated the client cert/key under an unchanged server/username, a TLS verify error, an
+            // unparseable profile). Only then drop it so the NEXT connect re-downloads. We deliberately do
+            // NOT drop on:
+            //   - auth / dynamic-challenge failures (rejected OTP, unanswered/timed-out push, re-challenge):
+            //     the PROFILE is fine, only the second factor failed; or
+            //   - transport / timeout failures (CONNECTION_TIMEOUT, NETWORK_RECV_ERROR — e.g. the gateway
+            //     rate-limiting a rapid reconnect by going silent mid-handshake): also not the profile's fault.
+            // Dropping on either would force the next connect onto the web-portal path (which can't answer the
+            // tunnel's CRV1, and re-fires the portal logon) and oscillate, instead of letting the user just
+            // retry the factor on the cached profile.
             _logger.LogWarning(ex,
-                "Watchguard '{Name}': the cached profile failed to start the tunnel; dropping it so the next connect re-downloads.",
+                "Watchguard '{Name}': the cached profile failed to start the tunnel (not an auth or transport error); dropping it so the next connect re-downloads.",
                 config.Name);
             await _profileCache.DeleteAsync(config.Id, CancellationToken.None).ConfigureAwait(false);
             throw;
+        }
+        catch (Exception ex) when (isOneTimeCode && ex is not OperationCanceledException
+            && (IsAuthOrChallengeFailure(ex) || IsTransientTransportFailure(ex)))
+        {
+            // A typed one-time code failed to bring up the tunnel — either rejected at the OpenVPN dynamic
+            // challenge (CRV1 AUTH_FAILED) or the gateway accepted the response then went silent until the
+            // connect timed out (TRANSPORT_ERROR / CONNECTION_TIMEOUT). On this firmware the dominant cause of
+            // BOTH is AuthPoint's brief post-authentication cooldown: for ~20-30s after a recent push approval
+            // or login, the next attempt is rate-limited server-side (a measured >24s window that escalates
+            // from an instant reject to a silent hang). Only waiting clears it — we do NOT auto-retry, which
+            // would just burn attempts toward the gateway's failed-auth lockout. Replace the raw sidecar dump
+            // with an actionable hint.
+            _logger.LogWarning(ex,
+                "Watchguard '{Name}': the one-time code did not complete the tunnel (rejected or timed out — most likely AuthPoint's post-push/login cooldown).",
+                config.Name);
+            throw new InvalidOperationException(
+                "WatchGuard couldn't complete the connection with your one-time code. Right after a push approval " +
+                "or login, AuthPoint briefly rate-limits the next attempt for ~20-30 seconds — it may reject the " +
+                "code or stop responding mid-handshake. Wait about half a minute and try again, or type \"p\" to " +
+                "approve with a push instead. (If it keeps failing when you haven't just logged in, check that the " +
+                "gateway is reachable.)", ex);
         }
 
         // Wrap-after-start safety: same pattern as Fortinet/OpenVPN providers — if the
@@ -195,23 +231,137 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
     }
 
     /// <summary>
-    /// Resolves the connection straight from a complete profile (imported .wgssl material OR a cached
-    /// download) with no web portal round-trip. Prompts ONCE for the second factor and hands it to
-    /// the sidecar as the OpenVPN dynamic-challenge response. The first OpenVPN auth uses
-    /// username/password; if the Firebox issues its AuthPoint CRV1 challenge the sidecar answers it
-    /// with this response — so the user authorizes a single time, and no portal push is triggered.
+    /// Resolves the connection from a complete profile (imported .wgssl material OR a cached download)
+    /// and prompts ONCE for the second factor. The factor type then decides how 2FA is satisfied:
+    ///
+    /// <list type="bullet">
+    ///   <item><b>one-time passcode</b> — answered deterministically at the OpenVPN data-channel
+    ///   dynamic challenge (CRV1): carried as <see cref="ResolvedConnection.ChallengeResponse"/>, no
+    ///   web logon, no portal push. The reliable path.</item>
+    ///   <item><b>"p" (push)</b> — approved once at the web <c>sslvpn_logon</c> long-poll (the reliable
+    ///   primitive that BLOCKS until the phone tap), THEN the OpenVPN connect carries <c>"p"</c> as the
+    ///   CRV1 answer. The bet: this firewall always re-challenges the tunnel, so we lean on AuthPoint's
+    ///   grace window — primed by the just-approved web push — to let the tunnel's <c>"p"</c> through
+    ///   WITHOUT a second push. If the grace window doesn't carry, the armed <c>"p"</c> fires a second
+    ///   push (the connect still succeeds, at the cost of a second tap) rather than failing.</item>
+    /// </list>
     /// </summary>
     private async Task<ResolvedConnection> ResolveViaStoredProfileAsync(
         TunnelConfig config, WatchguardSettings settings, string profile, string source, bool fromCache,
         CancellationToken cancellationToken)
     {
-        _logger.LogInformation(
-            "Watchguard '{Name}': connecting via the {Source} (no web logon); 2FA handled once at the OpenVPN layer.",
-            config.Name, source);
+        var entered = await PromptForSecondFactorAsync(config.Name, cancellationToken).ConfigureAwait(false);
 
-        var challengeResponse = await PromptForSecondFactorAsync(config.Name, cancellationToken).ConfigureAwait(false);
-        return new ResolvedConnection(profile, settings.Username, settings.Password, challengeResponse, fromCache);
+        if (entered.Equals("p", StringComparison.OrdinalIgnoreCase))
+        {
+            await ApprovePushViaWebLogonAsync(config, settings, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation(
+                "Watchguard '{Name}': push approved at the web layer; connecting via the {Source} with an armed CRV1 push fallback (grace window may absorb it).",
+                config.Name, source);
+            return new ResolvedConnection(profile, settings.Username, settings.Password, "p", fromCache);
+        }
+
+        _logger.LogInformation(
+            "Watchguard '{Name}': connecting via the {Source} (no web logon); the one-time code answers the OpenVPN challenge.",
+            config.Name, source);
+        return new ResolvedConnection(profile, settings.Username, settings.Password, entered, fromCache);
     }
+
+    /// <summary>
+    /// Approves an AuthPoint push through the web <c>sslvpn_logon</c> long-poll — the reliable push
+    /// primitive the native client uses: a bare logon to obtain the <c>logon_id</c>, then the distinct
+    /// <c>mfa_response&amp;mfa_choice=p</c> leg, which BLOCKS (up to ~120s) until the phone tap returns
+    /// <c>logon_status=1</c>. Throws an actionable error on denial/timeout/failure. Downloads nothing —
+    /// it only approves the second factor; the OpenVPN connect that follows uses the stored profile.
+    /// </summary>
+    private async Task ApprovePushViaWebLogonAsync(
+        TunnelConfig config, WatchguardSettings settings, CancellationToken cancellationToken)
+    {
+        var domain = ResolveEffectiveDomain(settings.Domain, null);
+        using var portal = new WatchguardConfigClient(
+            settings.TrustServerCertificate, settings.CaPem, _loggerFactory.CreateLogger<WatchguardConfigClient>());
+
+        async Task<PreAuthOutcome> SendAsync(Func<Task<PreAuthOutcome>> call, string what, bool isPush)
+        {
+            try
+            {
+                return await call().ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (HttpRequestException ex)
+            {
+                throw new InvalidOperationException(
+                    $"Watchguard push {what} could not reach '{settings.Server}:{settings.Port}': {ex.Message}", ex);
+            }
+            catch (TaskCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                throw new InvalidOperationException(
+                    isPush
+                        ? "Watchguard push approval timed out — approve the notification on your phone and retry."
+                        : $"Watchguard push {what} timed out talking to '{settings.Server}:{settings.Port}'.", ex);
+            }
+        }
+
+        var bare = await SendAsync(
+            () => portal.LogonAsync(settings.Server, settings.Port, settings.Username, settings.Password, domain, cancellationToken),
+            "pre-auth", isPush: false).ConfigureAwait(false);
+
+        switch (bare)
+        {
+            case PreAuthOutcome.Ok:
+                // Gateway accepted the bare password with no 2FA — nothing to approve.
+                return;
+            case PreAuthOutcome.Failure f:
+                throw new InvalidOperationException($"Watchguard push pre-auth failed: {f.Reason}");
+            case PreAuthOutcome.Challenge ch:
+                _logger.LogInformation("Watchguard '{Name}': sending an AuthPoint push and waiting for approval.", config.Name);
+                var resp = await SendAsync(
+                    () => portal.RespondToMfaChoiceAsync(settings.Server, settings.Port, ch.LogonId, "p", cancellationToken),
+                    "approval", isPush: true).ConfigureAwait(false);
+                switch (resp)
+                {
+                    case PreAuthOutcome.Ok:
+                        return; // approved on the phone
+                    case PreAuthOutcome.Failure rf:
+                        throw new InvalidOperationException($"Watchguard push was not approved: {rf.Reason}");
+                    default:
+                        throw new InvalidOperationException(
+                            "Watchguard push did not complete — approve the notification on your phone and retry.");
+                }
+            default:
+                throw new InvalidOperationException(
+                    $"Watchguard push produced an unexpected outcome: {bare?.GetType().Name ?? "null"}.");
+        }
+    }
+
+    /// <summary>
+    /// True when an OpenVPN sidecar start failure was an AUTHENTICATION / 2FA outcome rather than a
+    /// stale-profile (cert/transport) failure — a rejected code, an unanswered/timed-out push, or a
+    /// re-challenge the response didn't satisfy. Matched on the sidecar stderr folded into the
+    /// exception message by OpenVpnProcessHost. Used so a 2FA failure does NOT evict the (valid)
+    /// cached profile.
+    /// </summary>
+    private static bool IsAuthOrChallengeFailure(Exception ex) =>
+        ex.Message.Contains("AUTH_FAILED", StringComparison.OrdinalIgnoreCase)
+        || ex.Message.Contains("dynamic-challenge", StringComparison.OrdinalIgnoreCase)
+        || ex.Message.Contains("DYNAMIC_CHALLENGE", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// True when a sidecar start failure was a transient TRANSPORT / network / readiness-timeout outcome
+    /// (CONNECTION_TIMEOUT, TRANSPORT_ERROR, NETWORK_RECV/EOF_ERROR, or our own ready-timeout) rather than
+    /// an auth or stale-profile failure. On this firmware the gateway rate-limits a rapid reconnect by
+    /// accepting the TCP and then going silent mid-handshake, which surfaces here — so, like a 2FA failure,
+    /// it must NOT evict the (valid) cached profile, and for a typed one-time code it folds into the same
+    /// post-auth-cooldown hint. Matched on the sidecar stderr folded into the message by OpenVpnProcessHost.
+    /// </summary>
+    private static bool IsTransientTransportFailure(Exception ex) =>
+        ex is TimeoutException
+        || ex.Message.Contains("CONNECTION_TIMEOUT", StringComparison.OrdinalIgnoreCase)
+        || ex.Message.Contains("TRANSPORT_ERROR", StringComparison.OrdinalIgnoreCase)
+        || ex.Message.Contains("NETWORK_RECV_ERROR", StringComparison.OrdinalIgnoreCase)
+        || ex.Message.Contains("NETWORK_EOF_ERROR", StringComparison.OrdinalIgnoreCase)
+        || ex.Message.Contains("did not become ready", StringComparison.OrdinalIgnoreCase)
+        || ex.Message.Contains("did not produce a READY", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Prompts the user once for an AuthPoint second factor: a one-time passcode, or "p" to request
