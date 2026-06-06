@@ -46,7 +46,13 @@ type config struct {
 	ProfileOvpn string `json:"profile_ovpn"`
 	Username    string `json:"username"`
 	Password    string `json:"password"`
-	Mock        bool   `json:"mock"`
+	// ChallengeResponse, when non-empty, answers an OpenVPN data-channel dynamic challenge
+	// (CRV1) that the server issues after the initial username/password auth — e.g. WatchGuard
+	// AuthPoint 2FA presented at the OpenVPN layer. It is the user's one-time passcode, or
+	// "p"/"push" to request a push notification. The sidecar connects, and if the server
+	// challenges, it reconnects carrying this response. Empty for non-2FA / non-challenge VPNs.
+	ChallengeResponse string `json:"challenge_response"`
+	Mock              bool   `json:"mock"`
 }
 
 func logf(format string, args ...any) {
