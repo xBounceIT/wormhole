@@ -130,7 +130,10 @@
       <_WgProxyArch Condition="'$(PlatformTarget)' == 'ARM64' Or '$(PlatformTarget)' == 'arm64'">arm64</_WgProxyArch>
       <_WgProxyArch Condition="'$(_WgProxyArch)' == ''">x64</_WgProxyArch>
     </PropertyGroup>
-    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\scripts\Fetch-WgProxy.ps1&quot; -Arch $(_WgProxyArch) -Quiet" />
+    <!-- SkipSidecarFetch=true bypasses the (slow, toolchain-heavy) sidecar rebuild and reuses the
+         binary already staged in obj/ — for iterating on managed code when the Go/C++/vcpkg
+         toolchain is unavailable or flaking. Default-off: normal builds rebuild as before. -->
+    <Exec Condition="'$(SkipSidecarFetch)' != 'true'" Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\scripts\Fetch-WgProxy.ps1&quot; -Arch $(_WgProxyArch) -Quiet" />
     <ItemGroup>
       <None Include="$(MSBuildProjectDirectory)\obj\wgproxy\$(_WgProxyArch)\wormhole-wgproxy.exe"
             Condition="Exists('$(MSBuildProjectDirectory)\obj\wgproxy\$(_WgProxyArch)\wormhole-wgproxy.exe')">
@@ -151,7 +154,7 @@
       <_FortiProxyArch Condition="'$(PlatformTarget)' == 'ARM64' Or '$(PlatformTarget)' == 'arm64'">arm64</_FortiProxyArch>
       <_FortiProxyArch Condition="'$(_FortiProxyArch)' == ''">x64</_FortiProxyArch>
     </PropertyGroup>
-    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\scripts\Fetch-FortiProxy.ps1&quot; -Arch $(_FortiProxyArch) -Quiet" />
+    <Exec Condition="'$(SkipSidecarFetch)' != 'true'" Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\scripts\Fetch-FortiProxy.ps1&quot; -Arch $(_FortiProxyArch) -Quiet" />
     <ItemGroup>
       <None Include="$(MSBuildProjectDirectory)\obj\fortiproxy\$(_FortiProxyArch)\wormhole-fortiproxy.exe"
             Condition="Exists('$(MSBuildProjectDirectory)\obj\fortiproxy\$(_FortiProxyArch)\wormhole-fortiproxy.exe')">
@@ -173,7 +176,7 @@
       <_OvpnProxyArch Condition="'$(PlatformTarget)' == 'ARM64' Or '$(PlatformTarget)' == 'arm64'">arm64</_OvpnProxyArch>
       <_OvpnProxyArch Condition="'$(_OvpnProxyArch)' == ''">x64</_OvpnProxyArch>
     </PropertyGroup>
-    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\scripts\Fetch-OvpnProxy.ps1&quot; -Arch $(_OvpnProxyArch) -Quiet" />
+    <Exec Condition="'$(SkipSidecarFetch)' != 'true'" Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\scripts\Fetch-OvpnProxy.ps1&quot; -Arch $(_OvpnProxyArch) -Quiet" />
     <ItemGroup>
       <None Include="$(MSBuildProjectDirectory)\obj\ovpnproxy\$(_OvpnProxyArch)\wormhole-ovpnproxy.exe"
             Condition="Exists('$(MSBuildProjectDirectory)\obj\ovpnproxy\$(_OvpnProxyArch)\wormhole-ovpnproxy.exe')">
