@@ -84,6 +84,8 @@
     <Compile Include="..\Services\Tunneling\Watchguard\WatchguardPreAuthClient.cs" Link="Services\Tunneling\Watchguard\WatchguardPreAuthClient.cs" />
     <Compile Include="..\Services\Tunneling\Watchguard\WatchguardConfigClient.cs" Link="Services\Tunneling\Watchguard\WatchguardConfigClient.cs" />
     <Compile Include="..\Services\Tunneling\Watchguard\IWatchguardSamlAuthService.cs" Link="Services\Tunneling\Watchguard\IWatchguardSamlAuthService.cs" />
+    <Compile Include="..\Services\Tunneling\Watchguard\IWatchguardProfileCache.cs" Link="Services\Tunneling\Watchguard\IWatchguardProfileCache.cs" />
+    <Compile Include="..\Services\Tunneling\Watchguard\WatchguardProfileCache.cs" Link="Services\Tunneling\Watchguard\WatchguardProfileCache.cs" />
     <Compile Include="..\Services\Tunneling\Stormshield\StormshieldTunnelProvider.cs" Link="Services\Tunneling\Stormshield\StormshieldTunnelProvider.cs" />
     <Compile Include="..\Services\Tunneling\Stormshield\StormshieldPortalClient.cs" Link="Services\Tunneling\Stormshield\StormshieldPortalClient.cs" />
     <Compile Include="..\Services\Tunneling\Stormshield\StormshieldProfileNormalizer.cs" Link="Services\Tunneling\Stormshield\StormshieldProfileNormalizer.cs" />

@@ -11,6 +11,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
+using Microsoft.Extensions.Logging;
 
 namespace Wormhole.Services.Tunneling.Watchguard;
 
@@ -28,16 +29,33 @@ internal sealed record WatchguardGatewayStatus(
 internal sealed class WatchguardConfigClient : IWatchguardConfigClient
 {
     private const int MaxConfigBytes = 4 * 1024 * 1024;
+
+    /// <summary>
+    /// User-Agent of the native WatchGuard Mobile VPN with SSL client (captured from
+    /// wgsslvpnc.exe's WinHttpOpen agent string). The Firebox branches its AuthPoint behavior on
+    /// this header: identified as the native client, an OTP answered via the <c>response</c> leg is
+    /// validated as an OTP; an unrecognized/empty agent ALSO triggers a push notification — the
+    /// spurious push users reported when entering a one-time passcode.
+    /// </summary>
+    internal const string NativeUserAgent = "WatchGuard/wgsslvpnc.exe";
+
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan PushApprovalTimeout = TimeSpan.FromSeconds(90);
+    // The 2FA response leg is a LONG-POLL: the gateway holds the connection open while AuthPoint
+    // validates the entered OTP or waits for the user to approve a push on their phone, and only
+    // then replies with the final logon_status. Confirmed live — an answered challenge kept the
+    // connection open well past 30s. Both the OTP and the push answer go through this leg, so both
+    // get the generous timeout (the default 30s RequestTimeout would cut a valid login off).
+    private static readonly TimeSpan AuthenticatingTimeout = TimeSpan.FromSeconds(120);
 
     private readonly HttpClient _http;
     private readonly CookieContainer? _cookieContainer;
     private readonly bool _ownsHttpClient;
     private readonly X509Certificate2Collection? _pinnedCaCerts;
+    private readonly ILogger? _logger;
 
-    public WatchguardConfigClient(bool trustServerCertificate, string? caPem = null)
+    public WatchguardConfigClient(bool trustServerCertificate, string? caPem = null, ILogger? logger = null)
     {
+        _logger = logger;
         var handler = new HttpClientHandler
         {
             CookieContainer = new CookieContainer(),
@@ -86,11 +104,12 @@ internal sealed class WatchguardConfigClient : IWatchguardConfigClient
                 };
             }
 
-            _http = new HttpClient(handler, disposeHandler: true)
+            _http = new HttpClient(new RequestDiagnosticsHandler(handler, logger), disposeHandler: true)
             {
                 Timeout = System.Threading.Timeout.InfiniteTimeSpan,
                 MaxResponseContentBufferSize = MaxConfigBytes,
             };
+            ApplyNativeClientHeaders(_http);
             _cookieContainer = handler.CookieContainer;
             _ownsHttpClient = true;
             _pinnedCaCerts = caCerts;
@@ -107,7 +126,16 @@ internal sealed class WatchguardConfigClient : IWatchguardConfigClient
     {
         ArgumentNullException.ThrowIfNull(http);
         _http = http;
+        ApplyNativeClientHeaders(_http);
         _ownsHttpClient = false;
+    }
+
+    private static void ApplyNativeClientHeaders(HttpClient http)
+    {
+        // TryAddWithoutValidation: the value's ".exe" token is not a strictly-valid product/version
+        // per RFC 7231, but the Firebox expects this literal string, so bypass header validation.
+        if (!http.DefaultRequestHeaders.Contains("User-Agent"))
+            http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", NativeUserAgent);
     }
 
     public async Task<WatchguardGatewayStatus> GetStatusAsync(string server, int port, CancellationToken cancellationToken)
@@ -122,6 +150,7 @@ internal sealed class WatchguardConfigClient : IWatchguardConfigClient
         }
 
         var body = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
+        _logger?.LogInformation("Watchguard status raw response: {Body}", body);
         return ParseStatusResponse(body);
     }
 
@@ -152,14 +181,16 @@ internal sealed class WatchguardConfigClient : IWatchguardConfigClient
     public Task<PreAuthOutcome> LogonAsync(
         string server, int port, string username, string password, string domain, CancellationToken cancellationToken)
     {
+        // Field order mirrors wgsslvpnc.exe's template exactly:
+        // action, fw_username, fw_password, style, fw_logon_type, fw_domain.
         var form = new Dictionary<string, string>
         {
             ["action"] = "sslvpn_logon",
+            ["fw_username"] = username,
+            ["fw_password"] = password,
             ["style"] = "fw_logon_progress.xsl",
             ["fw_logon_type"] = "logon",
             ["fw_domain"] = domain,
-            ["fw_username"] = username,
-            ["fw_password"] = password,
         };
         return SendLogonRequestAsync(server, port, form, cancellationToken);
     }
@@ -167,29 +198,34 @@ internal sealed class WatchguardConfigClient : IWatchguardConfigClient
     public Task<PreAuthOutcome> RespondToChallengeAsync(
         string server, int port, string logonId, string otpCode, CancellationToken cancellationToken)
     {
+        // Native template: action, style, fw_logon_type=response, response, fw_logon_id.
         var form = new Dictionary<string, string>
         {
             ["action"] = "sslvpn_logon",
             ["style"] = "fw_logon_progress.xsl",
             ["fw_logon_type"] = "response",
-            ["fw_logon_id"] = logonId,
             ["response"] = otpCode,
+            ["fw_logon_id"] = logonId,
         };
-        return SendLogonRequestAsync(server, port, form, cancellationToken);
+        return SendLogonRequestAsync(server, port, form, cancellationToken, AuthenticatingTimeout);
     }
 
     public Task<PreAuthOutcome> RespondToMfaChoiceAsync(
         string server, int port, string logonId, string choice, CancellationToken cancellationToken)
     {
+        // Push uses the DISTINCT mfa_response leg, exactly as wgsslvpnc.exe does:
+        // action, style, fw_logon_type=mfa_response, mfa_choice, fw_logon_id. This is a different
+        // request from the OTP `response` leg — the firewall only fires a push for this one, which
+        // is precisely why an OTP answered via `response` must NOT reuse this shape.
         var form = new Dictionary<string, string>
         {
             ["action"] = "sslvpn_logon",
             ["style"] = "fw_logon_progress.xsl",
             ["fw_logon_type"] = "mfa_response",
-            ["fw_logon_id"] = logonId,
             ["mfa_choice"] = choice,
+            ["fw_logon_id"] = logonId,
         };
-        return SendLogonRequestAsync(server, port, form, cancellationToken, PushApprovalTimeout);
+        return SendLogonRequestAsync(server, port, form, cancellationToken, AuthenticatingTimeout);
     }
 
     private async Task<PreAuthOutcome> SendLogonRequestAsync(
@@ -202,8 +238,19 @@ internal sealed class WatchguardConfigClient : IWatchguardConfigClient
         var uri = BuildUri(server, port, "/" + BuildQuery(form));
         using var timeoutCts = CreateTimeoutCancellation(requestTimeout ?? RequestTimeout, cancellationToken);
         using var response = await _http.GetAsync(uri, timeoutCts.Token).ConfigureAwait(false);
+        // Diagnostic: log the logon-leg TYPE and the raw RESPONSE body. The response carries no
+        // secret (fw_password lives only in the request query, which we deliberately never log);
+        // it does carry logon_status / logon_id / message which is exactly what we need to map the
+        // AuthPoint progress-poll flow. fw_logon_type tells us which leg (logon / response /
+        // mfa_response / poll) produced the body.
+        form.TryGetValue("fw_logon_type", out var legType);
         if (!response.IsSuccessStatusCode)
+        {
+            _logger?.LogInformation(
+                "Watchguard logon leg '{Leg}' -> HTTP {Code} {Reason} (no body parsed).",
+                legType, (int)response.StatusCode, response.ReasonPhrase);
             return new PreAuthOutcome.Failure($"Firebox returned HTTP {(int)response.StatusCode} {response.ReasonPhrase}.");
+        }
 
         var mediaType = response.Content.Headers.ContentType?.MediaType;
         if (!string.IsNullOrEmpty(mediaType)
@@ -215,6 +262,8 @@ internal sealed class WatchguardConfigClient : IWatchguardConfigClient
         }
 
         var body = await response.Content.ReadAsStringAsync(timeoutCts.Token).ConfigureAwait(false);
+        _logger?.LogInformation(
+            "Watchguard logon leg '{Leg}' raw response: {Body}", legType, body);
         return WatchguardPreAuthClient.ParseLogonResponse(body);
     }
 
@@ -359,5 +408,61 @@ internal sealed class WatchguardConfigClient : IWatchguardConfigClient
     {
         if (_ownsHttpClient) _http.Dispose();
         DisposeCerts(_pinnedCaCerts);
+    }
+
+    /// <summary>
+    /// Diagnostic DelegatingHandler: logs the EXACT request line (query values for secrets
+    /// redacted), every request header (incl. the merged User-Agent), the negotiated HTTP version,
+    /// and the response's connection-management headers. Used to confirm Wormhole's on-the-wire
+    /// request byte-for-byte matches the native wgsslvpnc.exe client when chasing the spurious
+    /// AuthPoint push. No secret is logged: fw_password / fw_username / response are redacted.
+    /// </summary>
+    private sealed class RequestDiagnosticsHandler : DelegatingHandler
+    {
+        private static readonly HashSet<string> RedactKeys =
+            new(StringComparer.OrdinalIgnoreCase) { "fw_password", "fw_username", "response" };
+
+        private readonly ILogger? _logger;
+
+        public RequestDiagnosticsHandler(HttpMessageHandler inner, ILogger? logger) : base(inner) => _logger = logger;
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            if (_logger is not null && request.RequestUri is { } uri)
+            {
+                var headers = string.Join(" | ", request.Headers.Select(h => $"{h.Key}: {string.Join(",", h.Value)}"));
+                _logger.LogInformation(
+                    "Watchguard REQ {Method} {Path}?{Query} HTTP/{Version} || headers: {Headers}",
+                    request.Method.Method, uri.AbsolutePath, RedactQuery(uri.Query), request.Version, headers);
+            }
+
+            var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
+
+            if (_logger is not null)
+            {
+                response.Headers.TryGetValues("Set-Cookie", out var setCookie);
+                _logger.LogInformation(
+                    "Watchguard RESP {Code} HTTP/{Version} Connection=[{Conn}] Set-Cookie={HasCookie} Server=[{Server}]",
+                    (int)response.StatusCode, response.Version,
+                    string.Join(",", response.Headers.Connection),
+                    setCookie is not null,
+                    string.Join(",", response.Headers.Server.Select(s => s.ToString())));
+            }
+
+            return response;
+        }
+
+        private static string RedactQuery(string query)
+        {
+            var trimmed = query.TrimStart('?');
+            if (trimmed.Length == 0) return string.Empty;
+            return string.Join('&', trimmed.Split('&').Select(pair =>
+            {
+                var eq = pair.IndexOf('=');
+                if (eq < 0) return pair;
+                var key = pair[..eq];
+                return RedactKeys.Contains(Uri.UnescapeDataString(key)) ? key + "=***" : pair;
+            }));
+        }
     }
 }

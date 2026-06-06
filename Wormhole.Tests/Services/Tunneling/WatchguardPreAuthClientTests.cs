@@ -70,8 +70,12 @@ public class WatchguardPreAuthClientTests
     }
 
     [Fact]
-    public async Task RespondToMfaChoiceAsync_GetsNativePushChoiceShape()
+    public async Task RespondToMfaChoiceAsync_GetsNativeMfaResponseShape()
     {
+        // Push ("p") uses the DISTINCT mfa_response leg (fw_logon_type=mfa_response&mfa_choice=p),
+        // exactly as the native wgsslvpnc.exe binary does. Only this request makes the firewall fire
+        // a push — an OTP answered via the `response` leg must NOT reuse this shape, otherwise the
+        // user gets a spurious push when entering a one-time passcode.
         var captured = new CapturingHandler(canned: "<resp><logon_status>1</logon_status></resp>");
         using var http = new HttpClient(captured);
         using var client = new WatchguardPreAuthClient(http);
@@ -91,6 +95,24 @@ public class WatchguardPreAuthClientTests
         Assert.Equal("p", query["mfa_choice"]);
         Assert.False(query.AllKeys.Contains("response"));
         Assert.False(query.AllKeys.Contains("fw_password"));
+    }
+
+    [Fact]
+    public async Task Requests_CarryNativeWatchguardUserAgent()
+    {
+        // The Firebox branches its AuthPoint behavior on the client User-Agent: identified as the
+        // native client, an OTP answered via the `response` leg is validated as an OTP rather than
+        // ALSO triggering a push. Value captured from wgsslvpnc.exe (WinHttpOpen agent string).
+        var captured = new CapturingHandler(canned: "<resp><logon_status>1</logon_status></resp>");
+        using var http = new HttpClient(captured);
+        using var client = new WatchguardPreAuthClient(http);
+
+        await client.LogonAsync(
+            server: "firebox.example.com", port: 443,
+            username: "alice", password: "p4ss", domain: "AuthPoint",
+            cancellationToken: CancellationToken.None);
+
+        Assert.Equal("WatchGuard/wgsslvpnc.exe", captured.LastUserAgent);
     }
 
     [Fact]
@@ -136,6 +158,7 @@ public class WatchguardPreAuthClientTests
         public HttpMethod? LastMethod { get; private set; }
         public string? LastBody { get; private set; }
         public Uri? LastRequestUri { get; private set; }
+        public string? LastUserAgent { get; private set; }
         public System.Collections.Specialized.NameValueCollection LastQuery =>
             LastRequestUri is null ? new() : HttpUtility.ParseQueryString(LastRequestUri.Query);
 
@@ -145,6 +168,7 @@ public class WatchguardPreAuthClientTests
         {
             LastMethod = request.Method;
             LastRequestUri = request.RequestUri;
+            LastUserAgent = request.Headers.UserAgent.Count > 0 ? request.Headers.UserAgent.ToString() : null;
             LastBody = request.Content is null
                 ? null
                 : await request.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
@@ -308,6 +332,38 @@ public class WatchguardPreAuthClientTests
 
         var failure = Assert.IsType<PreAuthOutcome.Failure>(outcome);
         Assert.Equal("Wrong authentication domain", failure.Reason);
+    }
+
+    [Fact]
+    public void ParseLogonResponse_MapsStatus8WithLogonIdToChallenge()
+    {
+        // Live AuthPoint Firebox capture: a bare-password logon answers logon_status=8 with a
+        // logon_id + chaStr. That is a CHALLENGE answered via the response leg — not a credential
+        // rejection and not an "append OTP to the password" signal (which produced <errStr>501</errStr>).
+        const string xml = """
+            <resp>
+              <action>sslvpn_logon</action>
+              <logon_status>8</logon_status>
+              <auth-domain-list><auth-domain><name>AuthPoint</name></auth-domain></auth-domain-list>
+              <logon_id>1810</logon_id>
+              <chaStr>Type "p" to receive a push notification or type your one-time password</chaStr>
+            </resp>
+            """;
+        var outcome = WatchguardPreAuthClient.ParseLogonResponse(xml);
+
+        var ch = Assert.IsType<PreAuthOutcome.Challenge>(outcome);
+        Assert.Equal("1810", ch.LogonId);
+        Assert.Equal("Type \"p\" to receive a push notification or type your one-time password", ch.ChallengeText);
+    }
+
+    [Fact]
+    public void ParseLogonResponse_MapsStatus8WithoutLogonIdToFailure()
+    {
+        // Status 8 with no logon_id is a hard failure (nothing to respond to), not a challenge.
+        const string xml = "<resp><logon_status>8</logon_status></resp>";
+        var outcome = WatchguardPreAuthClient.ParseLogonResponse(xml);
+
+        Assert.IsType<PreAuthOutcome.Failure>(outcome);
     }
 
     [Fact]

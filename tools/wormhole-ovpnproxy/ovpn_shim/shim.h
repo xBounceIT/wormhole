@@ -29,6 +29,22 @@ int ovpn_load_profile(ovpn_client_t* c, const char* profile_ovpn);
 // Set username/password credentials. Either may be empty/null. Returns 0 on success.
 int ovpn_set_creds(ovpn_client_t* c, const char* username, const char* password);
 
+// Provide a response to an OpenVPN dynamic challenge (CRV1). `response` is the user's
+// one-time passcode (or "p"/"push" to request an AuthPoint push); `cookie` is the value
+// returned by ovpn_get_dynamic_challenge after a prior connect ended in a challenge. Call
+// before ovpn_connect_async on a fresh client. OpenVPN3 turns these into the
+// CRV1::stateID::response auth string. Returns 0 on success, 100 if built without ovpn3.
+int ovpn_set_challenge(ovpn_client_t* c, const char* response, const char* cookie);
+
+// Returns 1 if the most recent ovpn_wait_connected failure was because the server demanded
+// a dynamic challenge (rather than a flat auth/transport failure), else 0. Lets the caller
+// decide whether retrying with ovpn_set_challenge is worthwhile.
+int ovpn_is_dynamic_challenge(ovpn_client_t* c);
+
+// Copy the most recent dynamic-challenge CRV1 cookie into out_buf (NUL-terminated). Returns
+// 0 on success, non-zero on bad args, 100 if built without ovpn3.
+int ovpn_get_dynamic_challenge(ovpn_client_t* c, char* out_buf, int out_len);
+
 // Kick off the connect on a background thread. Returns 0 if the thread spawned;
 // the actual handshake result is reported via ovpn_wait_connected.
 int ovpn_connect_async(ovpn_client_t* c);

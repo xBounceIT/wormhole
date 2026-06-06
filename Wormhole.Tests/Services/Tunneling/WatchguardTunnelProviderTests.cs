@@ -20,6 +20,7 @@ public class WatchguardTunnelProviderTests
         var provider = new WatchguardTunnelProvider(
             new NullOtpPromptService(),
             new NullSamlAuthService(),
+            new NullWatchguardProfileCache(),
             NullLogger<WatchguardTunnelProvider>.Instance,
             NullLoggerFactory.Instance);
 
@@ -32,6 +33,7 @@ public class WatchguardTunnelProviderTests
         var provider = new WatchguardTunnelProvider(
             new NullOtpPromptService(),
             new NullSamlAuthService(),
+            new NullWatchguardProfileCache(),
             NullLogger<WatchguardTunnelProvider>.Instance,
             NullLoggerFactory.Instance);
         var cfg = new TunnelConfig { Id = Guid.NewGuid(), Name = "x", Kind = TunnelKind.Watchguard };
@@ -49,6 +51,7 @@ public class WatchguardTunnelProviderTests
         var provider = new WatchguardTunnelProvider(
             new NullOtpPromptService(),
             new NullSamlAuthService(),
+            new NullWatchguardProfileCache(),
             NullLogger<WatchguardTunnelProvider>.Instance,
             NullLoggerFactory.Instance);
         var cfg = new TunnelConfig { Id = Guid.NewGuid(), Name = "x", Kind = TunnelKind.Watchguard };
@@ -65,6 +68,7 @@ public class WatchguardTunnelProviderTests
         var provider = new WatchguardTunnelProvider(
             new NullOtpPromptService(),
             new NullSamlAuthService(),
+            new NullWatchguardProfileCache(),
             NullLogger<WatchguardTunnelProvider>.Instance,
             NullLoggerFactory.Instance);
         var cfg = new TunnelConfig { Id = Guid.NewGuid(), Name = "x", Kind = TunnelKind.Watchguard };
@@ -120,17 +124,20 @@ public class WatchguardTunnelProviderTests
     }
 
     [Fact]
-    public void ResolveEffectiveDomain_DefaultDomainWithSingleAdvertisedDomain_UsesAdvertisedDomain()
+    public void ResolveEffectiveDomain_DefaultOrUnsetDomain_SendsEmptyLikeNativeClient()
     {
+        // The native 2026.2 client has no domain field; it sends an empty fw_domain. Auto-detecting
+        // and sending the advertised "AuthPoint" instead selects a push-on-OTP policy. So both an
+        // unset domain and the built-in "Firebox-DB" default resolve to empty.
         var authDomains = new[] { "AuthPoint" };
         var status = new WatchguardGatewayStatus(
             SamlEnabled: false,
             SamlIdentityProviderName: null,
             AuthDomains: authDomains);
 
-        var domain = WatchguardTunnelProvider.ResolveEffectiveDomain(WatchguardSettings.DefaultDomain, status);
-
-        Assert.Equal("AuthPoint", domain);
+        Assert.Equal(string.Empty, WatchguardTunnelProvider.ResolveEffectiveDomain(WatchguardSettings.DefaultDomain, status));
+        Assert.Equal(string.Empty, WatchguardTunnelProvider.ResolveEffectiveDomain("", status));
+        Assert.Equal(string.Empty, WatchguardTunnelProvider.ResolveEffectiveDomain(null, status));
     }
 
     [Fact]
@@ -148,17 +155,18 @@ public class WatchguardTunnelProviderTests
     }
 
     [Fact]
-    public void ResolveEffectiveDomain_MultipleAdvertisedDomains_KeepsDefault()
+    public void ResolveEffectiveDomain_IgnoresAdvertisedDomains()
     {
+        // The advertised auth-domain list is no longer consulted for the fw_domain value — we always
+        // mirror the native client (empty unless the user explicitly set a non-default domain).
         var authDomains = new[] { "Firebox-DB", "AuthPoint" };
         var status = new WatchguardGatewayStatus(
             SamlEnabled: false,
             SamlIdentityProviderName: null,
             AuthDomains: authDomains);
 
-        var domain = WatchguardTunnelProvider.ResolveEffectiveDomain(WatchguardSettings.DefaultDomain, status);
-
-        Assert.Equal(WatchguardSettings.DefaultDomain, domain);
+        Assert.Equal(string.Empty, WatchguardTunnelProvider.ResolveEffectiveDomain(WatchguardSettings.DefaultDomain, status));
+        Assert.Equal("RADIUS-Corp", WatchguardTunnelProvider.ResolveEffectiveDomain("RADIUS-Corp", status));
     }
 
     // ----- Multi-stage 2FA loop tests -----
@@ -213,8 +221,29 @@ public class WatchguardTunnelProviderTests
     }
 
     [Fact]
-    public async Task RunPreAuthLoop_PushChoiceThenOk_ReturnsPushChoice()
+    public async Task RunPreAuthLoop_Status8ChallengeThenOk_ReturnsOtp()
     {
+        // Live AuthPoint behavior: the bare-password logon returns status 8, which ParseLogonResponse
+        // maps to Challenge. The loop answers via the response leg and the entered OTP becomes the
+        // OpenVPN credential — identical to the status-4 path.
+        var pre = new ScriptedPreAuth();
+        pre.Queue(new PreAuthOutcome.Challenge("1810", "Type \"p\" ... or type your one-time password"));
+        pre.Queue(new PreAuthOutcome.Ok());
+        var otp = new ScriptedOtpPrompt("112233");
+
+        var result = await WatchguardTunnelProvider.RunPreAuthLoopAsync(
+            pre, otp, NullLogger<WatchguardTunnelProvider>.Instance, "cfg", ValidSettings(), CancellationToken.None);
+
+        Assert.Equal("112233", result);
+        Assert.Equal("1810", pre.LastChallengeLogonId);
+        Assert.Equal("112233", pre.LastOtp);
+    }
+
+    [Fact]
+    public async Task RunPreAuthLoop_PushChoiceThenOk_ReturnsAccountPassword()
+    {
+        // Push ("p") goes through the response leg (RespondToMfaChoiceAsync). Because MFA is
+        // satisfied out-of-band, the OpenVPN credential returned is the account password, not "p".
         var pre = new ScriptedPreAuth();
         pre.Queue(new PreAuthOutcome.Challenge("session-1", "enter code or p"));
         pre.Queue(new PreAuthOutcome.Ok());
@@ -223,9 +252,53 @@ public class WatchguardTunnelProviderTests
         var result = await WatchguardTunnelProvider.RunPreAuthLoopAsync(
             pre, otp, NullLogger<WatchguardTunnelProvider>.Instance, "cfg", ValidSettings(), CancellationToken.None);
 
-        Assert.Equal("p", result);
+        Assert.Equal("stored-password", result);
         Assert.Equal("session-1", pre.LastMfaChoiceLogonId);
         Assert.Equal("p", pre.LastMfaChoice);
+        Assert.Null(pre.LastOtp);
+    }
+
+    [Fact]
+    public async Task RunPreAuthLoop_AuthPointDomain_ChallengeThenOtp_UsesResponseLegNotAppend()
+    {
+        // AuthPoint domains take the SAME bare-logon → response-leg path as Firebox-DB — there is no
+        // appended-OTP branch (the native wgsslvpnc.exe client doesn't append for this firmware; the
+        // gateway answers <errStr>501</errStr>). The bare password opens the challenge and the OTP is
+        // answered via the response leg, becoming the OpenVPN credential. No push (no mfa_choice).
+        var pre = new ScriptedPreAuth();
+        pre.Queue(new PreAuthOutcome.Challenge("1810", "type p or your one-time password"));
+        pre.Queue(new PreAuthOutcome.Ok());
+        var otp = new ScriptedOtpPrompt("112233");
+        var settings = ValidSettings();
+        settings.Domain = "AuthPoint";
+
+        var result = await WatchguardTunnelProvider.RunPreAuthLoopAsync(
+            pre, otp, NullLogger<WatchguardTunnelProvider>.Instance, "cfg", settings, CancellationToken.None);
+
+        Assert.Equal("112233", result);
+        Assert.Equal("stored-password", pre.LastLogonPassword); // bare password, NOT appended
+        Assert.Equal("112233", pre.LastOtp);                     // response leg used
+        Assert.Null(pre.LastMfaChoice);                          // no push fired
+    }
+
+    [Fact]
+    public async Task RunPreAuthLoop_AuthPointDomain_PushUpFront_UsesMfaResponse()
+    {
+        // "p" entered up front: bare logon opens the challenge and we answer immediately with the
+        // mfa_response leg, which is the request that legitimately triggers the push.
+        var pre = new ScriptedPreAuth();
+        pre.Queue(new PreAuthOutcome.Challenge("1900", "type p or otp")); // bare logon -> challenge
+        pre.Queue(new PreAuthOutcome.Ok());                                // mfa_response -> ok
+        var otp = new ScriptedOtpPrompt("p");
+        var settings = ValidSettings();
+        settings.Domain = "AuthPoint";
+
+        var result = await WatchguardTunnelProvider.RunPreAuthLoopAsync(
+            pre, otp, NullLogger<WatchguardTunnelProvider>.Instance, "cfg", settings, CancellationToken.None);
+
+        Assert.Equal("stored-password", result);   // account password after a push
+        Assert.Equal("p", pre.LastMfaChoice);
+        Assert.Equal("1900", pre.LastMfaChoiceLogonId);
         Assert.Null(pre.LastOtp);
     }
 
@@ -380,6 +453,26 @@ public class WatchguardTunnelProviderTests
             Task.FromException<WatchguardSamlAuthResult>(new InvalidOperationException("not scripted"));
     }
 
+    // Always a cache miss; records writes/deletes so a test can assert the provider cached a
+    // downloaded profile (the single-2FA upgrade) without touching DPAPI or the real filesystem.
+    private sealed class NullWatchguardProfileCache : IWatchguardProfileCache
+    {
+        public int Writes { get; private set; }
+        public string? LastWrittenProfile { get; private set; }
+
+        public Task<string?> TryReadProfileAsync(Guid tunnelConfigId, WatchguardSettings settings, CancellationToken cancellationToken) =>
+            Task.FromResult<string?>(null);
+
+        public Task WriteProfileAsync(Guid tunnelConfigId, WatchguardSettings settings, string profileOvpn, CancellationToken cancellationToken)
+        {
+            Writes++;
+            LastWrittenProfile = profileOvpn;
+            return Task.CompletedTask;
+        }
+
+        public Task DeleteAsync(Guid tunnelConfigId, CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
     /// <summary>
     /// Scripted IWatchguardPreAuth fake. Each LogonAsync or RespondToChallengeAsync dequeues the
     /// next pre-queued outcome (or throws the next pre-queued exception). Records the most
@@ -392,12 +485,16 @@ public class WatchguardTunnelProviderTests
         public string? LastOtp { get; private set; }
         public string? LastMfaChoiceLogonId { get; private set; }
         public string? LastMfaChoice { get; private set; }
+        public string? LastLogonPassword { get; private set; }
 
         public void Queue(PreAuthOutcome outcome) => _script.Enqueue(outcome);
         public void QueueThrow(Exception ex) => _script.Enqueue(ex);
 
         public Task<PreAuthOutcome> LogonAsync(string server, int port, string username, string password, string domain, CancellationToken cancellationToken)
-            => DequeueOrThrow();
+        {
+            LastLogonPassword = password;
+            return DequeueOrThrow();
+        }
 
         public Task<PreAuthOutcome> RespondToChallengeAsync(string server, int port, string logonId, string otpCode, CancellationToken cancellationToken)
         {

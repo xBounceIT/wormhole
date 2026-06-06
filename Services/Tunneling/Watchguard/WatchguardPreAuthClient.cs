@@ -32,7 +32,10 @@ internal interface IWatchguardPreAuth
 ///
 /// Outcome encoding follows the reverse-engineered logon_status values:
 ///   1 = Ok (credentials accepted, proceed)
-///   4 = Challenge (server wants an additional one-time code)
+///   4 = Challenge (classic Firebox-DB — server wants a one-time code via the response leg)
+///   8 = Challenge (AuthPoint/RADIUS MFA — same response-leg shape; the gateway returns a
+///       logon_id + chaStr "Type 'p' to receive a push notification or type your one-time
+///       password". Confirmed against a live AuthPoint Firebox.)
 ///   anything else = Failure (treat as bad credentials / server error)
 ///
 /// References:
@@ -137,6 +140,7 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
             {
                 Timeout = TimeSpan.FromSeconds(20),
             };
+            ApplyNativeClientHeaders(_http);
             _ownsHttpClient = true;
             _pinnedCaCerts = caCerts;
         }
@@ -148,11 +152,20 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
         }
     }
 
+    private static void ApplyNativeClientHeaders(HttpClient http)
+    {
+        // Identify as the native WatchGuard client so the Firebox doesn't fire a push for an OTP
+        // answered via the `response` leg. See WatchguardConfigClient.NativeUserAgent.
+        if (!http.DefaultRequestHeaders.Contains("User-Agent"))
+            http.DefaultRequestHeaders.TryAddWithoutValidation("User-Agent", WatchguardConfigClient.NativeUserAgent);
+    }
+
     // Test seam: inject a fake HttpClient pointed at a loopback HttpListener.
     public WatchguardPreAuthClient(HttpClient http)
     {
         ArgumentNullException.ThrowIfNull(http);
         _http = http;
+        ApplyNativeClientHeaders(_http);
         _ownsHttpClient = false;
         _pinnedCaCerts = null;
     }
@@ -171,16 +184,14 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
     {
         var form = new Dictionary<string, string>
         {
-            // Field names + values mirror the official client's HTTP request capture as
-            // reverse-engineered in tazjin/watchblob (urls.go templateChallengeTriggerUri).
-            // The Firebox routes this endpoint from the query string; the native client and
-            // watchblob both use a query-only request for this step.
+            // Field names AND ORDER mirror wgsslvpnc.exe's template exactly:
+            //   /?action=sslvpn_logon&fw_username=%1&fw_password=%2&style=fw_logon_progress.xsl&fw_logon_type=logon&fw_domain=%3
             ["action"] = "sslvpn_logon",
+            ["fw_username"] = username,
+            ["fw_password"] = password,
             ["style"] = "fw_logon_progress.xsl",
             ["fw_logon_type"] = "logon",
             ["fw_domain"] = domain,
-            ["fw_username"] = username,
-            ["fw_password"] = password,
         };
         var uri = BuildLogonUri(server, port, form);
         return await SendLogonRequestAsync(uri, cancellationToken).ConfigureAwait(false);
@@ -191,19 +202,15 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
     {
         var form = new Dictionary<string, string>
         {
-            // The challenge-response leg uses a DIFFERENT shape from the initial logon — the
-            // OTP goes in `response`, not `fw_password`, and `fw_logon_type` switches from
-            // "logon" to "response". MFA-enabled Fireboxes reject the second step otherwise.
-            // Field names captured from tazjin/watchblob (urls.go templateResponseUri).
-            //
-            // After a successful response leg the same OTP also becomes the OpenVPN
-            // auth-user-pass password (the gateway records the (user, OTP) tuple as a
-            // one-shot accept) — that's handled by the caller in WatchguardTunnelProvider.
+            // The OTP answer goes in `response` with fw_logon_type=response. Native template:
+            //   /?action=sslvpn_logon&style=fw_logon_progress.xsl&fw_logon_type=response&response=%1&fw_logon_id=%2
+            // After a successful response leg the same OTP also becomes the OpenVPN auth-user-pass
+            // password (the gateway records the (user, OTP) one-shot accept) — handled by the caller.
             ["action"] = "sslvpn_logon",
             ["style"] = "fw_logon_progress.xsl",
             ["fw_logon_type"] = "response",
-            ["fw_logon_id"] = logonId,
             ["response"] = otpCode,
+            ["fw_logon_id"] = logonId,
         };
         var uri = BuildLogonUri(server, port, form);
         return await SendLogonRequestAsync(uri, cancellationToken).ConfigureAwait(false);
@@ -214,13 +221,15 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
     {
         var form = new Dictionary<string, string>
         {
-            // WatchGuard native 2026.2 sends AuthPoint push choices through this distinct
-            // endpoint shape: `fw_logon_type=mfa_response&mfa_choice=p`.
+            // Push uses the DISTINCT mfa_response leg, exactly as wgsslvpnc.exe does:
+            //   /?action=sslvpn_logon&style=fw_logon_progress.xsl&fw_logon_type=mfa_response&mfa_choice=%1&fw_logon_id=%2
+            // Only this request makes the firewall fire a push — an OTP answered via the `response`
+            // leg must therefore NOT reuse this shape.
             ["action"] = "sslvpn_logon",
             ["style"] = "fw_logon_progress.xsl",
             ["fw_logon_type"] = "mfa_response",
-            ["fw_logon_id"] = logonId,
             ["mfa_choice"] = choice,
+            ["fw_logon_id"] = logonId,
         };
         var uri = BuildLogonUri(server, port, form);
         return await SendLogonRequestAsync(uri, cancellationToken).ConfigureAwait(false);
@@ -344,10 +353,17 @@ internal sealed class WatchguardPreAuthClient : IWatchguardPreAuth, IDisposable
         return status switch
         {
             1 => new PreAuthOutcome.Ok(),
-            // IsNullOrWhiteSpace (not IsNullOrEmpty): a `<logon_id>   </logon_id>` element from a
-            // non-conforming firmware or proxy would otherwise look like a valid challenge and the
-            // user would type an OTP only to have the challenge response send a whitespace ID.
-            4 when !string.IsNullOrWhiteSpace(logonId) => new PreAuthOutcome.Challenge(logonId!, chaStr ?? string.Empty),
+            // Both status 4 (classic Firebox-DB challenge) AND status 8 (AuthPoint/RADIUS MFA) are
+            // challenges when the gateway returns a logon_id + chaStr. Confirmed from a live
+            // AuthPoint Firebox capture: a bare-password logon answers
+            //   <logon_status>8</logon_status><logon_id>1810</logon_id>
+            //   <chaStr>Type "p" to receive a push notification or type your one-time password</chaStr>
+            // i.e. the OTP (or "p") must come back via the `response` leg
+            // (fw_logon_type=response&fw_logon_id=…&response=…), NOT appended to the password in a
+            // fresh logon — doing the latter makes the gateway answer <errStr>501</errStr>.
+            // IsNullOrWhiteSpace (not IsNullOrEmpty): a `<logon_id>   </logon_id>` from a
+            // non-conforming firmware would otherwise look like a valid challenge.
+            4 or 8 when !string.IsNullOrWhiteSpace(logonId) => new PreAuthOutcome.Challenge(logonId!, chaStr ?? string.Empty),
             4 => new PreAuthOutcome.Failure("Firebox requested a 2FA challenge but did not return a logon_id."),
             _ => new PreAuthOutcome.Failure(
                 string.IsNullOrWhiteSpace(errorMessage)

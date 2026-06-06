@@ -272,7 +272,22 @@ class WormholeClient final : public OpenVPNClient {
     std::fflush(stderr);
 
     std::lock_guard<std::mutex> lk(state_m_);
-    if (ev.name == "CONNECTED") {
+    if (ev.name == "DYNAMIC_CHALLENGE") {
+      // The server wants an OpenVPN data-channel challenge/response (CRV1) — e.g. a
+      // WatchGuard AuthPoint 2FA prompt presented at the OpenVPN auth layer, not the web
+      // portal. ev.info carries the opaque CRV1 cookie (CRV1:flags:stateID:user:text).
+      // Capture it so the caller can retry the connect on a FRESH client with the user's
+      // response (set via ovpn_set_challenge -> ProvideCreds.response + dynamicChallengeCookie,
+      // which OpenVPN3 turns into the CRV1::stateID::response auth). This event is fatal to the
+      // current session, so mark terminated to release wait_connected. NB: keep this branch
+      // BEFORE the generic `ev.fatal` branch below, which would otherwise swallow it.
+      is_dynamic_challenge_ = true;
+      dynamic_challenge_cookie_ = ev.info;
+      terminated_ = true;
+      last_error_ = "dynamic challenge required";
+      auto* tc = current_tun_.load(std::memory_order_acquire);
+      if (tc) tc->wake_inbound_waiters();
+    } else if (ev.name == "CONNECTED") {
       connected_ = true;
       terminated_ = false;
       last_error_.clear();
@@ -379,6 +394,28 @@ class WormholeClient final : public OpenVPNClient {
     // renegotiation/reconnect. That field was removed; modern OpenVPN3 does this
     // automatically whenever the server returns an auth-token, so there is nothing
     // to opt into here.
+  }
+
+  // Provide a response to an OpenVPN dynamic challenge (CRV1). `cookie` is the value
+  // captured from the DYNAMIC_CHALLENGE event (ovpn_get_dynamic_challenge); `response` is
+  // the user's one-time passcode, or "p"/"push" to request an AuthPoint push. OpenVPN3
+  // combines these into the CRV1::stateID::response auth string on the next connect.
+  void set_challenge(const std::string& response, const std::string& cookie) {
+    creds_.response = response;
+    creds_.dynamicChallengeCookie = cookie;
+  }
+
+  // True if the most recent connect() ended because the server demanded a dynamic
+  // challenge (rather than a flat auth/transport failure).
+  bool is_dynamic_challenge() {
+    std::lock_guard<std::mutex> lk(state_m_);
+    return is_dynamic_challenge_;
+  }
+
+  // The CRV1 cookie from the most recent dynamic challenge (empty if none).
+  std::string dynamic_challenge_cookie() {
+    std::lock_guard<std::mutex> lk(state_m_);
+    return dynamic_challenge_cookie_;
   }
 
   int connect_async() {
@@ -489,6 +526,10 @@ class WormholeClient final : public OpenVPNClient {
   bool connected_ = false;
   bool terminated_ = false;
   std::string last_error_;
+  // Set when a connect ended in an OpenVPN dynamic challenge (CRV1); the cookie is the
+  // opaque CRV1:flags:stateID:user:text token to feed back via set_challenge on retry.
+  bool is_dynamic_challenge_ = false;
+  std::string dynamic_challenge_cookie_;
 
   std::atomic<WormholeTunClient*> current_tun_{nullptr};
   std::atomic<WormholeTunFactory*> last_factory_{nullptr};
@@ -724,6 +765,41 @@ int ovpn_last_error(ovpn_client_t* c, char* out_buf, int out_len) {
   if (!c || !out_buf || out_len < 1) return 1;
   const std::string err = reinterpret_cast<ClientWrapper*>(c)->client->last_error();
   std::strncpy(out_buf, err.c_str(), out_len - 1);
+  out_buf[out_len - 1] = '\0';
+  return 0;
+#else
+  (void)c; (void)out_buf; (void)out_len;
+  return 100;
+#endif
+}
+
+int ovpn_set_challenge(ovpn_client_t* c, const char* response, const char* cookie) {
+#if HAVE_OPENVPN3
+  if (!c) return 1;
+  reinterpret_cast<ClientWrapper*>(c)->client->set_challenge(
+      response ? response : "", cookie ? cookie : "");
+  return 0;
+#else
+  (void)c; (void)response; (void)cookie;
+  return 100;
+#endif
+}
+
+int ovpn_is_dynamic_challenge(ovpn_client_t* c) {
+#if HAVE_OPENVPN3
+  if (!c) return 0;
+  return reinterpret_cast<ClientWrapper*>(c)->client->is_dynamic_challenge() ? 1 : 0;
+#else
+  (void)c;
+  return 0;
+#endif
+}
+
+int ovpn_get_dynamic_challenge(ovpn_client_t* c, char* out_buf, int out_len) {
+#if HAVE_OPENVPN3
+  if (!c || !out_buf || out_len < 1) return 1;
+  const std::string cookie = reinterpret_cast<ClientWrapper*>(c)->client->dynamic_challenge_cookie();
+  std::strncpy(out_buf, cookie.c_str(), out_len - 1);
   out_buf[out_len - 1] = '\0';
   return 0;
 #else

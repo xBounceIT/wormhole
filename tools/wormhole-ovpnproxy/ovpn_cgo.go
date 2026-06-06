@@ -93,70 +93,135 @@ func lastError(client *C.ovpn_client_t) string {
 	return strings.TrimSpace(string(buf[:end]))
 }
 
+// connectWithChallenge performs the OpenVPN connect, transparently answering a single
+// OpenVPN data-channel dynamic challenge (CRV1) with cfg.ChallengeResponse if the server
+// issues one — e.g. WatchGuard AuthPoint 2FA presented at the OpenVPN auth layer rather than
+// a web portal. It mirrors the OpenVPN3 ClientAPI pattern of using a FRESH client per attempt:
+// attempt 1 sends username/password; if that comes back as a dynamic challenge and we have a
+// response, attempt 2 sends username/password + the CRV1 response on a brand-new client.
+// Returns a live CONNECTED client (owned by the caller — free with C.ovpn_free) and its
+// assigned interface prefix, or an error.
+func connectWithChallenge(cfg config) (*C.ovpn_client_t, netip.Prefix, error) {
+	cProfile := C.CString(cfg.ProfileOvpn)
+	defer C.free(unsafe.Pointer(cProfile))
+
+	// attempt runs ONE connect on a fresh client. response/cookie are empty on the first
+	// attempt; on the retry they carry the user's 2FA answer and the CRV1 cookie captured from
+	// the first attempt. On a dynamic-challenge failure it returns isChallenge=true + the cookie
+	// (retryable); any other failure returns a terminal error (with the OpenVPN3 reason when
+	// available). The freshly-created client is freed here unless it actually connected (in
+	// which case ownership passes to the caller).
+	attempt := func(response, cookie string) (*C.ovpn_client_t, netip.Prefix, bool, string, error) {
+		client := C.ovpn_new()
+		if client == nil {
+			return nil, netip.Prefix{}, false, "", errors.New("ovpn_new returned null (out of memory, or sidecar built without -tags ovpn3 / submodules)")
+		}
+		connected := false
+		defer func() {
+			if !connected {
+				C.ovpn_stop(client)
+				C.ovpn_free(client)
+			}
+		}()
+
+		if rc := C.ovpn_load_profile(client, cProfile); rc != 0 {
+			return nil, netip.Prefix{}, false, "", fmt.Errorf("ovpn_load_profile failed (code %d) — likely a malformed .ovpn", int(rc))
+		}
+		if cfg.Username != "" || cfg.Password != "" {
+			cU := C.CString(cfg.Username)
+			cP := C.CString(cfg.Password)
+			rc := C.ovpn_set_creds(client, cU, cP)
+			C.free(unsafe.Pointer(cU))
+			C.free(unsafe.Pointer(cP))
+			if rc != 0 {
+				return nil, netip.Prefix{}, false, "", fmt.Errorf("ovpn_set_creds failed (code %d)", int(rc))
+			}
+		}
+		if response != "" || cookie != "" {
+			cR := C.CString(response)
+			cC := C.CString(cookie)
+			rc := C.ovpn_set_challenge(client, cR, cC)
+			C.free(unsafe.Pointer(cR))
+			C.free(unsafe.Pointer(cC))
+			if rc != 0 {
+				return nil, netip.Prefix{}, false, "", fmt.Errorf("ovpn_set_challenge failed (code %d)", int(rc))
+			}
+		}
+		if rc := C.ovpn_connect_async(client); rc != 0 {
+			return nil, netip.Prefix{}, false, "", fmt.Errorf("ovpn_connect_async failed (code %d)", int(rc))
+		}
+
+		// Block until CONNECTED (or a fatal handshake/auth failure / timeout). OpenVPN profiles
+		// can list multiple remotes, so keep this wait above one OpenVPN3 connTimeout. The shim
+		// returns the assigned interface address as a CIDR string.
+		cidrBuf := make([]byte, 64)
+		rc := C.ovpn_wait_connected(client, (*C.char)(unsafe.Pointer(&cidrBuf[0])), C.int(len(cidrBuf)), C.int(waitConnectedTimeoutMs))
+		if rc != 0 {
+			// Distinguish a retryable dynamic challenge from a flat auth/transport failure.
+			if C.ovpn_is_dynamic_challenge(client) != 0 {
+				ckBuf := make([]byte, 1024)
+				C.ovpn_get_dynamic_challenge(client, (*C.char)(unsafe.Pointer(&ckBuf[0])), C.int(len(ckBuf)))
+				n := 0
+				for n < len(ckBuf) && ckBuf[n] != 0 {
+					n++
+				}
+				return nil, netip.Prefix{}, true, string(ckBuf[:n]), errors.New("server issued an OpenVPN dynamic challenge")
+			}
+			if reason := lastError(client); reason != "" {
+				return nil, netip.Prefix{}, false, "", fmt.Errorf("ovpn_wait_connected failed (code %d): %s", int(rc), reason)
+			}
+			return nil, netip.Prefix{}, false, "", fmt.Errorf("ovpn_wait_connected failed (code %d) — handshake/auth failure or timeout", int(rc))
+		}
+
+		end := 0
+		for end < len(cidrBuf) && cidrBuf[end] != 0 {
+			end++
+		}
+		cidr := strings.TrimSpace(string(cidrBuf[:end]))
+		p, perr := netip.ParsePrefix(cidr)
+		if perr != nil {
+			return nil, netip.Prefix{}, false, "", fmt.Errorf("shim returned invalid interface CIDR %q: %w", cidr, perr)
+		}
+		connected = true // ownership passes to the caller; defer won't free it
+		return client, p, false, "", nil
+	}
+
+	// Attempt 1: plain username/password.
+	client, pfx, isChallenge, cookie, err := attempt("", "")
+	if err == nil {
+		return client, pfx, nil
+	}
+	if !isChallenge {
+		return nil, netip.Prefix{}, err
+	}
+	// The server wants an OpenVPN-layer 2FA response. Retry on a fresh client if we have one.
+	if cfg.ChallengeResponse == "" {
+		return nil, netip.Prefix{}, errors.New("server requires an OpenVPN dynamic-challenge response but none was provided")
+	}
+	logf("openvpn: server issued a dynamic challenge; retrying with the provided response")
+	client, pfx, isChallenge, _, err = attempt(cfg.ChallengeResponse, cookie)
+	if err != nil {
+		if isChallenge {
+			return nil, netip.Prefix{}, errors.New("openvpn dynamic-challenge response was rejected by the server")
+		}
+		return nil, netip.Prefix{}, err
+	}
+	return client, pfx, nil
+}
+
 // startOpenVpn boots OpenVPN3 via the shim and returns a Dialer routed through a
 // wireguard-go netstack. The cleanup function tears down both — pump goroutines first,
 // then the C++ session, then the netstack, then the C++ client object — so no thread
 // outlives the objects it dereferences.
 func startOpenVpn(ctx context.Context, cfg config) (sockstun.Dialer, func(), error) {
-	// 1. Construct the C++ client and load the profile.
-	cProfile := C.CString(cfg.ProfileOvpn)
-	defer C.free(unsafe.Pointer(cProfile))
-	client := C.ovpn_new()
-	if client == nil {
-		return nil, nil, errors.New("ovpn_new returned null (out of memory, or sidecar built without -tags ovpn3 / submodules)")
+	// Connect, transparently answering one OpenVPN-layer dynamic challenge with
+	// cfg.ChallengeResponse if the server issues one (see connectWithChallenge). On success we
+	// own a CONNECTED client and its assigned interface prefix.
+	client, pfx, err := connectWithChallenge(cfg)
+	if err != nil {
+		return nil, nil, err
 	}
 	cleanupClient := func() { C.ovpn_free(client) }
-
-	if rc := C.ovpn_load_profile(client, cProfile); rc != 0 {
-		cleanupClient()
-		return nil, nil, fmt.Errorf("ovpn_load_profile failed (code %d) — likely a malformed .ovpn", int(rc))
-	}
-
-	if cfg.Username != "" || cfg.Password != "" {
-		cU := C.CString(cfg.Username)
-		cP := C.CString(cfg.Password)
-		rc := C.ovpn_set_creds(client, cU, cP)
-		C.free(unsafe.Pointer(cU))
-		C.free(unsafe.Pointer(cP))
-		if rc != 0 {
-			cleanupClient()
-			return nil, nil, fmt.Errorf("ovpn_set_creds failed (code %d)", int(rc))
-		}
-	}
-
-	// 2. Kick off the connect in the C++ event loop.
-	if rc := C.ovpn_connect_async(client); rc != 0 {
-		cleanupClient()
-		return nil, nil, fmt.Errorf("ovpn_connect_async failed (code %d)", int(rc))
-	}
-
-	// 3. Block until CONNECTED (or a fatal handshake/auth failure / timeout). OpenVPN
-	//    profiles can list multiple remotes, and the client may need to work through one
-	//    connection timeout before a later remote succeeds. Keep this wait above one
-	//    OpenVPN3 connTimeout so fallback remotes get a chance to connect before we report
-	//    failure. The shim returns the assigned interface address as a CIDR string so we
-	//    can hand it to netstack.
-	cidrBuf := make([]byte, 64)
-	if rc := C.ovpn_wait_connected(client, (*C.char)(unsafe.Pointer(&cidrBuf[0])), C.int(len(cidrBuf)), C.int(waitConnectedTimeoutMs)); rc != 0 {
-		reason := lastError(client)
-		C.ovpn_stop(client)
-		cleanupClient()
-		if reason != "" {
-			return nil, nil, fmt.Errorf("ovpn_wait_connected failed (code %d): %s", int(rc), reason)
-		}
-		return nil, nil, fmt.Errorf("ovpn_wait_connected failed (code %d) — handshake/auth failure or timeout", int(rc))
-	}
-	end := 0
-	for end < len(cidrBuf) && cidrBuf[end] != 0 {
-		end++
-	}
-	cidr := strings.TrimSpace(string(cidrBuf[:end]))
-	pfx, err := netip.ParsePrefix(cidr)
-	if err != nil {
-		C.ovpn_stop(client)
-		cleanupClient()
-		return nil, nil, fmt.Errorf("shim returned invalid interface CIDR %q: %w", cidr, err)
-	}
 
 	// 4. Spin up a netstack TUN at the pushed address. nil DNS means hostname targets
 	//    fail closed inside netstack.DialContext; pushed DNS support is a v2 feature.

@@ -12,6 +12,7 @@ internal static class AppPaths
     private static readonly string KeysDirectory = Path.Combine(AppDataDirectory, "keys");
     private static readonly string TunnelConfigsDirectory = Path.Combine(AppDataDirectory, "tunnels");
     private static readonly string StormshieldCacheDirectory = Path.Combine(AppDataDirectory, "stormshield-cache");
+    private static readonly string WatchguardCacheDirectory = Path.Combine(AppDataDirectory, "watchguard-cache");
     private static readonly string UpdateCacheDirectory = Path.Combine(AppDataDirectory, "cache", "updates");
     private static readonly string WebView2UserDataDirectory = Path.Combine(AppDataDirectory, "webview2");
     private static readonly string WatchguardSamlWebView2UserDataDirectory = Path.Combine(AppDataDirectory, "watchguard-saml-webview2");
@@ -36,6 +37,12 @@ internal static class AppPaths
     // reconnect can reuse the profile instead of re-downloading it (which would spend the single-use
     // OTP on the HTTPS step rather than the OpenVPN data-plane password). See StormshieldConfigCache.
     public static string GetStormshieldCacheDirectory() => StormshieldCacheDirectory;
+
+    // Per-tunnel DPAPI-encrypted cache of downloaded WatchGuard OpenVPN profiles, so a reconnect can
+    // skip the web sslvpn_logon (which spends the single 2FA factor on the portal and leaves the
+    // OpenVPN CRV1 layer demanding a second) and route the one factor to the OpenVPN data channel.
+    // See WatchguardProfileCache.
+    public static string GetWatchguardCacheDirectory() => WatchguardCacheDirectory;
 
     public static string GetUpdateCacheDirectory() => UpdateCacheDirectory;
 
