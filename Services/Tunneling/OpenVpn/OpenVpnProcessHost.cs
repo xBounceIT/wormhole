@@ -207,9 +207,21 @@ public sealed class OpenVpnProcessHost : IAsyncDisposable
 
         var tail = string.Join(" / ", _stderrTail.ToArray());
         var detail = string.IsNullOrWhiteSpace(tail) ? "no diagnostic output was captured" : tail;
+
+        // Distinct exit code (see the sidecar's exitDynamicChallengeRequired): the server demanded
+        // an OpenVPN-layer dynamic challenge (CRV1) we had no response for. Surface a typed
+        // exception so a provider can prompt for the second factor and retry — only WHEN the server
+        // actually asks — instead of treating it as a flat auth failure.
+        if (exitCode == DynamicChallengeRequiredExitCode)
+            return new OpenVpnDynamicChallengeRequiredException(
+                $"OpenVPN sidecar requires a dynamic-challenge response. Sidecar reported: {detail}", inner);
+
         var code = exitCode is { } c ? $" (exit code {c})" : string.Empty;
         return new IOException($"OpenVPN sidecar {what}{code}. Sidecar reported: {detail}", inner);
     }
+
+    // Mirrors the sidecar's exitDynamicChallengeRequired (main.go).
+    private const int DynamicChallengeRequiredExitCode = 3;
 
     public async ValueTask DisposeAsync()
     {
@@ -243,5 +255,20 @@ public sealed class OpenVpnProcessHost : IAsyncDisposable
 
         try { await _stderrPump.ConfigureAwait(false); } catch { /* logged inside */ }
         try { _process.Dispose(); } catch { /* best effort */ }
+    }
+}
+
+/// <summary>
+/// Thrown by <see cref="OpenVpnProcessHost.StartAsync"/> when the sidecar exited because the
+/// OpenVPN server demanded a dynamic challenge (CRV1) that no response was supplied for. A caller
+/// that can obtain the second factor (e.g. the WatchGuard provider with a stored/cached profile)
+/// catches this to prompt the user and retry with <see cref="OpenVpnSidecarConfig.ChallengeResponse"/>
+/// set — so the prompt appears only when the server actually requires MFA, never up front.
+/// </summary>
+public sealed class OpenVpnDynamicChallengeRequiredException : Exception
+{
+    public OpenVpnDynamicChallengeRequiredException(string message, Exception? innerException)
+        : base(message, innerException)
+    {
     }
 }
