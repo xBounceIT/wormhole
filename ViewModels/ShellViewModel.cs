@@ -10,7 +10,7 @@ namespace Wormhole.ViewModels;
 
 public partial class ShellViewModel : ObservableObject
 {
-    private const double ResizerHitWidth = 24;
+    private const double ResizerHitWidth = 8;
     private const double FallbackMinSidebarWidth = 120;
     private const double MaxSidebarWidth = 600;
     private const double TextFitPadding = 8;
