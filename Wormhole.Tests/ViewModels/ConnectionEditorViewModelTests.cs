@@ -1480,6 +1480,260 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task ShowRdpDomain_HiddenOnlyWhenRealSavedRdpCredentialSelected()
+    {
+        // The connection-level Domain field duplicates the saved RDP credential's (mandatory) domain,
+        // so it hides once a real credential is picked — mirroring how the Username field hides under
+        // a saved credential. It stays visible for the no-real-credential cases that still need a
+        // place to type a domain: "(None) — prompt every time" (the AzureAD workflow) and inline mode.
+        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(rdpCred), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        vm.Protocol = ProtocolType.Rdp;
+
+        // Saved-credentials checked but "(None) — prompt every time" selected → still shown.
+        vm.UseSavedCredentials = true;
+        vm.SelectedCredential = ConnectionEditorViewModel.NoneCredential;
+        Assert.True(vm.ShowRdpDomain);
+
+        // A real saved RDP credential carries its own domain → node-level field redundant, hide it.
+        vm.SelectedCredential = rdpCred;
+        Assert.False(vm.ShowRdpDomain);
+
+        // Inline / connect-time prompt (not using saved credentials) → shown again.
+        vm.UseSavedCredentials = false;
+        Assert.True(vm.ShowRdpDomain);
+
+        // Never shown for SSH.
+        vm.Protocol = ProtocolType.Ssh;
+        Assert.False(vm.ShowRdpDomain);
+    }
+
+    [Fact]
+    public async Task DistinctTypedDomainStaysVisibleAfterSelectingRdpCredential()
+    {
+        // A domain typed in "(None)" mode (here "AzureAD", which forces the external-client flag)
+        // differs from the chosen credential's domain, so it stays a *visible* override once a real
+        // RDP credential is selected — the value (and the latched flag it drives) never go invisible.
+        // Clearing the now-visible field releases the flag and hides the redundant box.
+        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password, Domain = "CORP" };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(rdpCred), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        vm.Protocol = ProtocolType.Rdp;
+
+        vm.SelectedCredential = ConnectionEditorViewModel.NoneCredential;
+        vm.RdpDomain = "AzureAD";
+        Assert.True(vm.RdpUseExternalClient);
+
+        // Commit to a real saved credential → "AzureAD" differs from "CORP", so it stays visible.
+        vm.SelectedCredential = rdpCred;
+        Assert.Equal("AzureAD", vm.RdpDomain);
+        Assert.True(vm.ShowRdpDomain);
+        Assert.True(vm.RdpUseExternalClient); // latch persists, but its cause is on screen
+
+        // Clearing the visible override releases the flag and hides the now-redundant field.
+        vm.RdpDomain = string.Empty;
+        Assert.False(vm.ShowRdpDomain);
+        Assert.False(vm.RdpUseExternalClient);
+    }
+
+    [Fact]
+    public async Task DomainVisibilityTracksWhetherItOverridesCredential_AcrossSavedCredentialToggle()
+    {
+        // With a real RDP credential selected, a node-level domain that differs from the credential's
+        // stays visible/editable through a saved-credentials toggle (never an invisible override),
+        // while one that merely duplicates the credential's domain is redundant and hides.
+        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password, Domain = "CORP" };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(rdpCred), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        vm.Protocol = ProtocolType.Rdp;
+        vm.SelectedCredential = rdpCred;
+
+        // Drop to inline mode, type a domain that differs from the credential's.
+        vm.UseSavedCredentials = false;
+        Assert.True(vm.ShowRdpDomain);
+        vm.RdpDomain = "LEGACY";
+
+        // Re-enable saved credentials → distinct override is kept and stays visible (not invisible).
+        vm.UseSavedCredentials = true;
+        Assert.Equal("LEGACY", vm.RdpDomain);
+        Assert.True(vm.ShowRdpDomain);
+
+        // A value equal to the credential's domain is redundant → hidden.
+        vm.RdpDomain = "CORP";
+        Assert.False(vm.ShowRdpDomain);
+    }
+
+    [Fact]
+    public async Task LoadFrom_KeepsDistinctRdpDomainOverrideVisible()
+    {
+        // An existing connection with both a saved RDP credential and a node-level RdpDomain that
+        // differs from the credential's domain keeps the Domain field VISIBLE — the value still wins
+        // at connect, so hiding it would be an invisible override the user can't discover or clear.
+        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password, Domain = "CORP" };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(rdpCred), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        var source = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Rdp,
+            Kind = NodeKind.Connection,
+            CredentialId = rdpCred.Id,
+            RdpDomain = "LEGACY",
+        };
+
+        vm.LoadFrom(source);
+
+        Assert.Equal("LEGACY", vm.RdpDomain);
+        Assert.True(vm.ShowRdpDomain); // distinct override (LEGACY != CORP) stays visible/editable
+    }
+
+    [Fact]
+    public async Task LoadFrom_HidesRedundantRdpDomainDuplicatingCredential()
+    {
+        // A node-level RdpDomain equal to the saved RDP credential's domain is redundant (it can't
+        // change the connect-time result), so the Domain field is hidden — the decluttering goal.
+        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password, Domain = "CORP" };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(rdpCred), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        var source = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Rdp,
+            Kind = NodeKind.Connection,
+            CredentialId = rdpCred.Id,
+            RdpDomain = "CORP",
+        };
+
+        vm.LoadFrom(source);
+
+        Assert.Equal("CORP", vm.RdpDomain);
+        Assert.False(vm.ShowRdpDomain); // redundant duplicate hidden
+    }
+
+    [Fact]
+    public async Task WriteTo_DropsRedundantRdpDomainDuplicatingCredential()
+    {
+        // A hidden redundant duplicate must NOT be persisted: if it lingered and the credential's
+        // domain were later edited, the stale node value would still win at connect
+        // (explicitDomain ?? credentialDomain). WriteTo stores null so the credential stays authoritative.
+        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password, Domain = "CORP" };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(rdpCred), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        var source = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Rdp,
+            Kind = NodeKind.Connection,
+            CredentialId = rdpCred.Id,
+            RdpDomain = "CORP",
+        };
+        vm.LoadFrom(source);
+        Assert.False(vm.ShowRdpDomain);
+
+        var sink = new ConnectionNode { Kind = NodeKind.Connection };
+        vm.WriteTo(sink);
+
+        Assert.Null(sink.RdpDomain);           // redundant duplicate dropped
+        Assert.Equal(rdpCred.Id, sink.CredentialId); // credential remains authoritative
+    }
+
+    [Fact]
+    public async Task WriteTo_PersistsDistinctRdpDomainOverride()
+    {
+        // A distinct override is visible and meaningful (it wins at connect), so WriteTo keeps it.
+        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password, Domain = "CORP" };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(rdpCred), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        var source = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Rdp,
+            Kind = NodeKind.Connection,
+            CredentialId = rdpCred.Id,
+            RdpDomain = "LEGACY",
+        };
+        vm.LoadFrom(source);
+        Assert.True(vm.ShowRdpDomain);
+
+        var sink = new ConnectionNode { Kind = NodeKind.Connection };
+        vm.WriteTo(sink);
+
+        Assert.Equal("LEGACY", sink.RdpDomain);
+    }
+
+    [Fact]
+    public async Task ShowRdpDomain_VisibleWhenCredentialIdDoesNotResolve()
+    {
+        // A non-null CredentialId pointing at a deleted/unrestored credential doesn't resolve
+        // (SelectedCredential is null), so no credential can supply the domain. The Domain field must
+        // stay visible — it's the only place left to see/fix the domain — and the value must survive a
+        // saved-credentials toggle.
+        var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository(), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        var source = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Rdp,
+            Kind = NodeKind.Connection,
+            CredentialId = Guid.NewGuid(), // references a credential that no longer exists
+            RdpDomain = "CORP",
+        };
+
+        vm.LoadFrom(source);
+
+        Assert.Null(vm.SelectedCredential);   // dangling id doesn't resolve
+        Assert.True(vm.ShowRdpDomain);         // field stays visible so the user can see/fix it
+        Assert.Equal("CORP", vm.RdpDomain);
+
+        // The domain survives a saved-credentials toggle (nothing clears it).
+        vm.UseSavedCredentials = false;
+        vm.UseSavedCredentials = true;
+        Assert.Equal("CORP", vm.RdpDomain);
+        Assert.True(vm.ShowRdpDomain);
+    }
+
+    [Fact]
+    public async Task ShowRdpDomain_VisibleWhenSelectedCredentialIsProtocolMismatched()
+    {
+        // A stale, protocol-mismatched credential (an SSH credential saved on an RDP node) is kept by
+        // AppendStaleSelection so the binding round-trips, making SelectedCredential non-null — but an
+        // SSH credential carries no RDP domain (CredentialDialog stores domains only for RDP creds).
+        // Only a real RDP credential is authoritative, so the Domain field stays visible/editable and
+        // the value survives a saved-credentials toggle.
+        var sshCred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(sshCred), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        var source = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Rdp,
+            Kind = NodeKind.Connection,
+            CredentialId = sshCred.Id, // SSH credential bound to an RDP node (protocol mismatch)
+            RdpDomain = "CORP",
+        };
+
+        vm.LoadFrom(source);
+
+        Assert.NotNull(vm.SelectedCredential); // stale selection preserved for round-trip
+        Assert.Equal(ProtocolType.Ssh, vm.SelectedCredential!.Protocol);
+        Assert.True(vm.ShowRdpDomain);          // SSH cred has no RDP domain → field stays visible
+        Assert.Equal("CORP", vm.RdpDomain);
+
+        // The domain survives a saved-credentials toggle (nothing clears it).
+        vm.UseSavedCredentials = false;
+        vm.UseSavedCredentials = true;
+        Assert.Equal("CORP", vm.RdpDomain);
+        Assert.True(vm.ShowRdpDomain);
+    }
+
+    [Fact]
     public async Task CanUseSshAutoSudo_InlineMode_VisibleEvenWithSshKeyCredentialSelected()
     {
         var key = new CredentialProfile { Name = "ssh-key", Protocol = ProtocolType.Ssh, Kind = CredentialKind.SshKey };

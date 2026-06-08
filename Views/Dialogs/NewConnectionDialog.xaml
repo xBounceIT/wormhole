@@ -138,10 +138,15 @@
                                      PasswordChanged="OnInlinePasswordChanged"
                                      Visibility="{x:Bind ViewModel.ShowInlinePassword, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
 
+                        <!-- Hidden once a real saved RDP credential is picked: that credential
+                             already carries a (mandatory) domain, so a node-level Domain box would
+                             only duplicate/override it — same reason the Username box hides above.
+                             Still shown for inline/prompt and "(None) — prompt every time" (the
+                             AzureAD workflow needs a place to type the domain). See ShowRdpDomain. -->
                         <TextBox Header="Domain"
                                  PlaceholderText="WORKGROUP"
                                  Text="{x:Bind ViewModel.RdpDomain, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                 Visibility="{x:Bind ViewModel.IsRdp, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                                 Visibility="{x:Bind ViewModel.ShowRdpDomain, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
 
                         <StackPanel Spacing="4"
                                     Visibility="{x:Bind ViewModel.CanUseSshAutoSudo, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">

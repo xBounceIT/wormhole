@@ -71,7 +71,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private string name = string.Empty;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsRdp), nameof(IsSsh), nameof(IsHttp), nameof(IsHttps), nameof(ShowCredentialSection), nameof(IsValid), nameof(CanUseSshAutoSudo), nameof(ShowInlinePassword), nameof(HttpAddressError), nameof(IsHttpAddressErrorOpen))]
+    [NotifyPropertyChangedFor(nameof(IsRdp), nameof(IsSsh), nameof(IsHttp), nameof(IsHttps), nameof(ShowCredentialSection), nameof(IsValid), nameof(CanUseSshAutoSudo), nameof(ShowInlinePassword), nameof(ShowRdpDomain), nameof(HttpAddressError), nameof(IsHttpAddressErrorOpen))]
     private ProtocolType protocol = ProtocolType.Ssh;
 
     [ObservableProperty]
@@ -87,11 +87,11 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private string username = string.Empty;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsAzureAdCredential), nameof(IsRdpUseExternalClientEditable))]
+    [NotifyPropertyChangedFor(nameof(IsAzureAdCredential), nameof(IsRdpUseExternalClientEditable), nameof(ShowRdpDomain))]
     private string rdpDomain = string.Empty;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(SelectedCredential), nameof(IsAzureAdCredential), nameof(IsRdpUseExternalClientEditable), nameof(CanUseSshAutoSudo))]
+    [NotifyPropertyChangedFor(nameof(SelectedCredential), nameof(IsAzureAdCredential), nameof(IsRdpUseExternalClientEditable), nameof(CanUseSshAutoSudo), nameof(ShowRdpDomain))]
     private Guid? credentialId;
 
     /// <summary>
@@ -101,7 +101,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// Maps to <see cref="ConnectionNode.UseInlinePassword"/> (inverted) in WriteTo.
     /// </summary>
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(ShowInlinePassword), nameof(CanUseSshAutoSudo))]
+    [NotifyPropertyChangedFor(nameof(ShowInlinePassword), nameof(ShowRdpDomain), nameof(CanUseSshAutoSudo))]
     private bool useSavedCredentials = true;
 
     /// <summary>The inline login password (bound to the editor's PasswordBox). SSH-only,
@@ -113,6 +113,29 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// saved credential. RDP keeps its existing behavior (saved credential or connect-time
     /// prompt), so no inline password control is surfaced for it.</summary>
     public bool ShowInlinePassword => IsSsh && !UseSavedCredentials;
+
+    /// <summary>
+    /// Drives the connection-level Domain field's visibility. Hidden only when a resolved RDP
+    /// credential fully supplies the domain and the node adds nothing — an RDP connection using a
+    /// real RDP saved credential (<see cref="HasResolvedRdpCredential"/>) whose node-level
+    /// <see cref="RdpDomain"/> is empty or merely duplicates that credential's domain. An RDP saved
+    /// credential always carries its own (mandatory) domain, so a redundant node-level value is just
+    /// clutter; hiding the field here mirrors how the Username field hides under a saved credential.
+    /// <para>
+    /// It stays visible whenever the node holds a value the user still needs to see or fix: inline /
+    /// connect-time-prompt mode (<see cref="UseSavedCredentials"/> false); the "(None) — prompt every
+    /// time" selection; a non-null <see cref="CredentialId"/> that doesn't resolve to a real RDP
+    /// credential — deleted, unloaded, or a stale protocol-mismatched credential
+    /// (<see cref="HasResolvedRdpCredential"/>); and a distinct override that differs from the
+    /// credential's own domain (<see cref="HasDistinctRdpDomainOverride"/>). Keeping a distinct
+    /// override visible is what stops a value that wins at connect (<c>explicitDomain ?? credentialDomain</c>
+    /// in <see cref="Sessions.RdpSessionViewModel"/>) from becoming an invisible override the user
+    /// can't discover or clear. The "(None)" case is also load-bearing for the AzureAD "prompt every
+    /// time" workflow, where the user types <c>AzureAD</c> into this field to route RDP externally.
+    /// </para>
+    /// </summary>
+    public bool ShowRdpDomain =>
+        IsRdp && (!UseSavedCredentials || !HasResolvedRdpCredential || HasDistinctRdpDomainOverride);
 
     /// <summary>
     /// Tri-state Auto sudo selection: "inherit" (null — follow the folder default), "on" (true —
@@ -187,6 +210,36 @@ public partial class ConnectionEditorViewModel : ObservableObject
         get => CredentialId is null ? NoneCredential : GetCredentialById(CredentialId);
         set => CredentialId = (value is null || value.Id == Guid.Empty) ? null : value.Id;
     }
+
+    /// <summary>
+    /// True only when <see cref="CredentialId"/> resolves to a saved credential that actually carries
+    /// the RDP domain: a real <see cref="ProtocolType.Rdp"/> credential whose secret is a password
+    /// (only those store a domain — see <c>CredentialDialog.BuildDraft</c>, and they're the same
+    /// credentials <see cref="RebuildAvailableCredentials"/> offers for RDP). This excludes three
+    /// look-alikes that supply no domain and must therefore leave the Domain field editable: the
+    /// "(None) — prompt every time" sentinel; a dangling id whose credential was deleted or never
+    /// loaded (<see cref="SelectedCredential"/> is null); and a stale, protocol-mismatched credential
+    /// that <see cref="AppendStaleSelection"/> preserved for round-tripping (e.g. an SSH credential
+    /// bound to an RDP node). Gates hiding the node-level Domain field — using this rather than a bare
+    /// <c>CredentialId is not null</c> keeps that field available whenever nothing authoritative can
+    /// supply the domain.
+    /// </summary>
+    private bool HasResolvedRdpCredential =>
+        SelectedCredential is { Protocol: ProtocolType.Rdp, Kind: not CredentialKind.SshKey };
+
+    /// <summary>
+    /// True when the node-level <see cref="RdpDomain"/> is a meaningful override of the resolved RDP
+    /// credential's own domain: non-empty and different (case-insensitively) from
+    /// <see cref="SelectedCredential"/>'s domain. Such a value wins at connect
+    /// (<c>explicitDomain ?? credentialDomain</c>), so the Domain field stays visible for it even with
+    /// a credential selected — whereas a value that only duplicates the credential's domain is
+    /// redundant and hides. Comparing against the credential's domain (rather than merely checking
+    /// "non-empty") is what lets the original decluttering goal — hide a redundant duplicate — coexist
+    /// with never hiding a value that actually changes the connection.
+    /// </summary>
+    private bool HasDistinctRdpDomainOverride =>
+        !string.IsNullOrWhiteSpace(RdpDomain)
+        && !string.Equals(RdpDomain.Trim(), SelectedCredential?.Domain?.Trim(), StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// True when any AAD signal is present: the linked saved credential's Domain/Username,
@@ -923,7 +976,13 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
         if (IsRdp)
         {
-            node.RdpDomain = string.IsNullOrWhiteSpace(RdpDomain) ? null : RdpDomain.Trim();
+            // Persist the node-level domain only while the field is shown (a genuine override that
+            // differs from the credential's domain, or no governing credential). When it's hidden —
+            // a redundant duplicate of, or empty under, a resolved RDP credential — store null so the
+            // credential's domain stays authoritative even if it's later edited; a persisted hidden
+            // duplicate would otherwise linger and win at connect (explicitDomain ?? credentialDomain)
+            // once the credential diverges. Mirrors the visibility-gated SshAutoSudo write above.
+            node.RdpDomain = ShowRdpDomain && !string.IsNullOrWhiteSpace(RdpDomain) ? RdpDomain.Trim() : null;
             node.RdpScreenSize = string.IsNullOrWhiteSpace(RdpScreenSize) ? null : RdpScreenSize;
             node.RdpFullScreen = RdpFullScreen;
             node.RdpColorDepth = RdpColorDepth;
