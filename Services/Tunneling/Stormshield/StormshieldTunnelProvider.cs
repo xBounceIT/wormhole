@@ -133,14 +133,9 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             // one-time code to the OpenVPN data-plane password (a cache MISS aborts earlier, before the
             // sidecar starts). The code may have reached the firewall or simply expired while OpenVPN
             // worked through transport fallbacks. Either way a blind Retry would reuse a stale code, so
-            // tell the user to enter a fresh one.
-
-            // Forget the data-plane code in the reuse guard: it was handed to the sidecar but the tunnel
-            // didn't come up, so it may never have been consumed by the firewall (a transport-only failure,
-            // or a stale-cached-profile rejection). Let the firewall be the authority on the retry rather
-            // than locally blocking a code that might still be valid — especially the optimistic-drop path
-            // below, whose whole point is to recover via a fresh re-download.
-            _otpReuseGuard.Forget(config.Id);
+            // tell the user to enter a fresh one. (The reuse guard never recorded this data-plane code — it
+            // only records codes a successful download definitively spent — so the firewall stays the
+            // authority on whether it's still usable; nothing to clear here.)
 
             // If the profile was reused WITHOUT confirming it against the firewall's current hash (the
             // change-check was unavailable), the failure may mean the cached profile is stale. Drop it so
@@ -271,13 +266,15 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             "Stormshield v5 config resolve from {Server}:{Port} for '{Name}' (OTP={UseOtp}).",
             settings.Server, settings.Port, config.Name, settings.UseOtp);
 
-        // Guard the prompt against the user re-entering a code that was just spent (download) or just rejected
-        // (data plane) before their authenticator rolls — the firewall would only reject it again. Transparent
-        // to the core resolution logic, so the OTP-routing tests keep calling ResolveAutomaticCoreAsync directly.
+        // Guard the prompt against the user re-entering a code that was already SPENT before their authenticator
+        // rolls — the firewall would only reject it again. The wrapped prompt only CHECKS; the code is recorded
+        // as spent via onOtpSpent below, which the core invokes ONLY after a successful download actually
+        // consumes it. Transparent to the core logic, so the OTP-routing tests keep calling it directly.
         var guardedOtpPrompt = _otpReuseGuard.Wrap(_otpPrompt, config.Id);
 
         return await ResolveAutomaticCoreAsync(
-            portal, _configCache, guardedOtpPrompt, _logger, config.Id, config.Name, settings, cancellationToken, progress)
+            portal, _configCache, guardedOtpPrompt, _logger, config.Id, config.Name, settings, cancellationToken,
+            progress, onOtpSpent: code => _otpReuseGuard.Record(config.Id, code))
             .ConfigureAwait(false);
     }
 
@@ -309,7 +306,8 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         string configName,
         StormshieldSettings settings,
         CancellationToken cancellationToken,
-        IProgress<TunnelProgress>? progress = null)
+        IProgress<TunnelProgress>? progress = null,
+        Action<string>? onOtpSpent = null)
     {
         progress?.Report(new TunnelProgress(TunnelPhase.Authenticating));
 
@@ -354,6 +352,10 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             configName, cached is null ? "no cached configuration" : "firewall config changed");
         progress?.Report(new TunnelProgress(TunnelPhase.DownloadingConfiguration));
         var rawProfile = await DownloadProfileV5WrappedAsync(portal, settings, downloadOtp, cancellationToken).ConfigureAwait(false);
+        // The download succeeded, so the firewall has now DEFINITIVELY consumed this one-time code. Record it
+        // (only here — never on a failed download) so an immediate same-code retry, the cold-start trap this
+        // whole path exists for, is rejected locally instead of replayed at the firewall.
+        onOtpSpent?.Invoke(downloadOtp);
         var normalized = StormshieldProfileNormalizer.Normalize(rawProfile);
 
         // Best-effort persist. The OTP is ALREADY spent on the download above, so a failed cache write

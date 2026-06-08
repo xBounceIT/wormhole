@@ -21,8 +21,11 @@ namespace Wormhole.Services.Tunneling.Stormshield;
 /// (never the code itself, never logged), and it is honoured only inside <see cref="DefaultReuseWindow"/>.</para>
 ///
 /// <para>Wrap the real <see cref="IOtpPromptService"/> via <see cref="Wrap"/> for a given tunnel; the returned
-/// decorator throws <see cref="StormshieldOtpReusedException"/> when the user re-enters the remembered code
-/// inside the window. A genuinely new code (the next TOTP window) is always accepted.</para>
+/// decorator throws <see cref="StormshieldOtpReusedException"/> when the user re-enters a code that was recorded
+/// as SPENT, inside the window. The guard records nothing on its own — the provider calls <see cref="Record"/>
+/// only once a code is actually consumed (today: a successful config download), so a code that was prompted but
+/// never spent (e.g. the download failed before the firewall saw it) never blocks a legitimate retry. A
+/// genuinely new code (the next TOTP window) is always accepted.</para>
 /// </summary>
 internal sealed class StormshieldOtpReuseGuard
 {
@@ -33,8 +36,8 @@ internal sealed class StormshieldOtpReuseGuard
 
     private readonly TimeSpan _reuseWindow;
     private readonly Func<DateTimeOffset> _clock;
-    // Guarded by _gate (not a ConcurrentDictionary): the reuse decision is a check-THEN-record that must be
-    // atomic, which a lock-free dictionary can't give on its own.
+    // Guarded by _gate: Record (write) and CheckReuse (read) must not race on the same key. Maps a tunnel to
+    // the SHA-256 of its last definitively-spent code plus when it was spent.
     private readonly Dictionary<Guid, (byte[] Hash, DateTimeOffset At)> _recent = new();
     private readonly object _gate = new();
 
@@ -51,43 +54,45 @@ internal sealed class StormshieldOtpReuseGuard
     }
 
     /// <summary>
-    /// Returns an <see cref="IOtpPromptService"/> that delegates to <paramref name="inner"/> and then, for a
-    /// non-empty code, records/checks it against this tunnel's most-recent code — throwing
-    /// <see cref="StormshieldOtpReusedException"/> on a within-window reuse.
+    /// Returns an <see cref="IOtpPromptService"/> that delegates to <paramref name="inner"/> and then CHECKS the
+    /// entered code against this tunnel's last-spent code — throwing <see cref="StormshieldOtpReusedException"/>
+    /// on a within-window reuse. It does NOT record; recording is the caller's explicit <see cref="Record"/> call
+    /// once the code is actually spent.
     /// </summary>
     public IOtpPromptService Wrap(IOtpPromptService inner, Guid tunnelId) => new GuardedPrompt(this, inner, tunnelId);
 
     /// <summary>
-    /// Drop this tunnel's remembered code so the SAME code is accepted again. Call after a code reached the
-    /// data plane but did NOT bring the tunnel up: it may never have been consumed by the firewall (a
-    /// transport-only failure, or a stale-cached-profile rejection), so the firewall — not this local guard —
-    /// should be the authority on whether it's still usable. The cache-miss DOWNLOAD path does not call this:
-    /// a successful download definitively spends the code, so that record stands.
+    /// Remember a code that was DEFINITIVELY spent — the firewall consumed it (today: a successful Stormshield
+    /// config download on a cache miss). A later within-window prompt of the same code for this tunnel is then
+    /// rejected by the wrapped prompt. Recording only on a confirmed spend means a code that was prompted but
+    /// never consumed (download error, transport failure, etc.) is never remembered, so it can't block a
+    /// still-valid retry — the firewall stays the authority on those.
     /// </summary>
-    public void Forget(Guid tunnelId)
+    public void Record(Guid tunnelId, string code)
     {
-        lock (_gate) { _recent.Remove(tunnelId); }
+        var trimmed = code.Trim();
+        if (trimmed.Length == 0)
+            return;
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(trimmed));
+        lock (_gate) { _recent[tunnelId] = (hash, _clock()); }
     }
 
-    // True (and records the code as the tunnel's latest) when the code is NOT a within-window reuse; false
-    // when it matches the remembered code for this tunnel inside the reuse window. The check and the record
-    // are one atomic step under _gate so two near-simultaneous prompts can't both slip through.
-    private bool TryAccept(Guid tunnelId, string code)
+    // Throws StormshieldOtpReusedException when `code` matches this tunnel's last-spent code within the window.
+    // The dictionary read is under _gate; the throw is constructed outside the lock.
+    private void CheckReuse(Guid tunnelId, string code)
     {
-        var now = _clock();
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(code));
-
+        bool reused;
         lock (_gate)
         {
-            if (_recent.TryGetValue(tunnelId, out var prior)
-                && now - prior.At < _reuseWindow
-                && CryptographicOperations.FixedTimeEquals(prior.Hash, hash))
-            {
-                return false;
-            }
-
-            _recent[tunnelId] = (hash, now);
-            return true;
+            reused = _recent.TryGetValue(tunnelId, out var prior)
+                && _clock() - prior.At < _reuseWindow
+                && CryptographicOperations.FixedTimeEquals(prior.Hash, hash);
+        }
+        if (reused)
+        {
+            throw new StormshieldOtpReusedException(
+                "That one-time code was just used. Wait until your authenticator shows a NEW code, then reconnect.");
         }
     }
 
@@ -110,18 +115,13 @@ internal sealed class StormshieldOtpReuseGuard
             if (code is null)
                 return null; // user dismissed — nothing to guard; upstream maps null to a deliberate cancel
 
-            // Match the trimming the caller applies before use, and never record an empty code (the caller's
-            // empty-code check handles that). Comparing trimmed values keeps "123456" and "123456 " in sync.
+            // Match the trimming the caller applies before use (and Record uses), so "123456" and "123456 "
+            // compare equal; skip the check for an empty code (the caller's own empty-code check handles it).
             var trimmed = code.Trim();
             if (trimmed.Length == 0)
                 return code;
 
-            if (!_guard.TryAccept(_tunnelId, trimmed))
-            {
-                throw new StormshieldOtpReusedException(
-                    "That one-time code was just used. Wait until your authenticator shows a NEW code, then reconnect.");
-            }
-
+            _guard.CheckReuse(_tunnelId, trimmed); // throws StormshieldOtpReusedException on a within-window reuse
             return code;
         }
     }
