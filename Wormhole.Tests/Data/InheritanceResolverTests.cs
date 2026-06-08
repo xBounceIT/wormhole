@@ -159,6 +159,74 @@ public class InheritanceResolverTests
         Assert.Equal(3389, profile.Port);
     }
 
+    [Theory]
+    [InlineData(ProtocolType.Http, 80)]
+    [InlineData(ProtocolType.Https, 443)]
+    public void Resolve_DefaultsWebPortFromProtocol(ProtocolType protocol, int expectedPort)
+    {
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "fw-gui",
+            Kind = NodeKind.Connection,
+            Protocol = protocol,
+            Host = "fw.example.com",
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode> { [node.Id] = node };
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.Equal(expectedPort, profile.Port);
+    }
+
+    [Fact]
+    public void Resolve_HttpIgnoreCertErrors_DefaultsFalseWhenUnset()
+    {
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "fw-gui",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Https,
+            Host = "fw.example.com",
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode> { [node.Id] = node };
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.False(profile.HttpIgnoreCertErrors);
+    }
+
+    [Fact]
+    public void Resolve_HttpIgnoreCertErrors_InheritsFromParentFolder()
+    {
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "appliances",
+            Kind = NodeKind.Folder,
+            HttpIgnoreCertErrors = true,
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "fw-gui",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Https,
+            Host = "fw.example.com",
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        };
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.True(profile.HttpIgnoreCertErrors);
+    }
+
     [Fact]
     public void Resolve_ThrowsWhenProtocolMissing()
     {

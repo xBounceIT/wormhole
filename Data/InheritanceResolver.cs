@@ -54,6 +54,7 @@ public sealed class InheritanceResolver
         string? sshKeyFileName = null;
         string? sshKnownHostFingerprint = null;
         bool? sshAutoSudo = null;
+        bool? httpIgnoreCertErrors = null;
         bool? tunnelEnabled = null;
         Guid? tunnelConfigId = null;
 
@@ -105,6 +106,7 @@ public sealed class InheritanceResolver
             sshKeyFileName ??= current.SshKeyFileName;
             sshKnownHostFingerprint ??= current.SshKnownHostFingerprint;
             sshAutoSudo ??= current.SshAutoSudo;
+            httpIgnoreCertErrors ??= current.HttpIgnoreCertErrors;
             tunnelEnabled ??= current.TunnelEnabled;
             tunnelConfigId ??= current.TunnelConfigId;
 
@@ -174,6 +176,7 @@ public sealed class InheritanceResolver
             SshKeyFileName = sshKeyFileName,
             SshKnownHostFingerprint = sshKnownHostFingerprint,
             SshAutoSudo = sshAutoSudo ?? false,
+            HttpIgnoreCertErrors = httpIgnoreCertErrors ?? false,
             TunnelEnabled = tunnelEnabled ?? false,
             TunnelConfigId = tunnelConfigId,
         };
@@ -183,6 +186,8 @@ public sealed class InheritanceResolver
     {
         ProtocolType.Ssh => 22,
         ProtocolType.Rdp => 3389,
+        ProtocolType.Http => 80,
+        ProtocolType.Https => 443,
         _ => throw new ArgumentOutOfRangeException(nameof(protocol)),
     };
 }

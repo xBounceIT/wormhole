@@ -14,8 +14,10 @@ public sealed partial class CredentialDialog : UserControl, IDraftForm<Credentia
     }
 
     // Credentials are scoped per protocol (Ssh/Rdp). SFTP is not a protocol — file transfer
-    // runs over an SSH session and reuses that connection's SSH credential.
-    public ProtocolType[] Protocols { get; } = Enum.GetValues<ProtocolType>();
+    // runs over an SSH session and reuses that connection's SSH credential. The HTTP/HTTPS web
+    // protocols are credential-less, so they're deliberately excluded here (an explicit list, NOT
+    // Enum.GetValues, so new protocols don't silently appear as credential types).
+    public ProtocolType[] Protocols { get; } = { ProtocolType.Ssh, ProtocolType.Rdp };
 
     private ProtocolType SelectedProtocol =>
         ProtocolBox.SelectedItem is ProtocolType p ? p : ProtocolType.Ssh;

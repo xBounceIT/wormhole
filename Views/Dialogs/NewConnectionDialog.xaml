@@ -70,8 +70,35 @@
                                        Minimum="1"
                                        Maximum="65535"
                                        SpinButtonPlacementMode="Hidden"
+                                       Visibility="{x:Bind ViewModel.IsHttp, Mode=OneWay, Converter={StaticResource InverseBoolToVisibilityConverter}}"
                                        Value="{x:Bind PortBindable, Mode=TwoWay, FallbackValue=NaN}" />
                         </Grid>
+
+                        <!-- Web (HTTP/HTTPS): the address field above carries an optional port. -->
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                                   Opacity="0.7"
+                                   TextWrapping="Wrap"
+                                   Text="Enter the host or IP. Include a port if the appliance uses a non-standard one, e.g. 10.0.0.1:8443."
+                                   Visibility="{x:Bind ViewModel.IsHttp, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                        <InfoBar Severity="Error"
+                                 IsClosable="False"
+                                 IsOpen="{x:Bind ViewModel.IsHttpAddressErrorOpen, Mode=OneWay}"
+                                 Message="{x:Bind ViewModel.HttpAddressError, Mode=OneWay}" />
+
+                        <!-- HTTPS only: appliance management GUIs commonly serve self-signed certificates. -->
+                        <CheckBox Content="Ignore certificate errors"
+                                  IsChecked="{x:Bind ViewModel.HttpIgnoreCertErrors, Mode=TwoWay}"
+                                  Visibility="{x:Bind ViewModel.IsHttps, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                                   Opacity="0.7"
+                                   TextWrapping="Wrap"
+                                   Margin="0,-4,0,0"
+                                   Text="Accept self-signed or otherwise untrusted certificates — typical for firewall and appliance GUIs."
+                                   Visibility="{x:Bind ViewModel.IsHttps, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+
+                        <!-- Credentials (SSH/RDP). Hidden entirely for the credential-less web protocols. -->
+                        <StackPanel Spacing="10"
+                                    Visibility="{x:Bind ViewModel.ShowCredentialSection, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
 
                         <!-- Credential mode toggle: a saved credential (checked) OR an inline
                              username + password (unchecked). Pure x:Bind drives both panels'
@@ -131,6 +158,8 @@
                                        TextWrapping="Wrap"
                                        Text="{x:Bind ViewModel.SshAutoSudoDescription, Mode=OneWay}" />
                         </StackPanel>
+                        </StackPanel>
+                        <!-- /Credentials (SSH/RDP) -->
 
                         <StackPanel Spacing="4">
                             <TextBlock Text="VPN tunnel"

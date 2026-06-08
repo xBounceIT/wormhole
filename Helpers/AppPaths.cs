@@ -16,6 +16,10 @@ internal static class AppPaths
     private static readonly string UpdateCacheDirectory = Path.Combine(AppDataDirectory, "cache", "updates");
     private static readonly string WebView2UserDataDirectory = Path.Combine(AppDataDirectory, "webview2");
     private static readonly string WatchguardSamlWebView2UserDataDirectory = Path.Combine(AppDataDirectory, "watchguard-saml-webview2");
+    // Separate user-data root for the HTTP/HTTPS browser session surface, so its (possibly
+    // proxy-configured) WebView2 environments never collide with the SSH terminal's shared env, which
+    // must keep default options to share one browser process. Proxied tabs get a unique sub-folder.
+    private static readonly string WebBrowserUserDataDirectory = Path.Combine(AppDataDirectory, "webview2-web");
     private static readonly string WebAssetsDirectory = Path.Combine(AppContext.BaseDirectory, "Assets", "web");
     private static readonly string WgProxyExecutablePath = Path.Combine(AppContext.BaseDirectory, "wormhole-wgproxy.exe");
     private static readonly string FortiProxyExecutablePath = Path.Combine(AppContext.BaseDirectory, "wormhole-fortiproxy.exe");
@@ -52,6 +56,14 @@ internal static class AppPaths
     public static string GetWebView2UserDataDirectory() => WebView2UserDataDirectory;
 
     public static string GetWatchguardSamlWebView2UserDataDirectory() => WatchguardSamlWebView2UserDataDirectory;
+
+    // Shared environment folder for direct / loopback-forwarded web tabs (no proxy args).
+    public static string GetWebBrowserUserDataDirectory() => WebBrowserUserDataDirectory;
+
+    // Unique per-tab folder for a SOCKS5-proxied web tab: Chromium proxy args are fixed at environment
+    // creation, so each proxied session needs its own environment (and therefore its own user-data dir).
+    public static string GetWebBrowserProxyUserDataDirectory(string id) =>
+        Path.Combine(WebBrowserUserDataDirectory, "proxy-" + id);
 
     public static string GetWebAssetsDirectory() => WebAssetsDirectory;
 

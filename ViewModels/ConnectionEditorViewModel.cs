@@ -71,11 +71,11 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private string name = string.Empty;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsRdp), nameof(IsSsh), nameof(IsValid), nameof(CanUseSshAutoSudo), nameof(ShowInlinePassword))]
+    [NotifyPropertyChangedFor(nameof(IsRdp), nameof(IsSsh), nameof(IsHttp), nameof(IsHttps), nameof(ShowCredentialSection), nameof(IsValid), nameof(CanUseSshAutoSudo), nameof(ShowInlinePassword), nameof(HttpAddressError), nameof(IsHttpAddressErrorOpen))]
     private ProtocolType protocol = ProtocolType.Ssh;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsValid))]
+    [NotifyPropertyChangedFor(nameof(IsValid), nameof(HttpAddressError), nameof(IsHttpAddressErrorOpen))]
     private string host = string.Empty;
 
     [ObservableProperty]
@@ -212,6 +212,45 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     public bool IsRdp => Protocol == ProtocolType.Rdp;
     public bool IsSsh => Protocol == ProtocolType.Ssh;
+
+    /// <summary>True for the web protocols (<see cref="ProtocolType.Http"/> / <see cref="ProtocolType.Https"/>),
+    /// which render in an embedded browser and need no credentials.</summary>
+    public bool IsHttp => Protocol is ProtocolType.Http or ProtocolType.Https;
+
+    /// <summary>True only for HTTPS — gates the "ignore certificate errors" control.</summary>
+    public bool IsHttps => Protocol == ProtocolType.Https;
+
+    /// <summary>The credential block (saved credentials, inline username/password, domain, auto-sudo) is
+    /// shown for SSH/RDP but hidden for the credential-less web protocols.</summary>
+    public bool ShowCredentialSection => !IsHttp;
+
+    /// <summary>
+    /// Validation error for the web "address" field: non-null when the entered host (after stripping any
+    /// port/scheme) isn't a usable host name or IP, e.g. ":8443" (no host) or "host:99999" (out-of-range
+    /// port folds into the host). Keeps a malformed address from saving and later throwing a
+    /// UriFormatException at connect. Null for non-web protocols and for a blank field (the generic
+    /// "host required" rule in <see cref="IsValid"/> covers blank).
+    /// </summary>
+    public string? HttpAddressError
+    {
+        get
+        {
+            if (!IsHttp || string.IsNullOrWhiteSpace(Host)) return null;
+            var (parsedHost, _) = ParseHttpAddress(Host);
+            return string.IsNullOrEmpty(parsedHost) || Uri.CheckHostName(parsedHost) == UriHostNameType.Unknown
+                ? "Enter a valid host or IP — optionally with a port, e.g. 10.0.0.1:8443."
+                : null;
+        }
+    }
+
+    public bool IsHttpAddressErrorOpen => HttpAddressError is not null;
+
+    /// <summary>
+    /// Accept certificate errors when navigating an HTTPS connection (self-signed appliance certs).
+    /// Persisted to <see cref="ConnectionNode.HttpIgnoreCertErrors"/>; only meaningful for HTTPS.
+    /// </summary>
+    [ObservableProperty]
+    private bool httpIgnoreCertErrors;
 
     #endregion
 
@@ -432,6 +471,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
         {
             if (string.IsNullOrWhiteSpace(Name)) return false;
             if (string.IsNullOrWhiteSpace(Host)) return false;
+            if (HttpAddressError is not null) return false;
             // Port is int?: null means "use the inherited / protocol-default port" (the
             // "Default for protocol" NumberBox placeholder). C# property pattern matching
             // treats null as not matching either side, so this only rejects an explicit
@@ -708,6 +748,23 @@ public partial class ConnectionEditorViewModel : ObservableObject
             Protocol = node.Protocol ?? ProtocolType.Ssh;
             Host = node.Host ?? string.Empty;
             Port = node.Port;
+            // Web protocols: the single address field carries host[:port]. Fold a saved non-default
+            // port back into it and clear the (hidden, unused) Port box so the address field is the sole
+            // source when WriteTo re-parses it.
+            if (Protocol is ProtocolType.Http or ProtocolType.Https)
+            {
+                var webDefaultPort = Protocol == ProtocolType.Https ? 443 : 80;
+                if (node.Port is { } webPort && webPort != webDefaultPort && !string.IsNullOrWhiteSpace(Host))
+                {
+                    // Bracket a bare IPv6 literal so the folded "host:port" round-trips: an unbracketed
+                    // "fd00::1:8443" would re-parse (HostSpecParser's >1-colon branch) as a host with no
+                    // port, silently dropping the custom port on the next save.
+                    Host = Host.Contains(':', StringComparison.Ordinal)
+                        ? $"[{Host}]:{webPort}"
+                        : $"{Host}:{webPort}";
+                }
+                Port = null;
+            }
             Username = node.Username ?? string.Empty;
             RdpDomain = node.RdpDomain ?? string.Empty;
             CredentialId = node.CredentialId;
@@ -779,6 +836,8 @@ public partial class ConnectionEditorViewModel : ObservableObject
             RdpGatewayUseSameCreds = node.RdpGatewayUseSameCreds ?? false;
             RdpUseExternalClient = node.RdpUseExternalClient ?? false;
 
+            HttpIgnoreCertErrors = node.HttpIgnoreCertErrors ?? false;
+
             // Tunnel fields are protocol-agnostic — every connection type can pre-start a VPN.
             // Delegated to TunnelPicker, which owns the atomic two-field write that protects a
             // TwoWay SelectedTunnel binding from observing the intermediate (one-set, one-unset)
@@ -795,8 +854,19 @@ public partial class ConnectionEditorViewModel : ObservableObject
     {
         node.Name = Name.Trim();
         node.Protocol = Protocol;
-        node.Host = Host.Trim();
-        node.Port = Port;
+        if (IsHttp)
+        {
+            // The single address field is the sole source of host + port for web connections (the Port
+            // box is hidden). Parse "host", "host:port", or a tolerated scheme/path paste into the two.
+            var (httpHost, httpPort) = ParseHttpAddress(Host);
+            node.Host = httpHost;
+            node.Port = httpPort;
+        }
+        else
+        {
+            node.Host = Host.Trim();
+            node.Port = Port;
+        }
         // The free-text Username field is shown alongside the credential picker so users can
         // override the credential's stored username on a per-connection basis. When the field
         // is blank, fall back to the selected credential's username — without this fallback,
@@ -893,8 +963,50 @@ public partial class ConnectionEditorViewModel : ObservableObject
             node.RdpUseExternalClient = RdpUseExternalClient;
         }
 
+        // Only meaningful for HTTPS; store the user's choice there and null it otherwise so a stale flag
+        // doesn't linger on a connection switched away from HTTPS.
+        node.HttpIgnoreCertErrors = IsHttps ? HttpIgnoreCertErrors : (bool?)null;
+
         // Tunnel fields apply to every protocol — write them outside the RDP block.
         TunnelPicker.WriteTo(node);
+    }
+
+    /// <summary>
+    /// Parse the web "address" field into a bare host + optional port. Accepts <c>host</c>,
+    /// <c>host:port</c>, a bracketed IPv6 literal, and tolerates a pasted scheme/path (the protocol
+    /// dropdown already fixes the scheme, and the model carries no path). Reuses
+    /// <see cref="HostSpecParser"/> for the host:port split. Returns the trimmed input as the host
+    /// (port null) if it can't be parsed.
+    /// </summary>
+    private static readonly System.Buffers.SearchValues<char> HttpAddressTrailers =
+        System.Buffers.SearchValues.Create("/?#");
+
+    internal static (string Host, int? Port) ParseHttpAddress(string raw)
+    {
+        var trimmed = (raw ?? string.Empty).Trim();
+        if (trimmed.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+        {
+            trimmed = trimmed["https://".Length..];
+        }
+        else if (trimmed.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+        {
+            trimmed = trimmed["http://".Length..];
+        }
+
+        // Drop any path/query/fragment — we navigate to the host root (no path column in the model).
+        var cut = trimmed.AsSpan().IndexOfAny(HttpAddressTrailers);
+        if (cut >= 0) trimmed = trimmed[..cut];
+        if (trimmed.Length == 0) return ((raw ?? string.Empty).Trim(), null);
+
+        try
+        {
+            var spec = HostSpecParser.Parse(trimmed);
+            return (spec.Host, spec.Port);
+        }
+        catch (FormatException)
+        {
+            return (trimmed, null);
+        }
     }
 
     /// <summary>

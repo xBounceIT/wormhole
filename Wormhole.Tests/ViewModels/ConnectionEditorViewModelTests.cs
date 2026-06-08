@@ -1517,6 +1517,153 @@ public class ConnectionEditorViewModelTests
         Assert.Contains("sudo", on, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Theory]
+    [InlineData("fw.local", "fw.local", null)]
+    [InlineData("10.0.0.1:8443", "10.0.0.1", 8443)]
+    [InlineData("https://fw.local:8443/admin?x=1", "fw.local", 8443)]
+    [InlineData("http://fw.local", "fw.local", null)]
+    [InlineData("[fd00::1]:8443", "fd00::1", 8443)]
+    public void ParseHttpAddress_SplitsHostAndPort(string raw, string expectedHost, int? expectedPort)
+    {
+        var (host, port) = ConnectionEditorViewModel.ParseHttpAddress(raw);
+        Assert.Equal(expectedHost, host);
+        Assert.Equal(expectedPort, port);
+    }
+
+    [Fact]
+    public async Task Https_WriteTo_ParsesHostPort_AndPersistsIgnoreCert()
+    {
+        var vm = await NewEditorAsync();
+        vm.Name = "fw";
+        vm.Protocol = ProtocolType.Https;
+        vm.Host = "10.0.0.1:8443";
+        vm.HttpIgnoreCertErrors = true;
+
+        var node = new ConnectionNode();
+        vm.WriteTo(node);
+
+        Assert.Equal(ProtocolType.Https, node.Protocol);
+        Assert.Equal("10.0.0.1", node.Host);
+        Assert.Equal(8443, node.Port);
+        Assert.True(node.HttpIgnoreCertErrors);
+    }
+
+    [Fact]
+    public async Task Http_WriteTo_DoesNotPersistIgnoreCert()
+    {
+        var vm = await NewEditorAsync();
+        vm.Name = "fw";
+        vm.Protocol = ProtocolType.Http;
+        vm.Host = "fw.local";
+        vm.HttpIgnoreCertErrors = true; // irrelevant for plain HTTP — must not persist
+
+        var node = new ConnectionNode();
+        vm.WriteTo(node);
+
+        Assert.Equal("fw.local", node.Host);
+        Assert.Null(node.Port);
+        Assert.Null(node.HttpIgnoreCertErrors);
+    }
+
+    [Fact]
+    public async Task Https_LoadFrom_FoldsCustomPortIntoAddressField_AndHidesCredentials()
+    {
+        var vm = await NewEditorAsync();
+        var node = new ConnectionNode
+        {
+            Name = "fw",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Https,
+            Host = "10.0.0.1",
+            Port = 8443,
+        };
+
+        vm.LoadFrom(node);
+
+        Assert.Equal("10.0.0.1:8443", vm.Host);
+        Assert.Null(vm.Port);
+        Assert.True(vm.IsHttps);
+        Assert.False(vm.ShowCredentialSection);
+    }
+
+    [Fact]
+    public async Task Https_LoadFrom_DefaultPort_NotFoldedIntoAddress()
+    {
+        var vm = await NewEditorAsync();
+        var node = new ConnectionNode
+        {
+            Name = "fw",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Https,
+            Host = "fw.local",
+            Port = 443,
+        };
+
+        vm.LoadFrom(node);
+
+        Assert.Equal("fw.local", vm.Host);
+    }
+
+    [Fact]
+    public async Task Https_IPv6Host_RoundTripsCustomPort()
+    {
+        var vm = await NewEditorAsync();
+        var source = new ConnectionNode
+        {
+            Name = "fw6",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Https,
+            Host = "fd00::1",
+            Port = 8443,
+        };
+        vm.LoadFrom(source);
+        Assert.Equal("[fd00::1]:8443", vm.Host); // IPv6 is bracketed so the folded host:port round-trips
+
+        var sink = new ConnectionNode();
+        vm.WriteTo(sink);
+        Assert.Equal("fd00::1", sink.Host);
+        Assert.Equal(8443, sink.Port); // port preserved, not corrupted into the host
+    }
+
+    [Theory]
+    [InlineData(":8443", false)]      // no host
+    [InlineData("host:99999", false)] // out-of-range port folds into the host
+    [InlineData("10.0.0.1:8443", true)]
+    [InlineData("fw.example.com", true)]
+    public async Task Https_AddressValidation_GatesSave(string address, bool expectedValid)
+    {
+        var vm = await NewEditorAsync();
+        vm.Name = "fw";
+        vm.Protocol = ProtocolType.Https;
+        vm.Host = address;
+
+        Assert.Equal(expectedValid, vm.IsValid);
+        Assert.Equal(!expectedValid, vm.IsHttpAddressErrorOpen);
+    }
+
+    [Fact]
+    public async Task Https_RoundTrip_PreservesCustomPortAndIgnoreCert()
+    {
+        var vm = await NewEditorAsync();
+        var source = new ConnectionNode
+        {
+            Name = "fw",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Https,
+            Host = "10.0.0.1",
+            Port = 8443,
+            HttpIgnoreCertErrors = true,
+        };
+        vm.LoadFrom(source);
+
+        var sink = new ConnectionNode();
+        vm.WriteTo(sink);
+
+        Assert.Equal("10.0.0.1", sink.Host);
+        Assert.Equal(8443, sink.Port);
+        Assert.True(sink.HttpIgnoreCertErrors);
+    }
+
     private static async Task<ConnectionEditorViewModel> NewEditorAsync()
     {
         var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository(), EmptyTunnelRepo(), new FakeCredentialService());
