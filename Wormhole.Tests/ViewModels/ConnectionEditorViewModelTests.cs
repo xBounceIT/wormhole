@@ -1536,6 +1536,30 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task ReEnablingSavedCredentials_ClearsDomainTypedWhileToggledOff()
+    {
+        // With a real credential selected, unchecking "use saved credentials" reveals the Domain
+        // field; typing there and re-checking only re-hides it — CredentialId never changes, so
+        // OnCredentialIdChanged doesn't run. The domain must still be dropped via the
+        // UseSavedCredentials path, else WriteTo persists an invisible override that wins at connect.
+        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(rdpCred), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        vm.Protocol = ProtocolType.Rdp;
+        vm.SelectedCredential = rdpCred;
+
+        // Drop to inline mode → Domain field editable again; type an override.
+        vm.UseSavedCredentials = false;
+        Assert.True(vm.ShowRdpDomain);
+        vm.RdpDomain = "EVIL";
+
+        // Re-enable saved credentials (credential id unchanged) → field re-hides AND the override clears.
+        vm.UseSavedCredentials = true;
+        Assert.False(vm.ShowRdpDomain);
+        Assert.Equal(string.Empty, vm.RdpDomain);
+    }
+
+    [Fact]
     public async Task LoadFrom_PreservesExistingRdpDomainOverride_WithSavedCredential()
     {
         // The clear-on-select above is suppressed during LoadFrom: re-opening a connection that
