@@ -87,7 +87,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private string username = string.Empty;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsAzureAdCredential), nameof(IsRdpUseExternalClientEditable))]
+    [NotifyPropertyChangedFor(nameof(IsAzureAdCredential), nameof(IsRdpUseExternalClientEditable), nameof(ShowRdpDomain))]
     private string rdpDomain = string.Empty;
 
     [ObservableProperty]
@@ -115,26 +115,27 @@ public partial class ConnectionEditorViewModel : ObservableObject
     public bool ShowInlinePassword => IsSsh && !UseSavedCredentials;
 
     /// <summary>
-    /// Drives the connection-level Domain field's visibility. Shown for RDP <em>unless</em> a real
-    /// saved credential backs the connection: an RDP saved credential always carries its own domain
-    /// (the credential editor makes Domain mandatory for RDP — see <c>CredentialDialog.IsValid</c>),
-    /// so an editable node-level Domain alongside it is redundant. Whenever a real credential governs
-    /// the domain the node-level <see cref="RdpDomain"/> is dropped
-    /// (see <see cref="DropRedundantRdpDomainForSavedCredential"/>) so a now-hidden value can't
-    /// silently override the credential's domain at connect
-    /// (<c>explicitDomain ?? credentialDomain</c> in <see cref="Sessions.RdpSessionViewModel"/>);
-    /// hiding the field here mirrors how the Username field already hides under a saved credential.
+    /// Drives the connection-level Domain field's visibility. Hidden only when a resolved RDP
+    /// credential fully supplies the domain and the node adds nothing — an RDP connection using a
+    /// real RDP saved credential (<see cref="HasResolvedRdpCredential"/>) whose node-level
+    /// <see cref="RdpDomain"/> is empty or merely duplicates that credential's domain. An RDP saved
+    /// credential always carries its own (mandatory) domain, so a redundant node-level value is just
+    /// clutter; hiding the field here mirrors how the Username field hides under a saved credential.
     /// <para>
-    /// It stays visible for every case where no resolved RDP credential supplies the domain: inline /
-    /// connect-time-prompt mode (<see cref="UseSavedCredentials"/> false), the "(None) — prompt every
-    /// time" selection, a non-null <see cref="CredentialId"/> that no longer resolves (a deleted or
-    /// unloaded credential), and a stale protocol-mismatched credential preserved only for
-    /// round-tripping — see <see cref="HasResolvedRdpCredential"/>. The "(None)" case is also
-    /// load-bearing for the AzureAD "prompt every time" workflow, where the user types <c>AzureAD</c>
-    /// into this field to route RDP through the external client.
+    /// It stays visible whenever the node holds a value the user still needs to see or fix: inline /
+    /// connect-time-prompt mode (<see cref="UseSavedCredentials"/> false); the "(None) — prompt every
+    /// time" selection; a non-null <see cref="CredentialId"/> that doesn't resolve to a real RDP
+    /// credential — deleted, unloaded, or a stale protocol-mismatched credential
+    /// (<see cref="HasResolvedRdpCredential"/>); and a distinct override that differs from the
+    /// credential's own domain (<see cref="HasDistinctRdpDomainOverride"/>). Keeping a distinct
+    /// override visible is what stops a value that wins at connect (<c>explicitDomain ?? credentialDomain</c>
+    /// in <see cref="Sessions.RdpSessionViewModel"/>) from becoming an invisible override the user
+    /// can't discover or clear. The "(None)" case is also load-bearing for the AzureAD "prompt every
+    /// time" workflow, where the user types <c>AzureAD</c> into this field to route RDP externally.
     /// </para>
     /// </summary>
-    public bool ShowRdpDomain => IsRdp && (!UseSavedCredentials || !HasResolvedRdpCredential);
+    public bool ShowRdpDomain =>
+        IsRdp && (!UseSavedCredentials || !HasResolvedRdpCredential || HasDistinctRdpDomainOverride);
 
     /// <summary>
     /// Tri-state Auto sudo selection: "inherit" (null — follow the folder default), "on" (true —
@@ -219,12 +220,26 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// "(None) — prompt every time" sentinel; a dangling id whose credential was deleted or never
     /// loaded (<see cref="SelectedCredential"/> is null); and a stale, protocol-mismatched credential
     /// that <see cref="AppendStaleSelection"/> preserved for round-tripping (e.g. an SSH credential
-    /// bound to an RDP node). Gates hiding/clearing the node-level Domain field — using this rather
-    /// than a bare <c>CredentialId is not null</c> keeps that field available whenever nothing
-    /// authoritative can supply the domain.
+    /// bound to an RDP node). Gates hiding the node-level Domain field — using this rather than a bare
+    /// <c>CredentialId is not null</c> keeps that field available whenever nothing authoritative can
+    /// supply the domain.
     /// </summary>
     private bool HasResolvedRdpCredential =>
         SelectedCredential is { Protocol: ProtocolType.Rdp, Kind: not CredentialKind.SshKey };
+
+    /// <summary>
+    /// True when the node-level <see cref="RdpDomain"/> is a meaningful override of the resolved RDP
+    /// credential's own domain: non-empty and different (case-insensitively) from
+    /// <see cref="SelectedCredential"/>'s domain. Such a value wins at connect
+    /// (<c>explicitDomain ?? credentialDomain</c>), so the Domain field stays visible for it even with
+    /// a credential selected — whereas a value that only duplicates the credential's domain is
+    /// redundant and hides. Comparing against the credential's domain (rather than merely checking
+    /// "non-empty") is what lets the original decluttering goal — hide a redundant duplicate — coexist
+    /// with never hiding a value that actually changes the connection.
+    /// </summary>
+    private bool HasDistinctRdpDomainOverride =>
+        !string.IsNullOrWhiteSpace(RdpDomain)
+        && !string.Equals(RdpDomain.Trim(), SelectedCredential?.Domain?.Trim(), StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// True when any AAD signal is present: the linked saved credential's Domain/Username,
@@ -720,35 +735,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
             OnPropertyChanged(nameof(SelectedCredential));
         }
 
-        DropRedundantRdpDomainForSavedCredential();
         ApplyAadAutoFlag();
-    }
-
-    // Re-enabling saved credentials while a credential is already selected re-hides the Domain field
-    // but doesn't change CredentialId, so OnCredentialIdChanged never runs — the redundant-domain
-    // clear has to hang off this path too. (No ApplyAadAutoFlag call needed: the clear, when it
-    // fires, cascades through OnRdpDomainChanged; toggling the flag changes no AAD signal by itself.)
-    partial void OnUseSavedCredentialsChanged(bool value) => DropRedundantRdpDomainForSavedCredential();
-
-    /// <summary>
-    /// When a real saved RDP credential is authoritative for the domain — the Domain field is hidden
-    /// (see <see cref="ShowRdpDomain"/>) — drop any node-level <see cref="RdpDomain"/> the user typed,
-    /// so a now-invisible value can't (a) silently override the credential's domain at connect
-    /// (<c>explicitDomain ?? credentialDomain</c> in <see cref="Sessions.RdpSessionViewModel"/>) or
-    /// (b) strand an "AzureAD" value that keeps the external-client flag latched after the field is
-    /// gone (clearing it rolls the flag back via <see cref="OnRdpDomainChanged"/> → <see cref="ApplyAadAutoFlag"/>).
-    /// Reachable when the user selects a credential (<see cref="OnCredentialIdChanged"/>) or re-enables
-    /// saved credentials with one already selected (<see cref="OnUseSavedCredentialsChanged"/>).
-    /// Suppressed during <see cref="LoadFrom"/> so a persisted override on a re-opened profile is kept.
-    /// The Username field needs no equivalent: it's hidden whenever a saved credential is in play
-    /// (including "(None)" mode), so no typed value can be stranded by a later credential pick.
-    /// </summary>
-    private void DropRedundantRdpDomainForSavedCredential()
-    {
-        if (!_suppressAadAutoFlag && IsRdp && UseSavedCredentials && HasResolvedRdpCredential)
-        {
-            RdpDomain = string.Empty;
-        }
     }
 
     partial void OnRdpGatewayCredentialIdChanged(Guid? value)
