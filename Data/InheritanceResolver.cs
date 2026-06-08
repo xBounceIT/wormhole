@@ -19,6 +19,9 @@ public sealed class InheritanceResolver
         ProtocolType? protocol = null;
         string? host = null;
         int? port = null;
+        // Protocol governing the node `port` came from; compared after the walk to reject a port
+        // inherited across a protocol boundary (see the discard rule below).
+        ProtocolType? portContextProtocol = null;
         string? username = null;
         Guid? credentialId = null;
         string? rdpDomain = null;
@@ -70,6 +73,13 @@ public sealed class InheritanceResolver
             protocol ??= current.Protocol;
             host ??= current.Host;
             port ??= current.Port;
+            // Once a port is in hand, track the protocol governing the node it came from — its own, or
+            // (if that node inherits its protocol) the first an ancestor defines — for the cross-protocol
+            // discard below.
+            if (port is not null)
+            {
+                portContextProtocol ??= current.Protocol;
+            }
             username ??= current.Username;
             credentialId ??= current.CredentialId;
             rdpDomain ??= current.RdpDomain;
@@ -127,6 +137,20 @@ public sealed class InheritanceResolver
         {
             throw new InvalidOperationException(
                 $"Connection '{node.Name}' has no host set on itself or any ancestor folder.");
+        }
+
+        // A port is only meaningful for the protocol it was configured under. When the inherited port
+        // came from an ancestor folder governed by a protocol different from this connection's resolved
+        // protocol — e.g. an HTTPS appliance GUI or an SSH host dropped into an mRemoteNG-imported RDP
+        // folder (Protocol=Rdp + Port=3389) — the inherited port is wrong (the browser/client would dial
+        // :3389) and must not carry over. Discard it and fall back to the resolved protocol's default
+        // below. This uses the port owner's *governing* protocol (its own or an ancestor's), so a folder
+        // that pins a port but inherits its protocol is still caught. When no node at or above the port
+        // owner declares any protocol it is a genuinely protocol-agnostic default and is kept; the leaf's
+        // own port always shares the connection's protocol context and is likewise kept.
+        if (portContextProtocol is { } portContext && portContext != protocol.Value)
+        {
+            port = null;
         }
 
         // The web protocols are credential-less (the editor hides credentials and CredentialDialog won't

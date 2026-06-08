@@ -179,6 +179,237 @@ public class InheritanceResolverTests
         Assert.Equal(expectedPort, profile.Port);
     }
 
+    // Repro for the reported bug: an appliance-GUI web connection (own Port unset) dropped into an
+    // mRemoteNG-imported RDP folder that carries Protocol=Rdp + Port=3389. The web connection must
+    // NOT inherit the folder's RDP port — it should fall back to the protocol default (443/80),
+    // otherwise the embedded browser navigates to https://host:3389 and fails (connection refused).
+    [Theory]
+    [InlineData(ProtocolType.Http, 80)]
+    [InlineData(ProtocolType.Https, 443)]
+    public void Resolve_WebConnection_DoesNotInheritAncestorFolderPort(ProtocolType protocol, int expectedPort)
+    {
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "imported-rdp-folder",
+            Kind = NodeKind.Folder,
+            Protocol = ProtocolType.Rdp,
+            Port = 3389,
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "wazuh-gui",
+            Kind = NodeKind.Connection,
+            Protocol = protocol,
+            Host = "10.1.2.59",
+            // Port deliberately unset — the leaf's own port is null; only the folder carries 3389.
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        };
+
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.Equal(expectedPort, profile.Port);
+    }
+
+    // A web connection's OWN port (the editor folds a "host:port" address into ConnectionNode.Port)
+    // must still be honored — only inherited folder ports are dropped for web.
+    [Fact]
+    public void Resolve_WebConnection_HonorsOwnExplicitPort()
+    {
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "imported-rdp-folder",
+            Kind = NodeKind.Folder,
+            Protocol = ProtocolType.Rdp,
+            Port = 3389,
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "appliance-gui",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Https,
+            Host = "10.1.2.59",
+            Port = 8443,
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        };
+
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.Equal(8443, profile.Port);
+    }
+
+    // The cross-protocol port-inheritance guard is general, not web-only: a connection whose own
+    // Port is unset must not inherit a port that an ancestor folder configured for a DIFFERENT
+    // protocol. An SSH host in an mRemoteNG-imported RDP folder (Protocol=Rdp, Port=3389) would
+    // otherwise try to SSH on 3389; it must fall back to SSH's default 22 — and symmetrically.
+    [Theory]
+    [InlineData(ProtocolType.Ssh, ProtocolType.Rdp, 3389, 22)]
+    [InlineData(ProtocolType.Rdp, ProtocolType.Ssh, 22, 3389)]
+    public void Resolve_DoesNotInheritPortConfiguredForADifferentProtocol(
+        ProtocolType leafProtocol, ProtocolType folderProtocol, int folderPort, int expectedPort)
+    {
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "imported-folder",
+            Kind = NodeKind.Folder,
+            Protocol = folderProtocol,
+            Port = folderPort,
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "host",
+            Kind = NodeKind.Connection,
+            Protocol = leafProtocol,
+            Host = "10.1.2.59",
+            // Port deliberately unset — only the mismatched-protocol folder carries one.
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        };
+
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.Equal(expectedPort, profile.Port);
+    }
+
+    // The guard keys off the port owner's GOVERNING protocol, not just its own field: a folder that
+    // pins a Port but INHERITS its protocol from its own parent (the shape mRemoteNG import produces
+    // for an InheritProtocol container with an explicit Port) must still be caught. Here the mid
+    // folder has no protocol of its own but resolves to Rdp via the root, so its 3389 must NOT reach
+    // the SSH leaf — it falls back to SSH's default 22.
+    [Fact]
+    public void Resolve_DoesNotInheritPort_WhenPortOwnerInheritsADifferentProtocol()
+    {
+        var root = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "rdp-root",
+            Kind = NodeKind.Folder,
+            Protocol = ProtocolType.Rdp,
+        };
+        var mid = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = root.Id,
+            Name = "pins-port-inherits-protocol",
+            Kind = NodeKind.Folder,
+            // No Protocol of its own — inherits Rdp from root — but pins a port.
+            Port = 3389,
+        };
+        var leaf = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = mid.Id,
+            Name = "ssh-host",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            Host = "10.1.2.59",
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode>
+        {
+            [root.Id] = root,
+            [mid.Id] = mid,
+            [leaf.Id] = leaf,
+        };
+
+        var profile = new InheritanceResolver().Resolve(leaf, nodes);
+
+        Assert.Equal(22, profile.Port);
+    }
+
+    // The guard must not over-block: a folder that carries BOTH its protocol AND a non-default port
+    // still passes that port down to a child of the SAME protocol that doesn't set its own.
+    [Fact]
+    public void Resolve_InheritsCustomPortFromSameProtocolFolder()
+    {
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "rdp-farm",
+            Kind = NodeKind.Folder,
+            Protocol = ProtocolType.Rdp,
+            Port = 3390,
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "vm",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Rdp,
+            Host = "vm.example.com",
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        };
+
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.Equal(3390, profile.Port);
+    }
+
+    // A connection that INHERITS its protocol from a folder (own Protocol unset) still inherits a
+    // port the same folder configures — the guard keys off the port owner's protocol, which here
+    // equals the resolved protocol. Exercises the protocol-inheriting-leaf path (the guard reads
+    // the resolved protocol, not the leaf's own).
+    [Fact]
+    public void Resolve_InheritsPortWhenProtocolIsAlsoInherited()
+    {
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "https-appliances",
+            Kind = NodeKind.Folder,
+            Protocol = ProtocolType.Https,
+            Port = 8443,
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "fw",
+            Kind = NodeKind.Connection,
+            Host = "fw.example.com",
+            // Protocol deliberately unset — inherited from the folder.
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        };
+
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.Equal(ProtocolType.Https, profile.Protocol);
+        Assert.Equal(8443, profile.Port);
+    }
+
     [Fact]
     public void Resolve_HttpIgnoreCertErrors_DefaultsFalseWhenUnset()
     {
