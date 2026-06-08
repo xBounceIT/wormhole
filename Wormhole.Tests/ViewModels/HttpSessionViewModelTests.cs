@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Threading;
@@ -212,6 +213,35 @@ public class HttpSessionViewModelTests
     }
 
     [Fact]
+    public async Task ReportNavigationFailed_TunneledConnect_TearsDownTunnel()
+    {
+        // A tunneled web tab establishes the VPN before NavigateRequested. If the initial navigation then
+        // fails (cert error with validation on, timeout, bad host), the tunnel + any loopback forwarder must
+        // be released — not left running behind a "failed" tab until the user happens to Retry/Close.
+        var configId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        tunnelRepo.Configs[configId] = new TunnelConfig { Id = configId, Name = "corp", Kind = TunnelKind.WireGuard };
+        var creds = new FakeCredentialService();
+        creds.TunnelConfigs[configId] = new byte[] { 1, 2, 3 };
+        var tunnel = new FakeWebTunnel(new IPEndPoint(IPAddress.Loopback, 1080));
+        var tunnels = BuildTunnelManager(creds, tunnelRepo, new ITunnelProvider[] { new FakeWebTunnelProvider(tunnel) });
+
+        var vm = CreateVm(tunnels: tunnels);
+        vm.Initialize(Profile(ProtocolType.Https, "fw.local", 443, tunnelEnabled: true, tunnelConfigId: configId));
+        vm.NavigateRequested += _ => { };
+
+        await vm.AttachAsync();
+        Assert.Equal(SessionStatus.Connecting, vm.Status);
+        Assert.Equal(0, tunnel.DisposeCount);
+
+        vm.ReportNavigationFailed("cert error");
+
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.Equal("cert error", vm.ErrorMessage);
+        Assert.Equal(1, tunnel.DisposeCount);
+    }
+
+    [Fact]
     public void Initialize_StartsConnecting_SoUnrealizedTabIsntBlank()
     {
         var vm = CreateVm();
@@ -229,13 +259,9 @@ public class HttpSessionViewModelTests
 
     // ---- helpers -------------------------------------------------------------------------------
 
-    private static HttpSessionViewModel CreateVm(ITunnelRoutePrompter? prompter = null)
+    private static HttpSessionViewModel CreateVm(ITunnelRoutePrompter? prompter = null, TunnelManager? tunnels = null)
     {
-        var tunnels = new TunnelManager(
-            Array.Empty<ITunnelProvider>(),
-            new FakeTunnelConfigRepository(),
-            new FakeCredentialService(),
-            NullLoggerFactory.Instance.CreateLogger<TunnelManager>());
+        tunnels ??= BuildTunnelManager(new FakeCredentialService(), new FakeTunnelConfigRepository());
         return new HttpSessionViewModel(
             tunnels,
             prompter ?? new FakeRoutePrompter(),
@@ -243,8 +269,19 @@ public class HttpSessionViewModelTests
             NullLoggerFactory.Instance);
     }
 
+    private static TunnelManager BuildTunnelManager(
+        FakeCredentialService credentials,
+        FakeTunnelConfigRepository repo,
+        IEnumerable<ITunnelProvider>? providers = null) =>
+        new(
+            providers ?? Array.Empty<ITunnelProvider>(),
+            repo,
+            credentials,
+            NullLoggerFactory.Instance.CreateLogger<TunnelManager>());
+
     private static ConnectionProfile Profile(
-        ProtocolType protocol, string host, int port, bool ignoreCert = false, bool tunnelEnabled = false) =>
+        ProtocolType protocol, string host, int port, bool ignoreCert = false,
+        bool tunnelEnabled = false, Guid? tunnelConfigId = null) =>
         new()
         {
             NodeId = Guid.NewGuid(),
@@ -254,6 +291,7 @@ public class HttpSessionViewModelTests
             Port = port,
             HttpIgnoreCertErrors = ignoreCert,
             TunnelEnabled = tunnelEnabled,
+            TunnelConfigId = tunnelConfigId,
         };
 
     private sealed class FakeRoutePrompter : ITunnelRoutePrompter
@@ -278,6 +316,7 @@ public class HttpSessionViewModelTests
         public FakeWebTunnel(IPEndPoint? socks) => _socks = socks;
         public int BoundPort { get; set; } = 51000;
         public int BindCount { get; private set; }
+        public int DisposeCount { get; private set; }
         public string? LastForwardHost { get; private set; }
         public int? LastForwardPort { get; private set; }
         public TunnelState State => TunnelState.Up;
@@ -295,6 +334,24 @@ public class HttpSessionViewModelTests
             return Task.FromResult(BoundPort);
         }
 
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public ValueTask DisposeAsync()
+        {
+            DisposeCount++;
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    // Returns a pre-built FakeWebTunnel from EstablishAsync so a test can drive a full tunneled connect
+    // through TunnelManager and then assert the VM disposes the instance. Kind matches the config below.
+    private sealed class FakeWebTunnelProvider : ITunnelProvider
+    {
+        private readonly FakeWebTunnel _instance;
+        public FakeWebTunnelProvider(FakeWebTunnel instance) => _instance = instance;
+        public TunnelKind Kind => TunnelKind.WireGuard;
+
+        public Task<ITunnelInstance> EstablishAsync(
+            TunnelConfig config, byte[] secretBlob, CancellationToken cancellationToken,
+            IProgress<TunnelProgress>? progress = null) =>
+            Task.FromResult<ITunnelInstance>(_instance);
     }
 }

@@ -243,6 +243,13 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
         // not demote a healthy tab; and a late callback after teardown (Disconnected/Failed) is ignored.
         if (Status != SessionStatus.Connecting) return;
         ReportFailure(message);
+        // The tunnel (and any loopback forwarder + VPN sidecar process) was already established before
+        // NavigateRequested. A navigation failure ends THIS attempt, so release it now rather than leaving
+        // the VPN running behind a "failed" tab until the user happens to Retry or Close. Mirrors RDP's
+        // DisposeAndTransitionAsync (report failure, then dispose the tunnel). Fire-and-forget — the view's
+        // NavigationCompleted callback is synchronous, teardown is best-effort (TearDownTunnelAsync swallows
+        // its own errors), and a later Retry/Close is a no-op once _tunnel is nulled.
+        _ = TearDownTunnelAsync();
     }
 
     public void ReportFailure(string message)
