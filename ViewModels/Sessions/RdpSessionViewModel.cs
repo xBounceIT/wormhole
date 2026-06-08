@@ -142,6 +142,14 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     public bool CanUseExternalClient => Profile?.TunnelEnabled != true && !IsExternalClientActive;
     public bool CanDisconnect => Status is SessionStatus.Connecting or SessionStatus.Connected || IsExternalClientActive;
 
+    /// <summary>
+    /// A session handed off to an external mstsc.exe survives app exit — teardown only detaches the
+    /// process handle (<see cref="DetachExternalProcess"/>), it never kills the process — so closing
+    /// Wormhole does not disconnect it. Exclude it from the close-confirmation count even though
+    /// <see cref="SessionTabViewModel.Status"/> is Connected.
+    /// </summary>
+    public override bool WillDisconnectOnAppClose => base.WillDisconnectOnAppClose && !IsExternalClientActive;
+
     internal Func<ProcessStartInfo, Process?> ExternalProcessLauncher { get; set; } = Process.Start;
 
     public override void Initialize(ConnectionProfile profile)
