@@ -230,8 +230,34 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             return;
         }
 
+        // No live session to reattach to. A genuine first show connects below; but an incidental
+        // view reload (Sessions↔Settings nav, a manual tab switch, or the closest-neighbour
+        // selection SessionsPage drives when the active tab is closed) onto a tab that has since
+        // DROPPED must not silently reconnect — the "closed a tab, the neighbour started connecting
+        // again with a tunnel-route prompt over a blank pane" repro. A background SSH drop lands in
+        // Failed (OnSessionClosed → ReportFailure), which renders the in-pane Retry overlay; leave it
+        // standing and let the user choose. Unlike RDP — which also guards Disconnected, backed by
+        // its own Disconnected+Reconnect overlay — SSH guards ONLY Failed: it has no Disconnected
+        // overlay (just a blank pane), and the only realistic way to reach Disconnected post-attempt
+        // is a connect interrupted by a nav-away (WebView lost mid-connect), where auto-reconnecting
+        // on return is the wanted recovery, not a dead blank pane. Explicit Retry uses RetryAsync.
+        if (ShouldDeferAutoConnectOnReattach())
+        {
+            _logger.LogDebug("SSH attach: tab is Failed and sessionless; leaving the Retry overlay up instead of auto-reconnecting.");
+            return;
+        }
+
         await ConnectAsync().ConfigureAwait(true);
     }
+
+    // A sessionless tab reaching AttachAsync's connect tail is normally a genuine first show and
+    // should connect. The exception: a tab that already attempted and is now Failed must keep its
+    // in-pane Retry overlay rather than auto-reconnecting on an incidental view reload. Only Failed
+    // is deferred — Disconnected deliberately still auto-connects, so an interrupted-connect tab
+    // recovers instead of stranding in SSH's blank Disconnected pane (it has no Disconnected
+    // overlay). Failed implies a prior attempt (it is only ever set by ReportFailure), so no separate
+    // "have we connected before" latch is needed here.
+    internal bool ShouldDeferAutoConnectOnReattach() => Status is SessionStatus.Failed;
 
     /// <summary>
     /// Raised when <see cref="RetryAsync"/> is invoked but the view's WebView2 never
@@ -260,8 +286,22 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             // for the next AttachAsync. A non-null handler means the view is loaded
             // but WebView2 init failed — preserve the existing "retry init" fan-out.
             var handler = InitializationRetryRequested;
-            if (handler is not null) handler();
-            else _reconnectRequestedWhileDetached = true;
+            if (handler is not null)
+            {
+                // Re-running WebView2 init routes back through AttachAsync while Status is still
+                // Failed (the init/handshake failure happened before _webView was ever assigned, so
+                // there's no live session and no reconnect-while-detached intent). Flip to Connecting
+                // first so AttachAsync's ShouldDeferAutoConnectOnReattach() — which defers a
+                // sessionless Failed tab to avoid auto-reconnecting an incidental reattach — doesn't
+                // suppress THIS user-requested retry and strand the tab on the Failed overlay. Mirrors
+                // the foreground path below, which also moves to Connecting before reconnecting.
+                Status = SessionStatus.Connecting;
+                handler();
+            }
+            else
+            {
+                _reconnectRequestedWhileDetached = true;
+            }
             return;
         }
 
