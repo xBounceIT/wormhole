@@ -976,7 +976,13 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
         if (IsRdp)
         {
-            node.RdpDomain = string.IsNullOrWhiteSpace(RdpDomain) ? null : RdpDomain.Trim();
+            // Persist the node-level domain only while the field is shown (a genuine override that
+            // differs from the credential's domain, or no governing credential). When it's hidden —
+            // a redundant duplicate of, or empty under, a resolved RDP credential — store null so the
+            // credential's domain stays authoritative even if it's later edited; a persisted hidden
+            // duplicate would otherwise linger and win at connect (explicitDomain ?? credentialDomain)
+            // once the credential diverges. Mirrors the visibility-gated SshAutoSudo write above.
+            node.RdpDomain = ShowRdpDomain && !string.IsNullOrWhiteSpace(RdpDomain) ? RdpDomain.Trim() : null;
             node.RdpScreenSize = string.IsNullOrWhiteSpace(RdpScreenSize) ? null : RdpScreenSize;
             node.RdpFullScreen = RdpFullScreen;
             node.RdpColorDepth = RdpColorDepth;

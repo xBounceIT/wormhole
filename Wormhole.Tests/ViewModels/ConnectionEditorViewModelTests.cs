@@ -1614,6 +1614,59 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task WriteTo_DropsRedundantRdpDomainDuplicatingCredential()
+    {
+        // A hidden redundant duplicate must NOT be persisted: if it lingered and the credential's
+        // domain were later edited, the stale node value would still win at connect
+        // (explicitDomain ?? credentialDomain). WriteTo stores null so the credential stays authoritative.
+        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password, Domain = "CORP" };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(rdpCred), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        var source = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Rdp,
+            Kind = NodeKind.Connection,
+            CredentialId = rdpCred.Id,
+            RdpDomain = "CORP",
+        };
+        vm.LoadFrom(source);
+        Assert.False(vm.ShowRdpDomain);
+
+        var sink = new ConnectionNode { Kind = NodeKind.Connection };
+        vm.WriteTo(sink);
+
+        Assert.Null(sink.RdpDomain);           // redundant duplicate dropped
+        Assert.Equal(rdpCred.Id, sink.CredentialId); // credential remains authoritative
+    }
+
+    [Fact]
+    public async Task WriteTo_PersistsDistinctRdpDomainOverride()
+    {
+        // A distinct override is visible and meaningful (it wins at connect), so WriteTo keeps it.
+        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password, Domain = "CORP" };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(rdpCred), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        var source = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Rdp,
+            Kind = NodeKind.Connection,
+            CredentialId = rdpCred.Id,
+            RdpDomain = "LEGACY",
+        };
+        vm.LoadFrom(source);
+        Assert.True(vm.ShowRdpDomain);
+
+        var sink = new ConnectionNode { Kind = NodeKind.Connection };
+        vm.WriteTo(sink);
+
+        Assert.Equal("LEGACY", sink.RdpDomain);
+    }
+
+    [Fact]
     public async Task ShowRdpDomain_VisibleWhenCredentialIdDoesNotResolve()
     {
         // A non-null CredentialId pointing at a deleted/unrestored credential doesn't resolve
