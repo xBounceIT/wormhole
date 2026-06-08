@@ -1617,6 +1617,41 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task ShowRdpDomain_VisibleWhenSelectedCredentialIsProtocolMismatched()
+    {
+        // A stale, protocol-mismatched credential (an SSH credential saved on an RDP node) is kept by
+        // AppendStaleSelection so the binding round-trips, making SelectedCredential non-null — but an
+        // SSH credential carries no RDP domain (CredentialDialog stores domains only for RDP creds).
+        // Only a real RDP credential is authoritative, so the Domain field must stay visible/editable
+        // and must not be cleared on a saved-credentials toggle.
+        var sshCred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(sshCred), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        var source = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Rdp,
+            Kind = NodeKind.Connection,
+            CredentialId = sshCred.Id, // SSH credential bound to an RDP node (protocol mismatch)
+            RdpDomain = "CORP",
+        };
+
+        vm.LoadFrom(source);
+
+        Assert.NotNull(vm.SelectedCredential); // stale selection preserved for round-trip
+        Assert.Equal(ProtocolType.Ssh, vm.SelectedCredential!.Protocol);
+        Assert.True(vm.ShowRdpDomain);          // SSH cred has no RDP domain → field stays visible
+        Assert.Equal("CORP", vm.RdpDomain);
+
+        // Toggling saved credentials must not clear the domain for a protocol-mismatched credential.
+        vm.UseSavedCredentials = false;
+        vm.UseSavedCredentials = true;
+        Assert.Equal("CORP", vm.RdpDomain);
+        Assert.True(vm.ShowRdpDomain);
+    }
+
+    [Fact]
     public async Task CanUseSshAutoSudo_InlineMode_VisibleEvenWithSshKeyCredentialSelected()
     {
         var key = new CredentialProfile { Name = "ssh-key", Protocol = ProtocolType.Ssh, Kind = CredentialKind.SshKey };

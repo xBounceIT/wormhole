@@ -125,15 +125,16 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// (<c>explicitDomain ?? credentialDomain</c> in <see cref="Sessions.RdpSessionViewModel"/>);
     /// hiding the field here mirrors how the Username field already hides under a saved credential.
     /// <para>
-    /// It stays visible for every case where no resolved credential supplies the domain: inline /
+    /// It stays visible for every case where no resolved RDP credential supplies the domain: inline /
     /// connect-time-prompt mode (<see cref="UseSavedCredentials"/> false), the "(None) — prompt every
-    /// time" selection, and a non-null <see cref="CredentialId"/> that no longer resolves — a deleted
-    /// or unloaded credential (<see cref="HasResolvedSavedCredential"/>). The "(None)" case is also
+    /// time" selection, a non-null <see cref="CredentialId"/> that no longer resolves (a deleted or
+    /// unloaded credential), and a stale protocol-mismatched credential preserved only for
+    /// round-tripping — see <see cref="HasResolvedRdpCredential"/>. The "(None)" case is also
     /// load-bearing for the AzureAD "prompt every time" workflow, where the user types <c>AzureAD</c>
     /// into this field to route RDP through the external client.
     /// </para>
     /// </summary>
-    public bool ShowRdpDomain => IsRdp && (!UseSavedCredentials || !HasResolvedSavedCredential);
+    public bool ShowRdpDomain => IsRdp && (!UseSavedCredentials || !HasResolvedRdpCredential);
 
     /// <summary>
     /// Tri-state Auto sudo selection: "inherit" (null — follow the folder default), "on" (true —
@@ -210,14 +211,20 @@ public partial class ConnectionEditorViewModel : ObservableObject
     }
 
     /// <summary>
-    /// True only when <see cref="CredentialId"/> resolves to a real saved credential — not the
-    /// "(None) — prompt every time" sentinel, and not a dangling id whose credential was deleted or
-    /// never loaded (<see cref="SelectedCredential"/> is null then). Only a credential that actually
-    /// resolves can supply the RDP domain, so this — rather than a bare <c>CredentialId is not null</c>
-    /// — gates hiding (and clearing) the node-level Domain field; otherwise a profile pointing at a
-    /// deleted credential would hide the one field that can still set its domain.
+    /// True only when <see cref="CredentialId"/> resolves to a saved credential that actually carries
+    /// the RDP domain: a real <see cref="ProtocolType.Rdp"/> credential whose secret is a password
+    /// (only those store a domain — see <c>CredentialDialog.BuildDraft</c>, and they're the same
+    /// credentials <see cref="RebuildAvailableCredentials"/> offers for RDP). This excludes three
+    /// look-alikes that supply no domain and must therefore leave the Domain field editable: the
+    /// "(None) — prompt every time" sentinel; a dangling id whose credential was deleted or never
+    /// loaded (<see cref="SelectedCredential"/> is null); and a stale, protocol-mismatched credential
+    /// that <see cref="AppendStaleSelection"/> preserved for round-tripping (e.g. an SSH credential
+    /// bound to an RDP node). Gates hiding/clearing the node-level Domain field — using this rather
+    /// than a bare <c>CredentialId is not null</c> keeps that field available whenever nothing
+    /// authoritative can supply the domain.
     /// </summary>
-    private bool HasResolvedSavedCredential => SelectedCredential is { Id: var id } && id != Guid.Empty;
+    private bool HasResolvedRdpCredential =>
+        SelectedCredential is { Protocol: ProtocolType.Rdp, Kind: not CredentialKind.SshKey };
 
     /// <summary>
     /// True when any AAD signal is present: the linked saved credential's Domain/Username,
@@ -738,7 +745,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// </summary>
     private void DropRedundantRdpDomainForSavedCredential()
     {
-        if (!_suppressAadAutoFlag && IsRdp && UseSavedCredentials && HasResolvedSavedCredential)
+        if (!_suppressAadAutoFlag && IsRdp && UseSavedCredentials && HasResolvedRdpCredential)
         {
             RdpDomain = string.Empty;
         }
