@@ -159,6 +159,133 @@ public class InheritanceResolverTests
         Assert.Equal(3389, profile.Port);
     }
 
+    [Theory]
+    [InlineData(ProtocolType.Http, 80)]
+    [InlineData(ProtocolType.Https, 443)]
+    public void Resolve_DefaultsWebPortFromProtocol(ProtocolType protocol, int expectedPort)
+    {
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "fw-gui",
+            Kind = NodeKind.Connection,
+            Protocol = protocol,
+            Host = "fw.example.com",
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode> { [node.Id] = node };
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.Equal(expectedPort, profile.Port);
+    }
+
+    [Fact]
+    public void Resolve_HttpIgnoreCertErrors_DefaultsFalseWhenUnset()
+    {
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "fw-gui",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Https,
+            Host = "fw.example.com",
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode> { [node.Id] = node };
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.False(profile.HttpIgnoreCertErrors);
+    }
+
+    [Fact]
+    public void Resolve_HttpIgnoreCertErrors_IsLeafOnly_NotInheritedFromParentFolder()
+    {
+        // Leaf-only (like UseInlinePassword): a folder value must NOT be inherited, so an unrelated edit
+        // of a child (whose 2-state checkbox can't express "inherit") can't silently sever it.
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "appliances",
+            Kind = NodeKind.Folder,
+            HttpIgnoreCertErrors = true,
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "fw-gui",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Https,
+            Host = "fw.example.com",
+            // own value unset (null) -> resolves false, regardless of the folder's true
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        };
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.False(profile.HttpIgnoreCertErrors);
+    }
+
+    [Fact]
+    public void Resolve_HttpIgnoreCertErrors_UsesOwnLeafValue()
+    {
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "fw-gui",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Https,
+            Host = "fw.example.com",
+            HttpIgnoreCertErrors = true,
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode> { [node.Id] = node };
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.True(profile.HttpIgnoreCertErrors);
+    }
+
+    [Theory]
+    [InlineData(ProtocolType.Http)]
+    [InlineData(ProtocolType.Https)]
+    public void Resolve_WebProtocol_DropsInheritedCredentialAndUsername(ProtocolType webProtocol)
+    {
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "appliances",
+            Kind = NodeKind.Folder,
+            CredentialId = Guid.NewGuid(),
+            Username = "admin",
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "fw-gui",
+            Kind = NodeKind.Connection,
+            Protocol = webProtocol,
+            Host = "fw.example.com",
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        };
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        // A credential-less web node must not carry the parent folder's credential/identity, which the
+        // tree's "Show credentials" would otherwise surface as an unrelated parent's password.
+        Assert.Null(profile.CredentialId);
+        Assert.Null(profile.Username);
+        Assert.False(profile.UseInlinePassword);
+    }
+
     [Fact]
     public void Resolve_ThrowsWhenProtocolMissing()
     {

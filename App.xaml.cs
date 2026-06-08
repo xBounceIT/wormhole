@@ -47,9 +47,20 @@ public partial class App : Application
         TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
     }
 
+    /// <summary>
+    /// The startup sweep of orphaned web-browser WebView2 folders, run off the UI thread. Web-environment
+    /// creation in <c>WebBrowserView</c> awaits this so a web tab never races the delete — there is no web
+    /// session until well after this is kicked off, so it has ample time to finish in the background.
+    /// </summary>
+    internal static Task WebBrowserDataCleanup { get; private set; } = Task.CompletedTask;
+
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
         Directory.CreateDirectory(AppPaths.GetAppDataDirectory());
+
+        // Reclaim orphaned web-browser WebView2 folders off the UI thread (the delete of a Chromium
+        // profile can be slow); the first web tab awaits WebBrowserDataCleanup before creating its env.
+        WebBrowserDataCleanup = Task.Run(ClearWebBrowserUserData);
 
         var runner = Services.GetRequiredService<MigrationRunner>();
         await runner.RunAsync();
@@ -152,6 +163,26 @@ public partial class App : Application
         }
     }
 
+    /// <summary>
+    /// Wipe the web-browser WebView2 user-data root: no web session is live at launch, and web sessions
+    /// deliberately don't persist across restarts, so this also reclaims any per-tab proxy sub-folders
+    /// orphaned by a Sessions↔Settings navigation (see <c>WebBrowserView</c>). Best-effort — a locked
+    /// folder or any IO error is swallowed.
+    /// </summary>
+    private void ClearWebBrowserUserData()
+    {
+        try
+        {
+            var dir = AppPaths.GetWebBrowserUserDataDirectory();
+            if (Directory.Exists(dir)) Directory.Delete(dir, recursive: true);
+        }
+        catch (Exception ex)
+        {
+            Services.GetService<ILogger<App>>()?.LogDebug(
+                ex, "Could not clear the web-browser WebView2 user-data folder at startup (best-effort).");
+        }
+    }
+
     private static ServiceProvider ConfigureServices()
     {
         Directory.CreateDirectory(AppPaths.GetLogsDirectory());
@@ -244,6 +275,7 @@ public partial class App : Application
         services.AddTransient<FolderEditorViewModel>();
         services.AddTransient<SshSessionViewModel>();
         services.AddTransient<RdpSessionViewModel>();
+        services.AddTransient<HttpSessionViewModel>();
         services.AddTransient<MRemoteNgImportDialogViewModel>();
         services.AddTransient<BackupExportDialogViewModel>();
         services.AddTransient<BackupImportDialogViewModel>();

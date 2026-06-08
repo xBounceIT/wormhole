@@ -70,6 +70,13 @@ public sealed record ConnectionProfile
     public string? SshKnownHostFingerprint { get; init; }
     public bool SshAutoSudo { get; init; }
 
+    /// <summary>
+    /// For the <see cref="ProtocolType.Https"/> web protocol: accept certificate errors
+    /// (self-signed, name mismatch, untrusted chain) when navigating. Targets appliance GUIs —
+    /// firewalls etc. — that commonly serve self-signed certs. Ignored for non-web protocols.
+    /// </summary>
+    public bool HttpIgnoreCertErrors { get; init; }
+
     public bool TunnelEnabled { get; init; }
     public Guid? TunnelConfigId { get; init; }
 }

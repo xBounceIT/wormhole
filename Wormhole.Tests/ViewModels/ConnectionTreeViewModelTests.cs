@@ -67,6 +67,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
             SshKeyFileName           TEXT     NULL,
             SshKnownHostFingerprint  TEXT     NULL,
             SshAutoSudo              INTEGER  NULL,
+            HttpIgnoreCertErrors     INTEGER  NULL,
             TunnelEnabled            INTEGER  NULL,
             TunnelConfigId           TEXT     NULL,
             CreatedAt                TEXT     NOT NULL,

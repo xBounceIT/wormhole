@@ -76,6 +76,15 @@ public class ConnectionNode
     public string? SshKnownHostFingerprint { get; set; }
     public bool? SshAutoSudo { get; set; }
 
+    /// <summary>
+    /// For the HTTPS web protocol: when true, accept certificate errors (self-signed, name
+    /// mismatch, untrusted chain) when navigating. Per-connection (leaf-only) — NOT inherited from a
+    /// parent folder (the editor surfaces it as a 2-state checkbox that can't express "inherit", so
+    /// inheriting it would let an unrelated edit silently sever it). Null/false means "validate
+    /// certificates". Ignored for non-web protocols.
+    /// </summary>
+    public bool? HttpIgnoreCertErrors { get; set; }
+
     public bool? TunnelEnabled { get; set; }
     public Guid? TunnelConfigId { get; set; }
 
@@ -155,6 +164,7 @@ public class ConnectionNode
         SshKeyFileName = SshKeyFileName,
         SshKnownHostFingerprint = SshKnownHostFingerprint,
         SshAutoSudo = SshAutoSudo,
+        HttpIgnoreCertErrors = HttpIgnoreCertErrors,
         TunnelEnabled = TunnelEnabled,
         TunnelConfigId = TunnelConfigId,
         CreatedAt = CreatedAt,

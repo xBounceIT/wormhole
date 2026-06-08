@@ -894,6 +894,7 @@ public sealed partial class TreeNodeViewModel : ObservableObject
         {
             ProtocolType.Ssh => Glyphs.Ssh,
             ProtocolType.Rdp => Glyphs.Rdp,
+            ProtocolType.Http or ProtocolType.Https => Glyphs.Web,
             _ => Glyphs.Generic,
         };
 
