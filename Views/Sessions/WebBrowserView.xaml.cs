@@ -36,9 +36,9 @@ public sealed partial class WebBrowserView : UserControl
 
     private HttpSessionViewModel? _viewModel;
     private WinUIWebView2? _webView;
-    // Temp user-data folder backing a proxied environment; deleted (best-effort) when that WebView2 is
-    // torn down. Null for shared-environment (non-proxied) tabs.
-    private string? _proxyUserDataFolder;
+    // Temp user-data folder backing this tab's isolated environment (a SOCKS-proxy or ignore-cert tab);
+    // deleted (best-effort) when that WebView2 is torn down. Null for shared-environment (plain) tabs.
+    private string? _isolatedUserDataFolder;
     // Bumped on every CreateAndNavigate (and on unload) so a slower in-flight creation that lost the
     // race bails instead of binding a stale WebView2.
     private int _createGeneration;
@@ -134,14 +134,14 @@ public sealed partial class WebBrowserView : UserControl
             // generation. We created nothing yet, so leave the current _webView for the winner.
             if (generation != _createGeneration) return;
 
-            // Tear down any previous control + proxy env first (Retry, or a re-navigate whose tunnel got
-            // a different SOCKS port, needs a fresh environment). Safe: we hold the gate, so _webView is
-            // either the prior winner's control or null.
+            // Tear down any previous control + isolated env first (Retry, or a re-navigate whose tunnel
+            // got a different SOCKS port, needs a fresh environment). Safe: we hold the gate, so _webView
+            // is either the prior winner's control or null.
             DisposeWebView();
 
             var environment = await ResolveEnvironmentAsync(target).ConfigureAwait(true);
-            // ResolveEnvironmentAsync may have created a proxy folder + environment; DisposeWebView's
-            // CleanupProxyFolder reclaims the folder if we bail here.
+            // ResolveEnvironmentAsync may have created an isolated user-data folder + environment;
+            // DisposeWebView's CleanupIsolatedUserDataFolder reclaims the folder if we bail here.
             if (generation != _createGeneration) { DisposeWebView(); return; }
 
             var webView = new WinUIWebView2
@@ -202,17 +202,26 @@ public sealed partial class WebBrowserView : UserControl
         // first wait).
         await App.WebBrowserDataCleanup.ConfigureAwait(true);
 
-        if (target.Socks5Proxy is { } proxy)
+        // A web tab needs its OWN environment (dedicated user-data folder + browser process) when it
+        // either routes through a SOCKS5 proxy (Chromium proxy args are fixed at env creation) OR
+        // ignores certificate errors. The cert case is about isolation, not proxying: WebView2 caches an
+        // AlwaysAllow server-certificate decision for the lifetime of the environment, so if an
+        // ignore-cert tab shared the default environment, a LATER tab to the same host with the toggle
+        // OFF would silently inherit that allow and skip validation (its ServerCertificateErrorDetected
+        // wouldn't even fire). Isolating ignore-cert sessions scopes the bypass to the connection that
+        // opted in; plain (toggle-off) tabs use the shared environment, which never holds an allow.
+        if (target.Socks5Proxy is not null || target.IgnoreCertErrors)
         {
-            // Dedicated SOCKS5-proxied environment in its own user-data folder (Chromium does remote DNS
-            // for socks5://, so the appliance hostname is resolved on the far side of the VPN).
-            var folder = AppPaths.GetWebBrowserProxyUserDataDirectory(Guid.NewGuid().ToString("N"));
+            var folder = AppPaths.GetWebBrowserIsolatedUserDataDirectory(Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(folder);
-            _proxyUserDataFolder = folder;
-            var options = new CoreWebView2EnvironmentOptions
+            _isolatedUserDataFolder = folder;
+            var options = new CoreWebView2EnvironmentOptions();
+            if (target.Socks5Proxy is { } proxy)
             {
-                AdditionalBrowserArguments = $"--proxy-server=socks5://{proxy}",
-            };
+                // Chromium does remote DNS for socks5://, so the appliance hostname is resolved on the
+                // far side of the VPN.
+                options.AdditionalBrowserArguments = $"--proxy-server=socks5://{proxy}";
+            }
             return await CoreWebView2Environment.CreateWithOptionsAsync(null, folder, options);
         }
 
@@ -332,13 +341,13 @@ public sealed partial class WebBrowserView : UserControl
             catch (Exception ex) { LogDebug(ex, "WebView2 Close threw during teardown."); }
             WebViewHost.Children.Remove(webView);
         }
-        CleanupProxyFolder();
+        CleanupIsolatedUserDataFolder();
     }
 
-    private void CleanupProxyFolder()
+    private void CleanupIsolatedUserDataFolder()
     {
-        var folder = _proxyUserDataFolder;
-        _proxyUserDataFolder = null;
+        var folder = _isolatedUserDataFolder;
+        _isolatedUserDataFolder = null;
         if (folder is null) return;
         try
         {
@@ -348,7 +357,7 @@ public sealed partial class WebBrowserView : UserControl
         {
             // The browser process may still hold a lock immediately after Close(); the orphaned temp
             // folder is harmless and can be swept on a later run. Best-effort only.
-            LogDebug(ex, "Could not delete proxy user-data folder (browser may still hold a lock).");
+            LogDebug(ex, "Could not delete isolated web env user-data folder (browser may still hold a lock).");
         }
     }
 

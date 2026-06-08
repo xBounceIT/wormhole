@@ -57,13 +57,15 @@ internal static class AppPaths
 
     public static string GetWatchguardSamlWebView2UserDataDirectory() => WatchguardSamlWebView2UserDataDirectory;
 
-    // Shared environment folder for direct / loopback-forwarded web tabs (no proxy args).
+    // Shared environment folder for plain web tabs — those that neither proxy through SOCKS nor ignore
+    // certificate errors, so they can safely share one browser process / cert-decision cache.
     public static string GetWebBrowserUserDataDirectory() => WebBrowserUserDataDirectory;
 
-    // Unique per-tab folder for a SOCKS5-proxied web tab: Chromium proxy args are fixed at environment
-    // creation, so each proxied session needs its own environment (and therefore its own user-data dir).
-    public static string GetWebBrowserProxyUserDataDirectory(string id) =>
-        Path.Combine(WebBrowserUserDataDirectory, "proxy-" + id);
+    // Unique per-tab folder for a web tab that needs an ISOLATED environment: a SOCKS5 proxy (Chromium
+    // proxy args are fixed at env creation) or ignore-cert (WebView2 caches AlwaysAllow per environment,
+    // which must not leak to a sibling tab that didn't opt in). Each such session gets its own dir.
+    public static string GetWebBrowserIsolatedUserDataDirectory(string id) =>
+        Path.Combine(WebBrowserUserDataDirectory, "env-" + id);
 
     public static string GetWebAssetsDirectory() => WebAssetsDirectory;
 
