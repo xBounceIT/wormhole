@@ -131,6 +131,12 @@ public sealed class InheritanceResolver
                 $"Connection '{node.Name}' has no host set on itself or any ancestor folder.");
         }
 
+        // The web protocols are credential-less (the editor hides credentials and CredentialDialog won't
+        // create them). Drop any credential identity inherited from an ancestor folder, so a web node
+        // under an SSH/RDP folder can't carry — and, via the tree's "Show credentials", expose — an
+        // unrelated parent's password.
+        var isWeb = protocol.Value is ProtocolType.Http or ProtocolType.Https;
+
         return new ConnectionProfile
         {
             NodeId = node.Id,
@@ -138,11 +144,11 @@ public sealed class InheritanceResolver
             Protocol = protocol.Value,
             Host = host,
             Port = port ?? DefaultPortFor(protocol.Value),
-            Username = username,
-            CredentialId = credentialId,
+            Username = isWeb ? null : username,
+            CredentialId = isWeb ? null : credentialId,
             // Inline password is strictly per-connection — read from the leaf `node`, never
             // inherited up the folder chain (unlike CredentialId above).
-            UseInlinePassword = node.UseInlinePassword ?? false,
+            UseInlinePassword = !isWeb && (node.UseInlinePassword ?? false),
             RdpDomain = rdpDomain,
             RdpScreenSize = rdpScreenSize,
             RdpFullScreen = rdpFullScreen ?? false,

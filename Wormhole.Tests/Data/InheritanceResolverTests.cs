@@ -227,6 +227,43 @@ public class InheritanceResolverTests
         Assert.True(profile.HttpIgnoreCertErrors);
     }
 
+    [Theory]
+    [InlineData(ProtocolType.Http)]
+    [InlineData(ProtocolType.Https)]
+    public void Resolve_WebProtocol_DropsInheritedCredentialAndUsername(ProtocolType webProtocol)
+    {
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "appliances",
+            Kind = NodeKind.Folder,
+            CredentialId = Guid.NewGuid(),
+            Username = "admin",
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "fw-gui",
+            Kind = NodeKind.Connection,
+            Protocol = webProtocol,
+            Host = "fw.example.com",
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        };
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        // A credential-less web node must not carry the parent folder's credential/identity, which the
+        // tree's "Show credentials" would otherwise surface as an unrelated parent's password.
+        Assert.Null(profile.CredentialId);
+        Assert.Null(profile.Username);
+        Assert.False(profile.UseInlinePassword);
+    }
+
     [Fact]
     public void Resolve_ThrowsWhenProtocolMissing()
     {
