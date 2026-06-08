@@ -125,14 +125,15 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// (<c>explicitDomain ?? credentialDomain</c> in <see cref="Sessions.RdpSessionViewModel"/>);
     /// hiding the field here mirrors how the Username field already hides under a saved credential.
     /// <para>
-    /// It stays visible for the no-real-credential cases that still need somewhere to type a domain:
-    /// inline / connect-time-prompt mode (<see cref="UseSavedCredentials"/> false) and the
-    /// "(None) — prompt every time" selection (<see cref="CredentialId"/> null while the picker is
-    /// shown). The latter is load-bearing for the AzureAD "prompt every time" workflow, where the
-    /// user types <c>AzureAD</c> into this field to route RDP through the external client.
+    /// It stays visible for every case where no resolved credential supplies the domain: inline /
+    /// connect-time-prompt mode (<see cref="UseSavedCredentials"/> false), the "(None) — prompt every
+    /// time" selection, and a non-null <see cref="CredentialId"/> that no longer resolves — a deleted
+    /// or unloaded credential (<see cref="HasResolvedSavedCredential"/>). The "(None)" case is also
+    /// load-bearing for the AzureAD "prompt every time" workflow, where the user types <c>AzureAD</c>
+    /// into this field to route RDP through the external client.
     /// </para>
     /// </summary>
-    public bool ShowRdpDomain => IsRdp && (!UseSavedCredentials || CredentialId is null);
+    public bool ShowRdpDomain => IsRdp && (!UseSavedCredentials || !HasResolvedSavedCredential);
 
     /// <summary>
     /// Tri-state Auto sudo selection: "inherit" (null — follow the folder default), "on" (true —
@@ -207,6 +208,16 @@ public partial class ConnectionEditorViewModel : ObservableObject
         get => CredentialId is null ? NoneCredential : GetCredentialById(CredentialId);
         set => CredentialId = (value is null || value.Id == Guid.Empty) ? null : value.Id;
     }
+
+    /// <summary>
+    /// True only when <see cref="CredentialId"/> resolves to a real saved credential — not the
+    /// "(None) — prompt every time" sentinel, and not a dangling id whose credential was deleted or
+    /// never loaded (<see cref="SelectedCredential"/> is null then). Only a credential that actually
+    /// resolves can supply the RDP domain, so this — rather than a bare <c>CredentialId is not null</c>
+    /// — gates hiding (and clearing) the node-level Domain field; otherwise a profile pointing at a
+    /// deleted credential would hide the one field that can still set its domain.
+    /// </summary>
+    private bool HasResolvedSavedCredential => SelectedCredential is { Id: var id } && id != Guid.Empty;
 
     /// <summary>
     /// True when any AAD signal is present: the linked saved credential's Domain/Username,
@@ -727,7 +738,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// </summary>
     private void DropRedundantRdpDomainForSavedCredential()
     {
-        if (!_suppressAadAutoFlag && IsRdp && UseSavedCredentials && CredentialId is not null)
+        if (!_suppressAadAutoFlag && IsRdp && UseSavedCredentials && HasResolvedSavedCredential)
         {
             RdpDomain = string.Empty;
         }

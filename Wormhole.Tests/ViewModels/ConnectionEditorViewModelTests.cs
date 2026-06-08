@@ -1585,6 +1585,38 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task ShowRdpDomain_VisibleWhenCredentialIdDoesNotResolve()
+    {
+        // A non-null CredentialId pointing at a deleted/unrestored credential doesn't resolve
+        // (SelectedCredential is null), so no credential can supply the domain. The Domain field must
+        // stay visible — it's the only place left to see/fix the domain — and must NOT be cleared on
+        // a saved-credentials toggle, unlike when a real credential governs.
+        var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository(), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        var source = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Rdp,
+            Kind = NodeKind.Connection,
+            CredentialId = Guid.NewGuid(), // references a credential that no longer exists
+            RdpDomain = "CORP",
+        };
+
+        vm.LoadFrom(source);
+
+        Assert.Null(vm.SelectedCredential);   // dangling id doesn't resolve
+        Assert.True(vm.ShowRdpDomain);         // field stays visible so the user can see/fix it
+        Assert.Equal("CORP", vm.RdpDomain);
+
+        // Toggling saved credentials must not clear the domain for an unresolved credential.
+        vm.UseSavedCredentials = false;
+        vm.UseSavedCredentials = true;
+        Assert.Equal("CORP", vm.RdpDomain);
+        Assert.True(vm.ShowRdpDomain);
+    }
+
+    [Fact]
     public async Task CanUseSshAutoSudo_InlineMode_VisibleEvenWithSshKeyCredentialSelected()
     {
         var key = new CredentialProfile { Name = "ssh-key", Protocol = ProtocolType.Ssh, Kind = CredentialKind.SshKey };
