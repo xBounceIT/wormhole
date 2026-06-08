@@ -74,6 +74,15 @@ public partial class ShellViewModel : ObservableObject
 
     public bool IsEmpty => Tabs.Count == 0;
 
+    /// <summary>
+    /// Number of open tabs holding a live connection that closing the app would disconnect
+    /// (see <see cref="SessionTabViewModel.WillDisconnectOnAppClose"/>). Computed on demand —
+    /// read by the window-close path to decide whether to warn before disconnecting. Disconnected,
+    /// failed, and handed-off external sessions are excluded: closing the app won't tear them down,
+    /// so they don't warrant a confirmation prompt.
+    /// </summary>
+    public int ActiveSessionCount => Tabs.Count(static tab => tab.WillDisconnectOnAppClose);
+
     public ConnectionTreeViewModel Tree { get; }
 
     public UpdateViewModel Update { get; }

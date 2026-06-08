@@ -45,6 +45,31 @@ public class ShellViewModelTests
         Assert.Empty(vm.Tabs);
     }
 
+    [Theory]
+    [InlineData(SessionStatus.Connected, 1)]
+    [InlineData(SessionStatus.Connecting, 1)]
+    [InlineData(SessionStatus.Disconnected, 0)]
+    [InlineData(SessionStatus.Failed, 0)]
+    public void ActiveSessionCount_CountsOnlyLiveSessions(SessionStatus status, int expected)
+    {
+        var vm = CreateShell();
+        vm.Tabs.Add(new TestSessionTab("tab") { Status = status });
+
+        Assert.Equal(expected, vm.ActiveSessionCount);
+    }
+
+    [Fact]
+    public void ActiveSessionCount_ExcludesSessionsThatSurviveAppClose()
+    {
+        var vm = CreateShell();
+        vm.Tabs.Add(new TestSessionTab("embedded") { Status = SessionStatus.Connected });
+        vm.Tabs.Add(new TestSessionTab("external") { Status = SessionStatus.Connected, SurvivesAppClose = true });
+
+        // Closing the app tears down the embedded session but not the handed-off external one,
+        // so only the embedded session should drive the confirmation prompt.
+        Assert.Equal(1, vm.ActiveSessionCount);
+    }
+
     private static ShellViewModel CreateShell() =>
         new(
             tree: null!,
@@ -61,7 +86,17 @@ public class ShellViewModelTests
 
         public int CloseCount { get; private set; }
         public bool ThrowOnClose { get; init; }
+
+        /// <summary>
+        /// Simulates a session that closing the app won't actually disconnect (e.g. an RDP tab
+        /// handed off to an external mstsc.exe), so it is excluded from the close-warning count
+        /// even when its <see cref="SessionTabViewModel.Status"/> is live.
+        /// </summary>
+        public bool SurvivesAppClose { get; init; }
+
         public override ProtocolType Protocol => ProtocolType.Ssh;
+
+        public override bool WillDisconnectOnAppClose => !SurvivesAppClose && base.WillDisconnectOnAppClose;
 
         public override ValueTask CloseAsync()
         {

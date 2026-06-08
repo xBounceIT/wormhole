@@ -89,6 +89,17 @@ public abstract partial class SessionTabViewModel : ObservableObject
     }
 
     /// <summary>
+    /// Whether this tab holds a live connection that closing the app would actually tear down —
+    /// the signal the window-close confirmation uses to decide what to warn about and disconnect.
+    /// Default: any <see cref="SessionStatus.Connected"/> or <see cref="SessionStatus.Connecting"/>
+    /// session. RDP overrides this to exclude sessions handed off to an external <c>mstsc.exe</c>,
+    /// which keeps running after Wormhole exits — closing the app does not disconnect those, so
+    /// warning that it will would be a false promise. Read on demand (not observable).
+    /// </summary>
+    public virtual bool WillDisconnectOnAppClose =>
+        Status is SessionStatus.Connected or SessionStatus.Connecting;
+
+    /// <summary>
     /// Tear down all session-owned resources (sockets, ActiveX HWNDs, background pumps).
     /// Called from <c>SessionsPage.SessionTabs_TabCloseRequested</c> when the user closes the
     /// tab. Default implementation is a no-op so trivial sessions don't have to override.

@@ -1,4 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
@@ -30,6 +31,8 @@ public sealed partial class MainWindow : Window
     private const double MinConnectionsTreeHeight = 100;
 
     private readonly INavigationService _navigationService;
+    private readonly IDialogService _dialogService;
+    private readonly ILogger<MainWindow> _logger;
 
     private bool _isResizingSidebar;
     private double _resizeStartWidth;
@@ -40,14 +43,17 @@ public sealed partial class MainWindow : Window
     private OverlappedPresenterState _currentWindowState;
     private bool _sessionCleanupInProgress;
     private bool _sessionCleanupComplete;
+    private bool _closePromptInProgress;
     private double _lastConnectionsTreeMaxHeight = double.NaN;
 
     public ShellViewModel ViewModel { get; }
 
-    public MainWindow(ShellViewModel viewModel, INavigationService navigationService)
+    public MainWindow(ShellViewModel viewModel, INavigationService navigationService, IDialogService dialogService, ILogger<MainWindow> logger)
     {
         ViewModel = viewModel;
         _navigationService = navigationService;
+        _dialogService = dialogService;
+        _logger = logger;
 
         this.InitializeComponent();
 
@@ -108,7 +114,48 @@ public sealed partial class MainWindow : Window
         if (_sessionCleanupComplete) return;
 
         args.Cancel = true;
-        if (_sessionCleanupInProgress) return;
+        // Ignore repeat close clicks while we're already mid-teardown, or while the
+        // confirmation prompt from an earlier click is still up. Both run on this (UI)
+        // thread, so the flags are only ever read/written between awaits — no locking needed.
+        if (_sessionCleanupInProgress || _closePromptInProgress) return;
+
+        // Warn before tearing down live connections so a stray Alt+F4 — or a misclick on the
+        // close button — can't silently drop an SSH shell or RDP session. Only prompt when
+        // something is actually connected/connecting; a window full of disconnected tabs has
+        // nothing to lose. A "Cancel" leaves the window open for a later attempt.
+        // Snapshot once: ActiveSessionCount scans the tab collection, and capturing it keeps the
+        // gate and the message text consistent.
+        var activeCount = ViewModel.ActiveSessionCount;
+        if (activeCount > 0)
+        {
+            _closePromptInProgress = true;
+            bool confirmed;
+            try
+            {
+                confirmed = await _dialogService.ConfirmAsync(
+                    "Close Wormhole?",
+                    activeCount == 1
+                        ? "1 connection is still open. Closing the app will disconnect it."
+                        : $"{activeCount} connections are still open. Closing the app will disconnect them.",
+                    primaryText: "Close and disconnect",
+                    closeText: "Cancel");
+            }
+            catch (Exception ex)
+            {
+                // Showing our ContentDialog fails if another one already owns the XamlRoot (WinUI
+                // permits only one at a time) — e.g. an MCP approval prompt, a file-transfer dialog,
+                // or an in-flight backup/import. Fail safe: leave the window open rather than tearing
+                // down live sessions out from under that dialog; the user can finish it and retry.
+                _logger.LogWarning(ex, "Could not show close-confirmation prompt; leaving the window open.");
+                confirmed = false;
+            }
+            finally
+            {
+                _closePromptInProgress = false;
+            }
+
+            if (!confirmed) return;
+        }
 
         _sessionCleanupInProgress = true;
         try
