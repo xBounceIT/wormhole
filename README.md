@@ -5,10 +5,10 @@ philosophical sequel to [mRemoteNG](https://mremoteng.org).
 
 > **Status:** Active development, UNSTABLE. The WinUI shell,
 > persisted connection tree, connection editor, credential store, mRemoteNG
-> import, SSH terminal, embedded/external RDP, SFTP file transfer, per-connection
-> VPN across five providers (including RDP over VPN), an opt-in MCP server for
-> AI-driven SSH control, installer packaging, and in-app update checks are all
-> implemented.
+> import, SSH terminal, embedded/external RDP, SFTP file transfer, HTTP/HTTPS web
+> sessions, per-connection VPN across five providers (including RDP and web over
+> VPN), an opt-in MCP server for AI-driven SSH control, installer packaging, and
+> in-app update checks are all implemented.
 
 ## Why
 
@@ -24,11 +24,16 @@ everything else.
 - Connection tree with folders, search, and drag-reorder.
 - **Folder-level inheritance** — set a credential (or VPN tunnel, or any RDP
   setting) on a folder and every child inherits it.
-- Tabbed workspace for SSH and RDP sessions.
+- Tabbed workspace for SSH, RDP, and HTTP/HTTPS web sessions.
 - SSH terminal (xterm.js in WebView2, driven by SSH.NET), with either a saved
   credential reference or an inline per-connection username/password.
 - Embedded RDP session via the `mstscax` ActiveX control, with an external
   `mstsc.exe` fallback for Azure AD / WAM-sensitive targets.
+- **HTTP / HTTPS web sessions** that render a target web GUI — e.g. a firewall or
+  appliance management page — in an embedded WebView2 browser tab. No
+  credentials; HTTPS offers an opt-in "ignore certificate errors" toggle for
+  self-signed appliance certs. The motivating case is reaching an appliance GUI
+  that sits behind a per-connection VPN tunnel.
 - SFTP dual-pane file-transfer dialog from connected SSH tabs. The SFTP session
   is pre-warmed in the background as soon as the shell connects, so the dialog
   opens instantly.
@@ -37,7 +42,7 @@ everything else.
 - mRemoteNG `confCons.xml` import.
 - Per-connection userspace VPN tunnels for **WireGuard, OpenVPN, Fortinet SSL
   VPN, WatchGuard Mobile VPN with SSL, and Stormshield Network SSL VPN** — used
-  by SSH, SFTP, and RDP sessions.
+  by SSH, SFTP, RDP, and HTTP/HTTPS sessions.
 - Opt-in **MCP server** that lets AI agents drive your already-open SSH sessions
   over an authenticated loopback endpoint.
 - Modern WinUI 3 shell: Mica backdrop, dark mode, per-monitor DPI.
@@ -89,6 +94,13 @@ Three RDP + tunnel combinations are rejected because the loopback bridge can't
 safely handle them: the external `mstsc.exe` client, RD Gateway, and strict
 server authentication.
 
+HTTP/HTTPS sessions route through a hybrid of the two. When the tunnel exposes a
+SOCKS5 endpoint, the WebView2 is launched with a `--proxy-server=socks5://…` so
+it connects to the **real** hostname (correct SNI, certificate, and redirects).
+When it doesn't, the browser falls back to the same `127.0.0.1` loopback bridge
+as RDP — where the loopback name won't match the appliance certificate, so HTTPS
+over that path needs the "ignore certificate errors" opt-in.
+
 ```mermaid
 flowchart TD
     A["Open saved connection"] --> B["InheritanceResolver builds ConnectionProfile"]
@@ -106,9 +118,11 @@ flowchart TD
     K --> L{"Protocol path"}
     L -- "SSH" --> M["SSH.NET connects through SOCKS5"]
     L -- "SFTP file transfer" --> N["SftpClient connects through SOCKS5"]
+    L -- "HTTP / HTTPS" --> R["WebView2 proxies through SOCKS5 (real hostname preserved), else shares RDP's loopback bridge"]
     L -- "RDP" --> O["BindLocalForwarderAsync binds a 127.0.0.1 listener; ActiveX connects to it"]
     M --> P["Session owns tunnel lifetime"]
     N --> P
+    R --> P
     O --> P
     P --> Q["Close tab/dialog -> dispose tunnel sidecar"]
 ```
@@ -187,6 +201,7 @@ dotnet test Wormhole.Tests.Integration/Wormhole.Tests.Integration.csproj
 | SSH + SFTP | SSH.NET |
 | Terminal renderer | xterm.js inside WebView2 |
 | RDP | `mstscax` ActiveX (in-box) hosted via WinForms |
+| Web browser (HTTP/HTTPS) | WebView2 (Chromium); per-session SOCKS5 proxy when tunneled |
 | VPN tunnels | Userspace WireGuard / OpenVPN / Fortinet / WatchGuard / Stormshield sidecars exposing loopback SOCKS5 |
 | AI control | ModelContextProtocol.AspNetCore (loopback MCP server over Kestrel) |
 | Credentials | Meziantou.Framework.Win32.CredentialManager + DPAPI |
