@@ -78,12 +78,33 @@ internal sealed class StormshieldConfigCache : IStormshieldConfigCache
 
             var record = JsonSerializer.Deserialize<StormshieldCacheRecord>(json);
             if (record is null
-                || record.SchemaVersion != StormshieldCacheRecord.CurrentSchemaVersion
                 || !string.Equals(record.SiteIdentityHash, ComputeSiteIdentity(settings), StringComparison.Ordinal)
                 || string.IsNullOrEmpty(record.ProfileOvpn)
                 || !StormshieldPortalClient.LooksLikeOpenVpnProfile(record.ProfileOvpn))
             {
                 return null;
+            }
+
+            // Schema gate. A current-schema record is used verbatim. An OLDER record whose bump was
+            // normalization-only (within the migratable range) is upgraded IN PLACE by re-running the current
+            // normalizer on the stored profile — that is what spares the user an OTP-spending re-download just
+            // because the app updated to a build with a new normalizer. Anything newer than we understand, or
+            // older than the last structural change, is a genuine miss.
+            if (record.SchemaVersion != StormshieldCacheRecord.CurrentSchemaVersion)
+            {
+                if (record.SchemaVersion < StormshieldCacheRecord.MinMigratableSchemaVersion
+                    || record.SchemaVersion > StormshieldCacheRecord.CurrentSchemaVersion)
+                {
+                    _logger.LogDebug(
+                        "Stormshield config cache for {TunnelId} has unmigratable schema v{Version}; treating as a miss.",
+                        tunnelConfigId, record.SchemaVersion);
+                    return null;
+                }
+
+                var migrated = await TryMigrateInPlaceAsync(tunnelConfigId, record, cancellationToken).ConfigureAwait(false);
+                if (migrated is null)
+                    return null;
+                record = migrated;
             }
 
             if (DateTimeOffset.UtcNow - record.CachedAtUtc > _maxAge)
@@ -116,6 +137,15 @@ internal sealed class StormshieldConfigCache : IStormshieldConfigCache
             CachedAtUtc = DateTimeOffset.UtcNow,
         };
 
+        await PersistAsync(tunnelConfigId, record, cancellationToken).ConfigureAwait(false);
+    }
+
+    // DPAPI-encrypts and atomically writes an already-built record verbatim. Shared by WriteAsync (which
+    // stamps a fresh record) and the in-place migration (which must persist the upgraded record WITHOUT
+    // re-stamping CachedAtUtc — re-dating it would silently extend how long the cached private key is reused
+    // past its original max-age lease).
+    private async Task PersistAsync(Guid tunnelConfigId, StormshieldCacheRecord record, CancellationToken cancellationToken)
+    {
         Directory.CreateDirectory(_cacheDirectory);
         var path = CachePath(tunnelConfigId);
         // Unique temp name per write so concurrent writers can't clobber one another's temp file.
@@ -137,6 +167,55 @@ internal sealed class StormshieldConfigCache : IStormshieldConfigCache
             try { File.Delete(tempPath); } catch { /* best effort */ }
             throw;
         }
+    }
+
+    /// <summary>
+    /// Upgrades an older normalization-only record to the current schema by re-running
+    /// <see cref="StormshieldProfileNormalizer.Normalize"/> on the stored profile, preserving the original
+    /// identity / config-hash / cached-at so the firewall change-check and max-age semantics are unchanged.
+    /// Returns the upgraded record, or null when re-normalization can't produce a usable profile (caller then
+    /// treats it as a miss → fresh download). The upgrade is persisted best-effort: a write failure just means
+    /// the next read re-migrates — it must never fail the (successful) read, which would re-spend the OTP.
+    /// </summary>
+    private async Task<StormshieldCacheRecord?> TryMigrateInPlaceAsync(
+        Guid tunnelConfigId, StormshieldCacheRecord stale, CancellationToken cancellationToken)
+    {
+        // The caller only reaches here for a profile that already passed LooksLikeOpenVpnProfile, and Normalize
+        // throws only on whitespace-only input — so it can't throw and can't return empty for this input. The
+        // post-check below still rejects a re-normalized profile that no longer looks like one before it can be
+        // persisted; any unforeseen throw is handled identically (as a miss) by TryReadAsync's outer catch.
+        var renormalized = StormshieldProfileNormalizer.Normalize(stale.ProfileOvpn);
+        if (!StormshieldPortalClient.LooksLikeOpenVpnProfile(renormalized))
+            return null;
+
+        var upgraded = new StormshieldCacheRecord
+        {
+            SchemaVersion = StormshieldCacheRecord.CurrentSchemaVersion,
+            SiteIdentityHash = stale.SiteIdentityHash,
+            ConfigHash = stale.ConfigHash,
+            ProfileOvpn = renormalized,
+            CachedAtUtc = stale.CachedAtUtc,
+        };
+
+        try
+        {
+            await PersistAsync(tunnelConfigId, upgraded, cancellationToken).ConfigureAwait(false);
+            _logger.LogInformation(
+                "Stormshield config cache for {TunnelId}: migrated v{Old} -> v{New} in place by re-normalizing the cached profile (no re-download, one-time code preserved).",
+                tunnelConfigId, stale.SchemaVersion, StormshieldCacheRecord.CurrentSchemaVersion);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex,
+                "Stormshield config cache for {TunnelId}: re-normalized but failed to persist the v{New} upgrade; will re-migrate on the next read.",
+                tunnelConfigId, StormshieldCacheRecord.CurrentSchemaVersion);
+        }
+
+        return upgraded;
     }
 
     public Task DeleteAsync(Guid tunnelConfigId, CancellationToken cancellationToken) =>

@@ -134,6 +134,17 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     [ObservableProperty]
     private string? errorMessage;
 
+    // True when the Failed overlay is showing a benign, recoverable NOTICE (e.g. a tunnel downloaded a fresh
+    // profile and now needs a new one-time code) rather than a hard failure. Drives the overlay to a
+    // success/info presentation — checkmark + positive title — instead of the red "Connection failed" error.
+    [ObservableProperty]
+    private bool isRecoverableNotice;
+
+    // Heading shown on the recoverable-notice overlay (carried from the notice exception, e.g. "Profile
+    // downloaded"). Only displayed while IsRecoverableNotice is true.
+    [ObservableProperty]
+    private string? noticeTitle;
+
     [ObservableProperty]
     private bool hasReceivedOutput;
 
@@ -364,6 +375,25 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         CancelRemoteOutputWaitTimer();
         IsWaitingForRemoteOutput = false;
         Progress.Fail();
+        IsRecoverableNotice = false;
+        ErrorMessage = message;
+        Status = SessionStatus.Failed;
+    }
+
+    /// <summary>
+    /// End the connect attempt on a benign, recoverable outcome that is NOT a failure — the tunnel did the
+    /// right thing but needs the user to reconnect (e.g. it spent the one-time code downloading a fresh
+    /// profile, or rejected a re-entered just-spent code). Reuses the Failed overlay so the message +
+    /// Reconnect button stay available, but flags it as a notice so the view renders it as success/info, and
+    /// does NOT mark a progress step failed — the step it stopped on actually succeeded.
+    /// </summary>
+    public void ReportNotice(string title, string message)
+    {
+        CancelRemoteOutputWaitTimer();
+        IsWaitingForRemoteOutput = false;
+        Progress.Reset();
+        IsRecoverableNotice = true;
+        NoticeTitle = title;
         ErrorMessage = message;
         Status = SessionStatus.Failed;
     }
@@ -506,6 +536,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
         Status = SessionStatus.Connecting;
         ErrorMessage = null;
+        IsRecoverableNotice = false;
         ResetOutputState();
         var cts = new CancellationTokenSource();
         _cts = cts;
@@ -643,6 +674,16 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         {
             await SafeDisposeSessionAsync().ConfigureAwait(true);
             ReportFailure("Authentication failed: " + ex.Message);
+        }
+        catch (TunnelRecoverableNoticeException ex)
+        {
+            // Not a failure: the tunnel did the right thing but needs a reconnect (e.g. Stormshield downloaded
+            // a fresh profile spending the one-time code, or rejected a re-entered just-spent code). Present
+            // it as a success/notice with a Reconnect affordance, not a red error.
+            await SafeDisposeSessionAsync().ConfigureAwait(true);
+            ReportNotice(ex.NoticeTitle, ex.Message);
+            _logger.LogInformation(
+                "Recoverable tunnel notice for {Host} ({Title}); awaiting a reconnect.", profile.Host, ex.NoticeTitle);
         }
         catch (Exception ex)
         {

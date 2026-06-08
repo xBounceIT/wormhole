@@ -66,6 +66,7 @@
     <Compile Include="..\Services\Tunneling\ITunnelProvider.cs" Link="Services\Tunneling\ITunnelProvider.cs" />
     <Compile Include="..\Services\Tunneling\ITunnelInstance.cs" Link="Services\Tunneling\ITunnelInstance.cs" />
     <Compile Include="..\Services\Tunneling\TunnelManager.cs" Link="Services\Tunneling\TunnelManager.cs" />
+    <Compile Include="..\Services\Tunneling\TunnelRecoverableNoticeException.cs" Link="Services\Tunneling\TunnelRecoverableNoticeException.cs" />
     <Compile Include="..\Services\Tunneling\ITunnelRoutePrompter.cs" Link="Services\Tunneling\ITunnelRoutePrompter.cs" />
     <Compile Include="..\Services\Tunneling\TunnelRoutePrompter.cs" Link="Services\Tunneling\TunnelRoutePrompter.cs" />
     <Compile Include="..\Services\Tunneling\SocksTunnelInstance.cs" Link="Services\Tunneling\SocksTunnelInstance.cs" />
@@ -92,6 +93,7 @@
     <Compile Include="..\Services\Tunneling\Stormshield\IStormshieldConfigCache.cs" Link="Services\Tunneling\Stormshield\IStormshieldConfigCache.cs" />
     <Compile Include="..\Services\Tunneling\Stormshield\StormshieldCacheRecord.cs" Link="Services\Tunneling\Stormshield\StormshieldCacheRecord.cs" />
     <Compile Include="..\Services\Tunneling\Stormshield\StormshieldConfigCache.cs" Link="Services\Tunneling\Stormshield\StormshieldConfigCache.cs" />
+    <Compile Include="..\Services\Tunneling\Stormshield\StormshieldOtpReuseGuard.cs" Link="Services\Tunneling\Stormshield\StormshieldOtpReuseGuard.cs" />
     <Compile Include="..\Data\Repositories\ITunnelConfigRepository.cs" Link="Data\Repositories\ITunnelConfigRepository.cs" />
     <Compile Include="..\Helpers\AppPaths.cs" Link="Helpers\AppPaths.cs" />
     <Compile Include="..\Helpers\AzureAdCredentialDetector.cs" Link="Helpers\AzureAdCredentialDetector.cs" />

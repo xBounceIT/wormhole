@@ -76,6 +76,12 @@ public sealed partial class TunnelTestDialogViewModel : ObservableObject, IDispo
     [ObservableProperty]
     private bool wasCancelled;
 
+    // Distinguishes a benign, recoverable outcome (Stormshield downloaded a fresh profile and now needs a
+    // new one-time code) from a real failure, so the result InfoBar renders it as informational rather than
+    // an alarming error (also leaves Succeeded == false).
+    [ObservableProperty]
+    private bool wasInformational;
+
     public bool CanClose => !IsBusy;
     public bool HasResult => Succeeded.HasValue;
     public bool IsSuccess => Succeeded == true;
@@ -94,6 +100,7 @@ public sealed partial class TunnelTestDialogViewModel : ObservableObject, IDispo
         IsBusy = true;
         Succeeded = null;
         WasCancelled = false;
+        WasInformational = false;
         ResultTitle = string.Empty;
         ResultMessage = string.Empty;
         Volatile.Write(ref _lastProgress, null);
@@ -128,6 +135,18 @@ public sealed partial class TunnelTestDialogViewModel : ObservableObject, IDispo
             ResultTitle = "Tunnel test cancelled";
             ResultMessage = $"The test for '{config.Name}' was cancelled before it finished.";
             WasCancelled = true;
+            Succeeded = false;
+        }
+        catch (TunnelRecoverableNoticeException ex)
+        {
+            // Not a failure: the tunnel did the right thing (e.g. auth + profile download succeeded, spending
+            // the one-time code, or a re-entered just-spent code was rejected) and just needs a reconnect.
+            // Render it as an informational result, not an alarming error.
+            Status = $"{ex.NoticeTitle}.";
+            AppendLog(ex.Message);
+            ResultTitle = ex.NoticeTitle;
+            ResultMessage = ex.Message;
+            WasInformational = true;
             Succeeded = false;
         }
         catch (Exception ex)

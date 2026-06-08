@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Models;
 using Wormhole.Services.Tunneling;
+using Wormhole.Services.Tunneling.Stormshield;
 using Wormhole.Tests.Fakes;
 using Wormhole.ViewModels;
 using Xunit;
@@ -54,6 +55,54 @@ public class TunnelTestDialogViewModelTests
         Assert.Contains("simulated auth failure", vm.ResultMessage);
         Assert.Contains("Last step: starting tunnel.", vm.ResultMessage);
         Assert.Contains(vm.Log, l => l.Contains("simulated auth failure", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Run_ProfileRefreshed_ReportsInformationalNotice_NotFailure()
+    {
+        // Stormshield spent the one-time code downloading a fresh profile and needs a reconnect. The dialog
+        // must render this as an informational result (not an alarming error): Succeeded == false but
+        // WasInformational == true, which the InfoBar severity converter maps to Informational. The title
+        // comes from the exception's NoticeTitle.
+        var provider = new FakeTunnelProvider(TunnelKind.Stormshield)
+        {
+            EstablishFailure = new StormshieldConfigRefreshedException(
+                "Downloaded an updated VPN profile for 'alpha'. This used your current one-time code, so enter "
+                + "a NEW code from your authenticator and reconnect to bring up the tunnel."),
+        };
+        var (vm, config) = CreateVm(provider, new byte[] { 1, 2, 3 });
+
+        await vm.RunAsync(config);
+
+        Assert.False(vm.IsBusy);
+        Assert.True(vm.HasResult);
+        Assert.False(vm.IsSuccess);        // the tunnel did not come up...
+        Assert.True(vm.WasInformational);  // ...but this is a benign notice, NOT an error
+        Assert.False(vm.WasCancelled);
+        Assert.Equal("Profile downloaded", vm.ResultTitle);
+        Assert.Contains("enter a NEW code", vm.ResultMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Run_OtpReused_ReportsInformationalNotice_NotFailure()
+    {
+        // A re-entered just-spent code is also a TunnelRecoverableNoticeException (different subclass): the
+        // dialog must treat it as an informational notice too, NOT a red error, via the shared base-type catch.
+        var provider = new FakeTunnelProvider(TunnelKind.Stormshield)
+        {
+            EstablishFailure = new StormshieldOtpReusedException(
+                "That one-time code was just used. Wait until your authenticator shows a NEW code, then reconnect."),
+        };
+        var (vm, config) = CreateVm(provider, new byte[] { 1, 2, 3 });
+
+        await vm.RunAsync(config);
+
+        Assert.False(vm.IsBusy);
+        Assert.True(vm.HasResult);
+        Assert.False(vm.IsSuccess);
+        Assert.True(vm.WasInformational);
+        Assert.Equal("One-time code already used", vm.ResultTitle);
+        Assert.Contains("NEW code", vm.ResultMessage, StringComparison.Ordinal);
     }
 
     [Fact]

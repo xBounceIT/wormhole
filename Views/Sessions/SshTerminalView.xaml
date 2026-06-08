@@ -89,12 +89,26 @@
                     Header=""
                     Margin="0,0,0,4"
                     Visibility="{Binding HasFailedStep, Converter={StaticResource BoolToVisibilityConverter}}" />
+                <!-- Hard-failure chrome: red error glyph + "Connection failed". Hidden when the overlay
+                     is showing a benign recoverable notice (IsRecoverableNotice). -->
                 <FontIcon Glyph="&#xE783;" FontSize="32" Foreground="#FF6B6B"
-                          HorizontalAlignment="Center" />
+                          HorizontalAlignment="Center"
+                          Visibility="{Binding IsRecoverableNotice, Converter={StaticResource InverseBoolToVisibilityConverter}}" />
                 <TextBlock Text="Connection failed"
                            Style="{StaticResource SubtitleTextBlockStyle}"
                            Foreground="#e0e0e0"
-                           HorizontalAlignment="Center" />
+                           HorizontalAlignment="Center"
+                           Visibility="{Binding IsRecoverableNotice, Converter={StaticResource InverseBoolToVisibilityConverter}}" />
+                <!-- Recoverable-notice chrome: green check + positive title (e.g. Stormshield downloaded a
+                     fresh profile and just needs a new one-time code to reconnect). -->
+                <FontIcon Glyph="&#xE930;" FontSize="32" Foreground="#6BCB77"
+                          HorizontalAlignment="Center"
+                          Visibility="{Binding IsRecoverableNotice, Converter={StaticResource BoolToVisibilityConverter}}" />
+                <TextBlock Text="{Binding NoticeTitle}"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           Foreground="#e0e0e0"
+                           HorizontalAlignment="Center"
+                           Visibility="{Binding IsRecoverableNotice, Converter={StaticResource BoolToVisibilityConverter}}" />
                 <TextBlock Text="{Binding ErrorMessage}"
                            TextWrapping="Wrap"
                            HorizontalAlignment="Center"

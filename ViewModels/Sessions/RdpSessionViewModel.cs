@@ -120,6 +120,17 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     [ObservableProperty]
     private string? errorMessage;
 
+    // True when the failure overlay is showing a benign, recoverable NOTICE (e.g. a tunnel downloaded a fresh
+    // profile and now needs a new one-time code) rather than a hard failure. Drives the overlay to a
+    // success/info presentation instead of the red "Connection failed" error.
+    [ObservableProperty]
+    private bool isRecoverableNotice;
+
+    // Heading shown on the recoverable-notice overlay (carried from the notice exception, e.g. "Profile
+    // downloaded"). Only displayed while IsRecoverableNotice is true.
+    [ObservableProperty]
+    private string? noticeTitle;
+
     /// <summary>Surface for the "Reconnecting…" status banner while ActiveX auto-reconnect is in flight.</summary>
     [ObservableProperty]
     private int reconnectAttempt;
@@ -480,6 +491,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         {
             Status = SessionStatus.Connecting;
             ErrorMessage = null;
+            IsRecoverableNotice = false;
             FailedDueToCredentials = false;
             IsExternalClientActive = false;
             ReconnectAttempt = 0;
@@ -752,6 +764,19 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                     "Install the Remote Desktop Connection client.",
                     dueToCredentials: false);
                 _logger.LogError(ex, "RDP ActiveX not registered.");
+            }
+            catch (TunnelRecoverableNoticeException ex)
+            {
+                // Not a failure: the tunnel did the right thing but needs a reconnect (e.g. Stormshield
+                // downloaded a fresh profile spending the one-time code, or rejected a re-entered just-spent
+                // code). Present it as a success/notice with a Reconnect affordance, not a red error.
+                DisposeSessionSilently();
+                await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
+                if (!IsAttemptCurrent(teardownGeneration)) return;
+                ReportNotice(ex.NoticeTitle, ex.Message);
+                _logger.LogInformation(
+                    "Recoverable tunnel notice for {Host}:{Port} ({Title}); awaiting a reconnect.",
+                    profile.Host, profile.Port, ex.NoticeTitle);
             }
             catch (Exception ex)
             {
@@ -1144,8 +1169,27 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     private void ReportFailure(string message, bool dueToCredentials)
     {
         Progress.Fail();
+        IsRecoverableNotice = false;
         ErrorMessage = message;
         FailedDueToCredentials = dueToCredentials;
+        IsExternalClientActive = false;
+        Status = SessionStatus.Failed;
+    }
+
+    /// <summary>
+    /// End the connect attempt on a benign, recoverable outcome that is NOT a failure — the tunnel did the
+    /// right thing but needs the user to reconnect (e.g. it spent the one-time code downloading a fresh
+    /// profile, or rejected a re-entered just-spent code). Reuses the failure overlay so the message +
+    /// Reconnect button stay available, but flags it as a notice so the view renders success/info, and does
+    /// NOT mark a progress step failed — the step it stopped on actually succeeded.
+    /// </summary>
+    private void ReportNotice(string title, string message)
+    {
+        Progress.Reset();
+        IsRecoverableNotice = true;
+        NoticeTitle = title;
+        ErrorMessage = message;
+        FailedDueToCredentials = false;
         IsExternalClientActive = false;
         Status = SessionStatus.Failed;
     }
