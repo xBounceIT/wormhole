@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/net/dns/dnsmessage"
 )
@@ -202,5 +204,173 @@ func TestParseDNSResponse_TxidMismatch(t *testing.T) {
 	_, _, err = parseDNSResponse(wire, 0x2222)
 	if err == nil {
 		t.Fatal("expected error on txid mismatch, got nil")
+	}
+}
+
+// The core regression test for the "RDP through the Forti tunnel randomly won't connect"
+// bug: a transport timeout (dropped UDP datagram on the PPP link) must NOT fail the lookup —
+// queryServersUntilAnswer has to retransmit until a later attempt gets through.
+func TestQueryServersUntilAnswer_RetransmitsPastTransientLoss(t *testing.T) {
+	servers := []netip.Addr{netip.MustParseAddr("10.72.0.1"), netip.MustParseAddr("10.72.0.2")}
+	qname := dnsmessage.MustNewName("dyn-ar-cdb01.dynartis.local.")
+	want := netip.AddrFrom4([4]byte{10, 155, 50, 99})
+
+	var calls int
+	query := func(_ context.Context, _ netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
+		calls++
+		// Mimic the live log: both servers time out on the first round, then a retransmit
+		// lands. Pre-fix (single shot, single pass) this lookup failed outright.
+		if calls <= len(servers) {
+			return netip.Addr{}, "", errors.New("DNS read: i/o timeout")
+		}
+		return want, "", nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	addr, cname, err := queryServersUntilAnswer(ctx, servers, qname, "dyn-ar-cdb01.dynartis.local", 5*time.Millisecond, query)
+	if err != nil {
+		t.Fatalf("expected resolution to survive transient loss, got error: %v", err)
+	}
+	if cname != "" {
+		t.Errorf("unexpected cname %q", cname)
+	}
+	if addr != want {
+		t.Errorf("addr: got %v want %v", addr, want)
+	}
+	if calls <= len(servers) {
+		t.Errorf("expected a retransmit beyond the first round, only %d attempts", calls)
+	}
+}
+
+// An authoritative negative (NXDOMAIN-style response error) must fail fast: re-asking a
+// server that already answered can't change the result, so we must NOT spin retransmitting
+// for the whole budget. This keeps "host genuinely doesn't exist" from taking 6s to report.
+func TestQueryServersUntilAnswer_AuthoritativeNegativeFailsFast(t *testing.T) {
+	servers := []netip.Addr{netip.MustParseAddr("10.72.0.1"), netip.MustParseAddr("10.72.0.2")}
+	qname := dnsmessage.MustNewName("nope.dynartis.local.")
+
+	var calls int
+	query := func(_ context.Context, _ netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
+		calls++
+		return netip.Addr{}, "", &dnsResponseError{errors.New("DNS rcode NameError")}
+	}
+
+	// Generous budget: if response errors were (wrongly) retransmitted, calls would balloon
+	// well past one per server.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, _, err := queryServersUntilAnswer(ctx, servers, qname, "nope.dynartis.local", 50*time.Millisecond, query)
+	if err == nil {
+		t.Fatal("expected an error for an authoritative negative")
+	}
+	if calls != len(servers) {
+		t.Errorf("authoritative negative must not retransmit: got %d calls, want %d (one per server)", calls, len(servers))
+	}
+}
+
+// When every attempt is lost for the entire budget, the lookup retransmits repeatedly and
+// then surfaces the last transport error (not a bare context error) once the budget is spent.
+func TestQueryServersUntilAnswer_AllLossRetriesThenReportsLastError(t *testing.T) {
+	servers := []netip.Addr{netip.MustParseAddr("10.72.0.1")}
+	qname := dnsmessage.MustNewName("dyn-ar-cdb01.dynartis.local.")
+
+	var calls int
+	query := func(_ context.Context, _ netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
+		calls++
+		return netip.Addr{}, "", errors.New("DNS read: i/o timeout")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	_, _, err := queryServersUntilAnswer(ctx, servers, qname, "dyn-ar-cdb01.dynartis.local", 20*time.Millisecond, query)
+	if err == nil {
+		t.Fatal("expected an error when every attempt is lost")
+	}
+	if !strings.Contains(err.Error(), "i/o timeout") {
+		t.Errorf("expected the last transport error to surface, got: %v", err)
+	}
+	if calls < 2 {
+		t.Errorf("expected multiple retransmit attempts within the budget, got %d", calls)
+	}
+}
+
+// Failover within a single round: when the first server drops the datagram, the loop must
+// advance to the second server in the SAME pass and resolve there — not only via a later
+// retransmit round. This is the original "advance on read-timeout" property.
+func TestQueryServersUntilAnswer_FailsOverToSecondServerWithinRound(t *testing.T) {
+	servers := []netip.Addr{netip.MustParseAddr("10.72.0.1"), netip.MustParseAddr("10.72.0.2")}
+	qname := dnsmessage.MustNewName("dyn-ar-cdb01.dynartis.local.")
+	want := netip.AddrFrom4([4]byte{10, 155, 50, 7})
+
+	var calls int
+	query := func(_ context.Context, srv netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
+		calls++
+		if srv == servers[0] {
+			return netip.Addr{}, "", errors.New("DNS read: i/o timeout") // first server lost
+		}
+		return want, "", nil // second server answers
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	addr, _, err := queryServersUntilAnswer(ctx, servers, qname, "dyn-ar-cdb01.dynartis.local", 5*time.Millisecond, query)
+	if err != nil {
+		t.Fatalf("expected failover to the second server, got: %v", err)
+	}
+	if addr != want {
+		t.Errorf("addr: got %v want %v", addr, want)
+	}
+	if calls != 2 {
+		t.Errorf("expected exactly 2 calls (failover within one round), got %d", calls)
+	}
+}
+
+// resolveViaVPNQuery must follow a CNAME-only answer to its terminal A record. The new tests
+// otherwise only exercise queryServersUntilAnswer directly; this drives the outer hop loop.
+func TestResolveViaVPNQuery_FollowsCNAMEChain(t *testing.T) {
+	servers := []netip.Addr{netip.MustParseAddr("10.72.0.1")}
+	want := netip.AddrFrom4([4]byte{10, 155, 50, 7})
+
+	query := func(_ context.Context, _ netip.Addr, qname dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
+		switch qname.String() {
+		case "host.dynartis.local.":
+			return netip.Addr{}, "alias.dynartis.local.", nil // CNAME-only
+		case "alias.dynartis.local.":
+			return want, "", nil // terminal A
+		default:
+			return netip.Addr{}, "", errors.New("unexpected qname " + qname.String())
+		}
+	}
+
+	addr, err := resolveViaVPNQuery(context.Background(), servers, "host.dynartis.local", query)
+	if err != nil {
+		t.Fatalf("expected the CNAME chain to resolve, got: %v", err)
+	}
+	if addr != want {
+		t.Errorf("addr: got %v want %v", addr, want)
+	}
+}
+
+// A CNAME chain that never reaches an A record must terminate with the hop-cap error rather
+// than loop forever.
+func TestResolveViaVPNQuery_CNAMELoopBounded(t *testing.T) {
+	servers := []netip.Addr{netip.MustParseAddr("10.72.0.1")}
+
+	var calls int
+	query := func(_ context.Context, _ netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
+		calls++
+		return netip.Addr{}, "loop.dynartis.local.", nil // always a CNAME, never an A
+	}
+
+	_, err := resolveViaVPNQuery(context.Background(), servers, "loop.dynartis.local", query)
+	if err == nil {
+		t.Fatal("expected an error when a CNAME chain never terminates")
+	}
+	if !strings.Contains(err.Error(), "CNAME chain exceeded") {
+		t.Errorf("expected a CNAME-chain-exceeded error, got: %v", err)
+	}
+	if calls < 2 {
+		t.Errorf("expected the hop loop to iterate a bounded number of times, got %d call(s)", calls)
 	}
 }
