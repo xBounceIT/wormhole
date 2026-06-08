@@ -579,6 +579,26 @@ public sealed class SshSessionViewModelTests
         Assert.Equal(SessionStatus.Failed, vm.Status);
     }
 
+    [Theory]
+    [InlineData(SessionStatus.Failed, true)]         // dropped/failed tab keeps its in-pane Retry overlay — no silent reconnect
+    [InlineData(SessionStatus.Disconnected, false)]  // interrupted-connect tab must still recover (SSH has no Disconnected overlay)
+    [InlineData(SessionStatus.Connecting, false)]    // a connect already in flight — let it proceed
+    [InlineData(SessionStatus.Connected, false)]     // (defensive: a live tab reattaches before reaching this guard)
+    public void ShouldDeferAutoConnectOnReattach_OnlyDefersWhenFailed(SessionStatus status, bool expected)
+    {
+        // The middle-click-close repro: closing the active tab redirects to a neighbour whose view
+        // reloads and re-enters AttachAsync's connect tail. A neighbour that had quietly dropped in
+        // the background is Failed — it must NOT silently reconnect (a tunnel-route prompt over a
+        // blank pane); it keeps its in-pane Retry. Disconnected is deliberately NOT deferred: SSH
+        // renders no Disconnected overlay, so deferring there would strand an interrupted-connect tab
+        // in a blank black pane instead of letting it recover.
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        vm.Status = status;
+
+        Assert.Equal(expected, vm.ShouldDeferAutoConnectOnReattach());
+    }
+
     [Fact]
     public async Task RetryAsync_WithDetachedViewAndNoSubscribers_PreservesSession()
     {
@@ -607,6 +627,28 @@ public sealed class SshSessionViewModelTests
 
         // View-loaded-but-WebView2-init-failed case: existing fan-out is preserved.
         Assert.Equal(1, raised);
+    }
+
+    [Fact]
+    public async Task RetryAsync_AfterInitFailure_MovesToConnecting_SoReattachReconnects()
+    {
+        // Regression guard for the AttachAsync reattach-defer change: a WebView2-init / "ready"-
+        // handshake failure on a fresh tab leaves _webView null and Status=Failed, and recovery
+        // routes back THROUGH AttachAsync (Retry → InitializationRetryRequested → re-init →
+        // handshake → AttachAsync). RetryAsync must flip to Connecting so AttachAsync's
+        // ShouldDeferAutoConnectOnReattach() (which defers a sessionless Failed tab) doesn't suppress
+        // this user-requested retry and strand the tab on the Failed overlay with a dead Retry button.
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        vm.Status = SessionStatus.Failed; // init/handshake failure: _webView never assigned
+        var raised = 0;
+        vm.InitializationRetryRequested += () => raised++;
+
+        await vm.RetryAsync();
+
+        Assert.Equal(1, raised);                               // re-init fan-out still fires
+        Assert.Equal(SessionStatus.Connecting, vm.Status);     // so the follow-up AttachAsync connects…
+        Assert.False(vm.ShouldDeferAutoConnectOnReattach());   // …rather than deferring on Failed
     }
 
     [Fact]
