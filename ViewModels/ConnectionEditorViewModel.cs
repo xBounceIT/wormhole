@@ -71,7 +71,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private string name = string.Empty;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsRdp), nameof(IsSsh), nameof(IsHttp), nameof(IsHttps), nameof(ShowCredentialSection), nameof(IsValid), nameof(CanUseSshAutoSudo), nameof(ShowInlinePassword), nameof(HttpAddressError), nameof(IsHttpAddressErrorOpen))]
+    [NotifyPropertyChangedFor(nameof(IsRdp), nameof(IsSsh), nameof(IsHttp), nameof(IsHttps), nameof(ShowCredentialSection), nameof(IsValid), nameof(CanUseSshAutoSudo), nameof(ShowInlinePassword), nameof(ShowRdpDomain), nameof(HttpAddressError), nameof(IsHttpAddressErrorOpen))]
     private ProtocolType protocol = ProtocolType.Ssh;
 
     [ObservableProperty]
@@ -91,7 +91,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private string rdpDomain = string.Empty;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(SelectedCredential), nameof(IsAzureAdCredential), nameof(IsRdpUseExternalClientEditable), nameof(CanUseSshAutoSudo))]
+    [NotifyPropertyChangedFor(nameof(SelectedCredential), nameof(IsAzureAdCredential), nameof(IsRdpUseExternalClientEditable), nameof(CanUseSshAutoSudo), nameof(ShowRdpDomain))]
     private Guid? credentialId;
 
     /// <summary>
@@ -101,7 +101,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// Maps to <see cref="ConnectionNode.UseInlinePassword"/> (inverted) in WriteTo.
     /// </summary>
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(ShowInlinePassword), nameof(CanUseSshAutoSudo))]
+    [NotifyPropertyChangedFor(nameof(ShowInlinePassword), nameof(ShowRdpDomain), nameof(CanUseSshAutoSudo))]
     private bool useSavedCredentials = true;
 
     /// <summary>The inline login password (bound to the editor's PasswordBox). SSH-only,
@@ -113,6 +113,25 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// saved credential. RDP keeps its existing behavior (saved credential or connect-time
     /// prompt), so no inline password control is surfaced for it.</summary>
     public bool ShowInlinePassword => IsSsh && !UseSavedCredentials;
+
+    /// <summary>
+    /// Drives the connection-level Domain field's visibility. Shown for RDP <em>unless</em> a real
+    /// saved credential backs the connection: an RDP saved credential always carries its own domain
+    /// (the credential editor makes Domain mandatory for RDP — see <c>CredentialDialog.IsValid</c>),
+    /// so an editable node-level Domain alongside it is redundant. Picking a real credential also
+    /// clears any node-level <see cref="RdpDomain"/> (see <see cref="OnCredentialIdChanged"/>) so a
+    /// now-hidden value can't silently override the credential's domain at connect
+    /// (<c>explicitDomain ?? credentialDomain</c> in <see cref="Sessions.RdpSessionViewModel"/>);
+    /// hiding the field here mirrors how the Username field already hides under a saved credential.
+    /// <para>
+    /// It stays visible for the no-real-credential cases that still need somewhere to type a domain:
+    /// inline / connect-time-prompt mode (<see cref="UseSavedCredentials"/> false) and the
+    /// "(None) — prompt every time" selection (<see cref="CredentialId"/> null while the picker is
+    /// shown). The latter is load-bearing for the AzureAD "prompt every time" workflow, where the
+    /// user types <c>AzureAD</c> into this field to route RDP through the external client.
+    /// </para>
+    /// </summary>
+    public bool ShowRdpDomain => IsRdp && (!UseSavedCredentials || CredentialId is null);
 
     /// <summary>
     /// Tri-state Auto sudo selection: "inherit" (null — follow the folder default), "on" (true —
@@ -680,6 +699,21 @@ public partial class ConnectionEditorViewModel : ObservableObject
         {
             AppendStaleSelection(id);
             OnPropertyChanged(nameof(SelectedCredential));
+        }
+
+        // Picking a real saved RDP credential makes that credential's domain authoritative — the
+        // node-level Domain field hides (see ShowRdpDomain). Drop any node-level RdpDomain the user
+        // had typed so a now-invisible value can't (a) silently override the credential's domain at
+        // connect (explicitDomain ?? credentialDomain in RdpSessionViewModel), or (b) strand an
+        // "AzureAD" value that keeps the external-client flag latched after the field is gone — the
+        // ApplyAadAutoFlag call below rolls that flag back once the signal clears. (The Username
+        // field needs no equivalent clear: it's hidden whenever a saved credential is in play —
+        // including "(None)" mode — so no typed value can be stranded by a later credential pick.)
+        // Suppressed during LoadFrom (a persisted override on a re-opened profile is left intact) and
+        // skipped when the credential is cleared to null (the "prompt every time" / protocol paths).
+        if (!_suppressAadAutoFlag && value is not null && IsRdp)
+        {
+            RdpDomain = string.Empty;
         }
 
         ApplyAadAutoFlag();

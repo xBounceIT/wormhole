@@ -1480,6 +1480,87 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task ShowRdpDomain_HiddenOnlyWhenRealSavedRdpCredentialSelected()
+    {
+        // The connection-level Domain field duplicates the saved RDP credential's (mandatory) domain,
+        // so it hides once a real credential is picked — mirroring how the Username field hides under
+        // a saved credential. It stays visible for the no-real-credential cases that still need a
+        // place to type a domain: "(None) — prompt every time" (the AzureAD workflow) and inline mode.
+        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(rdpCred), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        vm.Protocol = ProtocolType.Rdp;
+
+        // Saved-credentials checked but "(None) — prompt every time" selected → still shown.
+        vm.UseSavedCredentials = true;
+        vm.SelectedCredential = ConnectionEditorViewModel.NoneCredential;
+        Assert.True(vm.ShowRdpDomain);
+
+        // A real saved RDP credential carries its own domain → node-level field redundant, hide it.
+        vm.SelectedCredential = rdpCred;
+        Assert.False(vm.ShowRdpDomain);
+
+        // Inline / connect-time prompt (not using saved credentials) → shown again.
+        vm.UseSavedCredentials = false;
+        Assert.True(vm.ShowRdpDomain);
+
+        // Never shown for SSH.
+        vm.Protocol = ProtocolType.Ssh;
+        Assert.False(vm.ShowRdpDomain);
+    }
+
+    [Fact]
+    public async Task SelectingRealRdpCredential_ClearsTypedDomain_AndReleasesAzureAdAutoFlag()
+    {
+        // A Domain typed in "(None) — prompt every time" mode (here "AzureAD", which auto-forces and
+        // locks the external-client flag) must not stay invisibly latched once the user commits to a
+        // real saved credential: selecting it makes the credential's domain authoritative, so the
+        // node-level Domain is dropped and the auto-flag rolls back. Without the clear the value would
+        // be hidden (ShowRdpDomain false) yet still override the credential's domain at connect.
+        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(rdpCred), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        vm.Protocol = ProtocolType.Rdp;
+
+        vm.SelectedCredential = ConnectionEditorViewModel.NoneCredential;
+        vm.RdpDomain = "AzureAD";
+        Assert.True(vm.RdpUseExternalClient);
+        Assert.False(vm.IsRdpUseExternalClientEditable);
+
+        // Commit to a real saved credential → node Domain dropped, field hidden, auto-flag released.
+        vm.SelectedCredential = rdpCred;
+        Assert.Equal(string.Empty, vm.RdpDomain);
+        Assert.False(vm.ShowRdpDomain);
+        Assert.False(vm.RdpUseExternalClient);
+        Assert.True(vm.IsRdpUseExternalClientEditable);
+    }
+
+    [Fact]
+    public async Task LoadFrom_PreservesExistingRdpDomainOverride_WithSavedCredential()
+    {
+        // The clear-on-select above is suppressed during LoadFrom: re-opening a connection that
+        // already persisted a node-level RdpDomain alongside a saved credential must NOT wipe it on
+        // load (backward compatible — the value still round-trips through WriteTo).
+        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(rdpCred), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        var source = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Rdp,
+            Kind = NodeKind.Connection,
+            CredentialId = rdpCred.Id,
+            RdpDomain = "LEGACY",
+        };
+
+        vm.LoadFrom(source);
+
+        Assert.Equal("LEGACY", vm.RdpDomain);
+        Assert.False(vm.ShowRdpDomain); // hidden, but the persisted value is retained
+    }
+
+    [Fact]
     public async Task CanUseSshAutoSudo_InlineMode_VisibleEvenWithSshKeyCredentialSelected()
     {
         var key = new CredentialProfile { Name = "ssh-key", Protocol = ProtocolType.Ssh, Kind = CredentialKind.SshKey };
