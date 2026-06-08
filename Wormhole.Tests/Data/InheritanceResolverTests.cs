@@ -198,8 +198,10 @@ public class InheritanceResolverTests
     }
 
     [Fact]
-    public void Resolve_HttpIgnoreCertErrors_InheritsFromParentFolder()
+    public void Resolve_HttpIgnoreCertErrors_IsLeafOnly_NotInheritedFromParentFolder()
     {
+        // Leaf-only (like UseInlinePassword): a folder value must NOT be inherited, so an unrelated edit
+        // of a child (whose 2-state checkbox can't express "inherit") can't silently sever it.
         var folder = new ConnectionNode
         {
             Id = Guid.NewGuid(),
@@ -215,6 +217,7 @@ public class InheritanceResolverTests
             Kind = NodeKind.Connection,
             Protocol = ProtocolType.Https,
             Host = "fw.example.com",
+            // own value unset (null) -> resolves false, regardless of the folder's true
         };
 
         var nodes = new Dictionary<Guid, ConnectionNode>
@@ -222,6 +225,25 @@ public class InheritanceResolverTests
             [folder.Id] = folder,
             [node.Id] = node,
         };
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.False(profile.HttpIgnoreCertErrors);
+    }
+
+    [Fact]
+    public void Resolve_HttpIgnoreCertErrors_UsesOwnLeafValue()
+    {
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "fw-gui",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Https,
+            Host = "fw.example.com",
+            HttpIgnoreCertErrors = true,
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode> { [node.Id] = node };
         var profile = new InheritanceResolver().Resolve(node, nodes);
 
         Assert.True(profile.HttpIgnoreCertErrors);

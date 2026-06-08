@@ -54,7 +54,6 @@ public sealed class InheritanceResolver
         string? sshKeyFileName = null;
         string? sshKnownHostFingerprint = null;
         bool? sshAutoSudo = null;
-        bool? httpIgnoreCertErrors = null;
         bool? tunnelEnabled = null;
         Guid? tunnelConfigId = null;
 
@@ -106,7 +105,6 @@ public sealed class InheritanceResolver
             sshKeyFileName ??= current.SshKeyFileName;
             sshKnownHostFingerprint ??= current.SshKnownHostFingerprint;
             sshAutoSudo ??= current.SshAutoSudo;
-            httpIgnoreCertErrors ??= current.HttpIgnoreCertErrors;
             tunnelEnabled ??= current.TunnelEnabled;
             tunnelConfigId ??= current.TunnelConfigId;
 
@@ -182,7 +180,11 @@ public sealed class InheritanceResolver
             SshKeyFileName = sshKeyFileName,
             SshKnownHostFingerprint = sshKnownHostFingerprint,
             SshAutoSudo = sshAutoSudo ?? false,
-            HttpIgnoreCertErrors = httpIgnoreCertErrors ?? false,
+            // Per-connection (leaf-only), like UseInlinePassword — NOT inherited up the folder chain.
+            // The editor surfaces it as a 2-state checkbox that can't express "inherit", so inheriting it
+            // would let an unrelated edit silently sever an inherited value; and the folder editor
+            // exposes no control to set it anyway.
+            HttpIgnoreCertErrors = node.HttpIgnoreCertErrors ?? false,
             TunnelEnabled = tunnelEnabled ?? false,
             TunnelConfigId = tunnelConfigId,
         };
