@@ -107,10 +107,21 @@
                     DataContext="{Binding Progress}"
                     Header=""
                     Visibility="{Binding HasFailedStep, Converter={StaticResource BoolToVisibilityConverter}}" />
-                <FontIcon Glyph="&#xE783;" FontSize="32" HorizontalAlignment="Center" />
+                <!-- Hard-failure chrome. Hidden when the overlay shows a benign recoverable notice. -->
+                <FontIcon Glyph="&#xE783;" FontSize="32" HorizontalAlignment="Center"
+                          Visibility="{Binding IsRecoverableNotice, Converter={StaticResource InverseBoolToVisibilityConverter}}" />
                 <TextBlock Text="Connection failed"
                            Style="{StaticResource SubtitleTextBlockStyle}"
-                           HorizontalAlignment="Center" />
+                           HorizontalAlignment="Center"
+                           Visibility="{Binding IsRecoverableNotice, Converter={StaticResource InverseBoolToVisibilityConverter}}" />
+                <!-- Recoverable-notice chrome: green check + positive title (e.g. Stormshield downloaded a
+                     fresh profile and just needs a new one-time code to reconnect). -->
+                <FontIcon Glyph="&#xE930;" FontSize="32" Foreground="#6BCB77" HorizontalAlignment="Center"
+                          Visibility="{Binding IsRecoverableNotice, Converter={StaticResource BoolToVisibilityConverter}}" />
+                <TextBlock Text="{Binding NoticeTitle}"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           HorizontalAlignment="Center"
+                           Visibility="{Binding IsRecoverableNotice, Converter={StaticResource BoolToVisibilityConverter}}" />
                 <TextBlock Text="{Binding ErrorMessage}"
                            Style="{StaticResource BodyTextBlockStyle}"
                            Opacity="0.8"

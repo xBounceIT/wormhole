@@ -27,11 +27,11 @@ public sealed partial class TunnelTestDialog : UserControl
     private void OnCloseClick(object sender, RoutedEventArgs e) => CloseRequested?.Invoke();
 
     /// <summary>x:Bind helper — map the outcome to the result InfoBar's severity. Only consulted once
-    /// a result exists (IsOpen = HasResult), so the running-state value is never shown. A user cancel
-    /// is informational rather than an alarming error.</summary>
-    public static InfoBarSeverity ResultSeverity(bool isSuccess, bool wasCancelled) =>
+    /// a result exists (IsOpen = HasResult), so the running-state value is never shown. A user cancel or a
+    /// benign recoverable notice (profile refreshed) is informational rather than an alarming error.</summary>
+    public static InfoBarSeverity ResultSeverity(bool isSuccess, bool wasCancelled, bool wasInformational) =>
         isSuccess ? InfoBarSeverity.Success
-        : wasCancelled ? InfoBarSeverity.Informational
+        : wasCancelled || wasInformational ? InfoBarSeverity.Informational
         : InfoBarSeverity.Error;
 
     private void OnLogChanged(object? sender, NotifyCollectionChangedEventArgs e)

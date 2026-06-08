@@ -91,7 +91,7 @@
                 <InfoBar Grid.Row="2"
                          IsOpen="{x:Bind ViewModel.HasResult, Mode=OneWay}"
                          IsClosable="False"
-                         Severity="{x:Bind local:TunnelTestDialog.ResultSeverity(ViewModel.IsSuccess, ViewModel.WasCancelled), Mode=OneWay}"
+                         Severity="{x:Bind local:TunnelTestDialog.ResultSeverity(ViewModel.IsSuccess, ViewModel.WasCancelled, ViewModel.WasInformational), Mode=OneWay}"
                          Title="{x:Bind ViewModel.ResultTitle, Mode=OneWay}"
                          Message="{x:Bind ViewModel.ResultMessage, Mode=OneWay}" />
             </Grid>

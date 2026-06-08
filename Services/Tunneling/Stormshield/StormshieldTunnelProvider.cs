@@ -46,6 +46,10 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
     private readonly IStormshieldConfigCache _configCache;
     private readonly ILogger<StormshieldTunnelProvider> _logger;
     private readonly ILoggerFactory _loggerFactory;
+    // Singleton-lived (the provider is registered AddSingleton), so its memory of the last code per tunnel
+    // survives the abort-and-reconnect a cache-miss download forces — letting it catch the user re-entering
+    // the just-spent code before their TOTP window rolls. See StormshieldOtpReuseGuard.
+    private readonly StormshieldOtpReuseGuard _otpReuseGuard = new();
 
     public StormshieldTunnelProvider(
         IOtpPromptService otpPrompt,
@@ -129,7 +133,9 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             // one-time code to the OpenVPN data-plane password (a cache MISS aborts earlier, before the
             // sidecar starts). The code may have reached the firewall or simply expired while OpenVPN
             // worked through transport fallbacks. Either way a blind Retry would reuse a stale code, so
-            // tell the user to enter a fresh one.
+            // tell the user to enter a fresh one. (The reuse guard never recorded this data-plane code — it
+            // only records codes a successful download definitively spent — so the firewall stays the
+            // authority on whether it's still usable; nothing to clear here.)
 
             // If the profile was reused WITHOUT confirming it against the firewall's current hash (the
             // change-check was unavailable), the failure may mean the cached profile is stale. Drop it so
@@ -260,8 +266,15 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             "Stormshield v5 config resolve from {Server}:{Port} for '{Name}' (OTP={UseOtp}).",
             settings.Server, settings.Port, config.Name, settings.UseOtp);
 
+        // Guard the prompt against the user re-entering a code that was already SPENT before their authenticator
+        // rolls — the firewall would only reject it again. The wrapped prompt only CHECKS; the code is recorded
+        // as spent via onOtpSpent below, which the core invokes ONLY after a successful download actually
+        // consumes it. Transparent to the core logic, so the OTP-routing tests keep calling it directly.
+        var guardedOtpPrompt = _otpReuseGuard.Wrap(_otpPrompt, config.Id);
+
         return await ResolveAutomaticCoreAsync(
-            portal, _configCache, _otpPrompt, _logger, config.Id, config.Name, settings, cancellationToken, progress)
+            portal, _configCache, guardedOtpPrompt, _logger, config.Id, config.Name, settings, cancellationToken,
+            progress, onOtpSpent: code => _otpReuseGuard.Record(config.Id, code))
             .ConfigureAwait(false);
     }
 
@@ -293,7 +306,8 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         string configName,
         StormshieldSettings settings,
         CancellationToken cancellationToken,
-        IProgress<TunnelProgress>? progress = null)
+        IProgress<TunnelProgress>? progress = null,
+        Action<string>? onOtpSpent = null)
     {
         progress?.Report(new TunnelProgress(TunnelPhase.Authenticating));
 
@@ -338,6 +352,10 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             configName, cached is null ? "no cached configuration" : "firewall config changed");
         progress?.Report(new TunnelProgress(TunnelPhase.DownloadingConfiguration));
         var rawProfile = await DownloadProfileV5WrappedAsync(portal, settings, downloadOtp, cancellationToken).ConfigureAwait(false);
+        // The download succeeded, so the firewall has now DEFINITIVELY consumed this one-time code. Record it
+        // (only here — never on a failed download) so an immediate same-code retry, the cold-start trap this
+        // whole path exists for, is rejected locally instead of replayed at the firewall.
+        onOtpSpent?.Invoke(downloadOtp);
         var normalized = StormshieldProfileNormalizer.Normalize(rawProfile);
 
         // Best-effort persist. The OTP is ALREADY spent on the download above, so a failed cache write
@@ -362,8 +380,9 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         }
 
         throw new StormshieldConfigRefreshedException(
-            $"Stormshield downloaded an updated configuration for '{configName}', which used your one-time code. "
-            + "Reconnect and enter a NEW one-time code to bring up the VPN tunnel.");
+            $"Downloaded an updated VPN profile for '{configName}'. This used your current one-time code, so "
+            + "enter a NEW code from your authenticator and reconnect to bring up the tunnel (re-using the same "
+            + "code won't work).");
     }
 
     private static async Task<string> DownloadProfileV5WrappedAsync(
@@ -415,14 +434,13 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
 /// up on this attempt: the user must reconnect with a NEW code, which the next connect routes to the
 /// OpenVPN data plane.
 ///
-/// <para>Its <see cref="Exception.Message"/> is user-facing (surfaced by the session view-models like any
-/// other connect failure) and already states the "reconnect with a new code" guidance. It derives from
-/// <see cref="InvalidOperationException"/> rather than being a bare one so this expected outcome can be
-/// distinguished from a genuine transport/auth failure — the provider's own tests assert on the type, and
-/// a future caller could special-case it (e.g. present a re-prompt instead of a red error). No caller
-/// special-cases it today; the clear message carries the UX.</para>
+/// <para>Its <see cref="Exception.Message"/> is user-facing and states the "downloaded — reconnect with a new
+/// code" guidance in success-toned language. It derives from <see cref="TunnelRecoverableNoticeException"/> so
+/// the session view-models and the tunnel-test dialog — which catch that base type — render a green
+/// success/info notice (titled "Profile downloaded") with a Reconnect affordance instead of a red "connection
+/// failed" error. The provider's own tests also assert on the type.</para>
 /// </summary>
-internal sealed class StormshieldConfigRefreshedException : InvalidOperationException
+internal sealed class StormshieldConfigRefreshedException : TunnelRecoverableNoticeException
 {
-    public StormshieldConfigRefreshedException(string message) : base(message) { }
+    public StormshieldConfigRefreshedException(string message) : base("Profile downloaded", message) { }
 }

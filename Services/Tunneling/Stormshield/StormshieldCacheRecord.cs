@@ -26,6 +26,18 @@ public sealed class StormshieldCacheRecord
     /// </summary>
     public const int CurrentSchemaVersion = 2;
 
+    /// <summary>
+    /// The oldest on-disk <see cref="SchemaVersion"/> the current build can MIGRATE in place (by
+    /// re-running <see cref="StormshieldProfileNormalizer"/> on the stored profile) instead of discarding.
+    /// Every bump so far has been normalization-only — the persisted <em>shape</em> is unchanged, only the
+    /// transform applied to <see cref="ProfileOvpn"/> moved on (v2 began stripping the <c>tls-cipher</c> pin) —
+    /// so an older record can be recovered without a re-download, which is what spares the user from spending a
+    /// one-time OTP just because the app updated. Raise this to the version of the first bump that ever changes
+    /// the persisted shape STRUCTURALLY (so a pre-change record genuinely can't be re-normalized into the new
+    /// shape); records older than it then correctly read as a miss.
+    /// </summary>
+    public const int MinMigratableSchemaVersion = 1;
+
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
 
     /// <summary>
