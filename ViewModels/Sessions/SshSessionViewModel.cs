@@ -27,6 +27,16 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private static readonly TimeSpan RemoteOutputWaitDelay = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan McpCommandTypingDelay = TimeSpan.FromMilliseconds(18);
     private static readonly TimeSpan McpCommandTypingMaxDuration = TimeSpan.FromMilliseconds(2500);
+    // Wait between automatic reconnect attempts after an unexpected drop. Fixed (not escalating) so a
+    // brief blip recovers quickly; a host reboot typically returns within a couple of these.
+    private static readonly TimeSpan AutoReconnectDelay = TimeSpan.FromSeconds(10);
+    private const int MaxAutoReconnectAttempts = 3;
+    // A reconnect earns its retry budget back only by staying Connected this long. Resetting the
+    // budget on first output instead would let a server that emits a banner then immediately closes
+    // the shell (forced-command accounts, a crashing MOTD/login script) reset the budget every cycle
+    // and reconnect forever. Longer than AutoReconnectDelay so a session that re-drops between attempts
+    // never counts as "stable".
+    private static readonly TimeSpan AutoReconnectStabilityWindow = TimeSpan.FromSeconds(30);
 
     private readonly ISshSessionService _sshService;
     private readonly ISshCredentialResolver _credentialResolver;
@@ -67,6 +77,28 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     // same-WebView reattach (where it normally skips replay because xterm.js already shows the
     // session). Cleared once a bridge is rebound, and reset whenever the buffer is cleared on teardown.
     private bool _connectedWhileDetached;
+
+    // Auto-reconnect after an UNEXPECTED drop of an already-established session (host reboot, network
+    // blip — now detectable via the SSH keep-alive). On such a drop the VM silently retries the
+    // connect up to MaxAutoReconnectAttempts times, AutoReconnectDelay apart, before surfacing the
+    // Failed overlay. The budget resets once a reconnect stays up for a stability window (proving it's
+    // healthy) or on a manual Retry, so an unrelated later drop gets a fresh budget; a connection that
+    // flaps before then exhausts the budget and stops. Auth failures, host-key mismatches, and
+    // user-initiated teardown are never auto-retried. All access is on the UI thread
+    // (OnSessionClosed marshals there; the loop awaits with ConfigureAwait(true)).
+    private int _autoReconnectAttempts;
+    private CancellationTokenSource? _autoReconnectCts;
+    // Fires AutoReconnectStabilityWindow after a connect succeeds; if still Connected then, the
+    // attempt budget resets. Cancelled the moment the session is torn down (SafeDisposeSessionAsync),
+    // so a session that drops before the window keeps its consumed budget — that's what bounds a
+    // flapping/banner-then-close server. Overridable in tests via _autoReconnectStabilityWindow.
+    private CancellationTokenSource? _stabilityResetCts;
+    private TimeSpan _autoReconnectStabilityWindow = AutoReconnectStabilityWindow;
+    // Set by ConnectAsync to categorize its terminal outcome for the auto-reconnect loop: false after a
+    // non-retryable failure (auth, host-key, cancelled prompt, missing creds, recoverable tunnel
+    // notice), true otherwise. Read only by the loop, immediately after its ConnectAsync call.
+    private bool _lastConnectRetryable = true;
+
     private readonly object _mcpPresentationLock = new();
     private ShellCommandPresentationFilter? _mcpPresentationFilter;
 
@@ -162,6 +194,15 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     public bool IsFailed => Status == SessionStatus.Failed;
 
     /// <summary>
+    /// Text shown under the connecting spinner. Normally "Connecting…"; during an automatic reconnect
+    /// it names the attempt in flight so the overlay reads as recovering rather than as a silent hang.
+    /// </summary>
+    public string ConnectingMessage =>
+        _autoReconnectAttempts > 0
+            ? $"Reconnecting — attempt {_autoReconnectAttempts} of {MaxAutoReconnectAttempts}…"
+            : "Connecting…";
+
+    /// <summary>
     /// Surfaces dropped UI updates (dispatcher rejected the work). The most common case is
     /// OnSessionDataReceived's MarkOutputReceived enqueue — without this log a closed/shutting-
     /// down dispatcher would silently swallow the state transition.
@@ -221,6 +262,18 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             }
             await TearDownSessionAsync().ConfigureAwait(true);
             await ConnectAsync().ConfigureAwait(true);
+
+            // This single connect realized the attempt that the background drop deferred while the view
+            // was unloaded. If it was an AUTO-reconnect episode (attempts already consumed) and the
+            // connect failed transiently, hand off to the retry loop for the remaining budget — now that
+            // a view is attached the loop can run, so a backgrounded drop gets the same 3 attempts a
+            // foreground one does instead of stopping after one. A deferred MANUAL Retry has
+            // _autoReconnectAttempts == 0 (RetryAsync reset it), so it's left at Failed here, matching how
+            // a foreground manual Retry behaves. Connected / non-retryable Failed outcomes also fall through.
+            if (_autoReconnectAttempts > 0 && ShouldContinueAutoReconnect(Status, _lastConnectRetryable))
+            {
+                BeginAutoReconnectLoop();
+            }
             return;
         }
 
@@ -294,6 +347,10 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     [RelayCommand(AllowConcurrentExecutions = false, CanExecute = nameof(CanRetry))]
     public async Task RetryAsync()
     {
+        // A manual Retry supersedes any pending automatic reconnect and starts a fresh budget — the
+        // user is explicitly driving now, so cancel the loop/deferred intent so they can't race.
+        CancelAutoReconnect();
+        SetAutoReconnectAttempts(0);
         ErrorMessage = null;
         ResetOutputState();
 
@@ -401,6 +458,10 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
     public async Task DetachAsync()
     {
+        // Explicit user teardown (Disconnect / tab close) — stop any pending auto-reconnect and clear
+        // the budget so a loop or deferred intent can't resurrect a connection the user just dropped.
+        CancelAutoReconnect();
+        SetAutoReconnectAttempts(0);
         await TearDownSessionAsync().ConfigureAwait(true);
         Progress.Reset();
         Status = SessionStatus.Disconnected;
@@ -536,6 +597,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         _session.Closed += OnSessionClosed;
         Status = SessionStatus.Connected;
         StartRemoteOutputWaitTimer();
+        // Mirror ConnectAsync's success path so tests can exercise the stability-based budget reset.
+        StartAutoReconnectStabilityTimer();
     }
 
     private void OnSessionClosed(object? sender, EventArgs e)
@@ -548,16 +611,43 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             // _session being null means we've already disposed (consumer-initiated
             // tear-down ran first). Failed/Disconnected from a prior path also means
             // we're already in the right terminal state. Otherwise: tear down the
-            // dead transport and surface the failure overlay. Status==Connecting can
-            // happen if the server immediately closes the shell after auth (e.g.
-            // forced-command accounts).
+            // dead transport and try to recover. Status==Connecting can happen if the
+            // server immediately closes the shell after auth (e.g. forced-command accounts).
             if (!ReferenceEquals(closedSession, _session)) return;
             if (Status == SessionStatus.Failed || Status == SessionStatus.Disconnected) return;
             await SafeDisposeSessionAsync().ConfigureAwait(true);
-            // Use Failed (not Disconnected) so the in-tab failure overlay with the
-            // Retry button becomes visible — otherwise users have no recovery path
-            // after a transient network drop without closing the tab.
-            ReportFailure("Remote session closed.");
+
+            // Re-check after the await: SafeDisposeSessionAsync yields on the real socket close, and a
+            // user teardown (Disconnect / tab close → DetachAsync) can land during that window and move
+            // us to a terminal state. Without this, the auto-reconnect below would resurrect a session
+            // the user just explicitly dropped. (The same guard runs before the await for the pre-await case.)
+            if (Status == SessionStatus.Failed || Status == SessionStatus.Disconnected) return;
+
+            // An established session dropped unexpectedly. Rather than going straight to the Failed
+            // overlay, attempt an automatic reconnect a bounded number of times (host reboots and
+            // transient blips usually recover within a couple of attempts) before giving up.
+            if (_autoReconnectAttempts >= MaxAutoReconnectAttempts)
+            {
+                // Budget spent — surface the Failed overlay (with the Retry button) so the user has a
+                // manual recovery path. Use Failed, not Disconnected: SSH has no Disconnected overlay.
+                ReportFailure($"Remote session closed. {ReconnectExhaustedNote}");
+                return;
+            }
+
+            if (_webView is null)
+            {
+                // Background tab (view unloaded): we can't connect without a WebView. Count one attempt
+                // and defer it to the next AttachAsync via the existing detached-reconnect intent —
+                // exactly how a manual Retry issued while detached behaves. The connecting overlay shows
+                // when the tab is brought forward; AttachAsync then tears down and reconnects.
+                SetAutoReconnectAttempts(_autoReconnectAttempts + 1);
+                _reconnectRequestedWhileDetached = true;
+                Status = SessionStatus.Connecting;
+                return;
+            }
+
+            // Foreground tab: drive the retry loop (wait, connect, repeat until success/budget/teardown).
+            BeginAutoReconnectLoop();
         });
     }
 
@@ -568,6 +658,152 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     // per site and stays at the call site.
     private TerminalBridge CreateTerminalBridge(CoreWebView2 view) =>
         new(view, _session!, _loggerFactory.CreateLogger<TerminalBridge>(), _settingsService);
+
+    /// <summary>
+    /// Start the foreground auto-reconnect loop after an unexpected drop, unless one is already
+    /// running. The loop owns the attempt counter and the connecting overlay until it reconnects,
+    /// exhausts the budget, hits a non-retryable failure, or is cancelled by a user action.
+    /// </summary>
+    private void BeginAutoReconnectLoop()
+    {
+        if (_autoReconnectCts is not null) return; // a loop is already driving reconnects
+        var cts = new CancellationTokenSource();
+        _autoReconnectCts = cts;
+        _ = RunAutoReconnectLoopAsync(cts);
+    }
+
+    private async Task RunAutoReconnectLoopAsync(CancellationTokenSource cts)
+    {
+        var token = cts.Token;
+        try
+        {
+            while (_autoReconnectAttempts < MaxAutoReconnectAttempts)
+            {
+                SetAutoReconnectAttempts(_autoReconnectAttempts + 1);
+                var attempt = _autoReconnectAttempts;
+
+                // Hold the connecting overlay (showing the "Reconnecting — attempt N of M" message)
+                // for the whole wait, and clear any prior attempt's failure chrome so it doesn't flash.
+                Status = SessionStatus.Connecting;
+                ErrorMessage = null;
+                IsRecoverableNotice = false;
+                Progress.Reset();
+
+                try { await Task.Delay(AutoReconnectDelay, token).ConfigureAwait(true); }
+                catch (OperationCanceledException) { return; }
+                // A user action (Disconnect / manual Retry) cancelled us or moved us out of Connecting
+                // while we waited — stand down and let that path own the state.
+                if (token.IsCancellationRequested || Status != SessionStatus.Connecting) return;
+
+                // The view unloaded during the wait (Sessions↔Settings nav / tab backgrounded), so
+                // there's no WebView2 to connect through. Defer to the next AttachAsync (same as a
+                // background-tab drop) instead of calling ConnectAsync, which would just no-op on the
+                // null _webView and silently burn this attempt. The overlay stays on Connecting.
+                if (_webView is null)
+                {
+                    _reconnectRequestedWhileDetached = true;
+                    return;
+                }
+
+                _logger.LogInformation(
+                    "SSH auto-reconnect attempt {Attempt}/{Max} for {Host}.",
+                    attempt, MaxAutoReconnectAttempts, Profile?.Host);
+                await ConnectAsync().ConfigureAwait(true);
+
+                // ConnectAsync swallows its outcome into Status (+ _lastConnectRetryable). Decide whether
+                // to keep retrying from that, rather than threading a result back through every caller.
+                // Connected (success), Disconnected (cancelled mid-connect), or a non-retryable Failed
+                // (auth / host-key / notice) all stop the loop; only a transient Failed loops again.
+                if (!ShouldContinueAutoReconnect(Status, _lastConnectRetryable)) return;
+            }
+
+            // Budget exhausted on a retryable failure: ConnectAsync left Status=Failed with the real
+            // error. Reframe it so the user sees this followed several automatic attempts.
+            if (Status == SessionStatus.Failed && !IsRecoverableNotice)
+            {
+                ErrorMessage = $"{ReconnectExhaustedNote} {ErrorMessage}".Trim();
+            }
+        }
+        finally
+        {
+            if (ReferenceEquals(_autoReconnectCts, cts)) _autoReconnectCts = null;
+            cts.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Cancel a fire-and-forget timer's CTS and clear the field. Cancel-without-dispose by design: these
+    /// CTSs hold no OS handle (no WaitHandle / linked-token use, only Task.Delay), so GC reclaims them,
+    /// and disposing could make an in-flight await observe ObjectDisposedException instead of the
+    /// expected OperationCanceledException. Shared by the reconnect, stability, and output-wait timers.
+    /// </summary>
+    private static void CancelTimer(ref CancellationTokenSource? cts)
+    {
+        var local = cts;
+        cts = null;
+        if (local is null) return;
+        try { local.Cancel(); }
+        catch (ObjectDisposedException) { /* already disposed */ }
+    }
+
+    /// <summary>
+    /// Cancel any pending/in-flight auto-reconnect and drop a deferred detached-reconnect intent. Called
+    /// when a user action (manual Retry, Disconnect, tab close) takes over so the loop can't fight it.
+    /// </summary>
+    private void CancelAutoReconnect()
+    {
+        CancelTimer(ref _autoReconnectCts);
+        _reconnectRequestedWhileDetached = false;
+    }
+
+    // Shared wording for "gave up after N auto-reconnects", used by both the budget-already-spent path
+    // (a fresh drop with no attempts left) and the loop's own exhaustion path, so the count and phrasing
+    // stay in lockstep.
+    private static string ReconnectExhaustedNote => $"Reconnection failed after {MaxAutoReconnectAttempts} attempts.";
+
+    // Set the attempt counter and notify the connecting-overlay message (which is derived from it).
+    private void SetAutoReconnectAttempts(int value)
+    {
+        if (_autoReconnectAttempts == value) return;
+        _autoReconnectAttempts = value;
+        OnPropertyChanged(nameof(ConnectingMessage));
+    }
+
+    /// <summary>
+    /// Arm the "this reconnect proved stable" timer after a successful connect. If the session is
+    /// still Connected when <see cref="AutoReconnectStabilityWindow"/> elapses, the retry budget is
+    /// cleared so a later, unrelated drop gets a fresh set of attempts. A session that drops before
+    /// then has its timer cancelled (see <see cref="SafeDisposeSessionAsync"/>) and keeps its consumed
+    /// budget — which is what bounds a flapping or banner-then-close server.
+    /// </summary>
+    private void StartAutoReconnectStabilityTimer()
+    {
+        CancelAutoReconnectStabilityTimer();
+        if (_autoReconnectAttempts == 0) return; // nothing to reset
+        var cts = new CancellationTokenSource();
+        _stabilityResetCts = cts;
+        _ = ResetAutoReconnectBudgetAfterStabilityAsync(cts.Token);
+    }
+
+    private async Task ResetAutoReconnectBudgetAfterStabilityAsync(CancellationToken token)
+    {
+        try { await Task.Delay(_autoReconnectStabilityWindow, token).ConfigureAwait(true); }
+        catch (OperationCanceledException) { return; }
+        if (token.IsCancellationRequested) return;
+        if (Status == SessionStatus.Connected) SetAutoReconnectAttempts(0);
+    }
+
+    private void CancelAutoReconnectStabilityTimer() => CancelTimer(ref _stabilityResetCts);
+
+    /// <summary>
+    /// Whether the auto-reconnect loop should keep retrying after a connect attempt with the given
+    /// outcome. Only a transient failure (<see cref="SessionStatus.Failed"/> + retryable) loops again;
+    /// success, a cancel-driven <see cref="SessionStatus.Disconnected"/>, or a non-retryable failure
+    /// (auth, host-key, recoverable notice) all stop it. Pure so it can be unit-tested directly — the
+    /// loop itself drives <see cref="ConnectAsync"/>, which requires a live WebView2.
+    /// </summary>
+    internal static bool ShouldContinueAutoReconnect(SessionStatus statusAfterConnect, bool lastConnectRetryable) =>
+        statusAfterConnect == SessionStatus.Failed && lastConnectRetryable;
 
     private async Task ConnectAsync()
     {
@@ -600,6 +836,10 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         ErrorMessage = null;
         IsRecoverableNotice = false;
         ResetOutputState();
+        // Assume a failure here would be worth auto-retrying (network/host transient); the specific
+        // catch blocks below flip this off for outcomes that retrying can't fix (auth, host key,
+        // cancelled prompt, missing creds, recoverable tunnel notice). Read by the auto-reconnect loop.
+        _lastConnectRetryable = true;
         var cts = new CancellationTokenSource();
         _cts = cts;
         var token = cts.Token;
@@ -621,7 +861,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
                 // Disconnected: the SSH terminal view only renders an in-pane Retry button on
                 // Failed (Disconnected leaves a blank pane), and this mirrors SSH's existing
                 // cancelled-prompt convention — a dismissed credential prompt also reports failure.
-                // Retry re-opens the route prompt.
+                // Retry re-opens the route prompt. Not auto-retryable: the user just declined.
+                _lastConnectRetryable = false;
                 ReportFailure("Connection cancelled.");
                 return;
             }
@@ -637,6 +878,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             var creds = await _credentialResolver.ResolveAsync(profile, token).ConfigureAwait(true);
             if (!creds.HasAny)
             {
+                // Not auto-retryable: no stored/entered credentials won't appear by retrying.
+                _lastConnectRetryable = false;
                 ReportFailure("No credentials provided.");
                 return;
             }
@@ -732,6 +975,9 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
                 Status = SessionStatus.Connected;
                 _bridge?.RequestFocus();
                 StartRemoteOutputWaitTimer();
+                // If this connect was an auto-reconnect, start the clock that restores the retry
+                // budget once the session proves stable (no-op when the budget is already 0).
+                StartAutoReconnectStabilityTimer();
             }
         }
         catch (OperationCanceledException)
@@ -742,12 +988,16 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         }
         catch (SshHostKeyMismatchException ex)
         {
+            // Never auto-retry a host-key mismatch — it's a security decision the user must make.
+            _lastConnectRetryable = false;
             await SafeDisposeSessionAsync().ConfigureAwait(true);
             ReportFailure(ex.Message);
             _logger.LogWarning("Host key mismatch for {Host}.", profile.Host);
         }
         catch (SshAuthenticationException ex)
         {
+            // Don't hammer the server with the same bad credentials (and risk account lockout).
+            _lastConnectRetryable = false;
             await SafeDisposeSessionAsync().ConfigureAwait(true);
             ReportFailure("Authentication failed: " + ex.Message);
         }
@@ -755,7 +1005,9 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         {
             // Not a failure: the tunnel did the right thing but needs a reconnect (e.g. Stormshield downloaded
             // a fresh profile spending the one-time code, or rejected a re-entered just-spent code). Present
-            // it as a success/notice with a Reconnect affordance, not a red error.
+            // it as a success/notice with a Reconnect affordance, not a red error. Not auto-retryable: it
+            // needs fresh user input (a new one-time code), so silently retrying would just burn codes.
+            _lastConnectRetryable = false;
             await SafeDisposeSessionAsync().ConfigureAwait(true);
             ReportNotice(ex.NoticeTitle, ex.Message);
             _logger.LogInformation(
@@ -835,6 +1087,9 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         CancelRemoteOutputWaitTimer();
         HasReceivedOutput = true;
         IsWaitingForRemoteOutput = false;
+        // NB: output does NOT reset the auto-reconnect budget — a server that banners then immediately
+        // closes would otherwise reset every cycle and reconnect forever. The budget resets only once a
+        // connection stays up (AutoReconnectStabilityWindow); see StartAutoReconnectStabilityTimer.
     }
 
     private void ResetOutputState()
@@ -882,18 +1137,15 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         });
     }
 
-    private void CancelRemoteOutputWaitTimer()
-    {
-        var cts = _outputWaitCts;
-        _outputWaitCts = null;
-        if (cts is null) return;
-        try { cts.Cancel(); }
-        catch (ObjectDisposedException) { /* already disposed */ }
-    }
+    private void CancelRemoteOutputWaitTimer() => CancelTimer(ref _outputWaitCts);
 
     private async Task SafeDisposeSessionAsync()
     {
         CancelRemoteOutputWaitTimer();
+        // The session is going away, so stop any pending "stayed stable long enough" timer — a session
+        // that drops before the window must NOT have its retry budget reset (that's what bounds a
+        // flapping/banner-then-close server).
+        CancelAutoReconnectStabilityTimer();
         IsWaitingForRemoteOutput = false;
         ClearMcpCommandPresentation();
 
@@ -1334,6 +1586,13 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     }
 
     internal byte[] PeekReplayBufferForTesting() => _replayBuffer.Snapshot();
+
+    internal int AutoReconnectAttemptsForTesting => _autoReconnectAttempts;
+    internal bool ReconnectRequestedWhileDetachedForTesting => _reconnectRequestedWhileDetached;
+
+    // Shrink the stability window so a test can observe the budget reset without a 30s wait. Set this
+    // BEFORE AttachConnectedSessionForTesting, which arms the timer.
+    internal void SetAutoReconnectStabilityWindowForTesting(TimeSpan window) => _autoReconnectStabilityWindow = window;
 
     // Records the just-attached WebView2 (or any object identity in tests) and
     // returns whether it differs from the previous attach — used by AttachAsync

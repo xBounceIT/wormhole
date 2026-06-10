@@ -21,6 +21,10 @@ namespace Wormhole.Tests.ViewModels;
 
 public sealed class SshSessionViewModelTests
 {
+    // Mirrors SshSessionViewModel.MaxAutoReconnectAttempts (private there). Used both as the loop
+    // bound and to build the expected exhaustion message, so the two stay in lockstep.
+    private const int MaxAutoReconnectAttemptsUnderTest = 3;
+
     [Fact]
     public void ConnectedSession_StartsWithoutReceivedOutput()
     {
@@ -730,6 +734,170 @@ public sealed class SshSessionViewModelTests
         Assert.False(vm.IsWaitingForRemoteOutput);
     }
 
+    // === Auto-reconnect after an unexpected drop =========================
+    // A dropped established session (host reboot, network blip — now detectable via the SSH
+    // keep-alive) auto-reconnects up to 3× before surfacing the Failed overlay. The foreground retry
+    // *loop* drives ConnectAsync (which needs a live WebView2 and so isn't unit-testable); these tests
+    // cover the shared budget/decision logic via the detached path the test harness exercises (no
+    // WebView → OnSessionClosed defers each attempt to the next AttachAsync, counting it the same way).
+
+    [Fact]
+    public void RemoteDrop_WithBudgetRemaining_AttemptsReconnectInsteadOfFailing()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        var session = new FakeSshSession();
+        vm.AttachConnectedSessionForTesting(session);
+
+        session.RaiseClosed();
+
+        // Not Failed — the drop schedules a reconnect (deferred to the next attach, since the test
+        // harness has no WebView) and shows the connecting overlay instead of the dead-end error.
+        Assert.Equal(SessionStatus.Connecting, vm.Status);
+        Assert.Equal(1, vm.AutoReconnectAttemptsForTesting);
+        Assert.True(vm.ReconnectRequestedWhileDetachedForTesting);
+        Assert.Equal(1, session.DisposeCount);
+        Assert.Null(vm.ErrorMessage);
+    }
+
+    [Fact]
+    public void RemoteDrop_ExhaustsBudget_SurfacesFailedAfterThreeAttempts()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+
+        // Drops 1–3 each schedule a reconnect (Connecting); re-attach a session between them to
+        // simulate a reconnect that came up and then dropped again before producing any output.
+        for (var i = 1; i <= MaxAutoReconnectAttemptsUnderTest; i++)
+        {
+            var session = new FakeSshSession();
+            vm.AttachConnectedSessionForTesting(session);
+            session.RaiseClosed();
+            Assert.Equal(SessionStatus.Connecting, vm.Status);
+            Assert.Equal(i, vm.AutoReconnectAttemptsForTesting);
+        }
+
+        // The 4th drop finds the budget spent → Failed overlay with the Retry button.
+        var last = new FakeSshSession();
+        vm.AttachConnectedSessionForTesting(last);
+        last.RaiseClosed();
+
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.Contains($"Reconnection failed after {MaxAutoReconnectAttemptsUnderTest} attempts", vm.ErrorMessage);
+    }
+
+    [Fact]
+    public void RemoteDrop_UserDisconnectsDuringDisposal_DoesNotAutoReconnect()
+    {
+        // TOCTOU guard: SafeDisposeSessionAsync yields on the real socket close, and a user
+        // Disconnect / tab close can land during that window. OnSessionClosed must re-check Status
+        // after the await and NOT resurrect the session the user just dropped. We simulate the
+        // interleaving by flipping Status to Disconnected from inside the session's DisposeAsync.
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        var session = new FakeSshSession();
+        vm.AttachConnectedSessionForTesting(session);
+        session.OnDisposing = () => vm.Status = SessionStatus.Disconnected;
+
+        session.RaiseClosed();
+
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);        // user's teardown preserved
+        Assert.Equal(0, vm.AutoReconnectAttemptsForTesting);        // no reconnect scheduled
+        Assert.False(vm.ReconnectRequestedWhileDetachedForTesting);
+    }
+
+    [Fact]
+    public void OutputAlone_DoesNotResetAutoReconnectBudget()
+    {
+        // Regression guard: a server that emits a banner/prompt then immediately closes the shell
+        // (forced-command accounts, a crashing login script) must NOT have its budget reset by that
+        // output — otherwise it would reset every cycle and auto-reconnect forever. Output is no longer
+        // the health signal; sustained connection is (see StableConnection_ResetsAutoReconnectBudget).
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        var first = new FakeSshSession();
+        vm.AttachConnectedSessionForTesting(first);
+        first.RaiseClosed();
+        Assert.Equal(1, vm.AutoReconnectAttemptsForTesting);
+
+        var second = new FakeSshSession();
+        vm.AttachConnectedSessionForTesting(second);
+        second.RaiseData((byte)'$', (byte)' ');
+
+        Assert.Equal(1, vm.AutoReconnectAttemptsForTesting); // output did NOT reset the budget
+    }
+
+    [Fact]
+    public async Task StableConnection_ResetsAutoReconnectBudget()
+    {
+        // A reconnect that stays Connected past the stability window is healthy, so the budget clears
+        // and a later, unrelated drop gets a fresh set of attempts.
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        vm.SetAutoReconnectStabilityWindowForTesting(TimeSpan.FromMilliseconds(50));
+        var first = new FakeSshSession();
+        vm.AttachConnectedSessionForTesting(first);
+        first.RaiseClosed();
+        Assert.Equal(1, vm.AutoReconnectAttemptsForTesting);
+
+        // The reconnect comes up and stays up (we never close `second`) -> after the tiny window the
+        // stability timer fires and clears the budget.
+        var second = new FakeSshSession();
+        vm.AttachConnectedSessionForTesting(second); // arms the stability timer (attempts > 0)
+
+        await WaitForAsync(() => vm.AutoReconnectAttemptsForTesting == 0);
+    }
+
+    [Fact]
+    public async Task UserDisconnect_CancelsPendingAutoReconnect()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        var session = new FakeSshSession();
+        vm.AttachConnectedSessionForTesting(session);
+        session.RaiseClosed();
+        Assert.Equal(SessionStatus.Connecting, vm.Status); // auto-reconnect pending
+
+        await vm.DisconnectAsync();
+
+        // The explicit Disconnect wins: no lingering reconnect intent, budget cleared, ends Disconnected.
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.False(vm.ReconnectRequestedWhileDetachedForTesting);
+        Assert.Equal(0, vm.AutoReconnectAttemptsForTesting);
+    }
+
+    [Fact]
+    public async Task RemoteClose_AfterUserDisconnect_IsIgnored()
+    {
+        // Teardown already ran (user closed the tab / hit Disconnect), so _session is null and a
+        // late Closed from the old read pump must be ignored rather than scheduling a reconnect or
+        // raising a Failed overlay. Guards the ReferenceEquals + status check in OnSessionClosed.
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        var session = new FakeSshSession();
+        vm.AttachConnectedSessionForTesting(session);
+
+        await vm.DisconnectAsync();
+        session.RaiseClosed();
+
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.Null(vm.ErrorMessage);
+        Assert.Equal(0, vm.AutoReconnectAttemptsForTesting);
+    }
+
+    [Theory]
+    [InlineData(SessionStatus.Failed, true, true)]        // transient failure (host still down) → keep retrying
+    [InlineData(SessionStatus.Failed, false, false)]      // auth / host-key / notice → stop, leave Failed
+    [InlineData(SessionStatus.Connected, true, false)]    // success → stop
+    [InlineData(SessionStatus.Connected, false, false)]   // (retryable flag is irrelevant unless Failed)
+    [InlineData(SessionStatus.Disconnected, true, false)] // cancelled mid-connect (user/nav-away) → stop
+    [InlineData(SessionStatus.Disconnected, false, false)]// "
+    [InlineData(SessionStatus.Connecting, true, false)]   // (defensive) not a terminal outcome → stop
+    public void ShouldContinueAutoReconnect_OnlyOnTransientFailure(SessionStatus status, bool retryable, bool expected)
+    {
+        Assert.Equal(expected, SshSessionViewModel.ShouldContinueAutoReconnect(status, retryable));
+    }
+
     [Fact]
     public void ReplayBuffer_CapturesDataReceivedFromSession()
     {
@@ -1085,9 +1253,14 @@ public sealed class SshSessionViewModelTests
         public void RaiseClosed() =>
             Closed?.Invoke(this, EventArgs.Empty);
 
+        // Runs synchronously inside DisposeAsync — lets a test simulate a concurrent teardown landing
+        // during the VM's `await SafeDisposeSessionAsync()` window.
+        public Action? OnDisposing { get; set; }
+
         public ValueTask DisposeAsync()
         {
             DisposeCount++;
+            OnDisposing?.Invoke();
             return ValueTask.CompletedTask;
         }
     }

@@ -58,6 +58,12 @@ public sealed class SftpService : ISftpService
         connectionInfo.Timeout = TimeSpan.FromSeconds(15);
 
         var client = new SftpClient(connectionInfo);
+        // Keep-alive so a silently-dead peer (host reboot, power loss, network partition) is noticed
+        // rather than leaving a zombie session. Matters most for the SSH-tab SFTP pre-warm, whose
+        // staleness gate (SshSessionViewModel.TryConsumePrewarmedSftp) relies on IsConnected reflecting
+        // reality — and without periodic traffic SSH.NET never learns the transport died. Same value
+        // and rationale as SshSessionService; see the longer note there.
+        client.KeepAliveInterval = TimeSpan.FromSeconds(30);
         string? capturedFingerprint = null;
         SshHostKeyMismatchException? mismatch = null;
 

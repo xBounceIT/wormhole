@@ -61,6 +61,16 @@ public sealed class SshSessionService : ISshSessionService
         connectionInfo.Timeout = TimeSpan.FromSeconds(15);
 
         var client = new SshClient(connectionInfo);
+        // Send an SSH-level keep-alive on an otherwise idle connection so a silently-dead peer is
+        // detected in tens of seconds instead of never. An abrupt host death (reboot, power loss,
+        // network partition) sends no FIN/RST, so our blocked ShellStream read never returns and the
+        // tab looks connected forever — the reported "appears open but nothing happens". The periodic
+        // SSH_MSG_IGNORE forces TCP to keep transmitting; once the peer is gone TCP's retransmit
+        // timeout errors the socket, SSH.NET's message loop raises a connection error and disconnects,
+        // which disposes the ShellStream and unblocks the read pump (n == 0 -> Closed -> the VM's
+        // failure overlay). A graceful sshd exit was already caught via EOF; this covers the ungraceful
+        // case. As a bonus it also keeps NAT/firewall mappings from evicting a genuinely idle session.
+        client.KeepAliveInterval = TimeSpan.FromSeconds(30);
         string? capturedFingerprint = null;
         SshHostKeyMismatchException? mismatch = null;
 
