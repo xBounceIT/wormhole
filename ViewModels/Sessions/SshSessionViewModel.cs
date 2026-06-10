@@ -61,6 +61,12 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     // file transfer. Null until a connect resolves a route; cleared on teardown.
     private ConnectionProfile? _activeRoutedProfile;
     private bool _reconnectRequestedWhileDetached;
+    // Set when a connect reaches Connected while no view is attached (tab backgrounded mid-connect):
+    // the session's banner/prompt lands only in _replayBuffer, so the live xterm.js — cleared at
+    // connect start and never fed since — is empty. The next AttachAsync must replay even on a
+    // same-WebView reattach (where it normally skips replay because xterm.js already shows the
+    // session). Cleared once a bridge is rebound, and reset whenever the buffer is cleared on teardown.
+    private bool _connectedWhileDetached;
     private readonly object _mcpPresentationLock = new();
     private ShellCommandPresentationFilter? _mcpPresentationFilter;
 
@@ -230,7 +236,15 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             // mid-reattach). The reverse race — bytes between snapshot and subscribe —
             // stays in the ring buffer and surfaces on the next reattach; a far less
             // visible cosmetic issue than the duplicated stream.
-            var snapshot = xtermIsFresh ? _replayBuffer.Snapshot() : null;
+            //
+            // Replay on a fresh WebView (empty xterm.js) OR when the session connected while detached:
+            // there the live xterm.js never received the banner/prompt (it went only to the buffer), so
+            // a same-WebView reattach must replay too — otherwise the tab shows Connected over a blank
+            // terminal until the next remote byte arrives. xterm.js is empty in that state (cleared at
+            // connect start, never fed), so replaying the full buffer can't duplicate.
+            var replayNeeded = xtermIsFresh || _connectedWhileDetached;
+            _connectedWhileDetached = false;
+            var snapshot = replayNeeded ? _replayBuffer.Snapshot() : null;
             var oldBridge = _bridge;
             _bridge = CreateTerminalBridge(webView);
             oldBridge?.Dispose();
@@ -666,6 +680,12 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             {
                 _bridge = CreateTerminalBridge(liveWebView);
             }
+            else
+            {
+                // No view to bind: the banner/prompt below lands only in _replayBuffer, so flag that the
+                // next AttachAsync must replay it even on a same-WebView reattach (which normally skips).
+                _connectedWhileDetached = true;
+            }
 
             // Auto sudo: once the shell is up, run "sudo su" and feed the saved password at the
             // sudo prompt. Only meaningful with a stored password — key-only logins and "prompt
@@ -913,6 +933,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         // across the detach window is the whole point. Session teardown clears it so
         // a same-VM reconnect doesn't bleed the old session's output into the new one.
         _replayBuffer.Clear();
+        // Buffer is empty now — nothing pending to replay on the next attach.
+        _connectedWhileDetached = false;
 
         // Drop the cached creds: a future reconnect will re-resolve via ConnectAsync so
         // a rotated password / removed key / revoked credential doesn't get silently
