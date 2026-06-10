@@ -71,14 +71,20 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     // file transfer. Null until a connect resolves a route; cleared on teardown.
     private ConnectionProfile? _activeRoutedProfile;
     private bool _reconnectRequestedWhileDetached;
+    // Set when a connect reaches Connected while no view is attached (tab backgrounded mid-connect):
+    // the session's banner/prompt lands only in _replayBuffer, so the live xterm.js — cleared at
+    // connect start and never fed since — is empty. The next AttachAsync must replay even on a
+    // same-WebView reattach (where it normally skips replay because xterm.js already shows the
+    // session). Cleared once a bridge is rebound, and reset whenever the buffer is cleared on teardown.
+    private bool _connectedWhileDetached;
 
     // Auto-reconnect after an UNEXPECTED drop of an already-established session (host reboot, network
     // blip — now detectable via the SSH keep-alive). On such a drop the VM silently retries the
     // connect up to MaxAutoReconnectAttempts times, AutoReconnectDelay apart, before surfacing the
-    // Failed overlay. The budget resets once a reconnect produces real output (proving it's healthy)
-    // or on a manual Retry, so an unrelated later drop gets a fresh budget; a connection that flaps
-    // before ever producing output exhausts the budget and stops. Auth failures, host-key mismatches,
-    // and user-initiated teardown are never auto-retried. All access is on the UI thread
+    // Failed overlay. The budget resets once a reconnect stays up for a stability window (proving it's
+    // healthy) or on a manual Retry, so an unrelated later drop gets a fresh budget; a connection that
+    // flaps before then exhausts the budget and stops. Auth failures, host-key mismatches, and
+    // user-initiated teardown are never auto-retried. All access is on the UI thread
     // (OnSessionClosed marshals there; the loop awaits with ConfigureAwait(true)).
     private int _autoReconnectAttempts;
     private CancellationTokenSource? _autoReconnectCts;
@@ -271,9 +277,17 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             // mid-reattach). The reverse race — bytes between snapshot and subscribe —
             // stays in the ring buffer and surfaces on the next reattach; a far less
             // visible cosmetic issue than the duplicated stream.
-            var snapshot = xtermIsFresh ? _replayBuffer.Snapshot() : null;
+            //
+            // Replay on a fresh WebView (empty xterm.js) OR when the session connected while detached:
+            // there the live xterm.js never received the banner/prompt (it went only to the buffer), so
+            // a same-WebView reattach must replay too — otherwise the tab shows Connected over a blank
+            // terminal until the next remote byte arrives. xterm.js is empty in that state (cleared at
+            // connect start, never fed), so replaying the full buffer can't duplicate.
+            var replayNeeded = xtermIsFresh || _connectedWhileDetached;
+            _connectedWhileDetached = false;
+            var snapshot = replayNeeded ? _replayBuffer.Snapshot() : null;
             var oldBridge = _bridge;
-            _bridge = new TerminalBridge(webView, _session, _loggerFactory.CreateLogger<TerminalBridge>(), _settingsService);
+            _bridge = CreateTerminalBridge(webView);
             oldBridge?.Dispose();
             if (snapshot is not null) _bridge.Replay(snapshot);
             await _session.ResizeAsync(initialSize.Columns, initialSize.Rows).ConfigureAwait(true);
@@ -625,6 +639,14 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         });
     }
 
+    // Both bridge sites — the initial connect below and the AttachAsync rebind after a view
+    // reload — wire the same logger category and settings around the live session, so centralize
+    // the construction here. Callers reach this only with a live _session (just connected, or
+    // guarded by `_session is not null`); the surrounding snapshot/replay/resize/focus differs
+    // per site and stays at the call site.
+    private TerminalBridge CreateTerminalBridge(CoreWebView2 view) =>
+        new(view, _session!, _loggerFactory.CreateLogger<TerminalBridge>(), _settingsService);
+
     /// <summary>
     /// Start the foreground auto-reconnect loop after an unexpected drop, unless one is already
     /// running. The loop owns the attempt counter and the connecting overlay until it reconnects,
@@ -865,22 +887,36 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
             Progress.Begin(ConnectionPhase.Connect);
             _session = await _sshService.ConnectAsync(profile, creds, _initialSize, _tunnel, token).ConfigureAwait(true);
-            // Re-read _webView after the awaits: if the user navigated away and back
-            // during credential prompt / SSH connect, AttachAsync swapped _webView to the
-            // freshly-created control but bailed on _connectInFlight, so the original
-            // local would bind the bridge to a stale/disposed WebView.
-            var liveWebView = _webView;
-            if (liveWebView is null)
-            {
-                await SafeDisposeSessionAsync().ConfigureAwait(true);
-                Status = SessionStatus.Disconnected;
-                return;
-            }
+
+            // Only a real teardown (tab close, Disconnect, Retry) cancels the token — a plain tab
+            // switch does not. Honor a cancellation here so a tab closed mid-connect unwinds through
+            // the OperationCanceledException handler (which disposes the just-built session + tunnel)
+            // rather than being marked Connected with no owner left to dispose it.
+            token.ThrowIfCancellationRequested();
+
             // Subscribe BEFORE Start() so we don't miss a Closed that fires immediately
             // (forced-command accounts, EOF-on-connect, etc.).
             _session.DataReceived += OnSessionDataReceived;
             _session.Closed += OnSessionClosed;
-            _bridge = new TerminalBridge(liveWebView, _session, _loggerFactory.CreateLogger<TerminalBridge>(), _settingsService);
+
+            // Re-read _webView (a navigate-away-and-back swaps in a fresh control) and bind the bridge
+            // only if a view is attached. A null _webView means the tab was backgrounded mid-connect:
+            // DetachView nulled it without cancelling the connect, so the session and its (possibly
+            // OTP-gated) tunnel are fully established. Keep them alive with no bridge — output buffers
+            // into _replayBuffer and the next AttachAsync's "_session is not null" path rebuilds the
+            // bridge and replays. Disposing them here instead would force a full reconnect on return,
+            // re-prompting for the tunnel route and re-establishing the VPN from scratch.
+            var liveWebView = _webView;
+            if (liveWebView is not null)
+            {
+                _bridge = CreateTerminalBridge(liveWebView);
+            }
+            else
+            {
+                // No view to bind: the banner/prompt below lands only in _replayBuffer, so flag that the
+                // next AttachAsync must replay it even on a same-WebView reattach (which normally skips).
+                _connectedWhileDetached = true;
+            }
 
             // Auto sudo: once the shell is up, run "sudo su" and feed the saved password at the
             // sudo prompt. Only meaningful with a stored password — key-only logins and "prompt
@@ -1137,6 +1173,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         // across the detach window is the whole point. Session teardown clears it so
         // a same-VM reconnect doesn't bleed the old session's output into the new one.
         _replayBuffer.Clear();
+        // Buffer is empty now — nothing pending to replay on the next attach.
+        _connectedWhileDetached = false;
 
         // Drop the cached creds: a future reconnect will re-resolve via ConnectAsync so
         // a rotated password / removed key / revoked credential doesn't get silently
