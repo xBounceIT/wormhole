@@ -232,7 +232,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             // visible cosmetic issue than the duplicated stream.
             var snapshot = xtermIsFresh ? _replayBuffer.Snapshot() : null;
             var oldBridge = _bridge;
-            _bridge = new TerminalBridge(webView, _session, _loggerFactory.CreateLogger<TerminalBridge>(), _settingsService);
+            _bridge = CreateTerminalBridge(webView);
             oldBridge?.Dispose();
             if (snapshot is not null) _bridge.Replay(snapshot);
             await _session.ResizeAsync(initialSize.Columns, initialSize.Rows).ConfigureAwait(true);
@@ -547,6 +547,14 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         });
     }
 
+    // Both bridge sites — the initial connect below and the AttachAsync rebind after a view
+    // reload — wire the same logger category and settings around the live session, so centralize
+    // the construction here. Callers reach this only with a live _session (just connected, or
+    // guarded by `_session is not null`); the surrounding snapshot/replay/resize/focus differs
+    // per site and stays at the call site.
+    private TerminalBridge CreateTerminalBridge(CoreWebView2 view) =>
+        new(view, _session!, _loggerFactory.CreateLogger<TerminalBridge>(), _settingsService);
+
     private async Task ConnectAsync()
     {
         var profile = Profile;
@@ -634,22 +642,30 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
             Progress.Begin(ConnectionPhase.Connect);
             _session = await _sshService.ConnectAsync(profile, creds, _initialSize, _tunnel, token).ConfigureAwait(true);
-            // Re-read _webView after the awaits: if the user navigated away and back
-            // during credential prompt / SSH connect, AttachAsync swapped _webView to the
-            // freshly-created control but bailed on _connectInFlight, so the original
-            // local would bind the bridge to a stale/disposed WebView.
-            var liveWebView = _webView;
-            if (liveWebView is null)
-            {
-                await SafeDisposeSessionAsync().ConfigureAwait(true);
-                Status = SessionStatus.Disconnected;
-                return;
-            }
+
+            // Only a real teardown (tab close, Disconnect, Retry) cancels the token — a plain tab
+            // switch does not. Honor a cancellation here so a tab closed mid-connect unwinds through
+            // the OperationCanceledException handler (which disposes the just-built session + tunnel)
+            // rather than being marked Connected with no owner left to dispose it.
+            token.ThrowIfCancellationRequested();
+
             // Subscribe BEFORE Start() so we don't miss a Closed that fires immediately
             // (forced-command accounts, EOF-on-connect, etc.).
             _session.DataReceived += OnSessionDataReceived;
             _session.Closed += OnSessionClosed;
-            _bridge = new TerminalBridge(liveWebView, _session, _loggerFactory.CreateLogger<TerminalBridge>(), _settingsService);
+
+            // Re-read _webView (a navigate-away-and-back swaps in a fresh control) and bind the bridge
+            // only if a view is attached. A null _webView means the tab was backgrounded mid-connect:
+            // DetachView nulled it without cancelling the connect, so the session and its (possibly
+            // OTP-gated) tunnel are fully established. Keep them alive with no bridge — output buffers
+            // into _replayBuffer and the next AttachAsync's "_session is not null" path rebuilds the
+            // bridge and replays. Disposing them here instead would force a full reconnect on return,
+            // re-prompting for the tunnel route and re-establishing the VPN from scratch.
+            var liveWebView = _webView;
+            if (liveWebView is not null)
+            {
+                _bridge = CreateTerminalBridge(liveWebView);
+            }
 
             // Auto sudo: once the shell is up, run "sudo su" and feed the saved password at the
             // sudo prompt. Only meaningful with a stored password — key-only logins and "prompt
