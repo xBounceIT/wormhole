@@ -21,8 +21,8 @@
     <DefaultItemExcludes>$(DefaultItemExcludes);bin\**;obj\**;Wormhole.Tests\**;Wormhole.Tests.Integration\**;Assets\web\node_modules\**</DefaultItemExcludes>
     <NoWarn>$(NoWarn);MVVMTK0045</NoWarn>
     <DefaultLanguage>en-US</DefaultLanguage>
-    <Version>0.3.1</Version>
-    <AssemblyVersion>0.3.1.0</AssemblyVersion>
+    <Version>0.3.2</Version>
+    <AssemblyVersion>0.3.2.0</AssemblyVersion>
     <InformationalVersion>$(Version)</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <RepositoryUrl>https://github.com/xBounceIT/wormhole</RepositoryUrl>
