@@ -262,6 +262,18 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             }
             await TearDownSessionAsync().ConfigureAwait(true);
             await ConnectAsync().ConfigureAwait(true);
+
+            // This single connect realized the attempt that the background drop deferred while the view
+            // was unloaded. If it was an AUTO-reconnect episode (attempts already consumed) and the
+            // connect failed transiently, hand off to the retry loop for the remaining budget — now that
+            // a view is attached the loop can run, so a backgrounded drop gets the same 3 attempts a
+            // foreground one does instead of stopping after one. A deferred MANUAL Retry has
+            // _autoReconnectAttempts == 0 (RetryAsync reset it), so it's left at Failed here, matching how
+            // a foreground manual Retry behaves. Connected / non-retryable Failed outcomes also fall through.
+            if (_autoReconnectAttempts > 0 && ShouldContinueAutoReconnect(Status, _lastConnectRetryable))
+            {
+                BeginAutoReconnectLoop();
+            }
             return;
         }
 
