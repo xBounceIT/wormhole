@@ -140,16 +140,38 @@ jobs:
         run: |
           set -e
           SHIM_DIR=tools/wormhole-ovpnproxy/ovpn_shim
+          # Apply the vendored OpenVPN3 patches before building — they are
+          # load-bearing for the data path (see the patch step in
+          # scripts/Fetch-OvpnProxy.ps1 for the full rationale). Notably
+          # 0001 restores CA-only server-cert verification under mbedTLS 3.6;
+          # without it the handshake against the fixture server (remote
+          # 127.0.0.1, cert CN from easyrsa) fails hostname verification.
+          # Same idempotent skip-if-reverse-applies logic as the script.
+          for p in tools/wormhole-ovpnproxy/patches/*.patch; do
+            if git -C tools/wormhole-ovpnproxy/third_party/openvpn3 apply --reverse --check "$GITHUB_WORKSPACE/$p" 2>/dev/null; then
+              echo "patch already applied: $p"
+            else
+              git -C tools/wormhole-ovpnproxy/third_party/openvpn3 apply "$GITHUB_WORKSPACE/$p"
+              echo "patch applied: $p"
+            fi
+          done
           cmake -B "$SHIM_DIR/build" -S "$SHIM_DIR" -DCMAKE_BUILD_TYPE=Release
           cmake --build "$SHIM_DIR/build" --config Release -j
           export CGO_ENABLED=1
           export CGO_CFLAGS="-I$GITHUB_WORKSPACE/$SHIM_DIR"
-          # libovpn_shim.a has unresolved external references to JsonCpp / lz4 /
-          # xxhash (pulled in via OpenVPN3's add_core_dependencies + add_json_library
-          # macros). asio is header-only so doesn't need linking. -ldl is required
-          # by mbedTLS's dynamic loader path. -lstdc++ -lpthread cover the C++
-          # runtime + threading used by the shim itself.
-          export CGO_LDFLAGS="-L$GITHUB_WORKSPACE/$SHIM_DIR/build -lovpn_shim -ljsoncpp -llz4 -lxxhash -ldl -lstdc++ -lpthread"
+          # libovpn_shim.a has unresolved external references to mbedTLS / JsonCpp /
+          # lz4 / xxhash (pulled in via OpenVPN3's add_core_dependencies +
+          # add_json_library macros). libovpn_shim.a is a thin archive of just
+          # shim.cc + ovpncli.cpp — the transitive closure has to be spelled out
+          # here, exactly like the Windows `#cgo LDFLAGS` block in ovpn_cgo.go.
+          # mbedTLS comes from the submodule built into the shim's build tree
+          # (third_party_mbedtls/library); single-pass ld needs dependents before
+          # dependencies, so the three mbed libs sit after -lovpn_shim and in
+          # tls → x509 → crypto order. asio is header-only so doesn't need
+          # linking. -ldl is required by mbedTLS's dynamic loader path.
+          # -lstdc++ -lpthread cover the C++ runtime + threading used by the
+          # shim itself.
+          export CGO_LDFLAGS="-L$GITHUB_WORKSPACE/$SHIM_DIR/build -L$GITHUB_WORKSPACE/$SHIM_DIR/build/third_party_mbedtls/library -lovpn_shim -lmbedtls -lmbedx509 -lmbedcrypto -ljsoncpp -llz4 -lxxhash -ldl -lstdc++ -lpthread"
           ( cd tools/wormhole-ovpnproxy && go build -trimpath -tags ovpn3 -ldflags "-s -w" -o "$GITHUB_WORKSPACE/bin/wormhole-ovpnproxy" . )
           ls -la bin/wormhole-ovpnproxy
 

@@ -101,6 +101,7 @@ static int v4_netmask_to_prefix(const std::string& mask) {
 struct PushedAddresses {
   std::string v4_cidr; // "10.8.0.6/24"
   std::string v6_cidr; // "fd00::abc/64"
+  std::vector<std::string> dns; // pushed resolver addresses, in push order
   int mtu = 1500;
 };
 
@@ -136,6 +137,28 @@ static PushedAddresses parse_pushed_addresses(const openvpn::OptionList& opt) {
   if (const auto* mtu = opt.get_ptr("tun-mtu")) {
     if (mtu->size() >= 2) {
       try { out.mtu = std::stoi(mtu->ref(1)); } catch (...) {}
+    }
+  }
+
+  // Pushed DNS resolvers. Two wire forms can reach the merged OptionList:
+  //   dhcp-option DNS <ip>                                  (classic; DNS6 for v6)
+  //   dns server <prio> address <ip[:port]> [<ip[:port]>..] (OpenVPN 2.6+ --dns)
+  // The Go side feeds these into the netstack so hostname targets resolve through
+  // the tunnel; without them every hostname dial fails (the netstack has no OS
+  // resolver fallback, by design — it would leak queries outside the tunnel).
+  if (const auto* il = opt.get_index_ptr("dhcp-option")) {
+    for (auto i : *il) {
+      const openvpn::Option& o = opt[i];
+      if (o.size() >= 3 && (o.ref(1) == "DNS" || o.ref(1) == "DNS6"))
+        out.dns.push_back(o.ref(2));
+    }
+  }
+  if (const auto* il = opt.get_index_ptr("dns")) {
+    for (auto i : *il) {
+      const openvpn::Option& o = opt[i];
+      if (o.size() >= 5 && o.ref(1) == "server" && o.ref(3) == "address") {
+        for (std::size_t j = 4; j < o.size(); ++j) out.dns.push_back(o.ref(j));
+      }
     }
   }
   return out;
@@ -176,9 +199,20 @@ class WormholeTunClient : public openvpn::TunClient {
 
   // Surface session info to the C ABI; the WormholeClient asks us when
   // wait_connected is invoked. address_cidr is the v4 CIDR if present, else v6.
+  // fields_m_ makes the tun_start (io_context thread) → C ABI (Go thread) handoff a
+  // proper happens-before: without it the cross-thread read is a data race (the
+  // wait_connected polling gate observing a non-empty CIDR does NOT order the other
+  // fields — current_tun_ was published back in the constructor).
   std::string assigned_cidr() const {
+    std::lock_guard<std::mutex> lk(fields_m_);
     if (!ip4_cidr_.empty()) return ip4_cidr_;
     return ip6_cidr_;
+  }
+
+  // Space-separated pushed DNS resolver list ("" when the server pushed none).
+  std::string pushed_dns() const {
+    std::lock_guard<std::mutex> lk(fields_m_);
+    return dns_;
   }
 
   // Called by stop()/dtor to wake any blocked dequeue_inbound waiters.
@@ -196,10 +230,15 @@ class WormholeTunClient : public openvpn::TunClient {
   openvpn::Frame::Ptr frame_;
   WormholeClient* owner_;
 
+  // Session fields written once by tun_start on the io_context thread and read from
+  // the Go thread via assigned_cidr()/pushed_dns(). Guarded by fields_m_ — see the
+  // accessor comment for why the wait_connected gate alone is not a handoff.
+  mutable std::mutex fields_m_;
   std::string ip4_addr_;
   std::string ip4_cidr_;
   std::string ip6_addr_;
   std::string ip6_cidr_;
+  std::string dns_; // space-separated pushed DNS resolvers
   int mtu_ = 1500;
 
   // Inbound queue: producer is tun_send on the io_context thread, consumer is
@@ -377,6 +416,14 @@ class WormholeClient final : public OpenVPNClient {
     // Stock openvpn.exe (the native client) offers CBC, so we match it. CBC+HMAC-SHA256 is still
     // a secure data channel; the VORACLE risk is from compression, which the profile normalizer strips.
     cfg.enableNonPreferredDCAlgorithms = true;
+    // Accept pushed compression framing in asymmetric mode: decompress server→client if
+    // the server insists, NEVER compress client→server. Legacy OpenVPN 2.x servers very
+    // commonly push `comp-lzo no` (stub framing, no actual compression); OpenVPN3's
+    // default COMPRESS_NO turns ANY pushed comp option other than stub-v2 into a fatal
+    // COMPRESS_ERROR immediately after CONNECTED (cliproto.hpp check_proto_warnings) —
+    // confirmed live against the kylemanna fixture server in CI. "asym" matches the
+    // official clients; never compressing outbound keeps VORACLE out of scope.
+    cfg.compressionMode = "asym";
     auto ev = eval_config(cfg);
     if (ev.error) {
       last_error_ = ev.message;
@@ -497,6 +544,13 @@ class WormholeClient final : public OpenVPNClient {
     return tc->inject_from_go(buf, buf_len);
   }
 
+  // Space-separated pushed DNS resolver list ("" when none / tunnel not up).
+  std::string pushed_dns() {
+    auto* tc = current_tun_.load(std::memory_order_acquire);
+    if (!tc) return {};
+    return tc->pushed_dns();
+  }
+
   void stop_session() {
     // Idempotent: OpenVPNClient::stop() is conservative about already-stopped
     // state. The atomic guards against double-calls from ovpn_stop + ovpn_free.
@@ -561,19 +615,28 @@ void WormholeTunClient::tun_start(const openvpn::OptionList& opt,
                                   openvpn::CryptoDCSettings& /*dc*/) {
   parent_.tun_pre_tun_config();
 
-  // Extract pushed addresses + MTU from the merged OptionList (profile + push-reply).
+  // Extract pushed addresses + DNS + MTU from the merged OptionList (profile +
+  // push-reply). All session fields are stored under fields_m_ so the Go thread's
+  // assigned_cidr()/pushed_dns() reads after wait_connected see them coherently.
   auto pushed = parse_pushed_addresses(opt);
-  ip4_cidr_ = pushed.v4_cidr;
-  ip6_cidr_ = pushed.v6_cidr;
-  mtu_ = pushed.mtu;
+  {
+    std::lock_guard<std::mutex> lk(fields_m_);
+    for (const auto& d : pushed.dns) {
+      if (!dns_.empty()) dns_ += ' ';
+      dns_ += d;
+    }
+    ip4_cidr_ = pushed.v4_cidr;
+    ip6_cidr_ = pushed.v6_cidr;
+    mtu_ = pushed.mtu;
 
-  // Bare-address forms used by tun_name/vpn_ip4/vpn_ip6 query methods.
-  auto bare = [](const std::string& cidr) -> std::string {
-    auto p = cidr.find('/');
-    return p == std::string::npos ? cidr : cidr.substr(0, p);
-  };
-  ip4_addr_ = bare(ip4_cidr_);
-  ip6_addr_ = bare(ip6_cidr_);
+    // Bare-address forms used by tun_name/vpn_ip4/vpn_ip6 query methods.
+    auto bare = [](const std::string& cidr) -> std::string {
+      auto p = cidr.find('/');
+      return p == std::string::npos ? cidr : cidr.substr(0, p);
+    };
+    ip4_addr_ = bare(ip4_cidr_);
+    ip6_addr_ = bare(ip6_cidr_);
+  }
 
   parent_.tun_pre_route_config();
   // We don't install routes in the OS — gVisor netstack on the Go side handles
@@ -727,6 +790,19 @@ int ovpn_wait_connected(ovpn_client_t* c, char* out_cidr_buf, int out_cidr_buf_l
   return reinterpret_cast<ClientWrapper*>(c)->client->wait_connected(out_cidr_buf, out_cidr_buf_len, timeout_ms);
 #else
   (void)c; (void)out_cidr_buf; (void)out_cidr_buf_len; (void)timeout_ms;
+  return 100;
+#endif
+}
+
+int ovpn_get_dns(ovpn_client_t* c, char* out_buf, int out_len) {
+#if HAVE_OPENVPN3
+  if (!c || !out_buf || out_len < 1) return 1;
+  const std::string dns = reinterpret_cast<ClientWrapper*>(c)->client->pushed_dns();
+  std::strncpy(out_buf, dns.c_str(), out_len - 1);
+  out_buf[out_len - 1] = '\0';
+  return 0;
+#else
+  (void)c; (void)out_buf; (void)out_len;
   return 100;
 #endif
 }

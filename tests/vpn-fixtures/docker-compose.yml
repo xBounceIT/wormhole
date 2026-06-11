@@ -1,15 +1,18 @@
 # Brings up the supporting infra for Wormhole.Tests.Integration: a WireGuard server,
-# an OpenVPN server, and a single TCP echo target reachable only through either tunnel.
-# Run `bootstrap.sh` first — it generates the keys / PKI / server + client configs into
-# the .out/ subdirectory, which this compose mounts.
+# an OpenVPN server, a DNS server, and a single TCP echo target reachable only through
+# either tunnel. Run `bootstrap.sh` first — it generates the keys / PKI / server +
+# client configs into the .out/ subdirectory, which this compose mounts.
 #
 # Address plan (everything on the vpn-test-net docker bridge):
 #   10.20.0.2   wireguard server (eth0)        — wg0 = 10.13.13.1/24
 #   10.20.0.3   openvpn server   (eth0)        — tun0 = 10.8.0.1/24
 #   10.20.0.10  echo-target (socat TCP echo)   — port 7777
+#   10.20.0.53  dns (dnsmasq)                  — echo.vpn.test → 10.20.0.10
 #
 # Both VPNs route 10.20.0.0/24 through the tunnel, so the client (wormhole-{wg,ovpn}proxy
-# on the test runner) can reach 10.20.0.10:7777 once a tunnel handshake succeeds.
+# on the test runner) can reach 10.20.0.10:7777 once a tunnel handshake succeeds. The
+# OpenVPN server additionally pushes `dhcp-option DNS 10.20.0.53` (see bootstrap.sh), so
+# the sidecar's in-netstack resolver can prove hostname resolution through the tunnel.
 
 services:
   wireguard:
@@ -119,6 +122,30 @@ services:
     # alpine/socat doesn't ship nc or pgrep; same /proc/1/comm trick.
     healthcheck:
       test: ["CMD-SHELL", "grep -q '^socat$' /proc/1/comm || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+      start_period: 2s
+
+  dns:
+    image: 4km3/dnsmasq:latest
+    # Authoritative-only dnsmasq: --no-resolv/--no-hosts cut every upstream and
+    # container-/etc dependency so answers are fully deterministic; the single
+    # --address rule maps the test hostname onto the echo target. The OpenVPN
+    # server pushes this container's bridge IP as `dhcp-option DNS` (bootstrap.sh),
+    # which the ovpnproxy sidecar surfaces into its gVisor netstack resolver —
+    # the hostname end-to-end test exercises exactly that path. The image's
+    # ENTRYPOINT is `dnsmasq --keep-in-foreground`, so these are appended args
+    # and dnsmasq stays PID 1 (which the healthcheck relies on).
+    command: ["--log-facility=-", "--no-resolv", "--no-hosts", "--address=/echo.vpn.test/10.20.0.10"]
+    networks:
+      vpn-test-net:
+        ipv4_address: 10.20.0.53
+    restart: unless-stopped
+    # Alpine base ships no nslookup/dig wired to a custom server in a healthcheck-
+    # friendly way; same /proc/1/comm process-presence trick as echo-target.
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q '^dnsmasq$' /proc/1/comm || exit 1"]
       interval: 2s
       timeout: 2s
       retries: 15

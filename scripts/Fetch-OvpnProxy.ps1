@@ -37,6 +37,22 @@ $registryPath = (([Environment]::GetEnvironmentVariable("PATH", "Machine"), [Env
 foreach ($p in ($registryPath -split ';' | Where-Object { $_ })) {
     if ($pathParts -notcontains $p) { $pathParts += $p }
 }
+
+# Drop MSYS / Git-for-Windows POSIX overlay dirs from PATH. Git hooks (husky's
+# pre-commit build runs this script via MSBuild) are ALWAYS spawned from Git's bundled
+# sh, which prepends Git\usr\bin, Git\bin, and Git\mingw64\bin. The last one ships its
+# own libwinpthread-1.dll; gcc's cc1.exe resolves DLLs by PATH search order, loads
+# Git's ABI-incompatible copy, and dies with a silent exit 1 — surfacing here as a
+# vcpkg "BUILD_FAILED" on whatever port misses the binary cache (and a poisoned vcpkg
+# compiler-ABI hash). Detection is by content, not by name: an entry goes if it is an
+# MSYS runtime dir (msys-2.0.dll present) or Git's private mingw64\bin (git.exe AND
+# libwinpthread-1.dll side by side — the real toolchain's mingw64\bin carries no
+# git.exe, and Git's cmd\ dir carries no DLLs, so `git` itself stays resolvable).
+$pathParts = @($pathParts | Where-Object {
+    -not ((Test-Path -LiteralPath (Join-Path $_ "msys-2.0.dll") -ErrorAction SilentlyContinue) -or
+          ((Test-Path -LiteralPath (Join-Path $_ "git.exe") -ErrorAction SilentlyContinue) -and
+           (Test-Path -LiteralPath (Join-Path $_ "libwinpthread-1.dll") -ErrorAction SilentlyContinue)))
+})
 $env:PATH = $pathParts -join ';'
 
 # Fetches (or builds) the wormhole-ovpnproxy.exe userspace OpenVPN sidecar and writes it
