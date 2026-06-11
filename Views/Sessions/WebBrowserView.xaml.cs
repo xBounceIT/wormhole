@@ -314,8 +314,24 @@ public sealed partial class WebBrowserView : UserControl
         if (args.WebErrorStatus == CoreWebView2WebErrorStatus.OperationCanceled) return;
 
         _awaitingInitialNavigation = false;
-        _viewModel?.ReportNavigationFailed(DescribeWebError(args.WebErrorStatus));
+        _viewModel?.ReportNavigationFailed(
+            DescribeWebError(args.WebErrorStatus), IsGenericTransportFailure(args.WebErrorStatus));
     }
+
+    // Statuses Chromium reports when the connection itself died rather than the page content. For a
+    // SOCKS-proxied tab these are how a sidecar dial failure surfaces — Chromium gets a SOCKS error
+    // reply (ERR_SOCKS_CONNECTION_FAILED) and WebView2 collapses it into Unknown — so the VM follows
+    // up with an in-tunnel reachability probe to produce an actionable message. Cert statuses are
+    // deliberately excluded: those mean the target WAS reached.
+    private static bool IsGenericTransportFailure(CoreWebView2WebErrorStatus status) => status is
+        CoreWebView2WebErrorStatus.Unknown
+        or CoreWebView2WebErrorStatus.CannotConnect
+        or CoreWebView2WebErrorStatus.ServerUnreachable
+        or CoreWebView2WebErrorStatus.Timeout
+        or CoreWebView2WebErrorStatus.ConnectionAborted
+        or CoreWebView2WebErrorStatus.ConnectionReset
+        or CoreWebView2WebErrorStatus.Disconnected
+        or CoreWebView2WebErrorStatus.HostNameNotResolved;
 
     private static string DescribeWebError(CoreWebView2WebErrorStatus status) => status switch
     {

@@ -241,6 +241,152 @@ public class HttpSessionViewModelTests
         Assert.Equal(1, tunnel.DisposeCount);
     }
 
+    // ---- Post-failure tunnel reachability probe --------------------------------------------------
+
+    [Fact]
+    public async Task TransportFailure_SocksTarget_ProbeFails_ReplacesMessage_AndTearsDown()
+    {
+        var (vm, tunnel) = await ConnectedThroughSocksTunnelAsync();
+        vm.TunnelReachabilityProbe = (_, _, _, _) =>
+            Task.FromException(new IOException("SOCKS5: CONNECT failed with reply code 0x04 (host unreachable)"));
+
+        vm.ReportNavigationFailed("Navigation failed (Unknown).", transportFailure: true);
+        await vm.PendingDiagnosticForTesting!;
+
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.Contains("fw.local:443 did not respond through it", vm.ErrorMessage);
+        Assert.Equal(1, tunnel.DisposeCount);
+    }
+
+    [Fact]
+    public async Task TransportFailure_SocksTarget_ProbeSucceeds_KeepsOriginalMessage()
+    {
+        var (vm, tunnel) = await ConnectedThroughSocksTunnelAsync();
+        vm.TunnelReachabilityProbe = (_, _, _, _) => Task.CompletedTask;
+
+        vm.ReportNavigationFailed("Navigation failed (Unknown).", transportFailure: true);
+        await vm.PendingDiagnosticForTesting!;
+
+        // The target answered through the tunnel, so the failure was higher up (TLS, HTTP) — the
+        // original message must survive, and the tunnel is still released for this failed attempt.
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.Equal("Navigation failed (Unknown).", vm.ErrorMessage);
+        Assert.Equal(1, tunnel.DisposeCount);
+    }
+
+    [Fact]
+    public async Task TransportFailure_Probe_ReceivesSocksEndpointAndRealTarget()
+    {
+        var (vm, _) = await ConnectedThroughSocksTunnelAsync();
+        IPEndPoint? probedEndpoint = null;
+        string? probedHost = null;
+        int probedPort = 0;
+        vm.TunnelReachabilityProbe = (ep, host, port, _) =>
+        {
+            probedEndpoint = ep;
+            probedHost = host;
+            probedPort = port;
+            return Task.CompletedTask;
+        };
+
+        vm.ReportNavigationFailed("Navigation failed (Unknown).", transportFailure: true);
+        await vm.PendingDiagnosticForTesting!;
+
+        Assert.Equal(new IPEndPoint(IPAddress.Loopback, 1080), probedEndpoint);
+        Assert.Equal("fw.local", probedHost);
+        Assert.Equal(443, probedPort);
+    }
+
+    [Fact]
+    public async Task NonTransportFailure_SocksTarget_DoesNotProbe()
+    {
+        var (vm, tunnel) = await ConnectedThroughSocksTunnelAsync();
+        var probed = false;
+        vm.TunnelReachabilityProbe = (_, _, _, _) => { probed = true; return Task.CompletedTask; };
+
+        // Default flag (e.g. a cert error with validation on): fail immediately, no probe.
+        vm.ReportNavigationFailed("cert error");
+
+        Assert.False(probed);
+        Assert.Null(vm.PendingDiagnosticForTesting);
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.Equal("cert error", vm.ErrorMessage);
+        Assert.Equal(1, tunnel.DisposeCount);
+    }
+
+    [Fact]
+    public async Task TransportFailure_ForwarderTarget_DoesNotProbe()
+    {
+        // A tunnel WITHOUT a SOCKS endpoint goes through the loopback forwarder; there is no SOCKS
+        // endpoint to probe, so the transport flag must not change behavior.
+        var configId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        tunnelRepo.Configs[configId] = new TunnelConfig { Id = configId, Name = "corp", Kind = TunnelKind.WireGuard };
+        var creds = new FakeCredentialService();
+        creds.TunnelConfigs[configId] = new byte[] { 1, 2, 3 };
+        var tunnel = new FakeWebTunnel(socks: null) { BoundPort = 51515 };
+        var tunnels = BuildTunnelManager(creds, tunnelRepo, new ITunnelProvider[] { new FakeWebTunnelProvider(tunnel) });
+
+        var vm = CreateVm(tunnels: tunnels);
+        vm.Initialize(Profile(ProtocolType.Https, "fw.local", 443, tunnelEnabled: true, tunnelConfigId: configId));
+        vm.NavigateRequested += _ => { };
+        await vm.AttachAsync();
+        var probed = false;
+        vm.TunnelReachabilityProbe = (_, _, _, _) => { probed = true; return Task.CompletedTask; };
+
+        vm.ReportNavigationFailed("Navigation failed (Unknown).", transportFailure: true);
+
+        Assert.False(probed);
+        Assert.Equal(SessionStatus.Failed, vm.Status);
+        Assert.Equal("Navigation failed (Unknown).", vm.ErrorMessage);
+        Assert.Equal(1, tunnel.DisposeCount);
+    }
+
+    [Fact]
+    public async Task CloseDuringProbe_LeavesDisconnected_WithoutFailureReport()
+    {
+        var (vm, tunnel) = await ConnectedThroughSocksTunnelAsync();
+        vm.TunnelReachabilityProbe = (_, _, _, ct) =>
+        {
+            // Block until the session teardown cancels the probe's linked token.
+            var tcs = new TaskCompletionSource();
+            ct.Register(() => tcs.TrySetCanceled(ct));
+            return tcs.Task;
+        };
+
+        vm.ReportNavigationFailed("Navigation failed (Unknown).", transportFailure: true);
+        Assert.Equal(SessionStatus.Connecting, vm.Status); // probing — not failed yet
+
+        await vm.CloseAsync();
+        await vm.PendingDiagnosticForTesting!;
+
+        // The close owns the state transition; the cancelled probe must not re-fail the closed tab.
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.Null(vm.ErrorMessage);
+        Assert.Equal(1, tunnel.DisposeCount);
+    }
+
+    /// <summary>Drives a full tunneled connect whose tunnel exposes a SOCKS5 endpoint (127.0.0.1:1080)
+    /// for profile fw.local:443, leaving the VM Connecting with a SOCKS-proxied CurrentTarget.</summary>
+    private static async Task<(HttpSessionViewModel Vm, FakeWebTunnel Tunnel)> ConnectedThroughSocksTunnelAsync()
+    {
+        var configId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        tunnelRepo.Configs[configId] = new TunnelConfig { Id = configId, Name = "corp", Kind = TunnelKind.WireGuard };
+        var creds = new FakeCredentialService();
+        creds.TunnelConfigs[configId] = new byte[] { 1, 2, 3 };
+        var tunnel = new FakeWebTunnel(new IPEndPoint(IPAddress.Loopback, 1080));
+        var tunnels = BuildTunnelManager(creds, tunnelRepo, new ITunnelProvider[] { new FakeWebTunnelProvider(tunnel) });
+
+        var vm = CreateVm(tunnels: tunnels);
+        vm.Initialize(Profile(ProtocolType.Https, "fw.local", 443, tunnelEnabled: true, tunnelConfigId: configId));
+        vm.NavigateRequested += _ => { };
+        await vm.AttachAsync();
+        Assert.Equal(SessionStatus.Connecting, vm.Status);
+        Assert.NotNull(vm.CurrentTarget?.Socks5Proxy);
+        return (vm, tunnel);
+    }
+
     [Fact]
     public void Initialize_StartsConnecting_SoUnrealizedTabIsntBlank()
     {
