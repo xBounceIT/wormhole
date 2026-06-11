@@ -101,6 +101,13 @@ When it doesn't, the browser falls back to the same `127.0.0.1` loopback bridge
 as RDP — where the loopback name won't match the appliance certificate, so HTTPS
 over that path needs the "ignore certificate errors" opt-in.
 
+Connections that use the same saved tunnel share a single live instance: each
+session holds a ref-counted lease, concurrent connects coalesce into one
+establishment (so an OTP-interactive VPN prompts once, not once per tab), and
+the sidecar is torn down when the last session using it closes. Editing a
+tunnel config applies to new connections — sessions already running on the old
+settings keep their tunnel until they disconnect.
+
 ```mermaid
 flowchart TD
     A["Open saved connection"] --> B["InheritanceResolver builds ConnectionProfile"]
@@ -120,11 +127,11 @@ flowchart TD
     L -- "SFTP file transfer" --> N["SftpClient connects through SOCKS5"]
     L -- "HTTP / HTTPS" --> R["WebView2 proxies through SOCKS5 (real hostname preserved), else shares RDP's loopback bridge"]
     L -- "RDP" --> O["BindLocalForwarderAsync binds a 127.0.0.1 listener; ActiveX connects to it"]
-    M --> P["Session owns tunnel lifetime"]
+    M --> P["Session holds a lease on the shared tunnel"]
     N --> P
     R --> P
     O --> P
-    P --> Q["Close tab/dialog -> dispose tunnel sidecar"]
+    P --> Q["Last tab/dialog using the tunnel closes -> dispose tunnel sidecar"]
 ```
 
 ## AI agent control (MCP)

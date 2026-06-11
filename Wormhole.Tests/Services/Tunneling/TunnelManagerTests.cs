@@ -189,13 +189,6 @@ public class TunnelManagerTests
         Assert.Empty(reports);
     }
 
-    private sealed class RecordingProgress : IProgress<TunnelProgress>
-    {
-        private readonly Action<TunnelProgress> _onReport;
-        public RecordingProgress(Action<TunnelProgress> onReport) => _onReport = onReport;
-        public void Report(TunnelProgress value) => _onReport(value);
-    }
-
     private static TunnelManager BuildManager(
         out FakeTunnelConfigRepository repo,
         out FakeCredentialService credentials,

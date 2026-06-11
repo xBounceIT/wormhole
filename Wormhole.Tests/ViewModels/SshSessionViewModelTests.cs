@@ -358,7 +358,7 @@ public sealed class SshSessionViewModelTests
         vm.Initialize(CreateProfile());
         vm.PrimeCredentialsForTesting(new SshCredentials("pwd", null, null));
 
-        var shellTunnel = new BorrowedTunnelInstanceTests.RecordingTunnel();
+        var shellTunnel = new RecordingTunnel();
         vm.AttachConnectedSessionForTesting(new FakeSshSession(), shellTunnel);
 
         await WaitForAsync(() => vm.HasPrewarmedSftpForTesting());

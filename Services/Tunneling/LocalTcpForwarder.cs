@@ -37,6 +37,15 @@ public sealed class LocalTcpForwarder : IAsyncDisposable
 
     public int LocalPort => ((IPEndPoint)_listener.LocalEndpoint).Port;
 
+    public string TargetHost => _targetHost;
+    public int TargetPort => _targetPort;
+
+    /// <summary>
+    /// False once the accept loop has exited — after dispose, or after an unexpected crash logged
+    /// by <see cref="AcceptLoopAsync"/>. A dead forwarder's port must not be reused.
+    /// </summary>
+    public bool IsAlive => _acceptLoop is { IsCompleted: false };
+
     public static LocalTcpForwarder Start(ITunnelInstance tunnel, string targetHost, int targetPort, ILogger logger)
     {
         ArgumentNullException.ThrowIfNull(tunnel);

@@ -49,6 +49,10 @@ public sealed class TunnelConfigRepository : ITunnelConfigRepository
             cancellationToken: cancellationToken));
     }
 
+    // The UpdatedAt bump here is load-bearing beyond auditing: TunnelManager's shared-tunnel pool
+    // snapshots it to detect config edits, so every save — including payload-only edits where
+    // Name/Kind are unchanged — must go through this row update or live pooled tunnels won't be
+    // refreshed on the next connect.
     public async Task UpdateAsync(TunnelConfig config, CancellationToken cancellationToken = default)
     {
         config.UpdatedAt = DateTime.UtcNow;
