@@ -38,6 +38,12 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
     private CancellationTokenSource? _cts;
     private ITunnelInstance? _tunnel;
     private int _connectInFlight;
+    private int _diagnoseInFlight;
+
+    // Upper bound on the post-failure reachability probe. The sidecar's own in-tunnel dial
+    // timeout is 15 s; a target that hasn't answered the probe within this window is reported
+    // as unreachable rather than holding the failed tab on the connecting spinner even longer.
+    private static readonly TimeSpan TunnelProbeTimeout = TimeSpan.FromSeconds(6);
 
     public HttpSessionViewModel(
         TunnelManager tunnels,
@@ -235,13 +241,32 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
     }
 
     /// <summary>Called by the view when the top-level navigation fails (transport error, cert error with
-    /// validation on, etc.).</summary>
-    public void ReportNavigationFailed(string message)
+    /// validation on, etc.). <paramref name="transportFailure"/> is true when the WebView2 error status was
+    /// a generic transport-level one (Unknown & friends): WebView2 collapses SOCKS-proxy dial failures —
+    /// the sidecar replying "host unreachable" because its in-tunnel dial to host:port got no answer —
+    /// into <c>WebErrorStatus.Unknown</c>, so for a SOCKS-routed target the VM re-probes the same
+    /// host:port through the tunnel to turn "Navigation failed (Unknown)" into an actionable message.</summary>
+    public void ReportNavigationFailed(string message, bool transportFailure = false)
     {
         // Only the initial connect (Status == Connecting) may fail the tab. A failure reported while
         // already Connected — e.g. a transient reload after a Sessions↔Settings re-navigation — must
         // not demote a healthy tab; and a late callback after teardown (Disconnected/Failed) is ignored.
         if (Status != SessionStatus.Connecting) return;
+
+        // Transport failure on a SOCKS-proxied target: probe host:port through the still-live tunnel
+        // BEFORE tearing it down, so the error message can say whether the target answered through the
+        // VPN at all. Status stays Connecting (the probe is bounded by TunnelProbeTimeout) and the
+        // diagnostic path reports + tears down when it concludes. The in-flight gate keeps a second
+        // failure report from racing a second probe; the first probe's conclusion fails the tab anyway.
+        if (transportFailure
+            && _tunnel is not null
+            && CurrentTarget is { Socks5Proxy: not null } target
+            && Interlocked.CompareExchange(ref _diagnoseInFlight, 1, 0) == 0)
+        {
+            PendingDiagnosticForTesting = DiagnoseTunnelTargetAsync(message, target);
+            return;
+        }
+
         ReportFailure(message);
         // The tunnel (and any loopback forwarder + VPN sidecar process) was already established before
         // NavigateRequested. A navigation failure ends THIS attempt, so release it now rather than leaving
@@ -250,6 +275,75 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
         // NavigationCompleted callback is synchronous, teardown is best-effort (TearDownTunnelAsync swallows
         // its own errors), and a later Retry/Close is a no-op once _tunnel is nulled.
         _ = TearDownTunnelAsync();
+    }
+
+    /// <summary>
+    /// Probes the failed target through the tunnel's SOCKS5 endpoint, then fails the tab with either the
+    /// original message (target reachable — the failure was higher up, e.g. TLS) or an actionable
+    /// "the tunnel could not reach it" message, and finally releases the tunnel. Runs detached from the
+    /// view's synchronous NavigationCompleted callback; <see cref="PendingDiagnosticForTesting"/> exposes
+    /// the in-flight task so tests can await the conclusion.
+    /// </summary>
+    private async Task DiagnoseTunnelTargetAsync(string message, HttpConnectionTarget target)
+    {
+        // SOCKS path targets keep the real host in NavigateUri (see BuildTargetAsync). IdnHost is the
+        // unbracketed/punycoded form Socks5Client expects for both IP literals and hostnames.
+        var host = target.NavigateUri.IdnHost;
+        var port = target.NavigateUri.Port;
+        var connectCts = _cts; // capture: teardown nulls the field
+        var reachable = false;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TunnelProbeTimeout);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(
+                timeout.Token, connectCts?.Token ?? CancellationToken.None);
+            await TunnelReachabilityProbe(target.Socks5Proxy!, host, port, linked.Token).ConfigureAwait(false);
+            reachable = true;
+        }
+        catch (OperationCanceledException) when (connectCts?.IsCancellationRequested == true)
+        {
+            // The session was closed/retried while probing — that teardown owns the state transition.
+            Interlocked.Exchange(ref _diagnoseInFlight, 0);
+            return;
+        }
+        catch (Exception ex)
+        {
+            // Probe timeout (CONNECT unanswered) or the sidecar's explicit failure reply. Either way the
+            // tunnel could not reach the target. Hostname/port only — never log anything credential-like.
+            _logger.LogInformation(ex, "Tunnel reachability probe to {Host}:{Port} failed.", host, port);
+        }
+
+        var finalMessage = reachable
+            ? message
+            : $"The VPN tunnel is up, but the target {host}:{port} did not respond through it. "
+              + "Check that the appliance allows access to this address and port from the VPN network.";
+
+        MarshalToUi(() =>
+        {
+            Interlocked.Exchange(ref _diagnoseInFlight, 0);
+            // Re-check: a Close/Disconnect/Retry that won the race already moved the tab on.
+            if (Status != SessionStatus.Connecting) return;
+            ReportFailure(finalMessage);
+            _ = TearDownTunnelAsync();
+        });
+    }
+
+    /// <summary>
+    /// Reachability probe used by <see cref="DiagnoseTunnelTargetAsync"/>: opens (and immediately closes)
+    /// a SOCKS5 CONNECT to host:port via the tunnel's loopback endpoint. Replaceable test seam.
+    /// </summary>
+    internal Func<IPEndPoint, string, int, CancellationToken, Task> TunnelReachabilityProbe { get; set; } =
+        ProbeViaSocks5Async;
+
+    /// <summary>In-flight diagnostic task (null until the first probe). Test observability only.</summary>
+    internal Task? PendingDiagnosticForTesting { get; private set; }
+
+    private static async Task ProbeViaSocks5Async(
+        IPEndPoint socksEndpoint, string host, int port, CancellationToken cancellationToken)
+    {
+        var stream = await Socks5Client.ConnectAsync(socksEndpoint, host, port, cancellationToken)
+            .ConfigureAwait(false);
+        await stream.DisposeAsync().ConfigureAwait(false);
     }
 
     public void ReportFailure(string message)
