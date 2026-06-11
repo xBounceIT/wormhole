@@ -15,6 +15,7 @@ mRemoteNG. This file orients agents touching the codebase.
 ## Conventions
 
 - Respect WinUI 3 guidelines. Custom title bar, Mica backdrop, per-monitor DPI.
+- Never wrap a `ListView`/`GridView` in a `ScrollViewer` — the unbounded measure disables UI virtualization and realizes every item at load (multi-second page hangs). Give the list a bounded height (star-sized grid row or `MaxHeight`) and let its built-in template `ScrollViewer` scroll.
 - DI: `Microsoft.Extensions.DependencyInjection` configured in [App.xaml.cs](App.xaml.cs). Resolve from `App.Current.Services`.
 - MVVM: `CommunityToolkit.Mvvm` (`ObservableObject`, `[ObservableProperty]`, `[RelayCommand]`). View models live under [ViewModels/](ViewModels).
 - Logging: log via `ILogger<T>` from MEL. Serilog is the provider. Logs land in `%LOCALAPPDATA%\Wormhole\logs\`.

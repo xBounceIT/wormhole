@@ -609,6 +609,157 @@ public class CredentialsViewModelTests
         Assert.Equal("gamma", vm.FilteredCredentials[0].Name);
     }
 
+    [Fact]
+    public async Task AddCredentialAsync_inserts_at_sorted_position_without_reload_or_reset()
+    {
+        var repo = new FakeCredentialRepository(
+            MakeProfile("alpha", ProtocolType.Ssh),
+            MakeProfile("gamma", ProtocolType.Ssh));
+        var dialog = new FakeDialogService
+        {
+            CredentialPromptResult = new CredentialDraft("beta", ProtocolType.Ssh, "u", null, "pw"),
+        };
+        var vm = NewVm(repo, dialog: dialog);
+        await vm.LoadCommand.ExecuteAsync(null);
+        vm.SelectedCredentials.Add(vm.Credentials.First());
+
+        var resetEvents = 0;
+        vm.FilteredCredentials.CollectionChanged += (_, args) =>
+        {
+            if (args.Action == NotifyCollectionChangedAction.Reset) resetEvents++;
+        };
+
+        await vm.AddCredentialCommand.ExecuteAsync(null);
+
+        Assert.Equal(1, repo.GetAllCallCount); // no full reload
+        Assert.Equal(new[] { "alpha", "beta", "gamma" }, vm.Credentials.Select(c => c.Name));
+        Assert.Equal(new[] { "alpha", "beta", "gamma" }, vm.FilteredCredentials.Select(c => c.Name));
+        Assert.Equal(0, resetEvents);
+        Assert.Single(vm.SelectedCredentials); // selection survives the add
+    }
+
+    [Fact]
+    public async Task EditCredentialAsync_replaces_in_place_and_migrates_selection()
+    {
+        var existing = MakeProfile("keep", ProtocolType.Ssh, username: "u1");
+        var repo = new FakeCredentialRepository(existing);
+        var dialog = new FakeDialogService
+        {
+            CredentialPromptResult = new CredentialDraft("keep", ProtocolType.Ssh, "u2", null, "pw"),
+        };
+        var vm = NewVm(repo, dialog: dialog);
+        await vm.LoadCommand.ExecuteAsync(null);
+        vm.SelectedCredentials.Add(vm.Credentials.Single());
+
+        var resetEvents = 0;
+        vm.FilteredCredentials.CollectionChanged += (_, args) =>
+        {
+            if (args.Action == NotifyCollectionChangedAction.Reset) resetEvents++;
+        };
+
+        await vm.EditCredentialCommand.ExecuteAsync(existing);
+
+        Assert.Equal(1, repo.GetAllCallCount); // no full reload
+        Assert.Equal(0, resetEvents);
+        var updated = Assert.Single(vm.Credentials);
+        Assert.Equal("u2", updated.Username);
+        Assert.Same(updated, Assert.Single(vm.SelectedCredentials)); // selection migrated to the new instance
+        Assert.True(vm.IsSelected(updated));
+    }
+
+    [Fact]
+    public async Task EditCredentialAsync_repositions_renamed_credential()
+    {
+        var repo = new FakeCredentialRepository(
+            MakeProfile("alpha", ProtocolType.Ssh),
+            MakeProfile("beta", ProtocolType.Ssh),
+            MakeProfile("gamma", ProtocolType.Ssh));
+        var dialog = new FakeDialogService
+        {
+            CredentialPromptResult = new CredentialDraft("zeta", ProtocolType.Ssh, "u", null, "pw"),
+        };
+        var vm = NewVm(repo, dialog: dialog);
+        await vm.LoadCommand.ExecuteAsync(null);
+        var target = vm.Credentials.Single(c => c.Name == "beta");
+
+        await vm.EditCredentialCommand.ExecuteAsync(target);
+
+        Assert.Equal(new[] { "alpha", "gamma", "zeta" }, vm.Credentials.Select(c => c.Name));
+        Assert.Equal(new[] { "alpha", "gamma", "zeta" }, vm.FilteredCredentials.Select(c => c.Name));
+    }
+
+    [Fact]
+    public async Task DeleteCredentialAsync_removes_card_without_reset()
+    {
+        var repo = new FakeCredentialRepository(
+            MakeProfile("a", ProtocolType.Ssh),
+            MakeProfile("b", ProtocolType.Ssh));
+        var dialog = new FakeDialogService { ConfirmResult = true };
+        var vm = NewVm(repo, dialog: dialog);
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        var resetEvents = 0;
+        var removeEvents = 0;
+        vm.FilteredCredentials.CollectionChanged += (_, args) =>
+        {
+            if (args.Action == NotifyCollectionChangedAction.Reset) resetEvents++;
+            if (args.Action == NotifyCollectionChangedAction.Remove) removeEvents++;
+        };
+
+        await vm.DeleteCredentialCommand.ExecuteAsync(vm.Credentials.First());
+
+        Assert.Equal(0, resetEvents);
+        Assert.Equal(1, removeEvents);
+        Assert.Single(vm.FilteredCredentials);
+    }
+
+    [Fact]
+    public async Task SearchText_with_unchanged_results_raises_no_filtered_events()
+    {
+        var repo = new FakeCredentialRepository(
+            MakeProfile("alpha", ProtocolType.Ssh),
+            MakeProfile("beta", ProtocolType.Ssh));
+        var vm = NewVm(repo); // debounce is zero in NewVm
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        var events = 0;
+        vm.FilteredCredentials.CollectionChanged += (_, _) => events++;
+
+        vm.SearchText = "a"; // matches both alpha and beta — same visible set, no event
+        Assert.Equal(0, events);
+        Assert.Equal(2, vm.FilteredCredentials.Count);
+
+        vm.SearchText = "alpha"; // narrows the set — must fire
+        Assert.Equal(1, events);
+        Assert.Single(vm.FilteredCredentials);
+    }
+
+    [Fact]
+    public async Task AddingNonMatchingCredential_notifies_no_match_state()
+    {
+        // Regression (Codex review): when the incremental mirror flips IsEmpty without
+        // changing FilteredCredentials (first credential added under a non-matching search),
+        // HasNoMatches must still be notified, or the page shows neither empty nor no-match.
+        var repo = new FakeCredentialRepository();
+        var dialog = new FakeDialogService
+        {
+            CredentialPromptResult = new CredentialDraft("alpha", ProtocolType.Ssh, "u", null, "pw"),
+        };
+        var vm = NewVm(repo, dialog: dialog);
+        await vm.LoadCommand.ExecuteAsync(null);
+        vm.SearchText = "zzz"; // matches nothing, including the credential about to be added
+
+        var notified = new List<string>();
+        vm.PropertyChanged += (_, e) => { if (e.PropertyName is not null) notified.Add(e.PropertyName); };
+
+        await vm.AddCredentialCommand.ExecuteAsync(null);
+
+        Assert.False(vm.IsEmpty);
+        Assert.False(vm.HasMatches);
+        Assert.True(vm.HasNoMatches);
+        Assert.Contains(nameof(vm.HasNoMatches), notified);
+    }
+
     private static CredentialProfile MakeProfile(
         string name,
         ProtocolType protocol,

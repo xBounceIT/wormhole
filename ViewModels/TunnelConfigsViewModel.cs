@@ -42,10 +42,18 @@ public partial class TunnelConfigsViewModel : ObservableObject
         _azureVpnTokenCache = azureVpnTokenCache;
         _dialog = dialog;
         _logger = logger;
-        Configs.CollectionChanged += (_, _) =>
+        Configs.CollectionChanged += (_, args) =>
         {
-            ApplyFilter(SearchText);
+            if (!FilteredConfigs.TryMirror(args, Configs, MatchesFilter))
+            {
+                ApplyFilter(SearchText);
+            }
             OnPropertyChanged(nameof(IsEmpty));
+            // HasNoMatches derives from IsEmpty, but an incremental mirror can flip IsEmpty
+            // without changing FilteredConfigs (e.g. adding the first tunnel while a non-matching
+            // search is active). In that path FilteredConfigs.CollectionChanged doesn't fire, so
+            // notify the match state here too or the page stays blank.
+            OnPropertyChanged(nameof(HasNoMatches));
         };
         FilteredConfigs.CollectionChanged += (_, _) =>
         {
@@ -123,11 +131,17 @@ public partial class TunnelConfigsViewModel : ObservableObject
         ApplyFilter(query);
     }
 
+    private bool MatchesFilter(TunnelConfig config) =>
+        string.IsNullOrWhiteSpace(SearchText) || MatchesQuery(config, SearchText.Trim());
+
+    private static bool MatchesQuery(TunnelConfig config, string trimmedQuery) =>
+        Contains(config.Name, trimmedQuery) || KindContains(config.Kind, trimmedQuery);
+
     private void ApplyFilter(string query)
     {
         if (string.IsNullOrWhiteSpace(query))
         {
-            FilteredConfigs.ReplaceAll(Configs);
+            FilteredConfigs.ReplaceAllIfChanged(Configs);
             return;
         }
 
@@ -135,14 +149,13 @@ public partial class TunnelConfigsViewModel : ObservableObject
         var matches = new List<TunnelConfig>(Configs.Count);
         foreach (var config in Configs)
         {
-            if (Contains(config.Name, q) ||
-                KindContains(config.Kind, q))
+            if (MatchesQuery(config, q))
             {
                 matches.Add(config);
             }
         }
 
-        FilteredConfigs.ReplaceAll(matches);
+        FilteredConfigs.ReplaceAllIfChanged(matches);
     }
 
     public Task EnsureLoadedAsync() =>

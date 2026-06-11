@@ -1090,6 +1090,74 @@ public class TunnelConfigsViewModelTests
         Assert.Contains("remote imported.example.com 443", stored.ProfileOvpn);
     }
 
+    [Fact]
+    public async Task AddTunnel_AppendsToFilteredWithoutReset()
+    {
+        var (vm, repo, _, _, dialog) = CreateVm();
+        var id = Guid.NewGuid();
+        repo.Configs[id] = new TunnelConfig { Id = id, Name = "alpha", Kind = TunnelKind.WireGuard };
+        await vm.LoadCommand.ExecuteAsync(null);
+        dialog.TunnelPromptResult = NewWireGuardDraft("corp-vpn");
+
+        var resetEvents = 0;
+        var addEvents = 0;
+        vm.FilteredConfigs.CollectionChanged += (_, args) =>
+        {
+            if (args.Action == NotifyCollectionChangedAction.Reset) resetEvents++;
+            if (args.Action == NotifyCollectionChangedAction.Add) addEvents++;
+        };
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        Assert.Equal(0, resetEvents);
+        Assert.Equal(1, addEvents);
+        Assert.Equal(2, vm.FilteredConfigs.Count);
+        Assert.Equal("corp-vpn", vm.FilteredConfigs[^1].Name);
+    }
+
+    [Fact]
+    public async Task EditTunnel_RenameWithUnchangedMembership_RaisesNoFilteredEvents()
+    {
+        var (vm, repo, _, _, dialog) = CreateVm();
+        var id = Guid.NewGuid();
+        repo.Configs[id] = new TunnelConfig { Id = id, Name = "alpha", Kind = TunnelKind.WireGuard };
+        await vm.LoadCommand.ExecuteAsync(null);
+        dialog.TunnelPromptResult = NewWireGuardDraft("renamed");
+
+        var events = 0;
+        vm.FilteredConfigs.CollectionChanged += (_, _) => events++;
+
+        await vm.EditTunnelCommand.ExecuteAsync(vm.Configs[0]);
+
+        // No search active, so membership is unchanged: the in-place rename must not
+        // rebuild the filtered view (TunnelConfig is observable — the card updates via
+        // PropertyChanged, not a collection event).
+        Assert.Equal(0, events);
+        Assert.Equal("renamed", vm.FilteredConfigs.Single().Name);
+    }
+
+    [Fact]
+    public async Task AddingNonMatchingTunnel_notifies_no_match_state()
+    {
+        // Regression (Codex review): the incremental mirror can flip IsEmpty without changing
+        // FilteredConfigs (first tunnel added under a non-matching search), so HasNoMatches must
+        // still be notified or the page shows neither the empty nor the no-match state.
+        var (vm, _, _, _, dialog) = CreateVm();
+        await vm.LoadCommand.ExecuteAsync(null);
+        vm.SearchText = "zzz"; // matches neither the name nor the kind of the tunnel about to be added
+        dialog.TunnelPromptResult = NewWireGuardDraft("corp-vpn");
+
+        var notified = new List<string>();
+        vm.PropertyChanged += (_, e) => { if (e.PropertyName is not null) notified.Add(e.PropertyName); };
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        Assert.False(vm.IsEmpty);
+        Assert.False(vm.HasMatches);
+        Assert.True(vm.HasNoMatches);
+        Assert.Contains(nameof(vm.HasNoMatches), notified);
+    }
+
     private static TunnelDraft NewWireGuardDraft(string name) =>
         new(name, TunnelKind.WireGuard, new WireGuardSettings
         {
