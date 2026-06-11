@@ -26,8 +26,11 @@ tunnel kinds uniformly through `OpenVpnProcessHost` / `WireGuardProcessHost`.
 
 `profile_ovpn` is the unmodified `.ovpn` blob — OpenVPN3 parses every directive (cipher
 negotiation, TLS control channel, `tls-auth`, `tls-crypt`, `push-reply`, MTU, reneg,
-replay). `username` / `password` are passed to OpenVPN3 via `ProvideCreds` when either
-is non-empty. `mock: true` short-circuits to an OS-socket dialer for tests.
+replay). One exception: a profile with no inline client cert/key gets `setenv CLIENT_CERT 0`
+appended, because OpenVPN3 otherwise treats it as an external-PKI profile and aborts with
+"Missing External PKI alias" (the shim implements no external PKI). `username` / `password`
+are passed to OpenVPN3 via `ProvideCreds` when either is non-empty. `mock: true`
+short-circuits to an OS-socket dialer for tests.
 
 ## Building
 

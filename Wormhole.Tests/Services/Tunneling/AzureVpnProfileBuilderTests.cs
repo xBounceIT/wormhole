@@ -38,6 +38,9 @@ public class AzureVpnProfileBuilderTests
         // The provider supplies username AzureAD / password = access token at connect time; the
         // profile must declare auth-user-pass or the sidecar's creds go unused.
         Assert.Contains("auth-user-pass\n", profile);
+        // No client cert in Entra profiles — without this OpenVPN3 assumes external PKI and
+        // aborts connect with "Missing External PKI alias".
+        Assert.Contains("setenv CLIENT_CERT 0\n", profile);
         // No serversecret → no tls-auth block.
         Assert.DoesNotContain("tls-auth", profile);
     }

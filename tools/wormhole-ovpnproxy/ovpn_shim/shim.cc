@@ -425,6 +425,24 @@ class WormholeClient final : public OpenVPNClient {
     // official clients; never compressing outbound keeps VORACLE out of scope.
     cfg.compressionMode = "asym";
     auto ev = eval_config(cfg);
+    if (!ev.error && ev.externalPki) {
+      // The profile carries no inline client cert/key (e.g. Azure P2S Entra ID profiles are
+      // auth-user-pass only). OpenVPN3 reads a missing <cert> as "the cert lives in external
+      // PKI" and connect() then dies with "Missing External PKI alias" — a dead end here,
+      // because this sidecar implements no external PKI (the callbacks above are no-ops).
+      // Declare "no client certificate" via the profile directive official cert-less profiles
+      // use (OpenVPN Access Server emits it too). NOT Config::disableClientCert: in this
+      // OpenVPN3 snapshot that flag only skips the alias check — ClientOptions never wires
+      // clientconf.disableClientCert into its legacy disable_client_cert duplicate, so the SSL
+      // config still loads with the local cert enabled and fails with "option 'cert' not
+      // found". The directive instead clears ParseClientConfig::clientCertEnabled_, which both
+      // the alias gate and set_local_cert_enabled consult. A server that genuinely requires a
+      // client cert then rejects the TLS handshake with a clear server-side error.
+      std::fprintf(stderr, "[ovpn3] profile has no client certificate; connecting with the client-cert path disabled\n");
+      std::fflush(stderr);
+      cfg.content += "\nsetenv CLIENT_CERT 0\n";
+      ev = eval_config(cfg); // re-parse so the directive lands in the state connect() reads
+    }
     if (ev.error) {
       last_error_ = ev.message;
       return 1;
