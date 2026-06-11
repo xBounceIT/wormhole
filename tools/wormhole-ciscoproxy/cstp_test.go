@@ -160,7 +160,7 @@ func TestRedactAuthBody_TerminatesAndMasks(t *testing.T) {
 }
 
 func TestBuildInitXML_IncludesGroup(t *testing.T) {
-	cfg := config{Host: "vpn.example.com", Group: strptr("Contractors")}
+	cfg := config{Host: "vpn.example.com", Port: 443, Group: strptr("Contractors")}
 	xml := buildInitXML(cfg)
 	if !strings.Contains(xml, `type="init"`) {
 		t.Fatalf("missing init type: %s", xml)
@@ -168,8 +168,36 @@ func TestBuildInitXML_IncludesGroup(t *testing.T) {
 	if !strings.Contains(xml, "<group-select>Contractors</group-select>") {
 		t.Fatalf("missing group-select: %s", xml)
 	}
-	if !strings.Contains(xml, "group-access>https://vpn.example.com") {
-		t.Fatalf("missing group-access: %s", xml)
+	if !strings.Contains(xml, "<group-access>https://vpn.example.com</group-access>") {
+		t.Fatalf("group-access wrong for default port: %s", xml)
+	}
+}
+
+func TestGroupAccessURL(t *testing.T) {
+	cases := []struct {
+		host string
+		port int
+		want string
+	}{
+		{"vpn.example.com", 443, "https://vpn.example.com"},       // default port omitted
+		{"vpn.example.com", 0, "https://vpn.example.com"},         // unset treated as default
+		{"vpn.example.com", 8443, "https://vpn.example.com:8443"}, // non-default port preserved
+		{"10.0.0.1", 8443, "https://10.0.0.1:8443"},
+		{"2001:db8::1", 443, "https://[2001:db8::1]"}, // IPv6 literal bracketed
+		{"2001:db8::1", 8443, "https://[2001:db8::1]:8443"},
+	}
+	for _, tc := range cases {
+		got := groupAccessURL(config{Host: tc.host, Port: tc.port})
+		if got != tc.want {
+			t.Errorf("groupAccessURL(%q,%d) = %q, want %q", tc.host, tc.port, got, tc.want)
+		}
+	}
+}
+
+func TestBuildInitXML_PreservesNonDefaultPort(t *testing.T) {
+	xml := buildInitXML(config{Host: "vpn.example.com", Port: 8443})
+	if !strings.Contains(xml, "<group-access>https://vpn.example.com:8443</group-access>") {
+		t.Fatalf("group-access dropped the non-default port: %s", xml)
 	}
 }
 

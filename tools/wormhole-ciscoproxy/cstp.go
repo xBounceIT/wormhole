@@ -363,12 +363,29 @@ func buildInitXML(cfg config) string {
 	b.WriteString(`<config-auth client="vpn" type="init" aggregate-auth-version="2">`)
 	fmt.Fprintf(&b, `<version who="vpn">%s</version>`, clientVersion)
 	b.WriteString(`<device-id>win</device-id>`)
-	fmt.Fprintf(&b, `<group-access>https://%s</group-access>`, xmlEscape(cfg.Host))
+	fmt.Fprintf(&b, `<group-access>%s</group-access>`, xmlEscape(groupAccessURL(cfg)))
 	if cfg.Group != nil && *cfg.Group != "" {
 		fmt.Fprintf(&b, `<group-select>%s</group-select>`, xmlEscape(*cfg.Group))
 	}
 	b.WriteString(`</config-auth>`)
 	return b.String()
+}
+
+// groupAccessURL builds the gateway URL the gateway uses during the init exchange to select the
+// connection profile / tunnel-group. It must reflect the SAME host and port the login POST and
+// CSTP CONNECT use, or a WebVPN listener on a non-default port (e.g. :8443) — or a port-specific
+// profile — can pick the wrong tunnel before credentials are even processed. The port is included
+// only when it isn't the default 443 (matching how a user types the URL and how OpenConnect forms
+// it); an IPv6 literal is bracketed for a valid URL authority.
+func groupAccessURL(cfg config) string {
+	authority := cfg.Host
+	if strings.Contains(authority, ":") {
+		authority = "[" + authority + "]" // IPv6 literal needs brackets in a URL authority
+	}
+	if cfg.Port != 0 && cfg.Port != 443 {
+		authority = fmt.Sprintf("%s:%d", authority, cfg.Port)
+	}
+	return "https://" + authority
 }
 
 // buildAuthReplyXML answers the current auth form with the configured credentials. On the primary
