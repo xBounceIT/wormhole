@@ -26,6 +26,10 @@ public interface ITunnelInstance : IAsyncDisposable
     /// Bind a TCP listener on 127.0.0.1 that forwards every accepted client through the tunnel to
     /// <paramref name="host"/>:<paramref name="port"/>. Returns the chosen port. Used for the RDP
     /// ActiveX control which opens its own socket from a hostname.
+    /// Implementations must be idempotent per (host, port): instances are shared across sessions
+    /// (<see cref="TunnelManager"/> pools one per tunnel config), so repeated binds for the same
+    /// target should return the existing live listener's port rather than accumulating one
+    /// listener per connect for the tunnel's lifetime.
     /// </summary>
     Task<int> BindLocalForwarderAsync(string host, int port, CancellationToken cancellationToken);
 }

@@ -49,9 +49,15 @@ public sealed class TunnelConfigRepository : ITunnelConfigRepository
             cancellationToken: cancellationToken));
     }
 
+    // Persists the caller-supplied UpdatedAt verbatim — it does NOT stamp "now" itself. That timing
+    // is load-bearing: TunnelManager's shared-tunnel pool snapshots UpdatedAt to detect config edits,
+    // and the edit must become visible to the pool only AFTER the new DPAPI payload is on disk, or a
+    // connection starting mid-save would cache the old payload under the new timestamp. So
+    // TunnelConfigsViewModel writes the row (Name/Kind) with the OLD timestamp first, stores the
+    // payload, then calls UpdateAsync again with a freshly bumped timestamp to publish the change.
+    // Auto-stamping "now" here would reintroduce that race.
     public async Task UpdateAsync(TunnelConfig config, CancellationToken cancellationToken = default)
     {
-        config.UpdatedAt = DateTime.UtcNow;
         using var connection = _factory.Open();
         await connection.ExecuteAsync(new CommandDefinition(@"
             UPDATE TunnelConfigs SET
