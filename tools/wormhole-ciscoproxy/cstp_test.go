@@ -91,6 +91,39 @@ func TestAnswerForm_ChallengeFormSecondFactor(t *testing.T) {
 	}
 }
 
+// TestAnswerForm_CombinedPrimaryFormSecondaryPassword locks the case where the gateway puts the
+// account password AND the second factor on the SAME (primary) form: a password-typed field named
+// secondary_password must get the TOTP/secondary password, not a second copy of the account
+// password. (ASA double-auth / RADIUS second-password profiles.)
+func TestAnswerForm_CombinedPrimaryFormSecondaryPassword(t *testing.T) {
+	cfg := config{Username: "alice", Password: "s3cret", TotpSecret: strptr("JBSWY3DPEHPK3PXP")}
+	form := xmlForm{Inputs: []xmlInput{
+		{Name: "username", Type: "text"},
+		{Name: "password", Type: "password"},
+		{Name: "secondary_password", Type: "password"},
+	}}
+	vals, err := answerForm(cfg, form, true /* isPrimaryForm */)
+	if err != nil {
+		t.Fatalf("answerForm: %v", err)
+	}
+	got := map[string]string{}
+	for _, v := range vals {
+		got[v.name] = v.value
+	}
+	if got["username"] != "alice" {
+		t.Fatalf("username: got %q", got["username"])
+	}
+	if got["password"] != "s3cret" {
+		t.Fatalf("password: got %q want the account password", got["password"])
+	}
+	if got["secondary_password"] == "s3cret" {
+		t.Fatal("secondary_password got the account password instead of the second factor (the bug)")
+	}
+	if len(got["secondary_password"]) != 6 {
+		t.Fatalf("secondary_password should carry a 6-digit TOTP code, got %q", got["secondary_password"])
+	}
+}
+
 // TestAnswerForm_TwoFormFlow_SendsSecondFactorOnChallenge locks the real ciscoLogin contract: the
 // primary form (isPrimaryForm=true) collects username+password, and the following challenge form
 // (isPrimaryForm=false) is answered with the second factor, NOT a re-send of the account password.

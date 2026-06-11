@@ -18,9 +18,12 @@ namespace Wormhole.Services.Tunneling.CiscoSecureClient;
 public sealed class CiscoSecureClientProcessHost : IAsyncDisposable
 {
     // AnyConnect login (HTTPS aggregate-auth round-trips, optional second-factor challenge, then
-    // the CSTP TLS CONNECT) is heavier than WireGuard's UDP handshake — and a 2FA prompt can add
-    // a round-trip — so allow a longer ready window before bailing.
-    private static readonly TimeSpan ReadyTimeout = TimeSpan.FromSeconds(40);
+    // the CSTP TLS CONNECT) is heavier than WireGuard's UDP handshake. The sidecar budgets these
+    // phases SEQUENTIALLY — up to 30s for aggregate-auth and then up to 20s for cstpConnect before
+    // it prints READY — so the parent must wait for that full 50s worst case (plus slack) or it
+    // would kill a slow-but-successful login on a sluggish gateway. Keep this >= the sidecar's
+    // ciscoLogin authCtx + cstpConnect tunnelCtx timeouts.
+    private static readonly TimeSpan ReadyTimeout = TimeSpan.FromSeconds(60);
     private static readonly byte[] s_newline = new byte[] { (byte)'\n' };
 
     private readonly ILogger _logger;

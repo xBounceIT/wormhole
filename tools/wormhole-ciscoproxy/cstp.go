@@ -430,19 +430,23 @@ type formValue struct {
 }
 
 // answerForm maps the gateway form inputs to credential values:
-//   - Primary form: a text/email input (commonly name="username") → cfg.Username, a password
-//     input → cfg.Password.
-//   - Challenge form (every form after the primary): EVERY answerable input — whether the gateway
-//     typed the answer box as text (e.g. name="answer") or password — gets the second factor. This
-//     is the key reason isPrimaryForm exists: a RADIUS/Duo/etc. OTP box is frequently a plain text
-//     input, and treating it as a username on the primary path would send the account name as the
-//     one-time code and fail MFA.
+//   - A field whose NAME marks it a second factor (e.g. AnyConnect's `secondary_password`/`answer`
+//     box, even when it shares the PRIMARY form with the account password — the ASA double-auth /
+//     RADIUS second-password pattern) → the TOTP / secondary password.
+//   - Otherwise on the primary form: a text/email input (commonly name="username") → cfg.Username,
+//     a password input → cfg.Password.
+//   - Otherwise on a challenge form (every form after the primary): EVERY answerable input —
+//     whether the gateway typed the answer box as text (e.g. name="answer") or password — gets the
+//     second factor. This is the key reason isPrimaryForm exists: a RADIUS/Duo/etc. OTP box is
+//     frequently a plain text input, and treating it as a username on the primary path would send
+//     the account name as the one-time code and fail MFA.
 func answerForm(cfg config, form xmlForm, isPrimaryForm bool) ([]formValue, error) {
 	var out []formValue
-	// answer returns the value for one input: on the primary form, the username (text) or password;
-	// on a challenge form, the second factor regardless of the box's declared type.
-	answer := func(isPassword bool) (string, error) {
-		if !isPrimaryForm {
+	// answer returns the value for one input. A second-factor-named field, or any field on a
+	// challenge form, gets the second factor; otherwise the primary form's password field gets the
+	// account password and its text field gets the username.
+	answer := func(name string, isPassword bool) (string, error) {
+		if !isPrimaryForm || isSecondFactorName(name) {
 			return secondFactor(cfg)
 		}
 		if isPassword {
@@ -459,13 +463,13 @@ func answerForm(cfg config, form xmlForm, isPrimaryForm bool) ([]formValue, erro
 		}
 		switch {
 		case typ == "password" || typ == "passwd":
-			val, err := answer(true)
+			val, err := answer(name, true)
 			if err != nil {
 				return nil, err
 			}
 			out = append(out, formValue{name, val})
 		case typ == "text" || typ == "" || typ == "email":
-			val, err := answer(false)
+			val, err := answer(name, false)
 			if err != nil {
 				return nil, err
 			}
@@ -484,7 +488,7 @@ func answerForm(cfg config, form xmlForm, isPrimaryForm bool) ([]formValue, erro
 		for _, in := range form.Inputs {
 			lname := strings.ToLower(in.Name)
 			if lname == "username" || lname == "password" || lname == "answer" || lname == "secondary_password" {
-				val, err := answer(lname != "username")
+				val, err := answer(in.Name, lname != "username")
 				if err != nil {
 					return nil, err
 				}
@@ -497,6 +501,18 @@ func answerForm(cfg config, form xmlForm, isPrimaryForm bool) ([]formValue, erro
 		return nil, fmt.Errorf("could not map any credential onto the gateway auth form (inputs: %s)", describeInputs(form))
 	}
 	return out, nil
+}
+
+// isSecondFactorName reports whether a form field's NAME marks it as a second-factor answer box
+// (e.g. AnyConnect's secondary_password on a combined primary+MFA form). Such a field gets the
+// TOTP / secondary password even on the primary form, where an ordinary password field takes the
+// account password.
+func isSecondFactorName(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "secondary_password", "secondary-password", "secondarypassword", "answer", "challenge", "otp", "passcode":
+		return true
+	}
+	return false
 }
 
 // secondFactor returns the answer for a second authentication form: a freshly generated TOTP
