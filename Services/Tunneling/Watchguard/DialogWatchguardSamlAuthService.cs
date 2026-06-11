@@ -13,7 +13,6 @@ namespace Wormhole.Services.Tunneling.Watchguard;
 
 public sealed class DialogWatchguardSamlAuthService : IWatchguardSamlAuthService, IDisposable
 {
-    private readonly SemaphoreSlim _dialogGate = new(1, 1);
     private readonly CancellationTokenSource _shutdownCts = new();
     private int _disposed;
 
@@ -32,7 +31,9 @@ public sealed class DialogWatchguardSamlAuthService : IWatchguardSamlAuthService
             ?? throw new InvalidOperationException("Main window has no DispatcherQueue.");
 
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _shutdownCts.Token);
-        await _dialogGate.WaitAsync(linked.Token).ConfigureAwait(false);
+        // App-wide gate: WinUI 3 permits one open ContentDialog per XamlRoot across ALL services,
+        // so this SAML dialog must queue behind any in-flight OTP / TLS-trust prompt too.
+        await ContentDialogGate.Shared.WaitAsync(linked.Token).ConfigureAwait(false);
         try
         {
             var tcs = new TaskCompletionSource<WatchguardSamlAuthResult>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -59,7 +60,7 @@ public sealed class DialogWatchguardSamlAuthService : IWatchguardSamlAuthService
         }
         finally
         {
-            try { _dialogGate.Release(); } catch (ObjectDisposedException) { }
+            ContentDialogGate.Shared.Release();
         }
     }
 
@@ -202,6 +203,6 @@ public sealed class DialogWatchguardSamlAuthService : IWatchguardSamlAuthService
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         try { _shutdownCts.Cancel(); } catch { }
         try { _shutdownCts.Dispose(); } catch { }
-        try { _dialogGate.Dispose(); } catch { }
+        // ContentDialogGate.Shared is process-lived — never disposed here.
     }
 }

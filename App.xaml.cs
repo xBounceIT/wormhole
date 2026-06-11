@@ -234,6 +234,7 @@ public partial class App : Application
         services.AddSingleton<IAzureVpnTokenCache, AzureVpnTokenCache>();
         services.AddSingleton<ITunnelProvider, AzureVpnTunnelProvider>();
         services.AddSingleton<IOtpPromptService, DialogOtpPromptService>();
+        services.AddSingleton<ITlsTrustPromptService, DialogTlsTrustPromptService>();
         services.AddSingleton<TunnelManager>();
         services.AddSingleton<ITunnelRoutePrompter, TunnelRoutePrompter>();
         services.AddSingleton<INavigationService, NavigationService>();

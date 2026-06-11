@@ -1,6 +1,9 @@
 using System;
 using System.Collections.Generic;
 using System.Net.Http;
+using System.Net.Security;
+using System.Security.Authentication;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -43,6 +46,8 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
     private static readonly char[] s_remoteDirectiveSeparators = new[] { ' ', '\t' };
 
     private readonly IOtpPromptService _otpPrompt;
+    private readonly ITlsTrustPromptService _tlsTrustPrompt;
+    private readonly ICredentialService _credentials;
     private readonly IStormshieldConfigCache _configCache;
     private readonly ILogger<StormshieldTunnelProvider> _logger;
     private readonly ILoggerFactory _loggerFactory;
@@ -53,11 +58,15 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
 
     public StormshieldTunnelProvider(
         IOtpPromptService otpPrompt,
+        ITlsTrustPromptService tlsTrustPrompt,
+        ICredentialService credentials,
         IStormshieldConfigCache configCache,
         ILogger<StormshieldTunnelProvider> logger,
         ILoggerFactory loggerFactory)
     {
         _otpPrompt = otpPrompt;
+        _tlsTrustPrompt = tlsTrustPrompt;
+        _credentials = credentials;
         _configCache = configCache;
         _logger = logger;
         _loggerFactory = loggerFactory;
@@ -259,9 +268,6 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
                 $"Tunnel config '{config.Name}' is in Automatic mode but is missing a username or password.");
         }
 
-        using var portal = new StormshieldPortalClient(
-            settings.Server, settings.Port, settings.TrustServerCertificate, settings.CaPem);
-
         _logger.LogDebug(
             "Stormshield v5 config resolve from {Server}:{Port} for '{Name}' (OTP={UseOtp}).",
             settings.Server, settings.Port, config.Name, settings.UseOtp);
@@ -272,10 +278,257 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         // consumes it. Transparent to the core logic, so the OTP-routing tests keep calling it directly.
         var guardedOtpPrompt = _otpReuseGuard.Wrap(_otpPrompt, config.Id);
 
-        return await ResolveAutomaticCoreAsync(
-            portal, _configCache, guardedOtpPrompt, _logger, config.Id, config.Name, settings, cancellationToken,
-            progress, onOtpSpent: code => _otpReuseGuard.Record(config.Id, code))
+        return await ResolveAutomaticWithTlsConsentAsync(
+            // The factory reads settings.TrustServerCertificate at call time: the consent flow flips
+            // it to true before asking for the retry portal, so no separate "trust override" needs
+            // to be threaded through.
+            () => new StormshieldPortalClient(
+                settings.Server, settings.Port, settings.TrustServerCertificate, settings.CaPem),
+            portal => ResolveAutomaticCoreAsync(
+                portal, _configCache, guardedOtpPrompt, _logger, config.Id, config.Name, settings,
+                cancellationToken, progress, onOtpSpent: code => _otpReuseGuard.Record(config.Id, code)),
+            _tlsTrustPrompt,
+            reloadPersistedTrustAsync: async () =>
+                (await TryReadPersistedSettingsAsync(config.Id).ConfigureAwait(false))?.TrustServerCertificate == true,
+            persistTrustAsync: () => PersistTrustServerCertificateAsync(config.Id, settings),
+            _logger, config.Name, settings, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Persists <c>TrustServerCertificate = true</c> with a read-modify-write: the blob on disk is
+    /// re-read and only the trust flag flipped on it, so an editor save that landed while this
+    /// connect (and its prompt) was in flight is not clobbered by the connect-time snapshot. The
+    /// snapshot is the fallback only when the stored blob is missing/unreadable. Same default
+    /// <see cref="JsonSerializer"/> shape the tunnel editor writes
+    /// (<c>TunnelConfigsViewModel.SerializeSecret</c>), so the editor round-trips the blob unchanged.
+    /// </summary>
+    private async Task PersistTrustServerCertificateAsync(Guid tunnelConfigId, StormshieldSettings snapshot)
+    {
+        var current = await TryReadPersistedSettingsAsync(tunnelConfigId).ConfigureAwait(false) ?? snapshot;
+        current.TrustServerCertificate = true;
+        await _credentials.StoreTunnelConfigAsync(tunnelConfigId, JsonSerializer.SerializeToUtf8Bytes(current))
+            .ConfigureAwait(false);
+    }
+
+    private async Task<StormshieldSettings?> TryReadPersistedSettingsAsync(Guid tunnelConfigId)
+    {
+        try
+        {
+            var blob = await _credentials.ReadTunnelConfigAsync(tunnelConfigId).ConfigureAwait(false);
+            return blob is null ? null : JsonSerializer.Deserialize<StormshieldSettings>(blob);
+        }
+        catch (Exception)
+        {
+            // Missing/corrupt blob or malformed JSON — callers fall back to their in-memory snapshot.
+            return null;
+        }
+    }
+
+    // Serializes the consent flow (recheck → prompt → persist) so two establishes that hit the TLS
+    // failure at the same time ask the user ONCE: the second waiter re-reads the persisted settings
+    // under the gate and skips the prompt when the first already granted trust. Static because the
+    // provider is a DI singleton; the rare consent path tolerates app-wide serialization.
+    private static readonly SemaphoreSlim s_tlsConsentGate = new(1, 1);
+
+    /// <summary>
+    /// Runs one resolve <paramref name="attempt"/> with a one-shot TLS-trust recovery. When the portal
+    /// rejects the firewall's certificate — the common case: SNS factory certificates are signed by an
+    /// appliance-local CA the OS does not trust — the user is told what failed and asked whether to trust
+    /// the server. Accepting flips <see cref="StormshieldSettings.TrustServerCertificate"/> on, persists
+    /// it (so the question is asked once, not on every connect), and retries the attempt with TLS
+    /// verification off. Declining surfaces an actionable error instead of the raw handshake failure.
+    ///
+    /// <para>The recovery triggers only when <see cref="IStormshieldPortal.LastTlsFailure"/> is set —
+    /// i.e. the validation callback actually rejected a certificate. A protocol-level handshake failure
+    /// (which trusting the server would not fix) never reaches the callback and is not offered the
+    /// prompt. Tunnels with a pinned CA (<see cref="StormshieldSettings.CaPem"/>) are NEVER offered the
+    /// prompt either: the user explicitly opted into verification, and a pin miss may mean interception —
+    /// one habituated click would permanently bypass the pin (the portal constructor honors the trust
+    /// flag BEFORE the pin). They get a hard, precise error instead.</para>
+    ///
+    /// <para>Static + seam-injected (portal factory, attempt, trust prompt, reload/persist callbacks) so
+    /// the consent/persist/retry choreography is unit-testable without a live firewall, a real dialog,
+    /// or DPAPI.</para>
+    /// </summary>
+    /// <param name="portalFactory">Creates a portal from the CURRENT <paramref name="settings"/> — called
+    /// again for the retry after the consent flow has flipped <c>TrustServerCertificate</c>.</param>
+    /// <param name="attempt">The resolve to run against a portal (production: <see cref="ResolveAutomaticCoreAsync"/>
+    /// with its dependencies closed over).</param>
+    /// <param name="reloadPersistedTrustAsync">Re-reads the persisted settings and returns whether trust is
+    /// already granted — true when a concurrent connect answered the prompt while this one was failing.</param>
+    internal static async Task<(string Profile, string DataPlanePassword, bool OptimisticCacheHit)> ResolveAutomaticWithTlsConsentAsync(
+        Func<IStormshieldPortal> portalFactory,
+        Func<IStormshieldPortal, Task<(string Profile, string DataPlanePassword, bool OptimisticCacheHit)>> attempt,
+        ITlsTrustPromptService tlsTrustPrompt,
+        Func<Task<bool>> reloadPersistedTrustAsync,
+        Func<Task> persistTrustAsync,
+        ILogger logger,
+        string configName,
+        StormshieldSettings settings,
+        CancellationToken cancellationToken)
+    {
+        StormshieldTlsFailure tlsFailure;
+        Exception original;
+        using (var portal = portalFactory())
+        {
+            try
+            {
+                return await attempt(portal).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (
+                !settings.TrustServerCertificate
+                && portal.LastTlsFailure is not null
+                && (ex is StormshieldTlsPreflightException || IsTlsAuthenticationFailure(ex)))
+            {
+                if (!string.IsNullOrWhiteSpace(settings.CaPem))
+                {
+                    // A pin miss is a strong signal (rotated certificate — or interception). Fail
+                    // hard with the precise reason; never offer to skip verification here.
+                    throw new InvalidOperationException(
+                        $"The TLS certificate presented by '{settings.Server}:{settings.Port}' does not chain to "
+                        + "the CA pinned in this tunnel's settings. If the firewall's certificate legitimately "
+                        + "changed, update the pinned CA (PEM) in the tunnel editor. Certificate: "
+                        + $"{portal.LastTlsFailure.Subject ?? "(unknown)"}, issued by {portal.LastTlsFailure.Issuer ?? "(unknown)"}.",
+                        ex);
+                }
+                // The filter guarantees LastTlsFailure is non-null; nothing runs on this portal
+                // between the filter and here.
+                tlsFailure = portal.LastTlsFailure!;
+                original = ex;
+            }
+        }
+
+        await s_tlsConsentGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (await reloadPersistedTrustAsync().ConfigureAwait(false))
+            {
+                // A concurrent connect for this tunnel was granted trust while this one was failing —
+                // don't ask the user the same question twice in a row (and don't re-persist).
+                logger.LogInformation(
+                    "Stormshield '{Name}': server trust was granted by a concurrent connection; skipping the prompt.",
+                    configName);
+            }
+            else if (await tlsTrustPrompt.ConfirmTrustAsync(
+                $"Unverified VPN server certificate — {configName}",
+                BuildTlsTrustPromptMessage(settings, tlsFailure),
+                cancellationToken).ConfigureAwait(false))
+            {
+                // A failed secret write must not block the connect the user just approved: log loudly
+                // and continue with trust for this attempt only (the prompt simply returns on the next
+                // connect). The persist callback flips the flag on whatever it writes, so it does not
+                // depend on the in-memory snapshot being updated first.
+                try
+                {
+                    await persistTrustAsync().ConfigureAwait(false);
+                    logger.LogInformation(
+                        "Stormshield '{Name}': user chose to trust '{Server}:{Port}' despite a TLS certificate "
+                        + "validation failure; 'Trust server certificate' is now enabled on the tunnel settings.",
+                        configName, settings.Server, settings.Port);
+                }
+                catch (Exception persistEx)
+                {
+                    logger.LogWarning(persistEx,
+                        "Stormshield '{Name}': failed to persist 'Trust server certificate' after the user trusted "
+                        + "the server; connecting with TLS verification skipped for this attempt only (the prompt "
+                        + "will return on the next connect).", configName);
+                }
+            }
+            else
+            {
+                throw new InvalidOperationException(
+                    $"The TLS certificate presented by '{settings.Server}:{settings.Port}' could not be verified, "
+                    + "and you chose not to trust it. To connect, paste the firewall's CA certificate (PEM) into this "
+                    + $"tunnel's settings — or reconnect and choose \"{ITlsTrustPromptService.AcceptButtonLabel}\" "
+                    + "to skip TLS verification for this tunnel from now on.",
+                    original);
+            }
+
+            // Both granted paths continue here: flip the snapshot BEFORE the retry so portalFactory
+            // builds the next portal with verification off.
+            settings.TrustServerCertificate = true;
+        }
+        finally
+        {
+            s_tlsConsentGate.Release();
+        }
+
+        using var trustedPortal = portalFactory();
+        return await attempt(trustedPortal).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// True when the exception chain contains a TLS authentication failure — HttpClient surfaces a
+    /// rejected server certificate as <see cref="HttpRequestException"/> wrapping an
+    /// <see cref="AuthenticationException"/> (possibly re-wrapped by
+    /// <see cref="DownloadProfileV5WrappedAsync"/>). The caller additionally requires
+    /// <see cref="IStormshieldPortal.LastTlsFailure"/> to be set, which narrows the match to
+    /// certificate validation specifically.
+    /// </summary>
+    internal static bool IsTlsAuthenticationFailure(Exception ex)
+    {
+        for (Exception? e = ex; e is not null; e = e.InnerException)
+        {
+            if (e is AuthenticationException) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Builds the user-facing body of the trust prompt: what failed (in plain words derived from the
+    /// <see cref="SslPolicyErrors"/> bits plus the OS chain verdict, so an expired or revoked
+    /// certificate isn't misdiagnosed as merely self-signed), the identity of the certificate that
+    /// would be trusted, why this is commonly benign on SNS appliances, and exactly what accepting
+    /// changes (the persisted "Trust server certificate" setting) plus the risk it carries. Only
+    /// shown for tunnels WITHOUT a pinned CA — pin misses fail hard instead. Never includes credentials.
+    /// </summary>
+    private static string BuildTlsTrustPromptMessage(StormshieldSettings settings, StormshieldTlsFailure failure)
+    {
+        var sb = new StringBuilder();
+        sb.Append("The TLS certificate presented by '").Append(settings.Server).Append(':').Append(settings.Port)
+            .Append("' could not be verified: ")
+            .Append(DescribeTlsPolicyErrors(failure.PolicyErrors))
+            .Append('.');
+
+        sb.AppendLine().AppendLine();
+        if (!string.IsNullOrEmpty(failure.Subject)) sb.Append("Certificate: ").Append(failure.Subject).AppendLine();
+        if (!string.IsNullOrEmpty(failure.Issuer)) sb.Append("Issued by: ").Append(failure.Issuer).AppendLine();
+        if (!string.IsNullOrEmpty(failure.Thumbprint)) sb.Append("Thumbprint (SHA-1): ").Append(failure.Thumbprint).AppendLine();
+        if (failure.NotBefore is { } from && failure.NotAfter is { } until)
+            sb.Append("Valid: ").Append(from.ToString("yyyy-MM-dd")).Append(" to ").Append(until.ToString("yyyy-MM-dd")).AppendLine();
+        if (!string.IsNullOrEmpty(failure.ChainStatus))
+            sb.Append("Windows reported: ").Append(failure.ChainStatus).AppendLine();
+
+        sb.AppendLine();
+        sb.AppendLine(
+            "Stormshield firewalls ship with a factory certificate that public authorities do not vouch for, "
+            + "so on many networks this is expected.");
+        sb.AppendLine();
+        sb.Append(
+            $"Choosing \"{ITlsTrustPromptService.AcceptButtonLabel}\" updates this tunnel's settings to skip TLS "
+            + "verification for this server from now on (the \"Trust server certificate\" option), so you will not "
+            + "be asked again. Only do this if you are sure you are talking to your own firewall — with "
+            + "verification off, a machine impersonating it could capture your VPN username, password");
+        if (settings.UseOtp) sb.Append(" and one-time codes");
+        sb.Append('.');
+        return sb.ToString();
+    }
+
+    private static string DescribeTlsPolicyErrors(SslPolicyErrors errors)
+    {
+        // RemoteCertificateChainErrors covers more than "untrusted root" — expiry, revocation, and
+        // partial chains land here too — so keep the wording open and let the "Windows reported:"
+        // chain-status line in the prompt carry the specific verdict.
+        var parts = new List<string>();
+        if (errors.HasFlag(SslPolicyErrors.RemoteCertificateNotAvailable))
+            parts.Add("the server did not present a certificate");
+        if (errors.HasFlag(SslPolicyErrors.RemoteCertificateChainErrors))
+            parts.Add("it could not be chained to a certificate authority this machine trusts "
+                + "(it may be self-signed, from a private CA, expired, or revoked)");
+        if (errors.HasFlag(SslPolicyErrors.RemoteCertificateNameMismatch))
+            parts.Add("its name does not match the server address");
+        return parts.Count > 0 ? string.Join(", and ", parts) : "certificate validation failed";
     }
 
     /// <summary>
@@ -343,6 +596,17 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             // optimistic == true only when we could NOT confirm the cache against the firewall's current
             // hash; the caller drops the cache if this (unconfirmed) profile then fails the data-plane auth.
             return (cached!.ProfileOvpn, settings.Password + dataPlaneOtp, optimistic);
+        }
+
+        // Cache MISS with the change-check having just failed TLS certificate validation: the
+        // download below is doomed to the identical handshake failure — but only AFTER consuming
+        // the user's attention on an OTP prompt. Fail fast BEFORE prompting; the consent wrapper
+        // turns this into the trust prompt, and the post-consent retry collects a code exactly once.
+        // (serverHash == null with a cached profile never reaches here — that's the optimistic hit.)
+        if (serverHash is null && portal.LastTlsFailure is not null)
+        {
+            throw new StormshieldTlsPreflightException(
+                $"The TLS certificate presented by '{settings.Server}:{settings.Port}' could not be verified.");
         }
 
         // Cache MISS: download (spends the OTP on the HTTPS step), persist for next time, then stop.
@@ -443,4 +707,18 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
 internal sealed class StormshieldConfigRefreshedException : TunnelRecoverableNoticeException
 {
     public StormshieldConfigRefreshedException(string message) : base("Profile downloaded", message) { }
+}
+
+/// <summary>
+/// Thrown by the Automatic + OTP flow when the unauthenticated change-check has already failed TLS
+/// certificate validation and no cached profile exists: the configuration download would fail the
+/// same handshake, but only after spending the user's attention on an OTP prompt. The consent
+/// wrapper (<see cref="StormshieldTunnelProvider.ResolveAutomaticWithTlsConsentAsync"/>) intercepts
+/// it and shows the trust prompt; it derives from <see cref="InvalidOperationException"/> so it
+/// degrades to a normal actionable error anywhere the wrapper deliberately does not intercept
+/// (e.g. CA-pinned tunnels).
+/// </summary>
+internal sealed class StormshieldTlsPreflightException : InvalidOperationException
+{
+    public StormshieldTlsPreflightException(string message) : base(message) { }
 }
