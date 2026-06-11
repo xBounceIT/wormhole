@@ -62,22 +62,63 @@ public sealed partial class WebBrowserView : UserControl
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         // Restore the surface that OnUnloaded collapsed to suppress airspace bleed in background tabs.
+        // The WebView2 itself is only restored when this view still belongs to the same session: on a
+        // VM change the control is stale (about to be torn down below) and re-showing it would flash
+        // the previous session's page during the gated-teardown await.
         WebViewHost.Visibility = Visibility.Visible;
-        if (_webView is not null) _webView.Visibility = Visibility.Visible;
-
         var newVm = DataContext as HttpSessionViewModel;
+        var vmChanged = newVm is not null && !ReferenceEquals(newVm, _viewModel);
+        if (!vmChanged && _webView is not null) _webView.Visibility = Visibility.Visible;
+
         if (newVm is null) return;
 
-        if (!ReferenceEquals(newVm, _viewModel))
+        if (vmChanged)
         {
             if (_viewModel is not null) _viewModel.NavigateRequested -= OnNavigateRequested;
             _viewModel = newVm;
+
+            // WinUI's TabView recycles item containers, so this same view instance can be rebound from
+            // a closed session's VM to a new one (close a web tab, open the next). Any WebView2 still
+            // attached was built for the PREVIOUS session: if we leave it, the live-WebView guard below
+            // short-circuits and the new session never runs AttachAsync — its "use tunnel" route prompt
+            // never appears and the tab is stuck on the connecting spinner until the app is restarted.
+            // Bump the generation so an in-flight create for the old VM bails (and disposes after
+            // itself at its own mismatch checks), clear the initial-navigation flag so a stray late
+            // NavigationCompleted from the old core can't report against the new VM, hide the stale
+            // surface, then tear the old control down UNDER the create gate — disposing outside the
+            // gate could Close() a control the old create is still inside EnsureCoreWebView2Async on,
+            // or delete an isolated user-data folder its environment creation is using (see the
+            // _createGate comment). SshTerminalView guards the same recycle hazard by resetting its
+            // per-VM handshake state on a VM change.
+            var generation = ++_createGeneration;
+            _awaitingInitialNavigation = false;
+            if (_webView is not null) _webView.Visibility = Visibility.Collapsed;
+
+            await _createGate.WaitAsync().ConfigureAwait(true);
+            try
+            {
+                // Superseded while waiting (an unload, or a newer rebind queued behind the gate):
+                // teardown belongs to whoever owns the newer generation — the old VM's in-flight
+                // create disposes after itself when it resumes and sees the mismatch.
+                if (generation == _createGeneration) DisposeWebView();
+            }
+            finally
+            {
+                _createGate.Release();
+            }
+            // A newer Loaded/unload took over while we waited on the gate; let it drive the connect
+            // (and the toolbar refresh).
+            if (generation != _createGeneration) return;
+            // Clear the previous session's URL and history state out of the toolbar while the new
+            // session connects (the create flow refreshes it once navigation starts).
+            UpdateToolbar();
         }
         // Always (re)subscribe — OnUnloaded drops it on every unload so a discarded view instance
         // (Sessions↔Settings round-trip) is left with no VM→view edge and is garbage-collected (its
         // WebView2 released with it, the same way SshTerminalView relies on GC for its terminal control).
-        _viewModel.NavigateRequested -= OnNavigateRequested;
-        _viewModel.NavigateRequested += OnNavigateRequested;
+        // newVm == _viewModel here on both paths; using it keeps nullable flow analysis satisfied.
+        newVm.NavigateRequested -= OnNavigateRequested;
+        newVm.NavigateRequested += OnNavigateRequested;
 
         // A live WebView2 already rendering this session (tab switch on the same view instance): keep it
         // so page state is preserved. Only (re)connect when there is nothing live to rebind to.
@@ -85,11 +126,11 @@ public sealed partial class WebBrowserView : UserControl
 
         try
         {
-            await _viewModel.AttachAsync().ConfigureAwait(true);
+            await newVm.AttachAsync().ConfigureAwait(true);
         }
         catch (Exception ex)
         {
-            _viewModel.ReportFailure(ex.Message);
+            newVm.ReportFailure(ex.Message);
         }
     }
 
@@ -110,6 +151,11 @@ public sealed partial class WebBrowserView : UserControl
 
     private async void OnNavigateRequested(HttpConnectionTarget target)
     {
+        // Capture the VM this navigate belongs to. If the container is recycled onto a different
+        // session while the create is in flight, _viewModel is reassigned — a failure from the
+        // superseded build must land on the session that requested it, not the new one (whose
+        // Connecting status would accept the report and fail a healthy connect).
+        var vm = _viewModel;
         try
         {
             await CreateAndNavigateAsync(target).ConfigureAwait(true);
@@ -117,7 +163,7 @@ public sealed partial class WebBrowserView : UserControl
         catch (Exception ex)
         {
             LogError(ex, "Failed to create or navigate the web view.");
-            _viewModel?.ReportNavigationFailed("Failed to start the browser: " + ex.Message);
+            vm?.ReportNavigationFailed("Failed to start the browser: " + ex.Message);
         }
     }
 
