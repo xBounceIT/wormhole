@@ -287,11 +287,13 @@ public partial class TunnelConfigsViewModel : ObservableObject
             if (!confirmed) return;
         }
 
-        // Persist row before the secret blob so a failing UpdateAsync doesn't leave the on-disk
-        // secret pointing at the new payload while the row still shows the old Name/Kind.
-        // Compensate-on-failure: roll the row back to its old Name/Kind if the secret write
-        // throws, so the user doesn't end up with a row claiming new settings while the blob
-        // still holds the old ones.
+        // Save ordering (three steps, see below): the row's Name/Kind is written first for
+        // crash-consistency (the stored Kind must never diverge from the payload's Kind), but its
+        // UpdatedAt — the stamp TunnelManager's shared-tunnel pool reads to detect edits — is only
+        // bumped AFTER the new payload is on disk. Writing the bumped stamp first would let a
+        // connection starting mid-save cache the old payload as if it were the new config. The
+        // initial write therefore carries the OLD timestamp; compensate-on-failure rolls the row
+        // back to its old Name/Kind (and old timestamp) if the secret write throws.
         var oldName = config.Name;
         var oldKind = config.Kind;
         var snapshot = new TunnelConfig
@@ -300,7 +302,7 @@ public partial class TunnelConfigsViewModel : ObservableObject
             Name = draft.Name,
             Kind = draft.Kind,
             CreatedAt = config.CreatedAt,
-            UpdatedAt = config.UpdatedAt,
+            UpdatedAt = config.UpdatedAt, // OLD stamp — the pool must not see the edit yet
         };
 
         byte[] secretBytes;
@@ -320,7 +322,9 @@ public partial class TunnelConfigsViewModel : ObservableObject
 
         try
         {
+            // Step 1 — Name/Kind with the OLD timestamp (pool still sees the pre-edit config).
             await _repo.UpdateAsync(snapshot);
+            // Step 2 — new payload; on failure roll the row back to its old Name/Kind + old stamp.
             await SaveSecretWithCompensationAsync(
                 config.Id,
                 secretBytes,
@@ -332,6 +336,22 @@ public partial class TunnelConfigsViewModel : ObservableObject
                     CreatedAt = config.CreatedAt,
                     UpdatedAt = config.UpdatedAt,
                 }));
+            // Step 3 — publish the edit to the pool only now that the payload is durable: bump
+            // UpdatedAt as the final write. The payload + Name/Kind are already saved, so a failure
+            // here loses no data — it only means a live shared tunnel keeps the old settings until
+            // the next edit — and therefore must not surface as a failed save.
+            snapshot.UpdatedAt = DateTime.UtcNow;
+            try
+            {
+                await _repo.UpdateAsync(snapshot);
+                config.UpdatedAt = snapshot.UpdatedAt;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Tunnel '{Name}' was saved but its UpdatedAt stamp could not be bumped; a live "
+                    + "shared tunnel may keep the previous settings until the next edit.", draft.Name);
+            }
             config.Name = draft.Name;
             config.Kind = draft.Kind;
             ApplyFilter(SearchText);

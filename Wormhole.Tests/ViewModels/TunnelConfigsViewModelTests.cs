@@ -388,6 +388,46 @@ public class TunnelConfigsViewModelTests
     }
 
     [Fact]
+    public async Task EditTunnel_BumpsUpdatedAtOnlyAfterSecretIsStored()
+    {
+        // Regression: the shared-tunnel pool (TunnelManager) keys cache-staleness on
+        // TunnelConfig.UpdatedAt. If the row's bumped UpdatedAt became visible before the new DPAPI
+        // payload was on disk, a connection starting mid-save would cache the OLD payload under the
+        // NEW timestamp and keep reusing the stale tunnel. The save must publish the UpdatedAt bump
+        // only after the secret write — Name/Kind first (with the old stamp), then payload, then bump.
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        var id = Guid.NewGuid();
+        var oldStamp = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        repo.Configs[id] = new TunnelConfig
+        {
+            Id = id,
+            Name = "alpha",
+            Kind = TunnelKind.WireGuard,
+            CreatedAt = oldStamp,
+            UpdatedAt = oldStamp,
+        };
+        creds.TunnelConfigs[id] = new byte[] { 9 };
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        // Capture how many secret-stores had happened at each row write. The first write carries the
+        // old stamp (Name/Kind only); the write that changes the stamp is the invalidation publish.
+        int storeCountAtNameKindWrite = -1;
+        int storeCountAtBumpWrite = -1;
+        repo.OnUpdate = cfg =>
+        {
+            if (cfg.UpdatedAt == oldStamp) storeCountAtNameKindWrite = creds.StoreTunnelConfigCount;
+            else storeCountAtBumpWrite = creds.StoreTunnelConfigCount;
+        };
+
+        dialog.TunnelPromptResult = NewWireGuardDraft("alpha"); // same name, new payload
+        await vm.EditTunnelCommand.ExecuteAsync(vm.Configs[0]);
+
+        Assert.Equal(0, storeCountAtNameKindWrite); // Name/Kind written before the payload, stamp not yet bumped
+        Assert.Equal(1, storeCountAtBumpWrite);     // UpdatedAt published only after the payload was stored
+        Assert.True(repo.Configs[id].UpdatedAt > oldStamp); // and the bump did land
+    }
+
+    [Fact]
     public async Task DeleteTunnel_WhenReferenced_RefusesAndKeepsRow()
     {
         var (vm, repo, conns, creds, dialog) = CreateVm();
