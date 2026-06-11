@@ -7,11 +7,21 @@ namespace Wormhole.Services.Tunneling.AzureVpn;
 /// <summary>
 /// Synthesizes an OpenVPN profile (.ovpn text) from <see cref="AzureVpnSettings"/>. The directive
 /// set mirrors what the native Azure VPN Client drives its embedded OpenVPN stack with: TLS to the
-/// gateway FQDN on 443, server cert validated against DigiCert Global Root G2 with the subject
-/// pinned to the gateway hostname, AES-256-GCM / SHA-256, an optional <c>tls-auth</c> static key
+/// gateway FQDN on 443, the server cert validated by chaining to DigiCert Global Root G2 plus
+/// <c>remote-cert-tls server</c>, AES-256-GCM / SHA-256, an optional <c>tls-auth</c> static key
 /// from the profile's <c>&lt;serversecret&gt;</c>, and <c>auth-user-pass</c> — the provider feeds
 /// the Entra access token as the password at connect time. The result is fed into the existing
 /// OpenVPN sidecar via <see cref="Wormhole.Services.Tunneling.OpenVpn.OpenVpnSidecarConfig.ProfileOvpn"/>.
+///
+/// <para>Note: we deliberately do NOT emit a <c>verify-x509-name</c> hostname pin. Azure's
+/// Entra-auth profile (<c>azurevpnconfig.xml</c>) validates the gateway by CA chain
+/// (<c>&lt;servervalidation&gt;&lt;cert&gt;&lt;hash&gt;</c> is the DigiCert Global Root G2
+/// thumbprint) and optional <c>&lt;serversecret&gt;</c> tls-auth key — not by hostname. The
+/// gateway certificate's subject CN is a GatewayID-based name that differs from the connection
+/// FQDN in <c>&lt;serverlist&gt;</c> and is not carried in the profile, so any name pinned from the
+/// connection FQDN would fail verification outright (and would break HA failover to a secondary
+/// gateway with a different CN). The CA chain + <c>remote-cert-tls server</c> is the validation the
+/// Entra profile actually specifies.</para>
 ///
 /// Pure — no IO, no logging, no clock — to keep golden-file tests deterministic.
 ///
@@ -61,7 +71,6 @@ public static class AzureVpnProfileBuilder
         ValidateFieldSafety(settings);
 
         var ca = string.IsNullOrWhiteSpace(settings.CaPem) ? DigiCertGlobalRootG2Pem : settings.CaPem;
-        var primary = settings.Servers[0].Trim();
 
         var sb = new StringBuilder(2048 + ca.Length);
         // Use \n explicitly (not Environment.NewLine) so the synthesized profile is byte-identical
@@ -81,9 +90,10 @@ public static class AzureVpnProfileBuilder
         sb.Append("persist-key").Append('\n');
         sb.Append("persist-tun").Append('\n');
         sb.Append("remote-cert-tls server").Append('\n');
-        // Pin the primary gateway CN. HA pairs share a wildcard *.vpn.azure.com cert, so the
-        // single allowed verify-x509-name directive covers failover in practice.
-        sb.Append("verify-x509-name ").Append(primary).Append(" name").Append('\n');
+        // No verify-x509-name: the gateway cert's subject is a GatewayID-based name not carried in
+        // the Entra profile, so pinning the connection FQDN would fail verification and break HA
+        // failover. Server validation is the DigiCert G2 CA chain + remote-cert-tls server, which
+        // is what the Entra profile's <servervalidation> actually specifies (see class remarks).
         sb.Append("auth SHA256").Append('\n');
         sb.Append("cipher AES-256-GCM").Append('\n');
         sb.Append("tls-version-min 1.2").Append('\n');

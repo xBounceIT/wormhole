@@ -29,7 +29,9 @@ public class AzureVpnProfileBuilderTests
         Assert.Contains("proto tcp-client\n", profile);
         Assert.Contains("remote azuregateway-0000.vpn.azure.com 443\n", profile);
         Assert.Contains("remote-cert-tls server\n", profile);
-        Assert.Contains("verify-x509-name azuregateway-0000.vpn.azure.com name\n", profile);
+        // No hostname pin: the Entra profile validates the gateway by CA chain, and its cert
+        // subject (a GatewayID name) isn't the connection FQDN, so pinning it would break auth/HA.
+        Assert.DoesNotContain("verify-x509-name", profile);
         Assert.Contains("auth SHA256\n", profile);
         Assert.Contains("cipher AES-256-GCM\n", profile);
         Assert.Contains("tls-version-min 1.2\n", profile);
@@ -60,7 +62,7 @@ public class AzureVpnProfileBuilderTests
     }
 
     [Fact]
-    public void Build_MultiServer_EmitsAllRemotes_PinsPrimaryName()
+    public void Build_MultiServer_EmitsAllRemotes_WithoutHostnamePin()
     {
         var settings = BaseSettings();
         settings.Servers = new List<string> { "primary.vpn.azure.com", "secondary.vpn.azure.com" };
@@ -69,9 +71,9 @@ public class AzureVpnProfileBuilderTests
 
         Assert.Contains("remote primary.vpn.azure.com 443\n", profile);
         Assert.Contains("remote secondary.vpn.azure.com 443\n", profile);
-        // OpenVPN accepts only one verify-x509-name; Azure HA pairs share a wildcard cert.
-        Assert.Equal(1, profile.Split("verify-x509-name").Length - 1);
-        Assert.Contains("verify-x509-name primary.vpn.azure.com name\n", profile);
+        // No verify-x509-name pin — pinning the primary FQDN would reject failover to the secondary
+        // gateway (different cert subject), so HA relies on the shared CA chain instead.
+        Assert.DoesNotContain("verify-x509-name", profile);
     }
 
     [Fact]
