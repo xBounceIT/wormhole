@@ -218,6 +218,14 @@ public sealed partial class WebBrowserView : UserControl
             core.Settings.AreDevToolsEnabled = Debugger.IsAttached;
             // A browser surface benefits from the default context menu (copy/paste, open link, save).
             core.Settings.AreDefaultContextMenusEnabled = true;
+            // No SmartScreen reputation checks: these tabs render private appliance/firewall admin
+            // pages whose URLs shouldn't be sent to Microsoft — and on a tunneled tab the check itself
+            // would route through the customer's VPN (see WebViewBrowserArguments). The supported
+            // setting is preferred over --disable-features=msSmartScreenProtection, which could clash
+            // with the runtime's own feature list. Guarded like DefaultBackgroundColor: an older
+            // WebView2 Runtime without this setting must not fail the tab over a privacy nicety.
+            try { core.Settings.IsReputationCheckingRequired = false; }
+            catch (Exception ex) { LogDebug(ex, "Disabling SmartScreen reputation checking failed (runtime too old?)."); }
 
             if (target.IgnoreCertErrors)
             {
@@ -261,13 +269,12 @@ public sealed partial class WebBrowserView : UserControl
             var folder = AppPaths.GetWebBrowserIsolatedUserDataDirectory(Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(folder);
             _isolatedUserDataFolder = folder;
-            var options = new CoreWebView2EnvironmentOptions();
-            if (target.Socks5Proxy is { } proxy)
+            // Hardening args always; the SOCKS5 proxy switch when the tab routes through a tunnel
+            // (see WebViewBrowserArguments for why each switch is there).
+            var options = new CoreWebView2EnvironmentOptions
             {
-                // Chromium does remote DNS for socks5://, so the appliance hostname is resolved on the
-                // far side of the VPN.
-                options.AdditionalBrowserArguments = $"--proxy-server=socks5://{proxy}";
-            }
+                AdditionalBrowserArguments = WebViewBrowserArguments.Build(target.Socks5Proxy),
+            };
             return await CoreWebView2Environment.CreateWithOptionsAsync(null, folder, options);
         }
 
@@ -281,8 +288,14 @@ public sealed partial class WebBrowserView : UserControl
 
         var folder = AppPaths.GetWebBrowserUserDataDirectory();
         Directory.CreateDirectory(folder);
+        // The shared (direct-connection) environment gets the same background-traffic hardening as the
+        // isolated ones: appliance GUIs never need Chromium's background services, and the component
+        // updater would otherwise quietly download into the shared user-data folder on every run.
         var created = await CoreWebView2Environment.CreateWithOptionsAsync(
-            null, folder, new CoreWebView2EnvironmentOptions());
+            null, folder, new CoreWebView2EnvironmentOptions
+            {
+                AdditionalBrowserArguments = WebViewBrowserArguments.Build(socks5Proxy: null),
+            });
         var winner = Interlocked.CompareExchange(ref s_sharedEnvironment, created, null);
         return winner ?? created;
     }
