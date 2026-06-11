@@ -65,9 +65,17 @@ public sealed partial class CredentialsPage : Page
     {
         if (args.InRecycleQueue) return;
         if (args.Item is not CredentialProfile profile) return;
-        if (args.ItemContainer is not GridViewItem container) return;
 
-        var checkBox = FindSelectCheckBox(container);
+        // A brand-new container's data template isn't inflated at phase 0, so retry on the
+        // next rendering phase. With virtualization, this sync is the only thing that sets
+        // the checkbox for items realized while a selection exists.
+        if (args.ItemContainer.ContentTemplateRoot is not { } root)
+        {
+            if (args.Phase < 2) args.RegisterUpdateCallback(OnContainerContentChanging);
+            return;
+        }
+
+        var checkBox = FindSelectCheckBox(root);
         if (checkBox is not null)
         {
             checkBox.IsChecked = ViewModel.IsSelected(profile);
@@ -96,18 +104,43 @@ public sealed partial class CredentialsPage : Page
     }
 
     // Fires when SelectedCredentials mutates by any path (toolbar Select all, Clear, bulk delete, etc.).
-    // Re-sync every realized CheckBox so the visual matches the VM source of truth.
+    // Re-sync CheckBoxes so the visual matches the VM source of truth. Add/Remove/Replace
+    // pinpoint the affected profiles, so only those containers are touched; a Reset
+    // (Select all, Clear) is the only action that needs the full realized-container walk.
     private void OnSelectedCredentialsChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
         if (CredentialsGrid?.Items is null) return;
+
+        if (e.Action is not NotifyCollectionChangedAction.Reset)
+        {
+            SyncCheckBoxes(e.OldItems);
+            SyncCheckBoxes(e.NewItems);
+            return;
+        }
+
         foreach (var item in CredentialsGrid.Items)
         {
-            if (CredentialsGrid.ContainerFromItem(item) is not GridViewItem container) continue;
-            var checkBox = FindSelectCheckBox(container);
-            if (checkBox is null) continue;
-            var shouldBeChecked = item is CredentialProfile profile && ViewModel.IsSelected(profile);
-            if (checkBox.IsChecked != shouldBeChecked) checkBox.IsChecked = shouldBeChecked;
+            SyncCheckBox(item);
         }
+    }
+
+    private void SyncCheckBoxes(System.Collections.IList? items)
+    {
+        if (items is null) return;
+        foreach (var item in items)
+        {
+            SyncCheckBox(item);
+        }
+    }
+
+    private void SyncCheckBox(object? item)
+    {
+        if (item is null) return;
+        if (CredentialsGrid.ContainerFromItem(item) is not GridViewItem container) return;
+        var checkBox = FindSelectCheckBox(container);
+        if (checkBox is null) return;
+        var shouldBeChecked = item is CredentialProfile profile && ViewModel.IsSelected(profile);
+        if (checkBox.IsChecked != shouldBeChecked) checkBox.IsChecked = shouldBeChecked;
     }
 
     private static CheckBox? FindSelectCheckBox(DependencyObject root)

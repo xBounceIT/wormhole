@@ -60,9 +60,12 @@ public partial class CredentialsViewModel : ObservableObject
         _credentialService = credentialService;
         _dialog = dialog;
         _logger = logger;
-        Credentials.CollectionChanged += (_, _) =>
+        Credentials.CollectionChanged += (_, args) =>
         {
-            RebuildFilteredCredentials(SearchText);
+            if (!FilteredCredentials.TryMirror(args, Credentials, MatchesFilter))
+            {
+                RebuildFilteredCredentials(SearchText);
+            }
             OnPropertyChanged(nameof(IsEmpty));
         };
         FilteredCredentials.CollectionChanged += (_, _) =>
@@ -243,13 +246,27 @@ public partial class CredentialsViewModel : ObservableObject
         {
             await _repository.AddAsync(profile);
             await _credentialService.StorePasswordAsync(profile.Id, draft.Password);
-            await LoadAsync();
+            // In-place insert instead of a full reload: the row's final state is already in
+            // hand, and a reload would clear the user's selection and Reset the grid.
+            Credentials.Insert(SortedIndexFor(profile.Name), profile);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to add credential '{Name}'", profile.Name);
             await _dialog.ShowMessageAsync("Couldn't save credential", ex.Message);
         }
+    }
+
+    // Mirrors the repository's ORDER BY Name (SQLite BINARY collation ≈ ordinal) so an
+    // in-place insert lands where the next full load would put the row.
+    private int SortedIndexFor(string name)
+    {
+        var index = 0;
+        while (index < Credentials.Count && string.CompareOrdinal(Credentials[index].Name, name) <= 0)
+        {
+            index++;
+        }
+        return index;
     }
 
     [RelayCommand]
@@ -307,13 +324,44 @@ public partial class CredentialsViewModel : ObservableObject
         {
             await _repository.UpdateAsync(updated);
             await _credentialService.StorePasswordAsync(updated.Id, draft.Password);
-            await LoadAsync();
+            ReplaceInPlace(profile, updated);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to update credential '{Name}'", updated.Name);
             await _dialog.ShowMessageAsync("Couldn't update credential", ex.Message);
             await LoadAsync();
+        }
+    }
+
+    // Swaps the edited row in place instead of a full reload, which would clear the user's
+    // selection and Reset the grid. A rename moves the card to its new Name-sorted position.
+    private void ReplaceInPlace(CredentialProfile original, CredentialProfile updated)
+    {
+        var index = Credentials.IndexOf(original);
+        if (index < 0)
+        {
+            // The instance vanished (a reload raced the edit dialog); insert the saved row
+            // so the UI still reflects what was persisted.
+            Credentials.Insert(SortedIndexFor(updated.Name), updated);
+            return;
+        }
+
+        if (string.Equals(original.Name, updated.Name, StringComparison.Ordinal))
+        {
+            Credentials[index] = updated;
+        }
+        else
+        {
+            Credentials.RemoveAt(index);
+            Credentials.Insert(SortedIndexFor(updated.Name), updated);
+        }
+
+        // The card is a new object; migrate any selection so the action strip's count
+        // doesn't strand a stale reference.
+        if (SelectedCredentials.Remove(original))
+        {
+            SelectedCredentials.Add(updated);
         }
     }
 
@@ -401,11 +449,19 @@ public partial class CredentialsViewModel : ObservableObject
     private static bool Contains(string? haystack, string needle) =>
         haystack is not null && haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
 
+    private bool MatchesFilter(CredentialProfile credential) =>
+        string.IsNullOrWhiteSpace(SearchText) || MatchesQuery(credential, SearchText.Trim());
+
+    private static bool MatchesQuery(CredentialProfile credential, string trimmedQuery) =>
+        Contains(credential.Name, trimmedQuery) ||
+        Contains(credential.Username, trimmedQuery) ||
+        Contains(credential.Domain, trimmedQuery);
+
     private void RebuildFilteredCredentials(string query)
     {
         if (string.IsNullOrWhiteSpace(query))
         {
-            FilteredCredentials.ReplaceAll(Credentials);
+            FilteredCredentials.ReplaceAllIfChanged(Credentials);
             return;
         }
 
@@ -413,15 +469,13 @@ public partial class CredentialsViewModel : ObservableObject
         var matches = new List<CredentialProfile>(Credentials.Count);
         foreach (var credential in Credentials)
         {
-            if (Contains(credential.Name, q) ||
-                Contains(credential.Username, q) ||
-                Contains(credential.Domain, q))
+            if (MatchesQuery(credential, q))
             {
                 matches.Add(credential);
             }
         }
 
-        FilteredCredentials.ReplaceAll(matches);
+        FilteredCredentials.ReplaceAllIfChanged(matches);
     }
 
     private bool NameExists(string name, Guid? excludingId)

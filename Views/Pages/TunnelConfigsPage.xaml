@@ -70,112 +70,111 @@
                        HorizontalAlignment="Center" />
         </StackPanel>
 
-        <ScrollViewer Grid.Row="2"
-                      HorizontalScrollMode="Disabled"
-                      VerticalScrollBarVisibility="Auto"
-                      Visibility="{x:Bind ViewModel.HasMatches, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}">
-            <GridView x:Name="TunnelsGrid"
-                      ItemsSource="{x:Bind ViewModel.FilteredConfigs, Mode=OneWay}"
-                      SelectionMode="None"
-                      IsItemClickEnabled="False">
-                <GridView.ItemTemplate>
-                    <DataTemplate x:DataType="models:TunnelConfig">
-                        <Border CornerRadius="8"
-                                Background="{ThemeResource LayerFillColorDefaultBrush}"
-                                BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
-                                BorderThickness="1"
-                                Padding="14"
-                                Width="260"
-                                Height="140"
-                                Margin="0,0,12,12"
-                                DoubleTapped="OnCardDoubleTapped">
-                            <Border.ContextFlyout>
-                                <MenuFlyout>
-                                    <MenuFlyoutItem Text="Test"
-                                                    Click="OnTestMenuItemClick">
-                                        <MenuFlyoutItem.Icon>
-                                            <FontIcon Glyph="&#xE768;" />
-                                        </MenuFlyoutItem.Icon>
-                                    </MenuFlyoutItem>
-                                    <MenuFlyoutItem Text="Edit"
-                                                    Click="OnEditMenuItemClick">
-                                        <MenuFlyoutItem.Icon>
-                                            <FontIcon Glyph="&#xE70F;" />
-                                        </MenuFlyoutItem.Icon>
-                                    </MenuFlyoutItem>
-                                    <MenuFlyoutItem Text="Delete"
-                                                    Click="OnDeleteMenuItemClick">
-                                        <MenuFlyoutItem.Icon>
-                                            <FontIcon Glyph="&#xE74D;" />
-                                        </MenuFlyoutItem.Icon>
-                                    </MenuFlyoutItem>
-                                </MenuFlyout>
-                            </Border.ContextFlyout>
+        <!-- No outer ScrollViewer — it would disable UI virtualization and realize every
+             card at load (see CLAUDE.md conventions). -->
+        <GridView x:Name="TunnelsGrid"
+                  Grid.Row="2"
+                  ItemsSource="{x:Bind ViewModel.FilteredConfigs, Mode=OneWay}"
+                  SelectionMode="None"
+                  IsItemClickEnabled="False"
+                  Visibility="{x:Bind ViewModel.HasMatches, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}">
+            <GridView.ItemTemplate>
+                <DataTemplate x:DataType="models:TunnelConfig">
+                    <Border CornerRadius="8"
+                            Background="{ThemeResource LayerFillColorDefaultBrush}"
+                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                            BorderThickness="1"
+                            Padding="14"
+                            Width="260"
+                            Height="140"
+                            Margin="0,0,12,12"
+                            DoubleTapped="OnCardDoubleTapped">
+                        <Border.ContextFlyout>
+                            <MenuFlyout>
+                                <MenuFlyoutItem Text="Test"
+                                                Click="OnTestMenuItemClick">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE768;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
+                                <MenuFlyoutItem Text="Edit"
+                                                Click="OnEditMenuItemClick">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE70F;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
+                                <MenuFlyoutItem Text="Delete"
+                                                Click="OnDeleteMenuItemClick">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon Glyph="&#xE74D;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
+                            </MenuFlyout>
+                        </Border.ContextFlyout>
 
-                            <Grid RowSpacing="6">
-                                <Grid.RowDefinitions>
-                                    <RowDefinition Height="Auto" />
-                                    <RowDefinition Height="Auto" />
-                                    <RowDefinition Height="*" />
-                                </Grid.RowDefinitions>
+                        <Grid RowSpacing="6">
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="*" />
+                            </Grid.RowDefinitions>
 
-                                <Grid Grid.Row="0" ColumnSpacing="8">
-                                    <Grid.ColumnDefinitions>
-                                        <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="Auto" />
-                                    </Grid.ColumnDefinitions>
-                                    <TextBlock Grid.Column="0"
-                                               Text="{x:Bind Name, Mode=OneWay}"
-                                               Style="{StaticResource BodyStrongTextBlockStyle}"
-                                               TextTrimming="CharacterEllipsis" />
-                                    <Border Grid.Column="1"
-                                            CornerRadius="4"
-                                            Background="{ThemeResource AccentFillColorSecondaryBrush}"
-                                            Padding="6,2,6,2"
-                                            VerticalAlignment="Center">
-                                        <TextBlock Text="{x:Bind Kind, Mode=OneWay, Converter={StaticResource ToUpperConverter}}"
-                                                   FontSize="11"
-                                                   Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />
-                                    </Border>
-                                </Grid>
-
-                                <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="6">
-                                    <FontIcon FontSize="12" Glyph="&#xE968;" Opacity="0.7" />
-                                    <TextBlock Text="In-process userspace tunnel"
-                                               Style="{StaticResource CaptionTextBlockStyle}"
-                                               Opacity="0.85"
-                                               TextTrimming="CharacterEllipsis" />
-                                </StackPanel>
-
-                                <StackPanel Grid.Row="2"
-                                            Orientation="Horizontal"
-                                            Spacing="2"
-                                            HorizontalAlignment="Right"
-                                            VerticalAlignment="Bottom">
-                                    <Button Style="{StaticResource IconButtonStyle}"
-                                            Click="OnTestMenuItemClick"
-                                            ToolTipService.ToolTip="Test"
-                                            AutomationProperties.Name="Test">
-                                        <FontIcon FontSize="14" Glyph="&#xE768;" />
-                                    </Button>
-                                    <Button Style="{StaticResource IconButtonStyle}"
-                                            Click="OnEditMenuItemClick"
-                                            ToolTipService.ToolTip="Edit"
-                                            AutomationProperties.Name="Edit">
-                                        <FontIcon FontSize="14" Glyph="&#xE70F;" />
-                                    </Button>
-                                    <Button Style="{StaticResource IconButtonStyle}"
-                                            Click="OnDeleteMenuItemClick"
-                                            ToolTipService.ToolTip="Delete"
-                                            AutomationProperties.Name="Delete">
-                                        <FontIcon FontSize="14" Glyph="&#xE74D;" />
-                                    </Button>
-                                </StackPanel>
+                            <Grid Grid.Row="0" ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0"
+                                           Text="{x:Bind Name, Mode=OneWay}"
+                                           Style="{StaticResource BodyStrongTextBlockStyle}"
+                                           TextTrimming="CharacterEllipsis" />
+                                <Border Grid.Column="1"
+                                        CornerRadius="4"
+                                        Background="{ThemeResource AccentFillColorSecondaryBrush}"
+                                        Padding="6,2,6,2"
+                                        VerticalAlignment="Center">
+                                    <TextBlock Text="{x:Bind Kind, Mode=OneWay, Converter={StaticResource ToUpperConverter}}"
+                                               FontSize="11"
+                                               Foreground="{ThemeResource TextOnAccentFillColorPrimaryBrush}" />
+                                </Border>
                             </Grid>
-                        </Border>
-                    </DataTemplate>
-                </GridView.ItemTemplate>
-            </GridView>
-        </ScrollViewer>
+
+                            <StackPanel Grid.Row="1" Orientation="Horizontal" Spacing="6">
+                                <FontIcon FontSize="12" Glyph="&#xE968;" Opacity="0.7" />
+                                <TextBlock Text="In-process userspace tunnel"
+                                           Style="{StaticResource CaptionTextBlockStyle}"
+                                           Opacity="0.85"
+                                           TextTrimming="CharacterEllipsis" />
+                            </StackPanel>
+
+                            <StackPanel Grid.Row="2"
+                                        Orientation="Horizontal"
+                                        Spacing="2"
+                                        HorizontalAlignment="Right"
+                                        VerticalAlignment="Bottom">
+                                <Button Style="{StaticResource IconButtonStyle}"
+                                        Click="OnTestMenuItemClick"
+                                        ToolTipService.ToolTip="Test"
+                                        AutomationProperties.Name="Test">
+                                    <FontIcon FontSize="14" Glyph="&#xE768;" />
+                                </Button>
+                                <Button Style="{StaticResource IconButtonStyle}"
+                                        Click="OnEditMenuItemClick"
+                                        ToolTipService.ToolTip="Edit"
+                                        AutomationProperties.Name="Edit">
+                                    <FontIcon FontSize="14" Glyph="&#xE70F;" />
+                                </Button>
+                                <Button Style="{StaticResource IconButtonStyle}"
+                                        Click="OnDeleteMenuItemClick"
+                                        ToolTipService.ToolTip="Delete"
+                                        AutomationProperties.Name="Delete">
+                                    <FontIcon FontSize="14" Glyph="&#xE74D;" />
+                                </Button>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </DataTemplate>
+            </GridView.ItemTemplate>
+        </GridView>
     </Grid>
 </Page>
