@@ -734,6 +734,32 @@ public class CredentialsViewModelTests
         Assert.Single(vm.FilteredCredentials);
     }
 
+    [Fact]
+    public async Task AddingNonMatchingCredential_notifies_no_match_state()
+    {
+        // Regression (Codex review): when the incremental mirror flips IsEmpty without
+        // changing FilteredCredentials (first credential added under a non-matching search),
+        // HasNoMatches must still be notified, or the page shows neither empty nor no-match.
+        var repo = new FakeCredentialRepository();
+        var dialog = new FakeDialogService
+        {
+            CredentialPromptResult = new CredentialDraft("alpha", ProtocolType.Ssh, "u", null, "pw"),
+        };
+        var vm = NewVm(repo, dialog: dialog);
+        await vm.LoadCommand.ExecuteAsync(null);
+        vm.SearchText = "zzz"; // matches nothing, including the credential about to be added
+
+        var notified = new List<string>();
+        vm.PropertyChanged += (_, e) => { if (e.PropertyName is not null) notified.Add(e.PropertyName); };
+
+        await vm.AddCredentialCommand.ExecuteAsync(null);
+
+        Assert.False(vm.IsEmpty);
+        Assert.False(vm.HasMatches);
+        Assert.True(vm.HasNoMatches);
+        Assert.Contains(nameof(vm.HasNoMatches), notified);
+    }
+
     private static CredentialProfile MakeProfile(
         string name,
         ProtocolType protocol,

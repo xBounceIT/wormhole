@@ -49,6 +49,11 @@ public partial class TunnelConfigsViewModel : ObservableObject
                 ApplyFilter(SearchText);
             }
             OnPropertyChanged(nameof(IsEmpty));
+            // HasNoMatches derives from IsEmpty, but an incremental mirror can flip IsEmpty
+            // without changing FilteredConfigs (e.g. adding the first tunnel while a non-matching
+            // search is active). In that path FilteredConfigs.CollectionChanged doesn't fire, so
+            // notify the match state here too or the page stays blank.
+            OnPropertyChanged(nameof(HasNoMatches));
         };
         FilteredConfigs.CollectionChanged += (_, _) =>
         {

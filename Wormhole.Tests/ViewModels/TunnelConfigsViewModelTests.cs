@@ -1136,6 +1136,28 @@ public class TunnelConfigsViewModelTests
         Assert.Equal("renamed", vm.FilteredConfigs.Single().Name);
     }
 
+    [Fact]
+    public async Task AddingNonMatchingTunnel_notifies_no_match_state()
+    {
+        // Regression (Codex review): the incremental mirror can flip IsEmpty without changing
+        // FilteredConfigs (first tunnel added under a non-matching search), so HasNoMatches must
+        // still be notified or the page shows neither the empty nor the no-match state.
+        var (vm, _, _, _, dialog) = CreateVm();
+        await vm.LoadCommand.ExecuteAsync(null);
+        vm.SearchText = "zzz"; // matches neither the name nor the kind of the tunnel about to be added
+        dialog.TunnelPromptResult = NewWireGuardDraft("corp-vpn");
+
+        var notified = new List<string>();
+        vm.PropertyChanged += (_, e) => { if (e.PropertyName is not null) notified.Add(e.PropertyName); };
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        Assert.False(vm.IsEmpty);
+        Assert.False(vm.HasMatches);
+        Assert.True(vm.HasNoMatches);
+        Assert.Contains(nameof(vm.HasNoMatches), notified);
+    }
+
     private static TunnelDraft NewWireGuardDraft(string name) =>
         new(name, TunnelKind.WireGuard, new WireGuardSettings
         {
