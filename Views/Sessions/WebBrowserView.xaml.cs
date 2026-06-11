@@ -218,6 +218,15 @@ public sealed partial class WebBrowserView : UserControl
             core.Settings.AreDevToolsEnabled = Debugger.IsAttached;
             // A browser surface benefits from the default context menu (copy/paste, open link, save).
             core.Settings.AreDefaultContextMenusEnabled = true;
+            // No SmartScreen reputation checks: these tabs render private appliance/firewall admin
+            // pages whose URLs shouldn't be sent to Microsoft — and on a tunneled tab the check itself
+            // would route through the customer's VPN. (Why the supported setting and not a browser
+            // flag: see WebViewBrowserArguments.) Guarded so an older WebView2 Runtime without the
+            // setting can't fail the tab; logged at Warning because a swallowed failure here means
+            // appliance URLs DO keep flowing to SmartScreen — Debug would be invisible at the
+            // configured Information minimum level.
+            try { core.Settings.IsReputationCheckingRequired = false; }
+            catch (Exception ex) { LogWarning(ex, "Disabling SmartScreen reputation checking failed (runtime too old?); appliance URLs will still be sent to SmartScreen."); }
 
             if (target.IgnoreCertErrors)
             {
@@ -261,13 +270,12 @@ public sealed partial class WebBrowserView : UserControl
             var folder = AppPaths.GetWebBrowserIsolatedUserDataDirectory(Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(folder);
             _isolatedUserDataFolder = folder;
-            var options = new CoreWebView2EnvironmentOptions();
-            if (target.Socks5Proxy is { } proxy)
+            // Hardening args always; the SOCKS5 proxy switch when the tab routes through a tunnel
+            // (see WebViewBrowserArguments for why each switch is there).
+            var options = new CoreWebView2EnvironmentOptions
             {
-                // Chromium does remote DNS for socks5://, so the appliance hostname is resolved on the
-                // far side of the VPN.
-                options.AdditionalBrowserArguments = $"--proxy-server=socks5://{proxy}";
-            }
+                AdditionalBrowserArguments = WebViewBrowserArguments.Build(target.Socks5Proxy),
+            };
             return await CoreWebView2Environment.CreateWithOptionsAsync(null, folder, options);
         }
 
@@ -279,10 +287,19 @@ public sealed partial class WebBrowserView : UserControl
         var existing = Volatile.Read(ref s_sharedEnvironment);
         if (existing is not null) return existing;
 
-        var folder = AppPaths.GetWebBrowserUserDataDirectory();
+        // Argument-keyed folder (not the root): a concurrently-running build with different browser
+        // arguments would otherwise make environment creation fail with ERROR_INVALID_STATE — see
+        // WebViewBrowserArguments.KeyedSharedFolderName. Stale keyed folders are removed by the
+        // startup wipe of the webview2-web root, so no sweep is needed here.
+        var folder = AppPaths.GetWebBrowserSharedUserDataDirectory();
         Directory.CreateDirectory(folder);
+        // Same background-traffic hardening as the isolated environments: appliance GUIs never need
+        // Chromium's background services (see WebViewBrowserArguments for the per-switch rationale).
         var created = await CoreWebView2Environment.CreateWithOptionsAsync(
-            null, folder, new CoreWebView2EnvironmentOptions());
+            null, folder, new CoreWebView2EnvironmentOptions
+            {
+                AdditionalBrowserArguments = WebViewBrowserArguments.Build(socks5Proxy: null),
+            });
         var winner = Interlocked.CompareExchange(ref s_sharedEnvironment, created, null);
         return winner ?? created;
     }
@@ -425,6 +442,9 @@ public sealed partial class WebBrowserView : UserControl
 
     private static void LogError(Exception ex, string message) =>
         App.Current?.Services?.GetService<ILogger<WebBrowserView>>()?.LogError(ex, "{Message}", message);
+
+    private static void LogWarning(Exception ex, string message) =>
+        App.Current?.Services?.GetService<ILogger<WebBrowserView>>()?.LogWarning(ex, "{Message}", message);
 
     private static void LogDebug(Exception ex, string message) =>
         App.Current?.Services?.GetService<ILogger<WebBrowserView>>()?.LogDebug(ex, "{Message}", message);

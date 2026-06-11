@@ -137,10 +137,19 @@ public sealed class DialogAzureVpnAuthService : IAzureVpnAuthService, IDisposabl
             SizeAndCenterOver(owner, popup);
             popup.Activate();
 
+            // Hardened arguments (no Chromium background services — the popup shows the Microsoft
+            // sign-in only) in an argument-keyed folder, so a concurrently-running build with
+            // different arguments can't fail environment creation; sweep folders left by older
+            // argument sets first. The Entra session cookies live inside the keyed folder, so a
+            // future argument change costs one interactive re-auth. SmartScreen stays ON here.
+            WebViewBrowserArguments.SweepStaleKeyedFolders(AppPaths.GetAzureVpnWebView2UserDataRoot());
             var environment = await CoreWebView2Environment.CreateWithOptionsAsync(
                 browserExecutableFolder: null,
                 userDataFolder: AppPaths.GetAzureVpnWebView2UserDataDirectory(),
-                options: new CoreWebView2EnvironmentOptions());
+                options: new CoreWebView2EnvironmentOptions
+                {
+                    AdditionalBrowserArguments = WebViewBrowserArguments.Build(socks5Proxy: null),
+                });
             await webView.EnsureCoreWebView2Async(environment);
 
             if (closed || codeCompletion.Task.IsFaulted || codeCompletion.Task.IsCanceled)

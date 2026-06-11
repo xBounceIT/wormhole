@@ -153,13 +153,22 @@ public sealed partial class SshTerminalView : UserControl
         var existing = Volatile.Read(ref s_sharedEnvironment);
         if (existing is not null) return existing;
 
+        // The terminal renders only local xterm.js assets via a virtual host, so none of Chromium's
+        // background services are needed — harden the environment like the web tabs do. The folder is
+        // argument-keyed (see WebViewBrowserArguments.KeyedSharedFolderName), so a build with different
+        // arguments running concurrently uses a disjoint folder instead of failing creation; sweep
+        // siblings left by older argument sets since this root has no startup wipe.
+        WebViewBrowserArguments.SweepStaleKeyedFolders(AppPaths.GetWebView2UserDataRoot());
         Directory.CreateDirectory(userDataFolder);
         // null browserExecutableFolder = use the installed Evergreen Runtime (the documented
         // sentinel). string.Empty works in this SDK but is not the contract.
         var created = await CoreWebView2Environment.CreateWithOptionsAsync(
             null,
             userDataFolder,
-            new CoreWebView2EnvironmentOptions());
+            new CoreWebView2EnvironmentOptions
+            {
+                AdditionalBrowserArguments = WebViewBrowserArguments.Build(socks5Proxy: null),
+            });
 
         // First writer wins. A concurrent call (e.g. two tabs opening at once) may have
         // created an env in parallel; per WebView2 docs, options-equivalent envs share the

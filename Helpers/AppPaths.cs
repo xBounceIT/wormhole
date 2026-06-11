@@ -15,12 +15,19 @@ internal static class AppPaths
     private static readonly string WatchguardCacheDirectory = Path.Combine(AppDataDirectory, "watchguard-cache");
     private static readonly string AzureVpnCacheDirectory = Path.Combine(AppDataDirectory, "azurevpn-cache");
     private static readonly string UpdateCacheDirectory = Path.Combine(AppDataDirectory, "cache", "updates");
+    // Every fixed-path WebView2 surface places its actual environment in an argument-fingerprinted
+    // subfolder of its root (see WebViewBrowserArguments.KeyedSharedFolderName): WebView2 fails
+    // environment creation with ERROR_INVALID_STATE when a browser process is already running on the
+    // same user-data folder with different arguments, and nothing stops an older installed build from
+    // running next to this one. Keying the folder by the arguments makes such builds use disjoint
+    // folders. Side effect when the argument set changes between builds: surfaces with persistent
+    // state (e.g. the Azure VPN popup's Entra session cookies) start from a fresh profile once.
     private static readonly string WebView2UserDataDirectory = Path.Combine(AppDataDirectory, "webview2");
     private static readonly string WatchguardSamlWebView2UserDataDirectory = Path.Combine(AppDataDirectory, "watchguard-saml-webview2");
     private static readonly string AzureVpnWebView2UserDataDirectory = Path.Combine(AppDataDirectory, "azurevpn-webview2");
     // Separate user-data root for the HTTP/HTTPS browser session surface, so its (possibly
-    // proxy-configured) WebView2 environments never collide with the SSH terminal's shared env, which
-    // must keep default options to share one browser process. Proxied tabs get a unique sub-folder.
+    // proxy-configured) WebView2 environments never collide with the SSH terminal's shared env.
+    // Isolated tabs get a unique sub-folder; this root is wiped at startup (App.ClearWebBrowserUserData).
     private static readonly string WebBrowserUserDataDirectory = Path.Combine(AppDataDirectory, "webview2-web");
     private static readonly string WebAssetsDirectory = Path.Combine(AppContext.BaseDirectory, "Assets", "web");
     private static readonly string WgProxyExecutablePath = Path.Combine(AppContext.BaseDirectory, "wormhole-wgproxy.exe");
@@ -61,17 +68,34 @@ internal static class AppPaths
     // WebView2's default user-data folder is `{exe_dir}\{exe_name}.WebView2\`,
     // which the app cannot create when installed under Program Files without
     // elevation. Pin it under %LOCALAPPDATA%\Wormhole\ to match sibling state.
-    public static string GetWebView2UserDataDirectory() => WebView2UserDataDirectory;
+    // Root accessors exist so callers can sweep stale keyed siblings
+    // (WebViewBrowserArguments.SweepStaleKeyedFolders) before creating the environment.
+    public static string GetWebView2UserDataRoot() => WebView2UserDataDirectory;
 
-    public static string GetWatchguardSamlWebView2UserDataDirectory() => WatchguardSamlWebView2UserDataDirectory;
+    public static string GetWebView2UserDataDirectory() =>
+        Path.Combine(WebView2UserDataDirectory, WebViewBrowserArguments.KeyedSharedFolderName);
+
+    public static string GetWatchguardSamlWebView2UserDataRoot() => WatchguardSamlWebView2UserDataDirectory;
+
+    public static string GetWatchguardSamlWebView2UserDataDirectory() =>
+        Path.Combine(WatchguardSamlWebView2UserDataDirectory, WebViewBrowserArguments.KeyedSharedFolderName);
 
     // Persistent profile for the Azure VPN Microsoft sign-in popup, so Entra session cookies
     // survive across connects and an interactive re-auth is usually a single account click.
-    public static string GetAzureVpnWebView2UserDataDirectory() => AzureVpnWebView2UserDataDirectory;
+    public static string GetAzureVpnWebView2UserDataRoot() => AzureVpnWebView2UserDataDirectory;
+
+    public static string GetAzureVpnWebView2UserDataDirectory() =>
+        Path.Combine(AzureVpnWebView2UserDataDirectory, WebViewBrowserArguments.KeyedSharedFolderName);
+
+    // Root for ALL web-tab environments — wiped at startup by App.ClearWebBrowserUserData, and the
+    // parent of both the keyed shared folder and the per-tab isolated env-<id> folders.
+    public static string GetWebBrowserUserDataDirectory() => WebBrowserUserDataDirectory;
 
     // Shared environment folder for plain web tabs — those that neither proxy through SOCKS nor ignore
-    // certificate errors, so they can safely share one browser process / cert-decision cache.
-    public static string GetWebBrowserUserDataDirectory() => WebBrowserUserDataDirectory;
+    // certificate errors, so they can safely share one browser process / cert-decision cache. No sweep
+    // needed here: the startup wipe of the root already removes stale keyed folders.
+    public static string GetWebBrowserSharedUserDataDirectory() =>
+        Path.Combine(WebBrowserUserDataDirectory, WebViewBrowserArguments.KeyedSharedFolderName);
 
     // Unique per-tab folder for a web tab that needs an ISOLATED environment: a SOCKS5 proxy (Chromium
     // proxy args are fixed at env creation) or ignore-cert (WebView2 caches AlwaysAllow per environment,
