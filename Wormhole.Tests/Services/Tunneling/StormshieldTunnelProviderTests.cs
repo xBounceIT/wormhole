@@ -17,10 +17,11 @@ namespace Wormhole.Tests.Services.Tunneling;
 
 public class StormshieldTunnelProviderTests
 {
-    private static StormshieldTunnelProvider NewProvider(IOtpPromptService? otp = null) =>
+    private static StormshieldTunnelProvider NewProvider(
+        IOtpPromptService? otp = null, FakeCredentialService? credentials = null) =>
         new(otp ?? new NullOtpPromptService(),
             new ScriptedTlsTrustPrompt(),
-            new FakeCredentialService(),
+            credentials ?? new FakeCredentialService(),
             new FakeStormshieldConfigCache(),
             NullLogger<StormshieldTunnelProvider>.Instance,
             NullLoggerFactory.Instance);
@@ -497,6 +498,76 @@ public class StormshieldTunnelProviderTests
         Assert.Equal(1, otp.PromptCount);                // exactly one code collected, on the trusted retry
         Assert.Equal("111111", working.LastDownloadV5Otp);
         Assert.Equal(1, cache.WriteCalls);               // fresh profile cached by the successful retry
+    }
+
+    // ----- PersistTrustServerCertificateAsync: consent-scope guard on the read-modify-write -----
+    //
+    // The user's consent was "skip TLS verification for {server}:{port}". If an editor save changed
+    // the blob while the prompt was open, the persist must not extend that consent to a different
+    // server or silently outrank a freshly pinned CA.
+
+    [Fact]
+    public async Task PersistTrust_FlipsOnlyTheFlag_PreservingConcurrentEdits()
+    {
+        // An editor save (new password, same server) landed while the prompt was open: keep it.
+        var id = Guid.NewGuid();
+        var stored = ValidSettings();
+        stored.Password = "edited-password";
+        var credentials = new FakeCredentialService();
+        credentials.TunnelConfigs[id] = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(stored);
+
+        await NewProvider(credentials: credentials).PersistTrustServerCertificateAsync(id, ValidSettings());
+
+        var written = System.Text.Json.JsonSerializer.Deserialize<StormshieldSettings>(credentials.TunnelConfigs[id])!;
+        Assert.True(written.TrustServerCertificate);
+        Assert.Equal("edited-password", written.Password);
+    }
+
+    [Fact]
+    public async Task PersistTrust_Refuses_WhenStoredSettingsPointAtDifferentServer()
+    {
+        var id = Guid.NewGuid();
+        var stored = ValidSettings();
+        stored.Server = "other.example.com";
+        var credentials = new FakeCredentialService();
+        credentials.TunnelConfigs[id] = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(stored);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            NewProvider(credentials: credentials).PersistTrustServerCertificateAsync(id, ValidSettings()));
+
+        var written = System.Text.Json.JsonSerializer.Deserialize<StormshieldSettings>(credentials.TunnelConfigs[id])!;
+        Assert.False(written.TrustServerCertificate);    // blob left untouched
+    }
+
+    [Fact]
+    public async Task PersistTrust_Refuses_WhenStoredSettingsNowPinACa()
+    {
+        // The user pasted a CA while the prompt was open; the trust flag would silently outrank it
+        // (the portal constructor honors TrustServerCertificate before CaPem).
+        var id = Guid.NewGuid();
+        var stored = ValidSettings();
+        stored.CaPem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----";
+        var credentials = new FakeCredentialService();
+        credentials.TunnelConfigs[id] = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(stored);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            NewProvider(credentials: credentials).PersistTrustServerCertificateAsync(id, ValidSettings()));
+
+        var written = System.Text.Json.JsonSerializer.Deserialize<StormshieldSettings>(credentials.TunnelConfigs[id])!;
+        Assert.False(written.TrustServerCertificate);    // blob left untouched
+    }
+
+    [Fact]
+    public async Task PersistTrust_FallsBackToSnapshot_WhenBlobMissing()
+    {
+        var id = Guid.NewGuid();
+        var credentials = new FakeCredentialService();
+
+        await NewProvider(credentials: credentials).PersistTrustServerCertificateAsync(id, ValidSettings());
+
+        var written = System.Text.Json.JsonSerializer.Deserialize<StormshieldSettings>(credentials.TunnelConfigs[id])!;
+        Assert.True(written.TrustServerCertificate);
+        Assert.Equal("rpv.example.com", written.Server);
     }
 
     [Fact]

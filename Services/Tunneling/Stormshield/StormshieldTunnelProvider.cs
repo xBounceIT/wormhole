@@ -289,7 +289,12 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
                 cancellationToken, progress, onOtpSpent: code => _otpReuseGuard.Record(config.Id, code)),
             _tlsTrustPrompt,
             reloadPersistedTrustAsync: async () =>
-                (await TryReadPersistedSettingsAsync(config.Id).ConfigureAwait(false))?.TrustServerCertificate == true,
+            {
+                // Trust granted concurrently counts only if the persisted blob still describes the
+                // server this connect (and its pending consent question) is actually about.
+                var persisted = await TryReadPersistedSettingsAsync(config.Id).ConfigureAwait(false);
+                return persisted is { TrustServerCertificate: true } && DescribesSameServer(persisted, settings);
+            },
             persistTrustAsync: () => PersistTrustServerCertificateAsync(config.Id, settings),
             _logger, config.Name, settings, cancellationToken)
             .ConfigureAwait(false);
@@ -302,14 +307,30 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
     /// snapshot is the fallback only when the stored blob is missing/unreadable. Same default
     /// <see cref="JsonSerializer"/> shape the tunnel editor writes
     /// (<c>TunnelConfigsViewModel.SerializeSecret</c>), so the editor round-trips the blob unchanged.
+    ///
+    /// <para>The consent the user just gave was "skip TLS verification for {snapshot.Server}:{snapshot.Port}".
+    /// If the re-read blob now points at a DIFFERENT server/port, or pins a CA — which the portal
+    /// constructor would silently bypass, because the trust flag wins over <c>CaPem</c> — persisting
+    /// the flag would grant trust the user never consented to. In that case this throws instead, and
+    /// the consent wrapper's persist-failure handling keeps the override in-memory for this attempt
+    /// only (the prompt returns on the next connect against the new settings).</para>
     /// </summary>
-    private async Task PersistTrustServerCertificateAsync(Guid tunnelConfigId, StormshieldSettings snapshot)
+    internal async Task PersistTrustServerCertificateAsync(Guid tunnelConfigId, StormshieldSettings snapshot)
     {
         var current = await TryReadPersistedSettingsAsync(tunnelConfigId).ConfigureAwait(false) ?? snapshot;
+        if (!DescribesSameServer(current, snapshot) || !string.IsNullOrWhiteSpace(current.CaPem))
+        {
+            throw new InvalidOperationException(
+                "The tunnel settings changed while the trust prompt was open (different server/port, or a CA "
+                + "is now pinned), so 'Trust server certificate' was not persisted.");
+        }
         current.TrustServerCertificate = true;
         await _credentials.StoreTunnelConfigAsync(tunnelConfigId, JsonSerializer.SerializeToUtf8Bytes(current))
             .ConfigureAwait(false);
     }
+
+    private static bool DescribesSameServer(StormshieldSettings a, StormshieldSettings b) =>
+        string.Equals(a.Server, b.Server, StringComparison.OrdinalIgnoreCase) && a.Port == b.Port;
 
     private async Task<StormshieldSettings?> TryReadPersistedSettingsAsync(Guid tunnelConfigId)
     {
