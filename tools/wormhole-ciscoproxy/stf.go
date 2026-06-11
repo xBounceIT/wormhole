@@ -230,8 +230,12 @@ func (s *cstpState) readLoop(ctx context.Context) {
 		case acData:
 			s.injectIPv4(payload)
 		case acDPDOut:
-			// Gateway dead-peer-detection probe — reply so it knows we're alive.
-			s.sendControl(acDPDResp, nil)
+			// Gateway dead-peer-detection probe — reply so it knows we're alive, ECHOING any
+			// payload the probe carried. Some gateways put a nonce in AC_PKT_DPD_OUT and expect it
+			// mirrored in AC_PKT_DPD_RESP, tearing down an otherwise-idle tunnel if it isn't; an
+			// empty probe just yields an empty response (the common ASA case). buildSTFFrame copies
+			// the bytes, so reusing this iteration's payload slice is safe.
+			s.sendControl(acDPDResp, payload)
 		case acDPDResp, acKeepalive:
 			// Replies to our own probes / idle keepalives — nothing to do.
 		case acDisconnect:
