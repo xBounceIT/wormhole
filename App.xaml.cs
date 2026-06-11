@@ -14,6 +14,7 @@ using Wormhole.Services.Rdp;
 using Wormhole.Services.Ssh;
 using Wormhole.Services.Tunneling;
 using Wormhole.Services.Tunneling.AzureVpn;
+using Wormhole.Services.Tunneling.CiscoSecureClient;
 using Wormhole.Services.Tunneling.Fortinet;
 using Wormhole.Services.Tunneling.OpenVpn;
 using Wormhole.Services.Tunneling.Stormshield;
@@ -233,6 +234,7 @@ public partial class App : Application
         services.AddSingleton<IAzureVpnAuthService, DialogAzureVpnAuthService>();
         services.AddSingleton<IAzureVpnTokenCache, AzureVpnTokenCache>();
         services.AddSingleton<ITunnelProvider, AzureVpnTunnelProvider>();
+        services.AddSingleton<ITunnelProvider, CiscoSecureClientTunnelProvider>();
         services.AddSingleton<IOtpPromptService, DialogOtpPromptService>();
         services.AddSingleton<TunnelManager>();
         services.AddSingleton<ITunnelRoutePrompter, TunnelRoutePrompter>();

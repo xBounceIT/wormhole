@@ -123,6 +123,15 @@ jobs:
           ( cd tools/wormhole-wgproxy && go build -trimpath -ldflags "-s -w" -o "$GITHUB_WORKSPACE/bin/wormhole-wgproxy" . )
           ls -la bin/wormhole-wgproxy
 
+      - name: Build & unit-test wormhole-ciscoproxy
+        # The Cisco AnyConnect sidecar is pure Go (no CGO / submodules), so it builds fast and its
+        # unit tests (CSTP framing, aggregate-auth form mapping, debug-log redaction) run here to
+        # guard the auth/data-plane logic. No docker fixture yet, so it has no e2e leg below.
+        run: |
+          ( cd tools/wormhole-ciscoproxy && go build -trimpath -ldflags "-s -w" -o "$GITHUB_WORKSPACE/bin/wormhole-ciscoproxy" . )
+          ( cd tools/wormhole-ciscoproxy && go test ./... )
+          ls -la bin/wormhole-ciscoproxy
+
       - name: Build wormhole-ovpnproxy (ovpn3-linked, best-effort)
         # The ovpn_shim CMakeLists targets Windows / MinGW today (tap-windows,
         # _WIN32_WINNT, big-obj). The OpenVPN3 core itself is cross-platform, so

@@ -26,6 +26,7 @@ internal static class AppPaths
     private static readonly string WgProxyExecutablePath = Path.Combine(AppContext.BaseDirectory, "wormhole-wgproxy.exe");
     private static readonly string FortiProxyExecutablePath = Path.Combine(AppContext.BaseDirectory, "wormhole-fortiproxy.exe");
     private static readonly string OvpnProxyExecutablePath = Path.Combine(AppContext.BaseDirectory, "wormhole-ovpnproxy.exe");
+    private static readonly string CiscoProxyExecutablePath = Path.Combine(AppContext.BaseDirectory, "wormhole-ciscoproxy.exe");
 
     public static string GetAppDataDirectory() => AppDataDirectory;
 
@@ -85,4 +86,6 @@ internal static class AppPaths
     public static string GetFortiProxyExecutablePath() => FortiProxyExecutablePath;
 
     public static string GetOvpnProxyExecutablePath() => OvpnProxyExecutablePath;
+
+    public static string GetCiscoProxyExecutablePath() => CiscoProxyExecutablePath;
 }

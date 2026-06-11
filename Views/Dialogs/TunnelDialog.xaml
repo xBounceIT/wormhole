@@ -528,6 +528,72 @@
                 </StackPanel>
             </Expander>
         </StackPanel>
+
+        <!-- Cisco Secure Client (AnyConnect) fields: SSL VPN over TLS/443. Gateway + Credentials
+             sit side-by-side; the Advanced expander spans the full width below for the optional
+             second-factor / cert-pin block. The data plane is the wormhole-ciscoproxy sidecar,
+             which speaks the AnyConnect aggregate-auth + CSTP protocol directly (it does NOT drive
+             the installed Cisco client). SAML SSO, client-certificate auth, and posture
+             (CSD/HostScan) are not supported in this version. -->
+        <StackPanel x:Name="CiscoSecureClientPanel" Spacing="10" Visibility="Collapsed">
+            <Grid ColumnSpacing="16">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Spacing="10">
+                    <TextBlock Text="Gateway" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+                    <TextBox x:Name="CiscoHostBox"
+                             Header="Host"
+                             PlaceholderText="vpn.example.com"
+                             TextChanged="OnFieldChanged" />
+                    <TextBox x:Name="CiscoPortBox"
+                             Header="Port"
+                             Text="443"
+                             TextChanged="OnFieldChanged" />
+                    <TextBox x:Name="CiscoGroupBox"
+                             Header="Group / connection profile (optional)"
+                             PlaceholderText="leave blank for the gateway default" />
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Spacing="10">
+                    <TextBlock Text="Credentials" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+                    <TextBox x:Name="CiscoUsernameBox"
+                             Header="Username"
+                             TextChanged="OnFieldChanged" />
+                    <PasswordBox x:Name="CiscoPasswordBox"
+                                 Header="Password"
+                                 PasswordChanged="OnPasswordFieldChanged" />
+                </StackPanel>
+            </Grid>
+
+            <Expander Header="Two-factor &amp; advanced" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                <StackPanel Spacing="10">
+                    <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                               Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                               TextWrapping="Wrap"
+                               Text="If the gateway prompts for a second factor, provide a TOTP secret (a code is generated automatically) or a static secondary password. SAML single sign-on and client-certificate authentication are not supported." />
+                    <!-- A TOTP shared secret is a long-lived bearer credential equivalent to a
+                         password; mask it like the password fields so it never appears in
+                         screen-shares, screenshots, or UI Automation readers. -->
+                    <PasswordBox x:Name="CiscoTotpSecretBox"
+                                 Header="TOTP shared secret (Base32, optional)"
+                                 FontFamily="Consolas"
+                                 PlaceholderText="answers a second-factor challenge automatically"
+                                 PasswordChanged="OnPasswordFieldChanged" />
+                    <PasswordBox x:Name="CiscoSecondaryPasswordBox"
+                                 Header="Secondary password (optional)"
+                                 PlaceholderText="static answer to a second-factor prompt (ignored if a TOTP secret is set)"
+                                 PasswordChanged="OnPasswordFieldChanged" />
+                    <CheckBox x:Name="CiscoTrustCertCheck"
+                              Content="Trust server certificate (skip verification)" />
+                    <TextBox x:Name="CiscoCertPinBox"
+                             Header="Server certificate SHA-256 pin (hex, optional)"
+                             FontFamily="Consolas" />
+                </StackPanel>
+            </Expander>
+        </StackPanel>
     </StackPanel>
     </ScrollViewer>
 </UserControl>

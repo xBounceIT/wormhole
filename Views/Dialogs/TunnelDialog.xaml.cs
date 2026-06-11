@@ -88,6 +88,13 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
                     if (string.IsNullOrWhiteSpace(WatchguardPasswordBox.Password)) missing.Add("Password");
                 }
                 break;
+            case TunnelKind.CiscoSecureClient:
+                if (string.IsNullOrWhiteSpace(CiscoHostBox.Text)) missing.Add("Host");
+                if (!IsValidPort(CiscoPortBox.Text)) missing.Add("Port (1-65535)");
+                if (string.IsNullOrWhiteSpace(CiscoUsernameBox.Text)) missing.Add("Username");
+                // IsNullOrWhiteSpace mirrors the server-side ValidateCiscoSecureClient check.
+                if (string.IsNullOrWhiteSpace(CiscoPasswordBox.Password)) missing.Add("Password");
+                break;
             case TunnelKind.AzureVpn:
                 if (string.IsNullOrWhiteSpace(AzureVpnServersBox.Text)) missing.Add("Server FQDN");
                 if (string.IsNullOrWhiteSpace(AzureVpnTenantBox.Text)) missing.Add("Tenant ID");
@@ -229,6 +236,18 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         AzureVpnServerSecretBox.Text = az.ServerSecretHex ?? string.Empty;
         AzureVpnCaPemBox.Text = az.CaPem ?? string.Empty;
 
+        // Coalesce defensively (same reasoning as the Watchguard/Stormshield/Azure blocks above).
+        var cs = initial.CiscoSecureClient ?? new CiscoSecureClientSettings();
+        CiscoHostBox.Text = cs.Host ?? string.Empty;
+        CiscoPortBox.Text = (cs.Port is >= 1 and <= 65535 ? cs.Port : 443).ToString();
+        CiscoUsernameBox.Text = cs.Username ?? string.Empty;
+        CiscoPasswordBox.Password = cs.Password ?? string.Empty;
+        CiscoGroupBox.Text = cs.Group ?? string.Empty;
+        CiscoTotpSecretBox.Password = cs.TotpSecret ?? string.Empty;
+        CiscoSecondaryPasswordBox.Password = cs.SecondaryPassword ?? string.Empty;
+        CiscoTrustCertCheck.IsChecked = cs.TrustServerCertificate;
+        CiscoCertPinBox.Text = cs.ServerCertSha256Pin ?? string.Empty;
+
         UpdateKindPanels();
     }
 
@@ -244,7 +263,34 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
             TunnelKind.Watchguard => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, Fortinet: null, Watchguard: BuildWatchguard()),
             TunnelKind.Stormshield => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, Fortinet: null, Watchguard: null, Stormshield: BuildStormshield()),
             TunnelKind.AzureVpn => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, Fortinet: null, Watchguard: null, Stormshield: null, AzureVpn: BuildAzureVpn()),
+            TunnelKind.CiscoSecureClient => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, Fortinet: null, Watchguard: null, Stormshield: null, AzureVpn: null, CiscoSecureClient: BuildCiscoSecureClient()),
             _ => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, Fortinet: null),
+        };
+    }
+
+    private CiscoSecureClientSettings BuildCiscoSecureClient()
+    {
+        // Strip ALL whitespace from the TOTP secret (Base32 enrollment screens often display it
+        // in space-separated groups) and the cert pin (often pasted with line wrapping) so the
+        // sidecar's Base32 / hex parsing can't trip over copy artifacts — same treatment as the
+        // Fortinet branch. (Colon separators in the cert pin are handled by the sidecar itself,
+        // which strips ':' before hex-decoding; StripWhitespace only removes whitespace.)
+        var totp = StripWhitespace(CiscoTotpSecretBox.Password);
+        return new CiscoSecureClientSettings
+        {
+            Host = CiscoHostBox.Text.Trim(),
+            Port = TryParseInt(CiscoPortBox.Text) ?? 443,
+            Username = CiscoUsernameBox.Text.Trim(),
+            // Strip ONLY trailing CR/LF (paste artifacts the user can't see in a PasswordBox) —
+            // leave every other character intact so legitimate whitespace in a password survives.
+            Password = CiscoPasswordBox.Password?.TrimEnd('\r', '\n') ?? string.Empty,
+            Group = string.IsNullOrWhiteSpace(CiscoGroupBox.Text) ? null : CiscoGroupBox.Text.Trim(),
+            SecondaryPassword = string.IsNullOrEmpty(CiscoSecondaryPasswordBox.Password)
+                ? null
+                : CiscoSecondaryPasswordBox.Password.TrimEnd('\r', '\n'),
+            TotpSecret = string.IsNullOrEmpty(totp) ? null : totp,
+            TrustServerCertificate = CiscoTrustCertCheck.IsChecked == true,
+            ServerCertSha256Pin = string.IsNullOrWhiteSpace(CiscoCertPinBox.Text) ? null : StripWhitespace(CiscoCertPinBox.Text),
         };
     }
 
@@ -675,6 +721,9 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
             ? Visibility.Visible
             : Visibility.Collapsed;
         AzureVpnPanel.Visibility = SelectedKind == TunnelKind.AzureVpn
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        CiscoSecureClientPanel.Visibility = SelectedKind == TunnelKind.CiscoSecureClient
             ? Visibility.Visible
             : Visibility.Collapsed;
         if (SelectedKind == TunnelKind.Watchguard)

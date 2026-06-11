@@ -558,6 +558,13 @@ public partial class TunnelConfigsViewModel : ObservableObject
                 OpenVpn: null,
                 Fortinet: null,
                 AzureVpn: DeserializeOrEmpty<AzureVpnSettings>(secret, config, ref loadFailure)),
+            TunnelKind.CiscoSecureClient => new TunnelDraft(
+                config.Name,
+                config.Kind,
+                WireGuard: null,
+                OpenVpn: null,
+                Fortinet: null,
+                CiscoSecureClient: DeserializeOrEmpty<CiscoSecureClientSettings>(secret, config, ref loadFailure)),
             _ => new TunnelDraft(config.Name, config.Kind, WireGuard: null, OpenVpn: null, Fortinet: null),
         };
         return (draft, loadFailure);
@@ -598,6 +605,8 @@ public partial class TunnelConfigsViewModel : ObservableObject
             draft.Stormshield ?? throw new InvalidOperationException("Stormshield settings are missing for a Stormshield draft.")),
         TunnelKind.AzureVpn => JsonSerializer.SerializeToUtf8Bytes(
             draft.AzureVpn ?? throw new InvalidOperationException("Azure VPN settings are missing for an Azure VPN draft.")),
+        TunnelKind.CiscoSecureClient => JsonSerializer.SerializeToUtf8Bytes(
+            draft.CiscoSecureClient ?? throw new InvalidOperationException("Cisco Secure Client settings are missing for a Cisco Secure Client draft.")),
         _ => throw new InvalidOperationException($"Unsupported tunnel kind '{draft.Kind}'."),
     };
 
@@ -629,6 +638,9 @@ public partial class TunnelConfigsViewModel : ObservableObject
                 return;
             case TunnelKind.AzureVpn:
                 ValidateAzureVpn(draft.AzureVpn);
+                return;
+            case TunnelKind.CiscoSecureClient:
+                ValidateCiscoSecureClient(draft.CiscoSecureClient);
                 return;
             default:
                 throw new InvalidOperationException($"Unsupported tunnel kind '{draft.Kind}'.");
@@ -733,6 +745,20 @@ public partial class TunnelConfigsViewModel : ObservableObject
         AzureVpnProfileBuilder.ValidateFieldSafety(az);
     }
 
+    private static void ValidateCiscoSecureClient(CiscoSecureClientSettings? cs)
+    {
+        if (cs is null)
+            throw new InvalidOperationException("Cisco Secure Client settings are required for a Cisco Secure Client tunnel.");
+        StringBuilder? sb = null;
+        if (string.IsNullOrWhiteSpace(cs.Host)) AppendValidationError(ref sb, "Gateway host is required.");
+        if (cs.Port is < 1 or > 65535) AppendValidationError(ref sb, "Port must be between 1 and 65535.");
+        if (string.IsNullOrWhiteSpace(cs.Username)) AppendValidationError(ref sb, "Username is required.");
+        // IsNullOrWhiteSpace mirrors every other required field — a single space passed as a
+        // password would otherwise reach the gateway and bounce back as a cryptic auth error.
+        if (string.IsNullOrWhiteSpace(cs.Password)) AppendValidationError(ref sb, "Password is required.");
+        ThrowValidationErrors(sb);
+    }
+
     private static void AppendValidationError(ref StringBuilder? sb, string message) =>
         (sb ??= new StringBuilder()).AppendLine(message);
 
@@ -776,6 +802,7 @@ public partial class TunnelConfigsViewModel : ObservableObject
             TunnelKind.Watchguard => nameof(TunnelKind.Watchguard),
             TunnelKind.Stormshield => nameof(TunnelKind.Stormshield),
             TunnelKind.AzureVpn => "Azure VPN",
+            TunnelKind.CiscoSecureClient => "Cisco Secure Client AnyConnect",
             _ => null,
         };
         return Contains(name, needle);
