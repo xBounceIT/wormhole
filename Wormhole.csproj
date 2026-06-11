@@ -166,6 +166,25 @@
     </ItemGroup>
   </Target>
 
+  <!-- Cisco Secure Client (AnyConnect) SSL VPN userspace sidecar. Same resolution policy as
+       FetchFortiProxy: pinned release -> source build -> non-fatal warning. -->
+  <Target Name="FetchCiscoProxy" BeforeTargets="BeforeBuild">
+    <PropertyGroup>
+      <_CiscoProxyArch Condition="'$(PlatformTarget)' == 'ARM64' Or '$(PlatformTarget)' == 'arm64'">arm64</_CiscoProxyArch>
+      <_CiscoProxyArch Condition="'$(_CiscoProxyArch)' == ''">x64</_CiscoProxyArch>
+    </PropertyGroup>
+    <Exec Condition="'$(SkipSidecarFetch)' != 'true'" Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\scripts\Fetch-CiscoProxy.ps1&quot; -Arch $(_CiscoProxyArch) -Quiet" />
+    <ItemGroup>
+      <None Include="$(MSBuildProjectDirectory)\obj\ciscoproxy\$(_CiscoProxyArch)\wormhole-ciscoproxy.exe"
+            Condition="Exists('$(MSBuildProjectDirectory)\obj\ciscoproxy\$(_CiscoProxyArch)\wormhole-ciscoproxy.exe')">
+        <Link>wormhole-ciscoproxy.exe</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        <Visible>false</Visible>
+      </None>
+    </ItemGroup>
+  </Target>
+
   <!-- OpenVPN userspace sidecar. Mirrors FetchWgProxy above. The script either downloads a
        pinned release, builds from tools\wormhole-ovpnproxy\ with the full toolchain (Go +
        CMake + C++ + populated submodules) for a real OpenVPN3-linked binary, or falls back

@@ -227,6 +227,7 @@ public sealed partial class TunnelTestDialogViewModel : ObservableObject, IDispo
         TunnelKind.Watchguard => "WatchGuard",
         TunnelKind.Stormshield => "Stormshield",
         TunnelKind.AzureVpn => "Azure VPN",
+        TunnelKind.CiscoSecureClient => "Cisco Secure Client",
         _ => kind.ToString(),
     };
 

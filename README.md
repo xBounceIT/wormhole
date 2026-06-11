@@ -6,7 +6,7 @@ philosophical sequel to [mRemoteNG](https://mremoteng.org).
 > **Status:** Active development, UNSTABLE. The WinUI shell,
 > persisted connection tree, connection editor, credential store, mRemoteNG
 > import, SSH terminal, embedded/external RDP, SFTP file transfer, HTTP/HTTPS web
-> sessions, per-connection VPN across five providers (including RDP and web over
+> sessions, per-connection VPN across seven providers (including RDP and web over
 > VPN), an opt-in MCP server for AI-driven SSH control, installer packaging, and
 > in-app update checks are all implemented.
 
@@ -41,8 +41,9 @@ everything else.
 - SQLite-backed connection store with a versioned schema.
 - mRemoteNG `confCons.xml` import.
 - Per-connection userspace VPN tunnels for **WireGuard, OpenVPN, Fortinet SSL
-  VPN, WatchGuard Mobile VPN with SSL, and Stormshield Network SSL VPN** — used
-  by SSH, SFTP, RDP, and HTTP/HTTPS sessions.
+  VPN, WatchGuard Mobile VPN with SSL, Stormshield Network SSL VPN, Azure VPN
+  (Microsoft Entra ID P2S), and Cisco Secure Client (AnyConnect)** — used by SSH,
+  SFTP, RDP, and HTTP/HTTPS sessions.
 - Opt-in **MCP server** that lets AI agents drive your already-open SSH sessions
   over an authenticated loopback endpoint.
 - Modern WinUI 3 shell: Mica backdrop, dark mode, per-monitor DPI.
@@ -69,22 +70,32 @@ resolved profile decides whether a tunnel is needed. Tunnel providers launch a
 userspace sidecar and consume the local SOCKS5 endpoint it reports. **No OS
 routes, adapters, DNS settings, or admin privileges are required.**
 
-Three sidecars cover all five providers — WatchGuard and Stormshield synthesize
-an OpenVPN profile in managed code and reuse the shared OpenVPN sidecar rather
-than shipping their own binary:
+Four sidecars cover all seven providers — WatchGuard, Stormshield, and Azure VPN
+synthesize an OpenVPN profile in managed code and reuse the shared OpenVPN
+sidecar rather than shipping their own binary:
 
 | Provider | Sidecar |
 |---|---|
 | WireGuard | `wormhole-wgproxy.exe` |
-| OpenVPN, WatchGuard, Stormshield | `wormhole-ovpnproxy.exe` |
+| OpenVPN, WatchGuard, Stormshield, Azure VPN | `wormhole-ovpnproxy.exe` |
 | Fortinet | `wormhole-fortiproxy.exe` |
+| Cisco Secure Client (AnyConnect) | `wormhole-ciscoproxy.exe` |
 
 2FA / OTP is supported where the provider needs it, but the mechanism differs.
-Fortinet is **not** interactive: it generates codes from a TOTP secret you store
-on the tunnel up front, and a gateway that prompts for a one-time code fails
-unless that secret is configured. WatchGuard (pre-auth challenge loop) and
+Fortinet and Cisco Secure Client are **not** interactive: they generate codes
+from a TOTP secret (or, for Cisco, fall back to a static secondary password) you
+store on the tunnel up front, and a gateway that prompts for a one-time code
+fails unless one of those is configured. WatchGuard (pre-auth challenge loop) and
 Stormshield (portal config download) instead prompt for the code at connect time
 through a single in-app OTP dialog.
+
+Cisco Secure Client speaks the AnyConnect protocol directly (aggregate-auth XML
+login + CSTP tunnel) rather than driving the locally-installed Cisco client, so
+no Cisco software needs to be installed. It currently supports
+username/password, an optional tunnel group, and the TOTP / secondary-password
+second factor above; **SAML single sign-on, client-certificate authentication,
+and endpoint posture (CSD/HostScan) are not yet supported**, so gateways that
+require them will reject the connection.
 
 SSH terminal sessions and SFTP file-transfer dialogs route through the sidecar's
 loopback SOCKS5 endpoint. RDP cannot speak SOCKS5 directly, so the embedded
@@ -117,11 +128,13 @@ flowchart TD
     E --> F["Read DPAPI-encrypted tunnel secret"]
     F --> G{"Tunnel kind"}
     G -- "WireGuard" --> H["wormhole-wgproxy.exe"]
-    G -- "OpenVPN / WatchGuard / Stormshield" --> I["wormhole-ovpnproxy.exe"]
+    G -- "OpenVPN / WatchGuard / Stormshield / Azure VPN" --> I["wormhole-ovpnproxy.exe"]
     G -- "Fortinet" --> J["wormhole-fortiproxy.exe"]
+    G -- "Cisco Secure Client" --> CA["wormhole-ciscoproxy.exe"]
     H --> K["Sidecar prints READY with loopback SOCKS5 port"]
     I --> K
     J --> K
+    CA --> K
     K --> L{"Protocol path"}
     L -- "SSH" --> M["SSH.NET connects through SOCKS5"]
     L -- "SFTP file transfer" --> N["SftpClient connects through SOCKS5"]
@@ -209,7 +222,7 @@ dotnet test Wormhole.Tests.Integration/Wormhole.Tests.Integration.csproj
 | Terminal renderer | xterm.js inside WebView2 |
 | RDP | `mstscax` ActiveX (in-box) hosted via WinForms |
 | Web browser (HTTP/HTTPS) | WebView2 (Chromium); per-session SOCKS5 proxy when tunneled |
-| VPN tunnels | Userspace WireGuard / OpenVPN / Fortinet / WatchGuard / Stormshield sidecars exposing loopback SOCKS5 |
+| VPN tunnels | Userspace WireGuard / OpenVPN / Fortinet / WatchGuard / Stormshield / Azure VPN / Cisco Secure Client sidecars exposing loopback SOCKS5 |
 | AI control | ModelContextProtocol.AspNetCore (loopback MCP server over Kestrel) |
 | Credentials | Meziantou.Framework.Win32.CredentialManager + DPAPI |
 | Database | SQLite via Microsoft.Data.Sqlite + Dapper |

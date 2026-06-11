@@ -1,12 +1,13 @@
-// Package sockstun is the SOCKS5 server the Wormhole VPN sidecars (wgproxy, ovpnproxy)
-// expose on 127.0.0.1 for parent-process traffic. It implements the minimum RFC 1928
-// surface the managed-side Socks5Client speaks: no-auth only, CONNECT command, IPv4 /
-// IPv6 / DOMAINNAME address types. Anything else gets a polite error reply.
+// Package sockstun is the SOCKS5 server the Wormhole VPN sidecars (wgproxy, ovpnproxy,
+// ciscoproxy) expose on 127.0.0.1 for parent-process traffic. It implements the minimum
+// RFC 1928 surface the managed-side Socks5Client speaks: no-auth only, CONNECT command,
+// IPv4 / IPv6 / DOMAINNAME address types. Anything else gets a polite error reply.
 //
-// The Dialer interface abstracts the destination — both sidecars wire it to a TUN-less
-// userspace netstack (gVisor for wgproxy, OpenVPN3 + gVisor for ovpnproxy), so the same
-// SOCKS5 loop serves traffic via either VPN. A trivial OS-socket Dialer is also exported
-// so --mock test paths can exercise the SOCKS5 surface without bringing a VPN up.
+// The Dialer interface abstracts the destination — each sidecar wires it to a TUN-less
+// userspace netstack (gVisor for wgproxy, OpenVPN3 + gVisor for ovpnproxy, AnyConnect CSTP +
+// gVisor for ciscoproxy), so the same SOCKS5 loop serves traffic via any VPN. A trivial
+// OS-socket Dialer is also exported so --mock test paths can exercise the SOCKS5 surface
+// without bringing a VPN up.
 package sockstun
 
 import (

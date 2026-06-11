@@ -14,4 +14,5 @@ public sealed record TunnelDraft(
     FortinetSettings? Fortinet,
     WatchguardSettings? Watchguard = null,
     StormshieldSettings? Stormshield = null,
-    AzureVpnSettings? AzureVpn = null);
+    AzureVpnSettings? AzureVpn = null,
+    CiscoSecureClientSettings? CiscoSecureClient = null);

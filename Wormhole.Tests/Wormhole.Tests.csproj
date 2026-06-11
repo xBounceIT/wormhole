@@ -55,6 +55,7 @@
     <Compile Include="..\Models\TunnelRouteChoice.cs" Link="Models\TunnelRouteChoice.cs" />
     <Compile Include="..\Models\WireGuardSettings.cs" Link="Models\WireGuardSettings.cs" />
     <Compile Include="..\Models\FortinetSettings.cs" Link="Models\FortinetSettings.cs" />
+    <Compile Include="..\Models\CiscoSecureClientSettings.cs" Link="Models\CiscoSecureClientSettings.cs" />
     <Compile Include="..\Models\OpenVpnSettings.cs" Link="Models\OpenVpnSettings.cs" />
     <Compile Include="..\Models\WatchguardSettings.cs" Link="Models\WatchguardSettings.cs" />
     <Compile Include="..\Models\StormshieldSettings.cs" Link="Models\StormshieldSettings.cs" />
@@ -76,6 +77,9 @@
     <Compile Include="..\Services\Tunneling\Fortinet\FortinetTunnelProvider.cs" Link="Services\Tunneling\Fortinet\FortinetTunnelProvider.cs" />
     <Compile Include="..\Services\Tunneling\Fortinet\FortinetProcessHost.cs" Link="Services\Tunneling\Fortinet\FortinetProcessHost.cs" />
     <Compile Include="..\Services\Tunneling\Fortinet\FortinetSidecarConfig.cs" Link="Services\Tunneling\Fortinet\FortinetSidecarConfig.cs" />
+    <Compile Include="..\Services\Tunneling\CiscoSecureClient\CiscoSecureClientTunnelProvider.cs" Link="Services\Tunneling\CiscoSecureClient\CiscoSecureClientTunnelProvider.cs" />
+    <Compile Include="..\Services\Tunneling\CiscoSecureClient\CiscoSecureClientProcessHost.cs" Link="Services\Tunneling\CiscoSecureClient\CiscoSecureClientProcessHost.cs" />
+    <Compile Include="..\Services\Tunneling\CiscoSecureClient\CiscoSecureClientSidecarConfig.cs" Link="Services\Tunneling\CiscoSecureClient\CiscoSecureClientSidecarConfig.cs" />
     <Compile Include="..\Services\Tunneling\OpenVpn\OpenVpnProcessHost.cs" Link="Services\Tunneling\OpenVpn\OpenVpnProcessHost.cs" />
     <Compile Include="..\Services\Tunneling\OpenVpn\OpenVpnSidecarConfig.cs" Link="Services\Tunneling\OpenVpn\OpenVpnSidecarConfig.cs" />
     <Compile Include="..\Services\Tunneling\IOtpPromptService.cs" Link="Services\Tunneling\IOtpPromptService.cs" />
