@@ -94,6 +94,16 @@
     <Compile Include="..\Services\Tunneling\Stormshield\StormshieldCacheRecord.cs" Link="Services\Tunneling\Stormshield\StormshieldCacheRecord.cs" />
     <Compile Include="..\Services\Tunneling\Stormshield\StormshieldConfigCache.cs" Link="Services\Tunneling\Stormshield\StormshieldConfigCache.cs" />
     <Compile Include="..\Services\Tunneling\Stormshield\StormshieldOtpReuseGuard.cs" Link="Services\Tunneling\Stormshield\StormshieldOtpReuseGuard.cs" />
+    <Compile Include="..\Models\AzureVpnSettings.cs" Link="Models\AzureVpnSettings.cs" />
+    <Compile Include="..\Models\AzureVpnTransport.cs" Link="Models\AzureVpnTransport.cs" />
+    <Compile Include="..\Services\Tunneling\AzureVpn\AzureVpnProfileParser.cs" Link="Services\Tunneling\AzureVpn\AzureVpnProfileParser.cs" />
+    <Compile Include="..\Services\Tunneling\AzureVpn\AzureVpnProfileBuilder.cs" Link="Services\Tunneling\AzureVpn\AzureVpnProfileBuilder.cs" />
+    <Compile Include="..\Services\Tunneling\AzureVpn\IAzureVpnAuthService.cs" Link="Services\Tunneling\AzureVpn\IAzureVpnAuthService.cs" />
+    <Compile Include="..\Services\Tunneling\AzureVpn\IAzureVpnOAuthClient.cs" Link="Services\Tunneling\AzureVpn\IAzureVpnOAuthClient.cs" />
+    <Compile Include="..\Services\Tunneling\AzureVpn\AzureVpnOAuthClient.cs" Link="Services\Tunneling\AzureVpn\AzureVpnOAuthClient.cs" />
+    <Compile Include="..\Services\Tunneling\AzureVpn\IAzureVpnTokenCache.cs" Link="Services\Tunneling\AzureVpn\IAzureVpnTokenCache.cs" />
+    <Compile Include="..\Services\Tunneling\AzureVpn\AzureVpnTokenCache.cs" Link="Services\Tunneling\AzureVpn\AzureVpnTokenCache.cs" />
+    <Compile Include="..\Services\Tunneling\AzureVpn\AzureVpnTunnelProvider.cs" Link="Services\Tunneling\AzureVpn\AzureVpnTunnelProvider.cs" />
     <Compile Include="..\Data\Repositories\ITunnelConfigRepository.cs" Link="Data\Repositories\ITunnelConfigRepository.cs" />
     <Compile Include="..\Helpers\AppPaths.cs" Link="Helpers\AppPaths.cs" />
     <Compile Include="..\Helpers\AzureAdCredentialDetector.cs" Link="Helpers\AzureAdCredentialDetector.cs" />

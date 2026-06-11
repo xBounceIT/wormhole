@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Services.Tunneling.AzureVpn;
 using Wormhole.Services.Tunneling.Stormshield;
 using Wormhole.Services.Tunneling.Watchguard;
 
@@ -20,6 +21,7 @@ public partial class TunnelConfigsViewModel : ObservableObject
     private readonly IConnectionRepository _connectionRepo;
     private readonly ICredentialService _credentials;
     private readonly IStormshieldConfigCache _stormshieldCache;
+    private readonly IAzureVpnTokenCache _azureVpnTokenCache;
     private readonly IDialogService _dialog;
     private readonly ILogger<TunnelConfigsViewModel> _logger;
     private bool _hasLoaded;
@@ -29,6 +31,7 @@ public partial class TunnelConfigsViewModel : ObservableObject
         IConnectionRepository connectionRepo,
         ICredentialService credentials,
         IStormshieldConfigCache stormshieldCache,
+        IAzureVpnTokenCache azureVpnTokenCache,
         IDialogService dialog,
         ILogger<TunnelConfigsViewModel> logger)
     {
@@ -36,6 +39,7 @@ public partial class TunnelConfigsViewModel : ObservableObject
         _connectionRepo = connectionRepo;
         _credentials = credentials;
         _stormshieldCache = stormshieldCache;
+        _azureVpnTokenCache = azureVpnTokenCache;
         _dialog = dialog;
         _logger = logger;
         Configs.CollectionChanged += (_, _) =>
@@ -341,6 +345,13 @@ public partial class TunnelConfigsViewModel : ObservableObject
                 && draft.Stormshield is { Mode: StormshieldConnectionMode.Automatic, UseOtp: true };
             if (!usesOtpCache)
                 await _stormshieldCache.DeleteAsync(config.Id, System.Threading.CancellationToken.None);
+
+            // Same hygiene for the Azure VPN refresh-token cache: a tunnel that is no longer
+            // Azure VPN must not leave a live Entra refresh token on disk. (A still-AzureVpn edit
+            // that changes tenant/audience/client is handled by the cache's own identity-hash
+            // check, so we keep the cache in that case.)
+            if (draft.Kind != TunnelKind.AzureVpn)
+                await _azureVpnTokenCache.DeleteAsync(config.Id, System.Threading.CancellationToken.None);
         }
         catch (Exception ex)
         {
@@ -417,9 +428,11 @@ public partial class TunnelConfigsViewModel : ObservableObject
         {
             await _repo.DeleteAsync(config.Id);
             await _credentials.DeleteTunnelConfigAsync(config.Id);
-            // Best-effort: drop any cached Stormshield profile (which holds a private key) for this tunnel.
-            // A no-op for non-Stormshield tunnels (the cache file simply won't exist).
+            // Best-effort: drop any cached Stormshield profile (which holds a private key) and any
+            // cached Azure VPN refresh token for this tunnel. No-ops for other tunnel kinds (the
+            // cache files simply won't exist).
             await _stormshieldCache.DeleteAsync(config.Id, System.Threading.CancellationToken.None);
+            await _azureVpnTokenCache.DeleteAsync(config.Id, System.Threading.CancellationToken.None);
             Configs.Remove(config);
         }
         catch (Exception ex)
@@ -505,6 +518,13 @@ public partial class TunnelConfigsViewModel : ObservableObject
                 OpenVpn: null,
                 Fortinet: null,
                 Stormshield: DeserializeOrEmpty<StormshieldSettings>(secret, config, ref loadFailure)),
+            TunnelKind.AzureVpn => new TunnelDraft(
+                config.Name,
+                config.Kind,
+                WireGuard: null,
+                OpenVpn: null,
+                Fortinet: null,
+                AzureVpn: DeserializeOrEmpty<AzureVpnSettings>(secret, config, ref loadFailure)),
             _ => new TunnelDraft(config.Name, config.Kind, WireGuard: null, OpenVpn: null, Fortinet: null),
         };
         return (draft, loadFailure);
@@ -543,6 +563,8 @@ public partial class TunnelConfigsViewModel : ObservableObject
             draft.Watchguard ?? throw new InvalidOperationException("Watchguard settings are missing for a Watchguard draft.")),
         TunnelKind.Stormshield => JsonSerializer.SerializeToUtf8Bytes(
             draft.Stormshield ?? throw new InvalidOperationException("Stormshield settings are missing for a Stormshield draft.")),
+        TunnelKind.AzureVpn => JsonSerializer.SerializeToUtf8Bytes(
+            draft.AzureVpn ?? throw new InvalidOperationException("Azure VPN settings are missing for an Azure VPN draft.")),
         _ => throw new InvalidOperationException($"Unsupported tunnel kind '{draft.Kind}'."),
     };
 
@@ -571,6 +593,9 @@ public partial class TunnelConfigsViewModel : ObservableObject
                 return;
             case TunnelKind.Stormshield:
                 ValidateStormshield(draft.Stormshield);
+                return;
+            case TunnelKind.AzureVpn:
+                ValidateAzureVpn(draft.AzureVpn);
                 return;
             default:
                 throw new InvalidOperationException($"Unsupported tunnel kind '{draft.Kind}'.");
@@ -659,6 +684,22 @@ public partial class TunnelConfigsViewModel : ObservableObject
         ThrowValidationErrors(sb);
     }
 
+    private static void ValidateAzureVpn(AzureVpnSettings? az)
+    {
+        if (az is null)
+            throw new InvalidOperationException("Azure VPN settings are required for an Azure VPN tunnel.");
+        StringBuilder? sb = null;
+        if (az.Servers is not { Count: > 0 } || string.IsNullOrWhiteSpace(az.Servers[0]))
+            AppendValidationError(ref sb, "At least one gateway server FQDN is required (import azurevpnconfig.xml).");
+        if (string.IsNullOrWhiteSpace(az.TenantId)) AppendValidationError(ref sb, "Tenant ID is required.");
+        if (string.IsNullOrWhiteSpace(az.Audience)) AppendValidationError(ref sb, "Audience is required.");
+        ThrowValidationErrors(sb);
+
+        // Directive-injection safety + serversecret shape, shared with the connect-time profile
+        // builder so the persistence layer rejects the identical inputs.
+        AzureVpnProfileBuilder.ValidateFieldSafety(az);
+    }
+
     private static void AppendValidationError(ref StringBuilder? sb, string message) =>
         (sb ??= new StringBuilder()).AppendLine(message);
 
@@ -701,6 +742,7 @@ public partial class TunnelConfigsViewModel : ObservableObject
             TunnelKind.Fortinet => nameof(TunnelKind.Fortinet),
             TunnelKind.Watchguard => nameof(TunnelKind.Watchguard),
             TunnelKind.Stormshield => nameof(TunnelKind.Stormshield),
+            TunnelKind.AzureVpn => "Azure VPN",
             _ => null,
         };
         return Contains(name, needle);

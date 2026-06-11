@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Controls;
 using Windows.Storage.Pickers;
 using Wormhole.Helpers;
 using Wormhole.Models;
+using Wormhole.Services.Tunneling.AzureVpn;
 using Wormhole.Services.Tunneling.Watchguard;
 
 namespace Wormhole.Views.Dialogs;
@@ -87,6 +88,15 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
                     if (string.IsNullOrWhiteSpace(WatchguardPasswordBox.Password)) missing.Add("Password");
                 }
                 break;
+            case TunnelKind.AzureVpn:
+                if (string.IsNullOrWhiteSpace(AzureVpnServersBox.Text)) missing.Add("Server FQDN");
+                if (string.IsNullOrWhiteSpace(AzureVpnTenantBox.Text)) missing.Add("Tenant ID");
+                if (string.IsNullOrWhiteSpace(AzureVpnAudienceBox.Text)) missing.Add("Audience");
+                // Mirrors the server-side ValidateAzureVpn / AzureVpnProfileBuilder check: a
+                // malformed tls-auth key would otherwise pass the dialog and only fail at save
+                // (or worse, connect) time with the same wording.
+                if (!IsValidAzureServerSecret(AzureVpnServerSecretBox.Text)) missing.Add("Server secret (512 hex chars, or blank)");
+                break;
             case TunnelKind.Stormshield:
                 if (StormshieldSelectedMode == StormshieldConnectionMode.Import)
                 {
@@ -131,6 +141,12 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
 
     private static bool IsValidPort(string text) =>
         int.TryParse(text, out var p) && p is >= 1 and <= 65535;
+
+    // Strip all whitespace first (matching BuildAzureVpn's save-path normalization), then apply the
+    // same empty-or-512-hex rule the profile builder enforces at connect time, so the live "what's
+    // missing" hint and the persisted value can't disagree.
+    private static bool IsValidAzureServerSecret(string text) =>
+        AzureVpnProfileBuilder.IsServerSecretHexValid(StripWhitespace(text));
 
     public void LoadDraft(TunnelDraft initial)
     {
@@ -202,6 +218,17 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         StormshieldAppTokenBox.Text = string.IsNullOrWhiteSpace(ss.AppToken) ? StormshieldSettings.DefaultAppToken : ss.AppToken;
         UpdateStormshieldModePanels();
 
+        // Coalesce defensively (same reasoning as the Watchguard/Stormshield blocks above).
+        var az = initial.AzureVpn ?? new AzureVpnSettings();
+        AzureVpnServersBox.Text = az.Servers is null ? string.Empty : string.Join(", ", az.Servers);
+        AzureVpnTransportBox.SelectedIndex = az.Protocol == AzureVpnTransport.Udp ? 1 : 0;
+        AzureVpnTenantBox.Text = az.TenantId ?? string.Empty;
+        AzureVpnAudienceBox.Text = az.Audience ?? string.Empty;
+        AzureVpnApplicationIdBox.Text = az.ApplicationId ?? string.Empty;
+        AzureVpnIssuerBox.Text = az.Issuer ?? string.Empty;
+        AzureVpnServerSecretBox.Text = az.ServerSecretHex ?? string.Empty;
+        AzureVpnCaPemBox.Text = az.CaPem ?? string.Empty;
+
         UpdateKindPanels();
     }
 
@@ -216,9 +243,24 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
             TunnelKind.Fortinet => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, BuildFortinet()),
             TunnelKind.Watchguard => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, Fortinet: null, Watchguard: BuildWatchguard()),
             TunnelKind.Stormshield => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, Fortinet: null, Watchguard: null, Stormshield: BuildStormshield()),
+            TunnelKind.AzureVpn => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, Fortinet: null, Watchguard: null, Stormshield: null, AzureVpn: BuildAzureVpn()),
             _ => new TunnelDraft(name, kind, WireGuard: null, OpenVpn: null, Fortinet: null),
         };
     }
+
+    private AzureVpnSettings BuildAzureVpn() => new()
+    {
+        Servers = SplitCsv(AzureVpnServersBox.Text),
+        Protocol = AzureVpnTransportBox.SelectedIndex == 1 ? AzureVpnTransport.Udp : AzureVpnTransport.Tcp,
+        TenantId = AzureVpnTenantBox.Text.Trim(),
+        Audience = AzureVpnAudienceBox.Text.Trim(),
+        ApplicationId = string.IsNullOrWhiteSpace(AzureVpnApplicationIdBox.Text) ? null : AzureVpnApplicationIdBox.Text.Trim(),
+        Issuer = string.IsNullOrWhiteSpace(AzureVpnIssuerBox.Text) ? null : AzureVpnIssuerBox.Text.Trim(),
+        // The tls-auth key is hex that some tools wrap/space when copied — strip ALL whitespace
+        // (same normalization as the Fortinet TOTP secret).
+        ServerSecretHex = StripWhitespace(AzureVpnServerSecretBox.Text) is { Length: > 0 } secret ? secret : null,
+        CaPem = string.IsNullOrWhiteSpace(AzureVpnCaPemBox.Text) ? null : AzureVpnCaPemBox.Text,
+    };
 
     private StormshieldSettings BuildStormshield() => new()
     {
@@ -542,6 +584,73 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         }
     }
 
+    private async void OnAzureVpnImportClicked(object sender, RoutedEventArgs e)
+    {
+        // async void + COM-backed FileOpenPicker: any throw would otherwise hit
+        // App.UnhandledException with the host dialog frozen, so the whole body is guarded and
+        // failures surface through the inline InfoBar (a nested ContentDialog is impossible here —
+        // TunnelDialog is itself hosted in a ContentDialog).
+        try
+        {
+            AzureVpnImportStatus.IsOpen = false;
+
+            var mainWindow = App.Current.MainWindow
+                ?? throw new InvalidOperationException("Main window is not available.");
+            var hwnd = mainWindow.GetHwnd();
+
+            var picker = new FileOpenPicker
+            {
+                ViewMode = PickerViewMode.List,
+                SuggestedStartLocation = PickerLocationId.Downloads,
+            };
+            picker.FileTypeFilter.Add(".xml");
+            // Deliberately NOT adding a "*" wildcard: mixing it with explicit extensions makes
+            // FileOpenPicker.PickSingleFileAsync throw on some Win11 builds.
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+
+            var file = await picker.PickSingleFileAsync();
+            if (file is null) return;
+
+            var xml = await File.ReadAllTextAsync(file.Path);
+            var imported = AzureVpnProfileParser.Parse(xml);
+
+            AzureVpnServersBox.Text = string.Join(", ", imported.Settings.Servers);
+            AzureVpnTransportBox.SelectedIndex = imported.Settings.Protocol == AzureVpnTransport.Udp ? 1 : 0;
+            AzureVpnTenantBox.Text = imported.Settings.TenantId;
+            AzureVpnAudienceBox.Text = imported.Settings.Audience;
+            AzureVpnApplicationIdBox.Text = imported.Settings.ApplicationId ?? string.Empty;
+            AzureVpnIssuerBox.Text = imported.Settings.Issuer ?? string.Empty;
+            AzureVpnServerSecretBox.Text = imported.Settings.ServerSecretHex ?? string.Empty;
+            // Suggest the profile's display name for a fresh tunnel; never clobber a name the
+            // user already typed or an existing tunnel's name being edited.
+            if (string.IsNullOrWhiteSpace(NameBox.Text) && !string.IsNullOrWhiteSpace(imported.ProfileName))
+                NameBox.Text = imported.ProfileName;
+
+            UpdateValidationHint();
+            ValidityChanged?.Invoke(this, EventArgs.Empty);
+
+            AzureVpnImportStatus.Severity = InfoBarSeverity.Success;
+            AzureVpnImportStatus.Title = "Imported";
+            AzureVpnImportStatus.Message = $"Loaded gateway '{imported.Settings.Servers[0]}' from {file.Name}.";
+            AzureVpnImportStatus.IsOpen = true;
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                if (AzureVpnImportStatus is null) return;
+                AzureVpnImportStatus.Severity = InfoBarSeverity.Error;
+                AzureVpnImportStatus.Title = "Couldn't import azurevpnconfig.xml";
+                AzureVpnImportStatus.Message = ex.Message;
+                AzureVpnImportStatus.IsOpen = true;
+            }
+            catch
+            {
+                // Visual tree gone (parent dialog closed mid-await); nothing meaningful to do.
+            }
+        }
+    }
+
     private void OnKindChanged(object sender, SelectionChangedEventArgs e)
     {
         UpdateKindPanels();
@@ -565,6 +674,9 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         StormshieldPanel.Visibility = SelectedKind == TunnelKind.Stormshield
             ? Visibility.Visible
             : Visibility.Collapsed;
+        AzureVpnPanel.Visibility = SelectedKind == TunnelKind.AzureVpn
+            ? Visibility.Visible
+            : Visibility.Collapsed;
         if (SelectedKind == TunnelKind.Watchguard)
         {
             WatchguardCertsExpander.IsExpanded =
@@ -577,6 +689,7 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         // toggles Kind away and back. They're panel-specific, so reset them on any panel change.
         OvpnImportErrorBar.IsOpen = false;
         StormshieldImportErrorBar.IsOpen = false;
+        AzureVpnImportStatus.IsOpen = false;
         UpdateValidationHint();
     }
 
