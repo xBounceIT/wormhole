@@ -199,15 +199,21 @@ class WormholeTunClient : public openvpn::TunClient {
 
   // Surface session info to the C ABI; the WormholeClient asks us when
   // wait_connected is invoked. address_cidr is the v4 CIDR if present, else v6.
+  // fields_m_ makes the tun_start (io_context thread) → C ABI (Go thread) handoff a
+  // proper happens-before: without it the cross-thread read is a data race (the
+  // wait_connected polling gate observing a non-empty CIDR does NOT order the other
+  // fields — current_tun_ was published back in the constructor).
   std::string assigned_cidr() const {
+    std::lock_guard<std::mutex> lk(fields_m_);
     if (!ip4_cidr_.empty()) return ip4_cidr_;
     return ip6_cidr_;
   }
 
   // Space-separated pushed DNS resolver list ("" when the server pushed none).
-  // Written in tun_start before the CIDR fields, so by the time wait_connected's
-  // assigned_cidr() gate passes this is populated too.
-  std::string pushed_dns() const { return dns_; }
+  std::string pushed_dns() const {
+    std::lock_guard<std::mutex> lk(fields_m_);
+    return dns_;
+  }
 
   // Called by stop()/dtor to wake any blocked dequeue_inbound waiters.
   void wake_inbound_waiters() {
@@ -224,6 +230,10 @@ class WormholeTunClient : public openvpn::TunClient {
   openvpn::Frame::Ptr frame_;
   WormholeClient* owner_;
 
+  // Session fields written once by tun_start on the io_context thread and read from
+  // the Go thread via assigned_cidr()/pushed_dns(). Guarded by fields_m_ — see the
+  // accessor comment for why the wait_connected gate alone is not a handoff.
+  mutable std::mutex fields_m_;
   std::string ip4_addr_;
   std::string ip4_cidr_;
   std::string ip6_addr_;
@@ -606,25 +616,27 @@ void WormholeTunClient::tun_start(const openvpn::OptionList& opt,
   parent_.tun_pre_tun_config();
 
   // Extract pushed addresses + DNS + MTU from the merged OptionList (profile +
-  // push-reply). DNS is stored BEFORE the CIDR fields: wait_connected gates on
-  // assigned_cidr() becoming non-empty, so ordering here is what makes pushed_dns()
-  // safe to read from the Go thread once wait_connected returns.
+  // push-reply). All session fields are stored under fields_m_ so the Go thread's
+  // assigned_cidr()/pushed_dns() reads after wait_connected see them coherently.
   auto pushed = parse_pushed_addresses(opt);
-  for (const auto& d : pushed.dns) {
-    if (!dns_.empty()) dns_ += ' ';
-    dns_ += d;
-  }
-  ip4_cidr_ = pushed.v4_cidr;
-  ip6_cidr_ = pushed.v6_cidr;
-  mtu_ = pushed.mtu;
+  {
+    std::lock_guard<std::mutex> lk(fields_m_);
+    for (const auto& d : pushed.dns) {
+      if (!dns_.empty()) dns_ += ' ';
+      dns_ += d;
+    }
+    ip4_cidr_ = pushed.v4_cidr;
+    ip6_cidr_ = pushed.v6_cidr;
+    mtu_ = pushed.mtu;
 
-  // Bare-address forms used by tun_name/vpn_ip4/vpn_ip6 query methods.
-  auto bare = [](const std::string& cidr) -> std::string {
-    auto p = cidr.find('/');
-    return p == std::string::npos ? cidr : cidr.substr(0, p);
-  };
-  ip4_addr_ = bare(ip4_cidr_);
-  ip6_addr_ = bare(ip6_cidr_);
+    // Bare-address forms used by tun_name/vpn_ip4/vpn_ip6 query methods.
+    auto bare = [](const std::string& cidr) -> std::string {
+      auto p = cidr.find('/');
+      return p == std::string::npos ? cidr : cidr.substr(0, p);
+    };
+    ip4_addr_ = bare(ip4_cidr_);
+    ip6_addr_ = bare(ip6_cidr_);
+  }
 
   parent_.tun_pre_route_config();
   // We don't install routes in the OS — gVisor netstack on the Go side handles
