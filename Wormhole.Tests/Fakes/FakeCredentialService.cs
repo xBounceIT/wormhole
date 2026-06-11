@@ -65,6 +65,10 @@ public sealed class FakeCredentialService : ICredentialService
     /// VM's compensate-on-failure rollback path under test.</summary>
     public bool ThrowOnStoreTunnelConfig { get; set; }
 
+    /// <summary>Count of successful tunnel-secret stores, so a test can assert ordering against
+    /// row writes (e.g. that the UpdatedAt bump lands only after the payload was stored).</summary>
+    public int StoreTunnelConfigCount { get; private set; }
+
     public Task StoreTunnelConfigAsync(Guid tunnelConfigId, byte[] configBytes)
     {
         if (ThrowOnStoreTunnelConfig) throw new InvalidOperationException("simulated secret write failure");
@@ -72,6 +76,7 @@ public sealed class FakeCredentialService : ICredentialService
         // before retaining anything, so callers can zero the input.
         CorruptTunnelConfigIds.Remove(tunnelConfigId);
         TunnelConfigs[tunnelConfigId] = (byte[])configBytes.Clone();
+        StoreTunnelConfigCount++;
         return Task.CompletedTask;
     }
     public Task<byte[]?> ReadTunnelConfigAsync(Guid tunnelConfigId)

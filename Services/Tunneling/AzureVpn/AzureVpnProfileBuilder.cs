@@ -98,6 +98,12 @@ public static class AzureVpnProfileBuilder
         sb.Append("cipher AES-256-GCM").Append('\n');
         sb.Append("tls-version-min 1.2").Append('\n');
         sb.Append("auth-user-pass").Append('\n');
+        // Entra-auth profiles have no client certificate. Without this declaration an
+        // OpenVPN3-based stack treats the missing <cert> as an external-PKI profile and aborts
+        // connect with "Missing External PKI alias". `setenv CLIENT_CERT 0` is the OpenVPN3
+        // client-side convention for "this profile authenticates without a client cert"
+        // (OpenVPN 2.x reads it as a plain env var — harmless).
+        sb.Append("setenv CLIENT_CERT 0").Append('\n');
 
         AppendPemBlock(sb, "ca", ca);
 

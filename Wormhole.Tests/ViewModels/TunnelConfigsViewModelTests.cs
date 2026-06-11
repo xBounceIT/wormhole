@@ -388,6 +388,46 @@ public class TunnelConfigsViewModelTests
     }
 
     [Fact]
+    public async Task EditTunnel_BumpsUpdatedAtOnlyAfterSecretIsStored()
+    {
+        // Regression: the shared-tunnel pool (TunnelManager) keys cache-staleness on
+        // TunnelConfig.UpdatedAt. If the row's bumped UpdatedAt became visible before the new DPAPI
+        // payload was on disk, a connection starting mid-save would cache the OLD payload under the
+        // NEW timestamp and keep reusing the stale tunnel. The save must publish the UpdatedAt bump
+        // only after the secret write — Name/Kind first (with the old stamp), then payload, then bump.
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        var id = Guid.NewGuid();
+        var oldStamp = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        repo.Configs[id] = new TunnelConfig
+        {
+            Id = id,
+            Name = "alpha",
+            Kind = TunnelKind.WireGuard,
+            CreatedAt = oldStamp,
+            UpdatedAt = oldStamp,
+        };
+        creds.TunnelConfigs[id] = new byte[] { 9 };
+        await vm.LoadCommand.ExecuteAsync(null);
+
+        // Capture how many secret-stores had happened at each row write. The first write carries the
+        // old stamp (Name/Kind only); the write that changes the stamp is the invalidation publish.
+        int storeCountAtNameKindWrite = -1;
+        int storeCountAtBumpWrite = -1;
+        repo.OnUpdate = cfg =>
+        {
+            if (cfg.UpdatedAt == oldStamp) storeCountAtNameKindWrite = creds.StoreTunnelConfigCount;
+            else storeCountAtBumpWrite = creds.StoreTunnelConfigCount;
+        };
+
+        dialog.TunnelPromptResult = NewWireGuardDraft("alpha"); // same name, new payload
+        await vm.EditTunnelCommand.ExecuteAsync(vm.Configs[0]);
+
+        Assert.Equal(0, storeCountAtNameKindWrite); // Name/Kind written before the payload, stamp not yet bumped
+        Assert.Equal(1, storeCountAtBumpWrite);     // UpdatedAt published only after the payload was stored
+        Assert.True(repo.Configs[id].UpdatedAt > oldStamp); // and the bump did land
+    }
+
+    [Fact]
     public async Task DeleteTunnel_WhenReferenced_RefusesAndKeepsRow()
     {
         var (vm, repo, conns, creds, dialog) = CreateVm();
@@ -1088,6 +1128,74 @@ public class TunnelConfigsViewModelTests
         Assert.Equal(6443, stored.Port);
         Assert.Equal("new", stored.Password);
         Assert.Contains("remote imported.example.com 443", stored.ProfileOvpn);
+    }
+
+    [Fact]
+    public async Task AddTunnel_AppendsToFilteredWithoutReset()
+    {
+        var (vm, repo, _, _, dialog) = CreateVm();
+        var id = Guid.NewGuid();
+        repo.Configs[id] = new TunnelConfig { Id = id, Name = "alpha", Kind = TunnelKind.WireGuard };
+        await vm.LoadCommand.ExecuteAsync(null);
+        dialog.TunnelPromptResult = NewWireGuardDraft("corp-vpn");
+
+        var resetEvents = 0;
+        var addEvents = 0;
+        vm.FilteredConfigs.CollectionChanged += (_, args) =>
+        {
+            if (args.Action == NotifyCollectionChangedAction.Reset) resetEvents++;
+            if (args.Action == NotifyCollectionChangedAction.Add) addEvents++;
+        };
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        Assert.Equal(0, resetEvents);
+        Assert.Equal(1, addEvents);
+        Assert.Equal(2, vm.FilteredConfigs.Count);
+        Assert.Equal("corp-vpn", vm.FilteredConfigs[^1].Name);
+    }
+
+    [Fact]
+    public async Task EditTunnel_RenameWithUnchangedMembership_RaisesNoFilteredEvents()
+    {
+        var (vm, repo, _, _, dialog) = CreateVm();
+        var id = Guid.NewGuid();
+        repo.Configs[id] = new TunnelConfig { Id = id, Name = "alpha", Kind = TunnelKind.WireGuard };
+        await vm.LoadCommand.ExecuteAsync(null);
+        dialog.TunnelPromptResult = NewWireGuardDraft("renamed");
+
+        var events = 0;
+        vm.FilteredConfigs.CollectionChanged += (_, _) => events++;
+
+        await vm.EditTunnelCommand.ExecuteAsync(vm.Configs[0]);
+
+        // No search active, so membership is unchanged: the in-place rename must not
+        // rebuild the filtered view (TunnelConfig is observable — the card updates via
+        // PropertyChanged, not a collection event).
+        Assert.Equal(0, events);
+        Assert.Equal("renamed", vm.FilteredConfigs.Single().Name);
+    }
+
+    [Fact]
+    public async Task AddingNonMatchingTunnel_notifies_no_match_state()
+    {
+        // Regression (Codex review): the incremental mirror can flip IsEmpty without changing
+        // FilteredConfigs (first tunnel added under a non-matching search), so HasNoMatches must
+        // still be notified or the page shows neither the empty nor the no-match state.
+        var (vm, _, _, _, dialog) = CreateVm();
+        await vm.LoadCommand.ExecuteAsync(null);
+        vm.SearchText = "zzz"; // matches neither the name nor the kind of the tunnel about to be added
+        dialog.TunnelPromptResult = NewWireGuardDraft("corp-vpn");
+
+        var notified = new List<string>();
+        vm.PropertyChanged += (_, e) => { if (e.PropertyName is not null) notified.Add(e.PropertyName); };
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        Assert.False(vm.IsEmpty);
+        Assert.False(vm.HasMatches);
+        Assert.True(vm.HasNoMatches);
+        Assert.Contains(nameof(vm.HasNoMatches), notified);
     }
 
     private static TunnelDraft NewWireGuardDraft(string name) =>

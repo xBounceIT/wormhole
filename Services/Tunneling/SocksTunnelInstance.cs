@@ -44,27 +44,54 @@ public sealed class SocksTunnelInstance : ITunnelInstance
 
     public async Task<int> BindLocalForwarderAsync(string host, int port, CancellationToken cancellationToken)
     {
-        ThrowIfDisposed();
-        var fwd = LocalTcpForwarder.Start(this, host, port, _logger);
-        // Re-check the disposed flag inside the gate: a concurrent DisposeAsync that took the
-        // gate first will already have snapshotted-and-cleared _forwarders, so adding this
-        // forwarder afterwards leaks it (listener still bound, target SOCKS5 endpoint already
-        // gone). Dispose synchronously on the lost race so the listener is reclaimed.
-        bool addedToList = false;
+        // Reuse an existing live listener for the same target instead of binding a new one per
+        // connect. The tunnel is shared across connections (TunnelManager pools it per config), so
+        // forwarders live for the whole shared tunnel's lifetime — without this, repeated RDP/web
+        // connects through a long-lived tunnel would pile up loopback listeners. The whole
+        // check-or-start runs under one gate (Start is a synchronous loopback bind, microseconds),
+        // which removes both races — concurrent DisposeAsync and concurrent same-target bind — by
+        // construction instead of compensating for them.
+        LocalTcpForwarder? stale = null;
+        int boundPort;
         lock (_gate)
         {
-            if (Volatile.Read(ref _disposedFlag) == 0)
+            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposedFlag) != 0, this);
+
+            if (FindForwarderLocked(host, port) is { } existing)
             {
-                _forwarders.Add(fwd);
-                addedToList = true;
+                if (existing.IsAlive) return existing.LocalPort;
+                // The accept loop crashed: its listener no longer accepts, so handing its port out
+                // would dead-end every future connect to this target. Replace it.
+                _forwarders.Remove(existing);
+                stale = existing;
+            }
+
+            var fwd = LocalTcpForwarder.Start(this, host, port, _logger);
+            _forwarders.Add(fwd);
+            boundPort = fwd.LocalPort;
+        }
+
+        if (stale is not null)
+        {
+            try { await stale.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception ex) { _logger.LogDebug(ex, "Stale forwarder dispose failed."); }
+        }
+        return boundPort;
+    }
+
+    private LocalTcpForwarder? FindForwarderLocked(string host, int port)
+    {
+        foreach (var fwd in _forwarders)
+        {
+            // Hostnames are case-insensitive; forwarders are keyed by the literal target the
+            // caller dialed (no DNS normalization — "10.0.0.5" and a name resolving to it stay
+            // distinct, which only costs an extra listener).
+            if (fwd.TargetPort == port && string.Equals(fwd.TargetHost, host, StringComparison.OrdinalIgnoreCase))
+            {
+                return fwd;
             }
         }
-        if (!addedToList)
-        {
-            await fwd.DisposeAsync().ConfigureAwait(false);
-            throw new ObjectDisposedException(nameof(SocksTunnelInstance));
-        }
-        return fwd.LocalPort;
+        return null;
     }
 
     public async ValueTask DisposeAsync()
