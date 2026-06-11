@@ -96,10 +96,18 @@ public sealed class DialogWatchguardSamlAuthService : IWatchguardSamlAuthService
             });
         });
 
+        // Hardened arguments (no Chromium background services — the popup shows the Firebox/IdP login
+        // only) in an argument-keyed folder, so a concurrently-running build with different arguments
+        // can't fail environment creation; sweep folders left by older argument sets first. SmartScreen
+        // stays ON here: the SAML flow navigates the open web via IdP redirects.
+        WebViewBrowserArguments.SweepStaleKeyedFolders(AppPaths.GetWatchguardSamlWebView2UserDataRoot());
         var environment = await CoreWebView2Environment.CreateWithOptionsAsync(
             browserExecutableFolder: null,
             userDataFolder: AppPaths.GetWatchguardSamlWebView2UserDataDirectory(),
-            options: new CoreWebView2EnvironmentOptions());
+            options: new CoreWebView2EnvironmentOptions
+            {
+                AdditionalBrowserArguments = WebViewBrowserArguments.Build(socks5Proxy: null),
+            });
         await webView.EnsureCoreWebView2Async(environment);
 
         if (webView.CoreWebView2 is null)

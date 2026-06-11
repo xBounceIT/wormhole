@@ -220,12 +220,13 @@ public sealed partial class WebBrowserView : UserControl
             core.Settings.AreDefaultContextMenusEnabled = true;
             // No SmartScreen reputation checks: these tabs render private appliance/firewall admin
             // pages whose URLs shouldn't be sent to Microsoft — and on a tunneled tab the check itself
-            // would route through the customer's VPN (see WebViewBrowserArguments). The supported
-            // setting is preferred over --disable-features=msSmartScreenProtection, which could clash
-            // with the runtime's own feature list. Guarded like DefaultBackgroundColor: an older
-            // WebView2 Runtime without this setting must not fail the tab over a privacy nicety.
+            // would route through the customer's VPN. (Why the supported setting and not a browser
+            // flag: see WebViewBrowserArguments.) Guarded so an older WebView2 Runtime without the
+            // setting can't fail the tab; logged at Warning because a swallowed failure here means
+            // appliance URLs DO keep flowing to SmartScreen — Debug would be invisible at the
+            // configured Information minimum level.
             try { core.Settings.IsReputationCheckingRequired = false; }
-            catch (Exception ex) { LogDebug(ex, "Disabling SmartScreen reputation checking failed (runtime too old?)."); }
+            catch (Exception ex) { LogWarning(ex, "Disabling SmartScreen reputation checking failed (runtime too old?); appliance URLs will still be sent to SmartScreen."); }
 
             if (target.IgnoreCertErrors)
             {
@@ -286,11 +287,14 @@ public sealed partial class WebBrowserView : UserControl
         var existing = Volatile.Read(ref s_sharedEnvironment);
         if (existing is not null) return existing;
 
-        var folder = AppPaths.GetWebBrowserUserDataDirectory();
+        // Argument-keyed folder (not the root): a concurrently-running build with different browser
+        // arguments would otherwise make environment creation fail with ERROR_INVALID_STATE — see
+        // WebViewBrowserArguments.KeyedSharedFolderName. Stale keyed folders are removed by the
+        // startup wipe of the webview2-web root, so no sweep is needed here.
+        var folder = AppPaths.GetWebBrowserSharedUserDataDirectory();
         Directory.CreateDirectory(folder);
-        // The shared (direct-connection) environment gets the same background-traffic hardening as the
-        // isolated ones: appliance GUIs never need Chromium's background services, and the component
-        // updater would otherwise quietly download into the shared user-data folder on every run.
+        // Same background-traffic hardening as the isolated environments: appliance GUIs never need
+        // Chromium's background services (see WebViewBrowserArguments for the per-switch rationale).
         var created = await CoreWebView2Environment.CreateWithOptionsAsync(
             null, folder, new CoreWebView2EnvironmentOptions
             {
@@ -422,6 +426,9 @@ public sealed partial class WebBrowserView : UserControl
 
     private static void LogError(Exception ex, string message) =>
         App.Current?.Services?.GetService<ILogger<WebBrowserView>>()?.LogError(ex, "{Message}", message);
+
+    private static void LogWarning(Exception ex, string message) =>
+        App.Current?.Services?.GetService<ILogger<WebBrowserView>>()?.LogWarning(ex, "{Message}", message);
 
     private static void LogDebug(Exception ex, string message) =>
         App.Current?.Services?.GetService<ILogger<WebBrowserView>>()?.LogDebug(ex, "{Message}", message);
