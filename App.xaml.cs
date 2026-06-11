@@ -236,6 +236,7 @@ public partial class App : Application
         services.AddSingleton<ITunnelProvider, AzureVpnTunnelProvider>();
         services.AddSingleton<ITunnelProvider, CiscoSecureClientTunnelProvider>();
         services.AddSingleton<IOtpPromptService, DialogOtpPromptService>();
+        services.AddSingleton<ITlsTrustPromptService, DialogTlsTrustPromptService>();
         services.AddSingleton<TunnelManager>();
         services.AddSingleton<ITunnelRoutePrompter, TunnelRoutePrompter>();
         services.AddSingleton<INavigationService, NavigationService>();

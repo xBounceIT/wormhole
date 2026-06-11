@@ -83,6 +83,7 @@
     <Compile Include="..\Services\Tunneling\OpenVpn\OpenVpnProcessHost.cs" Link="Services\Tunneling\OpenVpn\OpenVpnProcessHost.cs" />
     <Compile Include="..\Services\Tunneling\OpenVpn\OpenVpnSidecarConfig.cs" Link="Services\Tunneling\OpenVpn\OpenVpnSidecarConfig.cs" />
     <Compile Include="..\Services\Tunneling\IOtpPromptService.cs" Link="Services\Tunneling\IOtpPromptService.cs" />
+    <Compile Include="..\Services\Tunneling\ITlsTrustPromptService.cs" Link="Services\Tunneling\ITlsTrustPromptService.cs" />
     <Compile Include="..\Services\Tunneling\Watchguard\WatchguardTunnelProvider.cs" Link="Services\Tunneling\Watchguard\WatchguardTunnelProvider.cs" />
     <Compile Include="..\Services\Tunneling\Watchguard\WatchguardProfileBuilder.cs" Link="Services\Tunneling\Watchguard\WatchguardProfileBuilder.cs" />
     <Compile Include="..\Services\Tunneling\Watchguard\WatchguardWgsslImporter.cs" Link="Services\Tunneling\Watchguard\WatchguardWgsslImporter.cs" />

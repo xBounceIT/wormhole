@@ -34,7 +34,34 @@ internal interface IStormshieldPortal : IDisposable
     /// is unreachable. Used to decide whether a cached profile is still current.
     /// </summary>
     Task<string?> GetConfigHashAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Details of the most recent TLS server-certificate validation rejection observed by this client,
+    /// or <c>null</c> when no request has failed certificate validation. The provider combines this
+    /// with the thrown exception to drive the "trust this server?" recovery prompt: it pins the failure
+    /// to certificate <em>validation</em> specifically (a protocol-level handshake failure never reaches
+    /// the validation callback, and trusting the server wouldn't fix it) and supplies the certificate
+    /// identity the user would be trusting.
+    /// </summary>
+    StormshieldTlsFailure? LastTlsFailure { get; }
 }
+
+/// <summary>
+/// Snapshot of a rejected TLS server certificate, captured by <see cref="StormshieldPortalClient"/>'s
+/// validation callback so the provider can tell the user WHAT failed (and what they would be trusting)
+/// instead of a bare "the SSL connection could not be established". <paramref name="ChainStatus"/>
+/// carries the OS chain-engine verdict (e.g. <c>UntrustedRoot</c>, <c>NotTimeValid</c>, <c>Revoked</c>)
+/// so the prompt can distinguish a self-signed appliance certificate from, say, an expired one.
+/// Strings only — no certificate handle is retained beyond the callback.
+/// </summary>
+internal sealed record StormshieldTlsFailure(
+    SslPolicyErrors PolicyErrors,
+    string? Subject,
+    string? Issuer,
+    string? Thumbprint,
+    DateTime? NotBefore,
+    DateTime? NotAfter,
+    string? ChainStatus);
 
 /// <summary>
 /// Talks to the Stormshield SNS firewall's native <b>v5</b> "SN SSL VPN Client" surface over HTTPS,
@@ -78,6 +105,10 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
     // Held so Dispose can release the native handles the validation-callback closure captured —
     // HttpClientHandler.Dispose does not walk callback-captured certificates.
     private readonly X509Certificate2Collection? _pinnedCaCerts;
+    // Set by the TLS validation callback (a worker thread); read by the provider only after the
+    // failed request's task has completed (an exception filter past the await), and task completion
+    // already orders the callback's write before that read — no extra synchronization needed.
+    public StormshieldTlsFailure? LastTlsFailure { get; private set; }
 
     public StormshieldPortalClient(string server, int port, bool trustServerCertificate, string? caPem)
     {
@@ -128,8 +159,16 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
                     // same reason); the CA pin still prevents a MITM. Reject every OTHER policy bit.
                     const SslPolicyErrors tolerated =
                         SslPolicyErrors.RemoteCertificateChainErrors | SslPolicyErrors.RemoteCertificateNameMismatch;
-                    if ((errors & ~tolerated) != SslPolicyErrors.None) return false;
-                    if (serverCert is null) return false;
+                    if ((errors & ~tolerated) != SslPolicyErrors.None)
+                    {
+                        RecordTlsFailure(serverCert, errors, peerChain);
+                        return false;
+                    }
+                    if (serverCert is null)
+                    {
+                        RecordTlsFailure(null, errors | SslPolicyErrors.RemoteCertificateNotAvailable, peerChain);
+                        return false;
+                    }
                     using var customChain = new X509Chain();
                     customChain.ChainPolicy.TrustMode = X509ChainTrustMode.CustomRootTrust;
                     customChain.ChainPolicy.RevocationMode = X509RevocationMode.NoCheck;
@@ -139,11 +178,27 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
                         for (var i = 1; i < peerChain.ChainElements.Count; i++)
                             customChain.ChainPolicy.ExtraStore.Add(peerChain.ChainElements[i].Certificate);
                     }
-                    return customChain.Build(serverCert);
+                    var trusted = customChain.Build(serverCert);
+                    // Surface the pin miss as a chain error — that's what it is from the user's
+                    // point of view: the certificate does not chain to the CA they pinned.
+                    if (!trusted) RecordTlsFailure(serverCert, errors | SslPolicyErrors.RemoteCertificateChainErrors, customChain);
+                    return trusted;
                 };
             }
-            // else: default OS trust-store validation (works only when the firewall presents a
-            // publicly-trusted certificate — uncommon, but the recommended setup for OIDC SSO).
+            else
+            {
+                // Default OS trust-store validation (works only when the firewall presents a
+                // publicly-trusted certificate — uncommon, but the recommended setup for OIDC SSO).
+                // The callback re-implements the default policy verbatim (valid ⇔ errors == None);
+                // it exists only to RECORD what failed so the provider can offer an informed
+                // "trust this server?" recovery instead of a bare handshake error.
+                handler.ServerCertificateCustomValidationCallback = (_, serverCert, peerChain, errors) =>
+                {
+                    if (errors == SslPolicyErrors.None) return true;
+                    RecordTlsFailure(serverCert, errors, peerChain);
+                    return false;
+                };
+            }
 
             _http = new HttpClient(handler, disposeHandler: true)
             {
@@ -439,6 +494,19 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
         using var xmlReader = XmlReader.Create(stringReader, settings);
         doc.Load(xmlReader);
         return doc;
+    }
+
+    private void RecordTlsFailure(X509Certificate2? cert, SslPolicyErrors errors, X509Chain? chain)
+    {
+        LastTlsFailure = new StormshieldTlsFailure(
+            errors, cert?.Subject, cert?.Issuer, cert?.Thumbprint, cert?.NotBefore, cert?.NotAfter,
+            SummarizeChainStatus(chain));
+    }
+
+    private static string? SummarizeChainStatus(X509Chain? chain)
+    {
+        if (chain is null || chain.ChainStatus.Length == 0) return null;
+        return string.Join(", ", chain.ChainStatus.Select(s => s.Status).Distinct());
     }
 
     private static void DisposeCerts(X509Certificate2Collection? certs)

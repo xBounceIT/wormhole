@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Net.Http;
+using System.Net.Security;
+using System.Security.Authentication;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
@@ -15,8 +17,11 @@ namespace Wormhole.Tests.Services.Tunneling;
 
 public class StormshieldTunnelProviderTests
 {
-    private static StormshieldTunnelProvider NewProvider(IOtpPromptService? otp = null) =>
+    private static StormshieldTunnelProvider NewProvider(
+        IOtpPromptService? otp = null, FakeCredentialService? credentials = null) =>
         new(otp ?? new NullOtpPromptService(),
+            new ScriptedTlsTrustPrompt(),
+            credentials ?? new FakeCredentialService(),
             new FakeStormshieldConfigCache(),
             NullLogger<StormshieldTunnelProvider>.Instance,
             NullLoggerFactory.Instance);
@@ -221,6 +226,359 @@ public class StormshieldTunnelProviderTests
         Assert.Equal(string.Empty, cache.LastWritten!.ConfigHash);  // no hash was available to store
     }
 
+    // ----- ResolveAutomaticWithTlsConsentAsync: TLS-trust recovery -----
+    //
+    // When the portal rejects the firewall's certificate, the user is asked once whether to trust the
+    // server; accepting persists TrustServerCertificate=true and retries with verification off.
+
+    /// <summary>The shape HttpClient + DownloadProfileV5WrappedAsync produce for a rejected certificate:
+    /// InvalidOperationException → HttpRequestException → AuthenticationException.</summary>
+    private static InvalidOperationException NewTlsValidationException() =>
+        new(
+            "Stormshield configuration download could not reach 'rpv.example.com:443': "
+            + "The SSL connection could not be established, see inner exception.",
+            new HttpRequestException(
+                "The SSL connection could not be established, see inner exception.",
+                new AuthenticationException(
+                    "The remote certificate was rejected by the provided RemoteCertificateValidationCallback.")));
+
+    private static StormshieldTlsFailure NewTlsFailureDetails() => new(
+        SslPolicyErrors.RemoteCertificateChainErrors,
+        Subject: "CN=SN710A00000000A",
+        Issuer: "CN=SNS-WebServer-default-authority",
+        Thumbprint: "ABCDEF0123456789",
+        NotBefore: null,
+        NotAfter: null,
+        ChainStatus: "UntrustedRoot");
+
+    /// <summary>Runs the consent wrapper around the production attempt (ResolveAutomaticCoreAsync)
+    /// with test seams defaulted, mirroring how ResolveAutomaticAsync wires it.</summary>
+    private static Task<(string Profile, string DataPlanePassword, bool OptimisticCacheHit)> RunTlsConsentAsync(
+        Func<IStormshieldPortal> portalFactory,
+        StormshieldSettings settings,
+        ITlsTrustPromptService tlsPrompt,
+        IOtpPromptService? otp = null,
+        FakeStormshieldConfigCache? cache = null,
+        Func<Task<bool>>? reloadTrust = null,
+        Func<Task>? persistTrust = null)
+    {
+        var theCache = cache ?? new FakeStormshieldConfigCache();
+        var theOtp = otp ?? new ScriptedOtpPrompt();
+        var id = Guid.NewGuid();
+        return StormshieldTunnelProvider.ResolveAutomaticWithTlsConsentAsync(
+            portalFactory,
+            portal => StormshieldTunnelProvider.ResolveAutomaticCoreAsync(
+                portal, theCache, theOtp, NullLogger.Instance, id, "cfg", settings, CancellationToken.None),
+            tlsPrompt,
+            reloadTrust ?? (() => Task.FromResult(false)),
+            persistTrust ?? (() => Task.CompletedTask),
+            NullLogger.Instance, "cfg", settings, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task TlsConsent_Accepted_PersistsTrust_RetriesWithVerificationOff()
+    {
+        var trustAtCreate = new List<bool>();
+        var failing = new ScriptedPortal { DownloadV5Exception = NewTlsValidationException(), LastTlsFailure = NewTlsFailureDetails() };
+        var working = new ScriptedPortal { DownloadV5Result = "client\ndev tun\nremote fw 443\n<ca>trusted-retry</ca>\n" };
+        var portals = new Queue<ScriptedPortal>(new[] { failing, working });
+        var tlsPrompt = new ScriptedTlsTrustPrompt(accept: true);
+        var settings = ValidSettings(useOtp: false);
+        var persistCalls = 0;
+
+        var (profile, password, _) = await RunTlsConsentAsync(
+            () => { trustAtCreate.Add(settings.TrustServerCertificate); return portals.Dequeue(); },
+            settings, tlsPrompt,
+            persistTrust: () => { persistCalls++; return Task.CompletedTask; });
+
+        Assert.Collection(trustAtCreate, Assert.False, Assert.True);  // retry portal built with verification off
+        Assert.Equal(1, tlsPrompt.PromptCount);
+        Assert.Equal(1, persistCalls);
+        Assert.True(settings.TrustServerCertificate);
+        Assert.Contains("trusted-retry", profile);
+        Assert.Equal("stored-password", password);
+        // The prompt names the tunnel and server, and shows the rejected certificate's identity
+        // including the OS chain verdict.
+        Assert.Contains("cfg", tlsPrompt.LastTitle);
+        Assert.Contains("rpv.example.com:443", tlsPrompt.LastMessage);
+        Assert.Contains("SNS-WebServer-default-authority", tlsPrompt.LastMessage);
+        Assert.Contains("UntrustedRoot", tlsPrompt.LastMessage);
+        Assert.Contains("Trust server certificate", tlsPrompt.LastMessage);
+    }
+
+    [Fact]
+    public async Task TlsConsent_Declined_ThrowsActionable_NoPersist_NoRetry()
+    {
+        var created = 0;
+        var tlsPrompt = new ScriptedTlsTrustPrompt(accept: false);
+        var settings = ValidSettings();
+        var persistCalls = 0;
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            RunTlsConsentAsync(
+                () =>
+                {
+                    created++;
+                    return new ScriptedPortal { DownloadV5Exception = NewTlsValidationException(), LastTlsFailure = NewTlsFailureDetails() };
+                },
+                settings, tlsPrompt,
+                persistTrust: () => { persistCalls++; return Task.CompletedTask; }));
+
+        Assert.Contains("chose not to trust", ex.Message);
+        Assert.Equal(1, tlsPrompt.PromptCount);
+        Assert.Equal(1, created);                        // no retry portal
+        Assert.Equal(0, persistCalls);
+        Assert.False(settings.TrustServerCertificate);
+        Assert.NotNull(ex.InnerException);               // original TLS failure preserved for diagnostics
+    }
+
+    [Fact]
+    public async Task TlsConsent_NotOffered_WhenCaIsPinned_FailsWithPinMessage()
+    {
+        // The user explicitly pinned a CA: a validation failure may mean interception, and accepting
+        // a trust prompt would permanently bypass the pin (the portal constructor honors the trust
+        // flag BEFORE CaPem). Never offer the prompt — fail hard with the pin-specific reason.
+        var settings = ValidSettings();
+        settings.CaPem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----";
+        var portal = new ScriptedPortal { DownloadV5Exception = NewTlsValidationException(), LastTlsFailure = NewTlsFailureDetails() };
+        var tlsPrompt = new ScriptedTlsTrustPrompt(accept: true);
+        var persistCalls = 0;
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            RunTlsConsentAsync(() => portal, settings, tlsPrompt,
+                persistTrust: () => { persistCalls++; return Task.CompletedTask; }));
+
+        Assert.Contains("pinned", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, tlsPrompt.PromptCount);
+        Assert.Equal(0, persistCalls);
+        Assert.False(settings.TrustServerCertificate);
+    }
+
+    [Fact]
+    public async Task TlsConsent_SkipsPrompt_WhenConcurrentConnectAlreadyPersistedTrust()
+    {
+        // Two tabs sharing the tunnel can both fail TLS before either prompt is answered. The second
+        // one must re-read the persisted settings and, finding trust already granted, retry without
+        // asking the user the same question twice in a row.
+        var failing = new ScriptedPortal { DownloadV5Exception = NewTlsValidationException(), LastTlsFailure = NewTlsFailureDetails() };
+        var working = new ScriptedPortal { DownloadV5Result = "client\ndev tun\nremote fw 443\n<ca>ok</ca>\n" };
+        var portals = new Queue<ScriptedPortal>(new[] { failing, working });
+        var tlsPrompt = new ScriptedTlsTrustPrompt(accept: false);  // would decline if it were asked
+        var settings = ValidSettings();
+        var persistCalls = 0;
+
+        var (profile, _, _) = await RunTlsConsentAsync(
+            () => portals.Dequeue(), settings, tlsPrompt,
+            reloadTrust: () => Task.FromResult(true),
+            persistTrust: () => { persistCalls++; return Task.CompletedTask; });
+
+        Assert.Contains("ok", profile);
+        Assert.Equal(0, tlsPrompt.PromptCount);          // never asked — trust was already granted
+        Assert.Equal(0, persistCalls);                   // already persisted by the other connect
+        Assert.True(settings.TrustServerCertificate);
+    }
+
+    [Fact]
+    public async Task TlsConsent_NotPrompted_WhenFailureIsNotCertificateValidation()
+    {
+        // A firewall-side error (no AuthenticationException in the chain, nothing recorded by the
+        // validation callback) must propagate untouched — trusting the server wouldn't fix it.
+        var portal = new ScriptedPortal
+        {
+            DownloadV5Exception = new InvalidOperationException(
+                "Stormshield configuration download failed: the firewall rejected the configuration request."),
+        };
+        var tlsPrompt = new ScriptedTlsTrustPrompt(accept: true);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            RunTlsConsentAsync(() => portal, ValidSettings(), tlsPrompt));
+
+        Assert.Equal(0, tlsPrompt.PromptCount);
+    }
+
+    [Fact]
+    public async Task TlsConsent_NotPrompted_WhenNoValidationRejectionRecorded()
+    {
+        // A protocol-level TLS failure (alert/handshake) raises AuthenticationException WITHOUT ever
+        // invoking the validation callback. Trusting the server would not help, so no prompt.
+        var portal = new ScriptedPortal { DownloadV5Exception = NewTlsValidationException(), LastTlsFailure = null };
+        var tlsPrompt = new ScriptedTlsTrustPrompt(accept: true);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            RunTlsConsentAsync(() => portal, ValidSettings(), tlsPrompt));
+
+        Assert.Equal(0, tlsPrompt.PromptCount);
+    }
+
+    [Fact]
+    public async Task TlsConsent_NotPrompted_WhenTrustAlreadyEnabled()
+    {
+        // TrustServerCertificate is already on — a TLS failure here is something else entirely
+        // (should not even validate); never re-ask a question the user already answered.
+        var portal = new ScriptedPortal { DownloadV5Exception = NewTlsValidationException(), LastTlsFailure = NewTlsFailureDetails() };
+        var tlsPrompt = new ScriptedTlsTrustPrompt(accept: true);
+        var settings = ValidSettings();
+        settings.TrustServerCertificate = true;
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            RunTlsConsentAsync(() => portal, settings, tlsPrompt));
+
+        Assert.Equal(0, tlsPrompt.PromptCount);
+    }
+
+    [Fact]
+    public async Task TlsConsent_PersistFailure_DoesNotBlockTheApprovedConnect()
+    {
+        // The DPAPI write failing must not turn the user's explicit "trust and connect" into an
+        // error — connect with trust for this attempt; the prompt simply returns next time.
+        var failing = new ScriptedPortal { DownloadV5Exception = NewTlsValidationException(), LastTlsFailure = NewTlsFailureDetails() };
+        var working = new ScriptedPortal { DownloadV5Result = "client\ndev tun\nremote fw 443\n<ca>ok</ca>\n" };
+        var portals = new Queue<ScriptedPortal>(new[] { failing, working });
+
+        var (profile, _, _) = await RunTlsConsentAsync(
+            () => portals.Dequeue(), ValidSettings(), new ScriptedTlsTrustPrompt(accept: true),
+            persistTrust: () => throw new InvalidOperationException("simulated secret write failure"));
+
+        Assert.Contains("ok", profile);
+    }
+
+    [Fact]
+    public async Task ResolveAutomatic_Otp_TlsFailureOnChangeCheck_NoCache_FailsBeforePromptingCode()
+    {
+        // The hash GET's handshake already proved the certificate is rejected; the core must not
+        // collect a one-time code for a download that is doomed to the identical failure.
+        var portal = new ScriptedPortal { ConfigHashResult = null, LastTlsFailure = NewTlsFailureDetails() };
+        var otp = new ScriptedOtpPrompt("111111");
+
+        await Assert.ThrowsAsync<StormshieldTlsPreflightException>(() =>
+            StormshieldTunnelProvider.ResolveAutomaticCoreAsync(
+                portal, new FakeStormshieldConfigCache(), otp, NullLogger.Instance, Guid.NewGuid(), "cfg",
+                ValidSettings(useOtp: true), CancellationToken.None));
+
+        Assert.Equal(0, otp.PromptCount);
+        Assert.Equal(0, portal.DownloadV5Calls);
+    }
+
+    [Fact]
+    public async Task ResolveAutomatic_Otp_TlsFailureOnChangeCheck_WithCache_StillTakesOptimisticHit()
+    {
+        // A broken portal TLS handshake must not block the optimistic cache path: the cached profile
+        // carries its own CA and the OpenVPN data plane never touches the portal again.
+        var portal = new ScriptedPortal { ConfigHashResult = null, LastTlsFailure = NewTlsFailureDetails() };
+        var cache = new FakeStormshieldConfigCache();
+        var id = Guid.NewGuid();
+        cache.Seed(id, configHash: "ANY", profileOvpn: "client\ndev tun\nremote fw 443\n<ca>cached</ca>\n");
+        var otp = new ScriptedOtpPrompt("707070");
+
+        var (profile, password, optimistic) = await StormshieldTunnelProvider.ResolveAutomaticCoreAsync(
+            portal, cache, otp, NullLogger.Instance, id, "cfg", ValidSettings(useOtp: true), CancellationToken.None);
+
+        Assert.Contains("cached", profile);
+        Assert.Equal("stored-password707070", password);
+        Assert.True(optimistic);
+    }
+
+    [Fact]
+    public async Task TlsConsent_WithOtp_TrustPromptComesBeforeAnyCodePrompt()
+    {
+        // OTP + no cache + rejected certificate: the change-check preflight fails the first attempt
+        // BEFORE any code prompt, the trust prompt runs, and the retry collects exactly one code for
+        // the download (which then stops with the documented "reconnect with a new code" notice).
+        var failing = new ScriptedPortal { ConfigHashResult = null, LastTlsFailure = NewTlsFailureDetails() };
+        var working = new ScriptedPortal { ConfigHashResult = null };
+        var portals = new Queue<ScriptedPortal>(new[] { failing, working });
+        var otp = new ScriptedOtpPrompt("111111", "222222");
+        var cache = new FakeStormshieldConfigCache();
+
+        await Assert.ThrowsAsync<StormshieldConfigRefreshedException>(() =>
+            RunTlsConsentAsync(() => portals.Dequeue(), ValidSettings(useOtp: true),
+                new ScriptedTlsTrustPrompt(accept: true), otp: otp, cache: cache));
+
+        Assert.Equal(0, failing.DownloadV5Calls);        // preflight aborted before the doomed download
+        Assert.Equal(1, otp.PromptCount);                // exactly one code collected, on the trusted retry
+        Assert.Equal("111111", working.LastDownloadV5Otp);
+        Assert.Equal(1, cache.WriteCalls);               // fresh profile cached by the successful retry
+    }
+
+    // ----- PersistTrustServerCertificateAsync: consent-scope guard on the read-modify-write -----
+    //
+    // The user's consent was "skip TLS verification for {server}:{port}". If an editor save changed
+    // the blob while the prompt was open, the persist must not extend that consent to a different
+    // server or silently outrank a freshly pinned CA.
+
+    [Fact]
+    public async Task PersistTrust_FlipsOnlyTheFlag_PreservingConcurrentEdits()
+    {
+        // An editor save (new password, same server) landed while the prompt was open: keep it.
+        var id = Guid.NewGuid();
+        var stored = ValidSettings();
+        stored.Password = "edited-password";
+        var credentials = new FakeCredentialService();
+        credentials.TunnelConfigs[id] = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(stored);
+
+        await NewProvider(credentials: credentials).PersistTrustServerCertificateAsync(id, ValidSettings());
+
+        var written = System.Text.Json.JsonSerializer.Deserialize<StormshieldSettings>(credentials.TunnelConfigs[id])!;
+        Assert.True(written.TrustServerCertificate);
+        Assert.Equal("edited-password", written.Password);
+    }
+
+    [Fact]
+    public async Task PersistTrust_Refuses_WhenStoredSettingsPointAtDifferentServer()
+    {
+        var id = Guid.NewGuid();
+        var stored = ValidSettings();
+        stored.Server = "other.example.com";
+        var credentials = new FakeCredentialService();
+        credentials.TunnelConfigs[id] = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(stored);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            NewProvider(credentials: credentials).PersistTrustServerCertificateAsync(id, ValidSettings()));
+
+        var written = System.Text.Json.JsonSerializer.Deserialize<StormshieldSettings>(credentials.TunnelConfigs[id])!;
+        Assert.False(written.TrustServerCertificate);    // blob left untouched
+    }
+
+    [Fact]
+    public async Task PersistTrust_Refuses_WhenStoredSettingsNowPinACa()
+    {
+        // The user pasted a CA while the prompt was open; the trust flag would silently outrank it
+        // (the portal constructor honors TrustServerCertificate before CaPem).
+        var id = Guid.NewGuid();
+        var stored = ValidSettings();
+        stored.CaPem = "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----";
+        var credentials = new FakeCredentialService();
+        credentials.TunnelConfigs[id] = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(stored);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            NewProvider(credentials: credentials).PersistTrustServerCertificateAsync(id, ValidSettings()));
+
+        var written = System.Text.Json.JsonSerializer.Deserialize<StormshieldSettings>(credentials.TunnelConfigs[id])!;
+        Assert.False(written.TrustServerCertificate);    // blob left untouched
+    }
+
+    [Fact]
+    public async Task PersistTrust_FallsBackToSnapshot_WhenBlobMissing()
+    {
+        var id = Guid.NewGuid();
+        var credentials = new FakeCredentialService();
+
+        await NewProvider(credentials: credentials).PersistTrustServerCertificateAsync(id, ValidSettings());
+
+        var written = System.Text.Json.JsonSerializer.Deserialize<StormshieldSettings>(credentials.TunnelConfigs[id])!;
+        Assert.True(written.TrustServerCertificate);
+        Assert.Equal("rpv.example.com", written.Server);
+    }
+
+    [Fact]
+    public void IsTlsAuthenticationFailure_WalksTheInnerChain()
+    {
+        Assert.True(StormshieldTunnelProvider.IsTlsAuthenticationFailure(NewTlsValidationException()));
+        Assert.True(StormshieldTunnelProvider.IsTlsAuthenticationFailure(new AuthenticationException("boom")));
+        Assert.False(StormshieldTunnelProvider.IsTlsAuthenticationFailure(
+            new InvalidOperationException("x", new HttpRequestException("connection refused"))));
+    }
+
     [Fact]
     public void SummarizeOpenVpnRemotes_IncludesConnectionBlocks_SkipsInlineDataBlocks()
     {
@@ -259,12 +617,16 @@ public class StormshieldTunnelProviderTests
         public string DownloadV5Result { get; set; } = "client\ndev tun\nremote fw 443\n<ca>x</ca>\n";
         public int DownloadV5Calls { get; private set; }
         public string? LastDownloadV5Otp { get; private set; }
+        /// <summary>Thrown by every download when set — drives the TLS-consent recovery tests.</summary>
+        public Exception? DownloadV5Exception { get; set; }
+        public StormshieldTlsFailure? LastTlsFailure { get; set; }
 
         public Task<string> DownloadProfileV5Async(
             string username, string password, string? otp, CancellationToken cancellationToken)
         {
             DownloadV5Calls++;
             LastDownloadV5Otp = otp;
+            if (DownloadV5Exception is not null) throw DownloadV5Exception;
             return Task.FromResult(DownloadV5Result);
         }
 
@@ -275,6 +637,26 @@ public class StormshieldTunnelProviderTests
         }
 
         public void Dispose() { }
+    }
+
+    /// <summary>Scripted TLS-trust prompt: answers every confirmation with the configured choice and
+    /// records what it was asked, so tests can assert on the prompt content (or that none was shown).</summary>
+    private sealed class ScriptedTlsTrustPrompt : ITlsTrustPromptService
+    {
+        private readonly bool _accept;
+        public int PromptCount { get; private set; }
+        public string? LastTitle { get; private set; }
+        public string? LastMessage { get; private set; }
+
+        public ScriptedTlsTrustPrompt(bool accept = false) => _accept = accept;
+
+        public Task<bool> ConfirmTrustAsync(string title, string message, CancellationToken cancellationToken)
+        {
+            PromptCount++;
+            LastTitle = title;
+            LastMessage = message;
+            return Task.FromResult(_accept);
+        }
     }
 
     /// <summary>Scripted OTP prompt: returns the next queued code, or null (user dismiss) when empty.</summary>

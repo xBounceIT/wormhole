@@ -1560,10 +1560,16 @@ public class RdpSessionViewModelTests
         provider.ReleaseEstablish.SetResult(null);
         await attachTask;
 
+        // The cancelled attach abandons the shared establishment, which finishes — and disposes the
+        // late tunnel — on TunnelManager's background establish task. attachTask completes via the
+        // cancellation path without awaiting that task, so synchronize on the fake's own signals
+        // before asserting; checking provider.LastInstance right away races the continuation.
+        var lateInstance = await provider.EstablishCompleted.Task;
+        await lateInstance.DisposeStarted.Task;
+
         Assert.Equal(SessionStatus.Disconnected, vm.Status);
         Assert.Equal(0, svc.ConnectCount);
-        Assert.NotNull(provider.LastInstance);
-        Assert.Equal(1, provider.LastInstance!.DisposeCount);
+        Assert.Equal(1, lateInstance.DisposeCount);
     }
 
     [Fact]
@@ -1895,6 +1901,9 @@ public class RdpSessionViewModelTests
     {
         public TaskCompletionSource<object?> EstablishStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource<object?> ReleaseEstablish { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Completed with the produced instance AFTER EstablishAsync finishes its post-release work —
+        // tests whose attach was cancelled await this instead of racing the background continuation.
+        public TaskCompletionSource<FakeTunnelInstance> EstablishCompleted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public FakeTunnelInstance? LastInstance { get; private set; }
         public TunnelKind Kind => TunnelKind.WireGuard;
 
@@ -1907,6 +1916,7 @@ public class RdpSessionViewModelTests
             EstablishStarted.TrySetResult(null);
             await ReleaseEstablish.Task.ConfigureAwait(false);
             LastInstance = new FakeTunnelInstance();
+            EstablishCompleted.TrySetResult(LastInstance);
             return LastInstance;
         }
     }
