@@ -406,6 +406,14 @@ class WormholeClient final : public OpenVPNClient {
     // Stock openvpn.exe (the native client) offers CBC, so we match it. CBC+HMAC-SHA256 is still
     // a secure data channel; the VORACLE risk is from compression, which the profile normalizer strips.
     cfg.enableNonPreferredDCAlgorithms = true;
+    // Accept pushed compression framing in asymmetric mode: decompress server→client if
+    // the server insists, NEVER compress client→server. Legacy OpenVPN 2.x servers very
+    // commonly push `comp-lzo no` (stub framing, no actual compression); OpenVPN3's
+    // default COMPRESS_NO turns ANY pushed comp option other than stub-v2 into a fatal
+    // COMPRESS_ERROR immediately after CONNECTED (cliproto.hpp check_proto_warnings) —
+    // confirmed live against the kylemanna fixture server in CI. "asym" matches the
+    // official clients; never compressing outbound keeps VORACLE out of scope.
+    cfg.compressionMode = "asym";
     auto ev = eval_config(cfg);
     if (ev.error) {
       last_error_ = ev.message;
