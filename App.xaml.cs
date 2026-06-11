@@ -13,6 +13,7 @@ using Wormhole.Services.MRemoteNg;
 using Wormhole.Services.Rdp;
 using Wormhole.Services.Ssh;
 using Wormhole.Services.Tunneling;
+using Wormhole.Services.Tunneling.AzureVpn;
 using Wormhole.Services.Tunneling.Fortinet;
 using Wormhole.Services.Tunneling.OpenVpn;
 using Wormhole.Services.Tunneling.Stormshield;
@@ -225,6 +226,13 @@ public partial class App : Application
         services.AddSingleton<ITunnelProvider, WatchguardTunnelProvider>();
         services.AddSingleton<IStormshieldConfigCache, StormshieldConfigCache>();
         services.AddSingleton<ITunnelProvider, StormshieldTunnelProvider>();
+        // The concrete OAuth client is shared: the sign-in popup needs its code-exchange method
+        // (not on the interface), while the provider's silent-refresh path uses the interface.
+        services.AddSingleton<AzureVpnOAuthClient>();
+        services.AddSingleton<IAzureVpnOAuthClient>(sp => sp.GetRequiredService<AzureVpnOAuthClient>());
+        services.AddSingleton<IAzureVpnAuthService, DialogAzureVpnAuthService>();
+        services.AddSingleton<IAzureVpnTokenCache, AzureVpnTokenCache>();
+        services.AddSingleton<ITunnelProvider, AzureVpnTunnelProvider>();
         services.AddSingleton<IOtpPromptService, DialogOtpPromptService>();
         services.AddSingleton<TunnelManager>();
         services.AddSingleton<ITunnelRoutePrompter, TunnelRoutePrompter>();

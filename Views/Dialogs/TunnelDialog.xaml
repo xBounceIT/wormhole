@@ -437,6 +437,97 @@
                 </StackPanel>
             </Expander>
         </StackPanel>
+        <!-- Azure VPN (P2S, Microsoft Entra ID) fields: OpenVPN over TLS/443 against an Azure VPN
+             Gateway / Virtual WAN hub. No password is stored — sign-in happens in a separate
+             Microsoft popup at connect time. The expected workflow is importing the
+             azurevpnconfig.xml from the portal's profile download; manual entry is the fallback. -->
+        <StackPanel x:Name="AzureVpnPanel" Spacing="10" Visibility="Collapsed">
+            <Button Content="Import azurevpnconfig.xml…"
+                    ToolTipService.ToolTip="Load the azurevpnconfig.xml from the AzureVPN folder of the profile zip downloaded from the Azure portal"
+                    Click="OnAzureVpnImportClicked"
+                    HorizontalAlignment="Left" />
+            <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                       TextWrapping="Wrap"
+                       Text="Connecting opens a Microsoft sign-in window (like the native Azure VPN Client); after the first sign-in, reconnects are silent. Only Microsoft Entra ID profiles are supported." />
+            <!-- Inline status for xml import outcomes — TunnelDialog is hosted in a ContentDialog
+                 and WinUI 3 allows only one ContentDialog per XamlRoot, so errors can't open a
+                 nested dialog. -->
+            <InfoBar x:Name="AzureVpnImportStatus"
+                     IsOpen="False"
+                     IsClosable="True"
+                     Severity="Error" />
+
+            <Grid ColumnSpacing="16">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Spacing="10">
+                    <TextBlock Text="Gateway" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+                    <TextBox x:Name="AzureVpnServersBox"
+                             Header="Server FQDN(s) (comma-separated)"
+                             PlaceholderText="azuregateway-….vpn.azure.com"
+                             TextChanged="OnFieldChanged" />
+                    <ComboBox x:Name="AzureVpnTransportBox"
+                              Header="Transport"
+                              HorizontalAlignment="Stretch"
+                              SelectedIndex="0">
+                        <ComboBoxItem Content="TCP (default)" />
+                        <ComboBoxItem Content="UDP" />
+                    </ComboBox>
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Spacing="10">
+                    <TextBlock Text="Microsoft Entra ID" Style="{StaticResource BodyStrongTextBlockStyle}" Margin="0,4,0,0" />
+                    <TextBox x:Name="AzureVpnTenantBox"
+                             Header="Tenant ID"
+                             FontFamily="Consolas"
+                             PlaceholderText="00000000-0000-0000-0000-000000000000"
+                             TextChanged="OnFieldChanged" />
+                    <TextBox x:Name="AzureVpnAudienceBox"
+                             Header="Audience"
+                             FontFamily="Consolas"
+                             PlaceholderText="c632b3df-fb67-4d84-bdcf-b95ad541b5c8"
+                             TextChanged="OnFieldChanged" />
+                </StackPanel>
+            </Grid>
+
+            <Expander Header="Advanced" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                <StackPanel Spacing="10">
+                    <TextBox x:Name="AzureVpnApplicationIdBox"
+                             Header="Application (client) ID override"
+                             FontFamily="Consolas"
+                             PlaceholderText="leave blank to use the audience as the client id" />
+                    <TextBox x:Name="AzureVpnIssuerBox"
+                             Header="Issuer"
+                             FontFamily="Consolas"
+                             PlaceholderText="https://sts.windows.net/{tenant}/" />
+                    <!-- The serversecret is the gateway's tls-auth static key — key material, but
+                         512 hex chars don't fit a PasswordBox usefully; it arrives via import and
+                         is rarely hand-edited. -->
+                    <TextBox x:Name="AzureVpnServerSecretBox"
+                             Header="Server secret (tls-auth key, 512 hex chars, optional)"
+                             FontFamily="Consolas"
+                             TextWrapping="Wrap"
+                             AcceptsReturn="False"
+                             MaxHeight="120"
+                             TextChanged="OnFieldChanged" />
+                    <TextBox x:Name="AzureVpnCaPemBox"
+                             Header="CA certificate override (PEM, optional)"
+                             AcceptsReturn="True"
+                             TextWrapping="NoWrap"
+                             FontFamily="Consolas"
+                             MinHeight="80"
+                             MaxHeight="140"
+                             PlaceholderText="leave blank to validate against DigiCert Global Root G2 (Azure's gateway CA)"
+                             ScrollViewer.VerticalScrollBarVisibility="Auto"
+                             ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                             TextChanged="OnFieldChanged" />
+                </StackPanel>
+            </Expander>
+        </StackPanel>
     </StackPanel>
     </ScrollViewer>
 </UserControl>

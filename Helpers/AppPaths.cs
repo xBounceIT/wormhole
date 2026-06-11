@@ -13,9 +13,11 @@ internal static class AppPaths
     private static readonly string TunnelConfigsDirectory = Path.Combine(AppDataDirectory, "tunnels");
     private static readonly string StormshieldCacheDirectory = Path.Combine(AppDataDirectory, "stormshield-cache");
     private static readonly string WatchguardCacheDirectory = Path.Combine(AppDataDirectory, "watchguard-cache");
+    private static readonly string AzureVpnCacheDirectory = Path.Combine(AppDataDirectory, "azurevpn-cache");
     private static readonly string UpdateCacheDirectory = Path.Combine(AppDataDirectory, "cache", "updates");
     private static readonly string WebView2UserDataDirectory = Path.Combine(AppDataDirectory, "webview2");
     private static readonly string WatchguardSamlWebView2UserDataDirectory = Path.Combine(AppDataDirectory, "watchguard-saml-webview2");
+    private static readonly string AzureVpnWebView2UserDataDirectory = Path.Combine(AppDataDirectory, "azurevpn-webview2");
     // Separate user-data root for the HTTP/HTTPS browser session surface, so its (possibly
     // proxy-configured) WebView2 environments never collide with the SSH terminal's shared env, which
     // must keep default options to share one browser process. Proxied tabs get a unique sub-folder.
@@ -48,6 +50,11 @@ internal static class AppPaths
     // See WatchguardProfileCache.
     public static string GetWatchguardCacheDirectory() => WatchguardCacheDirectory;
 
+    // Per-tunnel DPAPI-encrypted cache of Microsoft Entra ID refresh tokens for Azure VPN tunnels,
+    // so a reconnect can mint a fresh access token silently instead of re-opening the Microsoft
+    // sign-in popup. See AzureVpnTokenCache.
+    public static string GetAzureVpnCacheDirectory() => AzureVpnCacheDirectory;
+
     public static string GetUpdateCacheDirectory() => UpdateCacheDirectory;
 
     // WebView2's default user-data folder is `{exe_dir}\{exe_name}.WebView2\`,
@@ -56,6 +63,10 @@ internal static class AppPaths
     public static string GetWebView2UserDataDirectory() => WebView2UserDataDirectory;
 
     public static string GetWatchguardSamlWebView2UserDataDirectory() => WatchguardSamlWebView2UserDataDirectory;
+
+    // Persistent profile for the Azure VPN Microsoft sign-in popup, so Entra session cookies
+    // survive across connects and an interactive re-auth is usually a single account click.
+    public static string GetAzureVpnWebView2UserDataDirectory() => AzureVpnWebView2UserDataDirectory;
 
     // Shared environment folder for plain web tabs — those that neither proxy through SOCKS nor ignore
     // certificate errors, so they can safely share one browser process / cert-decision cache.

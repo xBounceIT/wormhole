@@ -7,4 +7,5 @@ public enum TunnelKind
     Fortinet = 2,
     Watchguard = 3,
     Stormshield = 4,
+    AzureVpn = 5,
 }

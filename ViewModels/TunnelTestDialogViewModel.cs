@@ -226,6 +226,7 @@ public sealed partial class TunnelTestDialogViewModel : ObservableObject, IDispo
         TunnelKind.Fortinet => "Fortinet",
         TunnelKind.Watchguard => "WatchGuard",
         TunnelKind.Stormshield => "Stormshield",
+        TunnelKind.AzureVpn => "Azure VPN",
         _ => kind.ToString(),
     };
 
