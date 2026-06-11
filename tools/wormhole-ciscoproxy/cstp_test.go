@@ -201,6 +201,25 @@ func TestBuildAuthReplyXML_EchoesOpaque(t *testing.T) {
 	}
 }
 
+func TestBuildCstpConnectRequest_UsesStandardPath(t *testing.T) {
+	cfg := config{Host: "vpn.example.com", Port: 443}
+	req := buildCstpConnectRequest(cfg, "COOKIEVAL")
+	// ASA/FTD/AnyConnect gateways expect the CONNECT to /CSCOSSLC/tunnel (the OpenConnect path);
+	// a non-standard path is rejected after a valid login, so lock it.
+	if !strings.HasPrefix(req, "CONNECT /CSCOSSLC/tunnel HTTP/1.1\r\n") {
+		t.Fatalf("CSTP request line wrong; got:\n%q", req)
+	}
+	if strings.Contains(req, "/CSTP ") {
+		t.Fatalf("request still uses the bogus /CSTP path:\n%q", req)
+	}
+	if !strings.Contains(req, "Cookie: webvpn=COOKIEVAL\r\n") {
+		t.Fatalf("session cookie missing from CONNECT:\n%q", req)
+	}
+	if !strings.HasSuffix(req, "\r\n\r\n") {
+		t.Fatalf("request not terminated with a blank line:\n%q", req)
+	}
+}
+
 func TestReadCstpConnectResponse_ParsesHeaders(t *testing.T) {
 	raw := "HTTP/1.1 200 CONNECTED\r\n" +
 		"X-CSTP-Version: 1\r\n" +

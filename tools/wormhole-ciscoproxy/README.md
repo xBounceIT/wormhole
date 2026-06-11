@@ -31,7 +31,7 @@ Config fields (lower_snake_case): `host`, `port`, `username`, `password`, `group
    challenge) is answered with a generated TOTP code (`totp_secret`) or a static
    `secondary_password`.
 3. On `<auth id="success">` the gateway sets a `webvpn` session cookie.
-4. `CONNECT /CSTP HTTP/1.1` over a fresh TLS connection with `Cookie: webvpn=…` and the
+4. `CONNECT /CSCOSSLC/tunnel HTTP/1.1` over a fresh TLS connection with `Cookie: webvpn=…` and the
    `X-CSTP-*` request headers. The `200 CONNECTED` response carries `X-CSTP-Address`,
    `X-CSTP-MTU`, `X-CSTP-DNS`, `X-CSTP-DPD`.
 5. Data flows as STF-framed packets — an 8-byte header `['S','T','F',0x01][len:u16][type][0x00]`.

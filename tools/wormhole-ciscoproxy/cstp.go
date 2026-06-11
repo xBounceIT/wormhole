@@ -209,10 +209,23 @@ func cstpConnect(ctx context.Context, cfg config, tlsCfg *tls.Config, cookie str
 	return sess, nil
 }
 
+// cstpTunnelPath is the request path ASA/FTD/AnyConnect-compatible gateways expect for the CSTP
+// tunnel upgrade — the same path OpenConnect uses and that Cisco CSTP debug traces show. A
+// non-standard path (an earlier "/CSTP" placeholder) is rejected (404/401) by real gateways even
+// after a valid aggregate-auth login, leaving the tunnel unusable.
+const cstpTunnelPath = "/CSCOSSLC/tunnel"
+
 func writeCstpConnect(c *tls.Conn, cfg config, cookie string) error {
+	_, err := c.Write([]byte(buildCstpConnectRequest(cfg, cookie)))
+	return err
+}
+
+// buildCstpConnectRequest assembles the raw CSTP CONNECT request. Split out from writeCstpConnect
+// so the request line and headers are unit-testable without a live TLS connection.
+func buildCstpConnectRequest(cfg config, cookie string) string {
 	host := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
 	var b strings.Builder
-	fmt.Fprintf(&b, "CONNECT /CSTP HTTP/1.1\r\n")
+	fmt.Fprintf(&b, "CONNECT %s HTTP/1.1\r\n", cstpTunnelPath)
 	fmt.Fprintf(&b, "Host: %s\r\n", host)
 	fmt.Fprintf(&b, "User-Agent: %s\r\n", ciscoUserAgent)
 	fmt.Fprintf(&b, "Cookie: webvpn=%s\r\n", cookie)
@@ -227,8 +240,7 @@ func writeCstpConnect(c *tls.Conn, cfg config, cookie string) error {
 	// compressed frame, so a present-but-empty header would be malformed and could make a gateway
 	// either wait for a DTLS/UDP channel that never opens or push frames we'd have to drop.
 	fmt.Fprintf(&b, "\r\n")
-	_, err := c.Write([]byte(b.String()))
-	return err
+	return b.String()
 }
 
 // readCstpConnectResponse reads the CSTP CONNECT status line + headers and extracts the tunnel
