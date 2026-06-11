@@ -96,11 +96,11 @@ func ciscoLogin(ctx context.Context, cfg config) (*session, error) {
 		return nil, fmt.Errorf("parse auth init response: %w", err)
 	}
 
-	// Step 2: answer each auth form in turn (primary credentials, then any second-factor
-	// challenge) until the gateway returns id="success" or an error. primarySent latches once the
-	// account password has been placed on a form, so every later form's password field is
-	// answered with the SECOND factor instead of re-sending the primary password.
-	primarySent := false
+	// Step 2: answer each auth form in turn until the gateway returns id="success" or an error.
+	// The FIRST form (the init response) collects username + password; every later form is a
+	// second-factor challenge, so all of its fields — whether the gateway typed the answer box as
+	// text or password — are answered with the generated TOTP / static secondary password rather
+	// than re-sending the primary credentials.
 	for form := 0; form < maxAuthForms; form++ {
 		switch strings.ToLower(resp.Auth.ID) {
 		case "success":
@@ -113,7 +113,7 @@ func ciscoLogin(ctx context.Context, cfg config) (*session, error) {
 			return nil, fmt.Errorf("gateway rejected authentication: %s", firstNonEmpty(resp.Auth.Error, resp.Auth.Message, "unspecified error"))
 		}
 
-		reply, err := buildAuthReplyXML(cfg, resp, &primarySent)
+		reply, err := buildAuthReplyXML(cfg, resp, form == 0 /* isPrimaryForm */)
 		if err != nil {
 			return nil, err
 		}
@@ -359,14 +359,12 @@ func buildInitXML(cfg config) string {
 	return b.String()
 }
 
-// buildAuthReplyXML answers the current auth form with the configured credentials. The first
-// form (carrying a text/username input) gets username+password; a later form with only a
-// password input is treated as a second-factor challenge and answered with the TOTP code (if a
-// secret is configured) or the static secondary password. primarySent latches once the account
-// password has been placed, so the second factor — not the primary password — answers every
-// later form.
-func buildAuthReplyXML(cfg config, resp *xmlConfigAuth, primarySent *bool) (string, error) {
-	values, err := answerForm(cfg, resp.Auth.Form, primarySent)
+// buildAuthReplyXML answers the current auth form with the configured credentials. On the primary
+// form (isPrimaryForm) the text/username input gets cfg.Username and the password input gets
+// cfg.Password; on any later (challenge) form every field is answered with the second factor (TOTP
+// code if a secret is configured, else the static secondary password).
+func buildAuthReplyXML(cfg config, resp *xmlConfigAuth, isPrimaryForm bool) (string, error) {
+	values, err := answerForm(cfg, resp.Auth.Form, isPrimaryForm)
 	if err != nil {
 		return "", err
 	}
@@ -402,25 +400,26 @@ type formValue struct {
 	value string
 }
 
-// answerForm maps the gateway form inputs to credential values. Recognized fields:
-//   - a text/non-password input (commonly name="username") → cfg.Username
-//   - the FIRST password input across the whole login (primarySent still false) → cfg.Password
-//   - any later password input (primarySent already latched) → second factor (TOTP / secondary
-//     password)
-//
-// primarySent is shared across the per-form calls of one login, so a second form that carries
-// only a password input is answered with the second factor — not a re-send of the account
-// password. answerForm sets *primarySent the moment it consumes the primary password.
-func answerForm(cfg config, form xmlForm, primarySent *bool) ([]formValue, error) {
+// answerForm maps the gateway form inputs to credential values:
+//   - Primary form: a text/email input (commonly name="username") → cfg.Username, a password
+//     input → cfg.Password.
+//   - Challenge form (every form after the primary): EVERY answerable input — whether the gateway
+//     typed the answer box as text (e.g. name="answer") or password — gets the second factor. This
+//     is the key reason isPrimaryForm exists: a RADIUS/Duo/etc. OTP box is frequently a plain text
+//     input, and treating it as a username on the primary path would send the account name as the
+//     one-time code and fail MFA.
+func answerForm(cfg config, form xmlForm, isPrimaryForm bool) ([]formValue, error) {
 	var out []formValue
-	// fillPassword returns the value for a password-type input: the primary password the first
-	// time (latching primarySent), the second factor every time after.
-	fillPassword := func() (string, error) {
-		if !*primarySent {
-			*primarySent = true
+	// answer returns the value for one input: on the primary form, the username (text) or password;
+	// on a challenge form, the second factor regardless of the box's declared type.
+	answer := func(isPassword bool) (string, error) {
+		if !isPrimaryForm {
+			return secondFactor(cfg)
+		}
+		if isPassword {
 			return cfg.Password, nil
 		}
-		return secondFactor(cfg)
+		return cfg.Username, nil
 	}
 
 	for _, in := range form.Inputs {
@@ -431,13 +430,17 @@ func answerForm(cfg config, form xmlForm, primarySent *bool) ([]formValue, error
 		}
 		switch {
 		case typ == "password" || typ == "passwd":
-			val, err := fillPassword()
+			val, err := answer(true)
 			if err != nil {
 				return nil, err
 			}
 			out = append(out, formValue{name, val})
 		case typ == "text" || typ == "" || typ == "email":
-			out = append(out, formValue{name, cfg.Username})
+			val, err := answer(false)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, formValue{name, val})
 		case typ == "hidden":
 			// Hidden inputs carrying a default value are echoed by the real client; we omit
 			// them since the opaque blob already carries the gateway's session state.
@@ -446,14 +449,13 @@ func answerForm(cfg config, form xmlForm, primarySent *bool) ([]formValue, error
 		}
 	}
 	if len(out) == 0 {
-		// A form with no text/password inputs at all (e.g. a pure second-factor "answer" form
-		// whose single input typed itself oddly): fall back to answering the named "password"
-		// or "answer" field, still honoring primarySent so a primary-stage form isn't given a
-		// second factor it doesn't expect.
+		// No input matched by type (e.g. a field whose type attribute is a vendor extension) —
+		// fall back to matching by NAME so a recognizable answer field still gets filled. A
+		// "username" name takes the username (text-like); everything else is password-like.
 		for _, in := range form.Inputs {
 			lname := strings.ToLower(in.Name)
-			if lname == "password" || lname == "answer" || lname == "secondary_password" {
-				val, err := fillPassword()
+			if lname == "username" || lname == "password" || lname == "answer" || lname == "secondary_password" {
+				val, err := answer(lname != "username")
 				if err != nil {
 					return nil, err
 				}

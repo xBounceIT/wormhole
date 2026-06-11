@@ -42,8 +42,7 @@ func TestAnswerForm_PrimaryCredentials(t *testing.T) {
 		{Name: "username", Type: "text"},
 		{Name: "password", Type: "password"},
 	}}
-	primarySent := false
-	vals, err := answerForm(cfg, form, &primarySent)
+	vals, err := answerForm(cfg, form, true /* isPrimaryForm */)
 	if err != nil {
 		t.Fatalf("answerForm: %v", err)
 	}
@@ -54,24 +53,55 @@ func TestAnswerForm_PrimaryCredentials(t *testing.T) {
 	if got["username"] != "alice" || got["password"] != "s3cret" {
 		t.Fatalf("mapped values wrong: %+v", got)
 	}
-	if !primarySent {
-		t.Fatal("primarySent must latch once the account password is placed on the primary form")
+}
+
+// TestAnswerForm_ChallengeFormSecondFactor locks the contract that EVERY field on a challenge
+// (non-primary) form is answered with the second factor — covering both a password-typed box and,
+// critically, a TEXT-typed answer box (the openconnect/RADIUS pattern where the OTP field is
+// type="text" name="answer"; the pre-fix code filled it with the username and failed MFA).
+func TestAnswerForm_ChallengeFormSecondFactor(t *testing.T) {
+	cfg := config{Username: "alice", Password: "s3cret", TotpSecret: strptr("JBSWY3DPEHPK3PXP")}
+	cases := []struct {
+		name string
+		form xmlForm
+	}{
+		{"password-typed", xmlForm{Inputs: []xmlInput{{Name: "password", Type: "password", Label: "Answer:"}}}},
+		{"text-typed answer", xmlForm{Inputs: []xmlInput{{Name: "answer", Type: "text", Label: "OTP:"}}}},
+		{"text-typed secondary_password", xmlForm{Inputs: []xmlInput{{Name: "secondary_password", Type: "text"}}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			vals, err := answerForm(cfg, tc.form, false /* isPrimaryForm */)
+			if err != nil {
+				t.Fatalf("answerForm: %v", err)
+			}
+			if len(vals) != 1 {
+				t.Fatalf("values: %+v", vals)
+			}
+			if vals[0].value == "alice" {
+				t.Fatal("challenge field was filled with the username instead of the second factor")
+			}
+			if vals[0].value == "s3cret" {
+				t.Fatal("challenge field was filled with the account password instead of the second factor")
+			}
+			if len(vals[0].value) != 6 {
+				t.Fatalf("challenge field should carry a 6-digit TOTP code, got %q", vals[0].value)
+			}
+		})
 	}
 }
 
-// TestAnswerForm_TwoFormFlow_SendsSecondFactorOnChallenge locks the real ciscoLogin contract: a
-// SINGLE primarySent flag threaded through two consecutive forms must answer the second form's
-// password field with the second factor, NOT a re-send of the account password. (Regression test
-// for the bug where the primary password was sent as the OTP, failing every MFA gateway.)
+// TestAnswerForm_TwoFormFlow_SendsSecondFactorOnChallenge locks the real ciscoLogin contract: the
+// primary form (isPrimaryForm=true) collects username+password, and the following challenge form
+// (isPrimaryForm=false) is answered with the second factor, NOT a re-send of the account password.
 func TestAnswerForm_TwoFormFlow_SendsSecondFactorOnChallenge(t *testing.T) {
 	cfg := config{Username: "alice", Password: "s3cret", TotpSecret: strptr("JBSWY3DPEHPK3PXP")}
-	primarySent := false // exactly how ciscoLogin initializes it
 
 	form1 := xmlForm{Inputs: []xmlInput{
 		{Name: "username", Type: "text"},
 		{Name: "password", Type: "password"},
 	}}
-	vals1, err := answerForm(cfg, form1, &primarySent)
+	vals1, err := answerForm(cfg, form1, true)
 	if err != nil {
 		t.Fatalf("form1: %v", err)
 	}
@@ -79,14 +109,14 @@ func TestAnswerForm_TwoFormFlow_SendsSecondFactorOnChallenge(t *testing.T) {
 	for _, v := range vals1 {
 		got1[v.name] = v.value
 	}
-	if got1["password"] != "s3cret" {
-		t.Fatalf("form1 password: got %q want the account password", got1["password"])
+	if got1["username"] != "alice" || got1["password"] != "s3cret" {
+		t.Fatalf("form1 should carry the primary credentials: %+v", got1)
 	}
 
 	form2 := xmlForm{Inputs: []xmlInput{
 		{Name: "password", Type: "password", Label: "Answer:"},
 	}}
-	vals2, err := answerForm(cfg, form2, &primarySent)
+	vals2, err := answerForm(cfg, form2, false)
 	if err != nil {
 		t.Fatalf("form2: %v", err)
 	}
@@ -101,30 +131,10 @@ func TestAnswerForm_TwoFormFlow_SendsSecondFactorOnChallenge(t *testing.T) {
 	}
 }
 
-func TestAnswerForm_SecondFactorTotp(t *testing.T) {
-	// A base32 TOTP secret ("JBSWY3DPEHPK3PXP" is a standard RFC 4648 test vector).
-	cfg := config{Username: "alice", Password: "s3cret", TotpSecret: strptr("JBSWY3DPEHPK3PXP")}
-	form := xmlForm{Inputs: []xmlInput{
-		{Name: "password", Type: "password", Label: "Answer:"},
-	}}
-	primarySent := true // primary password already sent on a prior form
-	vals, err := answerForm(cfg, form, &primarySent)
-	if err != nil {
-		t.Fatalf("answerForm: %v", err)
-	}
-	if len(vals) != 1 || vals[0].name != "password" {
-		t.Fatalf("unexpected values: %+v", vals)
-	}
-	if len(vals[0].value) != 6 {
-		t.Fatalf("expected a 6-digit TOTP code, got %q", vals[0].value)
-	}
-}
-
 func TestAnswerForm_SecondFactorMissingFails(t *testing.T) {
 	cfg := config{Username: "alice", Password: "s3cret"} // no TOTP, no secondary password
 	form := xmlForm{Inputs: []xmlInput{{Name: "password", Type: "password"}}}
-	primarySent := true
-	_, err := answerForm(cfg, form, &primarySent)
+	_, err := answerForm(cfg, form, false /* challenge form */)
 	if err == nil {
 		t.Fatal("expected an error when a second factor is requested but none is configured")
 	}
@@ -175,8 +185,7 @@ func TestBuildAuthReplyXML_EchoesOpaque(t *testing.T) {
 			}},
 		},
 	}
-	used := false
-	out, err := buildAuthReplyXML(cfg, resp, &used)
+	out, err := buildAuthReplyXML(cfg, resp, true /* isPrimaryForm */)
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
