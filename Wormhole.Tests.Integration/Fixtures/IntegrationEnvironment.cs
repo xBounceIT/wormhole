@@ -18,6 +18,8 @@ namespace Wormhole.Tests.Integration.Fixtures;
 ///   WORMHOLE_OPENVPN_CLIENT_PROFILE     absolute path to a client .ovpn profile
 ///   WORMHOLE_OPENVPN_ECHO_TARGET        IP/hostname of the echo server reached through the tunnel (default 10.20.0.10)
 ///   WORMHOLE_OPENVPN_ECHO_PORT          TCP port of the echo server               (default 7777)
+///   WORMHOLE_OPENVPN_ECHO_HOSTNAME      DNS name of the echo server, resolvable only via the
+///                                       server-pushed in-tunnel DNS               (default echo.vpn.test)
 /// </summary>
 internal static class IntegrationEnvironment
 {
@@ -36,6 +38,11 @@ internal static class IntegrationEnvironment
     public static string? OvpnClientProfilePath => Env("WORMHOLE_OPENVPN_CLIENT_PROFILE");
     public static string OvpnEchoTarget => Env("WORMHOLE_OPENVPN_ECHO_TARGET") ?? "10.20.0.10";
     public static int OvpnEchoPort => ParsePort("WORMHOLE_OPENVPN_ECHO_PORT", 7777);
+    // Resolvable ONLY by the fixture dnsmasq container (10.20.0.53), which the OpenVPN
+    // server pushes as `dhcp-option DNS`. Dialing this name through SOCKS5 proves the
+    // sidecar plumbed the pushed DNS into its netstack resolver — the OS resolver
+    // cannot answer it, so a pass can't come from a resolution-path leak either.
+    public static string OvpnEchoHostname => Env("WORMHOLE_OPENVPN_ECHO_HOSTNAME") ?? "echo.vpn.test";
 
     public static bool WireGuardConfigured =>
         !string.IsNullOrEmpty(WgProxyPath) && File.Exists(WgProxyPath) &&

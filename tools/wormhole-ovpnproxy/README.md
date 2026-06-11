@@ -118,8 +118,10 @@ server.
 - No routing table changes: OpenVPN3's `tun_builder_add_route` is a no-op — the gVisor
   netstack already routes all traffic to NIC 1 inside this process.
 - No DNS changes: hostnames are resolved through the tunnel via `tnet.LookupContextHost`
-  (not the OS resolver). If the .ovpn doesn't push DNS, hostname dials fail with a clear
-  error rather than leaking lookups to the local network.
+  against the server-pushed resolvers (`dhcp-option DNS` / `--dns server`, surfaced by
+  the shim's `ovpn_get_dns`) — never the OS resolver. If the server pushes no DNS,
+  hostname dials fail with a clear error rather than leaking lookups to the local
+  network.
 
 `ipconfig /all` is unchanged after a session starts. A diff of `netstat -anob` shows
 exactly one new entry: this binary's SOCKS5 listener on a loopback port.
@@ -145,10 +147,6 @@ exist exactly for this case):
   `ifconfig-ipv6` push directives. `ovpn_wait_connected` currently surfaces only
   the v4 CIDR if both are present (v6 fallback when v4 is missing). A v2 ABI
   extension can fetch the full pair.
-- **Pushed DNS not honored.** `netstack.CreateNetTUN` is called with `nil` DNS
-  servers so hostname lookups via `tnet.LookupContextHost` will fail unless the
-  user uses IP literals. A v2 iteration plumbs `dhcp-option DNS` from the push
-  reply into the Go-side netstack DNS config.
 - **Dynamic challenge / 2FA, smartcard / PKCS#11, Windows certificate store.**
   Cert + username/password + TLS-auth/TLS-crypt work in v1; anything that
   requires interactive callback-style auth is deferred.

@@ -54,6 +54,14 @@ int ovpn_connect_async(ovpn_client_t* c);
 // returns 0. On failure returns non-zero; the buffer is left zero-terminated empty.
 int ovpn_wait_connected(ovpn_client_t* c, char* out_cidr_buf, int out_cidr_buf_len, int timeout_ms);
 
+// Copy the space-separated list of DNS resolver addresses the server pushed
+// ("dhcp-option DNS <ip>" / "dns server <prio> address <ip[:port]> ..." in the
+// push-reply) into out_buf (NUL-terminated; empty string when none were pushed).
+// Entries may carry a ":port" suffix in the --dns form. Call after
+// ovpn_wait_connected succeeds. Returns 0 on success, 1 on bad args, 100 if built
+// without OpenVPN3.
+int ovpn_get_dns(ovpn_client_t* c, char* out_buf, int out_len);
+
 // Wait up to timeout_ms for the next outbound IP packet from the tunnel (server ->
 // client direction in netstack terms) and copy it into buf. Returns the number of
 // bytes written, 0 on timeout (caller re-polls), or -1 if the shim is shutting down.

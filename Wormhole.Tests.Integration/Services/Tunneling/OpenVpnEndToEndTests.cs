@@ -24,7 +24,19 @@ public sealed class OpenVpnEndToEndTests
     public OpenVpnEndToEndTests(ITestOutputHelper output) => _output = output;
 
     [SkippableFact]
-    public async Task RoutesTrafficThroughTunnel()
+    public Task RoutesTrafficThroughTunnel() =>
+        EchoRoundTripAsync(IntegrationEnvironment.OvpnEchoTarget);
+
+    // Same round-trip, but the target is a DNS name only the fixture's dnsmasq container
+    // (pushed by the server as `dhcp-option DNS`) can resolve. Proves the sidecar surfaces
+    // the pushed DNS into its netstack resolver and resolves through the tunnel — the
+    // failure mode this guards against is hostname dials dying with "cannot marshal DNS
+    // message" because the netstack was created with no DNS servers at all.
+    [SkippableFact]
+    public Task ResolvesHostnamesViaPushedTunnelDns() =>
+        EchoRoundTripAsync(IntegrationEnvironment.OvpnEchoHostname);
+
+    private async Task EchoRoundTripAsync(string target)
     {
         Skip.IfNot(
             IntegrationEnvironment.OpenVpnConfigured,
@@ -48,7 +60,7 @@ public sealed class OpenVpnEndToEndTests
 
         await using var stream = await Socks5Client.ConnectAsync(
             host.SocksEndpoint,
-            IntegrationEnvironment.OvpnEchoTarget,
+            target,
             IntegrationEnvironment.OvpnEchoPort,
             cts.Token);
 

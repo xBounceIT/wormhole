@@ -143,9 +143,13 @@ echo "==> Generating OpenVPN server config (ovpn_genconfig)"
 # `-u udp://127.0.0.1:1194` pins the client `remote` to loopback (the server's
 # UDP port is published to the host by compose). `-p` pushes a route for the
 # docker bridge so the client routes 10.20.0.0/24 through the tunnel and can
-# reach the echo-target at 10.20.0.10.
+# reach the echo-target at 10.20.0.10. `-n` replaces ovpn_genconfig's default
+# pushed DNS (Google 8.8.8.8/8.8.4.4) with the fixture dnsmasq container, so
+# the sidecar's in-tunnel resolver answers `echo.vpn.test` deterministically —
+# the hostname end-to-end test depends on this push.
 docker run --rm "${DOCKER_USER_ARGS[@]}" -v "$OVPN_OUT:/etc/openvpn" "$OVPN_IMG" \
-    ovpn_genconfig -u "udp://127.0.0.1:1194" -p "route 10.20.0.0 255.255.255.0"
+    ovpn_genconfig -u "udp://127.0.0.1:1194" -p "route 10.20.0.0 255.255.255.0" \
+    -n "10.20.0.53"
 
 echo "==> Initializing OpenVPN PKI (ovpn_initpki nopass)"
 # EASYRSA_BATCH + EASYRSA_REQ_CN make initpki non-interactive. `nopass` skips

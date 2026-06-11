@@ -101,6 +101,7 @@ static int v4_netmask_to_prefix(const std::string& mask) {
 struct PushedAddresses {
   std::string v4_cidr; // "10.8.0.6/24"
   std::string v6_cidr; // "fd00::abc/64"
+  std::vector<std::string> dns; // pushed resolver addresses, in push order
   int mtu = 1500;
 };
 
@@ -136,6 +137,28 @@ static PushedAddresses parse_pushed_addresses(const openvpn::OptionList& opt) {
   if (const auto* mtu = opt.get_ptr("tun-mtu")) {
     if (mtu->size() >= 2) {
       try { out.mtu = std::stoi(mtu->ref(1)); } catch (...) {}
+    }
+  }
+
+  // Pushed DNS resolvers. Two wire forms can reach the merged OptionList:
+  //   dhcp-option DNS <ip>                                  (classic; DNS6 for v6)
+  //   dns server <prio> address <ip[:port]> [<ip[:port]>..] (OpenVPN 2.6+ --dns)
+  // The Go side feeds these into the netstack so hostname targets resolve through
+  // the tunnel; without them every hostname dial fails (the netstack has no OS
+  // resolver fallback, by design — it would leak queries outside the tunnel).
+  if (const auto* il = opt.get_index_ptr("dhcp-option")) {
+    for (auto i : *il) {
+      const openvpn::Option& o = opt[i];
+      if (o.size() >= 3 && (o.ref(1) == "DNS" || o.ref(1) == "DNS6"))
+        out.dns.push_back(o.ref(2));
+    }
+  }
+  if (const auto* il = opt.get_index_ptr("dns")) {
+    for (auto i : *il) {
+      const openvpn::Option& o = opt[i];
+      if (o.size() >= 5 && o.ref(1) == "server" && o.ref(3) == "address") {
+        for (std::size_t j = 4; j < o.size(); ++j) out.dns.push_back(o.ref(j));
+      }
     }
   }
   return out;
@@ -181,6 +204,11 @@ class WormholeTunClient : public openvpn::TunClient {
     return ip6_cidr_;
   }
 
+  // Space-separated pushed DNS resolver list ("" when the server pushed none).
+  // Written in tun_start before the CIDR fields, so by the time wait_connected's
+  // assigned_cidr() gate passes this is populated too.
+  std::string pushed_dns() const { return dns_; }
+
   // Called by stop()/dtor to wake any blocked dequeue_inbound waiters.
   void wake_inbound_waiters() {
     {
@@ -200,6 +228,7 @@ class WormholeTunClient : public openvpn::TunClient {
   std::string ip4_cidr_;
   std::string ip6_addr_;
   std::string ip6_cidr_;
+  std::string dns_; // space-separated pushed DNS resolvers
   int mtu_ = 1500;
 
   // Inbound queue: producer is tun_send on the io_context thread, consumer is
@@ -497,6 +526,13 @@ class WormholeClient final : public OpenVPNClient {
     return tc->inject_from_go(buf, buf_len);
   }
 
+  // Space-separated pushed DNS resolver list ("" when none / tunnel not up).
+  std::string pushed_dns() {
+    auto* tc = current_tun_.load(std::memory_order_acquire);
+    if (!tc) return {};
+    return tc->pushed_dns();
+  }
+
   void stop_session() {
     // Idempotent: OpenVPNClient::stop() is conservative about already-stopped
     // state. The atomic guards against double-calls from ovpn_stop + ovpn_free.
@@ -561,8 +597,15 @@ void WormholeTunClient::tun_start(const openvpn::OptionList& opt,
                                   openvpn::CryptoDCSettings& /*dc*/) {
   parent_.tun_pre_tun_config();
 
-  // Extract pushed addresses + MTU from the merged OptionList (profile + push-reply).
+  // Extract pushed addresses + DNS + MTU from the merged OptionList (profile +
+  // push-reply). DNS is stored BEFORE the CIDR fields: wait_connected gates on
+  // assigned_cidr() becoming non-empty, so ordering here is what makes pushed_dns()
+  // safe to read from the Go thread once wait_connected returns.
   auto pushed = parse_pushed_addresses(opt);
+  for (const auto& d : pushed.dns) {
+    if (!dns_.empty()) dns_ += ' ';
+    dns_ += d;
+  }
   ip4_cidr_ = pushed.v4_cidr;
   ip6_cidr_ = pushed.v6_cidr;
   mtu_ = pushed.mtu;
@@ -727,6 +770,19 @@ int ovpn_wait_connected(ovpn_client_t* c, char* out_cidr_buf, int out_cidr_buf_l
   return reinterpret_cast<ClientWrapper*>(c)->client->wait_connected(out_cidr_buf, out_cidr_buf_len, timeout_ms);
 #else
   (void)c; (void)out_cidr_buf; (void)out_cidr_buf_len; (void)timeout_ms;
+  return 100;
+#endif
+}
+
+int ovpn_get_dns(ovpn_client_t* c, char* out_buf, int out_len) {
+#if HAVE_OPENVPN3
+  if (!c || !out_buf || out_len < 1) return 1;
+  const std::string dns = reinterpret_cast<ClientWrapper*>(c)->client->pushed_dns();
+  std::strncpy(out_buf, dns.c_str(), out_len - 1);
+  out_buf[out_len - 1] = '\0';
+  return 0;
+#else
+  (void)c; (void)out_buf; (void)out_len;
   return 100;
 #endif
 }

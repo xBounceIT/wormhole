@@ -223,9 +223,25 @@ func startOpenVpn(ctx context.Context, cfg config) (sockstun.Dialer, func(), err
 	}
 	cleanupClient := func() { C.ovpn_free(client) }
 
-	// 4. Spin up a netstack TUN at the pushed address. nil DNS means hostname targets
-	//    fail closed inside netstack.DialContext; pushed DNS support is a v2 feature.
-	tunDev, tnet, err := netstack.CreateNetTUN([]netip.Addr{pfx.Addr()}, nil, 1500)
+	// nilable family flags: drive the family-aware dialer below and the DNS filter.
+	// tnet.HasV4/HasV6 isn't exposed on wireguard-go's *netstack.Net, but we know what
+	// we ask for at CreateNetTUN time — pfx.Addr() is the single family we install.
+	hasV4 := pfx.Addr().Is4() || pfx.Addr().Is4In6()
+	hasV6 := pfx.Addr().Is6() && !pfx.Addr().Is4In6()
+
+	// 4. Spin up a netstack TUN at the pushed address, resolving through the server-
+	//    pushed DNS (dhcp-option DNS / --dns server). Servers of a family the tunnel
+	//    can't route are dropped — netstack would burn a full query timeout on each.
+	//    With an empty list hostname targets fail closed in the dialer below (clear
+	//    error instead of netstack's misleading "cannot marshal DNS message", which is
+	//    what its zero-server resolver path degenerates to).
+	dnsAddrs := pushedDNS(client, hasV4, hasV6)
+	if len(dnsAddrs) > 0 {
+		logf("openvpn: tunnel DNS via pushed resolver(s) %v", dnsAddrs)
+	} else {
+		logf("openvpn: server pushed no usable DNS; hostname targets will fail (use IP literals or push dhcp-option DNS)")
+	}
+	tunDev, tnet, err := netstack.CreateNetTUN([]netip.Addr{pfx.Addr()}, dnsAddrs, 1500)
 	if err != nil {
 		C.ovpn_stop(client)
 		cleanupClient()
@@ -275,13 +291,41 @@ func startOpenVpn(ctx context.Context, cfg config) (sockstun.Dialer, func(), err
 		cleanupClient()
 	}
 
-	// nilable family flags: drives the family-aware dialer below. tnet.HasV4/HasV6 isn't
-	// exposed on wireguard-go's *netstack.Net, but we know what we asked for at CreateNetTUN
-	// time — pfx.Addr() is the single family we installed.
-	hasV4 := pfx.Addr().Is4() || pfx.Addr().Is4In6()
-	hasV6 := pfx.Addr().Is6() && !pfx.Addr().Is4In6()
+	return tnetDialer{tnet: tnet, hasV4: hasV4, hasV6: hasV6, hasDNS: len(dnsAddrs) > 0}, cleanup, nil
+}
 
-	return tnetDialer{tnet: tnet, hasV4: hasV4, hasV6: hasV6}, cleanup, nil
+// pushedDNS pulls the server-pushed DNS resolver list out of the shim and parses it
+// into netstack-ready addresses, keeping only families the tunnel can route. Entries
+// may carry a ":port" suffix (the `dns server <prio> address <ip:port>` form);
+// netstack's resolver only speaks plain UDP/TCP 53, so the port is dropped.
+func pushedDNS(client *C.ovpn_client_t, hasV4, hasV6 bool) []netip.Addr {
+	buf := make([]byte, 1024)
+	if rc := C.ovpn_get_dns(client, (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf))); rc != 0 {
+		return nil
+	}
+	end := 0
+	for end < len(buf) && buf[end] != 0 {
+		end++
+	}
+	var out []netip.Addr
+	for _, s := range strings.Fields(string(buf[:end])) {
+		addr, err := netip.ParseAddr(s)
+		if err != nil {
+			ap, err2 := netip.ParseAddrPort(s)
+			if err2 != nil {
+				logf("openvpn: ignoring unparseable pushed DNS server %q", s)
+				continue
+			}
+			addr = ap.Addr()
+		}
+		addr = addr.Unmap()
+		if addr.Is4() && !hasV4 || !addr.Is4() && !hasV6 {
+			logf("openvpn: ignoring pushed DNS server %s (family not routable through this tunnel)", addr)
+			continue
+		}
+		out = append(out, addr)
+	}
+	return out
 }
 
 // pumpInbound reads packets out of the OpenVPN3 shim (server → client direction) and
@@ -361,13 +405,13 @@ func pumpOutbound(ctx context.Context, client *C.ovpn_client_t, dev tun.Device) 
 //	    DNS servers configured at CreateNetTUN); ovpnproxy must match for behavioral
 //	    parity across sidecars.
 //
-// Pushed DNS support: CreateNetTUN was called with `nil` DNS servers (the shim doesn't
-// surface pushed dhcp-option DNS yet). With no DNS configured, tnet.LookupContextHost
-// returns an empty result for hostnames — DialContext will fail with a clear "no such
-// host" rather than fall back to the OS resolver. This is the v1 trade-off: hostnames
-// require the user to have DNS configured via the OpenVPN profile (push "dhcp-option
-// DNS x.y.z.w"), or to use IP literals. A v2 iteration plumbs the pushed DNS into
-// CreateNetTUN; the dialer code path here doesn't change.
+// Pushed DNS support: the shim surfaces the server-pushed resolvers (dhcp-option DNS /
+// --dns server, see ovpn_get_dns) and startOpenVpn feeds them into CreateNetTUN, so
+// LookupContextHost queries them through the tunnel. When the server pushes none,
+// hasDNS is false and hostname dials fail closed with a clear error — never a fallback
+// to the OS resolver. (Skipping LookupContextHost in that case also matters because
+// netstack's zero-server resolver path returns a bogus "cannot marshal DNS message"
+// instead of anything actionable.)
 //
 // Family-aware short-circuit: when netstack only has IPv4 (or only IPv6), dial only
 // addresses of the installed family. Without this, an OS resolver returning AAAA-first
@@ -376,9 +420,10 @@ func pumpOutbound(ctx context.Context, client *C.ovpn_client_t, dev tun.Device) 
 // but tnet.LookupContextHost can still return both families if the pushed DNS server
 // answers AAAA — the same penalty applies, just with different cause.
 type tnetDialer struct {
-	tnet  *netstack.Net
-	hasV4 bool
-	hasV6 bool
+	tnet   *netstack.Net
+	hasV4  bool
+	hasV6  bool
+	hasDNS bool
 }
 
 func (d tnetDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
@@ -403,6 +448,9 @@ func (d tnetDialer) DialContext(ctx context.Context, network, address string) (n
 	// Hostname: resolve via tnet (in-tunnel DNS), filter by installed family, dial in
 	// order. We deliberately do NOT fall back to net.DefaultResolver — that would leak
 	// the hostname to the local network in plaintext.
+	if !d.hasDNS {
+		return nil, fmt.Errorf("cannot resolve %s: the VPN server pushed no DNS servers; use an IP literal or push dhcp-option DNS in the profile", host)
+	}
 	addrs, err := d.tnet.LookupContextHost(ctx, host)
 	if err != nil {
 		return nil, fmt.Errorf("resolve %s through tunnel DNS: %w", host, err)
