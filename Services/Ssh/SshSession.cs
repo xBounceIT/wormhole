@@ -7,8 +7,9 @@ namespace Wormhole.Services.Ssh;
 internal sealed class SshSession : ISshSession
 {
     private readonly SshClient _client;
-    private readonly ShellStream _stream;
+    private readonly ISshSessionStream _stream;
     private readonly CancellationTokenSource _cts = new();
+    private readonly CancellationToken _disposeToken;
     // ShellStream's write buffer is not safe for concurrent access — SSH.NET's internal
     // _sync lock guards reads and disposal only. Serialize all writes through this gate so
     // overlapping callers can't corrupt the shared buffer (see WriteAsync).
@@ -27,11 +28,17 @@ internal sealed class SshSession : ISshSession
     private bool _readingPaused;
 
     public SshSession(SshClient client, ShellStream stream, string hostFingerprint, ILogger<SshSession> logger)
+        : this(client, new ShellStreamAdapter(stream), hostFingerprint, logger)
+    {
+    }
+
+    internal SshSession(SshClient client, ISshSessionStream stream, string hostFingerprint, ILogger<SshSession> logger)
     {
         _client = client;
         _stream = stream;
         _logger = logger;
         HostFingerprint = hostFingerprint;
+        _disposeToken = _cts.Token;
     }
 
     public void Start()
@@ -60,17 +67,27 @@ internal sealed class SshSession : ISshSession
         // so two overlapping writes scramble its offset/length bookkeeping and a byte gets dropped
         // or never flushed — most visibly the lone "\r" from Enter, which strands the user at a
         // prompt. Hold the gate across both the write and the flush so each write+flush is atomic.
+        using var linkedCts = cancellationToken.CanBeCanceled
+            ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _disposeToken)
+            : null;
+        var writeToken = linkedCts?.Token ?? _disposeToken;
+
         try
         {
-            await _writeLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+            await _writeLock.WaitAsync(writeToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { return; }
 
         try
         {
             if (IsDisposed) return;
-            await _stream.WriteAsync(data, cancellationToken).ConfigureAwait(false);
-            await _stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            await _stream.WriteAsync(data, writeToken).ConfigureAwait(false);
+            await _stream.FlushAsync(writeToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (_disposeToken.IsCancellationRequested || IsDisposed)
+        {
+            // DisposeAsync cancels the session token so active writes and queued waiters can unwind
+            // even when callers used the default, non-cancelable token.
         }
         catch (ObjectDisposedException) { /* raced with Dispose */ }
         finally
@@ -244,4 +261,32 @@ internal sealed class SshSession : ISshSession
         // strand it. It holds no OS handle unless AvailableWaitHandle is touched (we never do),
         // so GC reclaims it harmlessly. Mirrors FileTransferOrchestrator's gate convention.
     }
+}
+
+internal interface ISshSessionStream : IDisposable
+{
+    ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken);
+    ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken);
+    Task FlushAsync(CancellationToken cancellationToken);
+    void ChangeWindowSize(uint columns, uint rows, uint width, uint height);
+    void Close();
+}
+
+internal sealed class ShellStreamAdapter(ShellStream stream) : ISshSessionStream
+{
+    public ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken) =>
+        stream.ReadAsync(buffer, cancellationToken);
+
+    public ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
+        stream.WriteAsync(data, cancellationToken);
+
+    public Task FlushAsync(CancellationToken cancellationToken) =>
+        stream.FlushAsync(cancellationToken);
+
+    public void ChangeWindowSize(uint columns, uint rows, uint width, uint height) =>
+        stream.ChangeWindowSize(columns, rows, width, height);
+
+    public void Close() => stream.Close();
+
+    public void Dispose() => stream.Dispose();
 }
