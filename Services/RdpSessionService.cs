@@ -67,7 +67,12 @@ public sealed class RdpSessionService : IRdpSessionService
             // surface bounds when available; otherwise a 1x1 child is enough to keep
             // mstscax from starting the handshake against a never-shown ActiveX host.
             var activationBounds = surfaceBounds.IsDegenerate(minDim: 1) ? HostBounds.Seed : surfaceBounds;
-            if (!form.SetHostBounds(activationBounds.X, activationBounds.Y, activationBounds.Width, activationBounds.Height))
+            if (!form.SetHostBounds(
+                    activationBounds.X,
+                    activationBounds.Y,
+                    activationBounds.Width,
+                    activationBounds.Height,
+                    reveal: true))
             {
                 throw new InvalidOperationException("RDP host failed to activate its initial native surface.");
             }

@@ -105,8 +105,9 @@ internal sealed class RdpHostForm : FormsForm
     /// Position the owned top-level overlay (in screen coordinates). Size changes also force
     /// the AxHost child to fill the new client area; position-only moves avoid child layout
     /// and forced redraw so the overlay can track WinUI window drags without repaint churn.
+    /// Bounds updates preserve the current visibility unless <paramref name="reveal"/> is set.
     /// </summary>
-    internal bool SetHostBounds(int x, int y, int width, int height)
+    internal bool SetHostBounds(int x, int y, int width, int height, bool reveal = false)
     {
         EnsureStaThread();
         if (width < 1 || height < 1) return false;
@@ -118,18 +119,13 @@ internal sealed class RdpHostForm : FormsForm
         var positionChanged = !_hasAppliedHostBounds ||
                               x != _lastHostX ||
                               y != _lastHostY;
-        if (!sizeChanged && !positionChanged) return true;
+        if (!sizeChanged && !positionChanged)
+        {
+            return !reveal || EnsureVisibleAndRedraw("bounds");
+        }
 
         Marshal.SetLastSystemError(0);
-        var flags = Win32Interop.SWP_NOACTIVATE;
-        if (sizeChanged)
-        {
-            flags |= Win32Interop.SWP_SHOWWINDOW;
-        }
-        else
-        {
-            flags |= Win32Interop.SWP_NOZORDER;
-        }
+        var flags = RdpHostBoundsWindowPos.BuildFlags(sizeChanged, reveal);
 
         if (!Win32Interop.SetWindowPos(
                 hostHwnd,
@@ -201,8 +197,16 @@ internal sealed class RdpHostForm : FormsForm
 
         _ax.Invalidate();
         Invalidate(invalidateChildren: true);
-        var visible = EnsureVisibleAndRedraw("bounds");
-        if (childMoved && visible)
+        if (reveal)
+        {
+            if (!EnsureVisibleAndRedraw("bounds")) return false;
+        }
+        else
+        {
+            RequestHostAndAxRedraw(hostHwnd);
+        }
+
+        if (childMoved)
         {
             RecordAppliedHostBounds(x, y, width, height);
             return true;
@@ -474,13 +478,18 @@ internal sealed class RdpHostForm : FormsForm
             axVisible = ForceVisibleTop(_ax.Handle, "axhost", context);
         }
 
+        RequestHostAndAxRedraw(hostHwnd);
+
+        return hostVisible && axVisible;
+    }
+
+    private void RequestHostAndAxRedraw(IntPtr hostHwnd)
+    {
         RequestRedraw(hostHwnd, "host");
         if (_ax.IsHandleCreated)
         {
             RequestRedraw(_ax.Handle, "axhost");
         }
-
-        return hostVisible && axVisible;
     }
 
     /// <summary>Initiate the RDP handshake. Configure must have been called first.</summary>
