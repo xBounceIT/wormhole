@@ -43,10 +43,13 @@ internal static class WebViewBrowserArguments
     /// <summary>
     /// The hardening set, plus the SOCKS5 proxy switch when the surface routes through a tunnel.
     /// Chromium does remote DNS for <c>socks5://</c>, so the appliance hostname is resolved on the
-    /// far side of the VPN.
+    /// far side of the VPN. The explicit bypass subtraction keeps tunneled web sessions from
+    /// bypassing the proxy for IP-literal targets on overlapping private subnets.
     /// </summary>
     internal static string Build(IPEndPoint? socks5Proxy) =>
-        socks5Proxy is null ? Hardening : $"--proxy-server=socks5://{socks5Proxy} {Hardening}";
+        socks5Proxy is null
+            ? Hardening
+            : $"--proxy-server=socks5://{socks5Proxy} --proxy-bypass-list=<-loopback> {Hardening}";
 
     /// <summary>
     /// Folder name for a fixed-path (shared/persistent) environment, fingerprinted by the browser
