@@ -372,7 +372,7 @@ public sealed class DialogService : IDialogService
             XamlRoot = RequireXamlRoot(),
         };
 
-        return dialog.ShowAsync().AsTask();
+        return ShowDialogAsync(dialog);
     }
 
     public async Task<(string Username, string Password)?> PromptCredentialsAsync(string title, string message, string? initialUsername = null)
@@ -633,15 +633,23 @@ public sealed class DialogService : IDialogService
         return vm.Result;
     }
 
-    // Every ContentDialog renders centered over the active window's XamlRoot, where an owned
-    // RDP overlay (a top-level window composited above the WinUI content) would occlude it.
-    // Suppress the overlay for the lifetime of the dialog so dialogs stay visible/usable while
-    // an RDP tab is active.
+    // WinUI permits only one ContentDialog per XamlRoot. Queue app-owned dialogs behind the
+    // same gate tunnel/auth prompts use so close confirmation attempts wait instead of throwing
+    // while another modal is open. Also suppress any connected RDP overlay for the dialog lifetime
+    // so dialogs stay visible/usable while an RDP tab is active.
     private static async Task<ContentDialogResult> ShowDialogAsync(ContentDialog dialog)
     {
-        using (RdpOverlayCoordinator.Suppress())
+        await ContentDialogGate.Shared.WaitAsync().ConfigureAwait(true);
+        try
         {
-            return await dialog.ShowAsync();
+            using (RdpOverlayCoordinator.Suppress())
+            {
+                return await dialog.ShowAsync();
+            }
+        }
+        finally
+        {
+            ContentDialogGate.Shared.Release();
         }
     }
 

@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Wormhole.Data.Repositories;
+using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Services.Sftp;
 using Wormhole.Services.Ssh;
@@ -204,15 +205,25 @@ public sealed class FileTransferDialogService : IFileTransferDialogService
             // CloseButton.
             dialog.Opened += (sender, _) => AttachLightDismiss(sender);
 
-            // Initialize before ShowAsync so panes have entries by the time the dialog
-            // renders. Observe the task so a synchronous throw or failed pane load
-            // surfaces in logs rather than disappearing as an UnobservedTaskException.
-            _ = SafeInitializeAsync(view, vm);
-            // Suppress any connected RDP overlay (top-level window above the WinUI content) so it
-            // can't occlude this dialog while an RDP tab is the active, visible one.
-            using (Wormhole.Helpers.RdpOverlayCoordinator.Suppress())
+            // Queue behind the same gate DialogService and tunnel/auth prompts use; otherwise an
+            // app-close confirmation or provider prompt can collide with this ContentDialog and throw.
+            await ContentDialogGate.Shared.WaitAsync().ConfigureAwait(true);
+            try
             {
-                await dialog.ShowAsync();
+                // Initialize only once this dialog owns the ContentDialog slot. It still starts before
+                // ShowAsync so panes can populate by render, but it no longer does hidden SFTP work
+                // while another modal keeps this dialog queued.
+                _ = SafeInitializeAsync(view, vm);
+                // Suppress any connected RDP overlay (top-level window above the WinUI content) so it
+                // can't occlude this dialog while an RDP tab is the active, visible one.
+                using (RdpOverlayCoordinator.Suppress())
+                {
+                    await dialog.ShowAsync();
+                }
+            }
+            finally
+            {
+                ContentDialogGate.Shared.Release();
             }
         }
         finally

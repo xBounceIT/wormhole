@@ -142,10 +142,8 @@ public sealed partial class MainWindow : Window
             }
             catch (Exception ex)
             {
-                // Showing our ContentDialog fails if another one already owns the XamlRoot (WinUI
-                // permits only one at a time) — e.g. an MCP approval prompt, a file-transfer dialog,
-                // or an in-flight backup/import. Fail safe: leave the window open rather than tearing
-                // down live sessions out from under that dialog; the user can finish it and retry.
+                // Fail safe: leave the window open rather than tearing down live sessions if the
+                // confirmation cannot be shown or queued for any reason.
                 _logger.LogWarning(ex, "Could not show close-confirmation prompt; leaving the window open.");
                 confirmed = false;
             }
@@ -158,6 +156,12 @@ public sealed partial class MainWindow : Window
         }
 
         _sessionCleanupInProgress = true;
+        if (activeCount > 0 || ViewModel.HasTabs)
+        {
+            ShowModalOverlay(CreateShutdownOverlay(activeCount));
+            await WaitForDispatcherTurnAsync().ConfigureAwait(true);
+        }
+
         try
         {
             try
@@ -184,6 +188,54 @@ public sealed partial class MainWindow : Window
                 Close();
             }
         }
+    }
+
+    private static StackPanel CreateShutdownOverlay(int activeCount)
+    {
+        var panel = new StackPanel
+        {
+            Spacing = 12,
+            Margin = new Thickness(28),
+            Width = 360,
+        };
+
+        panel.Children.Add(new ProgressRing
+        {
+            IsActive = true,
+            Width = 36,
+            Height = 36,
+            HorizontalAlignment = HorizontalAlignment.Center,
+        });
+        panel.Children.Add(new TextBlock
+        {
+            Text = "Closing connections...",
+            FontSize = 20,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            TextAlignment = TextAlignment.Center,
+        });
+        panel.Children.Add(new TextBlock
+        {
+            Text = activeCount == 1
+                ? "Disconnecting 1 active connection and shutting down Wormhole."
+                : activeCount > 1
+                    ? $"Disconnecting {activeCount} active connections and shutting down Wormhole."
+                    : "Closing session tabs and shutting down Wormhole.",
+            TextWrapping = TextWrapping.Wrap,
+            TextAlignment = TextAlignment.Center,
+            Opacity = 0.8,
+        });
+
+        return panel;
+    }
+
+    private Task WaitForDispatcherTurnAsync()
+    {
+        var completion = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () => completion.TrySetResult(null)))
+        {
+            return Task.CompletedTask;
+        }
+        return completion.Task;
     }
 
     private void OnFirstActivated(object sender, WindowActivatedEventArgs args)
