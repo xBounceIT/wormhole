@@ -102,10 +102,11 @@ public sealed class TunnelManager
 
     private sealed class SharedEntry
     {
-        public SharedEntry(Guid configId, DateTime configUpdatedAt)
+        public SharedEntry(Guid configId, DateTime configUpdatedAt, ILogger<TunnelManager> logger)
         {
             ConfigId = configId;
             ConfigUpdatedAt = configUpdatedAt;
+            Progress = new FanOutProgress(configId, logger);
         }
 
         public Guid ConfigId { get; }
@@ -117,7 +118,7 @@ public sealed class TunnelManager
         // Deliberately never disposed: it has no timer (no OS handle to free), and disposing it
         // from the establish core would race a late waiter's Cancel in ReleaseAsync.
         public CancellationTokenSource EstablishCts { get; } = new();
-        public FanOutProgress Progress { get; } = new();
+        public FanOutProgress Progress { get; }
         public Task<ITunnelInstance> EstablishTask { get; set; } = null!;
         // Leases handed out + callers still awaiting the establishment. Guarded by _poolGate.
         public int RefCount;
@@ -162,7 +163,7 @@ public sealed class TunnelManager
 
                 if (entry is null)
                 {
-                    entry = new SharedEntry(config.Id, config.UpdatedAt) { RefCount = 1 };
+                    entry = new SharedEntry(config.Id, config.UpdatedAt, _logger) { RefCount = 1 };
                     // Task.Run so no provider/secret work executes while holding the gate; assigned inside
                     // the lock so a concurrent joiner can never observe a null EstablishTask.
                     var newEntry = entry;
@@ -345,9 +346,17 @@ public sealed class TunnelManager
     /// </summary>
     private sealed class FanOutProgress : IProgress<TunnelProgress>
     {
+        private readonly Guid _configId;
         private readonly object _gate = new();
         private readonly List<IProgress<TunnelProgress>> _sinks = new();
+        private readonly ILogger<TunnelManager> _logger;
         private TunnelProgress? _last;
+
+        public FanOutProgress(Guid configId, ILogger<TunnelManager> logger)
+        {
+            _configId = configId;
+            _logger = logger;
+        }
 
         public void AddSink(IProgress<TunnelProgress> sink)
         {
@@ -357,7 +366,7 @@ public sealed class TunnelManager
                 _sinks.Add(sink);
                 replay = _last;
             }
-            if (replay is not null) sink.Report(replay);
+            if (replay is not null) ReportToSink(sink, replay);
         }
 
         public void RemoveSink(IProgress<TunnelProgress> sink)
@@ -373,7 +382,24 @@ public sealed class TunnelManager
                 _last = value;
                 sinks = _sinks.ToArray();
             }
-            foreach (var sink in sinks) sink.Report(value);
+            foreach (var sink in sinks) ReportToSink(sink, value);
+        }
+
+        private void ReportToSink(IProgress<TunnelProgress> sink, TunnelProgress value)
+        {
+            try
+            {
+                sink.Report(value);
+            }
+            catch (Exception ex)
+            {
+                RemoveSink(sink);
+                _logger.LogWarning(
+                    ex,
+                    "Tunnel progress sink failed while reporting {Phase} for config {ConfigId}; removing it from fan-out.",
+                    value.Phase,
+                    _configId);
+            }
         }
     }
 
