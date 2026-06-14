@@ -19,12 +19,13 @@ public class WebViewBrowserArgumentsTests
     }
 
     [Fact]
-    public void Build_WithProxy_PrependsSocks5Switch_AndKeepsHardening()
+    public void Build_WithProxy_PrependsSocks5Switch_DisablesImplicitBypass_AndKeepsHardening()
     {
         var args = WebViewBrowserArguments.Build(new IPEndPoint(IPAddress.Loopback, 58921));
 
-        Assert.StartsWith("--proxy-server=socks5://127.0.0.1:58921 ", args);
-        Assert.EndsWith(WebViewBrowserArguments.Hardening, args);
+        Assert.Equal(
+            $"--proxy-server=socks5://127.0.0.1:58921 --proxy-bypass-list=<-loopback> {WebViewBrowserArguments.Hardening}",
+            args);
     }
 
     [Fact]
