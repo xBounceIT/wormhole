@@ -306,6 +306,59 @@ public class TunnelManagerSharingTests
     }
 
     [Fact]
+    public async Task ProviderProgress_ThrowingSink_DoesNotStarveOtherSinksOrFailEstablishment()
+    {
+        var provider = new TwoPhaseProvider();
+        var (repo, creds) = Stores();
+        var mgr = Manager(repo, creds, provider);
+        var profile = ProfileFor(AddConfig(repo, creds));
+
+        var first = mgr.EstablishAsync(profile, CancellationToken.None);
+        await provider.Started.Task;
+
+        var throwingReports = new List<TunnelPhase>();
+        var throwing = new RecordingProgress(progress =>
+        {
+            throwingReports.Add(progress.Phase);
+            if (progress.Phase == TunnelPhase.DownloadingConfiguration)
+            {
+                throw new InvalidOperationException("Progress sink failed.");
+            }
+        });
+
+        var goodReports = new List<TunnelPhase>();
+        var throwingWaiter = mgr.EstablishAsync(profile, CancellationToken.None, throwing);
+        var goodWaiter = mgr.EstablishAsync(
+            profile,
+            CancellationToken.None,
+            new RecordingProgress(progress => goodReports.Add(progress.Phase)));
+
+        Assert.Equal(new[] { TunnelPhase.Preparing, TunnelPhase.Authenticating }, throwingReports);
+        Assert.Equal(new[] { TunnelPhase.Preparing, TunnelPhase.Authenticating }, goodReports);
+
+        provider.Proceed.SetResult();
+
+        var leases = await Task.WhenAll(first, throwingWaiter, goodWaiter);
+        Assert.Equal(
+            new[] { TunnelPhase.Preparing, TunnelPhase.Authenticating, TunnelPhase.DownloadingConfiguration },
+            throwingReports);
+        Assert.Equal(
+            new[]
+            {
+                TunnelPhase.Preparing,
+                TunnelPhase.Authenticating,
+                TunnelPhase.DownloadingConfiguration,
+                TunnelPhase.StartingTunnel,
+            },
+            goodReports);
+
+        foreach (var lease in leases)
+        {
+            await lease!.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task ReusingLiveTunnel_ReportsReuseDetail()
     {
         var (mgr, _, profile, _) = Build();
@@ -412,6 +465,27 @@ public class TunnelManagerSharingTests
             // Deliberately ignores cancellation: the abandoned-result test needs a provider that
             // completes anyway so the pool's nobody-owns-it disposal is exercised.
             return await Gate.Task.ConfigureAwait(false);
+        }
+    }
+
+    private sealed class TwoPhaseProvider : ITunnelProvider
+    {
+        public TaskCompletionSource Started { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Proceed { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TunnelKind Kind => TunnelKind.WireGuard;
+
+        public async Task<ITunnelInstance> EstablishAsync(
+            TunnelConfig config, byte[] secretBlob, CancellationToken cancellationToken, IProgress<TunnelProgress>? progress = null)
+        {
+            progress?.Report(new TunnelProgress(TunnelPhase.Authenticating));
+            Started.TrySetResult();
+            await Proceed.Task.ConfigureAwait(false);
+            progress?.Report(new TunnelProgress(TunnelPhase.DownloadingConfiguration));
+            progress?.Report(new TunnelProgress(TunnelPhase.StartingTunnel));
+            return new RecordingTunnel();
         }
     }
 
