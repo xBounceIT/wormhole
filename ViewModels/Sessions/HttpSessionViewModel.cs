@@ -223,7 +223,9 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
         // path needs "ignore certificate errors" enabled (surfaced to the user as a cert-error failure
         // otherwise).
         var localPort = await tunnel.BindLocalForwarderAsync(profile.Host, profile.Port, token).ConfigureAwait(true);
-        return new HttpConnectionTarget(BuildUri(scheme, IPAddress.Loopback.ToString(), localPort), null, ignoreCert);
+        var originalUri = BuildUri(scheme, profile.Host, profile.Port);
+        var forwarderUri = BuildUri(scheme, IPAddress.Loopback.ToString(), localPort);
+        return new HttpConnectionTarget(forwarderUri, null, ignoreCert, originalUri);
     }
 
     // UriBuilder brackets a bare IPv6 literal and normalizes the default port on Build (same convention
@@ -451,5 +453,11 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
 /// non-null only when the session routes through a tunnel that exposes a SOCKS5 endpoint — in that case
 /// the view must create a WebView2 environment proxied through it. <see cref="IgnoreCertErrors"/> tells
 /// the view to accept certificate errors for this navigation (HTTPS + the user's opt-in).
+/// <see cref="OriginalUri"/> is non-null only when <see cref="NavigateUri"/> is a loopback forwarder for
+/// the real appliance origin.
 /// </summary>
-public sealed record HttpConnectionTarget(Uri NavigateUri, IPEndPoint? Socks5Proxy, bool IgnoreCertErrors);
+public sealed record HttpConnectionTarget(
+    Uri NavigateUri,
+    IPEndPoint? Socks5Proxy,
+    bool IgnoreCertErrors,
+    Uri? OriginalUri = null);

@@ -28,6 +28,7 @@ public class HttpSessionViewModelTests
         Assert.Equal(new Uri("http://fw.local:80/"), target!.NavigateUri);
         Assert.Null(target.Socks5Proxy);
         Assert.False(target.IgnoreCertErrors);
+        Assert.Null(target.OriginalUri);
     }
 
     [Fact]
@@ -79,6 +80,7 @@ public class HttpSessionViewModelTests
 
         Assert.Equal(new Uri("https://fw.local:443/"), target!.NavigateUri);
         Assert.Equal(socks, target.Socks5Proxy);
+        Assert.Null(target.OriginalUri);
         Assert.Equal(0, tunnel.BindCount); // SOCKS path must not bind a loopback forwarder
     }
 
@@ -92,6 +94,7 @@ public class HttpSessionViewModelTests
 
         Assert.Equal(new Uri("https://127.0.0.1:51515/"), target!.NavigateUri);
         Assert.Null(target.Socks5Proxy);
+        Assert.Equal(new Uri("https://fw.local:443/"), target.OriginalUri);
         Assert.Equal(1, tunnel.BindCount);
         Assert.Equal("fw.local", tunnel.LastForwardHost);
         Assert.Equal(443, tunnel.LastForwardPort);
