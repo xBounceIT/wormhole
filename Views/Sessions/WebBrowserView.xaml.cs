@@ -36,6 +36,7 @@ public sealed partial class WebBrowserView : UserControl
 
     private HttpSessionViewModel? _viewModel;
     private WinUIWebView2? _webView;
+    private HttpConnectionTarget? _currentTarget;
     // Temp user-data folder backing this tab's isolated environment (a SOCKS-proxy or ignore-cert tab);
     // deleted (best-effort) when that WebView2 is torn down. Null for shared-environment (plain) tabs.
     private string? _isolatedUserDataFolder;
@@ -202,6 +203,7 @@ public sealed partial class WebBrowserView : UserControl
             WebViewHost.Children.Clear();
             WebViewHost.Children.Add(webView);
             _webView = webView;
+            _currentTarget = null;
 
             // EnsureCoreWebView2Async returns a WinRT IAsyncAction (no ConfigureAwait); it already resumes
             // on the UI thread.
@@ -239,9 +241,12 @@ public sealed partial class WebBrowserView : UserControl
             core.SourceChanged += OnCoreSourceChanged;
             core.HistoryChanged -= OnCoreHistoryChanged;
             core.HistoryChanged += OnCoreHistoryChanged;
+            core.NewWindowRequested -= OnNewWindowRequested;
+            core.NewWindowRequested += OnNewWindowRequested;
 
             UpdateToolbar();
             _awaitingInitialNavigation = true;
+            _currentTarget = target;
             core.Navigate(target.NavigateUri.ToString());
         }
         finally
@@ -377,6 +382,32 @@ public sealed partial class WebBrowserView : UserControl
 
     private void OnCoreHistoryChanged(CoreWebView2 sender, object args) => UpdateToolbar();
 
+    private void OnNewWindowRequested(CoreWebView2 sender, CoreWebView2NewWindowRequestedEventArgs args)
+    {
+        // Never let WebView2 create an unmanaged popup window: it would not be bound to this tab's
+        // per-session proxy/cert environment and could bypass the selected tunnel route.
+        args.Handled = true;
+
+        var navigationUri = WebViewNewWindowNavigation.GetInSessionNavigationUri(
+            args.Uri,
+            _currentTarget?.NavigateUri,
+            _currentTarget?.OriginalUri);
+        if (navigationUri is null)
+        {
+            LogDebug("Suppressed WebView2 new-window request without a navigable target.");
+            return;
+        }
+
+        try
+        {
+            sender.Navigate(navigationUri);
+        }
+        catch (Exception ex)
+        {
+            LogDebug(ex, "WebView2 new-window in-session navigation threw.");
+        }
+    }
+
     private void UpdateToolbar()
     {
         var core = _webView?.CoreWebView2;
@@ -407,6 +438,7 @@ public sealed partial class WebBrowserView : UserControl
     {
         var webView = _webView;
         _webView = null;
+        _currentTarget = null;
         if (webView is not null)
         {
             if (webView.CoreWebView2 is { } core)
@@ -415,6 +447,7 @@ public sealed partial class WebBrowserView : UserControl
                 core.NavigationCompleted -= OnNavigationCompleted;
                 core.SourceChanged -= OnCoreSourceChanged;
                 core.HistoryChanged -= OnCoreHistoryChanged;
+                core.NewWindowRequested -= OnNewWindowRequested;
             }
             try { webView.Close(); }
             catch (Exception ex) { LogDebug(ex, "WebView2 Close threw during teardown."); }
@@ -448,4 +481,7 @@ public sealed partial class WebBrowserView : UserControl
 
     private static void LogDebug(Exception ex, string message) =>
         App.Current?.Services?.GetService<ILogger<WebBrowserView>>()?.LogDebug(ex, "{Message}", message);
+
+    private static void LogDebug(string message) =>
+        App.Current?.Services?.GetService<ILogger<WebBrowserView>>()?.LogDebug("{Message}", message);
 }
