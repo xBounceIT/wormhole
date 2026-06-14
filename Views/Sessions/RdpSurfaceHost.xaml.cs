@@ -351,9 +351,8 @@ public sealed partial class RdpSurfaceHost : UserControl
         if (!_attached || ViewModel is null) return;
         // A covering dialog owns visibility while suppressed — don't reposition/re-show under it.
         if (_overlaySuppressed) return;
-        // While the owner is minimized, ComputeBoundsScreenPx maps to off-screen coords and the
-        // SetBounds→EnsureVisibleAndRedraw side effect would (re)show the overlay; skip until the
-        // window is restored (the AppWindow visibility handler re-shows it then).
+        // While the owner is minimized, ComputeBoundsScreenPx maps to off-screen coords; skip until
+        // the window is restored (the AppWindow visibility handler re-shows it then).
         if (_trackedAppWindow is { IsVisible: false }) return;
 
         // ComputeBoundsScreenPx refreshes _lastRasterScale from the live XamlRoot, so per-monitor

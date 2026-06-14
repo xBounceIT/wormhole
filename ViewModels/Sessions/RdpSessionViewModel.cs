@@ -260,11 +260,10 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         RememberMeasuredBounds(bounds);
         var session = _session;
         if (session is null) return;
-        // Pushing bounds to the native host calls SetHostBounds → EnsureVisibleAndRedraw, which
-        // forces the window visible. Only do that when Connected; during Connecting / auto-reconnect
-        // a layout tick would otherwise reveal the surface over the WinUI ConnectingOverlay
-        // (spinner + Cancel). The surface is shown explicitly on the Connected flip
-        // (ResumeSurfaceForOverlay); here we only need to remember the latest measured bounds.
+        // Only push bounds while Connected; during Connecting / auto-reconnect the hidden native
+        // surface should stay parked behind the WinUI ConnectingOverlay (spinner + Cancel). The
+        // surface is shown explicitly on the Connected flip (ResumeSurfaceForOverlay); here we only
+        // need to remember the latest measured bounds.
         if (Status != SessionStatus.Connected) return;
 
         try
