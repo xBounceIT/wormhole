@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Wormhole.Data.Repositories;
@@ -478,6 +479,12 @@ public sealed class DialogService : IDialogService
             }
         }
 
+        // Capture the dispatcher on the UI thread NOW, before any deferred-close continuation
+        // runs. WaitForImportEnd's continuation fires on the thread pool, and by then
+        // sender.XamlRoot may have already been torn down (e.g. window closing during the
+        // in-flight import), leaving no safe way to reach back through sender to Hide().
+        var dispatcher = dialog.XamlRoot?.Content?.DispatcherQueue;
+
         // ContentDialog.Closing is the only hook that lets us defer Esc / Close mid-import.
         // We must NOT let the dialog tear down while CommitAsync is still running, because:
         //   (a) the VM's `Result = result;` assignment happens AFTER the tx commits, and
@@ -496,20 +503,7 @@ public sealed class DialogService : IDialogService
             args.Cancel = true;
             vm.RequestCancelForClose();
 
-            // When the in-flight import unwinds, re-request Hide on the UI thread. Using
-            // ContinueWith with the captured dispatcher avoids a deadlock if WaitForImportEnd
-            // resolves on a thread-pool thread.
-            _ = vm.WaitForImportEnd().ContinueWith(_ =>
-            {
-                if (sender.XamlRoot?.Content?.DispatcherQueue is { } queue)
-                {
-                    queue.TryEnqueue(() => sender.Hide());
-                }
-                else
-                {
-                    sender.Hide();
-                }
-            }, TaskScheduler.Default);
+            QueueHideWhenCompleted(vm.WaitForImportEnd(), sender, dispatcher);
         }
 
         vm.PropertyChanged += OnVmPropChanged;
@@ -570,17 +564,7 @@ public sealed class DialogService : IDialogService
             if (!vm.IsBusy) return;
             args.Cancel = true;
             vm.RequestCancelForClose();
-            _ = vm.WaitForRunEnd().ContinueWith(_ =>
-            {
-                if (dispatcher is not null)
-                {
-                    dispatcher.TryEnqueue(() => sender.Hide());
-                }
-                // If we never captured a dispatcher (extremely unlikely; would mean the dialog
-                // was shown without a XamlRoot), there's no safe way to call Hide from this
-                // thread. The dialog is already in the "deferred close" state, so the user's
-                // next Close click will just close it normally.
-            }, TaskScheduler.Default);
+            QueueHideWhenCompleted(vm.WaitForRunEnd(), sender, dispatcher);
         }
 
         vm.PropertyChanged += OnVmPropChanged;
@@ -630,13 +614,7 @@ public sealed class DialogService : IDialogService
             if (!vm.IsBusy) return;
             args.Cancel = true;
             vm.RequestCancelForClose();
-            _ = vm.WaitForRunEnd().ContinueWith(_ =>
-            {
-                if (dispatcher is not null)
-                {
-                    dispatcher.TryEnqueue(() => sender.Hide());
-                }
-            }, TaskScheduler.Default);
+            QueueHideWhenCompleted(vm.WaitForRunEnd(), sender, dispatcher);
         }
 
         vm.PropertyChanged += OnVmPropChanged;
@@ -665,6 +643,14 @@ public sealed class DialogService : IDialogService
         {
             return await dialog.ShowAsync();
         }
+    }
+
+    private static void QueueHideWhenCompleted(Task task, ContentDialog dialog, DispatcherQueue? dispatcher)
+    {
+        _ = task.ContinueWith(_ =>
+        {
+            dispatcher?.TryEnqueue(() => dialog.Hide());
+        }, TaskScheduler.Default);
     }
 
     private static XamlRoot RequireXamlRoot() =>
