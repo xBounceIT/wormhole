@@ -154,9 +154,9 @@ public sealed class InheritanceResolver
         }
 
         // The web protocols are credential-less (the editor hides credentials and CredentialDialog won't
-        // create them). Drop any credential identity inherited from an ancestor folder, so a web node
-        // under an SSH/RDP folder can't carry — and, via the tree's "Show credentials", expose — an
-        // unrelated parent's password.
+        // create them). Drop any credential and SSH identity inherited from an ancestor folder, so a web
+        // node under an SSH/RDP folder can't carry — and, via the tree's "Show credentials", expose — an
+        // unrelated parent's password or stale private-key metadata.
         var isWeb = protocol.Value is ProtocolType.Http or ProtocolType.Https;
 
         return new ConnectionProfile
@@ -201,8 +201,8 @@ public sealed class InheritanceResolver
             RdpGatewayBypassLocal = rdpGatewayBypassLocal ?? true,
             RdpGatewayUseSameCreds = rdpGatewayUseSameCreds ?? false,
             RdpUseExternalClient = rdpUseExternalClient ?? false,
-            SshKeyFileName = sshKeyFileName,
-            SshKnownHostFingerprint = sshKnownHostFingerprint,
+            SshKeyFileName = isWeb ? null : sshKeyFileName,
+            SshKnownHostFingerprint = isWeb ? null : sshKnownHostFingerprint,
             SshAutoSudo = sshAutoSudo ?? false,
             // Per-connection (leaf-only), like UseInlinePassword — NOT inherited up the folder chain.
             // The editor surfaces it as a 2-state checkbox that can't express "inherit", so inheriting it

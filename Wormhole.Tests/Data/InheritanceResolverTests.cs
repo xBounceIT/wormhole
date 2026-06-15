@@ -483,7 +483,7 @@ public class InheritanceResolverTests
     [Theory]
     [InlineData(ProtocolType.Http)]
     [InlineData(ProtocolType.Https)]
-    public void Resolve_WebProtocol_DropsInheritedCredentialAndUsername(ProtocolType webProtocol)
+    public void Resolve_WebProtocol_DropsInheritedAuthMaterial(ProtocolType webProtocol)
     {
         var folder = new ConnectionNode
         {
@@ -492,6 +492,8 @@ public class InheritanceResolverTests
             Kind = NodeKind.Folder,
             CredentialId = Guid.NewGuid(),
             Username = "admin",
+            SshKeyFileName = "shared-admin-key",
+            SshKnownHostFingerprint = "SHA256:inherited-pin",
         };
         var node = new ConnectionNode
         {
@@ -510,10 +512,41 @@ public class InheritanceResolverTests
         };
         var profile = new InheritanceResolver().Resolve(node, nodes);
 
-        // A credential-less web node must not carry the parent folder's credential/identity, which the
-        // tree's "Show credentials" would otherwise surface as an unrelated parent's password.
+        // A credential-less web node must not carry the parent folder's credential identity or
+        // SSH key metadata into the resolved web profile.
         Assert.Null(profile.CredentialId);
         Assert.Null(profile.Username);
+        Assert.Null(profile.SshKeyFileName);
+        Assert.Null(profile.SshKnownHostFingerprint);
+        Assert.False(profile.UseInlinePassword);
+    }
+
+    [Theory]
+    [InlineData(ProtocolType.Http)]
+    [InlineData(ProtocolType.Https)]
+    public void Resolve_WebProtocol_DropsOwnAuthMaterial(ProtocolType webProtocol)
+    {
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "fw-gui",
+            Kind = NodeKind.Connection,
+            Protocol = webProtocol,
+            Host = "fw.example.com",
+            CredentialId = Guid.NewGuid(),
+            Username = "admin",
+            UseInlinePassword = true,
+            SshKeyFileName = "stale-admin-key",
+            SshKnownHostFingerprint = "SHA256:stale-pin",
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode> { [node.Id] = node };
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.Null(profile.CredentialId);
+        Assert.Null(profile.Username);
+        Assert.Null(profile.SshKeyFileName);
+        Assert.Null(profile.SshKnownHostFingerprint);
         Assert.False(profile.UseInlinePassword);
     }
 
