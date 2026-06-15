@@ -375,7 +375,7 @@ public sealed partial class MainWindow : Window
 
     private void ResetLockOverlay(string message)
     {
-        ContentDialogTracker.HideAllForLock();
+        ContentDialogTracker.LockAndHideAll();
         LockTitleText.Text = "Wormhole is locked";
         LockMessageText.Text = message;
         LockErrorBar.IsOpen = false;
@@ -398,6 +398,7 @@ public sealed partial class MainWindow : Window
         _lockOverlaySuppression?.Dispose();
         _lockOverlaySuppression = null;
         _lockState.SetLocked(false);
+        ContentDialogTracker.Unlock();
     }
 
     private async void WindowsHelloUnlockButton_Click(object sender, RoutedEventArgs e)

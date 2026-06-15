@@ -6,23 +6,28 @@ internal static class ContentDialogTracker
 {
     private static readonly object Gate = new();
     private static readonly HashSet<ContentDialog> ActiveDialogs = [];
+    private static TaskCompletionSource? UnlockSignal;
+    private static bool IsLocked;
 
     public static bool IsLockDismissalInProgress { get; private set; }
 
-    public static IDisposable Track(ContentDialog dialog)
+    public static async Task<ContentDialogResult> ShowAsync(ContentDialog dialog, CancellationToken cancellationToken = default)
     {
-        lock (Gate)
+        await WaitUntilUnlockedAsync(cancellationToken);
+
+        using (Track(dialog))
         {
-            ActiveDialogs.Add(dialog);
+            return await dialog.ShowAsync();
         }
-        return new Scope(dialog);
     }
 
-    public static void HideAllForLock()
+    public static void LockAndHideAll()
     {
         ContentDialog[] dialogs;
         lock (Gate)
         {
+            IsLocked = true;
+            UnlockSignal ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             dialogs = [.. ActiveDialogs];
         }
 
@@ -45,6 +50,43 @@ internal static class ContentDialogTracker
         {
             IsLockDismissalInProgress = false;
         }
+    }
+
+    public static void Unlock()
+    {
+        TaskCompletionSource? signal;
+        lock (Gate)
+        {
+            IsLocked = false;
+            signal = UnlockSignal;
+            UnlockSignal = null;
+        }
+
+        signal?.TrySetResult();
+    }
+
+    private static async Task WaitUntilUnlockedAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            Task waitTask;
+            lock (Gate)
+            {
+                if (!IsLocked) return;
+                waitTask = (UnlockSignal ??= new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).Task;
+            }
+
+            await waitTask.WaitAsync(cancellationToken);
+        }
+    }
+
+    private static Scope Track(ContentDialog dialog)
+    {
+        lock (Gate)
+        {
+            ActiveDialogs.Add(dialog);
+        }
+        return new Scope(dialog);
     }
 
     private sealed class Scope : IDisposable

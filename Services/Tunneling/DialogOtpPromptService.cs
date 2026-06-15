@@ -170,9 +170,8 @@ public sealed class DialogOtpPromptService : IOtpPromptService, IDisposable
         // an OTP prompt can fire while a different RDP tab is the active, visible one.
         ContentDialogResult result;
         using (Wormhole.Helpers.RdpOverlayCoordinator.Suppress())
-        using (Wormhole.Services.ContentDialogTracker.Track(dialog))
         {
-            result = await dialog.ShowAsync();
+            result = await Wormhole.Services.ContentDialogTracker.ShowAsync(dialog, ct);
         }
 
         // If the user has already submitted (Primary button or Enter), honor that even if the

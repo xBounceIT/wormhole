@@ -769,9 +769,8 @@ public sealed class DialogService : IDialogService
     private static async Task<ContentDialogResult> ShowDialogAsync(ContentDialog dialog)
     {
         using (RdpOverlayCoordinator.Suppress())
-        using (ContentDialogTracker.Track(dialog))
         {
-            return await dialog.ShowAsync();
+            return await ContentDialogTracker.ShowAsync(dialog);
         }
     }
 

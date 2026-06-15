@@ -129,9 +129,8 @@ public sealed class DialogTlsTrustPromptService : ITlsTrustPromptService, IDispo
         // the centered dialog — a tunnel establish can fire while an RDP tab is the visible one.
         ContentDialogResult result;
         using (Wormhole.Helpers.RdpOverlayCoordinator.Suppress())
-        using (Wormhole.Services.ContentDialogTracker.Track(dialog))
         {
-            result = await dialog.ShowAsync();
+            result = await Wormhole.Services.ContentDialogTracker.ShowAsync(dialog, ct);
         }
 
         // An explicit "Trust and connect" click wins over a same-tick cancellation — the user's
