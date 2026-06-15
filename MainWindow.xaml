@@ -117,5 +117,55 @@
                 <ContentPresenter x:Name="ModalOverlayContent" />
             </Border>
         </Grid>
+
+        <Grid x:Name="LockOverlayHost"
+              Grid.RowSpan="3"
+              Canvas.ZIndex="20"
+              Background="{ThemeResource LockOverlayBackgroundBrush}"
+              Visibility="Collapsed">
+            <Border MaxWidth="460"
+                    MinWidth="360"
+                    Margin="24"
+                    Padding="28"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center"
+                    Background="{ThemeResource ContentDialogBackground}"
+                    BorderBrush="{ThemeResource ContentDialogBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="{ThemeResource OverlayCornerRadius}">
+                <StackPanel Spacing="14">
+                    <FontIcon Glyph="&#xE72E;" FontSize="36" HorizontalAlignment="Center" />
+                    <TextBlock x:Name="LockTitleText"
+                               Text="Wormhole is locked"
+                               Style="{StaticResource SubtitleTextBlockStyle}"
+                               HorizontalAlignment="Center" />
+                    <TextBlock x:Name="LockMessageText"
+                               TextWrapping="Wrap"
+                               TextAlignment="Center"
+                               Style="{StaticResource BodyTextBlockStyle}"
+                               Opacity="0.78" />
+                    <InfoBar x:Name="LockErrorBar"
+                             IsOpen="False"
+                             Severity="Error"
+                             IsClosable="False" />
+                    <Button x:Name="WindowsHelloUnlockButton"
+                            Content="Unlock with Windows Hello"
+                            HorizontalAlignment="Stretch"
+                            Click="WindowsHelloUnlockButton_Click"
+                            Visibility="Collapsed" />
+                    <PasswordBox x:Name="LockSecretBox"
+                                 Header="PIN"
+                                 PasswordChanged="LockSecretBox_PasswordChanged"
+                                 KeyDown="LockSecretBox_KeyDown"
+                                 Visibility="Collapsed" />
+                    <Button x:Name="LockUnlockButton"
+                            Content="Unlock"
+                            HorizontalAlignment="Stretch"
+                            IsEnabled="False"
+                            Click="LockUnlockButton_Click"
+                            Visibility="Collapsed" />
+                </StackPanel>
+            </Border>
+        </Grid>
     </Grid>
 </Window>

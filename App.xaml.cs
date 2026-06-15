@@ -11,6 +11,7 @@ using Wormhole.Services.Backup;
 using Wormhole.Services.Mcp;
 using Wormhole.Services.MRemoteNg;
 using Wormhole.Services.Rdp;
+using Wormhole.Services.Security;
 using Wormhole.Services.Ssh;
 using Wormhole.Services.Tunneling;
 using Wormhole.Services.Tunneling.AzureVpn;
@@ -71,6 +72,8 @@ public partial class App : Application
 
         MainWindow = Services.GetRequiredService<MainWindow>();
         MainWindow.Activate();
+
+        await MainWindow.RunStartupAuthenticationAsync().ConfigureAwait(true);
 
         await StartMcpServerIfEnabledAsync().ConfigureAwait(true);
     }
@@ -212,6 +215,11 @@ public partial class App : Application
         services.AddSingleton<MigrationRunner>();
 
         services.AddSingleton<IAppSettingsService, AppSettingsService>();
+        services.AddSingleton<IAppAuthenticationService, AppAuthenticationService>();
+        services.AddSingleton<IWindowsHelloService, WindowsHelloService>();
+        services.AddSingleton<IAppAuthenticationVerifier, AppAuthenticationVerifier>();
+        services.AddSingleton<IAppLockState, AppLockState>();
+        services.AddSingleton<AppInactivityLockEvaluator>();
         services.AddSingleton<ICredentialService, CredentialService>();
         services.AddSingleton<IConnectionRepository, ConnectionRepository>();
         services.AddSingleton<ICredentialRepository, CredentialRepository>();

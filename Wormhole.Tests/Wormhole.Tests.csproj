@@ -45,6 +45,7 @@
     <Compile Include="..\Models\NodeKind.cs" Link="Models\NodeKind.cs" />
     <Compile Include="..\Models\ProtocolType.cs" Link="Models\ProtocolType.cs" />
     <Compile Include="..\Models\AppSettings.cs" Link="Models\AppSettings.cs" />
+    <Compile Include="..\Models\AppAuthenticationMode.cs" Link="Models\AppAuthenticationMode.cs" />
     <Compile Include="..\Models\GitHubRelease.cs" Link="Models\GitHubRelease.cs" />
     <Compile Include="..\Models\UpdateCheckResult.cs" Link="Models\UpdateCheckResult.cs" />
     <Compile Include="..\Models\TunnelConfig.cs" Link="Models\TunnelConfig.cs" />
@@ -118,6 +119,16 @@
     <Compile Include="..\Helpers\RdpDesktopSizeResolver.cs" Link="Helpers\RdpDesktopSizeResolver.cs" />
     <Compile Include="..\Helpers\RdpScreenSizes.cs" Link="Helpers\RdpScreenSizes.cs" />
     <Compile Include="..\Services\IAppSettingsService.cs" Link="Services\IAppSettingsService.cs" />
+    <Compile Include="..\Services\Security\IAppAuthenticationDataProtector.cs" Link="Services\Security\IAppAuthenticationDataProtector.cs" />
+    <Compile Include="..\Services\Security\DpapiAppAuthenticationDataProtector.cs" Link="Services\Security\DpapiAppAuthenticationDataProtector.cs" />
+    <Compile Include="..\Services\Security\IAppAuthenticationService.cs" Link="Services\Security\IAppAuthenticationService.cs" />
+    <Compile Include="..\Services\Security\AppAuthenticationService.cs" Link="Services\Security\AppAuthenticationService.cs" />
+    <Compile Include="..\Services\Security\IWindowsHelloService.cs" Link="Services\Security\IWindowsHelloService.cs" />
+    <Compile Include="..\Services\Security\IAppAuthenticationVerifier.cs" Link="Services\Security\IAppAuthenticationVerifier.cs" />
+    <Compile Include="..\Services\Security\AppAuthenticationVerifier.cs" Link="Services\Security\AppAuthenticationVerifier.cs" />
+    <Compile Include="..\Services\Security\IAppLockState.cs" Link="Services\Security\IAppLockState.cs" />
+    <Compile Include="..\Services\Security\AppLockState.cs" Link="Services\Security\AppLockState.cs" />
+    <Compile Include="..\Services\Security\AppInactivityLockEvaluator.cs" Link="Services\Security\AppInactivityLockEvaluator.cs" />
     <Compile Include="..\Services\IUpdateService.cs" Link="Services\IUpdateService.cs" />
     <Compile Include="..\Services\UpdateService.cs" Link="Services\UpdateService.cs" />
     <Compile Include="..\Services\ICredentialService.cs" Link="Services\ICredentialService.cs" />
@@ -134,6 +145,8 @@
     <Compile Include="..\Services\ISessionTabFactory.cs" Link="Services\ISessionTabFactory.cs" />
     <Compile Include="..\Services\IConnectionProfileResolver.cs" Link="Services\IConnectionProfileResolver.cs" />
     <Compile Include="..\Services\ConnectionProfileResolver.cs" Link="Services\ConnectionProfileResolver.cs" />
+    <Compile Include="..\Services\Mcp\IMcpSessionRegistry.cs" Link="Services\Mcp\IMcpSessionRegistry.cs" />
+    <Compile Include="..\Services\Mcp\McpSessionRegistry.cs" Link="Services\Mcp\McpSessionRegistry.cs" />
     <Compile Include="..\Data\InheritanceResolver.cs" Link="Data\InheritanceResolver.cs" />
     <Compile Include="..\Data\Repositories\ICredentialRepository.cs" Link="Data\Repositories\ICredentialRepository.cs" />
     <Compile Include="..\Data\Repositories\IConnectionRepository.cs" Link="Data\Repositories\IConnectionRepository.cs" />

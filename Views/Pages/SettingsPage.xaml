@@ -60,6 +60,66 @@
                 </ScrollViewer>
             </TabViewItem>
 
+            <!-- Security -->
+            <TabViewItem Header="Security" IsClosable="False">
+                <ScrollViewer Style="{StaticResource TabContentScrollStyle}">
+                    <StackPanel Style="{StaticResource TabContentPanelStyle}">
+                        <TextBlock Text="App authentication" Style="{StaticResource SubtitleTextBlockStyle}" />
+                        <TextBlock Text="{x:Bind ViewModel.AppAuthenticationStatus, Mode=OneWay}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Opacity="0.75"
+                                   TextWrapping="Wrap" />
+                        <ComboBox Header="Unlock method"
+                                  SelectedIndex="{x:Bind ViewModel.AppAuthenticationModeIndex, Mode=TwoWay}"
+                                  Width="260"
+                                  HorizontalAlignment="Left">
+                            <ComboBoxItem Content="Disabled" />
+                            <ComboBoxItem Content="PIN" />
+                            <ComboBoxItem Content="Password" />
+                            <ComboBoxItem Content="Windows Hello" />
+                        </ComboBox>
+                        <StackPanel Visibility="{x:Bind ViewModel.ShowWindowsHelloFallback, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
+                                    Spacing="8">
+                            <TextBlock Text="{x:Bind ViewModel.WindowsHelloStatus, Mode=OneWay}"
+                                       Style="{StaticResource CaptionTextBlockStyle}"
+                                       Opacity="0.75"
+                                       TextWrapping="Wrap" />
+                            <ComboBox Header="Windows Hello fallback"
+                                      SelectedIndex="{x:Bind ViewModel.AppAuthenticationHelloFallbackIndex, Mode=TwoWay}"
+                                      Width="260"
+                                      HorizontalAlignment="Left">
+                                <ComboBoxItem Content="PIN" />
+                                <ComboBoxItem Content="Password" />
+                            </ComboBox>
+                            <Button Content="Refresh Windows Hello status"
+                                    HorizontalAlignment="Left"
+                                    Command="{x:Bind ViewModel.RefreshWindowsHelloStatusCommand}" />
+                        </StackPanel>
+                        <ComboBox Header="Lock after inactivity"
+                                  SelectedIndex="{x:Bind ViewModel.AppAuthenticationIdleTimeoutIndex, Mode=TwoWay}"
+                                  Width="260"
+                                  HorizontalAlignment="Left"
+                                  IsEnabled="{x:Bind ViewModel.IsAppAuthenticationEnabled, Mode=OneWay}">
+                            <ComboBoxItem Content="None" />
+                            <ComboBoxItem Content="1 minute" />
+                            <ComboBoxItem Content="5 minutes" />
+                            <ComboBoxItem Content="15 minutes" />
+                            <ComboBoxItem Content="30 minutes" />
+                            <ComboBoxItem Content="60 minutes" />
+                        </ComboBox>
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Content="{x:Bind ViewModel.SetOrChangeAppAuthenticationSecretButtonText, Mode=OneWay}"
+                                    IsEnabled="{x:Bind ViewModel.CanSetOrChangeAppAuthenticationSecret, Mode=OneWay}"
+                                    Visibility="{x:Bind ViewModel.CanSetOrChangeAppAuthenticationSecret, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
+                                    Command="{x:Bind ViewModel.SetOrChangeAppAuthenticationSecretCommand}" />
+                            <Button Content="Test unlock"
+                                    IsEnabled="{x:Bind ViewModel.CanTestAppAuthentication, Mode=OneWay}"
+                                    Command="{x:Bind ViewModel.TestAppAuthenticationCommand}" />
+                        </StackPanel>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabViewItem>
+
             <!-- Updates -->
             <TabViewItem Header="Updates" IsClosable="False">
                 <ScrollViewer Style="{StaticResource TabContentScrollStyle}">

@@ -304,6 +304,113 @@ public sealed class DialogService : IDialogService
         return accepted ? passwordBox.Password : null;
     }
 
+    public async Task<string?> PromptSecretAsync(
+        string title,
+        string message,
+        string label,
+        string primaryText = "OK")
+    {
+        var passwordBox = new PasswordBox
+        {
+            Header = label,
+            Width = 320,
+        };
+        var panel = new StackPanel { Spacing = 8 };
+        if (!string.IsNullOrWhiteSpace(message))
+        {
+            panel.Children.Add(new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap });
+        }
+        panel.Children.Add(passwordBox);
+
+        var dialog = new ContentDialog
+        {
+            Title = title,
+            Content = panel,
+            PrimaryButtonText = primaryText,
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = RequireXamlRoot(),
+            IsPrimaryButtonEnabled = false,
+        };
+
+        passwordBox.PasswordChanged += (_, _) =>
+            dialog.IsPrimaryButtonEnabled = !string.IsNullOrEmpty(passwordBox.Password);
+
+        var submittedViaEnter = false;
+        passwordBox.KeyDown += (_, args) =>
+        {
+            if (args.Key != Windows.System.VirtualKey.Enter || string.IsNullOrEmpty(passwordBox.Password)) return;
+            submittedViaEnter = true;
+            dialog.Hide();
+            args.Handled = true;
+        };
+
+        dialog.Opened += (_, _) => passwordBox.Focus(FocusState.Programmatic);
+
+        var result = await ShowDialogAsync(dialog);
+        var accepted = result == ContentDialogResult.Primary || submittedViaEnter;
+        return accepted ? passwordBox.Password : null;
+    }
+
+    public async Task<(string Secret, string Confirmation)?> PromptNewSecretAsync(
+        string title,
+        string message,
+        string label,
+        string primaryText = "Save")
+    {
+        var firstBox = new PasswordBox
+        {
+            Header = label,
+            Width = 320,
+        };
+        var confirmBox = new PasswordBox
+        {
+            Header = "Confirm " + label.ToLowerInvariant(),
+            Width = 320,
+        };
+        var panel = new StackPanel { Spacing = 8 };
+        if (!string.IsNullOrWhiteSpace(message))
+        {
+            panel.Children.Add(new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap });
+        }
+        panel.Children.Add(firstBox);
+        panel.Children.Add(confirmBox);
+
+        var dialog = new ContentDialog
+        {
+            Title = title,
+            Content = panel,
+            PrimaryButtonText = primaryText,
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = RequireXamlRoot(),
+            IsPrimaryButtonEnabled = false,
+        };
+
+        void UpdateEnabled() =>
+            dialog.IsPrimaryButtonEnabled =
+                !string.IsNullOrEmpty(firstBox.Password) &&
+                !string.IsNullOrEmpty(confirmBox.Password);
+
+        firstBox.PasswordChanged += (_, _) => UpdateEnabled();
+        confirmBox.PasswordChanged += (_, _) => UpdateEnabled();
+
+        var submittedViaEnter = false;
+        confirmBox.KeyDown += (_, args) =>
+        {
+            if (args.Key != Windows.System.VirtualKey.Enter || !dialog.IsPrimaryButtonEnabled) return;
+            submittedViaEnter = true;
+            dialog.Hide();
+            args.Handled = true;
+        };
+
+        dialog.Opened += (_, _) => firstBox.Focus(FocusState.Programmatic);
+
+        var result = await ShowDialogAsync(dialog);
+        var accepted = result == ContentDialogResult.Primary || submittedViaEnter;
+        return accepted ? (firstBox.Password, confirmBox.Password) : null;
+    }
+
     public async Task<TunnelRouteChoice> PromptTunnelRouteAsync(string connectionName, string tunnelName)
     {
         var dialog = new ContentDialog

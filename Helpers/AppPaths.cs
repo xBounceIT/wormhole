@@ -8,6 +8,7 @@ internal static class AppPaths
 
     private static readonly string DatabaseFilePath = Path.Combine(AppDataDirectory, "wormhole.db");
     private static readonly string SettingsFilePath = Path.Combine(AppDataDirectory, "settings.json");
+    private static readonly string AppAuthenticationFilePath = Path.Combine(AppDataDirectory, "app-auth.dpapi");
     private static readonly string LogsDirectory = Path.Combine(AppDataDirectory, "logs");
     private static readonly string KeysDirectory = Path.Combine(AppDataDirectory, "keys");
     private static readonly string TunnelConfigsDirectory = Path.Combine(AppDataDirectory, "tunnels");
@@ -40,6 +41,8 @@ internal static class AppPaths
     public static string GetDatabaseFilePath() => DatabaseFilePath;
 
     public static string GetSettingsFilePath() => SettingsFilePath;
+
+    public static string GetAppAuthenticationFilePath() => AppAuthenticationFilePath;
 
     public static string GetLogsDirectory() => LogsDirectory;
 

@@ -6,6 +6,7 @@ using Wormhole.Models;
 using Wormhole.Models.Backup;
 using Wormhole.Services;
 using Wormhole.Services.Mcp;
+using Wormhole.Services.Security;
 
 namespace Wormhole.ViewModels;
 
@@ -17,11 +18,16 @@ public partial class SettingsViewModel : ObservableObject
     private readonly CredentialsViewModel _credentials;
     private readonly TunnelConfigsViewModel _tunnels;
     private readonly IMcpServerHost _mcpHost;
+    private readonly IAppAuthenticationService _appAuthentication;
+    private readonly IAppAuthenticationVerifier _appAuthenticationVerifier;
+    private readonly IWindowsHelloService _windowsHello;
     private readonly ILogger<SettingsViewModel> _logger;
+    private static readonly int?[] IdleTimeoutOptions = [null, 1, 5, 15, 30, 60];
 
     // Guards against re-entrant OnEnableMcpServerChanged when we revert the toggle after a
     // start failure.
     private bool _suppressMcpToggle;
+    private bool _suppressSecurityChanges;
 
     [ObservableProperty]
     private ApplicationTheme theme;
@@ -43,6 +49,38 @@ public partial class SettingsViewModel : ObservableObject
 
     [ObservableProperty]
     private bool streamMcpCommandTyping;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsAppAuthenticationEnabled))]
+    [NotifyPropertyChangedFor(nameof(ShowWindowsHelloFallback))]
+    [NotifyPropertyChangedFor(nameof(CanTestAppAuthentication))]
+    [NotifyPropertyChangedFor(nameof(CanSetOrChangeAppAuthenticationSecret))]
+    [NotifyPropertyChangedFor(nameof(SetOrChangeAppAuthenticationSecretButtonText))]
+    private int appAuthenticationModeIndex;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SetOrChangeAppAuthenticationSecretButtonText))]
+    private int appAuthenticationHelloFallbackIndex;
+
+    [ObservableProperty]
+    private int appAuthenticationIdleTimeoutIndex;
+
+    [ObservableProperty]
+    private string appAuthenticationStatus = string.Empty;
+
+    [ObservableProperty]
+    private string windowsHelloStatus = string.Empty;
+
+    public bool IsAppAuthenticationEnabled => AppAuthenticationModeIndex != 0;
+
+    public bool ShowWindowsHelloFallback => AppAuthenticationModeIndex == (int)AppAuthenticationMode.WindowsHello;
+
+    public bool CanTestAppAuthentication => AppAuthenticationModeIndex != 0;
+
+    public bool CanSetOrChangeAppAuthenticationSecret => AppAuthenticationModeIndex != 0;
+
+    public string SetOrChangeAppAuthenticationSecretButtonText =>
+        "Set / change " + SecretActionLabel(SelectedSecretMethod());
 
     // double (not int) so it binds directly to NumberBox.Value.
     [ObservableProperty]
@@ -83,6 +121,9 @@ public partial class SettingsViewModel : ObservableObject
         CredentialsViewModel credentials,
         TunnelConfigsViewModel tunnels,
         IMcpServerHost mcpHost,
+        IAppAuthenticationService appAuthentication,
+        IAppAuthenticationVerifier appAuthenticationVerifier,
+        IWindowsHelloService windowsHello,
         ILogger<SettingsViewModel> logger)
     {
         _settingsService = settingsService;
@@ -91,6 +132,9 @@ public partial class SettingsViewModel : ObservableObject
         _credentials = credentials;
         _tunnels = tunnels;
         _mcpHost = mcpHost;
+        _appAuthentication = appAuthentication;
+        _appAuthenticationVerifier = appAuthenticationVerifier;
+        _windowsHello = windowsHello;
         _logger = logger;
         Update = update;
         theme = _settingsService.Current.Theme;
@@ -101,7 +145,11 @@ public partial class SettingsViewModel : ObservableObject
         enableMcpServer = _settingsService.Current.EnableMcpServer;
         streamMcpCommandTyping = _settingsService.Current.StreamMcpCommandTyping;
         mcpServerPort = _settingsService.Current.McpServerPort;
+        appAuthenticationModeIndex = (int)_settingsService.Current.AppAuthenticationMode;
+        appAuthenticationHelloFallbackIndex = (int)_settingsService.Current.AppAuthenticationHelloFallback;
+        appAuthenticationIdleTimeoutIndex = TimeoutMinutesToIndex(_settingsService.Current.AppAuthenticationIdleTimeoutMinutes);
         UpdateMcpStatus();
+        _ = RefreshSecurityStatusAsync();
     }
 
     partial void OnThemeChanged(ApplicationTheme value)
@@ -139,6 +187,323 @@ public partial class SettingsViewModel : ObservableObject
         _settingsService.Current.StreamMcpCommandTyping = value;
         _settingsService.Save();
     }
+
+    // === App authentication ==============================================
+
+    partial void OnAppAuthenticationModeIndexChanged(int value)
+    {
+        if (_suppressSecurityChanges) return;
+        _ = ChangeAppAuthenticationModeAsync(value);
+    }
+
+    partial void OnAppAuthenticationHelloFallbackIndexChanged(int value)
+    {
+        if (_suppressSecurityChanges) return;
+        _ = ChangeHelloFallbackAsync(value);
+    }
+
+    partial void OnAppAuthenticationIdleTimeoutIndexChanged(int value)
+    {
+        if (_suppressSecurityChanges) return;
+        _ = ChangeIdleTimeoutAsync(value);
+    }
+
+    private async Task ChangeAppAuthenticationModeAsync(int value)
+    {
+        if (value is < 0 or > 3)
+        {
+            SetSecurityIndexesFromSettings();
+            return;
+        }
+
+        var oldMode = _settingsService.Current.AppAuthenticationMode;
+        var newMode = (AppAuthenticationMode)value;
+        if (oldMode == newMode) return;
+
+        if (!await RequireCurrentAuthenticationAsync("Confirm security change").ConfigureAwait(true))
+        {
+            SetSecurityIndexesFromSettings();
+            return;
+        }
+
+        if (newMode == AppAuthenticationMode.Disabled)
+        {
+            await _appAuthentication.DeleteAllAsync().ConfigureAwait(true);
+            _settingsService.Current.AppAuthenticationMode = AppAuthenticationMode.Disabled;
+            _settingsService.Save();
+            await RefreshSecurityStatusAsync().ConfigureAwait(true);
+            return;
+        }
+
+        var requiredSecret = RequiredSecretForMode(newMode, _settingsService.Current.AppAuthenticationHelloFallback);
+
+        if (!await EnsureSecretConfiguredAsync(requiredSecret).ConfigureAwait(true))
+        {
+            SetSecurityIndexesFromSettings();
+            return;
+        }
+
+        _settingsService.Current.AppAuthenticationMode = newMode;
+        _settingsService.Current.AppAuthenticationIdleTimeoutMinutes ??= 15;
+        _settingsService.Save();
+        SetSecurityIndexesFromSettings();
+        await RefreshSecurityStatusAsync().ConfigureAwait(true);
+    }
+
+    private async Task ChangeHelloFallbackAsync(int value)
+    {
+        if (value is < 0 or > 1)
+        {
+            SetSecurityIndexesFromSettings();
+            return;
+        }
+
+        var fallback = (AppAuthenticationFallbackMethod)value;
+        if (_settingsService.Current.AppAuthenticationHelloFallback == fallback) return;
+
+        if (!await RequireCurrentAuthenticationAsync("Confirm fallback change").ConfigureAwait(true))
+        {
+            SetSecurityIndexesFromSettings();
+            return;
+        }
+
+        if (!await EnsureSecretConfiguredAsync(fallback).ConfigureAwait(true))
+        {
+            SetSecurityIndexesFromSettings();
+            return;
+        }
+
+        _settingsService.Current.AppAuthenticationHelloFallback = fallback;
+        _settingsService.Save();
+        SetSecurityIndexesFromSettings();
+        await RefreshSecurityStatusAsync().ConfigureAwait(true);
+    }
+
+    private async Task ChangeIdleTimeoutAsync(int value)
+    {
+        if (value < 0 || value >= IdleTimeoutOptions.Length)
+        {
+            SetSecurityIndexesFromSettings();
+            return;
+        }
+
+        var minutes = TimeoutIndexToMinutes(value);
+        if (_settingsService.Current.AppAuthenticationIdleTimeoutMinutes == minutes) return;
+
+        if (_settingsService.Current.AppAuthenticationMode != AppAuthenticationMode.Disabled &&
+            !await RequireCurrentAuthenticationAsync("Confirm timeout change").ConfigureAwait(true))
+        {
+            SetSecurityIndexesFromSettings();
+            return;
+        }
+
+        _settingsService.Current.AppAuthenticationIdleTimeoutMinutes = minutes;
+        _settingsService.Save();
+        SetSecurityIndexesFromSettings();
+        await RefreshSecurityStatusAsync().ConfigureAwait(true);
+    }
+
+    [RelayCommand]
+    private async Task SetOrChangeAppAuthenticationSecretAsync()
+    {
+        if (AppAuthenticationModeIndex == 0) return;
+
+        var method = SelectedSecretMethod();
+        if (!await RequireCurrentAuthenticationAsync($"Confirm {SecretActionLabel(method)} change").ConfigureAwait(true)) return;
+        if (!await PromptAndStoreSecretAsync(method).ConfigureAwait(true)) return;
+
+        if (_settingsService.Current.AppAuthenticationMode == AppAuthenticationMode.Disabled)
+        {
+            _settingsService.Current.AppAuthenticationMode = method == AppAuthenticationFallbackMethod.Password
+                ? AppAuthenticationMode.Password
+                : AppAuthenticationMode.Pin;
+            _settingsService.Current.AppAuthenticationIdleTimeoutMinutes ??= 15;
+        }
+        _settingsService.Save();
+        SetSecurityIndexesFromSettings();
+        await RefreshSecurityStatusAsync().ConfigureAwait(true);
+    }
+
+    [RelayCommand]
+    private async Task TestAppAuthenticationAsync()
+    {
+        var mode = _settingsService.Current.AppAuthenticationMode;
+        if (mode == AppAuthenticationMode.Disabled)
+        {
+            await _dialog.ShowMessageAsync("App authentication", "App authentication is disabled.");
+            return;
+        }
+
+        var result = await VerifyConfiguredAuthenticationAsync("Test app authentication").ConfigureAwait(true);
+        await _dialog.ShowMessageAsync(
+            result ? "Authentication succeeded" : "Authentication failed",
+            result ? "Wormhole accepted the configured unlock method." : "Wormhole could not verify the unlock method.");
+    }
+
+    [RelayCommand]
+    private async Task RefreshWindowsHelloStatusAsync()
+    {
+        var availability = await _windowsHello.CheckAvailabilityAsync().ConfigureAwait(true);
+        WindowsHelloStatus = availability.Message;
+    }
+
+    private async Task RefreshSecurityStatusAsync()
+    {
+        try
+        {
+            var status = await _appAuthentication.GetStatusAsync().ConfigureAwait(true);
+            var parts = new List<string>
+            {
+                _settingsService.Current.AppAuthenticationMode == AppAuthenticationMode.Disabled
+                    ? "App authentication is disabled."
+                    : $"App authentication is enabled ({DisplayMode(_settingsService.Current.AppAuthenticationMode)}).",
+                status.HasPin ? "PIN set." : "PIN not set.",
+                status.HasPassword ? "Password set." : "Password not set.",
+            };
+            if (status.IsCorrupted)
+            {
+                parts.Add("Verifier store is unreadable; set a new PIN or password.");
+            }
+            AppAuthenticationStatus = string.Join(" ", parts);
+            await RefreshWindowsHelloStatusAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to refresh app authentication status.");
+            AppAuthenticationStatus = "Could not read app authentication status.";
+        }
+    }
+
+    private async Task<bool> RequireCurrentAuthenticationAsync(string title)
+    {
+        var mode = _settingsService.Current.AppAuthenticationMode;
+        if (mode == AppAuthenticationMode.Disabled) return true;
+
+        var configured = await _appAuthentication.IsConfiguredForModeAsync(
+            mode,
+            _settingsService.Current.AppAuthenticationHelloFallback).ConfigureAwait(true);
+        if (!configured) return true;
+
+        var ok = await VerifyConfiguredAuthenticationAsync(title).ConfigureAwait(true);
+        if (!ok)
+        {
+            await _dialog.ShowMessageAsync("Authentication required", "The security setting was not changed.");
+        }
+        return ok;
+    }
+
+    private async Task<bool> VerifyConfiguredAuthenticationAsync(string title)
+    {
+        var ownerHwnd = App.Current.MainWindow?.GetHwnd() ?? IntPtr.Zero;
+        var result = await _appAuthenticationVerifier.VerifyAsync(
+            _settingsService.Current.AppAuthenticationMode,
+            _settingsService.Current.AppAuthenticationHelloFallback,
+            ownerHwnd,
+            "Unlock Wormhole",
+            method => _dialog.PromptSecretAsync(
+                title,
+                "Confirm your current Wormhole unlock secret.",
+                SecretLabel(method),
+                "Confirm")).ConfigureAwait(true);
+        if (!result.Succeeded && !string.IsNullOrWhiteSpace(result.Message))
+        {
+            _logger.LogInformation("App authentication verification failed while changing settings: {Message}", result.Message);
+        }
+        return result.Succeeded;
+    }
+
+    private async Task<bool> EnsureSecretConfiguredAsync(AppAuthenticationFallbackMethod method)
+    {
+        var status = await _appAuthentication.GetStatusAsync().ConfigureAwait(true);
+        var hasSecret = HasSecret(status, method);
+        return hasSecret || await PromptAndStoreSecretAsync(method).ConfigureAwait(true);
+    }
+
+    private async Task<bool> PromptAndStoreSecretAsync(AppAuthenticationFallbackMethod method)
+    {
+        var label = SecretLabel(method);
+        var entered = await _dialog.PromptNewSecretAsync(
+            $"Set Wormhole {label.ToLowerInvariant()}",
+            SecretRequirementText(method),
+            label,
+            "Save").ConfigureAwait(true);
+        if (entered is null) return false;
+
+        if (entered.Value.Secret != entered.Value.Confirmation)
+        {
+            await _dialog.ShowMessageAsync("Secret mismatch", $"{label} and confirmation do not match.");
+            return false;
+        }
+
+        var validation = _appAuthentication.ValidateSecret(method, entered.Value.Secret);
+        if (!validation.IsValid)
+        {
+            await _dialog.ShowMessageAsync($"Invalid {label.ToLowerInvariant()}", validation.Error ?? "The secret is not valid.");
+            return false;
+        }
+
+        await _appAuthentication.SetSecretAsync(method, entered.Value.Secret).ConfigureAwait(true);
+        return true;
+    }
+
+    private void SetSecurityIndexesFromSettings()
+    {
+        _suppressSecurityChanges = true;
+        AppAuthenticationModeIndex = (int)_settingsService.Current.AppAuthenticationMode;
+        AppAuthenticationHelloFallbackIndex = (int)_settingsService.Current.AppAuthenticationHelloFallback;
+        AppAuthenticationIdleTimeoutIndex = TimeoutMinutesToIndex(_settingsService.Current.AppAuthenticationIdleTimeoutMinutes);
+        _suppressSecurityChanges = false;
+        OnPropertyChanged(nameof(IsAppAuthenticationEnabled));
+        OnPropertyChanged(nameof(ShowWindowsHelloFallback));
+        OnPropertyChanged(nameof(CanTestAppAuthentication));
+        OnPropertyChanged(nameof(CanSetOrChangeAppAuthenticationSecret));
+        OnPropertyChanged(nameof(SetOrChangeAppAuthenticationSecretButtonText));
+    }
+
+    private static int? TimeoutIndexToMinutes(int index) =>
+        index >= 0 && index < IdleTimeoutOptions.Length ? IdleTimeoutOptions[index] : 15;
+
+    public static int TimeoutMinutesToIndex(int? minutes)
+    {
+        var index = Array.IndexOf(IdleTimeoutOptions, minutes);
+        return index >= 0 ? index : 3;
+    }
+
+    private static AppAuthenticationFallbackMethod RequiredSecretForMode(
+        AppAuthenticationMode mode,
+        AppAuthenticationFallbackMethod helloFallback) => mode switch
+    {
+        AppAuthenticationMode.Password => AppAuthenticationFallbackMethod.Password,
+        AppAuthenticationMode.WindowsHello => helloFallback,
+        _ => AppAuthenticationFallbackMethod.Pin,
+    };
+
+    private AppAuthenticationFallbackMethod SelectedSecretMethod() =>
+        AppAuthenticationModeIndex == (int)AppAuthenticationMode.WindowsHello
+            ? (AppAuthenticationFallbackMethod)AppAuthenticationHelloFallbackIndex
+            : RequiredSecretForMode((AppAuthenticationMode)AppAuthenticationModeIndex, AppAuthenticationFallbackMethod.Pin);
+
+    private static bool HasSecret(AppAuthenticationSecretStatus status, AppAuthenticationFallbackMethod method) =>
+        method == AppAuthenticationFallbackMethod.Pin ? status.HasPin : status.HasPassword;
+
+    private static string SecretLabel(AppAuthenticationFallbackMethod method) =>
+        method == AppAuthenticationFallbackMethod.Pin ? "PIN" : "Password";
+
+    private static string SecretActionLabel(AppAuthenticationFallbackMethod method) =>
+        method == AppAuthenticationFallbackMethod.Pin ? "PIN" : "password";
+
+    private static string SecretRequirementText(AppAuthenticationFallbackMethod method) =>
+        method == AppAuthenticationFallbackMethod.Pin
+            ? "Choose a 4 to 12 digit PIN."
+            : "Choose a password between 8 and 128 characters.";
+
+    private static string DisplayMode(AppAuthenticationMode mode) => mode switch
+    {
+        AppAuthenticationMode.Pin => "PIN",
+        AppAuthenticationMode.Password => "password",
+        AppAuthenticationMode.WindowsHello => "Windows Hello",
+        _ => "disabled",
+    };
 
     // === MCP server ========================================================
 
