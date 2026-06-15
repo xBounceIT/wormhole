@@ -472,11 +472,11 @@ public partial class SettingsViewModel : ObservableObject
     private static AppAuthenticationFallbackMethod RequiredSecretForMode(
         AppAuthenticationMode mode,
         AppAuthenticationFallbackMethod helloFallback) => mode switch
-    {
-        AppAuthenticationMode.Password => AppAuthenticationFallbackMethod.Password,
-        AppAuthenticationMode.WindowsHello => helloFallback,
-        _ => AppAuthenticationFallbackMethod.Pin,
-    };
+        {
+            AppAuthenticationMode.Password => AppAuthenticationFallbackMethod.Password,
+            AppAuthenticationMode.WindowsHello => helloFallback,
+            _ => AppAuthenticationFallbackMethod.Pin,
+        };
 
     private AppAuthenticationFallbackMethod SelectedSecretMethod() =>
         AppAuthenticationModeIndex == (int)AppAuthenticationMode.WindowsHello

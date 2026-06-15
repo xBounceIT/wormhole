@@ -162,6 +162,7 @@ public sealed class DialogWatchguardSamlAuthService : IWatchguardSamlAuthService
 
         ContentDialogResult dialogResult;
         using (RdpOverlayCoordinator.Suppress())
+        using (Wormhole.Services.ContentDialogTracker.Track(dialog))
         {
             dialogResult = await dialog.ShowAsync();
         }

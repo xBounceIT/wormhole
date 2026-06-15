@@ -478,7 +478,7 @@ public sealed class DialogService : IDialogService
             XamlRoot = RequireXamlRoot(),
         };
 
-        return dialog.ShowAsync().AsTask();
+        return ShowDialogAsync(dialog);
     }
 
     public async Task<(string Username, string Password)?> PromptCredentialsAsync(string title, string message, string? initialUsername = null)
@@ -597,7 +597,7 @@ public sealed class DialogService : IDialogService
         // we re-invoke Hide() to let the dialog actually close.
         void OnClosing(ContentDialog sender, ContentDialogClosingEventArgs args)
         {
-            if (!vm.IsBusy) return;
+            if (!vm.IsBusy || ContentDialogTracker.IsLockDismissalInProgress) return;
 
             // Defer this Close attempt.
             args.Cancel = true;
@@ -674,7 +674,7 @@ public sealed class DialogService : IDialogService
         // cancels first, then re-issues Hide once the run finishes so Result has been set.
         void OnClosing(ContentDialog sender, ContentDialogClosingEventArgs args)
         {
-            if (!vm.IsBusy) return;
+            if (!vm.IsBusy || ContentDialogTracker.IsLockDismissalInProgress) return;
             args.Cancel = true;
             vm.RequestCancelForClose();
             _ = vm.WaitForRunEnd().ContinueWith(_ =>
@@ -734,7 +734,7 @@ public sealed class DialogService : IDialogService
 
         void OnClosing(ContentDialog sender, ContentDialogClosingEventArgs args)
         {
-            if (!vm.IsBusy) return;
+            if (!vm.IsBusy || ContentDialogTracker.IsLockDismissalInProgress) return;
             args.Cancel = true;
             vm.RequestCancelForClose();
             _ = vm.WaitForRunEnd().ContinueWith(_ =>
@@ -769,6 +769,7 @@ public sealed class DialogService : IDialogService
     private static async Task<ContentDialogResult> ShowDialogAsync(ContentDialog dialog)
     {
         using (RdpOverlayCoordinator.Suppress())
+        using (ContentDialogTracker.Track(dialog))
         {
             return await dialog.ShowAsync();
         }

@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Data;
 using Wormhole.Data.Repositories;
@@ -8,7 +9,6 @@ using Wormhole.Services.Security;
 using Wormhole.Tests.Fakes;
 using Wormhole.ViewModels;
 using Xunit;
-using System.Runtime.CompilerServices;
 
 namespace Wormhole.Tests.Services.Security;
 

@@ -211,6 +211,7 @@ public sealed class FileTransferDialogService : IFileTransferDialogService
             // Suppress any connected RDP overlay (top-level window above the WinUI content) so it
             // can't occlude this dialog while an RDP tab is the active, visible one.
             using (Wormhole.Helpers.RdpOverlayCoordinator.Suppress())
+            using (ContentDialogTracker.Track(dialog))
             {
                 await dialog.ShowAsync();
             }

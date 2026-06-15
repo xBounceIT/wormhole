@@ -233,12 +233,33 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private async void OnSettingsChanged(object? sender, EventArgs args)
+    private void OnSettingsChanged(object? sender, EventArgs args)
     {
-        EnsureIdleLockTimer();
-        if (!await ShouldRequireAuthenticationAsync().ConfigureAwait(true))
+        if (DispatcherQueue.HasThreadAccess)
         {
-            HideLockOverlay();
+            _ = ApplySettingsChangedAsync();
+            return;
+        }
+
+        if (!DispatcherQueue.TryEnqueue(() => _ = ApplySettingsChangedAsync()))
+        {
+            _logger.LogWarning("Could not marshal settings-change handling to the UI thread.");
+        }
+    }
+
+    private async Task ApplySettingsChangedAsync()
+    {
+        try
+        {
+            EnsureIdleLockTimer();
+            if (!await ShouldRequireAuthenticationAsync().ConfigureAwait(true))
+            {
+                HideLockOverlay();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to apply settings change.");
         }
     }
 
@@ -354,6 +375,7 @@ public sealed partial class MainWindow : Window
 
     private void ResetLockOverlay(string message)
     {
+        ContentDialogTracker.HideAllForLock();
         LockTitleText.Text = "Wormhole is locked";
         LockMessageText.Text = message;
         LockErrorBar.IsOpen = false;
