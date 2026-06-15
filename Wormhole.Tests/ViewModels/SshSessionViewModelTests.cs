@@ -541,6 +541,21 @@ public sealed class SshSessionViewModelTests
     }
 
     [Fact]
+    public void RetryCommand_CanExecute_IsFalse_WhileConnectGateHeldAfterFailure()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+
+        vm.Status = SessionStatus.Failed;
+        vm.SetConnectInFlightForTesting(1);
+
+        Assert.False(vm.RetryCommand.CanExecute(null));
+
+        vm.SetConnectInFlightForTesting(0);
+        Assert.True(vm.RetryCommand.CanExecute(null));
+    }
+
+    [Fact]
     public void MarkConnecting_FlipsDisconnectedToConnecting_WhenIdle()
     {
         // The back-to-back-open repro: a freshly-opened tab whose view was unloaded mid-init sits
