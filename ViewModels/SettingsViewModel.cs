@@ -235,7 +235,9 @@ public partial class SettingsViewModel : ObservableObject
             return;
         }
 
-        var requiredSecret = RequiredSecretForMode(newMode, _settingsService.Current.AppAuthenticationHelloFallback);
+        var requiredSecret = newMode == AppAuthenticationMode.WindowsHello
+            ? await ResolveWindowsHelloFallbackAsync().ConfigureAwait(true)
+            : RequiredSecretForMode(newMode, _settingsService.Current.AppAuthenticationHelloFallback);
 
         if (!await EnsureSecretConfiguredAsync(requiredSecret).ConfigureAwait(true))
         {
@@ -244,6 +246,10 @@ public partial class SettingsViewModel : ObservableObject
         }
 
         _settingsService.Current.AppAuthenticationMode = newMode;
+        if (newMode == AppAuthenticationMode.WindowsHello)
+        {
+            _settingsService.Current.AppAuthenticationHelloFallback = requiredSecret;
+        }
         _settingsService.Current.AppAuthenticationIdleTimeoutMinutes ??= 15;
         _settingsService.Save();
         SetSecurityIndexesFromSettings();
@@ -417,6 +423,21 @@ public partial class SettingsViewModel : ObservableObject
         var status = await _appAuthentication.GetStatusAsync().ConfigureAwait(true);
         var hasSecret = HasSecret(status, method);
         return hasSecret || await PromptAndStoreSecretAsync(method).ConfigureAwait(true);
+    }
+
+    private async Task<AppAuthenticationFallbackMethod> ResolveWindowsHelloFallbackAsync()
+    {
+        var fallback = AppAuthenticationHelloFallbackIndex is >= 0 and <= 1
+            ? (AppAuthenticationFallbackMethod)AppAuthenticationHelloFallbackIndex
+            : _settingsService.Current.AppAuthenticationHelloFallback;
+
+        var status = await _appAuthentication.GetStatusAsync().ConfigureAwait(true);
+        if (HasSecret(status, fallback)) return fallback;
+
+        var alternate = fallback == AppAuthenticationFallbackMethod.Pin
+            ? AppAuthenticationFallbackMethod.Password
+            : AppAuthenticationFallbackMethod.Pin;
+        return HasSecret(status, alternate) ? alternate : fallback;
     }
 
     private async Task<bool> PromptAndStoreSecretAsync(AppAuthenticationFallbackMethod method)

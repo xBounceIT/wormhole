@@ -4,9 +4,20 @@ namespace Wormhole.Services.Security;
 
 public sealed class AppInactivityLockEvaluator
 {
-    private DateTimeOffset _lastUnlockUtc = DateTimeOffset.UtcNow;
+    private static readonly TimeSpan SuspendedTimerGap = TimeSpan.FromSeconds(45);
 
-    public void MarkUnlocked(DateTimeOffset nowUtc) => _lastUnlockUtc = nowUtc;
+    private DateTimeOffset _lastUnlockUtc = DateTimeOffset.UtcNow;
+    private DateTimeOffset? _lastSampleUtc;
+    private TimeSpan _lastSystemIdle;
+    private bool _hasIdleSample;
+
+    public void MarkUnlocked(DateTimeOffset nowUtc)
+    {
+        _lastUnlockUtc = nowUtc;
+        _lastSampleUtc = nowUtc;
+        _lastSystemIdle = TimeSpan.Zero;
+        _hasIdleSample = false;
+    }
 
     public bool ShouldLock(
         AppSettings settings,
@@ -20,7 +31,23 @@ public sealed class AppInactivityLockEvaluator
         if (minutes <= 0) return false;
 
         var timeout = TimeSpan.FromMinutes(minutes);
+        var effectiveIdle = EstimateEffectiveIdle(systemIdle, nowUtc);
+        _lastSampleUtc = nowUtc;
+        _lastSystemIdle = systemIdle;
+        _hasIdleSample = true;
+
         if (nowUtc - _lastUnlockUtc < timeout) return false;
-        return systemIdle >= timeout;
+        return effectiveIdle >= timeout;
+    }
+
+    private TimeSpan EstimateEffectiveIdle(TimeSpan systemIdle, DateTimeOffset nowUtc)
+    {
+        if (!_hasIdleSample) return systemIdle;
+        if (_lastSampleUtc is not { } lastSampleUtc) return systemIdle;
+
+        var sampleGap = nowUtc - lastSampleUtc;
+        if (sampleGap < SuspendedTimerGap) return systemIdle;
+
+        return TimeSpan.FromTicks(Math.Max(systemIdle.Ticks, (_lastSystemIdle + sampleGap).Ticks));
     }
 }
