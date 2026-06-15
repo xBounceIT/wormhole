@@ -72,6 +72,7 @@
     <Compile Include="..\Services\Tunneling\ITunnelRoutePrompter.cs" Link="Services\Tunneling\ITunnelRoutePrompter.cs" />
     <Compile Include="..\Services\Tunneling\TunnelRoutePrompter.cs" Link="Services\Tunneling\TunnelRoutePrompter.cs" />
     <Compile Include="..\Services\Tunneling\SocksTunnelInstance.cs" Link="Services\Tunneling\SocksTunnelInstance.cs" />
+    <Compile Include="..\Services\Tunneling\ProcessExitSignal.cs" Link="Services\Tunneling\ProcessExitSignal.cs" />
     <Compile Include="..\Services\Tunneling\BorrowedTunnelInstance.cs" Link="Services\Tunneling\BorrowedTunnelInstance.cs" />
     <Compile Include="..\Services\Tunneling\Socks5Client.cs" Link="Services\Tunneling\Socks5Client.cs" />
     <Compile Include="..\Services\Tunneling\LocalTcpForwarder.cs" Link="Services\Tunneling\LocalTcpForwarder.cs" />

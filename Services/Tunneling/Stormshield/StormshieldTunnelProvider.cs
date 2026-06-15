@@ -167,7 +167,8 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             return new SocksTunnelInstance(
                 host.SocksEndpoint,
                 _loggerFactory.CreateLogger<SocksTunnelInstance>(),
-                onDispose: async () => await host.DisposeAsync().ConfigureAwait(false));
+                onDispose: host.DisposeAsync,
+                failureSignal: host.ProcessExited);
         }
         catch
         {

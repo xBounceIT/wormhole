@@ -21,16 +21,27 @@ public sealed class SocksTunnelInstance : ITunnelInstance
     private readonly Func<ValueTask>? _onDispose;
     private readonly List<LocalTcpForwarder> _forwarders = new();
     private readonly object _gate = new();
+    private int _state = (int)TunnelState.Up;
     private int _disposedFlag;
 
-    public SocksTunnelInstance(IPEndPoint socksEndpoint, ILogger logger, Func<ValueTask>? onDispose = null)
+    public SocksTunnelInstance(
+        IPEndPoint socksEndpoint,
+        ILogger logger,
+        Func<ValueTask>? onDispose = null,
+        Task<int?>? failureSignal = null)
     {
         _socksEndpoint = socksEndpoint ?? throw new ArgumentNullException(nameof(socksEndpoint));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         _onDispose = onDispose;
+
+        if (failureSignal is not null)
+        {
+            _ = MonitorFailureSignalAsync(failureSignal);
+        }
     }
 
-    public TunnelState State => Volatile.Read(ref _disposedFlag) != 0 ? TunnelState.Closed : TunnelState.Up;
+    public TunnelState State =>
+        Volatile.Read(ref _disposedFlag) != 0 ? TunnelState.Closed : (TunnelState)Volatile.Read(ref _state);
 
     public event EventHandler<TunnelStateChangedEventArgs>? StateChanged;
 
@@ -38,7 +49,7 @@ public sealed class SocksTunnelInstance : ITunnelInstance
 
     public async Task<Stream> DialAsync(string host, int port, CancellationToken cancellationToken)
     {
-        ThrowIfDisposed();
+        ThrowIfUnavailable();
         return await Socks5Client.ConnectAsync(_socksEndpoint, host, port, cancellationToken).ConfigureAwait(false);
     }
 
@@ -55,7 +66,7 @@ public sealed class SocksTunnelInstance : ITunnelInstance
         int boundPort;
         lock (_gate)
         {
-            ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposedFlag) != 0, this);
+            ThrowIfUnavailable();
 
             if (FindForwarderLocked(host, port) is { } existing)
             {
@@ -99,6 +110,7 @@ public sealed class SocksTunnelInstance : ITunnelInstance
         // Interlocked guard makes DisposeAsync idempotent under concurrent calls — the
         // sidecar process tear-down (via _onDispose) must run exactly once.
         if (Interlocked.Exchange(ref _disposedFlag, 1) != 0) return;
+        Interlocked.Exchange(ref _state, (int)TunnelState.Closed);
 
         LocalTcpForwarder[] fwds;
         lock (_gate) { fwds = _forwarders.ToArray(); _forwarders.Clear(); }
@@ -113,8 +125,52 @@ public sealed class SocksTunnelInstance : ITunnelInstance
         }
     }
 
-    private void ThrowIfDisposed()
+    private async Task MonitorFailureSignalAsync(Task<int?> failureSignal)
     {
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposedFlag) != 0, this);
+        int? exitCode = null;
+        Exception? error = null;
+        try
+        {
+            exitCode = await failureSignal.ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            error = ex;
+        }
+
+        if (Volatile.Read(ref _disposedFlag) != 0) return;
+
+        var message = error is null
+            ? exitCode is { } code
+                ? $"Tunnel sidecar exited with code {code}."
+                : "Tunnel sidecar exited."
+            : "Tunnel sidecar exit monitor failed.";
+
+        if (error is null)
+        {
+            _logger.LogWarning("{Message}", message);
+        }
+        else
+        {
+            _logger.LogWarning(error, "{Message}", message);
+        }
+
+        if (Interlocked.CompareExchange(
+                ref _state,
+                (int)TunnelState.Failed,
+                (int)TunnelState.Up) == (int)TunnelState.Up)
+        {
+            StateChanged?.Invoke(this, new TunnelStateChangedEventArgs(TunnelState.Failed, message, error));
+        }
+    }
+
+    private void ThrowIfUnavailable()
+    {
+        var state = State;
+        ObjectDisposedException.ThrowIf(state == TunnelState.Closed, this);
+        if (state == TunnelState.Failed)
+        {
+            throw new IOException("Tunnel is unavailable because its sidecar process exited.");
+        }
     }
 }
