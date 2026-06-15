@@ -100,7 +100,7 @@ public sealed class TunnelManager
 
     // === Shared pool ====================================================
 
-    private sealed class SharedEntry
+    private sealed class SharedEntry : IDisposable
     {
         public SharedEntry(Guid configId, DateTime configUpdatedAt, ILogger<TunnelManager> logger)
         {
@@ -115,9 +115,13 @@ public sealed class TunnelManager
         // means the user changed the config and the pooled tunnel no longer reflects it.
         public DateTime ConfigUpdatedAt { get; }
         // Cancels the provider establishment. Cancelled only when the last waiter gives up.
-        // Deliberately never disposed: it has no timer (no OS handle to free), and disposing it
-        // from the establish core would race a late waiter's Cancel in ReleaseAsync.
-        public CancellationTokenSource EstablishCts { get; } = new();
+        // The token's wait handle can be materialized by provider/library code, so the source is
+        // disposed after the provider returns. Cancel and Dispose are serialized here because
+        // CancellationTokenSource.Dispose racing CancellationTokenSource.Cancel is not safe.
+        private readonly object _establishCtsGate = new();
+        private CancellationTokenSource? _establishCts = new();
+        private int _activeEstablishCancels;
+        private bool _disposeEstablishCtsRequested;
         public FanOutProgress Progress { get; }
         public Task<ITunnelInstance> EstablishTask { get; set; } = null!;
         // Leases handed out + callers still awaiting the establishment. Guarded by _poolGate.
@@ -125,6 +129,67 @@ public sealed class TunnelManager
         // Set (under _poolGate) only after the provider establishment succeeded AND at least one
         // waiter is still around to own the result. Null while establishing or after failure.
         public ITunnelInstance? Instance;
+
+        public CancellationToken EstablishToken
+        {
+            get
+            {
+                lock (_establishCtsGate)
+                {
+                    return (_establishCts ?? throw new ObjectDisposedException(nameof(SharedEntry))).Token;
+                }
+            }
+        }
+
+        public void CancelEstablishment()
+        {
+            CancellationTokenSource? source;
+            lock (_establishCtsGate)
+            {
+                source = _establishCts;
+                if (source is null) return;
+                _activeEstablishCancels++;
+            }
+
+            try
+            {
+                source.Cancel();
+            }
+            finally
+            {
+                CancellationTokenSource? toDispose = null;
+                lock (_establishCtsGate)
+                {
+                    _activeEstablishCancels--;
+                    if (_activeEstablishCancels == 0 && _disposeEstablishCtsRequested)
+                    {
+                        toDispose = TakeEstablishCtsForDisposeLocked();
+                    }
+                }
+                toDispose?.Dispose();
+            }
+        }
+
+        public void DisposeEstablishmentCancellation()
+        {
+            CancellationTokenSource? toDispose = null;
+            lock (_establishCtsGate)
+            {
+                _disposeEstablishCtsRequested = true;
+                toDispose = TakeEstablishCtsForDisposeLocked();
+            }
+            toDispose?.Dispose();
+        }
+
+        public void Dispose() => DisposeEstablishmentCancellation();
+
+        private CancellationTokenSource? TakeEstablishCtsForDisposeLocked()
+        {
+            if (_activeEstablishCancels != 0) return null;
+            var source = _establishCts;
+            _establishCts = null;
+            return source;
+        }
     }
 
     private async Task<ITunnelInstance> LeaseSharedAsync(
@@ -260,7 +325,7 @@ public sealed class TunnelManager
     private async ValueTask ReleaseAsync(SharedEntry entry)
     {
         ITunnelInstance? toDispose = null;
-        CancellationTokenSource? toCancel = null;
+        SharedEntry? toCancel = null;
         lock (_poolGate)
         {
             entry.RefCount--;
@@ -275,12 +340,11 @@ public sealed class TunnelManager
             {
                 // Still establishing (or already failed): abort the establishment. The establish
                 // core disposes any instance it ends up producing once it sees RefCount == 0.
-                toCancel = entry.EstablishCts;
+                toCancel = entry;
             }
         }
 
-        // Safe even if the establishment already finished — the CTS is never disposed (see SharedEntry).
-        toCancel?.Cancel();
+        toCancel?.CancelEstablishment();
 
         if (toDispose is not null)
         {
@@ -308,7 +372,7 @@ public sealed class TunnelManager
     {
         try
         {
-            var instance = await EstablishViaProviderAsync(config, entry.EstablishCts.Token, entry.Progress)
+            var instance = await EstablishViaProviderAsync(config, entry.EstablishToken, entry.Progress)
                 .ConfigureAwait(false);
 
             bool orphaned;
@@ -336,6 +400,10 @@ public sealed class TunnelManager
             // A no-op when the zero-ref release already evicted the entry.
             lock (_poolGate) EvictLocked(entry);
             throw;
+        }
+        finally
+        {
+            entry.DisposeEstablishmentCancellation();
         }
     }
 
