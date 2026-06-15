@@ -555,7 +555,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     /// </summary>
     public void MarkConnecting()
     {
-        if (Status == SessionStatus.Disconnected && _session is null && _connectInFlight == 0)
+        if (Status == SessionStatus.Disconnected && _session is null && Volatile.Read(ref _connectInFlight) == 0)
         {
             Status = SessionStatus.Connecting;
         }
