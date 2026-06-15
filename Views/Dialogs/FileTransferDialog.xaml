@@ -38,10 +38,8 @@
                                      Transfers="{x:Bind ViewModel.Transfers, Mode=OneWay}"
                                      Visibility="{x:Bind ViewModel.Transfers.Count, Mode=OneWay, Converter={StaticResource CountToVisibilityConverter}}" />
 
-        <!-- Close button row: built-in ContentDialog buttons stretch to fill their grid
-             column (template local-value), so a single Close button becomes a full-width
-             slab that can't be compacted via Style setters. Putting the button in the
-             dialog Content avoids that and lets us style it directly. -->
+        <!-- Close button row: the hosting modal owns disposal, so the content raises
+             CloseRequested instead of closing itself directly. -->
         <Button Grid.Row="3"
                 Content="Close"
                 MinWidth="100"
@@ -49,11 +47,8 @@
                 Click="OnCloseClick"
                 Style="{StaticResource AccentButtonStyle}" />
 
-        <!-- Inline conflict overlay. WinUI 3 only permits one ContentDialog open at a
-             time, and this UserControl is itself hosted inside a ContentDialog (see
-             FileTransferDialogService.ShowAsync). A nested ContentDialog.ShowAsync
-             throws COMException "Only a single ContentDialog can be open at any time."
-             So overwrite prompts are surfaced as an in-content modal instead. -->
+        <!-- Inline conflict overlay. Keep overwrite prompts in-content so they remain
+             below the app lock overlay and do not compete with app-level dialogs. -->
         <Grid x:Name="ConflictOverlay"
               Grid.RowSpan="4"
               Visibility="Collapsed"

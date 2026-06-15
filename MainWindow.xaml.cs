@@ -376,6 +376,7 @@ public sealed partial class MainWindow : Window
     private void ResetLockOverlay(string message)
     {
         ContentDialogTracker.LockAndHideAll();
+        SetShellEnabled(false);
         LockTitleText.Text = "Wormhole is locked";
         LockMessageText.Text = message;
         LockErrorBar.IsOpen = false;
@@ -399,6 +400,25 @@ public sealed partial class MainWindow : Window
         _lockOverlaySuppression = null;
         _lockState.SetLocked(false);
         ContentDialogTracker.Unlock();
+        SetShellEnabled(true);
+    }
+
+    private void SetShellEnabled(bool isEnabled)
+    {
+        var shellOpacity = isEnabled ? 1.0 : 0.0;
+        AppTitleBar.IsEnabled = isEnabled;
+        AppTitleBar.Opacity = shellOpacity;
+        UpdateInfoBar.IsEnabled = isEnabled;
+        UpdateInfoBar.Opacity = shellOpacity;
+        NavView.IsEnabled = isEnabled;
+        ContentArea.Visibility = isEnabled ? Visibility.Visible : Visibility.Collapsed;
+        ContentArea.IsHitTestVisible = isEnabled;
+        ModalOverlayHost.Opacity = shellOpacity;
+        ModalOverlayHost.IsHitTestVisible = isEnabled;
+        if (ModalOverlayContent.Content is Control modalControl)
+        {
+            modalControl.IsEnabled = isEnabled;
+        }
     }
 
     private async void WindowsHelloUnlockButton_Click(object sender, RoutedEventArgs e)
@@ -591,8 +611,30 @@ public sealed partial class MainWindow : Window
     /// WatchGuard SAML prompts a tunnel test can trigger) can still open over it on the same
     /// <c>XamlRoot</c>. Call <see cref="HideModalOverlay"/> to dismiss. UI thread only.
     /// </summary>
-    public void ShowModalOverlay(UIElement content)
+    public void ShowModalOverlay(UIElement content, double? width = null, double? height = null)
     {
+        if (width is { } modalWidth)
+        {
+            ModalOverlayFrame.MinWidth = modalWidth;
+            ModalOverlayFrame.MaxWidth = modalWidth;
+        }
+        else
+        {
+            ModalOverlayFrame.MinWidth = 380;
+            ModalOverlayFrame.MaxWidth = 600;
+        }
+
+        if (height is { } modalHeight)
+        {
+            ModalOverlayFrame.MinHeight = modalHeight;
+            ModalOverlayFrame.MaxHeight = modalHeight;
+        }
+        else
+        {
+            ModalOverlayFrame.MinHeight = 0;
+            ModalOverlayFrame.MaxHeight = double.PositiveInfinity;
+        }
+
         ModalOverlayContent.Content = content;
         ModalOverlayHost.Visibility = Visibility.Visible;
     }
@@ -603,6 +645,10 @@ public sealed partial class MainWindow : Window
     {
         ModalOverlayHost.Visibility = Visibility.Collapsed;
         ModalOverlayContent.Content = null;
+        ModalOverlayFrame.MinWidth = 380;
+        ModalOverlayFrame.MaxWidth = 600;
+        ModalOverlayFrame.MinHeight = 0;
+        ModalOverlayFrame.MaxHeight = double.PositiveInfinity;
     }
 
     private void NavView_ItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)

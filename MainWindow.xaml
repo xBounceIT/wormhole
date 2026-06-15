@@ -105,7 +105,8 @@
               Canvas.ZIndex="10"
               Background="{ThemeResource SmokeFillColorDefaultBrush}"
               Visibility="Collapsed">
-            <Border MaxWidth="600"
+            <Border x:Name="ModalOverlayFrame"
+                    MaxWidth="600"
                     MinWidth="380"
                     Margin="24"
                     HorizontalAlignment="Center"

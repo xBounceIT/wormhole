@@ -11,7 +11,7 @@ public sealed partial class FileTransferDialog : UserControl
     public FileTransferViewModel? ViewModel { get; private set; }
 
     /// <summary>Raised when the user clicks the in-content Close button. The hosting
-    /// service subscribes and calls <c>ContentDialog.Hide()</c> on the wrapping dialog.</summary>
+    /// service owns modal dismissal and transfer cleanup.</summary>
     public event EventHandler? CloseRequested;
 
     public FileTransferDialog()
@@ -53,10 +53,8 @@ public sealed partial class FileTransferDialog : UserControl
 
     private async Task<(ConflictDecision Decision, bool ApplyToAll)> PromptConflictAsync(ConflictContext ctx, CancellationToken ct)
     {
-        // Inline overlay rather than ContentDialog: this UserControl is hosted inside a
-        // ContentDialog (FileTransferDialogService) and WinUI 3 forbids two ContentDialogs
-        // open simultaneously. Trying to ShowAsync a nested ContentDialog throws
-        // COMException "Only a single ContentDialog can be open at any time."
+        // Inline overlay rather than ContentDialog: the file-transfer surface is long-lived
+        // and must stay underneath the app lock overlay without competing for dialog focus.
         ConflictMessage.Text = $"\"{ctx.ItemName}\" already exists at the destination.";
         if (ctx.IncomingSize is not null || ctx.ExistingSize is not null)
         {
