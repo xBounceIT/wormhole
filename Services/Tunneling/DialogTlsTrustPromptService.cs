@@ -130,7 +130,7 @@ public sealed class DialogTlsTrustPromptService : ITlsTrustPromptService, IDispo
         ContentDialogResult result;
         using (Wormhole.Helpers.RdpOverlayCoordinator.Suppress())
         {
-            result = await dialog.ShowAsync();
+            result = await Wormhole.Services.ContentDialogTracker.ShowAsync(dialog, ct);
         }
 
         // An explicit "Trust and connect" click wins over a same-tick cancellation — the user's

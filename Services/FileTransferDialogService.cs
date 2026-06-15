@@ -1,8 +1,5 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Media;
 using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Models;
@@ -137,9 +134,9 @@ public sealed class FileTransferDialogService : IFileTransferDialogService
             }
         }
 
-        // Everything from here through dialog.ShowAsync must be enclosed in a single
+        // Everything from here through the modal lifetime must be enclosed in a single
         // try block: orchestrator is the LAST owner of `session`, and if any ctor or
-        // ContentDialog property throws (e.g. XamlRoot null-coalesce at line ~108)
+        // modal setup throws (e.g. XamlRoot null-coalesce at line ~108)
         // before we enter the try/finally, the session + tunnel would leak.
         FileTransferOrchestrator? orchestrator = null;
         FileTransferViewModel? vm = null;
@@ -160,70 +157,35 @@ public sealed class FileTransferDialogService : IFileTransferDialogService
                 initialRemotePath: initialRemote);
 
             var view = new FileTransferDialog();
-            var xamlRoot = App.Current.MainWindow?.Content?.XamlRoot
+            var mainWindow = App.Current.MainWindow
                 ?? throw new InvalidOperationException("No active window to host dialog.");
-            // Note: no CloseButtonText. ContentDialog's built-in buttons stretch to fill
-            // their grid column via a template LOCAL-VALUE HorizontalAlignment=Stretch
-            // that Style setters cannot override. Instead, FileTransferDialog hosts its
-            // own compact Close button in its content; we subscribe to CloseRequested
-            // and call Hide() below.
-            var dialog = new ContentDialog
-            {
-                Title = $"File transfer — {profile.Name}",
-                Content = view,
-                XamlRoot = xamlRoot,
-            };
-            view.CloseRequested += (_, _) => dialog.Hide();
-            // ContentDialog's default ContentDialogMaxWidth theme resource is ~548 px —
-            // phone-friendly sizing that clamps a two-pane file browser to a single
-            // visible pane. FullSizeDesired does NOT lift this cap in WinUI 3; it only
-            // adjusts inner spacing. Override the theme resources at the dialog instance
-            // level so the dialog can grow to host the UserControl's MinWidth=900.
-            //
-            // Set Min == Max so the dialog is LOCKED at this width: by default
-            // ContentDialog sizes to its content's measured width within the [Min,Max]
-            // bounds, which makes the dialog visibly grow/shrink as the user navigates
-            // into folders with longer/shorter filenames. Locking both to the same value
-            // gives a stable size that doesn't oscillate with content changes.
-            //
+            var xamlRoot = mainWindow.Content?.XamlRoot
+                ?? throw new InvalidOperationException("No active window to host dialog.");
+            var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            void OnCloseRequested(object? sender, EventArgs args) => closed.TrySetResult();
+            view.CloseRequested += OnCloseRequested;
+
             // Target ~85% of the host window, with sensible bounds. If the user's window
             // is narrower than the minimum, the XamlRoot clips naturally.
             var rootSize = xamlRoot.Size;
             var targetWidth = Math.Clamp(rootSize.Width * 0.85, 900.0, 1400.0);
             var targetHeight = Math.Clamp(rootSize.Height * 0.85, 560.0, 900.0);
-            dialog.Resources["ContentDialogMinWidth"] = targetWidth;
-            dialog.Resources["ContentDialogMaxWidth"] = targetWidth;
-            dialog.Resources["ContentDialogMinHeight"] = targetHeight;
-            dialog.Resources["ContentDialogMaxHeight"] = targetHeight;
-            // FullSizeDesired keeps dynamic spacing in the content area for big content.
-            dialog.SetValue(ContentDialog.FullSizeDesiredProperty, true);
 
-            // Light-dismiss on outside click: ContentDialog doesn't ship with this by
-            // default (modal). Hook the template's outer root in Opened and close if
-            // the pointer-press hit lands on the smoke layer rather than the dialog
-            // body. Escape continues to work via ContentDialog's built-in handling for
-            // CloseButton.
-            dialog.Opened += (sender, _) => AttachLightDismiss(sender);
-
-            // Queue behind the same gate DialogService and tunnel/auth prompts use; otherwise an
-            // app-close confirmation or provider prompt can collide with this ContentDialog and throw.
-            await ContentDialogGate.Shared.WaitAsync().ConfigureAwait(true);
-            try
+            // Suppress any connected RDP overlay (top-level window above the WinUI content) so it
+            // can't occlude this overlay while an RDP tab is the active, visible one.
+            using (RdpOverlayCoordinator.Suppress())
             {
-                // Initialize only once this dialog owns the ContentDialog slot. It still starts before
-                // ShowAsync so panes can populate by render, but it no longer does hidden SFTP work
-                // while another modal keeps this dialog queued.
-                _ = SafeInitializeAsync(view, vm);
-                // Suppress any connected RDP overlay (top-level window above the WinUI content) so it
-                // can't occlude this dialog while an RDP tab is the active, visible one.
-                using (RdpOverlayCoordinator.Suppress())
+                try
                 {
-                    await dialog.ShowAsync();
+                    mainWindow.ShowModalOverlay(view, targetWidth, targetHeight);
+                    _ = SafeInitializeAsync(view, vm);
+                    await closed.Task.ConfigureAwait(true);
                 }
-            }
-            finally
-            {
-                ContentDialogGate.Shared.Release();
+                finally
+                {
+                    view.CloseRequested -= OnCloseRequested;
+                    mainWindow.HideModalOverlay();
+                }
             }
         }
         finally
@@ -307,68 +269,4 @@ public sealed class FileTransferDialogService : IFileTransferDialogService
         catch (Exception ex) { _logger.LogWarning(ex, "FileTransferDialog InitializeAsync failed."); }
     }
 
-    /// <summary>
-    /// Attach a PointerPressed handler to the ContentDialog's template root so a click
-    /// on the smoke-layer region (outside the dialog body) dismisses the dialog.
-    /// <para>
-    /// Uses <c>AddHandler(..., handledEventsToo: true)</c> because the dialog body
-    /// elements (ListView items, buttons, etc.) mark their PointerPressed events as
-    /// handled — without the bool, our handler never sees clicks. We resolve the
-    /// dialog-body Border (<c>BackgroundElement</c> in WinUI 3's ContentDialog
-    /// template) once at attach time and check ancestor-or-self against that
-    /// specific reference, so a misnamed inner element cannot accidentally suppress
-    /// dismissal and a template change in a future WinUI release fails safe (no
-    /// dismiss) rather than dismissing on every click.
-    /// </para>
-    /// </summary>
-    private static void AttachLightDismiss(ContentDialog dialog)
-    {
-        if (VisualTreeHelper.GetChildrenCount(dialog) == 0) return;
-        if (VisualTreeHelper.GetChild(dialog, 0) is not FrameworkElement templateRoot) return;
-
-        // Capture the dialog body reference now. The previous implementation matched
-        // by name and also accepted "LayoutRoot", but LayoutRoot IS the outermost
-        // template grid that contains both the smoke layer and the dialog body, so
-        // every click's ancestor chain reached it and dismissal never fired. Walking
-        // up looking for the captured BackgroundElement instance is unambiguous.
-        var body = FindDescendantByName(templateRoot, "BackgroundElement");
-        if (body is null) return;
-
-        templateRoot.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler((_, e) =>
-        {
-            if (IsAncestorOrSelf(e.OriginalSource as DependencyObject, body)) return;
-            dialog.Hide();
-        }), handledEventsToo: true);
-    }
-
-    /// <summary>
-    /// Depth-first descendant search by Name. Used to locate the ContentDialog
-    /// template's <c>BackgroundElement</c> Border once at attach time.
-    /// </summary>
-    private static FrameworkElement? FindDescendantByName(DependencyObject root, string name)
-    {
-        var count = VisualTreeHelper.GetChildrenCount(root);
-        for (int i = 0; i < count; i++)
-        {
-            var child = VisualTreeHelper.GetChild(root, i);
-            if (child is FrameworkElement fe && fe.Name == name) return fe;
-            if (FindDescendantByName(child, name) is { } match) return match;
-        }
-        return null;
-    }
-
-    /// <summary>
-    /// True if <paramref name="hit"/> is <paramref name="ancestor"/> itself or any
-    /// of its visual-tree ancestors. Reference comparison so unrelated elements
-    /// sharing a name cannot match.
-    /// </summary>
-    private static bool IsAncestorOrSelf(DependencyObject? hit, DependencyObject ancestor)
-    {
-        while (hit is not null)
-        {
-            if (ReferenceEquals(hit, ancestor)) return true;
-            hit = VisualTreeHelper.GetParent(hit);
-        }
-        return false;
-    }
 }

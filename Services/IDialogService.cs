@@ -40,6 +40,18 @@ public interface IDialogService
 
     Task<string?> PromptPasswordAsync(string title, string message, CancellationToken cancellationToken = default);
 
+    Task<string?> PromptSecretAsync(
+        string title,
+        string message,
+        string label,
+        string primaryText = "OK");
+
+    Task<(string Secret, string Confirmation)?> PromptNewSecretAsync(
+        string title,
+        string message,
+        string label,
+        string primaryText = "Save");
+
     /// <summary>
     /// Ask whether to route a tunnel-configured connection through its VPN tunnel or connect
     /// directly. Shown only when the user has enabled

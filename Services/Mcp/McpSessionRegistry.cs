@@ -1,6 +1,8 @@
+using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
+using Wormhole.Services.Security;
 using Wormhole.Services.Ssh;
 using Wormhole.ViewModels;
 using Wormhole.ViewModels.Sessions;
@@ -12,12 +14,27 @@ public sealed class McpSessionRegistry : IMcpSessionRegistry
 {
     private readonly ShellViewModel _shell;
     private readonly IDialogService _dialog;
+    private readonly IAppLockState _lockState;
     private readonly ILogger _audit;
+    private readonly DispatcherQueue? _dispatcher;
 
-    public McpSessionRegistry(ShellViewModel shell, IDialogService dialog, ILoggerFactory loggerFactory)
+    public McpSessionRegistry(
+        ShellViewModel shell,
+        IDialogService dialog,
+        IAppLockState lockState,
+        ILoggerFactory loggerFactory)
     {
         _shell = shell;
         _dialog = dialog;
+        _lockState = lockState;
+        try
+        {
+            _dispatcher = DispatcherQueue.GetForCurrentThread();
+        }
+        catch (COMException)
+        {
+            _dispatcher = null;
+        }
         // Dedicated audit category so MCP-initiated actions are greppable in the Serilog file.
         _audit = loggerFactory.CreateLogger("Wormhole.McpAudit");
     }
@@ -25,6 +42,7 @@ public sealed class McpSessionRegistry : IMcpSessionRegistry
     public Task<IReadOnlyList<McpSessionInfo>> ListSessionsAsync(CancellationToken cancellationToken = default)
         => OnUiAsync<IReadOnlyList<McpSessionInfo>>(() =>
         {
+            ThrowIfLocked();
             var list = new List<McpSessionInfo>();
             foreach (var tab in _shell.Tabs)
             {
@@ -45,6 +63,7 @@ public sealed class McpSessionRegistry : IMcpSessionRegistry
 
     public async Task<ShellCommandResult> RunCommandAsync(string sessionId, string command, int timeoutSeconds, CancellationToken cancellationToken = default)
     {
+        ThrowIfLocked();
         var vm = await ResolveApprovedAsync(sessionId).ConfigureAwait(false);
         var timeout = TimeSpan.FromSeconds(timeoutSeconds <= 0 ? 30 : timeoutSeconds);
 
@@ -60,6 +79,7 @@ public sealed class McpSessionRegistry : IMcpSessionRegistry
 
     public async Task SendTextAsync(string sessionId, string text, CancellationToken cancellationToken = default)
     {
+        ThrowIfLocked();
         var vm = await ResolveApprovedAsync(sessionId).ConfigureAwait(false);
         // Log only the byte count — raw text may be a password typed at a prompt.
         _audit.LogInformation("send_text {User}@{Host}: {Bytes} bytes",
@@ -69,6 +89,7 @@ public sealed class McpSessionRegistry : IMcpSessionRegistry
 
     public async Task<string> ReadTerminalAsync(string sessionId, int maxBytes, CancellationToken cancellationToken = default)
     {
+        ThrowIfLocked();
         var vm = await ResolveApprovedAsync(sessionId).ConfigureAwait(false);
         // TerminalReplayBuffer.Snapshot is itself thread-safe, so no UI hop needed here.
         var snapshot = vm.SnapshotTerminal();
@@ -91,6 +112,7 @@ public sealed class McpSessionRegistry : IMcpSessionRegistry
     private Task<SshSessionViewModel> ResolveApprovedAsync(string sessionId)
         => OnUiAsync(async () =>
         {
+            ThrowIfLocked();
             var vm = FindOnUi(sessionId)
                 ?? throw new InvalidOperationException(
                     $"No live SSH session with id '{sessionId}'. Call list_sessions for current ids.");
@@ -102,6 +124,14 @@ public sealed class McpSessionRegistry : IMcpSessionRegistry
                 throw new InvalidOperationException("The user denied AI-agent control of that session.");
             return vm;
         });
+
+    private void ThrowIfLocked()
+    {
+        if (_lockState.IsLocked)
+        {
+            throw new InvalidOperationException("Wormhole is locked. Unlock the app before using MCP tools.");
+        }
+    }
 
     // Must run on the UI thread (enumerates the UI-bound Tabs collection).
     private SshSessionViewModel? FindOnUi(string sessionId)
@@ -116,11 +146,9 @@ public sealed class McpSessionRegistry : IMcpSessionRegistry
         return null;
     }
 
-    private static DispatcherQueue? Dispatcher => App.Current.MainWindow?.DispatcherQueue;
-
-    private static Task<T> OnUiAsync<T>(Func<T> func)
+    private Task<T> OnUiAsync<T>(Func<T> func)
     {
-        var dq = Dispatcher;
+        var dq = _dispatcher;
         if (dq is null) return Task.FromResult(func()); // no window (tests/headless) — run inline
         var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!dq.TryEnqueue(() =>
@@ -134,9 +162,9 @@ public sealed class McpSessionRegistry : IMcpSessionRegistry
         return tcs.Task;
     }
 
-    private static Task<T> OnUiAsync<T>(Func<Task<T>> func)
+    private Task<T> OnUiAsync<T>(Func<Task<T>> func)
     {
-        var dq = Dispatcher;
+        var dq = _dispatcher;
         if (dq is null) return func();
         var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!dq.TryEnqueue(async () =>

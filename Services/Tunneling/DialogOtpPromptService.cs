@@ -171,7 +171,7 @@ public sealed class DialogOtpPromptService : IOtpPromptService, IDisposable
         ContentDialogResult result;
         using (Wormhole.Helpers.RdpOverlayCoordinator.Suppress())
         {
-            result = await dialog.ShowAsync();
+            result = await Wormhole.Services.ContentDialogTracker.ShowAsync(dialog, ct);
         }
 
         // If the user has already submitted (Primary button or Enter), honor that even if the

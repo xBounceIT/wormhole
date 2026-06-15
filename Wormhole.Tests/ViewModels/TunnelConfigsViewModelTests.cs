@@ -1352,6 +1352,16 @@ public class TunnelConfigsViewModelTests
         public Task<string?> PromptPasswordAsync(string title, string message, CancellationToken cancellationToken = default) =>
             Task.FromResult<string?>(null);
 
+        public Task<string?> PromptSecretAsync(string title, string message, string label, string primaryText = "OK") =>
+            Task.FromResult<string?>(null);
+
+        public Task<(string Secret, string Confirmation)?> PromptNewSecretAsync(
+            string title,
+            string message,
+            string label,
+            string primaryText = "Save") =>
+            Task.FromResult<(string Secret, string Confirmation)?>(null);
+
         public Task ShowCredentialsAsync(string title, string username, string secretLabel, string secret) =>
             Task.CompletedTask;
 
