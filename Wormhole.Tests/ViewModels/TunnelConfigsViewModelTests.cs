@@ -1328,7 +1328,10 @@ public class TunnelConfigsViewModelTests
         public Task<bool> ConfirmAsync(string title, string message, string primaryText = "Yes", string closeText = "No") =>
             Task.FromResult(ConfirmResult);
 
-        public Task<TunnelRouteChoice> PromptTunnelRouteAsync(string connectionName, string tunnelName) =>
+        public Task<TunnelRouteChoice> PromptTunnelRouteAsync(
+            string connectionName,
+            string tunnelName,
+            CancellationToken cancellationToken = default) =>
             Task.FromResult(TunnelRouteChoice.UseTunnel);
 
         public Task<string?> PromptForTextAsync(string title, string label, string defaultValue = "") =>
@@ -1346,7 +1349,7 @@ public class TunnelConfigsViewModelTests
         public Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null) =>
             Task.FromResult(TunnelPromptResult);
 
-        public Task<string?> PromptPasswordAsync(string title, string message) =>
+        public Task<string?> PromptPasswordAsync(string title, string message, CancellationToken cancellationToken = default) =>
             Task.FromResult<string?>(null);
 
         public Task<string?> PromptSecretAsync(string title, string message, string label, string primaryText = "OK") =>
@@ -1362,7 +1365,11 @@ public class TunnelConfigsViewModelTests
         public Task ShowCredentialsAsync(string title, string username, string secretLabel, string secret) =>
             Task.CompletedTask;
 
-        public Task<(string Username, string Password)?> PromptCredentialsAsync(string title, string message, string? initialUsername = null) =>
+        public Task<(string Username, string Password)?> PromptCredentialsAsync(
+            string title,
+            string message,
+            string? initialUsername = null,
+            CancellationToken cancellationToken = default) =>
             Task.FromResult<(string Username, string Password)?>(null);
 
         public Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync() =>

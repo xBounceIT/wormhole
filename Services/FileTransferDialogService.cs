@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Wormhole.Data.Repositories;
+using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Services.Sftp;
 using Wormhole.Services.Ssh;
@@ -170,17 +171,14 @@ public sealed class FileTransferDialogService : IFileTransferDialogService
             var targetWidth = Math.Clamp(rootSize.Width * 0.85, 900.0, 1400.0);
             var targetHeight = Math.Clamp(rootSize.Height * 0.85, 560.0, 900.0);
 
-            // Initialize before ShowAsync so panes have entries by the time the dialog
-            // renders. Observe the task so a synchronous throw or failed pane load
-            // surfaces in logs rather than disappearing as an UnobservedTaskException.
-            _ = SafeInitializeAsync(view, vm);
             // Suppress any connected RDP overlay (top-level window above the WinUI content) so it
-            // can't occlude this dialog while an RDP tab is the active, visible one.
-            using (Wormhole.Helpers.RdpOverlayCoordinator.Suppress())
+            // can't occlude this overlay while an RDP tab is the active, visible one.
+            using (RdpOverlayCoordinator.Suppress())
             {
                 try
                 {
                     mainWindow.ShowModalOverlay(view, targetWidth, targetHeight);
+                    _ = SafeInitializeAsync(view, vm);
                     await closed.Task.ConfigureAwait(true);
                 }
                 finally

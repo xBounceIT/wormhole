@@ -1,3 +1,4 @@
+using System.Threading;
 using Wormhole.Models;
 using Wormhole.Models.Backup;
 
@@ -37,7 +38,7 @@ public interface IDialogService
     /// </summary>
     Task ShowTunnelTestAsync(TunnelConfig config);
 
-    Task<string?> PromptPasswordAsync(string title, string message);
+    Task<string?> PromptPasswordAsync(string title, string message, CancellationToken cancellationToken = default);
 
     Task<string?> PromptSecretAsync(
         string title,
@@ -59,7 +60,7 @@ public interface IDialogService
     /// display-only. Returns <see cref="Models.TunnelRouteChoice.Cancel"/> if the user dismisses
     /// the dialog.
     /// </summary>
-    Task<TunnelRouteChoice> PromptTunnelRouteAsync(string connectionName, string tunnelName);
+    Task<TunnelRouteChoice> PromptTunnelRouteAsync(string connectionName, string tunnelName, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Reveal stored credentials read-only. Shows the (optional) username and the secret
@@ -76,7 +77,7 @@ public interface IDialogService
     /// on cancel; otherwise a non-empty tuple — both fields are required to enable the
     /// Connect button.
     /// </summary>
-    Task<(string Username, string Password)?> PromptCredentialsAsync(string title, string message, string? initialUsername = null);
+    Task<(string Username, string Password)?> PromptCredentialsAsync(string title, string message, string? initialUsername = null, CancellationToken cancellationToken = default);
     Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync();
 
     /// <summary>Show the export-backup dialog. Returns the result on success, null if the

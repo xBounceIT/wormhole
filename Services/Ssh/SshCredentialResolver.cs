@@ -105,7 +105,8 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
             {
                 passphrase = await _dialogs.PromptPasswordAsync(
                     "SSH key passphrase",
-                    "Enter the passphrase for the SSH key:").ConfigureAwait(true);
+                    "Enter the passphrase for the SSH key:",
+                    cancellationToken).ConfigureAwait(true);
                 cancellationToken.ThrowIfCancellationRequested();
                 if (string.IsNullOrEmpty(passphrase))
                 {
@@ -136,7 +137,8 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
         var user = string.IsNullOrEmpty(profile.Username) ? profile.Host : profile.Username + "@" + profile.Host;
         var password = await _dialogs.PromptPasswordAsync(
             "SSH password",
-            "Enter the password for " + user + ":").ConfigureAwait(true);
+            "Enter the password for " + user + ":",
+            cancellationToken).ConfigureAwait(true);
         // Re-check after the await: the user may have closed the tab (canceling the
         // connect CTS) while the dialog was open. Don't act on a stale password.
         cancellationToken.ThrowIfCancellationRequested();

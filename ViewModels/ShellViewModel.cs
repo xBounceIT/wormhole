@@ -132,19 +132,23 @@ public partial class ShellViewModel : ObservableObject
     public async Task CloseAllSessionsAsync()
     {
         var tabs = Tabs.ToArray();
-        foreach (var tab in tabs)
-        {
-            try
-            {
-                await tab.CloseAsync().ConfigureAwait(true);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Session tab '{Title}' failed to close during app shutdown.", tab.Title);
-            }
-        }
 
         SelectedTab = null;
         Tabs.Clear();
+
+        var closeTasks = tabs.Select(CloseTabForShutdownAsync).ToArray();
+        await Task.WhenAll(closeTasks).ConfigureAwait(true);
+    }
+
+    private async Task CloseTabForShutdownAsync(SessionTabViewModel tab)
+    {
+        try
+        {
+            await tab.CloseAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Session tab '{Title}' failed to close during app shutdown.", tab.Title);
+        }
     }
 }

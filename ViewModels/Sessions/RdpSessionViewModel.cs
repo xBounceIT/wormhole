@@ -929,7 +929,9 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             var prompted = await _dialog.PromptCredentialsAsync(
                 "RDP credentials",
                 $"Enter credentials for {profile.Host}",
-                initialUsername: null).ConfigureAwait(true);
+                initialUsername: null,
+                cancellationToken: token).ConfigureAwait(true);
+            token.ThrowIfCancellationRequested();
             if (prompted is null) return null;
 
             var parsedPrompt = SplitDomainUsername(
@@ -955,7 +957,8 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             ? $"{domain}\\{username}"
             : username;
         var promptMsg = $"Enter password for {prefix}@{profile.Host}";
-        var password = await _dialog.PromptPasswordAsync("RDP credentials", promptMsg).ConfigureAwait(true);
+        var password = await _dialog.PromptPasswordAsync("RDP credentials", promptMsg, token).ConfigureAwait(true);
+        token.ThrowIfCancellationRequested();
         return password is null
             ? null
             : new ResolvedRdpCredentials(
