@@ -206,6 +206,30 @@ public class TunnelManagerSharingTests
     }
 
     [Fact]
+    public async Task AllWaitersCancelled_DisposesEstablishCancellationWaitHandle()
+    {
+        var provider = new GatedProvider { CaptureWaitHandle = true };
+        var (repo, creds) = Stores();
+        var mgr = Manager(repo, creds, provider);
+        var profile = ProfileFor(AddConfig(repo, creds));
+
+        using var cts = new CancellationTokenSource();
+        var first = mgr.EstablishAsync(profile, cts.Token);
+        await provider.Started.Task;
+        var waitHandle = Assert.IsAssignableFrom<WaitHandle>(provider.LastWaitHandle);
+        Assert.False(waitHandle.SafeWaitHandle.IsClosed);
+
+        cts.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => first);
+        Assert.True(provider.LastToken.IsCancellationRequested);
+
+        var instance = new RecordingTunnel();
+        provider.Gate.SetResult(instance);
+        await WaitUntilAsync(() => waitHandle.SafeWaitHandle.IsClosed);
+        Assert.Equal(1, instance.DisposeCount);
+    }
+
+    [Fact]
     public async Task ReuseProbe_LiveSocksEndpoint_IsReused()
     {
         var (mgr, provider, profile, _) = Build();
@@ -413,6 +437,16 @@ public class TunnelManagerSharingTests
         TunnelConfigId = configId,
     };
 
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (!condition() && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
+        Assert.True(condition());
+    }
+
     /// <summary>Completes establishment synchronously with a fresh instance per call.</summary>
     private sealed class SimpleProvider : ITunnelProvider
     {
@@ -441,6 +475,8 @@ public class TunnelManagerSharingTests
         public int EstablishCount;
         public CancellationToken LastToken;
         public IProgress<TunnelProgress>? LastProgress;
+        public bool CaptureWaitHandle;
+        public WaitHandle? LastWaitHandle;
         public TaskCompletionSource<ITunnelInstance> Gate { get; private set; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource Started { get; private set; } =
@@ -460,6 +496,7 @@ public class TunnelManagerSharingTests
             Interlocked.Increment(ref EstablishCount);
             LastToken = cancellationToken;
             LastProgress = progress;
+            if (CaptureWaitHandle) LastWaitHandle = cancellationToken.WaitHandle;
             progress?.Report(new TunnelProgress(TunnelPhase.Authenticating));
             Started.TrySetResult();
             // Deliberately ignores cancellation: the abandoned-result test needs a provider that
