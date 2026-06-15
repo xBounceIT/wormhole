@@ -1157,9 +1157,8 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     }
 
     /// <summary>
-    /// Recovery path for exceptions escaping the dispatched continuation in
-    /// <see cref="SessionTabViewModel.MarshalToUi(Func{Task})"/>. Without this override the
-    /// VM could remain in <see cref="SessionStatus.Connecting"/> if e.g. session teardown
+    /// Recovery path for exceptions escaping a dispatched continuation. Without this override
+    /// the VM could remain in <see cref="SessionStatus.Connecting"/> if e.g. session teardown
     /// itself throws — leaving the user with a hanging spinner and no recovery affordance.
     /// </summary>
     protected override void OnDispatchedException(Exception ex)

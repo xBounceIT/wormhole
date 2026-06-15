@@ -117,24 +117,22 @@ public abstract partial class SessionTabViewModel : ObservableObject
     }
 
     /// <summary>
-    /// Marshal an action to the captured UI dispatcher. Falls through to synchronous
-    /// execution when no dispatcher was captured (unit tests, etc.). Logs to
+    /// Marshal an action to the captured UI dispatcher. Exceptions inside the
+    /// continuation are routed to <see cref="OnDispatchedException"/> so subclasses can put
+    /// the VM in a terminal state instead of letting the UI dispatcher crash the process.
+    /// Falls through to synchronous execution when no dispatcher was captured (unit tests,
+    /// etc.). Logs to
     /// <see cref="OnDispatchEnqueueFailed"/> if <see cref="DispatcherQueue.TryEnqueue(DispatcherQueueHandler)"/>
     /// rejects the work — a dropped status notification can otherwise strand the VM in
     /// <see cref="SessionStatus.Connecting"/> with no recovery path.
     /// </summary>
     protected void MarshalToUi(Action action)
     {
-        var dispatcher = UiDispatcher;
-        if (dispatcher is null)
+        MarshalToUi(() =>
         {
             action();
-            return;
-        }
-        if (!dispatcher.TryEnqueue(() => action()))
-        {
-            OnDispatchEnqueueFailed();
-        }
+            return Task.CompletedTask;
+        });
     }
 
     /// <summary>
@@ -192,8 +190,9 @@ public abstract partial class SessionTabViewModel : ObservableObject
     }
 
     /// <summary>
-    /// Invoked when <see cref="MarshalToUi(Func{Task})"/> catches an exception escaping the
-    /// dispatched continuation. Default: nothing — subclasses override to surface failure UI.
+    /// Invoked when <see cref="MarshalToUi(Action)"/> or
+    /// <see cref="MarshalToUi(Func{Task})"/> catches an exception escaping the dispatched
+    /// continuation. Default: nothing — subclasses override to surface failure UI.
     /// </summary>
     protected virtual void OnDispatchedException(Exception ex) { }
 
