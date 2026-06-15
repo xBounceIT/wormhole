@@ -38,6 +38,7 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
     private CancellationTokenSource? _cts;
     private ITunnelInstance? _tunnel;
     private int _connectInFlight;
+    private int _teardownGeneration;
     private int _diagnoseInFlight;
 
     // Upper bound on the post-failure reachability probe. The sidecar's own in-tunnel dial
@@ -141,12 +142,14 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
         var profile = Profile;
         if (profile is null) return;
         if (Interlocked.CompareExchange(ref _connectInFlight, 1, 0) != 0) return;
+        var teardownGeneration = Volatile.Read(ref _teardownGeneration);
 
         Status = SessionStatus.Connecting;
         ErrorMessage = null;
         var cts = new CancellationTokenSource();
         _cts = cts;
         var token = cts.Token;
+        ITunnelInstance? pendingTunnel = null;
 
         try
         {
@@ -155,6 +158,7 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
             // attempt. Null means the user cancelled — surface a recoverable Failed (the view's Retry
             // re-opens the prompt), mirroring SSH/RDP.
             var routed = await _tunnelPrompter.ResolveRouteAsync(profile, token).ConfigureAwait(true);
+            if (!IsAttemptCurrent(teardownGeneration)) return;
             if (routed is null)
             {
                 ReportFailure("Connection cancelled.");
@@ -164,11 +168,19 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
             InitializeProgress(routed);
 
             Progress.Begin(ConnectionPhase.Tunnel);
-            _tunnel = await _tunnels.EstablishAsync(
+            pendingTunnel = await _tunnels.EstablishAsync(
                 routed, token, CreateUiProgress<TunnelProgress>(OnTunnelProgress)).ConfigureAwait(true);
+            if (!IsAttemptCurrent(teardownGeneration))
+            {
+                await DisposeTunnelInstanceSilentlyAsync(pendingTunnel).ConfigureAwait(true);
+                return;
+            }
+            _tunnel = pendingTunnel;
+            pendingTunnel = null;
 
             Progress.Begin(ConnectionPhase.Connect);
             var target = await BuildTargetAsync(routed, _tunnel, token).ConfigureAwait(true);
+            if (!IsAttemptCurrent(teardownGeneration)) return;
             token.ThrowIfCancellationRequested();
 
             CurrentTarget = target;
@@ -178,12 +190,16 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
         }
         catch (OperationCanceledException)
         {
+            await DisposeTunnelInstanceSilentlyAsync(pendingTunnel).ConfigureAwait(true);
+            if (!IsAttemptCurrent(teardownGeneration)) return;
             await TearDownTunnelAsync().ConfigureAwait(true);
             Progress.Reset();
             Status = SessionStatus.Disconnected;
         }
         catch (Exception ex)
         {
+            await DisposeTunnelInstanceSilentlyAsync(pendingTunnel).ConfigureAwait(true);
+            if (!IsAttemptCurrent(teardownGeneration)) return;
             await TearDownTunnelAsync().ConfigureAwait(true);
             ReportFailure(ex.Message);
             _logger.LogError(ex, "Web connect failed for {Host}.", profile.Host);
@@ -191,6 +207,7 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
         finally
         {
             Interlocked.Exchange(ref _connectInFlight, 0);
+            RetryCommand.NotifyCanExecuteChanged();
         }
     }
 
@@ -358,18 +375,23 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
     [RelayCommand(AllowConcurrentExecutions = false, CanExecute = nameof(CanRetry))]
     public async Task RetryAsync()
     {
+        if (Volatile.Read(ref _connectInFlight) != 0) return;
+
         ErrorMessage = null;
         // Re-read the saved settings (through folder inheritance) so a tunnel/host/ignore-cert edit made
         // after the tab opened is honored on Retry — mirrors SSH/RDP.
         await RefreshProfileFromRepositoryAsync().ConfigureAwait(true);
         Status = SessionStatus.Connecting;
         Progress.Reset();
+        Interlocked.Increment(ref _teardownGeneration);
         await TearDownTunnelAsync().ConfigureAwait(true);
         await ConnectAsync().ConfigureAwait(true);
     }
 
     // While Connecting, an in-flight ConnectAsync still holds _connectInFlight; a second one would no-op.
-    private bool CanRetry() => Status != SessionStatus.Connecting;
+    private bool CanRetry() =>
+        Status != SessionStatus.Connecting &&
+        Volatile.Read(ref _connectInFlight) == 0;
 
     private async Task RefreshProfileFromRepositoryAsync()
     {
@@ -400,6 +422,7 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
 
     private async Task TearDownToDisconnectedAsync()
     {
+        Interlocked.Increment(ref _teardownGeneration);
         await TearDownTunnelAsync().ConfigureAwait(true);
         CurrentTarget = null;
         Progress.Reset();
@@ -419,6 +442,16 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
             try { await tunnel.DisposeAsync().ConfigureAwait(true); }
             catch (Exception ex) { _logger.LogWarning(ex, "Error tearing down web-session tunnel."); }
         }
+    }
+
+    private bool IsAttemptCurrent(int teardownGeneration) =>
+        Volatile.Read(ref _teardownGeneration) == teardownGeneration;
+
+    private async Task DisposeTunnelInstanceSilentlyAsync(ITunnelInstance? tunnel)
+    {
+        if (tunnel is null) return;
+        try { await tunnel.DisposeAsync().ConfigureAwait(true); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Error tearing down stale web-session tunnel."); }
     }
 
     private void InitializeProgress(ConnectionProfile profile)

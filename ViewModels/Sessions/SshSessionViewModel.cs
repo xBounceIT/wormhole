@@ -64,6 +64,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private TerminalSize _initialSize = TerminalSize.Default;
     private CancellationTokenSource? _outputWaitCts;
     private int _connectInFlight;
+    private int _teardownGeneration;
     private ITunnelInstance? _tunnel;
     // The profile actually used for the live connection's tunnel routing. TunnelEnabled reflects
     // the user's per-connect "use tunnel / go direct" choice; SFTP sub-sessions read it (via
@@ -347,10 +348,13 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     [RelayCommand(AllowConcurrentExecutions = false, CanExecute = nameof(CanRetry))]
     public async Task RetryAsync()
     {
+        if (Volatile.Read(ref _connectInFlight) != 0) return;
+
         // A manual Retry supersedes any pending automatic reconnect and starts a fresh budget — the
         // user is explicitly driving now, so cancel the loop/deferred intent so they can't race.
         CancelAutoReconnect();
         SetAutoReconnectAttempts(0);
+
         ErrorMessage = null;
         ResetOutputState();
 
@@ -413,7 +417,9 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     }
 
     // While Connecting, an in-flight ConnectAsync still holds _connectInFlight; a second one from RetryAsync would silently no-op.
-    private bool CanRetry() => Status != SessionStatus.Connecting;
+    private bool CanRetry() =>
+        Status != SessionStatus.Connecting &&
+        Volatile.Read(ref _connectInFlight) == 0;
 
     /// <summary>
     /// Re-resolve <see cref="SessionTabViewModel.Profile"/> from the repository (through folder
@@ -476,6 +482,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     // Disconnected and is the only place that should.
     private async Task TearDownSessionAsync()
     {
+        Interlocked.Increment(ref _teardownGeneration);
         // Signal cancel to any in-flight ConnectAsync; do NOT Dispose() — the awaiter still
         // holds the token. The CTS is GC-eligible once both sides drop their references.
         var cts = _cts;
@@ -810,6 +817,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         var profile = Profile;
         if (profile is null || _webView is null) return;
         if (Interlocked.CompareExchange(ref _connectInFlight, 1, 0) != 0) return;
+        var teardownGeneration = Volatile.Read(ref _teardownGeneration);
 
         // Reset xterm.js before flipping to Connecting so the prior session's text
         // doesn't bleed through the (now opaque) overlay nor reappear above the new
@@ -843,6 +851,15 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         var cts = new CancellationTokenSource();
         _cts = cts;
         var token = cts.Token;
+        ITunnelInstance? pendingTunnel = null;
+        ISshSession? pendingSession = null;
+
+        async Task<bool> CleanupPendingConnectArtifactsAndIsCurrentAsync()
+        {
+            await DisposeSessionInstanceSilentlyAsync(pendingSession).ConfigureAwait(true);
+            await DisposeTunnelInstanceSilentlyAsync(pendingTunnel).ConfigureAwait(true);
+            return IsAttemptCurrent(teardownGeneration);
+        }
 
         try
         {
@@ -855,6 +872,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             // host-fingerprint pin doesn't persist the per-attempt choice (Retry re-resolves the
             // saved tunnel setting and re-asks after a network change).
             var routed = await _tunnelPrompter.ResolveRouteAsync(profile, token).ConfigureAwait(true);
+            if (!IsAttemptCurrent(teardownGeneration)) return;
             if (routed is null)
             {
                 // User dismissed the route prompt. Surface a recoverable Failed state rather than
@@ -876,6 +894,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             InitializeProgress(routed);
 
             var creds = await _credentialResolver.ResolveAsync(profile, token).ConfigureAwait(true);
+            if (!IsAttemptCurrent(teardownGeneration)) return;
             if (!creds.HasAny)
             {
                 // Not auto-retryable: no stored/entered credentials won't appear by retrying.
@@ -894,11 +913,25 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             // "connect directly"); the SSH service routes through the explicit _tunnel handle, so
             // the rest of the connect keeps using the unmodified profile. When routed has no tunnel,
             // EstablishAsync returns null and the Begin calls are no-ops (the stepper is empty).
-            _tunnel = await _tunnels.EstablishAsync(
+            pendingTunnel = await _tunnels.EstablishAsync(
                 routed, token, CreateUiProgress<TunnelProgress>(OnTunnelProgress)).ConfigureAwait(true);
+            if (!IsAttemptCurrent(teardownGeneration))
+            {
+                await DisposeTunnelInstanceSilentlyAsync(pendingTunnel).ConfigureAwait(true);
+                return;
+            }
+            _tunnel = pendingTunnel;
+            pendingTunnel = null;
 
             Progress.Begin(ConnectionPhase.Connect);
-            _session = await _sshService.ConnectAsync(profile, creds, _initialSize, _tunnel, token).ConfigureAwait(true);
+            pendingSession = await _sshService.ConnectAsync(profile, creds, _initialSize, _tunnel, token).ConfigureAwait(true);
+            if (!IsAttemptCurrent(teardownGeneration))
+            {
+                await DisposeSessionInstanceSilentlyAsync(pendingSession).ConfigureAwait(true);
+                return;
+            }
+            _session = pendingSession;
+            pendingSession = null;
 
             // Only a real teardown (tab close, Disconnect, Retry) cancels the token — a plain tab
             // switch does not. Honor a cancellation here so a tab closed mid-connect unwinds through
@@ -958,13 +991,16 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
                 try
                 {
                     await _connectionRepo.UpdateHostFingerprintAsync(profile.NodeId, _session.HostFingerprint, token).ConfigureAwait(true);
+                    if (!IsAttemptCurrent(teardownGeneration)) return;
                 }
                 catch (Exception ex)
                 {
+                    if (!IsAttemptCurrent(teardownGeneration)) return;
                     _logger.LogWarning(ex, "Could not persist host fingerprint for {Host}.", profile.Host);
                 }
             }
 
+            if (!IsAttemptCurrent(teardownGeneration)) return;
             // Guard against an immediate remote close (forced-command / EOF) that
             // already ran OnSessionClosed while we were awaiting fingerprint
             // persistence — that handler will have set Status to Failed. Don't flip
@@ -982,12 +1018,14 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         }
         catch (OperationCanceledException)
         {
+            if (!await CleanupPendingConnectArtifactsAndIsCurrentAsync().ConfigureAwait(true)) return;
             await SafeDisposeSessionAsync().ConfigureAwait(true);
             Progress.Reset();
             Status = SessionStatus.Disconnected;
         }
         catch (SshHostKeyMismatchException ex)
         {
+            if (!await CleanupPendingConnectArtifactsAndIsCurrentAsync().ConfigureAwait(true)) return;
             // Never auto-retry a host-key mismatch — it's a security decision the user must make.
             _lastConnectRetryable = false;
             await SafeDisposeSessionAsync().ConfigureAwait(true);
@@ -996,6 +1034,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         }
         catch (SshAuthenticationException ex)
         {
+            if (!await CleanupPendingConnectArtifactsAndIsCurrentAsync().ConfigureAwait(true)) return;
             // Don't hammer the server with the same bad credentials (and risk account lockout).
             _lastConnectRetryable = false;
             await SafeDisposeSessionAsync().ConfigureAwait(true);
@@ -1003,6 +1042,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         }
         catch (TunnelRecoverableNoticeException ex)
         {
+            if (!await CleanupPendingConnectArtifactsAndIsCurrentAsync().ConfigureAwait(true)) return;
             // Not a failure: the tunnel did the right thing but needs a reconnect (e.g. Stormshield downloaded
             // a fresh profile spending the one-time code, or rejected a re-entered just-spent code). Present
             // it as a success/notice with a Reconnect affordance, not a red error. Not auto-retryable: it
@@ -1015,6 +1055,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         }
         catch (Exception ex)
         {
+            if (!await CleanupPendingConnectArtifactsAndIsCurrentAsync().ConfigureAwait(true)) return;
             await SafeDisposeSessionAsync().ConfigureAwait(true);
             ReportFailure(ex.Message);
             _logger.LogError(ex, "SSH connect failed for {Host}.", profile.Host);
@@ -1022,7 +1063,25 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         finally
         {
             Interlocked.Exchange(ref _connectInFlight, 0);
+            RetryCommand.NotifyCanExecuteChanged();
         }
+    }
+
+    private bool IsAttemptCurrent(int teardownGeneration) =>
+        Volatile.Read(ref _teardownGeneration) == teardownGeneration;
+
+    private async Task DisposeSessionInstanceSilentlyAsync(ISshSession? session)
+    {
+        if (session is null) return;
+        try { await session.DisposeAsync().ConfigureAwait(true); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Error disposing stale SSH session."); }
+    }
+
+    private async Task DisposeTunnelInstanceSilentlyAsync(ITunnelInstance? tunnel)
+    {
+        if (tunnel is null) return;
+        try { await tunnel.DisposeAsync().ConfigureAwait(true); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Error tearing down stale SSH session tunnel."); }
     }
 
     private void OnSessionDataReceived(object? sender, ReadOnlyMemory<byte> data)
@@ -1589,6 +1648,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
     internal int AutoReconnectAttemptsForTesting => _autoReconnectAttempts;
     internal bool ReconnectRequestedWhileDetachedForTesting => _reconnectRequestedWhileDetached;
+    internal void SetConnectInFlightForTesting(int value) => _connectInFlight = value;
 
     // Shrink the stability window so a test can observe the budget reset without a 30s wait. Set this
     // BEFORE AttachConnectedSessionForTesting, which arms the timer.

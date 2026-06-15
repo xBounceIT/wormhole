@@ -200,6 +200,48 @@ public class HttpSessionViewModelTests
     }
 
     [Fact]
+    public async Task CloseAsync_DuringInFlightConnect_IgnoresLateRouteResolution()
+    {
+        var prompter = new BlockingRoutePrompter();
+        var vm = CreateVm(prompter: prompter);
+        var profile = Profile(ProtocolType.Https, "fw.local", 443);
+        vm.Initialize(profile);
+        var navigateCount = 0;
+        vm.NavigateRequested += _ => navigateCount++;
+
+        var attachTask = vm.AttachAsync();
+        await prompter.WaitUntilCalledAsync();
+
+        await vm.CloseAsync();
+        prompter.Complete(profile);
+        await attachTask;
+
+        Assert.Equal(0, navigateCount);
+        Assert.Null(vm.CurrentTarget);
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+    }
+
+    [Fact]
+    public async Task RetryCommand_CanExecute_IsFalse_WhileConnectGateHeldAfterFailure()
+    {
+        var prompter = new BlockingRoutePrompter();
+        var vm = CreateVm(prompter: prompter);
+        var profile = Profile(ProtocolType.Https, "fw.local", 443);
+        vm.Initialize(profile);
+
+        var attachTask = vm.AttachAsync();
+        await prompter.WaitUntilCalledAsync();
+
+        vm.ReportFailure("boom");
+
+        Assert.False(vm.RetryCommand.CanExecute(null));
+
+        await vm.CloseAsync();
+        prompter.Complete(profile);
+        await attachTask;
+    }
+
+    [Fact]
     public async Task ReportNavigationFailed_WhenConnected_DoesNotDemote()
     {
         var vm = CreateVm();
@@ -451,6 +493,22 @@ public class HttpSessionViewModelTests
         public FakeRoutePrompter(ConnectionProfile? result) => _result = result;
         public Task<ConnectionProfile?> ResolveRouteAsync(ConnectionProfile profile, CancellationToken cancellationToken) =>
             Task.FromResult(_passthrough ? profile : _result);
+    }
+
+    private sealed class BlockingRoutePrompter : ITunnelRoutePrompter
+    {
+        private readonly TaskCompletionSource _called = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<ConnectionProfile?> _result = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<ConnectionProfile?> ResolveRouteAsync(ConnectionProfile profile, CancellationToken cancellationToken)
+        {
+            _called.TrySetResult();
+            return _result.Task;
+        }
+
+        public Task WaitUntilCalledAsync() => _called.Task;
+
+        public void Complete(ConnectionProfile? profile) => _result.TrySetResult(profile);
     }
 
     private sealed class FakeProfileResolver : IConnectionProfileResolver
