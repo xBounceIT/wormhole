@@ -14,6 +14,10 @@ public sealed class AppSettings
 
     public int SidebarWidth { get; set; } = 320;
 
+    public AppAuthenticationMode AppAuthenticationMode { get; set; } = AppAuthenticationMode.Disabled;
+    public AppAuthenticationFallbackMethod AppAuthenticationHelloFallback { get; set; } = AppAuthenticationFallbackMethod.Pin;
+    public int? AppAuthenticationIdleTimeoutMinutes { get; set; } = 15;
+
     // When on, a connection configured to use a VPN tunnel asks — at connect time — whether to
     // route through the tunnel or connect directly. For targets that are local on some networks
     // and only reachable over the VPN on others, this avoids editing the connection every time

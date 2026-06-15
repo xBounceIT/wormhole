@@ -15,6 +15,8 @@ public class FakeDialogService : IDialogService
 {
     public string? TextPromptResult { get; set; }
     public string? PasswordPromptResult { get; set; }
+    public string? SecretPromptResult { get; set; }
+    public (string Secret, string Confirmation)? NewSecretPromptResult { get; set; }
     public (string Username, string Password)? CredentialsPromptResult { get; set; }
     public bool ConfirmResult { get; set; } = true;
     public int ConfirmCount { get; private set; }
@@ -38,6 +40,8 @@ public class FakeDialogService : IDialogService
     public MRemoteNgImportResult? MRemoteNgImportResult { get; set; }
 
     public int PasswordPromptCount { get; private set; }
+    public int SecretPromptCount { get; private set; }
+    public int NewSecretPromptCount { get; private set; }
     public int CredentialsPromptCount { get; private set; }
     public int TextPromptCount { get; private set; }
     public int MRemoteNgImportPromptCount { get; private set; }
@@ -173,6 +177,22 @@ public class FakeDialogService : IDialogService
     {
         PasswordPromptCount++;
         return Task.FromResult(PasswordPromptResult);
+    }
+
+    public virtual Task<string?> PromptSecretAsync(string title, string message, string label, string primaryText = "OK")
+    {
+        SecretPromptCount++;
+        return Task.FromResult(SecretPromptResult);
+    }
+
+    public virtual Task<(string Secret, string Confirmation)?> PromptNewSecretAsync(
+        string title,
+        string message,
+        string label,
+        string primaryText = "Save")
+    {
+        NewSecretPromptCount++;
+        return Task.FromResult(NewSecretPromptResult);
     }
 
     /// <summary>Drives <see cref="PromptTunnelRouteAsync"/>. Defaults to

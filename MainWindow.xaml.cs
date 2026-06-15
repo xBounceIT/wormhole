@@ -8,8 +8,11 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.Foundation;
+using Wormhole.Helpers;
+using Wormhole.Models;
 using Wormhole.Services;
 using Wormhole.Services.Mcp;
+using Wormhole.Services.Security;
 using Wormhole.ViewModels;
 using Wormhole.Views.Pages;
 
@@ -32,6 +35,11 @@ public sealed partial class MainWindow : Window
 
     private readonly INavigationService _navigationService;
     private readonly IDialogService _dialogService;
+    private readonly IAppSettingsService _settingsService;
+    private readonly IAppAuthenticationService _appAuthentication;
+    private readonly IWindowsHelloService _windowsHello;
+    private readonly IAppLockState _lockState;
+    private readonly AppInactivityLockEvaluator _inactivityLockEvaluator;
     private readonly ILogger<MainWindow> _logger;
 
     private bool _isResizingSidebar;
@@ -45,14 +53,35 @@ public sealed partial class MainWindow : Window
     private bool _sessionCleanupComplete;
     private bool _closePromptInProgress;
     private double _lastConnectionsTreeMaxHeight = double.NaN;
+    private DispatcherQueueTimer? _idleLockTimer;
+    private Task<bool>? _activeUnlockTask;
+    private TaskCompletionSource<bool>? _activeUnlockTcs;
+    private IDisposable? _lockOverlaySuppression;
+    private AppAuthenticationFallbackMethod _lockFallbackMethod = AppAuthenticationFallbackMethod.Pin;
+    private bool _lockHelloInProgress;
+    private bool _lockUnlockInProgress;
 
     public ShellViewModel ViewModel { get; }
 
-    public MainWindow(ShellViewModel viewModel, INavigationService navigationService, IDialogService dialogService, ILogger<MainWindow> logger)
+    public MainWindow(
+        ShellViewModel viewModel,
+        INavigationService navigationService,
+        IDialogService dialogService,
+        IAppSettingsService settingsService,
+        IAppAuthenticationService appAuthentication,
+        IWindowsHelloService windowsHello,
+        IAppLockState lockState,
+        AppInactivityLockEvaluator inactivityLockEvaluator,
+        ILogger<MainWindow> logger)
     {
         ViewModel = viewModel;
         _navigationService = navigationService;
         _dialogService = dialogService;
+        _settingsService = settingsService;
+        _appAuthentication = appAuthentication;
+        _windowsHello = windowsHello;
+        _lockState = lockState;
+        _inactivityLockEvaluator = inactivityLockEvaluator;
         _logger = logger;
 
         this.InitializeComponent();
@@ -99,8 +128,26 @@ public sealed partial class MainWindow : Window
         NavView.SizeChanged += (_, _) => ApplyConnectionsTreeMaxHeight();
 
         Activated += OnFirstActivated;
+        _settingsService.SettingsChanged += OnSettingsChanged;
+        EnsureIdleLockTimer();
+        if (_settingsService.Current.AppAuthenticationMode != AppAuthenticationMode.Disabled)
+        {
+            ShowPendingAuthenticationOverlay();
+        }
 
         _ = RunStartupUpdateCheckAsync();
+    }
+
+    public async Task RunStartupAuthenticationAsync()
+    {
+        _inactivityLockEvaluator.MarkUnlocked(DateTimeOffset.UtcNow);
+        if (await ShouldRequireAuthenticationAsync().ConfigureAwait(true))
+        {
+            await ShowLockOverlayAsync("Unlock Wormhole to continue.").ConfigureAwait(true);
+            return;
+        }
+
+        HideLockOverlay();
     }
 
     private async Task RunStartupUpdateCheckAsync()
@@ -186,6 +233,342 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private void OnSettingsChanged(object? sender, EventArgs args)
+    {
+        if (DispatcherQueue.HasThreadAccess)
+        {
+            _ = ApplySettingsChangedAsync();
+            return;
+        }
+
+        if (!DispatcherQueue.TryEnqueue(() => _ = ApplySettingsChangedAsync()))
+        {
+            _logger.LogWarning("Could not marshal settings-change handling to the UI thread.");
+        }
+    }
+
+    private async Task ApplySettingsChangedAsync()
+    {
+        try
+        {
+            EnsureIdleLockTimer();
+            if (!await ShouldRequireAuthenticationAsync().ConfigureAwait(true))
+            {
+                HideLockOverlay();
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to apply settings change.");
+        }
+    }
+
+    private void EnsureIdleLockTimer()
+    {
+        if (_idleLockTimer is null)
+        {
+            _idleLockTimer = DispatcherQueue.GetForCurrentThread().CreateTimer();
+            _idleLockTimer.Interval = TimeSpan.FromSeconds(15);
+            _idleLockTimer.IsRepeating = true;
+            _idleLockTimer.Tick += IdleLockTimer_Tick;
+        }
+
+        if (_settingsService.Current.AppAuthenticationMode != AppAuthenticationMode.Disabled &&
+            _settingsService.Current.AppAuthenticationIdleTimeoutMinutes is not null)
+        {
+            _idleLockTimer.Start();
+        }
+        else
+        {
+            _idleLockTimer.Stop();
+        }
+    }
+
+    private async void IdleLockTimer_Tick(DispatcherQueueTimer sender, object args)
+    {
+        if (!await ShouldRequireAuthenticationAsync().ConfigureAwait(true)) return;
+        var idle = GetSystemIdleTime();
+        if (!_inactivityLockEvaluator.ShouldLock(_settingsService.Current, _lockState.IsLocked, idle, DateTimeOffset.UtcNow))
+        {
+            return;
+        }
+        _ = ShowLockOverlayAsync("Wormhole locked after inactivity.");
+    }
+
+    private static TimeSpan GetSystemIdleTime()
+    {
+        var info = new Win32Interop.LASTINPUTINFO
+        {
+            cbSize = (uint)System.Runtime.InteropServices.Marshal.SizeOf<Win32Interop.LASTINPUTINFO>(),
+        };
+        if (!Win32Interop.GetLastInputInfo(ref info))
+        {
+            return TimeSpan.Zero;
+        }
+
+        var now = unchecked((uint)Win32Interop.GetTickCount64());
+        var elapsed = unchecked(now - info.dwTime);
+        return TimeSpan.FromMilliseconds(elapsed);
+    }
+
+    private async Task<bool> ShouldRequireAuthenticationAsync()
+    {
+        var settings = _settingsService.Current;
+        if (settings.AppAuthenticationMode == AppAuthenticationMode.Disabled) return false;
+
+        var configured = await _appAuthentication.IsConfiguredForModeAsync(
+            settings.AppAuthenticationMode,
+            settings.AppAuthenticationHelloFallback).ConfigureAwait(true);
+        if (!configured)
+        {
+            _logger.LogWarning(
+                "App authentication mode {Mode} is enabled but no valid verifier is configured; skipping lock.",
+                settings.AppAuthenticationMode);
+        }
+        return configured;
+    }
+
+    private Task<bool> ShowLockOverlayAsync(string message)
+    {
+        if (_activeUnlockTask is not null) return _activeUnlockTask;
+        _activeUnlockTask = ShowLockOverlayCoreAsync(message);
+        return _activeUnlockTask;
+    }
+
+    private async Task<bool> ShowLockOverlayCoreAsync(string message)
+    {
+        _activeUnlockTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _lockState.SetLocked(true);
+        BeginLockOverlaySuppression();
+        ResetLockOverlay(message);
+
+        var settings = _settingsService.Current;
+        if (settings.AppAuthenticationMode == AppAuthenticationMode.WindowsHello)
+        {
+            WindowsHelloUnlockButton.Visibility = Visibility.Visible;
+            _lockFallbackMethod = settings.AppAuthenticationHelloFallback;
+            await TryUnlockWithWindowsHelloAsync().ConfigureAwait(true);
+        }
+        else
+        {
+            _lockFallbackMethod = FallbackMethodForMode(settings.AppAuthenticationMode);
+            ShowFallbackUnlock(null);
+        }
+
+        try
+        {
+            return await _activeUnlockTcs.Task.ConfigureAwait(true);
+        }
+        finally
+        {
+            _activeUnlockTask = null;
+            _activeUnlockTcs = null;
+        }
+    }
+
+    private void ShowPendingAuthenticationOverlay()
+    {
+        _lockState.SetLocked(true);
+        BeginLockOverlaySuppression();
+        ResetLockOverlay("Checking app authentication.");
+    }
+
+    private void ResetLockOverlay(string message)
+    {
+        ContentDialogTracker.LockAndHideAll();
+        SetShellEnabled(false);
+        LockTitleText.Text = "Wormhole is locked";
+        LockMessageText.Text = message;
+        LockErrorBar.IsOpen = false;
+        LockSecretBox.Password = string.Empty;
+        LockSecretBox.Visibility = Visibility.Collapsed;
+        LockUnlockButton.Visibility = Visibility.Collapsed;
+        WindowsHelloUnlockButton.Visibility = Visibility.Collapsed;
+        LockOverlayHost.Visibility = Visibility.Visible;
+    }
+
+    private void BeginLockOverlaySuppression()
+    {
+        _lockOverlaySuppression ??= RdpOverlayCoordinator.Suppress();
+    }
+
+    private void HideLockOverlay()
+    {
+        LockSecretBox.Password = string.Empty;
+        LockOverlayHost.Visibility = Visibility.Collapsed;
+        _lockOverlaySuppression?.Dispose();
+        _lockOverlaySuppression = null;
+        _lockState.SetLocked(false);
+        ContentDialogTracker.Unlock();
+        SetShellEnabled(true);
+    }
+
+    private void SetShellEnabled(bool isEnabled)
+    {
+        var shellOpacity = isEnabled ? 1.0 : 0.0;
+        AppTitleBar.IsEnabled = isEnabled;
+        AppTitleBar.Opacity = shellOpacity;
+        UpdateInfoBar.IsEnabled = isEnabled;
+        UpdateInfoBar.Opacity = shellOpacity;
+        NavView.IsEnabled = isEnabled;
+        ContentArea.Visibility = isEnabled ? Visibility.Visible : Visibility.Collapsed;
+        ContentArea.IsHitTestVisible = isEnabled;
+        ModalOverlayHost.Opacity = shellOpacity;
+        ModalOverlayHost.IsHitTestVisible = isEnabled;
+        if (ModalOverlayContent.Content is Control modalControl)
+        {
+            modalControl.IsEnabled = isEnabled;
+        }
+    }
+
+    private async void WindowsHelloUnlockButton_Click(object sender, RoutedEventArgs e)
+    {
+        await TryUnlockWithWindowsHelloAsync().ConfigureAwait(true);
+    }
+
+    private async Task TryUnlockWithWindowsHelloAsync()
+    {
+        if (_lockHelloInProgress) return;
+        _lockHelloInProgress = true;
+        WindowsHelloUnlockButton.IsEnabled = false;
+        LockMessageText.Text = "Waiting for Windows Hello.";
+        LockErrorBar.IsOpen = false;
+        try
+        {
+            WindowsHelloAvailability availability;
+            try
+            {
+                availability = await _windowsHello.CheckAvailabilityAsync().ConfigureAwait(true);
+            }
+            catch (Exception ex) when (IsExpectedWindowsHelloFailure(ex))
+            {
+                ShowWindowsHelloUnavailableFallback(ex);
+                return;
+            }
+
+            if (!availability.IsAvailable)
+            {
+                ShowFallbackUnlock(availability.Message);
+                return;
+            }
+
+            WindowsHelloVerification verified;
+            try
+            {
+                verified = await _windowsHello.RequestVerificationAsync(this.GetHwnd(), "Unlock Wormhole").ConfigureAwait(true);
+            }
+            catch (Exception ex) when (IsExpectedWindowsHelloFailure(ex))
+            {
+                ShowWindowsHelloUnavailableFallback(ex);
+                return;
+            }
+
+            if (verified.IsVerified)
+            {
+                CompleteUnlock();
+                return;
+            }
+            ShowFallbackUnlock(verified.Message);
+        }
+        finally
+        {
+            _lockHelloInProgress = false;
+            WindowsHelloUnlockButton.IsEnabled = true;
+        }
+    }
+
+    private void ShowFallbackUnlock(string? error)
+    {
+        LockMessageText.Text = _lockFallbackMethod == AppAuthenticationFallbackMethod.Pin
+            ? "Enter your Wormhole PIN to continue."
+            : "Enter your Wormhole password to continue.";
+        LockSecretBox.Header = SecretLabel(_lockFallbackMethod);
+        LockUnlockButton.Content = "Unlock";
+        LockSecretBox.Visibility = Visibility.Visible;
+        LockUnlockButton.Visibility = Visibility.Visible;
+        if (!string.IsNullOrWhiteSpace(error))
+        {
+            LockErrorBar.Message = error;
+            LockErrorBar.IsOpen = true;
+        }
+        LockSecretBox.Focus(FocusState.Programmatic);
+    }
+
+    private void LockSecretBox_PasswordChanged(object sender, RoutedEventArgs e)
+    {
+        LockUnlockButton.IsEnabled = !string.IsNullOrEmpty(LockSecretBox.Password);
+    }
+
+    private async void LockSecretBox_KeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != Windows.System.VirtualKey.Enter || !LockUnlockButton.IsEnabled) return;
+        e.Handled = true;
+        await TryUnlockWithFallbackAsync().ConfigureAwait(true);
+    }
+
+    private async void LockUnlockButton_Click(object sender, RoutedEventArgs e)
+    {
+        await TryUnlockWithFallbackAsync().ConfigureAwait(true);
+    }
+
+    private async Task TryUnlockWithFallbackAsync()
+    {
+        if (_lockUnlockInProgress) return;
+        _lockUnlockInProgress = true;
+        LockUnlockButton.IsEnabled = false;
+        try
+        {
+            var verified = await _appAuthentication.VerifySecretAsync(_lockFallbackMethod, LockSecretBox.Password).ConfigureAwait(true);
+            if (verified)
+            {
+                CompleteUnlock();
+                return;
+            }
+
+            LockErrorBar.Message = InvalidSecretMessage(_lockFallbackMethod);
+            LockErrorBar.IsOpen = true;
+            LockSecretBox.Password = string.Empty;
+            LockSecretBox.Focus(FocusState.Programmatic);
+        }
+        finally
+        {
+            _lockUnlockInProgress = false;
+            LockUnlockButton.IsEnabled = !string.IsNullOrEmpty(LockSecretBox.Password);
+        }
+    }
+
+    private static bool IsExpectedWindowsHelloFailure(Exception ex) =>
+        ex is UnauthorizedAccessException
+            or InvalidOperationException
+            or NotSupportedException
+            or System.Runtime.InteropServices.COMException
+            or InvalidCastException;
+
+    private void ShowWindowsHelloUnavailableFallback(Exception ex)
+    {
+        _logger.LogInformation(ex, "Windows Hello unlock was unavailable; showing configured fallback.");
+        ShowFallbackUnlock("Windows Hello is unavailable.");
+    }
+
+    private static AppAuthenticationFallbackMethod FallbackMethodForMode(AppAuthenticationMode mode) =>
+        mode == AppAuthenticationMode.Password
+            ? AppAuthenticationFallbackMethod.Password
+            : AppAuthenticationFallbackMethod.Pin;
+
+    private static string SecretLabel(AppAuthenticationFallbackMethod method) =>
+        method == AppAuthenticationFallbackMethod.Pin ? "PIN" : "Password";
+
+    private static string InvalidSecretMessage(AppAuthenticationFallbackMethod method) =>
+        method == AppAuthenticationFallbackMethod.Pin ? "Invalid PIN." : "Invalid password.";
+
+    private void CompleteUnlock()
+    {
+        HideLockOverlay();
+        _inactivityLockEvaluator.MarkUnlocked(DateTimeOffset.UtcNow);
+        _activeUnlockTcs?.TrySetResult(true);
+        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () => ContentFrame.Focus(FocusState.Programmatic));
+    }
+
     private void OnFirstActivated(object sender, WindowActivatedEventArgs args)
     {
         if (args.WindowActivationState == WindowActivationState.Deactivated) return;
@@ -228,8 +611,30 @@ public sealed partial class MainWindow : Window
     /// WatchGuard SAML prompts a tunnel test can trigger) can still open over it on the same
     /// <c>XamlRoot</c>. Call <see cref="HideModalOverlay"/> to dismiss. UI thread only.
     /// </summary>
-    public void ShowModalOverlay(UIElement content)
+    public void ShowModalOverlay(UIElement content, double? width = null, double? height = null)
     {
+        if (width is { } modalWidth)
+        {
+            ModalOverlayFrame.MinWidth = modalWidth;
+            ModalOverlayFrame.MaxWidth = modalWidth;
+        }
+        else
+        {
+            ModalOverlayFrame.MinWidth = 380;
+            ModalOverlayFrame.MaxWidth = 600;
+        }
+
+        if (height is { } modalHeight)
+        {
+            ModalOverlayFrame.MinHeight = modalHeight;
+            ModalOverlayFrame.MaxHeight = modalHeight;
+        }
+        else
+        {
+            ModalOverlayFrame.MinHeight = 0;
+            ModalOverlayFrame.MaxHeight = double.PositiveInfinity;
+        }
+
         ModalOverlayContent.Content = content;
         ModalOverlayHost.Visibility = Visibility.Visible;
     }
@@ -240,6 +645,10 @@ public sealed partial class MainWindow : Window
     {
         ModalOverlayHost.Visibility = Visibility.Collapsed;
         ModalOverlayContent.Content = null;
+        ModalOverlayFrame.MinWidth = 380;
+        ModalOverlayFrame.MaxWidth = 600;
+        ModalOverlayFrame.MinHeight = 0;
+        ModalOverlayFrame.MaxHeight = double.PositiveInfinity;
     }
 
     private void NavView_ItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)

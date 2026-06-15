@@ -163,7 +163,7 @@ public sealed class DialogWatchguardSamlAuthService : IWatchguardSamlAuthService
         ContentDialogResult dialogResult;
         using (RdpOverlayCoordinator.Suppress())
         {
-            dialogResult = await dialog.ShowAsync();
+            dialogResult = await Wormhole.Services.ContentDialogTracker.ShowAsync(dialog, cancellationToken);
         }
 
         if (completion.Task.IsCompleted)

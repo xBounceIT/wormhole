@@ -62,6 +62,13 @@ internal static class Win32Interop
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool ClientToScreen(IntPtr hWnd, ref POINT lpPoint);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
+
+    [DllImport("kernel32.dll")]
+    public static extern ulong GetTickCount64();
+
     // The *LongPtr accessors are required for HWND-sized values (GWLP_HWNDPARENT) and to be
     // safe on 64-bit; the app is x64/arm64 only, so the W entry points always exist.
     [DllImport("user32.dll", SetLastError = true, EntryPoint = "GetWindowLongPtrW")]
@@ -118,6 +125,13 @@ internal static class Win32Interop
         public int cx;
         public int cy;
         public uint flags;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct LASTINPUTINFO
+    {
+        public uint cbSize;
+        public uint dwTime;
     }
 
     public const uint WM_SIZE = 0x0005;
