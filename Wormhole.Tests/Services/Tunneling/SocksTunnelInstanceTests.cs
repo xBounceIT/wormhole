@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
@@ -11,6 +12,53 @@ namespace Wormhole.Tests.Services.Tunneling;
 
 public class SocksTunnelInstanceTests
 {
+    [Fact]
+    public async Task FailureSignal_TransitionsToFailed_AndRejectsNewWork()
+    {
+        var failed = new TaskCompletionSource<int?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var changed = new TaskCompletionSource<TunnelStateChangedEventArgs>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var endpoint = new IPEndPoint(IPAddress.Loopback, 1);
+        var instance = new SocksTunnelInstance(
+            endpoint,
+            NullLogger<SocksTunnelInstance>.Instance,
+            failureSignal: failed.Task);
+        instance.StateChanged += (_, e) => changed.TrySetResult(e);
+
+        failed.SetResult(42);
+
+        var args = await changed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(TunnelState.Failed, args.State);
+        Assert.NotNull(args.Message);
+        Assert.Contains("42", args.Message);
+        Assert.Equal(TunnelState.Failed, instance.State);
+        await Assert.ThrowsAsync<IOException>(() =>
+            instance.DialAsync("example.invalid", 443, CancellationToken.None));
+        await Assert.ThrowsAsync<IOException>(() =>
+            instance.BindLocalForwarderAsync("example.invalid", 443, CancellationToken.None));
+
+        await instance.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task DisposeAsync_BeforeFailureSignal_CompletesAsClosed()
+    {
+        var failed = new TaskCompletionSource<int?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var states = new System.Collections.Generic.List<TunnelState>();
+        var endpoint = new IPEndPoint(IPAddress.Loopback, 1);
+        var instance = new SocksTunnelInstance(
+            endpoint,
+            NullLogger<SocksTunnelInstance>.Instance,
+            failureSignal: failed.Task);
+        instance.StateChanged += (_, e) => states.Add(e.State);
+
+        await instance.DisposeAsync();
+        failed.SetResult(42);
+        await Task.Delay(50);
+
+        Assert.Equal(TunnelState.Closed, instance.State);
+        Assert.Equal(new[] { TunnelState.Closed }, states);
+    }
+
     [Fact]
     public async Task BindLocalForwarderAsync_AfterDispose_Throws()
     {

@@ -184,10 +184,10 @@ public sealed class TunnelManager
             {
                 if (reusedLive)
                 {
-                    // A dead sidecar process is not observable through State (nothing flips a live
-                    // instance to Failed today) — probe the loopback SOCKS listener before handing
-                    // the tunnel out. On failure: evict so new connects establish fresh, drop our
-                    // ref, and retry; outstanding leases drain the dead instance as usual.
+                    // State catches sidecar exits wired through SocksTunnelInstance, and this probe
+                    // remains a defensive check for missed signals or listener-level failure before
+                    // handing the tunnel out. On failure: evict so new connects establish fresh, drop
+                    // our ref, and retry; outstanding leases drain the dead instance as usual.
                     // Probing assumes every pooled instance exposes a loopback SOCKS endpoint —
                     // true for all current providers, which wrap a sidecar SOCKS listener. An
                     // instance with a null Socks5Endpoint is reused UNPROBED; if a non-SOCKS

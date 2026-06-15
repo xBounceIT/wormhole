@@ -37,6 +37,7 @@ public sealed class OpenVpnProcessHost : IAsyncDisposable
     private readonly ILogger _logger;
     private readonly Process _process;
     private readonly Task _stderrPump;
+    private readonly ProcessExitSignal _processExit;
     // Last few stderr lines, kept so an early-exit failure can surface the sidecar's own
     // diagnostic (e.g. "OpenVPN3 binding not linked") instead of an opaque pipe error.
     private readonly ConcurrentQueue<string> _stderrTail = new();
@@ -47,10 +48,13 @@ public sealed class OpenVpnProcessHost : IAsyncDisposable
     {
         _process = process;
         _logger = logger;
+        _processExit = new ProcessExitSignal(process);
         _stderrPump = PumpStderrAsync();
     }
 
     public IPEndPoint SocksEndpoint => new(IPAddress.Loopback, _socksPort);
+
+    public Task<int?> ProcessExited => _processExit.Exited;
 
     public static async Task<OpenVpnProcessHost> StartAsync(
         string sidecarPath,
@@ -241,6 +245,8 @@ public sealed class OpenVpnProcessHost : IAsyncDisposable
             _logger.LogWarning(ex, "Error while shutting down OpenVPN sidecar.");
         }
 
+        _processExit.Complete();
+        _processExit.Dispose();
         try { await _stderrPump.ConfigureAwait(false); } catch { /* logged inside */ }
         try { _process.Dispose(); } catch { /* best effort */ }
     }

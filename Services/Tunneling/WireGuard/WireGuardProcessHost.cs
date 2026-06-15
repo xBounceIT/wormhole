@@ -25,6 +25,7 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
     private readonly ILogger _logger;
     private readonly Process _process;
     private readonly Task _stderrPump;
+    private readonly ProcessExitSignal _processExit;
     // Last few stderr lines, kept so an early-exit failure surfaces the sidecar's own
     // diagnostic instead of an opaque pipe error.
     private readonly ConcurrentQueue<string> _stderrTail = new();
@@ -35,10 +36,13 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
     {
         _process = process;
         _logger = logger;
+        _processExit = new ProcessExitSignal(process);
         _stderrPump = PumpStderrAsync();
     }
 
     public IPEndPoint SocksEndpoint => new(IPAddress.Loopback, _socksPort);
+
+    public Task<int?> ProcessExited => _processExit.Exited;
 
     public static async Task<WireGuardProcessHost> StartAsync(
         string sidecarPath,
@@ -232,6 +236,8 @@ public sealed class WireGuardProcessHost : IAsyncDisposable
             _logger.LogWarning(ex, "Error while shutting down WireGuard sidecar.");
         }
 
+        _processExit.Complete();
+        _processExit.Dispose();
         try { await _stderrPump.ConfigureAwait(false); } catch { /* logged inside */ }
         try { _process.Dispose(); } catch { /* best effort */ }
     }
