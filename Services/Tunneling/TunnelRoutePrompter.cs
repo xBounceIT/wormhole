@@ -47,7 +47,8 @@ public sealed class TunnelRoutePrompter : ITunnelRoutePrompter
         // covers the no-config-id fast path, which doesn't await.
         cancellationToken.ThrowIfCancellationRequested();
 
-        var choice = await _dialog.PromptTunnelRouteAsync(profile.Name, tunnelName).ConfigureAwait(true);
+        var choice = await _dialog.PromptTunnelRouteAsync(profile.Name, tunnelName, cancellationToken).ConfigureAwait(true);
+        cancellationToken.ThrowIfCancellationRequested();
         return choice switch
         {
             // Force the tunnel off for this attempt; downstream EstablishAsync sees

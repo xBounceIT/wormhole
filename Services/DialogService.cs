@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Threading;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -263,7 +264,7 @@ public sealed class DialogService : IDialogService
         return result == ContentDialogResult.Primary ? form.BuildDraft() : null;
     }
 
-    public async Task<string?> PromptPasswordAsync(string title, string message)
+    public async Task<string?> PromptPasswordAsync(string title, string message, CancellationToken cancellationToken = default)
     {
         var passwordBox = new PasswordBox
         {
@@ -300,12 +301,16 @@ public sealed class DialogService : IDialogService
 
         dialog.Opened += (_, _) => passwordBox.Focus(FocusState.Programmatic);
 
-        var result = await ShowDialogAsync(dialog);
+        var result = await ShowDialogAsync(dialog, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
         var accepted = result == ContentDialogResult.Primary || submittedViaEnter;
         return accepted ? passwordBox.Password : null;
     }
 
-    public async Task<TunnelRouteChoice> PromptTunnelRouteAsync(string connectionName, string tunnelName)
+    public async Task<TunnelRouteChoice> PromptTunnelRouteAsync(
+        string connectionName,
+        string tunnelName,
+        CancellationToken cancellationToken = default)
     {
         var dialog = new ContentDialog
         {
@@ -324,7 +329,8 @@ public sealed class DialogService : IDialogService
             XamlRoot = RequireXamlRoot(),
         };
 
-        var result = await ShowDialogAsync(dialog);
+        var result = await ShowDialogAsync(dialog, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
         return result switch
         {
             ContentDialogResult.Primary => TunnelRouteChoice.UseTunnel,
@@ -375,7 +381,11 @@ public sealed class DialogService : IDialogService
         return ShowDialogAsync(dialog);
     }
 
-    public async Task<(string Username, string Password)?> PromptCredentialsAsync(string title, string message, string? initialUsername = null)
+    public async Task<(string Username, string Password)?> PromptCredentialsAsync(
+        string title,
+        string message,
+        string? initialUsername = null,
+        CancellationToken cancellationToken = default)
     {
         var userBox = new TextBox
         {
@@ -446,7 +456,8 @@ public sealed class DialogService : IDialogService
                 passwordBox.Focus(FocusState.Programmatic);
         };
 
-        var result = await ShowDialogAsync(dialog);
+        var result = await ShowDialogAsync(dialog, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
         var accepted = result == ContentDialogResult.Primary || submittedViaEnter;
         if (!accepted) return null;
         var username = userBox.Text.Trim();
@@ -637,11 +648,24 @@ public sealed class DialogService : IDialogService
     // same gate tunnel/auth prompts use so close confirmation attempts wait instead of throwing
     // while another modal is open. Also suppress any connected RDP overlay for the dialog lifetime
     // so dialogs stay visible/usable while an RDP tab is active.
-    private static async Task<ContentDialogResult> ShowDialogAsync(ContentDialog dialog)
+    private static async Task<ContentDialogResult> ShowDialogAsync(
+        ContentDialog dialog,
+        CancellationToken cancellationToken = default)
     {
-        await ContentDialogGate.Shared.WaitAsync().ConfigureAwait(true);
+        await ContentDialogGate.Shared.WaitAsync(cancellationToken).ConfigureAwait(true);
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            var dispatcher = dialog.XamlRoot?.Content?.DispatcherQueue;
+            using var cancellationRegistration = cancellationToken.CanBeCanceled
+                ? cancellationToken.Register(() =>
+                {
+                    dispatcher?.TryEnqueue(() =>
+                    {
+                        try { dialog.Hide(); } catch { /* dialog already closed */ }
+                    });
+                })
+                : default;
             using (RdpOverlayCoordinator.Suppress())
             {
                 return await dialog.ShowAsync();

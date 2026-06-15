@@ -23,6 +23,18 @@ public class SshCredentialResolverTests
     }
 
     [Fact]
+    public async Task Resolve_NoCredentialId_PassesCancellationToken_ToPasswordPrompt()
+    {
+        var dialogs = new FakeDialogService { PasswordPromptResult = "prompted-pwd" };
+        var resolver = NewResolver(dialogs);
+        using var cts = new CancellationTokenSource();
+
+        await resolver.ResolveAsync(MakeProfile(credentialId: null), cts.Token);
+
+        Assert.Equal(cts.Token, dialogs.LastPasswordPromptCancellationToken);
+    }
+
+    [Fact]
     public async Task Resolve_NoCredentialId_PromptCancelled_ReturnsEmpty()
     {
         var resolver = NewResolver(new FakeDialogService());

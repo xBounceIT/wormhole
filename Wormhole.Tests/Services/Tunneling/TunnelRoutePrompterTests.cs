@@ -104,6 +104,19 @@ public sealed class TunnelRoutePrompterTests
     }
 
     [Fact]
+    public async Task SettingOn_PassesCancellationToken_ToDialog()
+    {
+        var (prompter, dialog, _, settings) = Create();
+        settings.Current.PromptBeforeTunnelConnect = true;
+        var profile = Profile(tunnelEnabled: true, configId: Guid.NewGuid());
+        using var cts = new CancellationTokenSource();
+
+        await prompter.ResolveRouteAsync(profile, cts.Token);
+
+        Assert.Equal(cts.Token, dialog.LastTunnelRouteCancellationToken);
+    }
+
+    [Fact]
     public async Task SettingOn_ConfigLookupThrows_StillPromptsWithGenericName()
     {
         var dialog = new FakeDialogService();

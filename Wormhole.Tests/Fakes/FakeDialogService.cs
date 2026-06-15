@@ -169,9 +169,12 @@ public class FakeDialogService : IDialogService
         return Task.CompletedTask;
     }
 
-    public virtual Task<string?> PromptPasswordAsync(string title, string message)
+    public CancellationToken LastPasswordPromptCancellationToken { get; private set; }
+
+    public virtual Task<string?> PromptPasswordAsync(string title, string message, CancellationToken cancellationToken = default)
     {
         PasswordPromptCount++;
+        LastPasswordPromptCancellationToken = cancellationToken;
         return Task.FromResult(PasswordPromptResult);
     }
 
@@ -182,12 +185,17 @@ public class FakeDialogService : IDialogService
     public int TunnelRoutePromptCount { get; private set; }
     public string? LastTunnelRouteName { get; private set; }
     public string? LastTunnelRouteConnectionName { get; private set; }
+    public CancellationToken LastTunnelRouteCancellationToken { get; private set; }
 
-    public virtual Task<TunnelRouteChoice> PromptTunnelRouteAsync(string connectionName, string tunnelName)
+    public virtual Task<TunnelRouteChoice> PromptTunnelRouteAsync(
+        string connectionName,
+        string tunnelName,
+        CancellationToken cancellationToken = default)
     {
         TunnelRoutePromptCount++;
         LastTunnelRouteConnectionName = connectionName;
         LastTunnelRouteName = tunnelName;
+        LastTunnelRouteCancellationToken = cancellationToken;
         return Task.FromResult(TunnelRouteResult);
     }
 
@@ -200,7 +208,11 @@ public class FakeDialogService : IDialogService
         return Task.CompletedTask;
     }
 
-    public virtual Task<(string Username, string Password)?> PromptCredentialsAsync(string title, string message, string? initialUsername = null)
+    public virtual Task<(string Username, string Password)?> PromptCredentialsAsync(
+        string title,
+        string message,
+        string? initialUsername = null,
+        CancellationToken cancellationToken = default)
     {
         CredentialsPromptCount++;
         return Task.FromResult(CredentialsPromptResult);
