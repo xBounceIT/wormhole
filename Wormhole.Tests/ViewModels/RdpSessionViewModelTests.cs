@@ -1456,10 +1456,12 @@ public class RdpSessionViewModelTests
         var provider = new FakeTunnelProvider();
         tunnelRepo.Configs[configId] = new TunnelConfig { Id = configId, Name = "corp", Kind = TunnelKind.WireGuard };
 
-        // Default settings: PromptBeforeTunnelConnect is off.
+        var settings = new FakeAppSettingsService();
+        settings.Current.PromptBeforeTunnelConnect = false;
         var (vm, svc, creds, dlg, _) = CreateVm(
             tunnelRepo: tunnelRepo,
-            tunnelProviders: new ITunnelProvider[] { provider });
+            tunnelProviders: new ITunnelProvider[] { provider },
+            settings: settings);
         creds.TunnelConfigs[configId] = new byte[] { 1, 2, 3 };
         dlg.PasswordPromptResult = "password";
         svc.NextSession = new FakeRdpSession();

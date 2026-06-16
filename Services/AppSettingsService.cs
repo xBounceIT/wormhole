@@ -12,36 +12,80 @@ public sealed class AppSettingsService : IAppSettingsService
     };
 
     private readonly object _writeLock = new();
+    private readonly string _settingsFilePath;
 
     public AppSettings Current { get; private set; }
 
     public event EventHandler? SettingsChanged;
 
     public AppSettingsService()
+        : this(AppPaths.GetSettingsFilePath())
     {
-        Current = Load();
+    }
+
+    internal AppSettingsService(string settingsFilePath)
+    {
+        _settingsFilePath = settingsFilePath;
+        Current = Load(settingsFilePath, out var migrated);
+        if (migrated)
+        {
+            TryPersistMigratedSettings();
+        }
     }
 
     public void Save()
+    {
+        Persist(raiseChanged: true);
+    }
+
+    private void Persist(bool raiseChanged)
     {
         // Serialize the read of Current + the file write so concurrent callers (e.g. the
         // UI thread toggling a setting and the background update check stamping
         // LastUpdateCheck) cannot collide on File.WriteAllText and surface an IOException.
         lock (_writeLock)
         {
-            Directory.CreateDirectory(AppPaths.GetAppDataDirectory());
-            File.WriteAllBytes(AppPaths.GetSettingsFilePath(), JsonSerializer.SerializeToUtf8Bytes(Current, JsonOptions));
+            var directory = Path.GetDirectoryName(_settingsFilePath);
+            if (!string.IsNullOrEmpty(directory))
+            {
+                Directory.CreateDirectory(directory);
+            }
+            File.WriteAllBytes(_settingsFilePath, JsonSerializer.SerializeToUtf8Bytes(Current, JsonOptions));
         }
-        SettingsChanged?.Invoke(this, EventArgs.Empty);
+        if (raiseChanged)
+        {
+            SettingsChanged?.Invoke(this, EventArgs.Empty);
+        }
     }
 
-    private static AppSettings Load()
+    private void TryPersistMigratedSettings()
     {
-        var path = AppPaths.GetSettingsFilePath();
+        try
+        {
+            Persist(raiseChanged: false);
+        }
+        catch
+        {
+            // Loading must remain tolerant of settings-file problems; a failed best-effort
+            // migration write should not stop startup with an otherwise usable in-memory default.
+        }
+    }
+
+    private static AppSettings Load(string path, out bool migrated)
+    {
+        migrated = false;
         try
         {
             var json = File.ReadAllBytes(path);
-            return JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
+            var schemaVersion = ReadSchemaVersion(json);
+            var settings = JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
+            if (schemaVersion < AppSettings.CurrentSchemaVersion)
+            {
+                settings.PromptBeforeTunnelConnect = true;
+                settings.SettingsSchemaVersion = AppSettings.CurrentSchemaVersion;
+                migrated = true;
+            }
+            return settings;
         }
         catch (FileNotFoundException)
         {
@@ -55,5 +99,15 @@ public sealed class AppSettingsService : IAppSettingsService
         {
             return new AppSettings();
         }
+    }
+
+    private static int ReadSchemaVersion(byte[] json)
+    {
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.ValueKind == JsonValueKind.Object &&
+            document.RootElement.TryGetProperty(nameof(AppSettings.SettingsSchemaVersion), out var value) &&
+            value.TryGetInt32(out var version)
+                ? version
+                : 0;
     }
 }

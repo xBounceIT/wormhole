@@ -2,6 +2,10 @@ namespace Wormhole.Models;
 
 public sealed class AppSettings
 {
+    public const int CurrentSchemaVersion = 1;
+
+    public int SettingsSchemaVersion { get; set; } = CurrentSchemaVersion;
+
     public ApplicationTheme Theme { get; set; } = ApplicationTheme.System;
     public bool ConfirmOnTabClose { get; set; } = true;
     public string DefaultSshFont { get; set; } = "Cascadia Mono";
@@ -21,8 +25,9 @@ public sealed class AppSettings
     // When on, a connection configured to use a VPN tunnel asks — at connect time — whether to
     // route through the tunnel or connect directly. For targets that are local on some networks
     // and only reachable over the VPN on others, this avoids editing the connection every time
-    // the user moves networks. Off by default: connections honor their configured tunnel.
-    public bool PromptBeforeTunnelConnect { get; set; }
+    // the user moves networks. On by default: legacy settings files are migrated once so
+    // previously saved off values become on, while future explicit opt-outs still persist.
+    public bool PromptBeforeTunnelConnect { get; set; } = true;
 
     // In-app MCP server (lets AI agents control already-open SSH sessions). Off by default;
     // the bearer token is stored in Windows Credential Manager, not here.

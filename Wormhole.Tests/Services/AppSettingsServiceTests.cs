@@ -1,0 +1,91 @@
+using System.Text.Json;
+using Wormhole.Models;
+using Wormhole.Services;
+using Xunit;
+
+namespace Wormhole.Tests.Services;
+
+public sealed class AppSettingsServiceTests
+{
+    [Fact]
+    public void AppSettings_DefaultsPromptBeforeTunnelConnectOn()
+    {
+        var settings = new AppSettings();
+
+        Assert.True(settings.PromptBeforeTunnelConnect);
+        Assert.Equal(AppSettings.CurrentSchemaVersion, settings.SettingsSchemaVersion);
+    }
+
+    [Fact]
+    public void LegacySettings_MigratesPromptBeforeTunnelConnectOn()
+    {
+        using var temp = TempSettingsFile.Create();
+        File.WriteAllText(temp.FilePath, """
+        {
+          "PromptBeforeTunnelConnect": false
+        }
+        """);
+
+        var service = new AppSettingsService(temp.FilePath);
+
+        Assert.True(service.Current.PromptBeforeTunnelConnect);
+        Assert.Equal(AppSettings.CurrentSchemaVersion, service.Current.SettingsSchemaVersion);
+
+        var saved = JsonSerializer.Deserialize<AppSettings>(File.ReadAllBytes(temp.FilePath));
+        Assert.NotNull(saved);
+        Assert.True(saved!.PromptBeforeTunnelConnect);
+        Assert.Equal(AppSettings.CurrentSchemaVersion, saved.SettingsSchemaVersion);
+    }
+
+    [Fact]
+    public void VersionedSettings_PreservesPromptBeforeTunnelConnectOff()
+    {
+        using var temp = TempSettingsFile.Create();
+        File.WriteAllText(temp.FilePath, """
+        {
+          "SettingsSchemaVersion": 1,
+          "PromptBeforeTunnelConnect": false
+        }
+        """);
+
+        var service = new AppSettingsService(temp.FilePath);
+
+        Assert.False(service.Current.PromptBeforeTunnelConnect);
+        Assert.Equal(AppSettings.CurrentSchemaVersion, service.Current.SettingsSchemaVersion);
+
+        var saved = JsonSerializer.Deserialize<AppSettings>(File.ReadAllBytes(temp.FilePath));
+        Assert.NotNull(saved);
+        Assert.False(saved!.PromptBeforeTunnelConnect);
+        Assert.Equal(AppSettings.CurrentSchemaVersion, saved.SettingsSchemaVersion);
+    }
+
+    private sealed class TempSettingsFile : IDisposable
+    {
+        private TempSettingsFile(string directory)
+        {
+            DirectoryPath = directory;
+            FilePath = Path.Combine(directory, "settings.json");
+        }
+
+        public string DirectoryPath { get; }
+        public string FilePath { get; }
+
+        public static TempSettingsFile Create()
+        {
+            var directory = Path.Combine(
+                Path.GetTempPath(),
+                "Wormhole.Tests",
+                Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            return new TempSettingsFile(directory);
+        }
+
+        public void Dispose()
+        {
+            if (Directory.Exists(DirectoryPath))
+            {
+                Directory.Delete(DirectoryPath, recursive: true);
+            }
+        }
+    }
+}
