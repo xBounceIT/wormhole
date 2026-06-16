@@ -340,17 +340,19 @@ public class ConnectionEditorViewModelTests
         var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
 
-        // AvailableCredentials always leads with the "(None)" sentinel for "prompt every
-        // time"; the next slot is the protocol-filtered repository entry.
-        Assert.Equal(2, vm.AvailableCredentials.Count);
-        Assert.Equal(Guid.Empty, vm.AvailableCredentials[0].Id);
-        Assert.Equal("ssh", vm.AvailableCredentials[1].Name);
+        // AvailableCredentials leads with "(Inherit)" and "(None)" sentinels, followed by
+        // the protocol-filtered repository entry.
+        Assert.Equal(3, vm.AvailableCredentials.Count);
+        Assert.Equal(ConnectionEditorViewModel.InheritCredential.Id, vm.AvailableCredentials[0].Id);
+        Assert.Equal(Guid.Empty, vm.AvailableCredentials[1].Id);
+        Assert.Equal("ssh", vm.AvailableCredentials[2].Name);
 
         vm.Protocol = ProtocolType.Rdp;
 
-        Assert.Equal(2, vm.AvailableCredentials.Count);
-        Assert.Equal(Guid.Empty, vm.AvailableCredentials[0].Id);
-        Assert.Equal("rdp", vm.AvailableCredentials[1].Name);
+        Assert.Equal(3, vm.AvailableCredentials.Count);
+        Assert.Equal(ConnectionEditorViewModel.InheritCredential.Id, vm.AvailableCredentials[0].Id);
+        Assert.Equal(Guid.Empty, vm.AvailableCredentials[1].Id);
+        Assert.Equal("rdp", vm.AvailableCredentials[2].Name);
     }
 
     [Fact]
@@ -365,10 +367,11 @@ public class ConnectionEditorViewModelTests
         vm.Protocol = ProtocolType.Rdp;
         await vm.LoadCredentialsAsync();
 
-        // Sentinel + the one password-kind credential, key-kind filtered out.
-        Assert.Equal(2, vm.AvailableCredentials.Count);
-        Assert.Equal(Guid.Empty, vm.AvailableCredentials[0].Id);
-        Assert.Equal("rdp-pwd", vm.AvailableCredentials[1].Name);
+        // Sentinels + the one password-kind credential, key-kind filtered out.
+        Assert.Equal(3, vm.AvailableCredentials.Count);
+        Assert.Equal(ConnectionEditorViewModel.InheritCredential.Id, vm.AvailableCredentials[0].Id);
+        Assert.Equal(Guid.Empty, vm.AvailableCredentials[1].Id);
+        Assert.Equal("rdp-pwd", vm.AvailableCredentials[2].Name);
     }
 
     [Fact]
@@ -382,13 +385,14 @@ public class ConnectionEditorViewModelTests
         vm.SelectedCredential = cred;
         Assert.Equal(cred.Id, vm.CredentialId);
 
-        var none = vm.AvailableCredentials[0];
+        var none = vm.AvailableCredentials[1];
         Assert.Equal(Guid.Empty, none.Id);
         vm.SelectedCredential = none;
 
         // CredentialId reverts to null, but the getter returns the sentinel so the
         // ComboBox has an in-collection item to display.
         Assert.Null(vm.CredentialId);
+        Assert.Equal(CredentialBindingMode.None, vm.CredentialMode);
         Assert.Equal(Guid.Empty, vm.SelectedCredential!.Id);
     }
 
@@ -409,7 +413,8 @@ public class ConnectionEditorViewModelTests
         vm.Protocol = ProtocolType.Rdp;
 
         Assert.Null(vm.CredentialId);
-        Assert.Equal(Guid.Empty, vm.SelectedCredential!.Id);
+        Assert.Equal(CredentialBindingMode.Inherit, vm.CredentialMode);
+        Assert.Equal(ConnectionEditorViewModel.InheritCredential.Id, vm.SelectedCredential!.Id);
     }
 
     [Fact]
@@ -439,7 +444,7 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
-    public async Task FilterCredentials_EmptyQuery_ReturnsFullListIncludingNoneSentinel()
+    public async Task FilterCredentials_EmptyQuery_ReturnsFullListIncludingSentinels()
     {
         var sshA = new CredentialProfile { Name = "alpha", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var sshB = new CredentialProfile { Name = "bravo", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
@@ -449,9 +454,10 @@ public class ConnectionEditorViewModelTests
 
         var all = vm.FilterCredentials("");
 
-        // Mirrors AvailableCredentials: the None sentinel leads, followed by the two matches.
+        // Mirrors AvailableCredentials: inherit/none sentinels lead, followed by the two matches.
         Assert.Equal(vm.AvailableCredentials.Count, all.Count);
-        Assert.Equal(Guid.Empty, all[0].Id);
+        Assert.Equal(ConnectionEditorViewModel.InheritCredential.Id, all[0].Id);
+        Assert.Equal(Guid.Empty, all[1].Id);
         Assert.Contains(all, c => c.Name == "alpha");
         Assert.Contains(all, c => c.Name == "bravo");
     }
@@ -527,10 +533,10 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
-    public async Task SelectedCredential_SetToNull_ClearsBindingToPromptEveryTime()
+    public async Task SelectedCredential_SetToNull_ClearsBindingToInherit()
     {
         // The picker's "empty text clears the selection" path applies null to SelectedCredential;
-        // the setter must map that back to CredentialId == null (prompt every time).
+        // the setter must map that back to inherited credentials.
         var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
         var repo = new MultiCredentialRepository(cred);
         var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo(), new FakeCredentialService());
@@ -542,7 +548,8 @@ public class ConnectionEditorViewModelTests
         vm.SelectedCredential = null;
 
         Assert.Null(vm.CredentialId);
-        Assert.Equal(Guid.Empty, vm.SelectedCredential!.Id); // getter returns the None sentinel
+        Assert.Equal(CredentialBindingMode.Inherit, vm.CredentialMode);
+        Assert.Equal(ConnectionEditorViewModel.InheritCredential.Id, vm.SelectedCredential!.Id);
     }
 
     [Fact]
@@ -1348,6 +1355,7 @@ public class ConnectionEditorViewModelTests
         Assert.True(node.UseInlinePassword);
         Assert.Equal("hunter2", node.PendingInlinePassword);
         Assert.Null(node.CredentialId);
+        Assert.Equal(CredentialBindingMode.None, node.CredentialMode);
         Assert.Equal("root", node.Username);
     }
 
@@ -1369,6 +1377,27 @@ public class ConnectionEditorViewModelTests
         Assert.False(node.UseInlinePassword);
         Assert.Null(node.PendingInlinePassword);
         Assert.Equal(cred.Id, node.CredentialId);
+        Assert.Equal(CredentialBindingMode.Saved, node.CredentialMode);
+    }
+
+    [Fact]
+    public async Task WriteTo_InheritCredential_WritesExplicitInheritMode()
+    {
+        var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository(), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        vm.Protocol = ProtocolType.Ssh;
+        vm.Name = "n";
+        vm.Host = "h";
+        vm.UseSavedCredentials = true;
+        vm.SelectedCredential = ConnectionEditorViewModel.InheritCredential;
+
+        var node = new ConnectionNode();
+        vm.WriteTo(node);
+
+        Assert.False(node.UseInlinePassword);
+        Assert.Null(node.PendingInlinePassword);
+        Assert.Null(node.CredentialId);
+        Assert.Equal(CredentialBindingMode.Inherit, node.CredentialMode);
     }
 
     [Fact]
@@ -1393,6 +1422,7 @@ public class ConnectionEditorViewModelTests
         Assert.False(node.UseInlinePassword);
         Assert.Null(node.PendingInlinePassword);
         Assert.Null(node.CredentialId);
+        Assert.Equal(CredentialBindingMode.None, node.CredentialMode);
         Assert.False(vm.ShowInlinePassword);
     }
 
@@ -1414,6 +1444,49 @@ public class ConnectionEditorViewModelTests
 
         Assert.False(vm.UseSavedCredentials);
         Assert.True(vm.ShowInlinePassword);
+    }
+
+    [Fact]
+    public async Task LoadFrom_LegacyNullModeWithCredential_LoadsAsSavedCredential()
+    {
+        var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(cred), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        var source = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Ssh,
+            Kind = NodeKind.Connection,
+            CredentialId = cred.Id,
+            CredentialMode = null,
+        };
+
+        vm.LoadFrom(source);
+
+        Assert.Equal(CredentialBindingMode.Saved, vm.CredentialMode);
+        Assert.Equal(cred.Id, vm.SelectedCredential!.Id);
+    }
+
+    [Fact]
+    public async Task LoadFrom_LegacyNullModeWithoutCredential_LoadsAsInherit()
+    {
+        var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository(), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        var source = new ConnectionNode
+        {
+            Name = "n",
+            Host = "h",
+            Protocol = ProtocolType.Ssh,
+            Kind = NodeKind.Connection,
+            CredentialId = null,
+            CredentialMode = null,
+        };
+
+        vm.LoadFrom(source);
+
+        Assert.Equal(CredentialBindingMode.Inherit, vm.CredentialMode);
+        Assert.Equal(ConnectionEditorViewModel.InheritCredential.Id, vm.SelectedCredential!.Id);
     }
 
     [Fact]

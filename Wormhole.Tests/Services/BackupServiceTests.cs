@@ -27,6 +27,7 @@ public sealed class BackupServiceTests : IDisposable
             Port                     INTEGER  NULL,
             Username                 TEXT     NULL,
             CredentialId             TEXT     NULL,
+            CredentialMode           INTEGER  NULL,
             UseInlinePassword        INTEGER  NULL,
             RdpDomain                TEXT     NULL,
             RdpScreenSize            TEXT     NULL,
@@ -950,6 +951,7 @@ public sealed class BackupServiceTests : IDisposable
                     "host": "h",
                     "port": 22,
                     "credentialId": "{{missingCred}}",
+                    "credentialMode": 2,
                     "tunnelConfigId": "{{missingTun}}",
                     "createdAt": "{{DateTime.UtcNow:O}}",
                     "updatedAt": "{{DateTime.UtcNow:O}}"
@@ -968,6 +970,7 @@ public sealed class BackupServiceTests : IDisposable
         Assert.Contains(result.Warnings, w => w.Contains("missing tunnel", StringComparison.OrdinalIgnoreCase));
         var node = (await dst.Connections.GetAllAsync()).Single();
         Assert.Null(node.CredentialId);
+        Assert.Equal(CredentialBindingMode.None, node.CredentialMode);
         Assert.Null(node.TunnelConfigId);
     }
 

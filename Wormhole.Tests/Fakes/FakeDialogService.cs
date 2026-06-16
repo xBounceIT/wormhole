@@ -30,8 +30,7 @@ public class FakeDialogService : IDialogService
 
     /// <summary>
     /// When non-null, drives <see cref="EditFolderAsync"/>. The fake mirrors the real dialog:
-    /// identity is preserved from <c>initial</c>; Name and the two tunnel fields are copied
-    /// from this seed (folders don't carry any other editable state today).
+    /// identity is preserved from <c>initial</c>; editable folder fields are copied from this seed.
     /// </summary>
     public ConnectionNode? EditFolderResult { get; set; }
 
@@ -80,6 +79,7 @@ public class FakeDialogService : IDialogService
         output.Port = src.Port;
         output.Username = src.Username;
         output.CredentialId = src.CredentialId;
+        output.CredentialMode = src.CredentialMode;
         output.UseInlinePassword = src.UseInlinePassword;
         // Transient plaintext the tree VM stores in Credential Manager after the row commits —
         // mirror it so inline-password tree tests can seed a password through the fake editor.
@@ -134,6 +134,12 @@ public class FakeDialogService : IDialogService
             var output = initial.Clone();
             var src = EditFolderResult;
             output.Name = src.Name;
+            output.CredentialId = src.CredentialId;
+            output.CredentialMode = src.CredentialMode;
+            if (src.CredentialMode == CredentialBindingMode.Saved)
+            {
+                output.Username = src.Username;
+            }
             output.TunnelEnabled = src.TunnelEnabled;
             output.TunnelConfigId = src.TunnelConfigId;
             return Task.FromResult<ConnectionNode?>(output);

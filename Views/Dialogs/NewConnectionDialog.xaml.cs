@@ -103,39 +103,72 @@ public sealed partial class NewConnectionDialog : UserControl
     // An untouched field stays empty so PlaceholderText shows; only a real selection sets text.
 
     private void OnCredentialTextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args) =>
-        FilterSuggestions(sender, args);
+        FilterCredentialSuggestions(sender, args);
 
     private void OnCredentialQuerySubmitted(AutoSuggestBox sender, AutoSuggestBoxQuerySubmittedEventArgs args) =>
-        CommitCredential(sender, args.ChosenSuggestion, c => ViewModel.SelectedCredential = c, () => ViewModel.SelectedCredential);
+        CommitCredential(
+            sender,
+            args.ChosenSuggestion,
+            c => ViewModel.SelectedCredential = c,
+            () => ViewModel.SelectedCredential,
+            ViewModel.ResolveCredentialForCommit);
 
     private void OnCredentialGotFocus(object sender, RoutedEventArgs e) =>
-        ShowAllSuggestions((AutoSuggestBox)sender);
+        ShowAllCredentialSuggestions((AutoSuggestBox)sender);
 
     private void OnCredentialLostFocus(object sender, RoutedEventArgs e) =>
-        CommitCredential((AutoSuggestBox)sender, null, c => ViewModel.SelectedCredential = c, () => ViewModel.SelectedCredential);
+        CommitCredential(
+            (AutoSuggestBox)sender,
+            null,
+            c => ViewModel.SelectedCredential = c,
+            () => ViewModel.SelectedCredential,
+            ViewModel.ResolveCredentialForCommit);
 
     private void OnGatewayCredentialTextChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args) =>
-        FilterSuggestions(sender, args);
+        FilterGatewayCredentialSuggestions(sender, args);
 
     private void OnGatewayCredentialQuerySubmitted(AutoSuggestBox sender, AutoSuggestBoxQuerySubmittedEventArgs args) =>
-        CommitCredential(sender, args.ChosenSuggestion, c => ViewModel.SelectedGatewayCredential = c, () => ViewModel.SelectedGatewayCredential);
+        CommitCredential(
+            sender,
+            args.ChosenSuggestion,
+            c => ViewModel.SelectedGatewayCredential = c,
+            () => ViewModel.SelectedGatewayCredential,
+            ViewModel.ResolveGatewayCredentialForCommit);
 
     private void OnGatewayCredentialGotFocus(object sender, RoutedEventArgs e) =>
-        ShowAllSuggestions((AutoSuggestBox)sender);
+        ShowAllGatewayCredentialSuggestions((AutoSuggestBox)sender);
 
     private void OnGatewayCredentialLostFocus(object sender, RoutedEventArgs e) =>
-        CommitCredential((AutoSuggestBox)sender, null, c => ViewModel.SelectedGatewayCredential = c, () => ViewModel.SelectedGatewayCredential);
+        CommitCredential(
+            (AutoSuggestBox)sender,
+            null,
+            c => ViewModel.SelectedGatewayCredential = c,
+            () => ViewModel.SelectedGatewayCredential,
+            ViewModel.ResolveGatewayCredentialForCommit);
 
-    private void FilterSuggestions(AutoSuggestBox box, AutoSuggestBoxTextChangedEventArgs args)
+    private void FilterCredentialSuggestions(AutoSuggestBox box, AutoSuggestBoxTextChangedEventArgs args)
     {
         // Only react to typing — programmatic Text updates (selection sync) must not re-filter.
         if (args.Reason != AutoSuggestionBoxTextChangeReason.UserInput) return;
         box.ItemsSource = ViewModel.FilterCredentials(box.Text);
     }
 
-    private void ShowAllSuggestions(AutoSuggestBox box)
+    private void FilterGatewayCredentialSuggestions(AutoSuggestBox box, AutoSuggestBoxTextChangedEventArgs args)
+    {
+        // Only react to typing — programmatic Text updates (selection sync) must not re-filter.
+        if (args.Reason != AutoSuggestionBoxTextChangeReason.UserInput) return;
+        box.ItemsSource = ViewModel.FilterGatewayCredentials(box.Text);
+    }
+
+    private void ShowAllCredentialSuggestions(AutoSuggestBox box)
     {
         box.ItemsSource = ViewModel.FilterCredentials(null);
+        box.IsSuggestionListOpen = true;
+    }
+
+    private void ShowAllGatewayCredentialSuggestions(AutoSuggestBox box)
+    {
+        box.ItemsSource = ViewModel.FilterGatewayCredentials(null);
         box.IsSuggestionListOpen = true;
     }
 
@@ -143,15 +176,16 @@ public sealed partial class NewConnectionDialog : UserControl
     /// Resolve the picker's current input to a selection and apply it. Selection is committed on
     /// BOTH submit (Enter / tap / arrow+Enter) and focus loss, so a typed or arrow-highlighted
     /// credential isn't silently dropped when the user tabs or clicks away without pressing Enter.
-    /// A chosen suggestion wins; empty text clears back to "(None — prompt every time)"; otherwise
+    /// A chosen suggestion wins; empty text applies the picker-specific null behavior; otherwise
     /// the text is resolved to an exact-or-unique match (ambiguous/no match keeps the current
     /// selection). <paramref name="apply"/> accepts null to clear via the VM's sentinel mapping.
     /// </summary>
-    private void CommitCredential(
+    private static void CommitCredential(
         AutoSuggestBox box,
         object? chosenSuggestion,
         Action<CredentialProfile?> apply,
-        Func<CredentialProfile?> current)
+        Func<CredentialProfile?> current,
+        Func<string?, CredentialProfile?> resolve)
     {
         if (chosenSuggestion is CredentialProfile chosen)
         {
@@ -161,7 +195,7 @@ public sealed partial class NewConnectionDialog : UserControl
         {
             apply(null); // empty input means "no saved credential — prompt every time"
         }
-        else if (ViewModel.ResolveCredentialForCommit(box.Text) is { } resolved)
+        else if (resolve(box.Text) is { } resolved)
         {
             apply(resolved);
         }

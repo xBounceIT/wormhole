@@ -11,7 +11,7 @@
     <UserControl.Resources>
         <Thickness x:Key="FieldRowMargin">0,0,0,8</Thickness>
         <DataTemplate x:Key="CredentialItemTemplate" x:DataType="models:CredentialProfile">
-            <TextBlock Text="{x:Bind Name}" />
+            <TextBlock Text="{Binding Converter={StaticResource CredentialProfileDisplayConverter}}" />
         </DataTemplate>
         <DataTemplate x:Key="TunnelItemTemplate" x:DataType="models:TunnelConfig">
             <TextBlock Text="{x:Bind Name, Mode=OneWay}" />
@@ -113,7 +113,7 @@
                                        Style="{StaticResource CaptionTextBlockStyle}" />
                             <AutoSuggestBox x:Name="CredentialBox"
                                             HorizontalAlignment="Stretch"
-                                            PlaceholderText="Prompt every time"
+                                            PlaceholderText="Inherit from folder"
                                             QueryIcon="Find"
                                             TextMemberPath="Name"
                                             ItemTemplate="{StaticResource CredentialItemTemplate}"

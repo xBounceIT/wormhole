@@ -28,6 +28,7 @@
             <conv:StringEqualsConverter x:Key="StringEqualsConverter" />
             <conv:StringPresentVisibilityConverter x:Key="StringPresentVisibilityConverter" />
             <conv:ToUpperConverter x:Key="ToUpperConverter" />
+            <conv:CredentialProfileDisplayConverter x:Key="CredentialProfileDisplayConverter" />
             <conv:DirectoryGlyphConverter x:Key="DirectoryGlyphConverter" />
             <conv:ByteSizeConverter x:Key="ByteSizeConverter" />
             <conv:UtcDateConverter x:Key="UtcDateConverter" />

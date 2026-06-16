@@ -6,6 +6,9 @@
     xmlns:models="using:Wormhole.Models">
 
     <UserControl.Resources>
+        <DataTemplate x:Key="CredentialItemTemplate" x:DataType="models:CredentialProfile">
+            <TextBlock Text="{Binding Converter={StaticResource CredentialProfileDisplayConverter}}" />
+        </DataTemplate>
         <DataTemplate x:Key="TunnelItemTemplate" x:DataType="models:TunnelConfig">
             <TextBlock Text="{x:Bind Name, Mode=OneWay}" />
         </DataTemplate>
@@ -17,6 +20,19 @@
                      Header="Name"
                      PlaceholderText="Production"
                      Text="{x:Bind ViewModel.Name, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+
+            <StackPanel Spacing="4">
+                <TextBlock Text="Credentials"
+                           Style="{StaticResource CaptionTextBlockStyle}" />
+                <ComboBox HorizontalAlignment="Stretch"
+                          ItemsSource="{x:Bind ViewModel.AvailableCredentials}"
+                          ItemTemplate="{StaticResource CredentialItemTemplate}"
+                          SelectedItem="{x:Bind ViewModel.SelectedCredential, Mode=TwoWay}" />
+                <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                           Opacity="0.7"
+                           TextWrapping="Wrap"
+                           Text="Descendants that choose &quot;Inherit from folder&quot; use this saved credential. &quot;No credential&quot; overrides any inherited saved credential for the subtree." />
+            </StackPanel>
 
             <StackPanel Spacing="4">
                 <TextBlock Text="VPN tunnel"
