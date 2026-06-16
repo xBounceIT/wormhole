@@ -76,7 +76,9 @@ hits the echo target. A successful 4-byte echo proves every layer below the
 WinUI 3 surface — Go sidecar, sidecar wire protocol, .NET process host, SOCKS5
 client — is working end-to-end.
 
-The OpenVPN server additionally pushes `dhcp-option DNS 10.20.0.53` (bootstrap.sh's
+The OpenVPN server also uses `topology net30`, matching Stormshield-style
+point-to-point profiles where the pushed `ifconfig` peer address is the tunnel
+gateway. It additionally pushes `dhcp-option DNS 10.20.0.53` (bootstrap.sh's
 `ovpn_genconfig -n`). The hostname variant of the OpenVPN test dials
 `echo.vpn.test:7777` (override: `WORMHOLE_OPENVPN_ECHO_HOSTNAME`) — a name only the
 fixture dnsmasq can answer — proving the sidecar plumbs server-pushed DNS into its
