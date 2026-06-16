@@ -309,8 +309,9 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     #region Display
 
-    /// <summary>Mstsc-style preset string ("640x480" … "Full screen"). Null/empty means
-    /// "auto" (fit the embedded tab surface, see <c>RdpHostForm.ResolveDesktopSize</c>).</summary>
+    /// <summary>Mstsc-style preset string ("Full connection content", "640x480" ...).
+    /// Null/empty means "auto" (fit the embedded tab surface, see
+    /// <c>RdpHostForm.ResolveDesktopSize</c>).</summary>
     [ObservableProperty]
     private string? rdpScreenSize;
 
@@ -835,7 +836,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
                 null => SshAutoSudoInherit,
             };
 
-            RdpScreenSize = node.RdpScreenSize;
+            RdpScreenSize = RdpScreenSizes.NormalizeForPicker(node.RdpScreenSize);
             RdpFullScreen = node.RdpFullScreen ?? false;
             RdpColorDepth = node.RdpColorDepth ?? 32;
             RdpUseAllMonitors = node.RdpUseAllMonitors ?? false;

@@ -3,6 +3,7 @@ using Dapper;
 using Microsoft.Extensions.Logging;
 using Wormhole.Data;
 using Wormhole.Data.Repositories;
+using Wormhole.Helpers;
 using Wormhole.Models;
 
 namespace Wormhole.Services.MRemoteNg;
@@ -679,14 +680,13 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
     }
 
     // mRemoteNG `Resolution` values: "FullScreen", "FitToWindow", or "WxH" like "1920x1080".
-    // Wormhole's RdpScreenSize is a free-form string; RdpFullScreen is a bool. Map to whichever
-    // representation is closest, leaving null/null when nothing was set so InheritanceResolver
-    // can pull from an ancestor folder.
+    // Wormhole's canonical dynamic mode is "Full connection content"; leave null/null only when
+    // nothing was set so InheritanceResolver can pull from an ancestor folder.
     private static (string? ScreenSize, bool? FullScreen) MapResolution(string? resolution)
     {
         if (string.IsNullOrWhiteSpace(resolution)) return (null, null);
-        if (resolution.Equals("FullScreen", StringComparison.OrdinalIgnoreCase)) return (null, true);
-        if (resolution.Equals("FitToWindow", StringComparison.OrdinalIgnoreCase)) return ("FitToWindow", false);
+        if (resolution.Equals("FullScreen", StringComparison.OrdinalIgnoreCase)) return (RdpScreenSizes.FullConnectionContent, true);
+        if (resolution.Equals("FitToWindow", StringComparison.OrdinalIgnoreCase)) return (RdpScreenSizes.FullConnectionContent, false);
         return (resolution, false);
     }
 

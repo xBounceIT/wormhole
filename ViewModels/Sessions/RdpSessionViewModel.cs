@@ -312,15 +312,14 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     }
 
     /// <summary>
-    /// True when the profile's desktop size tracks the embedded surface ("fill the tab" / Full
-    /// screen / unset), i.e. exactly when <see cref="Helpers.RdpDesktopSizeResolver"/> derives the
-    /// connect-time resolution from the surface. A fixed preset ("1024x768") returns false so the
-    /// resolution stays pinned and is scaled by SmartSizing rather than dynamically renegotiated.
+    /// True when the profile's desktop size tracks the embedded surface ("full connection content"
+    /// / legacy full-screen / imported FitToWindow / unset), i.e. exactly when
+    /// <see cref="Helpers.RdpDesktopSizeResolver"/> derives the connect-time resolution from the
+    /// surface. A fixed preset ("1024x768") returns false so the resolution stays pinned and is
+    /// scaled by SmartSizing rather than dynamically renegotiated.
     /// </summary>
     private static bool UsesDynamicRemoteResolution(ConnectionProfile? profile) =>
-        profile is not null &&
-        (string.IsNullOrWhiteSpace(profile.RdpScreenSize) ||
-         string.Equals(profile.RdpScreenSize, RdpScreenSizes.FullScreenSentinel, StringComparison.OrdinalIgnoreCase));
+        profile is not null && RdpScreenSizes.IsFullConnectionContent(profile.RdpScreenSize);
 
     public void DetachView()
     {
@@ -432,9 +431,9 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         var forcePrompt = FailedDueToCredentials;
         await FullTeardownAsync(fastTunnelTeardown: true).ConfigureAwait(true);
 
-        // Reuse the last real layout bounds for desktop-size negotiation. Passing the 1x1
-        // seed through here would make default/Full screen retries negotiate a 640x480
-        // remote desktop that is only smart-sized inside the tab afterward.
+        // Reuse the last real layout bounds for desktop-size negotiation. Passing the 1x1 seed
+        // through here would make dynamic-size retries negotiate a 640x480 remote desktop that
+        // is only smart-sized inside the tab afterward.
         await ConnectAsync(_ownerHwnd, GetRetryInitialBounds(), forcePromptForPassword: forcePrompt).ConfigureAwait(true);
     }
 

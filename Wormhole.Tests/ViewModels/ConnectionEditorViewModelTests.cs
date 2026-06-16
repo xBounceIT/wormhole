@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Wormhole.Data.Repositories;
+using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Tests.Fakes;
 using Wormhole.ViewModels;
@@ -47,6 +48,14 @@ public class ConnectionEditorViewModelTests
         var err = ConnectionEditorViewModel.ValidateDriveList("C,C,D");
         Assert.NotNull(err);
         Assert.Contains("'C'", err);
+    }
+
+    [Fact]
+    public async Task DisplayChoices_StartWithFullConnectionContent()
+    {
+        var vm = await NewEditorAsync();
+
+        Assert.Equal(RdpScreenSizes.FullConnectionContent, vm.ScreenSizeChoices[0]);
     }
 
     [Theory]
@@ -226,6 +235,29 @@ public class ConnectionEditorViewModelTests
         Assert.Contains("Warn", vm.ServerAuthChoices[0].Value);
         Assert.Equal(1, vm.ServerAuthChoices[1].Key);
         Assert.Equal(0, vm.ServerAuthChoices[2].Key);
+    }
+
+    [Theory]
+    [InlineData(RdpScreenSizes.LegacyFullScreenSentinel)]
+    [InlineData(RdpScreenSizes.MRemoteNgFitToWindowSentinel)]
+    public async Task LoadFrom_LegacyDynamicRdpScreenSize_NormalizesToPickerValue(string legacyScreenSize)
+    {
+        var vm = await NewEditorAsync();
+        var node = new ConnectionNode
+        {
+            Kind = NodeKind.Connection,
+            Name = "rdp-legacy",
+            Protocol = ProtocolType.Rdp,
+            Host = "h",
+            RdpScreenSize = legacyScreenSize,
+        };
+
+        vm.LoadFrom(node);
+        var sink = new ConnectionNode { Kind = NodeKind.Connection };
+        vm.WriteTo(sink);
+
+        Assert.Equal(RdpScreenSizes.FullConnectionContent, vm.RdpScreenSize);
+        Assert.Equal(RdpScreenSizes.FullConnectionContent, sink.RdpScreenSize);
     }
 
     [Fact]

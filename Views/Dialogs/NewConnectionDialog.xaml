@@ -195,7 +195,7 @@
                     <StackPanel Spacing="10">
                         <ComboBox Header="Display configuration"
                                   HorizontalAlignment="Stretch"
-                                  PlaceholderText="Default (monitor work area)"
+                                  PlaceholderText="Full connection content"
                                   ItemsSource="{x:Bind ViewModel.ScreenSizeChoices}"
                                   SelectedItem="{x:Bind ViewModel.RdpScreenSize, Mode=TwoWay}" />
 

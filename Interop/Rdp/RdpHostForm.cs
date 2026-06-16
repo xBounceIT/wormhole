@@ -325,8 +325,8 @@ internal sealed class RdpHostForm : FormsForm
         ocx.DesktopHeight = dh;
         ocx.ColorDepth = NormaliseColorDepth(profile.RdpColorDepth);
         // Keep the whole remote logon surface visible inside the tab. Without this, a
-        // monitor-sized/default "Full screen" desktop hosted in a smaller tab can show only
-        // the empty top-left corner and look like a blank RDP canvas.
+        // monitor-sized/default desktop hosted in a smaller tab can show only the empty top-left
+        // corner and look like a blank RDP canvas.
         TrySetOptional(() => ocx.AdvancedSettings9.SmartSizing = true);
         // UseMultimon is exposed via IMsRdpClientNonScriptable5 — IDispatch lookup against
         // the OCX finds it directly. Older builds without the interface return E_NOTFOUND
@@ -903,15 +903,15 @@ internal sealed class RdpHostForm : FormsForm
         int initialSurfaceWidth,
         int initialSurfaceHeight)
     {
-        // Null / empty / "Full screen" means "fill the embedded tab" in Wormhole. Using
-        // the whole owner monitor here makes the remote Windows logon UI center itself
-        // outside the visible tab surface, which reads as a blank canvas even though the
-        // RDP transport has connected. Fall back to the owner monitor only during very
-        // early layout races where the surface has not measured at all. If the surface is
-        // only the 1x1 seed used during retry/initial load, clamp to the RDP minimum rather
-        // than falling back to a full monitor-sized desktop.
-        if (string.IsNullOrWhiteSpace(screenSize) ||
-            string.Equals(screenSize, RdpScreenSizes.FullScreenSentinel, StringComparison.OrdinalIgnoreCase))
+        // Null / empty / "Full connection content" means "fill the embedded tab" in Wormhole.
+        // Older saved "Full screen" rows and mRemoteNG "FitToWindow" imports are aliases for the
+        // same dynamic mode. Using the whole owner monitor here makes the remote Windows logon UI
+        // center itself outside the visible tab surface, which reads as a blank canvas even though
+        // the RDP transport has connected. Fall back to the owner monitor only during very early
+        // layout races where the surface has not measured at all. If the surface is only the 1x1
+        // seed used during retry/initial load, clamp to the RDP minimum rather than falling back
+        // to a full monitor-sized desktop.
+        if (RdpScreenSizes.IsFullConnectionContent(screenSize))
         {
             Screen? screen = null;
             if (ownerHwnd != IntPtr.Zero)

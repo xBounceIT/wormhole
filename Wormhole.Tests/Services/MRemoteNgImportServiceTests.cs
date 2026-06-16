@@ -3,6 +3,7 @@ using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Data;
 using Wormhole.Data.Repositories;
+using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Services.MRemoteNg;
 using Wormhole.Tests.Fakes;
@@ -304,6 +305,36 @@ public class MRemoteNgImportServiceTests : IDisposable
         Assert.Equal(ssh.CredentialId, sshCred.Id);
         Assert.True(_credentialService.Passwords.ContainsKey(sshCred.Id));
         Assert.Equal("secret-alice", _credentialService.Passwords[sshCred.Id]);
+    }
+
+    [Fact]
+    public async Task PlanAndCommit_MapsDynamicRdpResolutionsToFullConnectionContent()
+    {
+        var xml = BuildXml(
+            ("full", "Connection", new[]
+            {
+                NodeAttr.Make("Protocol", "RDP"),
+                NodeAttr.Make("Hostname", "full.example.com"),
+                NodeAttr.Make("Resolution", "FullScreen"),
+            }),
+            ("fit", "Connection", new[]
+            {
+                NodeAttr.Make("Protocol", "RDP"),
+                NodeAttr.Make("Hostname", "fit.example.com"),
+                NodeAttr.Make("Resolution", "FitToWindow"),
+            }));
+        var path = WriteFixture(xml);
+
+        var plan = await _service.PlanAsync(path, DefaultPassword);
+        await _service.CommitAsync(plan);
+
+        var nodes = await _connectionRepo.GetAllAsync();
+        var full = Assert.Single(nodes, n => n.Name == "full");
+        var fit = Assert.Single(nodes, n => n.Name == "fit");
+        Assert.Equal(RdpScreenSizes.FullConnectionContent, full.RdpScreenSize);
+        Assert.True(full.RdpFullScreen);
+        Assert.Equal(RdpScreenSizes.FullConnectionContent, fit.RdpScreenSize);
+        Assert.False(fit.RdpFullScreen);
     }
 
     [Fact]
