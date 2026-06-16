@@ -1,3 +1,4 @@
+using Wormhole.Helpers;
 using Wormhole.Models;
 
 namespace Wormhole.Data;
@@ -83,7 +84,8 @@ public sealed class InheritanceResolver
             username ??= current.Username;
             credentialId ??= current.CredentialId;
             rdpDomain ??= current.RdpDomain;
-            rdpScreenSize ??= current.RdpScreenSize;
+            rdpScreenSize ??= current.RdpScreenSize ??
+                (current.RdpFullScreen == true ? RdpScreenSizes.FullConnectionContent : null);
             rdpFullScreen ??= current.RdpFullScreen;
             rdpColorDepth ??= current.RdpColorDepth;
             rdpUseAllMonitors ??= current.RdpUseAllMonitors;

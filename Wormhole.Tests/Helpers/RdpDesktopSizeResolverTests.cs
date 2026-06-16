@@ -9,8 +9,10 @@ public class RdpDesktopSizeResolverTests
     [InlineData(null)]
     [InlineData("")]
     [InlineData("   ")]
-    [InlineData(RdpScreenSizes.FullScreenSentinel)]
-    public void DefaultOrFullScreen_UsesEmbeddedSurfaceBounds_WhenMeasured(string? screenSize)
+    [InlineData(RdpScreenSizes.FullConnectionContent)]
+    [InlineData(RdpScreenSizes.LegacyFullScreenSentinel)]
+    [InlineData(RdpScreenSizes.MRemoteNgFitToWindowSentinel)]
+    public void DynamicScreenSize_UsesEmbeddedSurfaceBounds_WhenMeasured(string? screenSize)
     {
         var size = RdpDesktopSizeResolver.Resolve(
             screenSize,
@@ -23,10 +25,10 @@ public class RdpDesktopSizeResolverTests
     }
 
     [Fact]
-    public void DefaultOrFullScreen_ClampsSeedSurfaceBounds_ToRdpMinimum()
+    public void DynamicScreenSize_ClampsSeedSurfaceBounds_ToRdpMinimum()
     {
         var size = RdpDesktopSizeResolver.Resolve(
-            RdpScreenSizes.FullScreenSentinel,
+            RdpScreenSizes.FullConnectionContent,
             initialSurfaceWidth: 1,
             initialSurfaceHeight: 1,
             fallbackWidth: 3440,
@@ -36,10 +38,10 @@ public class RdpDesktopSizeResolverTests
     }
 
     [Fact]
-    public void DefaultOrFullScreen_UsesMonitorFallback_WhenSurfaceNotMeasured()
+    public void DynamicScreenSize_UsesMonitorFallback_WhenSurfaceNotMeasured()
     {
         var size = RdpDesktopSizeResolver.Resolve(
-            RdpScreenSizes.FullScreenSentinel,
+            RdpScreenSizes.FullConnectionContent,
             initialSurfaceWidth: 0,
             initialSurfaceHeight: 0,
             fallbackWidth: 3440,

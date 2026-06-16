@@ -1,4 +1,5 @@
 using Wormhole.Data;
+using Wormhole.Helpers;
 using Wormhole.Models;
 using Xunit;
 
@@ -676,6 +677,53 @@ public class InheritanceResolverTests
         Assert.True(profile.RdpGatewayBypassLocal);
         Assert.Equal(string.Empty, profile.RdpRedirectDrives);
         Assert.False(profile.RdpUseExternalClient); // embedded ActiveX is the default; opt-in routes through mstsc.exe.
+    }
+
+    [Fact]
+    public void Resolve_RdpFullScreenTrue_OverridesInheritedFixedScreenSize()
+    {
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "rdp-folder",
+            Kind = NodeKind.Folder,
+            Protocol = ProtocolType.Rdp,
+            RdpScreenSize = "1024x768",
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "vm",
+            Kind = NodeKind.Connection,
+            Host = "vm.example.com",
+            RdpFullScreen = true,
+        };
+        var nodes = new Dictionary<Guid, ConnectionNode> { [folder.Id] = folder, [node.Id] = node };
+
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.Equal(RdpScreenSizes.FullConnectionContent, profile.RdpScreenSize);
+    }
+
+    [Fact]
+    public void Resolve_RdpScreenSize_OverridesSameNodeLegacyFullScreenFlag()
+    {
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "vm",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Rdp,
+            Host = "vm.example.com",
+            RdpScreenSize = "1024x768",
+            RdpFullScreen = true,
+        };
+        var nodes = new Dictionary<Guid, ConnectionNode> { [node.Id] = node };
+
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.Equal("1024x768", profile.RdpScreenSize);
     }
 
     [Fact]

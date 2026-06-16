@@ -43,8 +43,7 @@ public static class RdpDesktopSizeResolver
         int fallbackWidth,
         int fallbackHeight)
     {
-        if (string.IsNullOrWhiteSpace(screenSize) ||
-            string.Equals(screenSize, RdpScreenSizes.FullScreenSentinel, StringComparison.OrdinalIgnoreCase))
+        if (RdpScreenSizes.IsFullConnectionContent(screenSize))
         {
             if (initialSurfaceWidth > 0 && initialSurfaceHeight > 0)
             {

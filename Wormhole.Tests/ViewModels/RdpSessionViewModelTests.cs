@@ -377,8 +377,10 @@ public class RdpSessionViewModelTests
     [Theory]
     [InlineData(null)]
     [InlineData("")]
-    [InlineData("Full screen")]
-    [InlineData("FULL SCREEN")] // locks in the OrdinalIgnoreCase match (mirrors connect-time ResolveDesktopSize)
+    [InlineData("Full connection content")]
+    [InlineData("FULL CONNECTION CONTENT")] // locks in the OrdinalIgnoreCase match (mirrors connect-time ResolveDesktopSize)
+    [InlineData("Full screen")] // legacy saved value
+    [InlineData("FitToWindow")] // mRemoteNG import value
     public void UpdateRemoteResolution_FillTheTabProfile_RenegotiatesResolution(string? screenSize)
     {
         var (vm, _, _, _, _) = CreateVm();
