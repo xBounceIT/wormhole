@@ -121,6 +121,8 @@
     <Compile Include="..\Helpers\RdpScreenSizes.cs" Link="Helpers\RdpScreenSizes.cs" />
     <Compile Include="..\Helpers\WebViewNewWindowNavigation.cs" Link="Helpers\WebViewNewWindowNavigation.cs" />
     <Compile Include="..\Services\IAppSettingsService.cs" Link="Services\IAppSettingsService.cs" />
+    <Compile Include="..\Services\ICrashDiagnosticsService.cs" Link="Services\ICrashDiagnosticsService.cs" />
+    <Compile Include="..\Services\CrashDiagnosticsService.cs" Link="Services\CrashDiagnosticsService.cs" />
     <Compile Include="..\Services\Security\IAppAuthenticationDataProtector.cs" Link="Services\Security\IAppAuthenticationDataProtector.cs" />
     <Compile Include="..\Services\Security\DpapiAppAuthenticationDataProtector.cs" Link="Services\Security\DpapiAppAuthenticationDataProtector.cs" />
     <Compile Include="..\Services\Security\IAppAuthenticationService.cs" Link="Services\Security\IAppAuthenticationService.cs" />

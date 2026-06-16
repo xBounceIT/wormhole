@@ -705,6 +705,28 @@ public class MRemoteNgImportServiceTests : IDisposable
         Assert.Contains("already exists", ex.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task PlanAsync_RejectsExcessiveNestingDepth()
+    {
+        var path = WriteFixture(BuildDeeplyNestedXml(MRemoteNgXmlReader.MaxNestingDepth + 1));
+
+        var ex = await Assert.ThrowsAsync<InvalidDataException>(
+            () => _service.PlanAsync(path, DefaultPassword));
+
+        Assert.Contains("nesting depth exceeds", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task PlanAsync_MaxSupportedNestingDepth_DoesNotOverflow()
+    {
+        var path = WriteFixture(BuildDeeplyNestedXml(MRemoteNgXmlReader.MaxNestingDepth));
+
+        var plan = await _service.PlanAsync(path, DefaultPassword);
+
+        Assert.Equal(MRemoteNgXmlReader.MaxNestingDepth, plan.FolderCount);
+        Assert.Equal(0, plan.ConnectionCount);
+    }
+
     private string WriteFixture(string xml)
     {
         var path = Path.Combine(_scratchDir, Guid.NewGuid() + ".xml");
@@ -751,6 +773,25 @@ public class MRemoteNgImportServiceTests : IDisposable
         foreach (var (name, type, attrs) in flatNodes)
         {
             sb.AppendLine($"  <Node Name=\"{name}\" Type=\"{type}\" {FormatAttrs(attrs)} />");
+        }
+        sb.AppendLine("</mrng:Connections>");
+        return sb.ToString();
+    }
+
+    private static string BuildDeeplyNestedXml(int depth)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("<?xml version=\"1.0\" encoding=\"utf-8\"?>");
+        sb.AppendLine($"<mrng:Connections xmlns:mrng=\"http://mremoteng.org\" EncryptionEngine=\"AES\" " +
+                      $"BlockCipherMode=\"GCM\" KdfIterations=\"{DefaultIterations}\" " +
+                      "FullFileEncryption=\"false\" Protected=\"\" ConfVersion=\"2.7\">");
+        for (var i = 0; i < depth; i++)
+        {
+            sb.AppendLine($"<Node Name=\"Folder {i}\" Type=\"Container\">");
+        }
+        for (var i = 0; i < depth; i++)
+        {
+            sb.AppendLine("</Node>");
         }
         sb.AppendLine("</mrng:Connections>");
         return sb.ToString();

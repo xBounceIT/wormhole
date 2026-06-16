@@ -23,6 +23,7 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
     // grow it to thousands of strings retained in memory. Anything past this is counted in
     // the Plan/Result's `DroppedWarningCount` so the user-visible summary still tells the truth.
     private const int WarningSoftCap = 50;
+    private const int MaxImportNestingDepth = MRemoteNgXmlReader.MaxNestingDepth;
 
     private readonly IConnectionRepository _connectionRepository;
     private readonly ICredentialRepository _credentialRepository;
@@ -227,10 +228,36 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
         }
         var rootSortStart = maxRootSortOrder + 1;
 
-        for (var i = 0; i < rawRoots.Count; i++)
+        var pending = new Stack<ImportFrame>();
+        for (var i = rawRoots.Count - 1; i >= 0; i--)
+        {
+            pending.Push(new ImportFrame(rawRoots[i], ParentId: null, SortOrder: rootSortStart + i, Depth: 1));
+        }
+
+        while (pending.Count > 0)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            Walk(rawRoots[i], parentId: null, sortOrder: rootSortStart + i);
+            var frame = pending.Pop();
+            var (node, isContainer) = PlanNode(frame.Raw, frame.ParentId, frame.SortOrder, frame.Depth);
+            if (node is null) continue;
+
+            orderedNodes.Add(node);
+            if (isContainer)
+            {
+                folderCount++;
+                for (var i = frame.Raw.Children.Count - 1; i >= 0; i--)
+                {
+                    pending.Push(new ImportFrame(
+                        frame.Raw.Children[i],
+                        node.Id,
+                        SortOrder: i,
+                        Depth: frame.Depth + 1));
+                }
+            }
+            else
+            {
+                connectionCount++;
+            }
         }
 
         progress?.Report(new MRemoteNgImportProgress(25,
@@ -247,8 +274,14 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
             warnings,
             droppedWarningCount);
 
-        void Walk(MRemoteNgRawNode raw, Guid? parentId, int sortOrder)
+        (ConnectionNode? Node, bool IsContainer) PlanNode(MRemoteNgRawNode raw, Guid? parentId, int sortOrder, int depth)
         {
+            if (depth > MaxImportNestingDepth)
+            {
+                throw new InvalidDataException(
+                    $"mRemoteNG nesting depth exceeds {MaxImportNestingDepth}; refusing to import.");
+            }
+
             // Containers and Connections share the same node shape in mRemoteNG and the same
             // shape in Wormhole — a folder can carry Protocol/Host/Username/CredentialId so
             // that Wormhole's InheritanceResolver picks them up when a leaf has them unset.
@@ -260,7 +293,7 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
             if (!isContainer && !isConnection)
             {
                 // Unknown node types (rare; defensive). Skip without complaint.
-                return;
+                return (null, false);
             }
 
             // Protocol on a Container is a default for its children; only fail the import for a
@@ -285,7 +318,7 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
                     var label = string.IsNullOrEmpty(raw.Protocol) ? "(unspecified)" : raw.Protocol;
                     skippedSamples.Add($"{raw.Name}: {label}");
                 }
-                return;
+                return (null, false);
             }
             else
             {
@@ -418,20 +451,7 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
                 RdpScreenSize = (protocol == ProtocolType.Rdp || protocol is null) ? screenSize : null,
                 RdpFullScreen = (protocol == ProtocolType.Rdp || protocol is null) ? fullScreen : null,
             };
-            orderedNodes.Add(node);
-            if (isContainer)
-            {
-                folderCount++;
-                var childSort = 0;
-                foreach (var child in raw.Children)
-                {
-                    Walk(child, node.Id, childSort++);
-                }
-            }
-            else
-            {
-                connectionCount++;
-            }
+            return (node, isContainer);
         }
     }
 
@@ -587,6 +607,12 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
         if (!isUnique) return false;
         return ex.Message.Contains("CredentialProfiles.Name", StringComparison.OrdinalIgnoreCase);
     }
+
+    private readonly record struct ImportFrame(
+        MRemoteNgRawNode Raw,
+        Guid? ParentId,
+        int SortOrder,
+        int Depth);
 
     private async Task<IReadOnlyCollection<string>> CollectExistingCredentialNamesAsync(CancellationToken ct)
     {

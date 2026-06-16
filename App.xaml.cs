@@ -48,6 +48,7 @@ public partial class App : Application
         UnhandledException += OnUnhandledException;
         AppDomain.CurrentDomain.UnhandledException += OnAppDomainUnhandledException;
         TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
+        AppDomain.CurrentDomain.ProcessExit += OnProcessExit;
     }
 
     /// <summary>
@@ -59,7 +60,26 @@ public partial class App : Application
 
     protected override async void OnLaunched(LaunchActivatedEventArgs args)
     {
+        try
+        {
+            await LaunchAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            Services.GetService<ILogger<App>>()?.LogCritical(ex, "Unhandled exception during application launch.");
+            FlushLogsForTermination();
+            throw;
+        }
+    }
+
+    private async Task LaunchAsync()
+    {
         Directory.CreateDirectory(AppPaths.GetAppDataDirectory());
+
+        var crashDiagnostics = Services.GetRequiredService<ICrashDiagnosticsService>();
+        crashDiagnostics.Initialize();
+        crashDiagnostics.LogStartupContext();
+        crashDiagnostics.LogNewCrashDumps();
 
         // Reclaim orphaned web-browser WebView2 folders off the UI thread (the delete of a Chromium
         // profile can be slow); the first web tab awaits WebBrowserDataCleanup before creating its env.
@@ -224,6 +244,7 @@ public partial class App : Application
         services.AddSingleton<IConnectionRepository, ConnectionRepository>();
         services.AddSingleton<ICredentialRepository, CredentialRepository>();
         services.AddSingleton<ITunnelConfigRepository, TunnelConfigRepository>();
+        services.AddSingleton<ICrashDiagnosticsService, CrashDiagnosticsService>();
         services.AddSingleton<InheritanceResolver>();
         services.AddSingleton<IConnectionProfileResolver, ConnectionProfileResolver>();
 
@@ -309,6 +330,7 @@ public partial class App : Application
     {
         var logger = Services.GetService<ILogger<App>>();
         logger?.LogError(e.Exception, "Unhandled exception reached App boundary.");
+        FlushLogsForTermination();
     }
 
     private void OnAppDomainUnhandledException(object sender, System.UnhandledExceptionEventArgs e)
@@ -331,8 +353,7 @@ public partial class App : Application
         // [ERR]/[CRT] line about why we died often gets buffered out of existence and the
         // user sees the post-crash log file end mid-handshake (which is exactly what
         // happened with the 0xC06D007F mstscax delay-load crash that motivated this hook).
-        try { Log.CloseAndFlush(); }
-        catch { /* nothing useful to do — we're terminating */ }
+        FlushLogsForTermination();
     }
 
     private void OnUnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs e)
@@ -343,5 +364,17 @@ public partial class App : Application
         // taking down the process. The exception is already a bug — but a crash from a
         // background continuation we forgot to await shouldn't kill the user's session.
         e.SetObserved();
+    }
+
+    private void OnProcessExit(object? sender, EventArgs e)
+    {
+        Services.GetService<ILogger<App>>()?.LogInformation("Wormhole process exiting.");
+        FlushLogsForTermination();
+    }
+
+    private static void FlushLogsForTermination()
+    {
+        try { Log.CloseAndFlush(); }
+        catch { /* nothing useful to do while the process is exiting */ }
     }
 }
