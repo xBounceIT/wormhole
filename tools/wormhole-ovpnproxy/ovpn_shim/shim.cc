@@ -81,15 +81,25 @@ class WormholeClient;
 class WormholeTunClient;
 
 // ---------------------------------------------------------------------------
-// Address parsing — minimal push-reply OptionList walker. We only need the
-// assigned ifconfig and a couple of metadata fields for the spike.
+// Address parsing — minimal push-reply OptionList walker. We need the assigned
+// addresses, gateway/peer addresses, pushed DNS, and route metadata for the
+// userspace sidecar diagnostics.
 // ---------------------------------------------------------------------------
+
+static bool parse_v4_dotted_quad(const std::string& value, uint32_t& out) {
+  unsigned a, b, c, d;
+  char tail;
+  if (std::sscanf(value.c_str(), "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) != 4)
+    return false;
+  if (a > 255 || b > 255 || c > 255 || d > 255) return false;
+  out = (a << 24) | (b << 16) | (c << 8) | d;
+  return true;
+}
 
 // IPv4 dotted-quad netmask → prefix length. -1 on malformed.
 static int v4_netmask_to_prefix(const std::string& mask) {
-  unsigned a, b, c, d;
-  if (std::sscanf(mask.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) != 4) return -1;
-  uint32_t m = (a << 24) | (b << 16) | (c << 8) | d;
+  uint32_t m;
+  if (!parse_v4_dotted_quad(mask, m)) return -1;
   // Count leading 1-bits; reject non-contiguous masks.
   int n = 0;
   while (n < 32 && (m & (1u << (31 - n)))) ++n;
@@ -100,10 +110,22 @@ static int v4_netmask_to_prefix(const std::string& mask) {
 
 struct PushedAddresses {
   std::string v4_cidr; // "10.8.0.6/24"
+  std::string v4_gateway; // "10.8.0.5" for net30/p2p or route-gateway
   std::string v6_cidr; // "fd00::abc/64"
+  std::string v6_gateway;
   std::vector<std::string> dns; // pushed resolver addresses, in push order
+  std::vector<std::string> routes; // pushed route directives, normalized for logs
   int mtu = 1500;
 };
+
+static std::string join_strings(const std::vector<std::string>& values, const char* sep) {
+  std::string out;
+  for (const auto& v : values) {
+    if (!out.empty()) out += sep;
+    out += v;
+  }
+  return out;
+}
 
 static PushedAddresses parse_pushed_addresses(const openvpn::OptionList& opt) {
   PushedAddresses out;
@@ -124,14 +146,29 @@ static PushedAddresses parse_pushed_addresses(const openvpn::OptionList& opt) {
         // prefix only needs to install the local address. Without this fallback the
         // CIDR is left empty and ovpn_wait_connected spins until its 90s deadline
         // (a long hang) then fails with code 3 even though the tunnel is fully up.
+        uint32_t peer;
         out.v4_cidr = addr + "/32";
+        if (parse_v4_dotted_quad(mask, peer)) out.v4_gateway = mask;
       }
+    }
+  }
+  if (const auto* rg = opt.get_ptr("route-gateway")) {
+    if (rg->size() >= 2) {
+      const auto& gw = rg->ref(1);
+      uint32_t parsed;
+      // Symbolic gateways such as "dhcp" or "vpn_gateway" rely on OpenVPN's
+      // adapter routing layer. This sidecar has no OS adapter, so keep the
+      // net30/p2p peer fallback unless the server pushed a concrete IPv4 gateway.
+      if (parse_v4_dotted_quad(gw, parsed)) out.v4_gateway = gw;
     }
   }
   if (const auto* ifc6 = opt.get_ptr("ifconfig-ipv6")) {
     if (ifc6->size() >= 2) {
       // ifconfig-ipv6 already arrives as "addr/prefix".
       out.v6_cidr = ifc6->ref(1);
+    }
+    if (ifc6->size() >= 3) {
+      out.v6_gateway = ifc6->ref(2);
     }
   }
   if (const auto* mtu = opt.get_ptr("tun-mtu")) {
@@ -161,6 +198,16 @@ static PushedAddresses parse_pushed_addresses(const openvpn::OptionList& opt) {
       }
     }
   }
+  if (const auto* il = opt.get_index_ptr("route")) {
+    for (auto i : *il) {
+      const openvpn::Option& o = opt[i];
+      if (o.size() < 2) continue;
+      std::string route = o.ref(1);
+      if (o.size() >= 3) route += "/" + o.ref(2);
+      if (o.size() >= 4) route += " via " + o.ref(3);
+      out.routes.push_back(route);
+    }
+  }
   return out;
 }
 
@@ -188,6 +235,8 @@ class WormholeTunClient : public openvpn::TunClient {
   std::string tun_name() const override { return "wormhole-ovpn"; }
   std::string vpn_ip4() const override { return ip4_addr_; }
   std::string vpn_ip6() const override { return ip6_addr_; }
+  std::string vpn_gw4() const override { return ip4_gateway_; }
+  std::string vpn_gw6() const override { return ip6_gateway_; }
   int vpn_mtu() const override { return mtu_; }
 
   // Called by the C ABI ovpn_tun_send (from Go). Schedules the inject onto the
@@ -236,8 +285,10 @@ class WormholeTunClient : public openvpn::TunClient {
   mutable std::mutex fields_m_;
   std::string ip4_addr_;
   std::string ip4_cidr_;
+  std::string ip4_gateway_;
   std::string ip6_addr_;
   std::string ip6_cidr_;
+  std::string ip6_gateway_;
   std::string dns_; // space-separated pushed DNS resolvers
   int mtu_ = 1500;
 
@@ -644,7 +695,9 @@ void WormholeTunClient::tun_start(const openvpn::OptionList& opt,
       dns_ += d;
     }
     ip4_cidr_ = pushed.v4_cidr;
+    ip4_gateway_ = pushed.v4_gateway;
     ip6_cidr_ = pushed.v6_cidr;
+    ip6_gateway_ = pushed.v6_gateway;
     mtu_ = pushed.mtu;
 
     // Bare-address forms used by tun_name/vpn_ip4/vpn_ip6 query methods.
@@ -655,6 +708,19 @@ void WormholeTunClient::tun_start(const openvpn::OptionList& opt,
     ip4_addr_ = bare(ip4_cidr_);
     ip6_addr_ = bare(ip6_cidr_);
   }
+
+  const auto dns = join_strings(pushed.dns, " ");
+  const auto routes = join_strings(pushed.routes, ", ");
+  std::fprintf(stderr,
+               "openvpn: tunnel config address4=%s gateway4=%s address6=%s gateway6=%s mtu=%d dns=[%s] routes=[%s]\n",
+               pushed.v4_cidr.empty() ? "(none)" : pushed.v4_cidr.c_str(),
+               pushed.v4_gateway.empty() ? "(none)" : pushed.v4_gateway.c_str(),
+               pushed.v6_cidr.empty() ? "(none)" : pushed.v6_cidr.c_str(),
+               pushed.v6_gateway.empty() ? "(none)" : pushed.v6_gateway.c_str(),
+               pushed.mtu,
+               dns.empty() ? "(none)" : dns.c_str(),
+               routes.empty() ? "(none)" : routes.c_str());
+  std::fflush(stderr);
 
   parent_.tun_pre_route_config();
   // We don't install routes in the OS — gVisor netstack on the Go side handles

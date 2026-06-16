@@ -25,7 +25,7 @@ public sealed class OpenVpnEndToEndTests
 
     [SkippableFact]
     public Task RoutesTrafficThroughTunnel() =>
-        EchoRoundTripAsync(IntegrationEnvironment.OvpnEchoTarget);
+        EchoRoundTripAsync(IntegrationEnvironment.OvpnEchoTarget, assertGateway: true);
 
     // Same round-trip, but the target is a DNS name only the fixture's dnsmasq container
     // (pushed by the server as `dhcp-option DNS`) can resolve. Proves the sidecar surfaces
@@ -34,9 +34,9 @@ public sealed class OpenVpnEndToEndTests
     // message" because the netstack was created with no DNS servers at all.
     [SkippableFact]
     public Task ResolvesHostnamesViaPushedTunnelDns() =>
-        EchoRoundTripAsync(IntegrationEnvironment.OvpnEchoHostname);
+        EchoRoundTripAsync(IntegrationEnvironment.OvpnEchoHostname, assertGateway: false);
 
-    private async Task EchoRoundTripAsync(string target)
+    private async Task EchoRoundTripAsync(string target, bool assertGateway)
     {
         Skip.IfNot(
             IntegrationEnvironment.OpenVpnConfigured,
@@ -47,13 +47,14 @@ public sealed class OpenVpnEndToEndTests
 
         var ovpnProfile = await File.ReadAllTextAsync(IntegrationEnvironment.OvpnClientProfilePath!);
         var config = new OpenVpnSidecarConfig { ProfileOvpn = ovpnProfile };
+        var logger = new TestOutputLogger(_output);
 
         using var cts = new CancellationTokenSource(TestTimeout);
 
         await using var host = await OpenVpnProcessHost.StartAsync(
             IntegrationEnvironment.OvpnProxyPath!,
             config,
-            new TestOutputLogger(_output),
+            logger,
             cts.Token);
 
         Assert.NotEqual(0, host.SocksEndpoint.Port);
@@ -70,5 +71,33 @@ public sealed class OpenVpnEndToEndTests
         var buf = new byte[4];
         await stream.ReadExactlyAsync(buf, cts.Token);
         Assert.Equal("ping", Encoding.ASCII.GetString(buf));
+
+        if (assertGateway)
+        {
+            await AssertEventuallyLoggedAsync(
+                logger,
+                line => line.Contains("openvpn: tunnel config", StringComparison.Ordinal)
+                    && !line.Contains("gateway4=(none)", StringComparison.Ordinal),
+                cts.Token);
+        }
+    }
+
+    private static async Task AssertEventuallyLoggedAsync(
+        TestOutputLogger logger,
+        Func<string, bool> predicate,
+        CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromSeconds(5);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            foreach (var line in logger.Lines)
+            {
+                if (predicate(line)) return;
+            }
+            await Task.Delay(50, cancellationToken);
+        }
+
+        Assert.Fail("Expected sidecar log line was not captured. Logs:" + Environment.NewLine
+            + string.Join(Environment.NewLine, logger.Lines));
     }
 }
