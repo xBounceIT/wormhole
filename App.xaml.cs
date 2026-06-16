@@ -191,14 +191,15 @@ public partial class App : Application
     private static ServiceProvider ConfigureServices()
     {
         Directory.CreateDirectory(AppPaths.GetLogsDirectory());
+        var settingsService = new AppSettingsService();
 
         Log.Logger = new LoggerConfiguration()
             .MinimumLevel.Information()
             .Enrich.FromLogContext()
             .WriteTo.File(
-                Path.Combine(AppPaths.GetLogsDirectory(), "wormhole-.log"),
+                LogFiles.GetDailySinkPath(),
                 rollingInterval: RollingInterval.Day,
-                retainedFileCountLimit: 14,
+                retainedFileCountLimit: LogFiles.NormalizeRetentionDays(settingsService.Current.LogRetentionDays),
                 shared: true)
             .CreateLogger();
 
@@ -214,7 +215,7 @@ public partial class App : Application
         services.AddSingleton<ISqliteConnectionFactory>(_ => new SqliteConnectionFactory(connectionString));
         services.AddSingleton<MigrationRunner>();
 
-        services.AddSingleton<IAppSettingsService, AppSettingsService>();
+        services.AddSingleton<IAppSettingsService>(settingsService);
         services.AddSingleton<IAppAuthenticationService, AppAuthenticationService>();
         services.AddSingleton<IWindowsHelloService, WindowsHelloService>();
         services.AddSingleton<IAppAuthenticationVerifier, AppAuthenticationVerifier>();
