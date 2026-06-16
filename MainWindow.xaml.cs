@@ -86,6 +86,12 @@ public sealed partial class MainWindow : Window
 
         this.InitializeComponent();
 
+        var iconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "Wormhole.ico");
+        if (File.Exists(iconPath))
+        {
+            AppWindow.SetIcon(iconPath);
+        }
+
         ExtendsContentIntoTitleBar = true;
         SetTitleBar(AppTitleBar);
         // The native TitleBar control renders at ~48 px; match the AppWindow's
