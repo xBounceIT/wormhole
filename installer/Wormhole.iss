@@ -31,6 +31,7 @@ DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
+SetupIconFile=..\Assets\Wormhole.ico
 OutputBaseFilename=Wormhole-{#MyAppVersion}-win-{#AppArchitecture}-setup
 SolidCompression=yes
 WizardStyle=modern
