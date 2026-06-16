@@ -1,4 +1,5 @@
 using System.Collections.Specialized;
+using Dapper;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Data;
@@ -16,6 +17,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     private static readonly string[] ExpectedSortOrderAbc = { "A", "B", "C" };
     private static readonly string[] ExpectedReorderBca = { "B", "C", "A" };
     private static readonly string[] ExpectedReorderCab = { "C", "A", "B" };
+    private const int DeepTreeDepth = 5000;
 
     // Inlined from Data/Migrations/0001_initial.sql + 0003_add_tunnel_config.sql + 0003_rdp_extras.sql
     // + 0004_rdp_use_external_client.sql: the test project links source files rather than
@@ -1319,6 +1321,31 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task SearchText_FolderNameMatch_DoesNotExpandDescendantFolders()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Linux";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var parent = vm.Roots.Single();
+        dialog.TextPromptResult = "Nested";
+        await vm.AddFolderCommand.ExecuteAsync(parent);
+        var child = parent.Children.Single();
+        dialog.EditConnectionResult = MakeConnectionDraft(
+            "leaf", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(child);
+
+        vm.SearchText = "Linux";
+
+        Assert.True(parent.IsExpanded);
+        Assert.False(child.IsExpanded);
+        Assert.True(child.IsVisible);
+        Assert.True(child.Children.Single().IsVisible);
+    }
+
+    [Fact]
     public async Task SearchText_CaseInsensitive()
     {
         var dialog = new FakeDialogService { TextPromptResult = "Linux" };
@@ -1465,6 +1492,60 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task SearchText_DeepTree_DoesNotOverflowAndRestoresExpansion()
+    {
+        await SeedDeepTreeAsync(DeepTreeDepth, "needle-leaf");
+        var vm = CreateVm();
+        await vm.RefreshAsync();
+
+        var root = vm.Roots.Single();
+        var leaf = GetDeepestNode(root);
+        Assert.Equal(NodeKind.Connection, leaf.Kind);
+        AssertNoFoldersExpanded(root);
+
+        vm.SearchText = "needle";
+
+        Assert.True(root.IsVisible);
+        Assert.True(leaf.IsVisible);
+        AssertAllFoldersExpanded(root);
+
+        vm.SearchText = string.Empty;
+
+        Assert.True(root.IsVisible);
+        Assert.True(leaf.IsVisible);
+        AssertNoFoldersExpanded(root);
+    }
+
+    [Fact]
+    public async Task ExpandCollapseAll_DeepTree_DoesNotOverflow()
+    {
+        await SeedDeepTreeAsync(DeepTreeDepth, "leaf");
+        var vm = CreateVm();
+        await vm.RefreshAsync();
+
+        var root = vm.Roots.Single();
+
+        vm.ExpandAllCommand.Execute(null);
+        AssertAllFoldersExpanded(root);
+
+        vm.CollapseAllCommand.Execute(null);
+        AssertNoFoldersExpanded(root);
+    }
+
+    [Fact]
+    public async Task Delete_DeepTreeCountsDescendantsWithoutOverflow()
+    {
+        await SeedDeepTreeAsync(DeepTreeDepth, "leaf");
+        var dialog = new RecordingConfirmDialogService { ConfirmResult = false };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        await vm.DeleteCommand.ExecuteAsync(vm.Roots.Single());
+
+        Assert.Contains($"{DeepTreeDepth} nested items", dialog.LastConfirmMessage);
+    }
+
+    [Fact]
     public async Task AddFolder_WithTunnel_PersistsTunnelFields()
     {
         var tunnelId = Guid.NewGuid();
@@ -1558,6 +1639,89 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         Assert.Equal("CORP", row.RdpDomain);
     }
 
+    private async Task SeedDeepTreeAsync(int folderDepth, string leafName)
+    {
+        var now = DateTime.UtcNow;
+        var nodes = new List<ConnectionNode>(folderDepth + 1);
+        Guid? parentId = null;
+
+        for (var i = 0; i < folderDepth; i++)
+        {
+            var node = new ConnectionNode
+            {
+                Id = Guid.NewGuid(),
+                ParentId = parentId,
+                Name = $"Folder {i:D4}",
+                Kind = NodeKind.Folder,
+                SortOrder = 0,
+                CreatedAt = now,
+                UpdatedAt = now,
+            };
+            nodes.Add(node);
+            parentId = node.Id;
+        }
+
+        nodes.Add(new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = parentId,
+            Name = leafName,
+            Kind = NodeKind.Connection,
+            SortOrder = 0,
+            Protocol = ProtocolType.Ssh,
+            Host = "host",
+            CreatedAt = now,
+            UpdatedAt = now,
+        });
+
+        using var connection = _factory.Open();
+        using var tx = connection.BeginTransaction();
+        await connection.ExecuteAsync(@"
+            INSERT INTO Nodes (
+                Id, ParentId, Name, Kind, SortOrder,
+                Protocol, Host, CreatedAt, UpdatedAt
+            ) VALUES (
+                @Id, @ParentId, @Name, @Kind, @SortOrder,
+                @Protocol, @Host, @CreatedAt, @UpdatedAt
+            );", nodes, transaction: tx);
+        tx.Commit();
+    }
+
+    private static TreeNodeViewModel GetDeepestNode(TreeNodeViewModel root)
+    {
+        var current = root;
+        while (current.Children.Count > 0)
+        {
+            current = current.Children[0];
+        }
+        return current;
+    }
+
+    private static void AssertAllFoldersExpanded(TreeNodeViewModel root) =>
+        AssertFolderExpansion(root, expanded: true);
+
+    private static void AssertNoFoldersExpanded(TreeNodeViewModel root) =>
+        AssertFolderExpansion(root, expanded: false);
+
+    private static void AssertFolderExpansion(TreeNodeViewModel root, bool expanded)
+    {
+        var stack = new Stack<TreeNodeViewModel>();
+        stack.Push(root);
+        while (stack.Count > 0)
+        {
+            var node = stack.Pop();
+            if (node.Kind == NodeKind.Folder)
+            {
+                Assert.Equal(expanded, node.IsExpanded);
+            }
+
+            for (var i = node.Children.Count - 1; i >= 0; i--)
+            {
+                stack.Push(node.Children[i]);
+            }
+        }
+    }
+
     private sealed class ThrowOnUpdateRepository : IConnectionRepository
     {
         private readonly IConnectionRepository _inner;
@@ -1613,6 +1777,21 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
             => _inner.UpdateHostFingerprintAsync(nodeId, fingerprint, ct);
         public Task DeleteAsync(Guid id, System.Threading.CancellationToken ct = default)
             => _inner.DeleteAsync(id, ct);
+    }
+
+    private sealed class RecordingConfirmDialogService : FakeDialogService
+    {
+        public string? LastConfirmMessage { get; private set; }
+
+        public override Task<bool> ConfirmAsync(
+            string title,
+            string message,
+            string primaryText = "Yes",
+            string closeText = "No")
+        {
+            LastConfirmMessage = message;
+            return base.ConfirmAsync(title, message, primaryText, closeText);
+        }
     }
 
     private sealed class NullSessionTabFactory : ISessionTabFactory

@@ -319,13 +319,12 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     private static void SetExpandedRecursive(IEnumerable<TreeNodeViewModel> level, bool expanded)
     {
-        foreach (var node in level)
+        foreach (var node in EnumerateSubtree(level))
         {
             if (node.Kind == NodeKind.Folder)
             {
                 node.IsExpanded = expanded;
             }
-            SetExpandedRecursive(node.Children, expanded);
         }
     }
 
@@ -410,30 +409,46 @@ public partial class ConnectionTreeViewModel : ObservableObject
     private static int CountDescendants(TreeNodeViewModel node)
     {
         var count = 0;
-        foreach (var child in node.Children)
+        var seen = new HashSet<Guid> { node.Node.Id };
+        var stack = new Stack<TreeNodeViewModel>();
+        PushChildrenReverse(stack, node.Children);
+
+        while (stack.Count > 0)
         {
+            var child = stack.Pop();
+            if (!seen.Add(child.Node.Id)) continue;
+
             count++;
-            count += CountDescendants(child);
+            PushChildrenReverse(stack, child.Children);
         }
+
         return count;
     }
 
     // Node Ids of every connection in the subtree rooted at `root` (including the root itself
     // when it is a connection). Drives inline-secret cleanup on delete: a folder delete cascades
     // the DB rows but not the Credential Manager entries keyed by each connection's node Id.
-    private static IEnumerable<Guid> CollectConnectionNodeIds(TreeNodeViewModel root)
+    private static List<Guid> CollectConnectionNodeIds(TreeNodeViewModel root)
     {
-        if (root.Kind == NodeKind.Connection)
+        var ids = new List<Guid>();
+        var seen = new HashSet<Guid>();
+        var stack = new Stack<TreeNodeViewModel>();
+        stack.Push(root);
+
+        while (stack.Count > 0)
         {
-            yield return root.Node.Id;
-        }
-        foreach (var child in root.Children)
-        {
-            foreach (var id in CollectConnectionNodeIds(child))
+            var node = stack.Pop();
+            if (!seen.Add(node.Node.Id)) continue;
+
+            if (node.Kind == NodeKind.Connection)
             {
-                yield return id;
+                ids.Add(node.Node.Id);
             }
+
+            PushChildrenReverse(stack, node.Children);
         }
+
+        return ids;
     }
 
     public async Task PersistTreeStructureAsync()
@@ -481,21 +496,25 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     private static void NotifyHostForSubtree(IEnumerable<TreeNodeViewModel> level)
     {
-        foreach (var n in level)
+        foreach (var n in EnumerateSubtree(level))
         {
             n.NotifyHostChanged();
-            NotifyHostForSubtree(n.Children);
         }
     }
 
     private static bool HasCycleOrInvalidParent(IList<TreeNodeViewModel> level, HashSet<Guid> seen)
     {
-        foreach (var n in level)
+        var stack = new Stack<TreeNodeViewModel>();
+        PushChildrenReverse(stack, level);
+
+        while (stack.Count > 0)
         {
+            var n = stack.Pop();
             if (!seen.Add(n.Node.Id)) return true;
             if (n.Kind == NodeKind.Connection && n.Children.Count > 0) return true;
-            if (HasCycleOrInvalidParent(n.Children, seen)) return true;
+            PushChildrenReverse(stack, n.Children);
         }
+
         return false;
     }
 
@@ -510,16 +529,27 @@ public partial class ConnectionTreeViewModel : ObservableObject
         List<ConnectionNode> updates)
 #pragma warning restore CA1859
     {
-        for (var i = 0; i < level.Count; i++)
+        var stack = new Stack<ReorderFrame>();
+        for (var i = level.Count - 1; i >= 0; i--)
         {
-            var n = level[i];
-            if (n.Node.ParentId != parentId || n.Node.SortOrder != i)
+            stack.Push(new ReorderFrame(level[i], parentId, i));
+        }
+
+        while (stack.Count > 0)
+        {
+            var frame = stack.Pop();
+            var n = frame.Node;
+            if (n.Node.ParentId != frame.ParentId || n.Node.SortOrder != frame.SortOrder)
             {
-                n.Node.ParentId = parentId;
-                n.Node.SortOrder = i;
+                n.Node.ParentId = frame.ParentId;
+                n.Node.SortOrder = frame.SortOrder;
                 updates.Add(n.Node);
             }
-            ApplyAndCollectChangedNodes(n.Children, n.Node.Id, updates);
+
+            for (var i = n.Children.Count - 1; i >= 0; i--)
+            {
+                stack.Push(new ReorderFrame(n.Children[i], n.Node.Id, i));
+            }
         }
     }
 
@@ -641,79 +671,102 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     private static void MarkAllVisible(IEnumerable<TreeNodeViewModel> level)
     {
-        foreach (var node in level)
+        foreach (var node in EnumerateSubtree(level))
         {
             node.IsVisible = true;
-            MarkAllVisible(node.Children);
         }
     }
 
     private static bool EvaluateFilter(IEnumerable<TreeNodeViewModel> level, string query)
     {
         var anyVisible = false;
-        foreach (var node in level)
-        {
-            var nameMatches = node.Name.Contains(query, StringComparison.OrdinalIgnoreCase);
+        var seen = new HashSet<Guid>();
+        var stack = new Stack<FilterFrame>();
+        PushFilterFramesReverse(stack, level, ancestorMatched: false);
 
-            if (node.Kind == NodeKind.Folder)
+        while (stack.Count > 0)
+        {
+            var frame = stack.Pop();
+            var node = frame.Node;
+            if (frame.Exiting)
             {
-                if (nameMatches)
+                var hasVisibleChild = false;
+                foreach (var child in node.Children)
                 {
-                    // Folder name matched — show the folder and everything beneath it,
-                    // and expand it so the contents the user searched for are actually
-                    // visible. The pre-filter IsExpanded value is in the snapshot, so
-                    // clearing the search will restore the original collapsed state.
-                    node.IsVisible = true;
+                    if (child.IsVisible)
+                    {
+                        hasVisibleChild = true;
+                        break;
+                    }
+                }
+
+                node.IsVisible = hasVisibleChild;
+                if (hasVisibleChild)
+                {
                     node.IsExpanded = true;
-                    MarkAllVisible(node.Children);
+                    anyVisible = true;
                 }
-                else
-                {
-                    var hasVisibleChild = EvaluateFilter(node.Children, query);
-                    node.IsVisible = hasVisibleChild;
-                    // Auto-expand non-matching folders that contain a match so the
-                    // matching descendant is actually rendered.
-                    if (hasVisibleChild) node.IsExpanded = true;
-                }
+                continue;
+            }
+
+            if (!seen.Add(node.Node.Id)) continue;
+
+            if (frame.AncestorMatched)
+            {
+                node.IsVisible = true;
+                anyVisible = true;
+                PushFilterFramesReverse(stack, node.Children, ancestorMatched: true);
+                continue;
+            }
+
+            var nameMatches = node.Name.Contains(query, StringComparison.OrdinalIgnoreCase);
+            if (node.Kind == NodeKind.Folder && nameMatches)
+            {
+                // Folder name matched — show the folder and everything beneath it, and
+                // expand this folder so the contents the user searched for are visible.
+                // Descendant expansion is deliberately left alone; clearing the search will
+                // restore the pre-filter snapshot for every folder.
+                node.IsVisible = true;
+                node.IsExpanded = true;
+                anyVisible = true;
+                PushFilterFramesReverse(stack, node.Children, ancestorMatched: true);
+            }
+            else if (node.Kind == NodeKind.Folder)
+            {
+                stack.Push(new FilterFrame(node, AncestorMatched: false, Exiting: true));
+                PushFilterFramesReverse(stack, node.Children, ancestorMatched: false);
             }
             else
             {
                 node.IsVisible = nameMatches;
+                if (nameMatches) anyVisible = true;
             }
-
-            if (node.IsVisible) anyVisible = true;
         }
+
         return anyVisible;
     }
 
     private static Dictionary<Guid, bool> SnapshotExpandState(IEnumerable<TreeNodeViewModel> level)
     {
         var snapshot = new Dictionary<Guid, bool>();
-        CollectExpandState(level, snapshot);
-        return snapshot;
-    }
-
-    private static void CollectExpandState(IEnumerable<TreeNodeViewModel> level, Dictionary<Guid, bool> snapshot)
-    {
-        foreach (var node in level)
+        foreach (var node in EnumerateSubtree(level))
         {
             if (node.Kind == NodeKind.Folder)
             {
                 snapshot[node.Node.Id] = node.IsExpanded;
             }
-            CollectExpandState(node.Children, snapshot);
         }
+        return snapshot;
     }
 
-    private static void RestoreExpandState(IEnumerable<TreeNodeViewModel> level, IReadOnlyDictionary<Guid, bool> snapshot)
+    private static void RestoreExpandState(IEnumerable<TreeNodeViewModel> level, Dictionary<Guid, bool> snapshot)
     {
-        foreach (var node in level)
+        foreach (var node in EnumerateSubtree(level))
         {
             if (node.Kind == NodeKind.Folder && snapshot.TryGetValue(node.Node.Id, out var wasExpanded))
             {
                 node.IsExpanded = wasExpanded;
             }
-            RestoreExpandState(node.Children, snapshot);
         }
     }
 
@@ -749,6 +802,22 @@ public partial class ConnectionTreeViewModel : ObservableObject
         IReadOnlyList<ConnectionNode> target,
         IReadOnlyDictionary<Guid, List<ConnectionNode>> byParent)
     {
+        var pending = new Stack<ReconcileFrame>();
+        pending.Push(new ReconcileFrame(current, target));
+
+        while (pending.Count > 0)
+        {
+            var frame = pending.Pop();
+            ReconcileLevel(frame.Current, frame.Target, byParent, pending);
+        }
+    }
+
+    private void ReconcileLevel(
+        BulkObservableCollection<TreeNodeViewModel> current,
+        IReadOnlyList<ConnectionNode> target,
+        IReadOnlyDictionary<Guid, List<ConnectionNode>> byParent,
+        Stack<ReconcileFrame> pending)
+    {
         if (current.Count == 0)
         {
             if (target.Count == 0) return;
@@ -757,12 +826,11 @@ public partial class ConnectionTreeViewModel : ObservableObject
             foreach (var node in target)
             {
                 var vm = new TreeNodeViewModel(node, ResolveEffectiveHost);
-                byParent.TryGetValue(node.Id, out var children);
-                Reconcile(vm.Children, children ?? (IReadOnlyList<ConnectionNode>)Array.Empty<ConnectionNode>(), byParent);
                 next.Add(vm);
             }
 
             current.ReplaceAll(next);
+            QueueChildReconciles(current, target, byParent, pending);
             return;
         }
 
@@ -816,9 +884,91 @@ public partial class ConnectionTreeViewModel : ObservableObject
             }
 
             byParent.TryGetValue(node.Id, out var children);
-            Reconcile(vm.Children, children ?? (IReadOnlyList<ConnectionNode>)Array.Empty<ConnectionNode>(), byParent);
+            pending.Push(new ReconcileFrame(
+                vm.Children,
+                children ?? (IReadOnlyList<ConnectionNode>)Array.Empty<ConnectionNode>()));
         }
     }
+
+    private static void QueueChildReconciles(
+        BulkObservableCollection<TreeNodeViewModel> current,
+        IReadOnlyList<ConnectionNode> target,
+        IReadOnlyDictionary<Guid, List<ConnectionNode>> byParent,
+        Stack<ReconcileFrame> pending)
+    {
+        for (var i = target.Count - 1; i >= 0; i--)
+        {
+            byParent.TryGetValue(target[i].Id, out var children);
+            pending.Push(new ReconcileFrame(
+                current[i].Children,
+                children ?? (IReadOnlyList<ConnectionNode>)Array.Empty<ConnectionNode>()));
+        }
+    }
+
+    private static IEnumerable<TreeNodeViewModel> EnumerateSubtree(IEnumerable<TreeNodeViewModel> level)
+    {
+        var seen = new HashSet<Guid>();
+        var stack = new Stack<TreeNodeViewModel>();
+        PushChildrenReverse(stack, level);
+
+        while (stack.Count > 0)
+        {
+            var node = stack.Pop();
+            if (!seen.Add(node.Node.Id)) continue;
+
+            yield return node;
+            PushChildrenReverse(stack, node.Children);
+        }
+    }
+
+    private static void PushChildrenReverse(Stack<TreeNodeViewModel> stack, IEnumerable<TreeNodeViewModel> children)
+    {
+        if (children is IList<TreeNodeViewModel> list)
+        {
+            PushChildrenReverse(stack, list);
+            return;
+        }
+
+        var snapshot = new List<TreeNodeViewModel>(children);
+        PushChildrenReverse(stack, snapshot);
+    }
+
+    private static void PushChildrenReverse(Stack<TreeNodeViewModel> stack, IList<TreeNodeViewModel> children)
+    {
+        for (var i = children.Count - 1; i >= 0; i--)
+        {
+            stack.Push(children[i]);
+        }
+    }
+
+    private static void PushFilterFramesReverse(
+        Stack<FilterFrame> stack,
+        IEnumerable<TreeNodeViewModel> children,
+        bool ancestorMatched)
+    {
+        if (children is IList<TreeNodeViewModel> list)
+        {
+            for (var i = list.Count - 1; i >= 0; i--)
+            {
+                stack.Push(new FilterFrame(list[i], ancestorMatched, Exiting: false));
+            }
+            return;
+        }
+
+        var snapshot = new List<TreeNodeViewModel>(children);
+        for (var i = snapshot.Count - 1; i >= 0; i--)
+        {
+            stack.Push(new FilterFrame(snapshot[i], ancestorMatched, Exiting: false));
+        }
+    }
+
+    private readonly record struct ReorderFrame(TreeNodeViewModel Node, Guid? ParentId, int SortOrder);
+
+    private readonly record struct FilterFrame(TreeNodeViewModel Node, bool AncestorMatched, bool Exiting);
+
+    private readonly record struct ReconcileFrame(
+        BulkObservableCollection<TreeNodeViewModel> Current,
+        IReadOnlyList<ConnectionNode> Target);
 
     private static void RefreshIndexMap(
         BulkObservableCollection<TreeNodeViewModel> current,

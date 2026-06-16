@@ -7,6 +7,8 @@ namespace Wormhole.Services.MRemoteNg;
 // what to do with each node afterwards.
 internal static class MRemoteNgXmlReader
 {
+    internal const int MaxNestingDepth = 4096;
+
     private static readonly XNamespace Mrng = "http://mremoteng.org";
 
     public static MRemoteNgRoot Parse(Stream xml, out IReadOnlyList<MRemoteNgRawNode> roots)
@@ -47,16 +49,39 @@ internal static class MRemoteNgXmlReader
         // for elements by LocalName so we don't miss them.
         var collected = new List<MRemoteNgRawNode>();
         hasPasswordPayloads = false;
-        foreach (var nodeElement in rootElement.Elements())
+        var stack = new Stack<NodeReadStackEntry>();
+        PushNodeElementsReverse(stack, rootElement.Elements(), parent: null, depth: 1);
+
+        while (stack.Count > 0)
         {
-            if (!IsNodeElement(nodeElement))
+            var entry = stack.Pop();
+            var frame = entry.Frame;
+            if (frame.Depth > MaxNestingDepth)
             {
+                throw new InvalidDataException(
+                    $"mRemoteNG nesting depth exceeds {MaxNestingDepth}; refusing to import.");
+            }
+
+            if (entry.Exiting)
+            {
+                var raw = BuildNode(frame, out var nodeHasPasswordPayload);
+                if (frame.Parent is null)
+                {
+                    collected.Add(raw);
+                    hasPasswordPayloads |= nodeHasPasswordPayload;
+                }
+                else
+                {
+                    frame.Parent.Children.Add(raw);
+                    frame.Parent.HasPasswordPayload |= nodeHasPasswordPayload;
+                }
                 continue;
             }
 
-            collected.Add(ReadNode(nodeElement, out var nodeHasPasswordPayload));
-            hasPasswordPayloads |= nodeHasPasswordPayload;
+            stack.Push(new NodeReadStackEntry(frame, Exiting: true));
+            PushNodeElementsReverse(stack, frame.Element.Elements(), frame, frame.Depth + 1);
         }
+
         roots = collected;
         return root;
     }
@@ -64,24 +89,12 @@ internal static class MRemoteNgXmlReader
     private static bool IsNodeElement(XElement element) =>
         string.Equals(element.Name.LocalName, "Node", StringComparison.Ordinal);
 
-    private static MRemoteNgRawNode ReadNode(XElement element, out bool hasPasswordPayload)
+    private static MRemoteNgRawNode BuildNode(NodeReadFrame frame, out bool hasPasswordPayload)
     {
-        var children = new List<MRemoteNgRawNode>();
-        var childHasPasswordPayloads = false;
-        foreach (var child in element.Elements())
-        {
-            if (!IsNodeElement(child))
-            {
-                continue;
-            }
-
-            children.Add(ReadNode(child, out var childHasPasswordPayload));
-            childHasPasswordPayloads |= childHasPasswordPayload;
-        }
-
+        var element = frame.Element;
         var passwordCipher = Attr(element, "Password");
         var inheritPassword = AttrBool(element, "InheritPassword");
-        hasPasswordPayload = childHasPasswordPayloads ||
+        hasPasswordPayload = frame.HasPasswordPayload ||
                              (!inheritPassword && !string.IsNullOrWhiteSpace(passwordCipher));
 
         return new MRemoteNgRawNode(
@@ -104,7 +117,7 @@ internal static class MRemoteNgXmlReader
             InheritPort: AttrBool(element, "InheritPort"),
             InheritProtocol: AttrBool(element, "InheritProtocol"),
             InheritResolution: AttrBool(element, "InheritResolution"),
-            Children: children);
+            Children: frame.Children);
     }
 
     private static string Attr(XElement element, string name)
@@ -118,6 +131,39 @@ internal static class MRemoteNgXmlReader
 
     private static int ParseInt(string raw, int fallback)
         => int.TryParse(raw, out var n) && n > 0 ? n : fallback;
+
+    private static void PushNodeElementsReverse(
+        Stack<NodeReadStackEntry> stack,
+        IEnumerable<XElement> elements,
+        NodeReadFrame? parent,
+        int depth)
+    {
+        var nodes = elements.Where(IsNodeElement).ToList();
+        for (var i = nodes.Count - 1; i >= 0; i--)
+        {
+            stack.Push(new NodeReadStackEntry(
+                new NodeReadFrame(nodes[i], parent, depth),
+                Exiting: false));
+        }
+    }
+
+    private readonly record struct NodeReadStackEntry(NodeReadFrame Frame, bool Exiting);
+
+    private sealed class NodeReadFrame
+    {
+        public NodeReadFrame(XElement element, NodeReadFrame? parent, int depth)
+        {
+            Element = element;
+            Parent = parent;
+            Depth = depth;
+        }
+
+        public XElement Element { get; }
+        public NodeReadFrame? Parent { get; }
+        public int Depth { get; }
+        public List<MRemoteNgRawNode> Children { get; } = new();
+        public bool HasPasswordPayload { get; set; }
+    }
 }
 
 internal sealed record MRemoteNgRoot(

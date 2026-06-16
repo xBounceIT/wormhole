@@ -10,6 +10,7 @@ internal static class AppPaths
     private static readonly string SettingsFilePath = Path.Combine(AppDataDirectory, "settings.json");
     private static readonly string AppAuthenticationFilePath = Path.Combine(AppDataDirectory, "app-auth.dpapi");
     private static readonly string LogsDirectory = Path.Combine(AppDataDirectory, "logs");
+    private static readonly string CrashDumpsDirectory = Path.Combine(AppDataDirectory, "crashdumps");
     private static readonly string KeysDirectory = Path.Combine(AppDataDirectory, "keys");
     private static readonly string TunnelConfigsDirectory = Path.Combine(AppDataDirectory, "tunnels");
     private static readonly string StormshieldCacheDirectory = Path.Combine(AppDataDirectory, "stormshield-cache");
@@ -45,6 +46,8 @@ internal static class AppPaths
     public static string GetAppAuthenticationFilePath() => AppAuthenticationFilePath;
 
     public static string GetLogsDirectory() => LogsDirectory;
+
+    public static string GetCrashDumpsDirectory() => CrashDumpsDirectory;
 
     public static string GetKeysDirectory() => KeysDirectory;
 
