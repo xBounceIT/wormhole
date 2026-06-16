@@ -184,15 +184,18 @@ public sealed class SshSessionViewModelTests
             NullLoggerFactory.Instance.CreateLogger<TunnelManager>());
     }
 
-    // Default route prompter for tests that don't exercise the tunnel-routing prompt: the
-    // settings flag defaults off, so ResolveRouteAsync returns the profile unchanged (the
-    // tunnel is used as configured) without ever invoking the dialog.
-    private static TunnelRoutePrompter CreateTunnelRoutePrompter() =>
-        new(
-            new FakeAppSettingsService(),
+    // Default route prompter for tests that don't exercise the tunnel-routing prompt:
+    // explicitly disable it so ResolveRouteAsync returns the profile unchanged.
+    private static TunnelRoutePrompter CreateTunnelRoutePrompter()
+    {
+        var settings = new FakeAppSettingsService();
+        settings.Current.PromptBeforeTunnelConnect = false;
+        return new(
+            settings,
             new Fakes.FakeDialogService(),
             new FakeTunnelConfigRepository(),
             NullLoggerFactory.Instance.CreateLogger<TunnelRoutePrompter>());
+    }
 
     [Fact]
     public void CanReconnect_IsFalse_ByDefault()

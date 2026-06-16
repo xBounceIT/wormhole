@@ -120,6 +120,7 @@
     <Compile Include="..\Helpers\RdpDesktopSizeResolver.cs" Link="Helpers\RdpDesktopSizeResolver.cs" />
     <Compile Include="..\Helpers\RdpScreenSizes.cs" Link="Helpers\RdpScreenSizes.cs" />
     <Compile Include="..\Helpers\WebViewNewWindowNavigation.cs" Link="Helpers\WebViewNewWindowNavigation.cs" />
+    <Compile Include="..\Services\AppSettingsService.cs" Link="Services\AppSettingsService.cs" />
     <Compile Include="..\Services\IAppSettingsService.cs" Link="Services\IAppSettingsService.cs" />
     <Compile Include="..\Services\Security\IAppAuthenticationDataProtector.cs" Link="Services\Security\IAppAuthenticationDataProtector.cs" />
     <Compile Include="..\Services\Security\DpapiAppAuthenticationDataProtector.cs" Link="Services\Security\DpapiAppAuthenticationDataProtector.cs" />
