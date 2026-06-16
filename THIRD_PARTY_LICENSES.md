@@ -49,6 +49,7 @@ Used by `Wormhole.csproj`.
 | [Meziantou.Framework.Win32.CredentialManager](https://github.com/meziantou/Meziantou.Framework) | MIT |
 | [Microsoft.Data.Sqlite](https://learn.microsoft.com/dotnet/standard/data/sqlite/) | MIT (bundles the [SQLite library](https://www.sqlite.org/copyright.html), public domain) |
 | [Dapper](https://github.com/DapperLib/Dapper) | Apache-2.0 |
+| [Markdig](https://github.com/xoofx/markdig) | BSD-2-Clause |
 | [BouncyCastle.Cryptography](https://github.com/bcgit/bc-csharp) | MIT (based on the MIT X Consortium license; bundles a modified Bzip2 under Apache-2.0) |
 | [xunit](https://github.com/xunit/xunit) (test-only) | Apache-2.0 |
 

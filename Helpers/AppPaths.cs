@@ -26,6 +26,7 @@ internal static class AppPaths
     private static readonly string WebView2UserDataDirectory = Path.Combine(AppDataDirectory, "webview2");
     private static readonly string WatchguardSamlWebView2UserDataDirectory = Path.Combine(AppDataDirectory, "watchguard-saml-webview2");
     private static readonly string AzureVpnWebView2UserDataDirectory = Path.Combine(AppDataDirectory, "azurevpn-webview2");
+    private static readonly string UpdateChangelogWebView2UserDataDirectory = Path.Combine(AppDataDirectory, "update-changelog-webview2");
     // Separate user-data root for the HTTP/HTTPS browser session surface, so its (possibly
     // proxy-configured) WebView2 environments never collide with the SSH terminal's shared env.
     // Isolated tabs get a unique sub-folder; this root is wiped at startup (App.ClearWebBrowserUserData).
@@ -89,6 +90,11 @@ internal static class AppPaths
 
     public static string GetAzureVpnWebView2UserDataDirectory() =>
         Path.Combine(AzureVpnWebView2UserDataDirectory, WebViewBrowserArguments.KeyedSharedFolderName);
+
+    public static string GetUpdateChangelogWebView2UserDataRoot() => UpdateChangelogWebView2UserDataDirectory;
+
+    public static string GetUpdateChangelogWebView2UserDataDirectory() =>
+        Path.Combine(UpdateChangelogWebView2UserDataDirectory, WebViewBrowserArguments.KeyedSharedFolderName);
 
     // Root for ALL web-tab environments — wiped at startup by App.ClearWebBrowserUserData, and the
     // parent of both the keyed shared folder and the per-tab isolated env-<id> folders.
