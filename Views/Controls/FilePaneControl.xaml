@@ -14,7 +14,7 @@
              row is impossible. Per-container wiring solves that AND restricts the
              menu to rows (no menu on empty list background). -->
         <MenuFlyout x:Key="EntryContextFlyout">
-            <!-- Open: directory → navigate into it; local file → launch with default
+            <!-- Open: directory -> navigate into it; local file -> launch with default
                  OS handler. Visibility is decided per-context in
                  UpdateOpenMenuVisibility (hidden only for remote files, where there's
                  no local handler to launch the bytes into). -->
@@ -29,9 +29,36 @@
                 <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE74D;" /></MenuFlyoutItem.Icon>
             </MenuFlyoutItem>
         </MenuFlyout>
+
+        <Style x:Key="ColumnHeaderButtonStyle"
+               TargetType="Button"
+               BasedOn="{StaticResource DefaultButtonStyle}">
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Padding" Value="0,6" />
+            <Setter Property="MinHeight" Value="34" />
+            <Setter Property="HorizontalAlignment" Value="Stretch" />
+            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+
+        <Style x:Key="ColumnHeaderTextBlockStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="Opacity" Value="0.7" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+
+        <Style x:Key="PaneToolbarButtonStyle"
+               TargetType="Button"
+               BasedOn="{StaticResource DefaultButtonStyle}">
+            <Setter Property="Width" Value="34" />
+            <Setter Property="Height" Value="34" />
+            <Setter Property="MinWidth" Value="34" />
+            <Setter Property="Padding" Value="0" />
+        </Style>
     </UserControl.Resources>
 
-    <Grid RowSpacing="6">
+    <Grid RowSpacing="8">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
@@ -43,7 +70,7 @@
                    Text="{x:Bind ViewModel.Title, Mode=OneWay}"
                    Style="{StaticResource BodyStrongTextBlockStyle}" />
 
-        <Grid Grid.Row="1" ColumnSpacing="4">
+        <Grid Grid.Row="1" ColumnSpacing="8">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
@@ -52,8 +79,9 @@
                  height (~32px). Without this the button uses its content's natural
                  size (a 14pt FontIcon plus padding) and renders visibly shorter than
                  the adjacent path TextBox. Glyph E70E is the standard Segoe Fluent
-                 "Up" arrow — same icon File Explorer uses for parent-directory nav. -->
+                 "Up" arrow - same icon File Explorer uses for parent-directory nav. -->
             <Button Grid.Column="0"
+                    Style="{StaticResource PaneToolbarButtonStyle}"
                     ToolTipService.ToolTip="Up one level"
                     VerticalAlignment="Stretch"
                     Command="{x:Bind ViewModel.GoUpCommand, Mode=OneWay}">
@@ -65,28 +93,45 @@
                      KeyDown="OnPathBoxKeyDown" />
         </Grid>
 
-        <StackPanel Grid.Row="2" Orientation="Horizontal" Spacing="4">
-            <Button ToolTipService.ToolTip="Refresh"
-                    Command="{x:Bind ViewModel.RefreshCommand, Mode=OneWay}">
-                <FontIcon Glyph="&#xE72C;" FontSize="14" />
-            </Button>
-            <Button ToolTipService.ToolTip="New folder"
-                    Click="OnNewFolderClick">
-                <FontIcon Glyph="&#xE8F4;" FontSize="14" />
-            </Button>
-            <Button ToolTipService.ToolTip="New file"
-                    Click="OnNewFileClick">
-                <FontIcon Glyph="&#xE7C3;" FontSize="14" />
-            </Button>
-            <Button ToolTipService.ToolTip="Delete selected"
-                    Click="OnDeleteClick">
-                <FontIcon Glyph="&#xE74D;" FontSize="14" />
-            </Button>
-            <ProgressRing IsActive="{x:Bind ViewModel.IsBusy, Mode=OneWay}"
-                          Width="20" Height="20"
-                          VerticalAlignment="Center"
-                          Margin="6,0,0,0" />
-        </StackPanel>
+        <Grid Grid.Row="2" ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0" Orientation="Horizontal" Spacing="6">
+                <Button ToolTipService.ToolTip="Refresh"
+                        Style="{StaticResource PaneToolbarButtonStyle}"
+                        Command="{x:Bind ViewModel.RefreshCommand, Mode=OneWay}">
+                    <FontIcon Glyph="&#xE72C;" FontSize="14" />
+                </Button>
+                <Button ToolTipService.ToolTip="New folder"
+                        Style="{StaticResource PaneToolbarButtonStyle}"
+                        Click="OnNewFolderClick">
+                    <FontIcon Glyph="&#xE8F4;" FontSize="14" />
+                </Button>
+                <Button ToolTipService.ToolTip="New file"
+                        Style="{StaticResource PaneToolbarButtonStyle}"
+                        Click="OnNewFileClick">
+                    <FontIcon Glyph="&#xE7C3;" FontSize="14" />
+                </Button>
+                <Button ToolTipService.ToolTip="Delete selected"
+                        Style="{StaticResource PaneToolbarButtonStyle}"
+                        Click="OnDeleteClick">
+                    <FontIcon Glyph="&#xE74D;" FontSize="14" />
+                </Button>
+                <ProgressRing IsActive="{x:Bind ViewModel.IsBusy, Mode=OneWay}"
+                              Width="20" Height="20"
+                              VerticalAlignment="Center"
+                              Margin="8,0,0,0" />
+            </StackPanel>
+
+            <TextBox Grid.Column="1"
+                     PlaceholderText="Search this folder"
+                     Text="{x:Bind ViewModel.SearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                     HorizontalAlignment="Stretch"
+                     MinWidth="120" />
+        </Grid>
 
         <Grid Grid.Row="3">
             <Grid.RowDefinitions>
@@ -94,57 +139,154 @@
                 <RowDefinition Height="Auto" />
             </Grid.RowDefinitions>
 
-            <ListView x:Name="EntriesList"
-                      Grid.Row="0"
-                      ItemsSource="{x:Bind ViewModel.Entries, Mode=OneWay}"
-                      SelectionMode="Extended"
-                      CanDragItems="True"
-                      AllowDrop="True"
-                      DragItemsStarting="OnDragItemsStarting"
-                      DragOver="OnDragOver"
-                      Drop="OnDrop"
-                      DoubleTapped="OnEntryDoubleTapped"
-                      SelectionChanged="OnSelectionChanged"
-                      ContainerContentChanging="OnEntriesContainerContentChanging"
-                      BorderThickness="1"
-                      BorderBrush="{ThemeResource ControlElevationBorderBrush}">
-                <ListView.ItemTemplate>
-                    <DataTemplate x:DataType="transfer:FileEntryViewModel">
-                        <Grid ColumnSpacing="8" Padding="4,2">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="20" />
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="100" />
-                                <ColumnDefinition Width="140" />
-                            </Grid.ColumnDefinitions>
-                            <FontIcon Grid.Column="0"
-                                      Glyph="{x:Bind IsDirectory, Converter={StaticResource DirectoryGlyphConverter}, Mode=OneWay}"
-                                      FontSize="14" />
-                            <TextBlock Grid.Column="1"
-                                       Text="{x:Bind Name, Mode=OneWay}"
-                                       Visibility="{x:Bind IsEditing, Converter={StaticResource InverseBoolToVisibilityConverter}, Mode=OneWay}"
-                                       IsHitTestVisible="False"
-                                       VerticalAlignment="Center" />
-                            <TextBox Grid.Column="1"
-                                     Text="{x:Bind EditingName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                     Visibility="{x:Bind IsEditing, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}"
-                                     KeyDown="OnRenameKeyDown"
-                                     LostFocus="OnRenameLostFocus"
-                                     Loaded="OnRenameTextBoxLoaded"
-                                     Tag="{x:Bind}" />
-                            <TextBlock Grid.Column="2"
-                                       Text="{x:Bind Size, Converter={StaticResource ByteSizeConverter}, Mode=OneWay}"
-                                       Opacity="0.7"
-                                       HorizontalAlignment="Right"
-                                       VerticalAlignment="Center" />
-                            <TextBlock Grid.Column="3"
-                                       Text="{x:Bind LastModifiedUtc, Converter={StaticResource UtcDateConverter}, Mode=OneWay}"
-                                       Opacity="0.7"
-                                       VerticalAlignment="Center" />
-                        </Grid>
-                    </DataTemplate>
-                </ListView.ItemTemplate>
-            </ListView>
+            <Border Grid.Row="0"
+                    BorderThickness="1"
+                    BorderBrush="{ThemeResource ControlElevationBorderBrush}">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="*" />
+                    </Grid.RowDefinitions>
+
+                    <Grid Grid.Row="0"
+                          ColumnSpacing="10"
+                          Padding="22,0,22,0"
+                          MinHeight="34"
+                          Background="{ThemeResource LayerFillColorDefaultBrush}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="24" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="84" />
+                            <ColumnDefinition Width="124" />
+                        </Grid.ColumnDefinitions>
+
+                        <Button Grid.Column="1"
+                                Tag="Name"
+                                Click="OnSortHeaderClick"
+                                Style="{StaticResource ColumnHeaderButtonStyle}"
+                                ToolTipService.ToolTip="Sort by name">
+                            <Grid ColumnSpacing="4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Name" Style="{StaticResource ColumnHeaderTextBlockStyle}" />
+                                <FontIcon Grid.Column="1"
+                                          Glyph="{x:Bind ViewModel.NameSortGlyph, Mode=OneWay}"
+                                          FontSize="10"
+                                          VerticalAlignment="Center" />
+                            </Grid>
+                        </Button>
+
+                        <Button Grid.Column="2"
+                                Tag="Size"
+                                Click="OnSortHeaderClick"
+                                Style="{StaticResource ColumnHeaderButtonStyle}"
+                                ToolTipService.ToolTip="Sort by size">
+                            <Grid ColumnSpacing="4" HorizontalAlignment="Stretch">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0"
+                                           Text="Size"
+                                           Style="{StaticResource ColumnHeaderTextBlockStyle}"
+                                           HorizontalAlignment="Right" />
+                                <FontIcon Grid.Column="1"
+                                          Glyph="{x:Bind ViewModel.SizeSortGlyph, Mode=OneWay}"
+                                          FontSize="10"
+                                          VerticalAlignment="Center" />
+                            </Grid>
+                        </Button>
+
+                        <Button Grid.Column="3"
+                                Tag="Modified"
+                                Click="OnSortHeaderClick"
+                                Style="{StaticResource ColumnHeaderButtonStyle}"
+                                ToolTipService.ToolTip="Sort by modified time">
+                            <Grid ColumnSpacing="4">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="Modified" Style="{StaticResource ColumnHeaderTextBlockStyle}" />
+                                <FontIcon Grid.Column="1"
+                                          Glyph="{x:Bind ViewModel.ModifiedSortGlyph, Mode=OneWay}"
+                                          FontSize="10"
+                                          VerticalAlignment="Center" />
+                            </Grid>
+                        </Button>
+                    </Grid>
+
+                    <ListView x:Name="EntriesList"
+                              Grid.Row="1"
+                              ItemsSource="{x:Bind ViewModel.Entries, Mode=OneWay}"
+                              SelectionMode="Extended"
+                              CanDragItems="True"
+                              AllowDrop="True"
+                              DragItemsStarting="OnDragItemsStarting"
+                              DragOver="OnDragOver"
+                              Drop="OnDrop"
+                              DoubleTapped="OnEntryDoubleTapped"
+                              SelectionChanged="OnSelectionChanged"
+                              ContainerContentChanging="OnEntriesContainerContentChanging"
+                              BorderThickness="0">
+                        <ListView.ItemContainerStyle>
+                            <Style TargetType="ListViewItem">
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                <Setter Property="Padding" Value="0" />
+                                <Setter Property="Margin" Value="0" />
+                            </Style>
+                        </ListView.ItemContainerStyle>
+                        <ListView.ItemTemplate>
+                            <DataTemplate x:DataType="transfer:FileEntryViewModel">
+                                <Grid ColumnSpacing="10" Padding="22,3,22,3">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="24" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="84" />
+                                        <ColumnDefinition Width="124" />
+                                    </Grid.ColumnDefinitions>
+                                    <FontIcon Grid.Column="0"
+                                              Glyph="{x:Bind IsDirectory, Converter={StaticResource DirectoryGlyphConverter}, Mode=OneWay}"
+                                              FontSize="14" />
+                                    <TextBlock Grid.Column="1"
+                                               Text="{x:Bind Name, Mode=OneWay}"
+                                               Visibility="{x:Bind IsEditing, Converter={StaticResource InverseBoolToVisibilityConverter}, Mode=OneWay}"
+                                               IsHitTestVisible="False"
+                                               TextTrimming="CharacterEllipsis"
+                                               VerticalAlignment="Center" />
+                                    <TextBox Grid.Column="1"
+                                             Text="{x:Bind EditingName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                             Visibility="{x:Bind IsEditing, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}"
+                                             KeyDown="OnRenameKeyDown"
+                                             LostFocus="OnRenameLostFocus"
+                                             Loaded="OnRenameTextBoxLoaded"
+                                             Tag="{x:Bind}" />
+                                    <TextBlock Grid.Column="2"
+                                               Text="{x:Bind Size, Converter={StaticResource ByteSizeConverter}, Mode=OneWay}"
+                                               Opacity="0.7"
+                                               HorizontalAlignment="Right"
+                                               VerticalAlignment="Center" />
+                                    <TextBlock Grid.Column="3"
+                                               Text="{x:Bind LastModifiedUtc, Converter={StaticResource UtcDateConverter}, Mode=OneWay}"
+                                               Opacity="0.7"
+                                               TextTrimming="CharacterEllipsis"
+                                               VerticalAlignment="Center" />
+                                </Grid>
+                            </DataTemplate>
+                        </ListView.ItemTemplate>
+                    </ListView>
+                </Grid>
+            </Border>
+
+            <TextBlock Grid.Row="0"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       Text="No files match your search"
+                       Opacity="0.7"
+                       IsHitTestVisible="False"
+                       Visibility="{x:Bind ViewModel.HasNoMatches, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}" />
 
             <TextBlock Grid.Row="1"
                        Text="{x:Bind ViewModel.ErrorMessage, Mode=OneWay}"

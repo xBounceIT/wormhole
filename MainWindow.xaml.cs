@@ -32,7 +32,6 @@ public sealed partial class MainWindow : Window
     // Floor so a transient zero-height layout pass (e.g. before the footer
     // items have measured) doesn't collapse the tree to nothing.
     private const double MinConnectionsTreeHeight = 100;
-
     private readonly INavigationService _navigationService;
     private readonly IDialogService _dialogService;
     private readonly IAppSettingsService _settingsService;
@@ -57,6 +56,8 @@ public sealed partial class MainWindow : Window
     private Task<bool>? _activeUnlockTask;
     private TaskCompletionSource<bool>? _activeUnlockTcs;
     private IDisposable? _lockOverlaySuppression;
+    private ModalOverlaySizing? _modalOverlaySizing;
+    private XamlRoot? _modalOverlayTrackedXamlRoot;
     private AppAuthenticationFallbackMethod _lockFallbackMethod = AppAuthenticationFallbackMethod.Pin;
     private bool _lockHelloInProgress;
     private bool _lockUnlockInProgress;
@@ -117,6 +118,7 @@ public sealed partial class MainWindow : Window
         RootGrid.SizeChanged += (_, args) =>
         {
             ViewModel.MaxAvailableWidth = args.NewSize.Width;
+            ApplyModalOverlaySizing();
         };
 
         // NavigationView.PaneCustomContent sits in an Auto-height row of the
@@ -663,7 +665,36 @@ public sealed partial class MainWindow : Window
     /// WatchGuard SAML prompts a tunnel test can trigger) can still open over it on the same
     /// <c>XamlRoot</c>. Call <see cref="HideModalOverlay"/> to dismiss. UI thread only.
     /// </summary>
-    public void ShowModalOverlay(UIElement content, double? width = null, double? height = null)
+    public void ShowModalOverlay(UIElement content, double? width = null, double? height = null, ModalOverlaySizing? sizing = null)
+    {
+        _modalOverlaySizing = sizing;
+        if (sizing is not null)
+        {
+            TrackModalOverlayXamlRoot();
+            ApplyModalOverlaySizing();
+        }
+        else
+        {
+            UntrackModalOverlayXamlRoot();
+            ApplyFixedModalOverlaySize(width, height);
+        }
+
+        ModalOverlayContent.Content = content;
+        ModalOverlayHost.Visibility = Visibility.Visible;
+    }
+
+    /// <summary>Hide the app-modal overlay and release its content so the hosted control (and its
+    /// view-model) can be collected.</summary>
+    public void HideModalOverlay()
+    {
+        ModalOverlayHost.Visibility = Visibility.Collapsed;
+        ModalOverlayContent.Content = null;
+        _modalOverlaySizing = null;
+        UntrackModalOverlayXamlRoot();
+        ApplyFixedModalOverlaySize(width: null, height: null);
+    }
+
+    private void ApplyFixedModalOverlaySize(double? width, double? height)
     {
         if (width is { } modalWidth)
         {
@@ -686,22 +717,51 @@ public sealed partial class MainWindow : Window
             ModalOverlayFrame.MinHeight = 0;
             ModalOverlayFrame.MaxHeight = double.PositiveInfinity;
         }
-
-        ModalOverlayContent.Content = content;
-        ModalOverlayHost.Visibility = Visibility.Visible;
     }
 
-    /// <summary>Hide the app-modal overlay and release its content so the hosted control (and its
-    /// view-model) can be collected.</summary>
-    public void HideModalOverlay()
+    private void ApplyModalOverlaySizing()
     {
-        ModalOverlayHost.Visibility = Visibility.Collapsed;
-        ModalOverlayContent.Content = null;
-        ModalOverlayFrame.MinWidth = 380;
-        ModalOverlayFrame.MaxWidth = 600;
-        ModalOverlayFrame.MinHeight = 0;
-        ModalOverlayFrame.MaxHeight = double.PositiveInfinity;
+        if (_modalOverlaySizing is not { } sizing) return;
+
+        var rootSize = RootGrid.XamlRoot?.Size ?? default;
+        var hostWidth = RootGrid.ActualWidth > 0 ? RootGrid.ActualWidth : rootSize.Width;
+        var hostHeight = RootGrid.ActualHeight > 0 ? RootGrid.ActualHeight : rootSize.Height;
+        var margin = ModalOverlayFrame.Margin;
+        var size = sizing.Calculate(
+            new Size(hostWidth, hostHeight),
+            horizontalMargin: margin.Left + margin.Right,
+            verticalMargin: margin.Top + margin.Bottom);
+
+        ModalOverlayFrame.MinWidth = size.Width;
+        ModalOverlayFrame.MaxWidth = size.Width;
+        ModalOverlayFrame.MinHeight = size.Height;
+        ModalOverlayFrame.MaxHeight = size.Height;
     }
+
+    private void TrackModalOverlayXamlRoot()
+    {
+        var root = RootGrid.XamlRoot;
+        if (ReferenceEquals(root, _modalOverlayTrackedXamlRoot)) return;
+
+        UntrackModalOverlayXamlRoot();
+        _modalOverlayTrackedXamlRoot = root;
+        if (_modalOverlayTrackedXamlRoot is not null)
+        {
+            _modalOverlayTrackedXamlRoot.Changed += OnModalOverlayXamlRootChanged;
+        }
+    }
+
+    private void UntrackModalOverlayXamlRoot()
+    {
+        if (_modalOverlayTrackedXamlRoot is not null)
+        {
+            _modalOverlayTrackedXamlRoot.Changed -= OnModalOverlayXamlRootChanged;
+            _modalOverlayTrackedXamlRoot = null;
+        }
+    }
+
+    private void OnModalOverlayXamlRootChanged(XamlRoot sender, XamlRootChangedEventArgs args) =>
+        ApplyModalOverlaySizing();
 
     private void NavView_ItemInvoked(NavigationView sender, NavigationViewItemInvokedEventArgs args)
     {

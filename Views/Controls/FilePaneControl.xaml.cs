@@ -39,6 +39,15 @@ public sealed partial class FilePaneControl : UserControl
         Bindings.Update();
     }
 
+    private void OnSortHeaderClick(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null || sender is not Button { Tag: string rawColumn }) return;
+        if (Enum.TryParse<FilePaneSortColumn>(rawColumn, ignoreCase: false, out var column))
+        {
+            ViewModel.ToggleSort(column);
+        }
+    }
+
     /// <summary>
     /// "Open" makes sense in three cases: any local entry (folder navigates, file
     /// launches via OS handler), and remote folders (navigate into them). Remote files

@@ -14,6 +14,14 @@ namespace Wormhole.Services;
 
 public sealed class FileTransferDialogService : IFileTransferDialogService
 {
+    private static readonly ModalOverlaySizing TransferOverlaySizing = new(
+        WidthRatio: 0.92,
+        HeightRatio: 0.88,
+        MinWidth: 820,
+        MinHeight: 560,
+        MaxWidth: 1720,
+        MaxHeight: 900);
+
     private readonly ISftpService _sftp;
     private readonly ISshCredentialResolver _credentials;
     private readonly TunnelManager _tunnels;
@@ -159,17 +167,11 @@ public sealed class FileTransferDialogService : IFileTransferDialogService
             var view = new FileTransferDialog();
             var mainWindow = App.Current.MainWindow
                 ?? throw new InvalidOperationException("No active window to host dialog.");
-            var xamlRoot = mainWindow.Content?.XamlRoot
+            _ = mainWindow.Content?.XamlRoot
                 ?? throw new InvalidOperationException("No active window to host dialog.");
             var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             void OnCloseRequested(object? sender, EventArgs args) => closed.TrySetResult();
             view.CloseRequested += OnCloseRequested;
-
-            // Target ~85% of the host window, with sensible bounds. If the user's window
-            // is narrower than the minimum, the XamlRoot clips naturally.
-            var rootSize = xamlRoot.Size;
-            var targetWidth = Math.Clamp(rootSize.Width * 0.85, 900.0, 1400.0);
-            var targetHeight = Math.Clamp(rootSize.Height * 0.85, 560.0, 900.0);
 
             // Suppress any connected RDP overlay (top-level window above the WinUI content) so it
             // can't occlude this overlay while an RDP tab is the active, visible one.
@@ -177,7 +179,7 @@ public sealed class FileTransferDialogService : IFileTransferDialogService
             {
                 try
                 {
-                    mainWindow.ShowModalOverlay(view, targetWidth, targetHeight);
+                    mainWindow.ShowModalOverlay(view, sizing: TransferOverlaySizing);
                     _ = SafeInitializeAsync(view, vm);
                     await closed.Task.ConfigureAwait(true);
                 }
