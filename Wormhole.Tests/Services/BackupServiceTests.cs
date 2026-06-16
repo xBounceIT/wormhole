@@ -1528,6 +1528,9 @@ public sealed class BackupServiceTests : IDisposable
 
         public Task DeleteAsync(Guid id, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
+
+        public Task DeleteManyAsync(IReadOnlyCollection<Guid> ids, CancellationToken cancellationToken = default) =>
+            throw new NotSupportedException();
     }
 
     /// <summary>Seeds a folder + one connection beneath it, two credentials (password +

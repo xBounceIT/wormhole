@@ -1994,6 +1994,7 @@ public class RdpSessionViewModelTests
         public Task UpdateManyAsync(IReadOnlyCollection<ConnectionNode> nodes, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task UpdateHostFingerprintAsync(Guid nodeId, string fingerprint, CancellationToken cancellationToken = default) => Task.CompletedTask;
         public Task DeleteAsync(Guid id, CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task DeleteManyAsync(IReadOnlyCollection<Guid> ids, CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 
     private sealed class EmptyCredentialRepository : Wormhole.Data.Repositories.ICredentialRepository

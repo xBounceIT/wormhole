@@ -51,9 +51,23 @@ public sealed partial class ConnectionTreeView : UserControl
         await ViewModel.PersistTreeStructureAsync();
     }
 
+    private void OnTreeSelectionChanged(TreeView sender, TreeViewSelectionChangedEventArgs args)
+    {
+        var selected = new List<TreeNodeViewModel>(sender.SelectedItems.Count);
+        foreach (var item in sender.SelectedItems)
+        {
+            if (item is TreeNodeViewModel node)
+            {
+                selected.Add(node);
+            }
+        }
+
+        ViewModel.SetSelectedNodes(selected);
+    }
+
     private void OnRenameAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        if (Tree.SelectedItem is TreeNodeViewModel node)
+        if (SingleSelectedNode() is { } node)
         {
             ViewModel.EditCommand.Execute(node);
         }
@@ -62,10 +76,7 @@ public sealed partial class ConnectionTreeView : UserControl
 
     private void OnDeleteAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        if (Tree.SelectedItem is TreeNodeViewModel node)
-        {
-            ViewModel.DeleteCommand.Execute(node);
-        }
+        ViewModel.DeleteCommand.Execute(null);
         args.Handled = true;
     }
 
@@ -145,11 +156,24 @@ public sealed partial class ConnectionTreeView : UserControl
 
     private void OnOpenAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        if (Tree.SelectedItem is TreeNodeViewModel vm &&
+        if (SingleSelectedNode() is { } vm &&
             ViewModel.OpenConnectionCommand.CanExecute(vm))
         {
             ViewModel.OpenConnectionCommand.Execute(vm);
             args.Handled = true;
         }
+    }
+
+    private TreeNodeViewModel? SingleSelectedNode()
+    {
+        TreeNodeViewModel? selected = null;
+        foreach (var item in Tree.SelectedItems)
+        {
+            if (item is not TreeNodeViewModel node) continue;
+            if (selected is not null) return null;
+            selected = node;
+        }
+
+        return selected ?? Tree.SelectedItem as TreeNodeViewModel;
     }
 }

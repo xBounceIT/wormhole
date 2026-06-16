@@ -23,6 +23,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
     private bool _isLoading;
 
     public BulkObservableCollection<TreeNodeViewModel> Roots { get; } = new();
+    public BulkObservableCollection<TreeNodeViewModel> SelectedNodes { get; } = new();
 
     [ObservableProperty]
     private TreeNodeViewModel? selectedNode;
@@ -144,6 +145,20 @@ public partial class ConnectionTreeViewModel : ObservableObject
         _logger = logger;
     }
 
+    public void SetSelectedNodes(IEnumerable<TreeNodeViewModel> nodes)
+    {
+        var selected = new List<TreeNodeViewModel>();
+        var seen = new HashSet<Guid>();
+        foreach (var node in nodes)
+        {
+            if (!seen.Add(node.Node.Id)) continue;
+            selected.Add(node);
+        }
+
+        SelectedNodes.ReplaceAll(selected);
+        SelectedNode = selected.Count == 0 ? null : selected[^1];
+    }
+
     [RelayCommand]
     public async Task RefreshAsync()
     {
@@ -162,6 +177,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
     [RelayCommand]
     public async Task OpenConnectionAsync(TreeNodeViewModel? vm)
     {
+        vm = ResolveSingleTarget(vm);
         if (vm is null || vm.Kind != NodeKind.Connection) return;
 
         try
@@ -190,6 +206,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
     [RelayCommand]
     private async Task ShowCredentials(TreeNodeViewModel? clicked)
     {
+        clicked = ResolveSingleTarget(clicked);
         if (clicked is null || clicked.Kind != NodeKind.Connection) return;
 
         try
@@ -277,6 +294,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
     [RelayCommand]
     private async Task Edit(TreeNodeViewModel? clicked)
     {
+        clicked = ResolveSingleTarget(clicked);
         if (clicked is null) return;
         var node = clicked.Node;
 
@@ -296,6 +314,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
     [RelayCommand]
     private async Task Duplicate(TreeNodeViewModel? clicked)
     {
+        clicked = ResolveSingleTarget(clicked);
         if (clicked is null || clicked.Kind != NodeKind.Connection) return;
 
         // CloneAsNewIdentity copies the node's OWN fields (not the inheritance-resolved profile),
@@ -351,20 +370,17 @@ public partial class ConnectionTreeViewModel : ObservableObject
     [RelayCommand]
     private async Task Delete(TreeNodeViewModel? clicked)
     {
-        if (clicked is null) return;
-        var node = clicked.Node;
+        var targets = ResolveDeleteTargets(clicked);
+        if (targets.Count == 0) return;
 
-        var descendantCount = CountDescendants(clicked);
-        var message = descendantCount == 0
-            ? $"Delete '{node.Name}'? This cannot be undone."
-            : $"Delete '{node.Name}' and its {descendantCount} nested item{(descendantCount == 1 ? "" : "s")}? This cannot be undone.";
+        var message = BuildDeleteMessage(targets);
 
         var confirmed = await _dialog.ConfirmAsync("Delete", message, primaryText: "Delete", closeText: "Cancel");
         if (!confirmed) return;
 
         try
         {
-            await _repository.DeleteAsync(node.Id);
+            await _repository.DeleteManyAsync(targets.Select(t => t.Node.Id).ToArray());
             // Purge inline per-connection secrets (Credential Manager, keyed by node Id) for every
             // connection in the deleted subtree. The DB rows cascade via ON DELETE CASCADE, but the
             // out-of-band secrets do not — so deleting a FOLDER must also walk its descendant
@@ -372,7 +388,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
             // self-swallows a missing entry, so it's a no-op for connections that never used an
             // inline password. Saved-credential secrets are intentionally left alone — they're keyed
             // by CredentialProfile.Id (a shared pool), not by node Id.
-            foreach (var connectionId in CollectConnectionNodeIds(clicked))
+            foreach (var connectionId in targets.SelectMany(CollectConnectionNodeIds).Distinct())
             {
                 await _credentialService.DeletePasswordAsync(connectionId);
             }
@@ -380,7 +396,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to delete {Kind} '{Name}'", node.Kind, node.Name);
+            _logger.LogError(ex, "Failed to delete {Count} selected connection tree item(s)", targets.Count);
             await _dialog.ShowMessageAsync("Couldn't delete", ex.Message);
         }
     }
@@ -404,6 +420,105 @@ public partial class ConnectionTreeViewModel : ObservableObject
             // don't touch the original node, so this reload is a no-op for them.)
             await RefreshAsync();
         }
+    }
+
+    private TreeNodeViewModel? ResolveSingleTarget(TreeNodeViewModel? clicked)
+    {
+        if (clicked is not null) return clicked;
+        if (SelectedNodes.Count == 1) return SelectedNodes[0];
+        if (SelectedNodes.Count > 1) return null;
+        return SelectedNode;
+    }
+
+    private IReadOnlyList<TreeNodeViewModel> ResolveDeleteTargets(TreeNodeViewModel? clicked)
+    {
+        if (clicked is not null)
+        {
+            return SelectedNodes.Count > 1 && SelectedNodes.Contains(clicked)
+                ? CanonicalizeBatchTargets(SelectedNodes)
+                : new[] { clicked };
+        }
+
+        if (SelectedNodes.Count > 0)
+        {
+            return CanonicalizeBatchTargets(SelectedNodes);
+        }
+
+        return SelectedNode is null ? Array.Empty<TreeNodeViewModel>() : new[] { SelectedNode };
+    }
+
+    private IReadOnlyList<TreeNodeViewModel> CanonicalizeBatchTargets(IEnumerable<TreeNodeViewModel> candidates)
+    {
+        var selectedById = new Dictionary<Guid, TreeNodeViewModel>();
+        foreach (var candidate in candidates)
+        {
+            selectedById.TryAdd(candidate.Node.Id, candidate);
+        }
+
+        if (selectedById.Count < 2) return selectedById.Values.ToArray();
+
+        var selectedIds = new HashSet<Guid>(selectedById.Keys);
+        var encounteredIds = new HashSet<Guid>();
+        var result = new List<TreeNodeViewModel>(selectedById.Count);
+        CollectCanonicalBatchTargets(Roots, selectedIds, encounteredIds, ancestorSelected: false, result);
+
+        // Defensive fallback for stale selections or tests that pass detached VMs.
+        var resultIds = new HashSet<Guid>(result.Select(n => n.Node.Id));
+        foreach (var candidate in selectedById.Values)
+        {
+            if (!encounteredIds.Contains(candidate.Node.Id) && resultIds.Add(candidate.Node.Id))
+            {
+                result.Add(candidate);
+            }
+        }
+
+        return result;
+    }
+
+    private static void CollectCanonicalBatchTargets(
+        IEnumerable<TreeNodeViewModel> level,
+        IReadOnlySet<Guid> selectedIds,
+        HashSet<Guid> encounteredIds,
+        bool ancestorSelected,
+        List<TreeNodeViewModel> result)
+    {
+        foreach (var node in level)
+        {
+            var isSelected = selectedIds.Contains(node.Node.Id);
+            if (isSelected)
+            {
+                encounteredIds.Add(node.Node.Id);
+            }
+
+            if (isSelected && !ancestorSelected)
+            {
+                result.Add(node);
+            }
+
+            CollectCanonicalBatchTargets(
+                node.Children,
+                selectedIds,
+                encounteredIds,
+                ancestorSelected || isSelected,
+                result);
+        }
+    }
+
+    private static string BuildDeleteMessage(IReadOnlyList<TreeNodeViewModel> targets)
+    {
+        if (targets.Count == 1)
+        {
+            var target = targets[0];
+            var descendantCount = CountDescendants(target);
+            return descendantCount == 0
+                ? $"Delete '{target.Node.Name}'? This cannot be undone."
+                : $"Delete '{target.Node.Name}' and its {descendantCount} nested item{(descendantCount == 1 ? "" : "s")}? This cannot be undone.";
+        }
+
+        var nestedCount = targets.Sum(CountDescendants);
+        return nestedCount == 0
+            ? $"Delete {targets.Count} selected items? This cannot be undone."
+            : $"Delete {targets.Count} selected items and their {nestedCount} nested item{(nestedCount == 1 ? "" : "s")}? This cannot be undone.";
     }
 
     private static int CountDescendants(TreeNodeViewModel node)
@@ -644,10 +759,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
         Reconcile(Roots, topLevel, byParent);
 
-        if (SelectedNode is not null && !_lastSnapshotById.ContainsKey(SelectedNode.Node.Id))
-        {
-            SelectedNode = null;
-        }
+        PruneSelectionToSnapshot();
 
         // New nodes default to IsVisible=true, so skip the rewalk when no filter is
         // active — Reconcile already produced the correct state.
@@ -767,6 +879,35 @@ public partial class ConnectionTreeViewModel : ObservableObject
             {
                 node.IsExpanded = wasExpanded;
             }
+        }
+    }
+
+    private void PruneSelectionToSnapshot()
+    {
+        if (SelectedNode is not null && !_lastSnapshotById.ContainsKey(SelectedNode.Node.Id))
+        {
+            SelectedNode = null;
+        }
+
+        if (SelectedNodes.Count == 0) return;
+
+        var selected = new List<TreeNodeViewModel>(SelectedNodes.Count);
+        foreach (var node in SelectedNodes)
+        {
+            if (_lastSnapshotById.ContainsKey(node.Node.Id))
+            {
+                selected.Add(node);
+            }
+        }
+
+        if (selected.Count != SelectedNodes.Count)
+        {
+            SelectedNodes.ReplaceAll(selected);
+        }
+
+        if (SelectedNode is null && selected.Count == 1)
+        {
+            SelectedNode = selected[0];
         }
     }
 

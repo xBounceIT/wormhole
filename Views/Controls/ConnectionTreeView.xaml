@@ -86,10 +86,11 @@
         <TreeView Grid.Row="2"
                   x:Name="Tree"
                   ItemsSource="{x:Bind ViewModel.Roots, Mode=OneWay}"
-                  SelectionMode="Single"
+                  SelectionMode="Multiple"
                   CanDragItems="True"
                   CanReorderItems="True"
                   AllowDrop="True"
+                  SelectionChanged="OnTreeSelectionChanged"
                   DragItemsCompleted="OnDragItemsCompleted"
                   ItemInvoked="OnTreeItemInvoked">
             <!-- ItemInvoked fires on single-click: we toggle folder expansion (so the

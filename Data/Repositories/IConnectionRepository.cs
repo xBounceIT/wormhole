@@ -17,4 +17,5 @@ public interface IConnectionRepository
     Task UpdateManyAsync(IReadOnlyCollection<ConnectionNode> nodes, CancellationToken cancellationToken = default);
     Task UpdateHostFingerprintAsync(Guid nodeId, string fingerprint, CancellationToken cancellationToken = default);
     Task DeleteAsync(Guid id, CancellationToken cancellationToken = default);
+    Task DeleteManyAsync(IReadOnlyCollection<Guid> ids, CancellationToken cancellationToken = default);
 }
