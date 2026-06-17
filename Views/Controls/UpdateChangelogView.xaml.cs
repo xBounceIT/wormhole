@@ -22,6 +22,7 @@ public sealed partial class UpdateChangelogView : UserControl
     private static CoreWebView2Environment? s_environment;
 
     private bool _isInitialized;
+    private bool _isLoaded;
     private string? _pendingHtmlDocument;
 
     public string HtmlDocument
@@ -34,25 +35,26 @@ public sealed partial class UpdateChangelogView : UserControl
     {
         InitializeComponent();
         Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
     }
 
     private static void OnHtmlDocumentChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
         if (d is not UpdateChangelogView view) return;
-        view.NavigateToHtml(e.NewValue as string);
+        _ = view.NavigateToHtmlAsync(e.NewValue as string);
     }
 
-    private async void OnLoaded(object sender, RoutedEventArgs e)
+    private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        try
-        {
-            await EnsureInitializedAsync().ConfigureAwait(true);
-            NavigateToHtml(_pendingHtmlDocument ?? HtmlDocument);
-        }
-        catch (Exception ex)
-        {
-            ShowError("Could not render the changelog: " + ex.Message);
-        }
+        _isLoaded = true;
+        ChangelogWebView.Visibility = Visibility.Visible;
+        _ = NavigateToHtmlAsync(_pendingHtmlDocument ?? HtmlDocument);
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        _isLoaded = false;
+        ChangelogWebView.Visibility = Visibility.Collapsed;
     }
 
     private async Task EnsureInitializedAsync()
@@ -100,13 +102,14 @@ public sealed partial class UpdateChangelogView : UserControl
         return winner ?? created;
     }
 
-    private void NavigateToHtml(string? html)
+    private async Task NavigateToHtmlAsync(string? html)
     {
         _pendingHtmlDocument = html;
-        if (!_isInitialized || string.IsNullOrWhiteSpace(html)) return;
+        if (!_isLoaded || string.IsNullOrWhiteSpace(html)) return;
 
         try
         {
+            await EnsureInitializedAsync().ConfigureAwait(true);
             ChangelogWebView.CoreWebView2.NavigateToString(html);
             _pendingHtmlDocument = null;
             ErrorHost.Visibility = Visibility.Collapsed;
