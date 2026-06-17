@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.InteropServices;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
@@ -28,16 +29,25 @@ public partial class UpdateViewModel : ObservableObject
     private readonly ILogger<UpdateViewModel> _logger;
     private readonly DispatcherQueue? _dispatcher;
 
-    [ObservableProperty] private bool isUpdateAvailable;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowChangelog))]
+    private bool isUpdateAvailable;
     [ObservableProperty] private bool isBusy;
     [ObservableProperty] private double downloadProgress;
     [ObservableProperty] private string currentVersionText = "Wormhole 0.0.0";
     [ObservableProperty] private string latestVersionText = string.Empty;
     [ObservableProperty] private string releaseNotes = string.Empty;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowChangelog))]
+    private bool hasChangelog;
+    [ObservableProperty] private string changelogHtml = string.Empty;
+    [ObservableProperty] private string changelogTitle = string.Empty;
     [ObservableProperty] private string status = string.Empty;
     [ObservableProperty] private string lastCheckText = "Never";
     [ObservableProperty] private string infoBarMessage = string.Empty;
     [ObservableProperty] private string? releaseUrl;
+
+    public bool ShowChangelog => HasChangelog && IsUpdateAvailable;
 
     public UpdateViewModel(
         IUpdateService updateService,
@@ -47,7 +57,7 @@ public partial class UpdateViewModel : ObservableObject
         _updateService = updateService;
         _settings = settings;
         _logger = logger;
-        _dispatcher = DispatcherQueue.GetForCurrentThread();
+        _dispatcher = TryGetDispatcherQueue();
 
         var infoVersion = Assembly.GetEntryAssembly()?
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
@@ -139,6 +149,8 @@ public partial class UpdateViewModel : ObservableObject
         if (latest?.LatestVersion is null) return;
         _settings.Current.SkippedUpdateVersion = latest.LatestVersion.ToString();
         _settings.Save();
+        IsUpdateAvailable = false;
+        ClearChangelog();
     }
 
     [RelayCommand]
@@ -166,7 +178,7 @@ public partial class UpdateViewModel : ObservableObject
     {
         if (result.CheckFailed)
         {
-            // Leave any previously surfaced update visible; just report the failure.
+            // Leave any previously surfaced update and changelog visible; just report the failure.
             Status = "Couldn't reach the update server. Try again later.";
             return;
         }
@@ -179,6 +191,7 @@ public partial class UpdateViewModel : ObservableObject
             LatestVersionText = result.ReleaseName ?? $"Wormhole {versionString}";
             InfoBarMessage = $"Wormhole {versionString} is available.";
             Status = $"Update available: {versionString}";
+            ApplyChangelog(result, versionString);
             IsUpdateAvailable = !string.Equals(
                 _settings.Current.SkippedUpdateVersion, versionString, StringComparison.Ordinal);
         }
@@ -187,14 +200,43 @@ public partial class UpdateViewModel : ObservableObject
             IsUpdateAvailable = false;
             LatestVersionText = string.Empty;
             InfoBarMessage = string.Empty;
+            ClearChangelog();
             Status = "You're on the latest version.";
         }
+    }
+
+    private void ApplyChangelog(UpdateCheckResult result, string versionString)
+    {
+        var html = UpdateChangelogFormatter.ToHtmlDocument(result.ReleaseNotes);
+        if (string.IsNullOrEmpty(html))
+        {
+            ClearChangelog();
+            return;
+        }
+
+        ChangelogTitle = "Changelog - " + (result.ReleaseName ?? result.ReleaseTag ?? $"Wormhole {versionString}");
+        ChangelogHtml = html;
+        HasChangelog = true;
+    }
+
+    private void ClearChangelog()
+    {
+        HasChangelog = false;
+        ChangelogTitle = string.Empty;
+        ChangelogHtml = string.Empty;
     }
 
     private void Marshal(Action action)
     {
         if (_dispatcher is null || _dispatcher.HasThreadAccess) { action(); return; }
         _dispatcher.TryEnqueue(() => action());
+    }
+
+    private static DispatcherQueue? TryGetDispatcherQueue()
+    {
+        try { return DispatcherQueue.GetForCurrentThread(); }
+        catch (COMException) { return null; }
+        catch (TypeInitializationException) { return null; }
     }
 
     private static string FormatLastCheck(DateTimeOffset? when)

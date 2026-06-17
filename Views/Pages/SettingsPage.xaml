@@ -2,7 +2,8 @@
 <Page
     x:Class="Wormhole.Views.Pages.SettingsPage"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Wormhole.Views.Controls">
 
     <Page.Resources>
         <!-- Shared layout for every settings tab's content so padding/width live in one place. -->
@@ -150,6 +151,21 @@
                         <ProgressBar Minimum="0" Maximum="1"
                                      Value="{x:Bind ViewModel.Update.DownloadProgress, Mode=OneWay}"
                                      Visibility="{x:Bind ViewModel.Update.IsBusy, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
+                        <StackPanel Spacing="8"
+                                    Margin="0,8,0,0"
+                                    Visibility="{x:Bind ViewModel.Update.ShowChangelog, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+                            <TextBlock Text="{x:Bind ViewModel.Update.ChangelogTitle, Mode=OneWay}"
+                                       Style="{StaticResource SubtitleTextBlockStyle}" />
+                            <Border MinHeight="300"
+                                    BorderBrush="#40606A78"
+                                    BorderThickness="1"
+                                    CornerRadius="6"
+                                    Background="{ThemeResource LayerFillColorDefaultBrush}">
+                                <controls:UpdateChangelogView
+                                    MinHeight="300"
+                                    HtmlDocument="{x:Bind ViewModel.Update.ChangelogHtml, Mode=OneWay}" />
+                            </Border>
+                        </StackPanel>
                     </StackPanel>
                 </ScrollViewer>
             </TabViewItem>
