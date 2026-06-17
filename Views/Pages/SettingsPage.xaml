@@ -153,7 +153,7 @@
                                      Visibility="{x:Bind ViewModel.Update.IsBusy, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
                         <StackPanel Spacing="8"
                                     Margin="0,8,0,0"
-                                    Visibility="{x:Bind ViewModel.Update.HasChangelog, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+                                    Visibility="{x:Bind ViewModel.Update.ShowChangelog, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
                             <TextBlock Text="{x:Bind ViewModel.Update.ChangelogTitle, Mode=OneWay}"
                                        Style="{StaticResource SubtitleTextBlockStyle}" />
                             <Border MinHeight="300"

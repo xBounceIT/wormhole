@@ -29,19 +29,25 @@ public partial class UpdateViewModel : ObservableObject
     private readonly ILogger<UpdateViewModel> _logger;
     private readonly DispatcherQueue? _dispatcher;
 
-    [ObservableProperty] private bool isUpdateAvailable;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowChangelog))]
+    private bool isUpdateAvailable;
     [ObservableProperty] private bool isBusy;
     [ObservableProperty] private double downloadProgress;
     [ObservableProperty] private string currentVersionText = "Wormhole 0.0.0";
     [ObservableProperty] private string latestVersionText = string.Empty;
     [ObservableProperty] private string releaseNotes = string.Empty;
-    [ObservableProperty] private bool hasChangelog;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowChangelog))]
+    private bool hasChangelog;
     [ObservableProperty] private string changelogHtml = string.Empty;
     [ObservableProperty] private string changelogTitle = string.Empty;
     [ObservableProperty] private string status = string.Empty;
     [ObservableProperty] private string lastCheckText = "Never";
     [ObservableProperty] private string infoBarMessage = string.Empty;
     [ObservableProperty] private string? releaseUrl;
+
+    public bool ShowChangelog => HasChangelog && IsUpdateAvailable;
 
     public UpdateViewModel(
         IUpdateService updateService,
@@ -143,6 +149,8 @@ public partial class UpdateViewModel : ObservableObject
         if (latest?.LatestVersion is null) return;
         _settings.Current.SkippedUpdateVersion = latest.LatestVersion.ToString();
         _settings.Save();
+        IsUpdateAvailable = false;
+        ClearChangelog();
     }
 
     [RelayCommand]

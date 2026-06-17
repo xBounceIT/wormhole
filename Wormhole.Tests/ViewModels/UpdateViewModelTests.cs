@@ -16,6 +16,7 @@ public class UpdateViewModelTests
         updates.Raise(UpdateWithNotes("## Changes\n\n- Fixed update checks"));
 
         Assert.True(vm.HasChangelog);
+        Assert.True(vm.ShowChangelog);
         Assert.Equal("Changelog - Release v9.9.9", vm.ChangelogTitle);
         Assert.Contains("<h2", vm.ChangelogHtml);
         Assert.Contains("<li>Fixed update checks</li>", vm.ChangelogHtml);
@@ -29,6 +30,7 @@ public class UpdateViewModelTests
         updates.Raise(UpdateWithNotes("   "));
 
         Assert.False(vm.HasChangelog);
+        Assert.False(vm.ShowChangelog);
         Assert.Equal(string.Empty, vm.ChangelogTitle);
         Assert.Equal(string.Empty, vm.ChangelogHtml);
     }
@@ -42,6 +44,7 @@ public class UpdateViewModelTests
         updates.Raise(UpdateCheckResult.NoUpdate(new Version(0, 4, 0), new Version(0, 4, 0)));
 
         Assert.False(vm.HasChangelog);
+        Assert.False(vm.ShowChangelog);
         Assert.Equal(string.Empty, vm.ChangelogTitle);
         Assert.Equal(string.Empty, vm.ChangelogHtml);
     }
@@ -55,8 +58,24 @@ public class UpdateViewModelTests
         updates.Raise(UpdateCheckResult.Failed(new Version(0, 4, 0)));
 
         Assert.True(vm.HasChangelog);
+        Assert.True(vm.ShowChangelog);
         Assert.Equal("Changelog - Release v9.9.9", vm.ChangelogTitle);
         Assert.Contains("<li>Fixed update checks</li>", vm.ChangelogHtml);
+    }
+
+    [Fact]
+    public void Dismiss_ClearsVisibleChangelogForSkippedUpdate()
+    {
+        var (vm, updates) = NewHarness();
+        updates.Raise(UpdateWithNotes("## Changes\n\n- Fixed update checks"));
+
+        vm.DismissCommand.Execute(null);
+
+        Assert.False(vm.IsUpdateAvailable);
+        Assert.False(vm.HasChangelog);
+        Assert.False(vm.ShowChangelog);
+        Assert.Equal(string.Empty, vm.ChangelogTitle);
+        Assert.Equal(string.Empty, vm.ChangelogHtml);
     }
 
     private static (UpdateViewModel ViewModel, FakeUpdateService Updates) NewHarness()
@@ -83,9 +102,14 @@ public class UpdateViewModelTests
 
     private sealed class FakeUpdateService : IUpdateService
     {
-        public UpdateCheckResult? LatestKnown => null;
+        public UpdateCheckResult? LatestKnown { get; private set; }
         public event EventHandler<UpdateCheckResult>? UpdateAvailable;
-        public void Raise(UpdateCheckResult result) => UpdateAvailable?.Invoke(this, result);
+        public void Raise(UpdateCheckResult result)
+        {
+            if (!result.CheckFailed)
+                LatestKnown = result;
+            UpdateAvailable?.Invoke(this, result);
+        }
         public Task<UpdateCheckResult> CheckAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult(UpdateCheckResult.NoUpdate(new Version(0, 4, 0)));
         public Task<string> DownloadInstallerAsync(UpdateCheckResult update, IProgress<double>? progress, CancellationToken cancellationToken = default) =>
