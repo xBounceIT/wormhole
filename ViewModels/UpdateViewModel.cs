@@ -229,8 +229,7 @@ public partial class UpdateViewModel : ObservableObject
     private void Marshal(Action action)
     {
         if (_dispatcher is null || _dispatcher.HasThreadAccess) { action(); return; }
-        if (!_dispatcher.TryEnqueue(() => action()))
-            action();
+        _dispatcher.TryEnqueue(() => action());
     }
 
     private static DispatcherQueue? TryGetDispatcherQueue()
