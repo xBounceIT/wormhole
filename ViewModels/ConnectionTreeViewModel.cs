@@ -509,30 +509,55 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     private static void CollectCanonicalBatchTargets(
         IEnumerable<TreeNodeViewModel> level,
-        IReadOnlySet<Guid> selectedIds,
+        HashSet<Guid> selectedIds,
         HashSet<Guid> encounteredIds,
         bool ancestorSelected,
         List<TreeNodeViewModel> result)
     {
-        foreach (var node in level)
+        var stack = new Stack<(TreeNodeViewModel Node, bool AncestorSelected)>();
+        PushCanonicalFramesReverse(stack, level, ancestorSelected);
+
+        while (stack.Count > 0)
         {
+            var (node, parentSelected) = stack.Pop();
             var isSelected = selectedIds.Contains(node.Node.Id);
             if (isSelected)
             {
                 encounteredIds.Add(node.Node.Id);
             }
 
-            if (isSelected && !ancestorSelected)
+            if (isSelected && !parentSelected)
             {
                 result.Add(node);
             }
 
-            CollectCanonicalBatchTargets(
-                node.Children,
-                selectedIds,
-                encounteredIds,
-                ancestorSelected || isSelected,
-                result);
+            PushCanonicalFramesReverse(stack, node.Children, parentSelected || isSelected);
+        }
+    }
+
+    private static void PushCanonicalFramesReverse(
+        Stack<(TreeNodeViewModel Node, bool AncestorSelected)> stack,
+        IEnumerable<TreeNodeViewModel> children,
+        bool ancestorSelected)
+    {
+        if (children is IList<TreeNodeViewModel> list)
+        {
+            PushCanonicalFramesReverse(stack, list, ancestorSelected);
+            return;
+        }
+
+        var snapshot = new List<TreeNodeViewModel>(children);
+        PushCanonicalFramesReverse(stack, snapshot, ancestorSelected);
+    }
+
+    private static void PushCanonicalFramesReverse(
+        Stack<(TreeNodeViewModel Node, bool AncestorSelected)> stack,
+        IList<TreeNodeViewModel> children,
+        bool ancestorSelected)
+    {
+        for (var i = children.Count - 1; i >= 0; i--)
+        {
+            stack.Push((children[i], ancestorSelected));
         }
     }
 

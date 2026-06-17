@@ -1727,6 +1727,24 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Delete_DeepTreeCanonicalizesSelectedDescendantWithoutOverflow()
+    {
+        await SeedDeepTreeAsync(DeepTreeDepth, "leaf");
+        var dialog = new RecordingConfirmDialogService { ConfirmResult = false };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        var root = vm.Roots.Single();
+        var leaf = GetDeepestNode(root);
+        vm.SetSelectedNodes(new[] { root, leaf });
+
+        await vm.DeleteCommand.ExecuteAsync(null);
+
+        Assert.Equal(1, dialog.ConfirmCount);
+        Assert.Contains($"{DeepTreeDepth} nested items", dialog.LastConfirmMessage);
+    }
+
+    [Fact]
     public async Task AddFolder_WithTunnel_PersistsTunnelFields()
     {
         var tunnelId = Guid.NewGuid();
