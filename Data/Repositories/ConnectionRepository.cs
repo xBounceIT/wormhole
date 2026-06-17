@@ -138,11 +138,19 @@ public sealed class ConnectionRepository : IConnectionRepository
     }
 
     public async Task DeleteAsync(Guid id, CancellationToken cancellationToken = default)
+        => await DeleteManyAsync(new[] { id }, cancellationToken);
+
+    public async Task DeleteManyAsync(IReadOnlyCollection<Guid> ids, CancellationToken cancellationToken = default)
     {
+        if (ids.Count == 0) return;
+
         using var connection = _factory.Open();
+        using var tx = connection.BeginTransaction();
         await connection.ExecuteAsync(new CommandDefinition(
             "DELETE FROM Nodes WHERE Id = @id;",
-            new { id },
+            ids.Select(id => new { id }),
+            transaction: tx,
             cancellationToken: cancellationToken));
+        tx.Commit();
     }
 }

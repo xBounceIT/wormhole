@@ -1304,6 +1304,7 @@ public class TunnelConfigsViewModelTests
         public Task UpdateManyAsync(IReadOnlyCollection<ConnectionNode> nodes, CancellationToken ct = default) => Task.CompletedTask;
         public Task UpdateHostFingerprintAsync(Guid nodeId, string fingerprint, CancellationToken ct = default) => Task.CompletedTask;
         public Task DeleteAsync(Guid id, CancellationToken ct = default) => Task.CompletedTask;
+        public Task DeleteManyAsync(IReadOnlyCollection<Guid> ids, CancellationToken ct = default) => Task.CompletedTask;
     }
 
     private sealed class FakeDialog : IDialogService

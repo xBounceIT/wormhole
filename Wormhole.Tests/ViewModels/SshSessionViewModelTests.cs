@@ -1187,6 +1187,9 @@ public sealed class SshSessionViewModelTests
 
         public Task DeleteAsync(Guid id, CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
+
+        public Task DeleteManyAsync(IReadOnlyCollection<Guid> ids, CancellationToken cancellationToken = default) =>
+            Task.CompletedTask;
     }
 
     private sealed class FakeSftpService : ISftpService
