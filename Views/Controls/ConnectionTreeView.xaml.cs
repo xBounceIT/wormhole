@@ -245,10 +245,10 @@ public sealed partial class ConnectionTreeView : UserControl
         var checkBox = FindSelectionCheckBox(item);
         if (checkBox is null) return null;
 
-        checkBox.Width = 24;
-        checkBox.MinWidth = 24;
-        checkBox.MinHeight = 24;
-        checkBox.Margin = new Thickness(6, 0, 0, 0);
+        checkBox.Width = 32;
+        checkBox.MinWidth = 32;
+        checkBox.MinHeight = 28;
+        checkBox.Margin = new Thickness(10, 0, 0, 0);
         checkBox.RenderTransformOrigin = new Point(0.5, 0.5);
         checkBox.RenderTransform = new ScaleTransform
         {
