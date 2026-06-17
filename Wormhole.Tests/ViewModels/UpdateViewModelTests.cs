@@ -47,16 +47,16 @@ public class UpdateViewModelTests
     }
 
     [Fact]
-    public void ApplyResult_FailedCheck_ClearsPreviousChangelog()
+    public void ApplyResult_FailedCheck_PreservesPreviousChangelog()
     {
         var (vm, updates) = NewHarness();
         updates.Raise(UpdateWithNotes("## Changes\n\n- Fixed update checks"));
 
         updates.Raise(UpdateCheckResult.Failed(new Version(0, 4, 0)));
 
-        Assert.False(vm.HasChangelog);
-        Assert.Equal(string.Empty, vm.ChangelogTitle);
-        Assert.Equal(string.Empty, vm.ChangelogHtml);
+        Assert.True(vm.HasChangelog);
+        Assert.Equal("Changelog - Release v9.9.9", vm.ChangelogTitle);
+        Assert.Contains("<li>Fixed update checks</li>", vm.ChangelogHtml);
     }
 
     private static (UpdateViewModel ViewModel, FakeUpdateService Updates) NewHarness()

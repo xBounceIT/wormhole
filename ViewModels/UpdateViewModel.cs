@@ -170,8 +170,7 @@ public partial class UpdateViewModel : ObservableObject
     {
         if (result.CheckFailed)
         {
-            // Leave any previously surfaced update visible; just report the failure.
-            ClearChangelog();
+            // Leave any previously surfaced update and changelog visible; just report the failure.
             Status = "Couldn't reach the update server. Try again later.";
             return;
         }
