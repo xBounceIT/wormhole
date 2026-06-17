@@ -91,6 +91,7 @@
                   CanReorderItems="True"
                   AllowDrop="True"
                   SelectionChanged="OnTreeSelectionChanged"
+                  DragItemsStarting="OnDragItemsStarting"
                   DragItemsCompleted="OnDragItemsCompleted"
                   ItemInvoked="OnTreeItemInvoked">
             <!-- ItemInvoked fires on single-click: we toggle folder expansion (so the

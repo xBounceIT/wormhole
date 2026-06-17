@@ -159,6 +159,38 @@ public partial class ConnectionTreeViewModel : ObservableObject
         SelectedNode = selected.Count == 0 ? null : selected[^1];
     }
 
+    public bool ShouldRejectDragSelection(IEnumerable<TreeNodeViewModel> draggedNodes)
+    {
+        var draggedIds = new HashSet<Guid>();
+        foreach (var node in draggedNodes)
+        {
+            draggedIds.Add(node.Node.Id);
+        }
+
+        if (draggedIds.Count < 2) return false;
+
+        var stack = new Stack<(TreeNodeViewModel Node, bool AncestorDragged)>();
+        for (var i = Roots.Count - 1; i >= 0; i--)
+        {
+            stack.Push((Roots[i], false));
+        }
+
+        while (stack.Count > 0)
+        {
+            var (node, ancestorDragged) = stack.Pop();
+            var isDragged = draggedIds.Contains(node.Node.Id);
+            if (isDragged && ancestorDragged) return true;
+
+            var childAncestorDragged = ancestorDragged || isDragged;
+            for (var i = node.Children.Count - 1; i >= 0; i--)
+            {
+                stack.Push((node.Children[i], childAncestorDragged));
+            }
+        }
+
+        return false;
+    }
+
     [RelayCommand]
     public async Task RefreshAsync()
     {

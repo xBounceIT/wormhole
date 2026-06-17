@@ -56,6 +56,14 @@ public sealed partial class ConnectionTreeView : UserControl
         await ViewModel.PersistTreeStructureAsync();
     }
 
+    private void OnDragItemsStarting(TreeView sender, TreeViewDragItemsStartingEventArgs args)
+    {
+        if (ViewModel.ShouldRejectDragSelection(args.Items.OfType<TreeNodeViewModel>()))
+        {
+            args.Cancel = true;
+        }
+    }
+
     private void OnTreeSelectionChanged(TreeView sender, TreeViewSelectionChangedEventArgs args)
     {
         var selected = new List<TreeNodeViewModel>(sender.SelectedItems.Count);

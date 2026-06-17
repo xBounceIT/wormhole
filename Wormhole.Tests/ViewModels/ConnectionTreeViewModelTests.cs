@@ -1052,6 +1052,31 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task ShouldRejectDragSelection_RejectsAncestorAndDescendantPayloadOnly()
+    {
+        var parent = new ConnectionNode { Kind = NodeKind.Folder, Name = "Parent", SortOrder = 0 };
+        var child = MakeConnectionDraft("child", ProtocolType.Ssh, "child.example.com", 22, "alice");
+        child.ParentId = parent.Id;
+        var sibling = MakeConnectionDraft("sibling", ProtocolType.Ssh, "sibling.example.com", 22, "bob");
+        sibling.SortOrder = 1;
+
+        await _repo.AddAsync(parent);
+        await _repo.AddAsync(child);
+        await _repo.AddAsync(sibling);
+
+        var vm = CreateVm(new FakeDialogService());
+        await vm.RefreshAsync();
+
+        var parentVm = vm.Roots.Single(r => r.Name == "Parent");
+        var childVm = parentVm.Children.Single();
+        var siblingVm = vm.Roots.Single(r => r.Name == "sibling");
+
+        Assert.True(vm.ShouldRejectDragSelection(new[] { parentVm, childVm }));
+        Assert.False(vm.ShouldRejectDragSelection(new[] { parentVm, siblingVm }));
+        Assert.False(vm.ShouldRejectDragSelection(new[] { childVm, siblingVm }));
+    }
+
+    [Fact]
     public async Task PersistTreeStructure_InvalidMultiDrop_RevertsAndKeepsDb()
     {
         var parent = new ConnectionNode { Kind = NodeKind.Folder, Name = "Parent", SortOrder = 0 };
