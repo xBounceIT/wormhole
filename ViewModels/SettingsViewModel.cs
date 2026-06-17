@@ -242,6 +242,26 @@ public partial class SettingsViewModel : ObservableObject
         }
     }
 
+    [RelayCommand]
+    private async Task OpenLogsFolderAsync()
+    {
+        try
+        {
+            var path = AppPaths.GetLogsDirectory();
+            Directory.CreateDirectory(path);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = path,
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to open logs folder.");
+            await _dialog.ShowMessageAsync("Couldn't open logs folder", ex.Message);
+        }
+    }
+
     // === App authentication ==============================================
 
     partial void OnAppAuthenticationModeIndexChanged(int value)
