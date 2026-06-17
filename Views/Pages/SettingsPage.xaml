@@ -159,17 +159,19 @@
                 <ScrollViewer Style="{StaticResource TabContentScrollStyle}">
                     <StackPanel Style="{StaticResource TabContentPanelStyle}">
                         <TextBlock Text="Current log" Style="{StaticResource SubtitleTextBlockStyle}" />
-                        <StackPanel Orientation="Horizontal" Spacing="8">
+                        <StackPanel Spacing="8">
                             <TextBox Header="Today's log file"
                                      Text="{x:Bind ViewModel.CurrentLogFilePath, Mode=OneWay}"
                                      IsReadOnly="True" IsSpellCheckEnabled="False"
-                                     Width="480" />
-                            <Button Content="Open today's log"
-                                    VerticalAlignment="Bottom"
-                                    Command="{x:Bind ViewModel.OpenCurrentLogFileCommand}" />
-                            <Button Content="Open log folder"
-                                    VerticalAlignment="Bottom"
-                                    Command="{x:Bind ViewModel.OpenLogsFolderCommand}" />
+                                     HorizontalAlignment="Stretch" />
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Button Content="Open today's log"
+                                        VerticalAlignment="Bottom"
+                                        Command="{x:Bind ViewModel.OpenCurrentLogFileCommand}" />
+                                <Button Content="Open log folder"
+                                        VerticalAlignment="Bottom"
+                                        Command="{x:Bind ViewModel.OpenLogsFolderCommand}" />
+                            </StackPanel>
                         </StackPanel>
 
                         <TextBlock Text="Rotation" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
