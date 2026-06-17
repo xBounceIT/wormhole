@@ -154,6 +154,40 @@
                 </ScrollViewer>
             </TabViewItem>
 
+            <!-- Logs -->
+            <TabViewItem Header="Logs" IsClosable="False">
+                <ScrollViewer Style="{StaticResource TabContentScrollStyle}">
+                    <StackPanel Style="{StaticResource TabContentPanelStyle}">
+                        <TextBlock Text="Current log" Style="{StaticResource SubtitleTextBlockStyle}" />
+                        <StackPanel Spacing="8">
+                            <TextBox Header="Today's log file"
+                                     Text="{x:Bind ViewModel.CurrentLogFilePath, Mode=OneWay}"
+                                     IsReadOnly="True" IsSpellCheckEnabled="False"
+                                     HorizontalAlignment="Stretch" />
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <Button Content="Open today's log"
+                                        VerticalAlignment="Bottom"
+                                        Command="{x:Bind ViewModel.OpenCurrentLogFileCommand}" />
+                                <Button Content="Open log folder"
+                                        VerticalAlignment="Bottom"
+                                        Command="{x:Bind ViewModel.OpenLogsFolderCommand}" />
+                            </StackPanel>
+                        </StackPanel>
+
+                        <TextBlock Text="Rotation" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
+                        <NumberBox Header="Retain daily log files"
+                                   Value="{x:Bind ViewModel.LogRetentionDays, Mode=TwoWay}"
+                                   SpinButtonPlacementMode="Inline"
+                                   Minimum="1" Maximum="365"
+                                   SmallChange="1" LargeChange="7"
+                                   Width="200"
+                                   HorizontalAlignment="Left" />
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}" Opacity="0.7" TextWrapping="Wrap"
+                                   Text="Logs rotate daily. Retention changes are saved now and apply after restarting Wormhole." />
+                    </StackPanel>
+                </ScrollViewer>
+            </TabViewItem>
+
             <!-- Backup & Restore -->
             <TabViewItem Header="Backup &amp; Restore" IsClosable="False">
                 <ScrollViewer Style="{StaticResource TabContentScrollStyle}">

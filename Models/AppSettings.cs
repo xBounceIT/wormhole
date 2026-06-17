@@ -15,6 +15,7 @@ public sealed class AppSettings
     public bool AutoCheckForUpdates { get; set; } = true;
     public DateTimeOffset? LastUpdateCheck { get; set; }
     public string? SkippedUpdateVersion { get; set; }
+    public int LogRetentionDays { get; set; } = 14;
 
     public int SidebarWidth { get; set; } = 320;
 

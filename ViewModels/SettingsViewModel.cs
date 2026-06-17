@@ -71,6 +71,12 @@ public partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     private string windowsHelloStatus = string.Empty;
 
+    [ObservableProperty]
+    private string currentLogFilePath = string.Empty;
+
+    [ObservableProperty]
+    private double logRetentionDays;
+
     public bool IsAppAuthenticationEnabled => AppAuthenticationModeIndex != 0;
 
     public bool ShowWindowsHelloFallback => AppAuthenticationModeIndex == (int)AppAuthenticationMode.WindowsHello;
@@ -148,6 +154,8 @@ public partial class SettingsViewModel : ObservableObject
         appAuthenticationModeIndex = (int)_settingsService.Current.AppAuthenticationMode;
         appAuthenticationHelloFallbackIndex = (int)_settingsService.Current.AppAuthenticationHelloFallback;
         appAuthenticationIdleTimeoutIndex = TimeoutMinutesToIndex(_settingsService.Current.AppAuthenticationIdleTimeoutMinutes);
+        currentLogFilePath = LogFiles.GetCurrentDayLogFilePath();
+        logRetentionDays = LogFiles.NormalizeRetentionDays(_settingsService.Current.LogRetentionDays);
         UpdateMcpStatus();
         _ = RefreshSecurityStatusAsync();
     }
@@ -186,6 +194,72 @@ public partial class SettingsViewModel : ObservableObject
     {
         _settingsService.Current.StreamMcpCommandTyping = value;
         _settingsService.Save();
+    }
+
+    partial void OnLogRetentionDaysChanged(double value)
+    {
+        if (!double.IsFinite(value))
+        {
+            LogRetentionDays = LogFiles.NormalizeRetentionDays(_settingsService.Current.LogRetentionDays);
+            return;
+        }
+
+        var days = (int)Math.Round(value, MidpointRounding.AwayFromZero);
+        var normalized = LogFiles.NormalizeRetentionDays(days);
+        if (normalized != days || Math.Abs(value - normalized) > 0.001)
+        {
+            LogRetentionDays = normalized;
+            return;
+        }
+
+        if (_settingsService.Current.LogRetentionDays == normalized) return;
+        _settingsService.Current.LogRetentionDays = normalized;
+        _settingsService.Save();
+    }
+
+    [RelayCommand]
+    private async Task OpenCurrentLogFileAsync()
+    {
+        try
+        {
+            var path = LogFiles.GetCurrentDayLogFilePath();
+            Directory.CreateDirectory(AppPaths.GetLogsDirectory());
+            using (File.Open(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite | FileShare.Delete))
+            {
+            }
+
+            CurrentLogFilePath = path;
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = path,
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to open current log file.");
+            await _dialog.ShowMessageAsync("Couldn't open log file", ex.Message);
+        }
+    }
+
+    [RelayCommand]
+    private async Task OpenLogsFolderAsync()
+    {
+        try
+        {
+            var path = AppPaths.GetLogsDirectory();
+            Directory.CreateDirectory(path);
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = path,
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to open logs folder.");
+            await _dialog.ShowMessageAsync("Couldn't open logs folder", ex.Message);
+        }
     }
 
     // === App authentication ==============================================
