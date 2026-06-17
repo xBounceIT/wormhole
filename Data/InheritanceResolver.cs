@@ -25,6 +25,7 @@ public sealed class InheritanceResolver
         ProtocolType? portContextProtocol = null;
         string? username = null;
         Guid? credentialId = null;
+        var credentialResolved = node.UseInlinePassword ?? false;
         string? rdpDomain = null;
         string? rdpScreenSize = null;
         bool? rdpFullScreen = null;
@@ -82,7 +83,23 @@ public sealed class InheritanceResolver
                 portContextProtocol ??= current.Protocol;
             }
             username ??= current.Username;
-            credentialId ??= current.CredentialId;
+            if (!credentialResolved)
+            {
+                var mode = current.CredentialMode;
+                if (mode is null)
+                {
+                    if (current.CredentialId is { } legacyCredentialId)
+                    {
+                        credentialId = legacyCredentialId;
+                        credentialResolved = true;
+                    }
+                }
+                else if (mode != CredentialBindingMode.Inherit)
+                {
+                    credentialResolved = true;
+                    credentialId = mode == CredentialBindingMode.Saved ? current.CredentialId : null;
+                }
+            }
             rdpDomain ??= current.RdpDomain;
             rdpScreenSize ??= current.RdpScreenSize ??
                 (current.RdpFullScreen == true ? RdpScreenSizes.FullConnectionContent : null);
@@ -157,7 +174,7 @@ public sealed class InheritanceResolver
 
         // The web protocols are credential-less (the editor hides credentials and CredentialDialog won't
         // create them). Drop any credential and SSH identity inherited from an ancestor folder, so a web
-        // node under an SSH/RDP folder can't carry — and, via the tree's "Show credentials", expose — an
+        // node under an SSH/RDP folder can't carry - and, via the tree's "Show credentials", expose - an
         // unrelated parent's password or stale private-key metadata.
         var isWeb = protocol.Value is ProtocolType.Http or ProtocolType.Https;
 
@@ -170,8 +187,8 @@ public sealed class InheritanceResolver
             Port = port ?? DefaultPortFor(protocol.Value),
             Username = isWeb ? null : username,
             CredentialId = isWeb ? null : credentialId,
-            // Inline password is strictly per-connection — read from the leaf `node`, never
-            // inherited up the folder chain (unlike CredentialId above).
+            // Inline password is strictly per-connection - read from the leaf `node`, never
+            // inherited up the folder chain. When set, it suppresses any inherited saved credential.
             UseInlinePassword = !isWeb && (node.UseInlinePassword ?? false),
             RdpDomain = rdpDomain,
             RdpScreenSize = rdpScreenSize,

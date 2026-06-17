@@ -23,6 +23,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private readonly List<CredentialProfile> _allCredentials = new();
     private readonly Dictionary<Guid, CredentialProfile> _allCredentialsById = new();
     private readonly Dictionary<Guid, CredentialProfile> _availableCredentialsById = new();
+    private readonly Dictionary<Guid, CredentialProfile> _availableGatewayCredentialsById = new();
     private bool _suppressPresetSync;
     private bool _suppressAadAutoFlag;
     // True when the editor (not the user, not the persisted DB value) set RdpUseExternalClient
@@ -64,6 +65,13 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// </summary>
     public BulkObservableCollection<CredentialProfile> AvailableCredentials { get; } = new();
 
+    /// <summary>
+    /// RD Gateway uses the same protocol-filtered credential pool, but it has no folder
+    /// inheritance state. Keep its picker separate so the main connection picker can offer
+    /// "(Inherit from folder)" without leaking that sentinel into gateway credentials.
+    /// </summary>
+    public BulkObservableCollection<CredentialProfile> AvailableGatewayCredentials { get; } = new();
+
     #region General
 
     [ObservableProperty]
@@ -93,6 +101,10 @@ public partial class ConnectionEditorViewModel : ObservableObject
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(SelectedCredential), nameof(IsAzureAdCredential), nameof(IsRdpUseExternalClientEditable), nameof(CanUseSshAutoSudo), nameof(ShowRdpDomain))]
     private Guid? credentialId;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(SelectedCredential), nameof(IsAzureAdCredential), nameof(IsRdpUseExternalClientEditable), nameof(CanUseSshAutoSudo), nameof(ShowRdpDomain))]
+    private CredentialBindingMode? credentialMode;
 
     /// <summary>
     /// Drives the credential mode toggle. When true (default), the connection uses a saved
@@ -196,20 +208,57 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// </summary>
     public bool CanUseSshAutoSudo => IsSsh && (!UseSavedCredentials || SelectedCredential?.Kind != CredentialKind.SshKey);
 
+    /// <summary>Sentinel for "inherit from folder". AutoSuggestBox.PlaceholderText
+    /// isn't selectable, so the picker needs a real item to round-trip to.</summary>
+    internal static readonly CredentialProfile InheritCredential = new()
+    {
+        Id = CredentialBindingSentinelIds.Inherit,
+        Name = "(Inherit from folder)",
+    };
+
     /// <summary>Sentinel for "no credential — prompt every time". ComboBox.PlaceholderText
     /// isn't selectable, so the picker needs a real item to round-trip to. Both selection
     /// getters return this when the underlying id is null; setters map it back to null.</summary>
     internal static readonly CredentialProfile NoneCredential = new()
     {
-        Id = Guid.Empty,
+        Id = CredentialBindingSentinelIds.ConnectionNone,
         Name = "(None — prompt every time)",
     };
 
     public CredentialProfile? SelectedCredential
     {
-        get => CredentialId is null ? NoneCredential : GetCredentialById(CredentialId);
-        set => CredentialId = (value is null || value.Id == Guid.Empty) ? null : value.Id;
+        get
+        {
+            return EffectiveCredentialMode switch
+            {
+                CredentialBindingMode.Inherit => InheritCredential,
+                CredentialBindingMode.None => NoneCredential,
+                CredentialBindingMode.Saved => CredentialId is { } id ? GetCredentialById(id) : null,
+                _ => InheritCredential,
+            };
+        }
+        set
+        {
+            if (value is null || value.Id == InheritCredential.Id)
+            {
+                CredentialId = null;
+                CredentialMode = CredentialBindingMode.Inherit;
+            }
+            else if (value.Id == NoneCredential.Id)
+            {
+                CredentialId = null;
+                CredentialMode = CredentialBindingMode.None;
+            }
+            else
+            {
+                CredentialId = value.Id;
+                CredentialMode = CredentialBindingMode.Saved;
+            }
+        }
     }
+
+    private CredentialBindingMode EffectiveCredentialMode =>
+        CredentialMode ?? (CredentialId is null ? CredentialBindingMode.Inherit : CredentialBindingMode.Saved);
 
     /// <summary>
     /// True only when <see cref="CredentialId"/> resolves to a saved credential that actually carries
@@ -442,12 +491,17 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     public CredentialProfile? SelectedGatewayCredential
     {
-        get => RdpGatewayCredentialId is null ? NoneCredential : GetCredentialById(RdpGatewayCredentialId);
+        get => RdpGatewayCredentialId is null ? NoneCredential : GetGatewayCredentialById(RdpGatewayCredentialId);
         set => RdpGatewayCredentialId = (value is null || value.Id == Guid.Empty) ? null : value.Id;
     }
 
     private CredentialProfile? GetCredentialById(Guid? id) =>
         id is { } guid && _availableCredentialsById.TryGetValue(guid, out var credential)
+            ? credential
+            : null;
+
+    private CredentialProfile? GetGatewayCredentialById(Guid? id) =>
+        id is { } guid && _availableGatewayCredentialsById.TryGetValue(guid, out var credential)
             ? credential
             : null;
 
@@ -579,6 +633,11 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
         var available = new List<CredentialProfile>(_allCredentials.Count + 3)
         {
+            InheritCredential,
+            NoneCredential,
+        };
+        var gatewayAvailable = new List<CredentialProfile>(_allCredentials.Count + 1)
+        {
             NoneCredential,
         };
         foreach (var c in _allCredentials)
@@ -588,14 +647,16 @@ public partial class ConnectionEditorViewModel : ObservableObject
             // user into a misleading prompt path. Filter them out.
             if (connectionIsRdp && c.Kind == CredentialKind.SshKey) continue;
             available.Add(c);
+            gatewayAvailable.Add(c);
         }
 
         ReplaceAvailableCredentials(available);
+        ReplaceAvailableGatewayCredentials(gatewayAvailable);
 
         // Preserve the existing main + gateway selections when they no longer match the filter
         // so edit round-trip doesn't lose the binding on a saved node.
         AppendStaleSelection(CredentialId);
-        AppendStaleSelection(RdpGatewayCredentialId);
+        AppendStaleGatewaySelection(RdpGatewayCredentialId);
 
         OnPropertyChanged(nameof(SelectedCredential));
         OnPropertyChanged(nameof(SelectedGatewayCredential));
@@ -611,6 +672,16 @@ public partial class ConnectionEditorViewModel : ObservableObject
         AvailableCredentials.Add(stale);
     }
 
+    private void AppendStaleGatewaySelection(Guid? id)
+    {
+        if (id is not { } guid) return;
+        if (_availableGatewayCredentialsById.ContainsKey(guid)) return;
+        if (!_allCredentialsById.TryGetValue(guid, out var stale)) return;
+
+        _availableGatewayCredentialsById[stale.Id] = stale;
+        AvailableGatewayCredentials.Add(stale);
+    }
+
     private void ReplaceAvailableCredentials(IReadOnlyList<CredentialProfile> available)
     {
         _availableCredentialsById.Clear();
@@ -621,6 +692,16 @@ public partial class ConnectionEditorViewModel : ObservableObject
         AvailableCredentials.ReplaceAll(available);
     }
 
+    private void ReplaceAvailableGatewayCredentials(IReadOnlyList<CredentialProfile> available)
+    {
+        _availableGatewayCredentialsById.Clear();
+        foreach (var credential in available)
+        {
+            _availableGatewayCredentialsById[credential.Id] = credential;
+        }
+        AvailableGatewayCredentials.ReplaceAll(available);
+    }
+
     /// <summary>
     /// Filter <see cref="AvailableCredentials"/> for the credential pickers' type-to-search.
     /// An empty/whitespace query returns the full list (including the <see cref="NoneCredential"/>
@@ -629,15 +710,23 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// bind it straight to AutoSuggestBox.ItemsSource without observing later source mutations.
     /// </summary>
     public IReadOnlyList<CredentialProfile> FilterCredentials(string? query)
+        => FilterCredentialList(AvailableCredentials, query);
+
+    public IReadOnlyList<CredentialProfile> FilterGatewayCredentials(string? query)
+        => FilterCredentialList(AvailableGatewayCredentials, query);
+
+    private static List<CredentialProfile> FilterCredentialList(
+        BulkObservableCollection<CredentialProfile> credentials,
+        string? query)
     {
         if (string.IsNullOrWhiteSpace(query))
         {
-            return AvailableCredentials.ToList();
+            return credentials.ToList();
         }
 
         var q = query.Trim();
-        var matches = new List<CredentialProfile>(AvailableCredentials.Count);
-        foreach (var credential in AvailableCredentials)
+        var matches = new List<CredentialProfile>(credentials.Count);
+        foreach (var credential in credentials)
         {
             if (CredentialContains(credential.Name, q) ||
                 CredentialContains(credential.Username, q) ||
@@ -656,11 +745,19 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// that doesn't name a real credential leaves the current selection untouched.
     /// </summary>
     public CredentialProfile? ResolveCredentialByText(string? text)
+        => ResolveCredentialByText(AvailableCredentials, text);
+
+    public CredentialProfile? ResolveGatewayCredentialByText(string? text)
+        => ResolveCredentialByText(AvailableGatewayCredentials, text);
+
+    private static CredentialProfile? ResolveCredentialByText(
+        IReadOnlyList<CredentialProfile> credentials,
+        string? text)
     {
         if (string.IsNullOrWhiteSpace(text)) return null;
 
         var t = text.Trim();
-        foreach (var credential in AvailableCredentials)
+        foreach (var credential in credentials)
         {
             if (string.Equals(credential.Name, t, StringComparison.OrdinalIgnoreCase))
             {
@@ -681,15 +778,23 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// caller treating empty text as "select none".
     /// </summary>
     public CredentialProfile? ResolveCredentialForCommit(string? text)
+        => ResolveCredentialForCommit(AvailableCredentials, text);
+
+    public CredentialProfile? ResolveGatewayCredentialForCommit(string? text)
+        => ResolveCredentialForCommit(AvailableGatewayCredentials, text);
+
+    private static CredentialProfile? ResolveCredentialForCommit(
+        IReadOnlyList<CredentialProfile> credentials,
+        string? text)
     {
-        if (ResolveCredentialByText(text) is { } exact) return exact;
+        if (ResolveCredentialByText(credentials, text) is { } exact) return exact;
         if (string.IsNullOrWhiteSpace(text)) return null;
 
         var q = text.Trim();
         CredentialProfile? single = null;
-        foreach (var credential in AvailableCredentials)
+        foreach (var credential in credentials)
         {
-            if (credential.Id == Guid.Empty) continue; // skip the None sentinel
+            if (IsCredentialSentinel(credential)) continue;
             if (CredentialContains(credential.Name, q) ||
                 CredentialContains(credential.Username, q) ||
                 CredentialContains(credential.Domain, q))
@@ -701,6 +806,9 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
         return single;
     }
+
+    private static bool IsCredentialSentinel(CredentialProfile credential) =>
+        CredentialBindingSentinelIds.IsSentinel(credential.Id);
 
     private static bool CredentialContains(string? haystack, string needle) =>
         haystack is not null && haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
@@ -715,7 +823,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
             var connectionIsRdp = value == ProtocolType.Rdp;
             var stillCompatible = cred.Protocol == value
                 && (!connectionIsRdp || cred.Kind != CredentialKind.SshKey);
-            if (!stillCompatible) CredentialId = null;
+            if (!stillCompatible) SelectedCredential = InheritCredential;
         }
         // Gateway credential is RDP-only — switching away from RDP makes it meaningless.
         if (value != ProtocolType.Rdp) RdpGatewayCredentialId = null;
@@ -739,11 +847,13 @@ public partial class ConnectionEditorViewModel : ObservableObject
         ApplyAadAutoFlag();
     }
 
+    partial void OnCredentialModeChanged(CredentialBindingMode? value) => ApplyAadAutoFlag();
+
     partial void OnRdpGatewayCredentialIdChanged(Guid? value)
     {
-        if (value is { } id && !_availableCredentialsById.ContainsKey(id))
+        if (value is { } id && !_availableGatewayCredentialsById.ContainsKey(id))
         {
-            AppendStaleSelection(id);
+            AppendStaleGatewaySelection(id);
             OnPropertyChanged(nameof(SelectedGatewayCredential));
         }
     }
@@ -822,6 +932,9 @@ public partial class ConnectionEditorViewModel : ObservableObject
             Username = node.Username ?? string.Empty;
             RdpDomain = node.RdpDomain ?? string.Empty;
             CredentialId = node.CredentialId;
+            CredentialMode = node.CredentialMode ?? (node.CredentialId is null
+                ? CredentialBindingMode.Inherit
+                : CredentialBindingMode.Saved);
             _editingNodeId = node.Id;
             _loadedUseInlinePassword = node.UseInlinePassword ?? false;
             UseSavedCredentials = !_loadedUseInlinePassword;
@@ -950,6 +1063,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
         if (!UseSavedCredentials)
         {
             node.CredentialId = null;
+            node.CredentialMode = CredentialBindingMode.None;
             node.UseInlinePassword = IsSsh;
             node.PendingInlinePassword = IsSsh ? InlinePassword : null; // never logged
         }
@@ -957,7 +1071,11 @@ public partial class ConnectionEditorViewModel : ObservableObject
         {
             node.UseInlinePassword = false;
             node.PendingInlinePassword = null;
-            node.CredentialId = CredentialId;
+            var effectiveCredentialMode = EffectiveCredentialMode;
+            node.CredentialMode = effectiveCredentialMode;
+            node.CredentialId = effectiveCredentialMode == CredentialBindingMode.Saved
+                ? CredentialId
+                : null;
         }
 
         // Persist the tri-state Auto sudo choice (inherit→null / on→true / off→false) only when the

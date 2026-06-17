@@ -143,6 +143,170 @@ public class InheritanceResolverTests
     }
 
     [Fact]
+    public void Resolve_CredentialModeSaved_InheritsFromParentFolder()
+    {
+        var credId = Guid.NewGuid();
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "prod",
+            Kind = NodeKind.Folder,
+            Username = "deploy",
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = credId,
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "web-1",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            Host = "web-1.prod",
+            CredentialMode = CredentialBindingMode.Inherit,
+        };
+
+        var profile = new InheritanceResolver().Resolve(node, new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        });
+
+        Assert.Equal(credId, profile.CredentialId);
+        Assert.Equal("deploy", profile.Username);
+    }
+
+    [Fact]
+    public void Resolve_CredentialModeNone_OnChildStopsInheritedFolderCredential()
+    {
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "prod",
+            Kind = NodeKind.Folder,
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = Guid.NewGuid(),
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "web-1",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            Host = "web-1.prod",
+            CredentialMode = CredentialBindingMode.None,
+        };
+
+        var profile = new InheritanceResolver().Resolve(node, new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        });
+
+        Assert.Null(profile.CredentialId);
+    }
+
+    [Fact]
+    public void Resolve_CredentialModeSaved_OnChildOverridesParentFolder()
+    {
+        var parentCredId = Guid.NewGuid();
+        var childCredId = Guid.NewGuid();
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "prod",
+            Kind = NodeKind.Folder,
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = parentCredId,
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "web-1",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            Host = "web-1.prod",
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = childCredId,
+        };
+
+        var profile = new InheritanceResolver().Resolve(node, new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        });
+
+        Assert.Equal(childCredId, profile.CredentialId);
+    }
+
+    [Fact]
+    public void Resolve_LegacyNullModeWithCredentialId_TreatsNodeAsSavedCredential()
+    {
+        var childCredId = Guid.NewGuid();
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "prod",
+            Kind = NodeKind.Folder,
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = Guid.NewGuid(),
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "web-1",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            Host = "web-1.prod",
+            CredentialMode = null,
+            CredentialId = childCredId,
+        };
+
+        var profile = new InheritanceResolver().Resolve(node, new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        });
+
+        Assert.Equal(childCredId, profile.CredentialId);
+    }
+
+    [Fact]
+    public void Resolve_InlinePassword_OnChildSuppressesInheritedSavedCredential()
+    {
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "prod",
+            Kind = NodeKind.Folder,
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = Guid.NewGuid(),
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "web-1",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            Host = "web-1.prod",
+            UseInlinePassword = true,
+        };
+
+        var profile = new InheritanceResolver().Resolve(node, new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        });
+
+        Assert.True(profile.UseInlinePassword);
+        Assert.Null(profile.CredentialId);
+    }
+
+    [Fact]
     public void Resolve_DefaultsPortFromProtocolWhenNoneInherited()
     {
         var node = new ConnectionNode
@@ -492,6 +656,7 @@ public class InheritanceResolverTests
             Name = "appliances",
             Kind = NodeKind.Folder,
             CredentialId = Guid.NewGuid(),
+            CredentialMode = CredentialBindingMode.Saved,
             Username = "admin",
             SshKeyFileName = "shared-admin-key",
             SshKnownHostFingerprint = "SHA256:inherited-pin",
@@ -535,6 +700,7 @@ public class InheritanceResolverTests
             Protocol = webProtocol,
             Host = "fw.example.com",
             CredentialId = Guid.NewGuid(),
+            CredentialMode = CredentialBindingMode.Saved,
             Username = "admin",
             UseInlinePassword = true,
             SshKeyFileName = "stale-admin-key",

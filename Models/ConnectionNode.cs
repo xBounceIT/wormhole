@@ -13,6 +13,12 @@ public class ConnectionNode
     public int? Port { get; set; }
     public string? Username { get; set; }
     public Guid? CredentialId { get; set; }
+    /// <summary>
+    /// Tri-state binding for saved credentials: inherit from ancestors, explicitly use no saved
+    /// credential, or use <see cref="CredentialId"/>. Null is the legacy shape:
+    /// null + CredentialId = saved credential; null + no CredentialId = inherit.
+    /// </summary>
+    public CredentialBindingMode? CredentialMode { get; set; }
 
     /// <summary>
     /// When true, the connection authenticates with an inline, per-connection password the
@@ -130,6 +136,7 @@ public class ConnectionNode
         Port = Port,
         Username = Username,
         CredentialId = CredentialId,
+        CredentialMode = CredentialMode,
         UseInlinePassword = UseInlinePassword,
         RdpDomain = RdpDomain,
         RdpScreenSize = RdpScreenSize,

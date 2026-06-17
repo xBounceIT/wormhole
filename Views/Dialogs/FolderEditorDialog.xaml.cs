@@ -29,12 +29,12 @@ public sealed partial class FolderEditorDialog : UserControl
 
     public bool IsValid => ViewModel.IsValid;
 
-    /// <summary>Load tunnel configs, then copy field values from <paramref name="initial"/>
-    /// into the VM. Tunnel configs must populate before LoadFrom so the SelectedTunnel
-    /// binding can resolve a saved TunnelConfigId.</summary>
+    /// <summary>Load pick-list options, then copy field values from <paramref name="initial"/>
+    /// into the VM. Options must populate before LoadFrom so saved ids can resolve to
+    /// selected items.</summary>
     public async Task LoadAsync(ConnectionNode initial)
     {
-        await ViewModel.LoadTunnelConfigsAsync();
+        await ViewModel.LoadOptionsAsync();
         ViewModel.LoadFrom(initial);
     }
 

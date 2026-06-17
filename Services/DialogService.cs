@@ -146,10 +146,10 @@ public sealed class DialogService : IDialogService
         if (result != ContentDialogResult.Primary) return null;
 
         // Full Clone — not CloneIdentityFrom. Folders can carry Protocol / Host / Username /
-        // CredentialId / RdpDomain etc. as inheritance defaults (mRemoteNG import populates
-        // them on container nodes; see MRemoteNgImportService.Walk). The folder editor only
-        // writes Name + tunnel, so anything else MUST round-trip untouched or descendants
-        // that resolve through this folder lose their defaults.
+        // RdpDomain etc. as inheritance defaults (mRemoteNG import populates them on container
+        // nodes; see MRemoteNgImportService.Walk). The folder editor writes only the fields it
+        // exposes, so anything else MUST round-trip untouched or descendants that resolve through
+        // this folder lose their defaults.
         var output = initial.Clone();
         form.WriteTo(output);
         return output;

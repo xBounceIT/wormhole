@@ -840,6 +840,10 @@ public sealed class BackupService : IBackupService
             result.Warnings.Add(
                 $"Node '{node.Name}' references missing credential {credId}; credential cleared.");
             node.CredentialId = null;
+            if (node.CredentialMode != CredentialBindingMode.Inherit)
+            {
+                node.CredentialMode = CredentialBindingMode.None;
+            }
         }
         if (node.RdpGatewayCredentialId is Guid gwCredId && !resolvableCredentialIds.Contains(gwCredId))
         {

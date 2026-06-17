@@ -35,6 +35,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
             Port                     INTEGER  NULL,
             Username                 TEXT     NULL,
             CredentialId             TEXT     NULL,
+            CredentialMode           INTEGER  NULL,
             UseInlinePassword        INTEGER  NULL,
             RdpDomain                TEXT     NULL,
             RdpScreenSize            TEXT     NULL,
@@ -1572,6 +1573,34 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task AddFolder_WithCredential_PersistsCredentialFields()
+    {
+        var credentialId = Guid.NewGuid();
+        var dialog = new FakeDialogService
+        {
+            EditFolderResult = new ConnectionNode
+            {
+                Kind = NodeKind.Folder,
+                Name = "Production",
+                CredentialMode = CredentialBindingMode.Saved,
+                CredentialId = credentialId,
+                Username = "admin",
+            },
+        };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        await vm.AddFolderCommand.ExecuteAsync(null);
+
+        var row = Assert.Single(await _repo.GetAllAsync());
+        Assert.Equal("Production", row.Name);
+        Assert.Equal(NodeKind.Folder, row.Kind);
+        Assert.Equal(CredentialBindingMode.Saved, row.CredentialMode);
+        Assert.Equal(credentialId, row.CredentialId);
+        Assert.Equal("admin", row.Username);
+    }
+
+    [Fact]
     public async Task Edit_FolderTunnelChange_PersistsTunnelFields()
     {
         // Start from a folder with no tunnel, then assign one via the editor and confirm both
@@ -1599,6 +1628,31 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task Edit_FolderCredentialChange_PersistsCredentialFields()
+    {
+        var dialog = new FakeDialogService { TextPromptResult = "Production" };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+        await vm.AddFolderCommand.ExecuteAsync(null);
+
+        var credentialId = Guid.NewGuid();
+        dialog.EditFolderResult = new ConnectionNode
+        {
+            Kind = NodeKind.Folder,
+            Name = "Production",
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = credentialId,
+            Username = "admin",
+        };
+        await vm.EditCommand.ExecuteAsync(vm.Roots.Single());
+
+        var row = (await _repo.GetAllAsync()).Single();
+        Assert.Equal(CredentialBindingMode.Saved, row.CredentialMode);
+        Assert.Equal(credentialId, row.CredentialId);
+        Assert.Equal("admin", row.Username);
+    }
+
+    [Fact]
     public async Task Edit_FolderRename_PreservesInheritedDefaultsOnFolder()
     {
         // Regression for codex PR review: folders carry inheritance defaults for their
@@ -1617,6 +1671,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
             Port = 2222,
             Username = "admin",
             CredentialId = credentialId,
+            CredentialMode = CredentialBindingMode.Saved,
             RdpDomain = "CORP",
         };
         await _repo.AddAsync(seed);
@@ -1636,6 +1691,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         Assert.Equal(2222, row.Port);
         Assert.Equal("admin", row.Username);
         Assert.Equal(credentialId, row.CredentialId);
+        Assert.Equal(CredentialBindingMode.Saved, row.CredentialMode);
         Assert.Equal("CORP", row.RdpDomain);
     }
 
