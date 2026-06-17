@@ -55,6 +55,188 @@ public sealed class LocalFilePaneViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task ToggleSort_Name_ReversesWithinDirectoryAndFileGroups()
+    {
+        File.WriteAllText(Path.Combine(_root, "a-file.txt"), "a");
+        File.WriteAllText(Path.Combine(_root, "z-file.txt"), "z");
+        Directory.CreateDirectory(Path.Combine(_root, "a-dir"));
+        Directory.CreateDirectory(Path.Combine(_root, "z-dir"));
+
+        var pane = new LocalFilePaneViewModel();
+        await pane.LoadAsync(_root);
+
+        pane.ToggleSort(FilePaneSortColumn.Name);
+
+        Assert.Collection(pane.Entries,
+            e => Assert.Equal("z-dir", e.Name),
+            e => Assert.Equal("a-dir", e.Name),
+            e => Assert.Equal("z-file.txt", e.Name),
+            e => Assert.Equal("a-file.txt", e.Name));
+        Assert.Equal(FilePaneSortColumn.Name, pane.SortColumn);
+        Assert.False(pane.SortAscending);
+    }
+
+    [Fact]
+    public async Task ToggleSort_Size_SortsAscendingThenDescending()
+    {
+        File.WriteAllText(Path.Combine(_root, "small.txt"), "x");
+        File.WriteAllText(Path.Combine(_root, "large.txt"), "xxxx");
+        Directory.CreateDirectory(Path.Combine(_root, "dir"));
+
+        var pane = new LocalFilePaneViewModel();
+        await pane.LoadAsync(_root);
+
+        pane.ToggleSort(FilePaneSortColumn.Size);
+        Assert.Collection(pane.Entries,
+            e => Assert.Equal("dir", e.Name),
+            e => Assert.Equal("small.txt", e.Name),
+            e => Assert.Equal("large.txt", e.Name));
+
+        pane.ToggleSort(FilePaneSortColumn.Size);
+        Assert.Collection(pane.Entries,
+            e => Assert.Equal("dir", e.Name),
+            e => Assert.Equal("large.txt", e.Name),
+            e => Assert.Equal("small.txt", e.Name));
+    }
+
+    [Fact]
+    public async Task ToggleSort_Modified_SortsAscendingThenDescending()
+    {
+        var older = Path.Combine(_root, "older.txt");
+        var newer = Path.Combine(_root, "newer.txt");
+        File.WriteAllText(older, "x");
+        File.WriteAllText(newer, "x");
+        File.SetLastWriteTimeUtc(older, new DateTime(2024, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+        File.SetLastWriteTimeUtc(newer, new DateTime(2024, 2, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        var pane = new LocalFilePaneViewModel();
+        await pane.LoadAsync(_root);
+
+        pane.ToggleSort(FilePaneSortColumn.Modified);
+        Assert.Collection(pane.Entries,
+            e => Assert.Equal("older.txt", e.Name),
+            e => Assert.Equal("newer.txt", e.Name));
+
+        pane.ToggleSort(FilePaneSortColumn.Modified);
+        Assert.Collection(pane.Entries,
+            e => Assert.Equal("newer.txt", e.Name),
+            e => Assert.Equal("older.txt", e.Name));
+    }
+
+    [Fact]
+    public async Task SearchText_FiltersCurrentFolderByName_CaseInsensitive()
+    {
+        File.WriteAllText(Path.Combine(_root, "Alpha.txt"), "a");
+        File.WriteAllText(Path.Combine(_root, "beta.txt"), "b");
+        Directory.CreateDirectory(Path.Combine(_root, "Reports"));
+
+        var pane = new LocalFilePaneViewModel();
+        await pane.LoadAsync(_root);
+
+        pane.SearchText = "alp";
+
+        var entry = Assert.Single(pane.Entries);
+        Assert.Equal("Alpha.txt", entry.Name);
+        Assert.True(pane.HasMatches);
+        Assert.False(pane.HasNoMatches);
+    }
+
+    [Fact]
+    public async Task RefreshAsync_ReappliesActiveSearchAndSort()
+    {
+        File.WriteAllText(Path.Combine(_root, "small.txt"), "x");
+        File.WriteAllText(Path.Combine(_root, "large.txt"), "xxxx");
+
+        var pane = new LocalFilePaneViewModel();
+        await pane.LoadAsync(_root);
+        pane.SearchText = ".txt";
+        pane.ToggleSort(FilePaneSortColumn.Size);
+
+        File.WriteAllText(Path.Combine(_root, "middle.txt"), "xx");
+        File.WriteAllText(Path.Combine(_root, "ignore.bin"), "xxxxx");
+        await pane.RefreshAsync();
+
+        Assert.Collection(pane.Entries,
+            e => Assert.Equal("small.txt", e.Name),
+            e => Assert.Equal("middle.txt", e.Name),
+            e => Assert.Equal("large.txt", e.Name));
+    }
+
+    [Fact]
+    public async Task SearchText_NoMatches_UpdatesNoMatchState()
+    {
+        File.WriteAllText(Path.Combine(_root, "alpha.txt"), "a");
+
+        var pane = new LocalFilePaneViewModel();
+        await pane.LoadAsync(_root);
+
+        pane.SearchText = "zzz";
+
+        Assert.Empty(pane.Entries);
+        Assert.False(pane.HasMatches);
+        Assert.True(pane.HasNoMatches);
+    }
+
+    [Fact]
+    public async Task SearchText_PrunesSelectionToVisibleEntries()
+    {
+        File.WriteAllText(Path.Combine(_root, "alpha.txt"), "a");
+        File.WriteAllText(Path.Combine(_root, "beta.txt"), "b");
+
+        var pane = new LocalFilePaneViewModel();
+        await pane.LoadAsync(_root);
+        foreach (var entry in pane.Entries)
+        {
+            pane.SelectedEntries.Add(entry);
+        }
+
+        pane.SearchText = "alpha";
+
+        var selected = Assert.Single(pane.SelectedEntries);
+        Assert.Equal("alpha.txt", selected.Name);
+    }
+
+    [Fact]
+    public async Task SearchText_LargeFolder_RebuildsAsynchronouslyUsingLatestQuery()
+    {
+        for (var i = 0; i < 300; i++)
+        {
+            File.WriteAllText(Path.Combine(_root, $"file-{i:D3}.txt"), "x");
+        }
+
+        File.WriteAllText(Path.Combine(_root, "target.txt"), "x");
+
+        var pane = new LocalFilePaneViewModel();
+        await pane.LoadAsync(_root);
+
+        pane.SearchText = "file-";
+        pane.SearchText = "target";
+
+        await WaitForConditionAsync(() => pane.Entries.Count == 1 && pane.Entries[0].Name == "target.txt");
+    }
+
+    [Fact]
+    public async Task ToggleSort_LargeFolder_RebuildsAsynchronouslyUsingLatestDirection()
+    {
+        for (var i = 0; i < 300; i++)
+        {
+            File.WriteAllText(Path.Combine(_root, $"middle-{i:D3}.txt"), "xx");
+        }
+
+        File.WriteAllText(Path.Combine(_root, "small.txt"), "x");
+        File.WriteAllText(Path.Combine(_root, "large.txt"), "xxxx");
+
+        var pane = new LocalFilePaneViewModel();
+        await pane.LoadAsync(_root);
+
+        pane.ToggleSort(FilePaneSortColumn.Size);
+        await WaitForConditionAsync(() => pane.Entries.Count > 0 && pane.Entries[0].Name == "small.txt");
+
+        pane.ToggleSort(FilePaneSortColumn.Size);
+        await WaitForConditionAsync(() => pane.Entries.Count > 0 && pane.Entries[0].Name == "large.txt");
+    }
+
+    [Fact]
     public async Task LoadAsync_ReplacesEntriesWithSingleReset()
     {
         File.WriteAllText(Path.Combine(_root, "a.txt"), "hello");
@@ -242,6 +424,17 @@ public sealed class LocalFilePaneViewModelTests : IDisposable
         // and returned without listing.
         Assert.Equal(1, pane.ListCallCount);
         Assert.Equal(5, pane.Entries.Count);
+    }
+
+    private static async Task WaitForConditionAsync(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (!condition() && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(20);
+        }
+
+        Assert.True(condition(), "Timed out waiting for asynchronous file-pane projection.");
     }
 
     /// <summary>
