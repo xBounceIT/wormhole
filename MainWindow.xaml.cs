@@ -439,7 +439,8 @@ public sealed partial class MainWindow : Window
         SetShellEnabled(false);
         LockTitleText.Text = "Wormhole is locked";
         LockMessageText.Text = message;
-        LockErrorBar.IsOpen = false;
+        LockStatusBar.Severity = InfoBarSeverity.Informational;
+        LockStatusBar.IsOpen = false;
         LockSecretBox.Password = string.Empty;
         LockSecretBox.Visibility = Visibility.Collapsed;
         LockUnlockButton.Visibility = Visibility.Collapsed;
@@ -492,7 +493,7 @@ public sealed partial class MainWindow : Window
         _lockHelloInProgress = true;
         WindowsHelloUnlockButton.IsEnabled = false;
         LockMessageText.Text = "Waiting for Windows Hello.";
-        LockErrorBar.IsOpen = false;
+        LockStatusBar.IsOpen = false;
         try
         {
             WindowsHelloAvailability availability;
@@ -508,7 +509,7 @@ public sealed partial class MainWindow : Window
 
             if (!availability.IsAvailable)
             {
-                ShowFallbackUnlock(availability.Message);
+                ShowFallbackUnlock(availability.Message, InfoBarSeverity.Informational);
                 return;
             }
 
@@ -528,7 +529,7 @@ public sealed partial class MainWindow : Window
                 CompleteUnlock();
                 return;
             }
-            ShowFallbackUnlock(verified.Message);
+            ShowFallbackUnlock(verified.Message, InfoBarSeverity.Informational);
         }
         finally
         {
@@ -537,7 +538,7 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private void ShowFallbackUnlock(string? error)
+    private void ShowFallbackUnlock(string? statusMessage, InfoBarSeverity statusSeverity = InfoBarSeverity.Informational)
     {
         LockMessageText.Text = _lockFallbackMethod == AppAuthenticationFallbackMethod.Pin
             ? "Enter your Wormhole PIN to continue."
@@ -546,10 +547,11 @@ public sealed partial class MainWindow : Window
         LockUnlockButton.Content = "Unlock";
         LockSecretBox.Visibility = Visibility.Visible;
         LockUnlockButton.Visibility = Visibility.Visible;
-        if (!string.IsNullOrWhiteSpace(error))
+        if (!string.IsNullOrWhiteSpace(statusMessage))
         {
-            LockErrorBar.Message = error;
-            LockErrorBar.IsOpen = true;
+            LockStatusBar.Severity = statusSeverity;
+            LockStatusBar.Message = statusMessage;
+            LockStatusBar.IsOpen = true;
         }
         LockSecretBox.Focus(FocusState.Programmatic);
     }
@@ -585,8 +587,9 @@ public sealed partial class MainWindow : Window
                 return;
             }
 
-            LockErrorBar.Message = InvalidSecretMessage(_lockFallbackMethod);
-            LockErrorBar.IsOpen = true;
+            LockStatusBar.Message = InvalidSecretMessage(_lockFallbackMethod);
+            LockStatusBar.Severity = InfoBarSeverity.Error;
+            LockStatusBar.IsOpen = true;
             LockSecretBox.Password = string.Empty;
             LockSecretBox.Focus(FocusState.Programmatic);
         }
@@ -607,7 +610,7 @@ public sealed partial class MainWindow : Window
     private void ShowWindowsHelloUnavailableFallback(Exception ex)
     {
         _logger.LogInformation(ex, "Windows Hello unlock was unavailable; showing configured fallback.");
-        ShowFallbackUnlock("Windows Hello is unavailable.");
+        ShowFallbackUnlock("Windows Hello is unavailable.", InfoBarSeverity.Informational);
     }
 
     private static AppAuthenticationFallbackMethod FallbackMethodForMode(AppAuthenticationMode mode) =>

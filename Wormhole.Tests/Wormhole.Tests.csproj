@@ -134,6 +134,9 @@
     <Compile Include="..\Services\Security\IAppAuthenticationService.cs" Link="Services\Security\IAppAuthenticationService.cs" />
     <Compile Include="..\Services\Security\AppAuthenticationService.cs" Link="Services\Security\AppAuthenticationService.cs" />
     <Compile Include="..\Services\Security\IWindowsHelloService.cs" Link="Services\Security\IWindowsHelloService.cs" />
+    <Compile Include="..\Services\Security\IRemoteDesktopSessionDetector.cs" Link="Services\Security\IRemoteDesktopSessionDetector.cs" />
+    <Compile Include="..\Services\Security\RemoteDesktopSessionDetector.cs" Link="Services\Security\RemoteDesktopSessionDetector.cs" />
+    <Compile Include="..\Services\Security\WindowsHelloService.cs" Link="Services\Security\WindowsHelloService.cs" />
     <Compile Include="..\Services\Security\IAppAuthenticationVerifier.cs" Link="Services\Security\IAppAuthenticationVerifier.cs" />
     <Compile Include="..\Services\Security\AppAuthenticationVerifier.cs" Link="Services\Security\AppAuthenticationVerifier.cs" />
     <Compile Include="..\Services\Security\IAppLockState.cs" Link="Services\Security\IAppLockState.cs" />

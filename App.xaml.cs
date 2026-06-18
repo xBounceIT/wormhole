@@ -237,6 +237,7 @@ public partial class App : Application
 
         services.AddSingleton<IAppSettingsService>(settingsService);
         services.AddSingleton<IAppAuthenticationService, AppAuthenticationService>();
+        services.AddSingleton<IRemoteDesktopSessionDetector, RemoteDesktopSessionDetector>();
         services.AddSingleton<IWindowsHelloService, WindowsHelloService>();
         services.AddSingleton<IAppAuthenticationVerifier, AppAuthenticationVerifier>();
         services.AddSingleton<IAppLockState, AppLockState>();

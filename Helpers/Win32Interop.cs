@@ -12,6 +12,9 @@ internal static class Win32Interop
     [DllImport("user32.dll")]
     public static extern uint GetDpiForWindow(IntPtr hWnd);
 
+    [DllImport("user32.dll")]
+    public static extern int GetSystemMetrics(int nIndex);
+
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
@@ -141,6 +144,7 @@ internal static class Win32Interop
     public const int SW_HIDE = 0;
     public const int SW_SHOW = 5;
     public const int SW_SHOWNA = 8; // Show without activating
+    public const int SM_REMOTESESSION = 0x1000;
 
     public const int GWL_STYLE = -16;
     public const int GWL_EXSTYLE = -20;

@@ -145,9 +145,9 @@
                                TextAlignment="Center"
                                Style="{StaticResource BodyTextBlockStyle}"
                                Opacity="0.78" />
-                    <InfoBar x:Name="LockErrorBar"
+                    <InfoBar x:Name="LockStatusBar"
                              IsOpen="False"
-                             Severity="Error"
+                             Severity="Informational"
                              IsClosable="False" />
                     <Button x:Name="WindowsHelloUnlockButton"
                             Content="Unlock with Windows Hello"
