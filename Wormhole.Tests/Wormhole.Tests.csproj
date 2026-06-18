@@ -63,6 +63,8 @@
     <Compile Include="..\Models\WatchguardSettings.cs" Link="Models\WatchguardSettings.cs" />
     <Compile Include="..\Models\StormshieldSettings.cs" Link="Models\StormshieldSettings.cs" />
     <Compile Include="..\Models\StormshieldConnectionMode.cs" Link="Models\StormshieldConnectionMode.cs" />
+    <Compile Include="..\Models\StormshieldOpenVpnTransportOverride.cs" Link="Models\StormshieldOpenVpnTransportOverride.cs" />
+    <Compile Include="..\Models\StormshieldOpenVpnCompressionFramingOverride.cs" Link="Models\StormshieldOpenVpnCompressionFramingOverride.cs" />
     <Compile Include="..\Models\MRemoteNgFileInfo.cs" Link="Models\MRemoteNgFileInfo.cs" />
     <Compile Include="..\Models\MRemoteNgImportPlan.cs" Link="Models\MRemoteNgImportPlan.cs" />
     <Compile Include="..\Models\MRemoteNgImportProgress.cs" Link="Models\MRemoteNgImportProgress.cs" />

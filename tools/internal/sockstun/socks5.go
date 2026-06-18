@@ -16,8 +16,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // Dialer is what the SOCKS5 loop uses to reach the requested target. Implementations
@@ -38,6 +41,18 @@ func (OSDialer) DialContext(ctx context.Context, network, address string) (net.C
 // fmt.Fprintln-to-stderr wrapper.
 type Logger interface {
 	Logf(format string, args ...any)
+}
+
+type dialIDContextKey struct{}
+
+var nextDialID atomic.Uint64
+
+// DialIDFromContext returns the SOCKS CONNECT correlation id assigned by this package.
+// Sidecar Dialer implementations use it to tag lower-level tunnel diagnostics without
+// changing the public Dialer interface shared by the VPN sidecars.
+func DialIDFromContext(ctx context.Context) (uint64, bool) {
+	id, ok := ctx.Value(dialIDContextKey{}).(uint64)
+	return id, ok && id != 0
 }
 
 // Serve runs the SOCKS5 accept loop on ln until ctx is cancelled or ln is closed. Each
@@ -148,20 +163,25 @@ func handle(ctx context.Context, c net.Conn, dial Dialer, log Logger) {
 		return
 	}
 	port := int(portBuf[0])<<8 | int(portBuf[1])
+	target := net.JoinHostPort(host, fmt.Sprintf("%d", port))
+	dialID := nextDialID.Add(1)
 
 	// Clear deadline before long-lived stream.
 	_ = c.SetDeadline(time.Time{})
 
 	dialCtx, cancelDial := context.WithTimeout(ctx, 15*time.Second)
-	upstream, err := dial.DialContext(dialCtx, "tcp", net.JoinHostPort(host, fmt.Sprintf("%d", port)))
+	dialCtx = context.WithValue(dialCtx, dialIDContextKey{}, dialID)
+	log.Logf("socks5: dial_id=%d target=%s starting", dialID, target)
+	upstream, err := dial.DialContext(dialCtx, "tcp", target)
 	cancelDial()
 	if err != nil {
-		log.Logf("dial %s:%d failed: %v", host, port, err)
+		log.Logf("socks5: dial_id=%d target=%s failed: %v", dialID, target, err)
 		// 0x04 host unreachable is a reasonable generic reply
-		writeReply(c, 0x04)
+		writeReplyWithDetail(c, 0x04, err.Error())
 		return
 	}
 	defer upstream.Close()
+	log.Logf("socks5: dial_id=%d target=%s connected", dialID, target)
 
 	// Success reply with BND.ADDR = 0.0.0.0:0 (we don't expose the bind address).
 	if _, err := c.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
@@ -201,4 +221,39 @@ func pump(ctx context.Context, client, upstream net.Conn) {
 
 func writeReply(c net.Conn, code byte) {
 	_, _ = c.Write([]byte{0x05, code, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+}
+
+func writeReplyWithDetail(c net.Conn, code byte, detail string) {
+	detail = sanitizeReplyDetail(detail)
+	if detail == "" {
+		writeReply(c, code)
+		return
+	}
+	b := []byte(detail)
+	reply := make([]byte, 0, 4+1+len(b)+2)
+	reply = append(reply, 0x05, code, 0x00, 0x03, byte(len(b)))
+	reply = append(reply, b...)
+	reply = append(reply, 0, 0)
+	_, _ = c.Write(reply)
+}
+
+func sanitizeReplyDetail(detail string) string {
+	detail = strings.TrimSpace(strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, detail))
+	if detail == "" {
+		return ""
+	}
+	b := []byte(detail)
+	if len(b) <= 255 {
+		return detail
+	}
+	b = b[:255]
+	for !utf8.Valid(b) {
+		b = b[:len(b)-1]
+	}
+	return strings.TrimSpace(string(b))
 }

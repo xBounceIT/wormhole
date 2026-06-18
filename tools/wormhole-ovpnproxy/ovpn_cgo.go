@@ -69,6 +69,8 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/xBounceIT/wormhole/tools/internal/sockstun"
@@ -259,15 +261,17 @@ func startOpenVpn(ctx context.Context, cfg config) (sockstun.Dialer, func(), err
 	// unblocks WHEN tunDev.Close() runs (blocking dev.Read returns ErrClosed), so we close
 	// the TUN after inbound has exited, then wait for outbound, then free the C++ client.
 	pumpCtx, pumpCancel := context.WithCancel(ctx)
+	counters := &ovpnTrafficCounters{}
+	packetDiag := newPacketDiagHub()
 	inboundDone := make(chan struct{})
 	outboundDone := make(chan struct{})
 	go func() {
 		defer close(inboundDone)
-		pumpInbound(pumpCtx, client, tunDev)
+		pumpInbound(pumpCtx, client, tunDev, counters, packetDiag)
 	}()
 	go func() {
 		defer close(outboundDone)
-		pumpOutbound(pumpCtx, client, tunDev)
+		pumpOutbound(pumpCtx, client, tunDev, counters, packetDiag)
 	}()
 
 	// Cleanup sequence (load-bearing ordering):
@@ -291,7 +295,15 @@ func startOpenVpn(ctx context.Context, cfg config) (sockstun.Dialer, func(), err
 		cleanupClient()
 	}
 
-	return tnetDialer{tnet: tnet, hasV4: hasV4, hasV6: hasV6, hasDNS: len(dnsAddrs) > 0}, cleanup, nil
+	return tnetDialer{
+		tnet:     tnet,
+		hasV4:    hasV4,
+		hasV6:    hasV6,
+		hasDNS:   len(dnsAddrs) > 0,
+		counters: counters,
+		client:   client,
+		diag:     packetDiag,
+	}, cleanup, nil
 }
 
 // pushedDNS pulls the server-pushed DNS resolver list out of the shim and parses it
@@ -335,7 +347,7 @@ func pushedDNS(client *C.ovpn_client_t, hasV4, hasV6 bool) []netip.Addr {
 // even though cleanup() waits for <-inboundDone BEFORE calling tunDev.Close(), the
 // extra check ensures a packet that arrived between cancel and recv-return doesn't
 // reach dev.Write after the shutdown signal.
-func pumpInbound(ctx context.Context, client *C.ovpn_client_t, dev tun.Device) {
+func pumpInbound(ctx context.Context, client *C.ovpn_client_t, dev tun.Device, counters *ovpnTrafficCounters, diag *packetDiagHub) {
 	buf := make([]byte, 2048)
 	bufs := make([][]byte, 1)
 	for {
@@ -353,10 +365,21 @@ func pumpInbound(ctx context.Context, client *C.ovpn_client_t, dev tun.Device) {
 		if ctx.Err() != nil {
 			return
 		}
+		info := parsePacketSummary(buf[:n])
+		if diag != nil {
+			diag.observeSummary(packetDirectionInbound, info)
+		}
+		if !info.valid {
+			counters.inNonIPPackets.Add(1)
+			counters.inNonIPBytes.Add(uint64(n))
+			continue
+		}
 		bufs[0] = buf[:n]
 		if _, err := dev.Write(bufs, 0); err != nil {
 			return
 		}
+		counters.inPackets.Add(1)
+		counters.inBytes.Add(uint64(n))
 	}
 }
 
@@ -365,7 +388,7 @@ func pumpInbound(ctx context.Context, client *C.ovpn_client_t, dev tun.Device) {
 // channel. tunDev.Read blocks until a packet is ready or the device is closed, so this
 // loop is naturally driven by the netstack — no busy-spin needed. cleanup() closes the
 // TUN to wake this loop after pumpInbound has confirmed it's done.
-func pumpOutbound(ctx context.Context, client *C.ovpn_client_t, dev tun.Device) {
+func pumpOutbound(ctx context.Context, client *C.ovpn_client_t, dev tun.Device, counters *ovpnTrafficCounters, diag *packetDiagHub) {
 	bufs := [][]byte{make([]byte, 2048)}
 	sizes := []int{0}
 	for {
@@ -382,6 +405,7 @@ func pumpOutbound(ctx context.Context, client *C.ovpn_client_t, dev tun.Device) 
 				continue
 			}
 			pkt := bufs[i][:sz]
+			diag.observe(packetDirectionOutbound, pkt)
 			if rc := C.ovpn_tun_send(client, (*C.char)(unsafe.Pointer(&pkt[0])), C.int(sz)); rc != 0 {
 				// rc=1 means the shim is shutting down (tunnel not up, or stopping_).
 				// rc=100 means the shim was built without OpenVPN3 (HAVE_OPENVPN3=0).
@@ -389,6 +413,8 @@ func pumpOutbound(ctx context.Context, client *C.ovpn_client_t, dev tun.Device) 
 				// than silently dropping outbound packets while looking healthy.
 				return
 			}
+			counters.outPackets.Add(1)
+			counters.outBytes.Add(uint64(sz))
 		}
 	}
 }
@@ -420,16 +446,48 @@ func pumpOutbound(ctx context.Context, client *C.ovpn_client_t, dev tun.Device) 
 // but tnet.LookupContextHost can still return both families if the pushed DNS server
 // answers AAAA — the same penalty applies, just with different cause.
 type tnetDialer struct {
-	tnet   *netstack.Net
-	hasV4  bool
-	hasV6  bool
-	hasDNS bool
+	tnet     *netstack.Net
+	hasV4    bool
+	hasV6    bool
+	hasDNS   bool
+	counters *ovpnTrafficCounters
+	client   *C.ovpn_client_t
+	diag     *packetDiagHub
 }
 
-func (d tnetDialer) DialContext(ctx context.Context, network, address string) (net.Conn, error) {
+func (d tnetDialer) DialContext(ctx context.Context, network, address string) (conn net.Conn, err error) {
+	start := time.Now()
+	before := d.snapshotCounters()
+	shimBefore := d.snapshotShimStats()
+	dialID, _ := sockstun.DialIDFromContext(ctx)
+	var packetSummary string
+	defer func() {
+		after := d.snapshotCounters()
+		shimAfter := d.snapshotShimStats()
+		delta := after.Sub(before)
+		if d.diag != nil && dialID != 0 {
+			packetSummary = d.diag.endDial(dialID)
+		}
+		if err != nil {
+			err = d.enrichDialError(address, dialID, delta, err)
+			logf("openvpn: dial_id=%d target=%s duration=%s result=failed error=%v counters_before=%s counters_after=%s counters_delta=%s shim_before=%s shim_after=%s packet_summary=%s",
+				dialID, address, time.Since(start).Round(time.Millisecond), err, before, after, delta, shimBefore, shimAfter, packetSummary)
+		} else {
+			logf("openvpn: dial_id=%d target=%s duration=%s result=success counters_before=%s counters_after=%s counters_delta=%s shim_before=%s shim_after=%s packet_summary=%s",
+				dialID, address, time.Since(start).Round(time.Millisecond), before, after, delta, shimBefore, shimAfter, packetSummary)
+		}
+	}()
+
 	host, port, err := net.SplitHostPort(address)
 	if err != nil {
 		return nil, err
+	}
+	if d.diag != nil && dialID != 0 {
+		d.diag.beginDial(dialID, address)
+	}
+	if d.client != nil && dialID != 0 {
+		C.ovpn_set_dial_id(d.client, C.ulonglong(dialID))
+		defer C.ovpn_set_dial_id(d.client, C.ulonglong(0))
 	}
 
 	// IP literal: bypass resolution entirely, but enforce the family-installed check so
@@ -485,4 +543,85 @@ func (d tnetDialer) DialContext(ctx context.Context, network, address string) (n
 		return nil, fmt.Errorf("no addresses of installed family (v4=%v v6=%v) for %s", d.hasV4, d.hasV6, host)
 	}
 	return nil, lastErr
+}
+
+type ovpnTrafficCounters struct {
+	inPackets      atomic.Uint64
+	inBytes        atomic.Uint64
+	outPackets     atomic.Uint64
+	outBytes       atomic.Uint64
+	inNonIPPackets atomic.Uint64
+	inNonIPBytes   atomic.Uint64
+}
+
+type ovpnTrafficSnapshot struct {
+	inPackets      uint64
+	inBytes        uint64
+	outPackets     uint64
+	outBytes       uint64
+	inNonIPPackets uint64
+	inNonIPBytes   uint64
+}
+
+func (d tnetDialer) snapshotCounters() ovpnTrafficSnapshot {
+	if d.counters == nil {
+		return ovpnTrafficSnapshot{}
+	}
+	return ovpnTrafficSnapshot{
+		inPackets:      d.counters.inPackets.Load(),
+		inBytes:        d.counters.inBytes.Load(),
+		outPackets:     d.counters.outPackets.Load(),
+		outBytes:       d.counters.outBytes.Load(),
+		inNonIPPackets: d.counters.inNonIPPackets.Load(),
+		inNonIPBytes:   d.counters.inNonIPBytes.Load(),
+	}
+}
+
+func (d tnetDialer) snapshotShimStats() string {
+	if d.client == nil {
+		return "unavailable"
+	}
+	buf := make([]byte, 512)
+	rc := C.ovpn_tun_stats(d.client, (*C.char)(unsafe.Pointer(&buf[0])), C.int(len(buf)))
+	if rc != 0 {
+		return fmt.Sprintf("unavailable(rc=%d)", int(rc))
+	}
+	end := 0
+	for end < len(buf) && buf[end] != 0 {
+		end++
+	}
+	return string(buf[:end])
+}
+
+func (d tnetDialer) enrichDialError(target string, dialID uint64, delta ovpnTrafficSnapshot, err error) error {
+	if delta.outPackets > 0 && delta.inPackets == 0 {
+		return fmt.Errorf("no data-plane response from tunnel (dial_id=%d target=%s root=%w counters_delta=%s)", dialID, target, err, delta)
+	}
+	if dialID != 0 {
+		return fmt.Errorf("dial_id=%d target=%s: %w", dialID, target, err)
+	}
+	return err
+}
+
+func (s ovpnTrafficSnapshot) String() string {
+	return fmt.Sprintf("in_packets=%d in_bytes=%d in_non_ip_packets=%d in_non_ip_bytes=%d out_packets=%d out_bytes=%d",
+		s.inPackets, s.inBytes, s.inNonIPPackets, s.inNonIPBytes, s.outPackets, s.outBytes)
+}
+
+func (s ovpnTrafficSnapshot) Sub(before ovpnTrafficSnapshot) ovpnTrafficSnapshot {
+	return ovpnTrafficSnapshot{
+		inPackets:      saturatingSub(s.inPackets, before.inPackets),
+		inBytes:        saturatingSub(s.inBytes, before.inBytes),
+		outPackets:     saturatingSub(s.outPackets, before.outPackets),
+		outBytes:       saturatingSub(s.outBytes, before.outBytes),
+		inNonIPPackets: saturatingSub(s.inNonIPPackets, before.inNonIPPackets),
+		inNonIPBytes:   saturatingSub(s.inNonIPBytes, before.inNonIPBytes),
+	}
+}
+
+func saturatingSub(after, before uint64) uint64 {
+	if after < before {
+		return 0
+	}
+	return after - before
 }

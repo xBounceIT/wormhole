@@ -85,6 +85,26 @@ public sealed class StormshieldSettings
     [JsonPropertyName("UseOtp")] public bool UseOtp { get; set; }
 
     /// <summary>
+    /// Optional override for the fetched/imported OpenVPN profile's remote transport. Leave at
+    /// <see cref="StormshieldOpenVpnTransportOverride.Auto"/> to preserve the firewall-provided
+    /// profile order. Use a forced mode only when a gateway reports CONNECTED on one transport but
+    /// cannot actually pass data-plane traffic.
+    /// </summary>
+    [JsonPropertyName("OpenVpnTransportOverride")]
+    public StormshieldOpenVpnTransportOverride OpenVpnTransportOverride { get; set; } =
+        StormshieldOpenVpnTransportOverride.Auto;
+
+    /// <summary>
+    /// Compatibility override for old OpenVPN data-channel framing. Some Stormshield gateways still
+    /// exchange no-compression payloads with the legacy <c>NO_COMPRESS</c> marker byte even when the
+    /// downloaded profile omits <c>comp-lzo no</c>. Leave at Auto unless diagnostics show inbound
+    /// non-IP packets such as <c>unknown_ip_version=15 len=17</c>.
+    /// </summary>
+    [JsonPropertyName("OpenVpnCompressionFramingOverride")]
+    public StormshieldOpenVpnCompressionFramingOverride OpenVpnCompressionFramingOverride { get; set; } =
+        StormshieldOpenVpnCompressionFramingOverride.Auto;
+
+    /// <summary>
     /// The self-contained OpenVPN profile for <see cref="StormshieldConnectionMode.Import"/> mode
     /// (inline <c>&lt;ca&gt;/&lt;cert&gt;/&lt;key&gt;</c>). Opaque to managed code — the OpenVPN3
     /// sidecar parses it. Empty in Automatic mode (the profile is fetched). Contains a plaintext

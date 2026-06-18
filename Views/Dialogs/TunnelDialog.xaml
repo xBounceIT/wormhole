@@ -430,6 +430,21 @@
                              ScrollViewer.HorizontalScrollBarVisibility="Auto" />
                     <CheckBox x:Name="StormshieldTrustCertCheck"
                               Content="Trust server certificate (skip ALL TLS checks — pre-auth credentials and OTP travel unverified)" />
+                    <ComboBox x:Name="StormshieldTransportOverrideBox"
+                              Header="OpenVPN transport override"
+                              HorizontalAlignment="Stretch"
+                              SelectedIndex="0">
+                        <ComboBoxItem Content="Auto — use profile order" />
+                        <ComboBoxItem Content="Force TCP" />
+                        <ComboBoxItem Content="Force UDP" />
+                    </ComboBox>
+                    <ComboBox x:Name="StormshieldCompressionFramingOverrideBox"
+                              Header="OpenVPN legacy compression framing"
+                              HorizontalAlignment="Stretch"
+                              SelectedIndex="0">
+                        <ComboBoxItem Content="Auto" />
+                        <ComboBoxItem Content="Force legacy no-compression stub" />
+                    </ComboBox>
                     <TextBox x:Name="StormshieldAppTokenBox"
                              Header="Portal app token (advanced)"
                              FontFamily="Consolas"

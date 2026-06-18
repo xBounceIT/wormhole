@@ -42,6 +42,21 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
     private StormshieldConnectionMode StormshieldSelectedMode =>
         StormshieldModeBox.SelectedIndex == 1 ? StormshieldConnectionMode.Import : StormshieldConnectionMode.Automatic;
 
+    private StormshieldOpenVpnTransportOverride StormshieldSelectedTransportOverride =>
+        StormshieldTransportOverrideBox.SelectedIndex switch
+        {
+            1 => StormshieldOpenVpnTransportOverride.ForceTcp,
+            2 => StormshieldOpenVpnTransportOverride.ForceUdp,
+            _ => StormshieldOpenVpnTransportOverride.Auto,
+        };
+
+    private StormshieldOpenVpnCompressionFramingOverride StormshieldSelectedCompressionFramingOverride =>
+        StormshieldCompressionFramingOverrideBox.SelectedIndex switch
+        {
+            1 => StormshieldOpenVpnCompressionFramingOverride.ForceLegacyStub,
+            _ => StormshieldOpenVpnCompressionFramingOverride.Auto,
+        };
+
     private WatchguardAuthMode WatchguardSelectedAuthMode =>
         WatchguardAuthModeBox.SelectedItem is WatchguardAuthMode mode ? mode : WatchguardAuthMode.Automatic;
 
@@ -222,6 +237,17 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         StormshieldProfileOvpnBox.Text = ss.ProfileOvpn ?? string.Empty;
         StormshieldCaPemBox.Text = ss.CaPem ?? string.Empty;
         StormshieldTrustCertCheck.IsChecked = ss.TrustServerCertificate;
+        StormshieldTransportOverrideBox.SelectedIndex = ss.OpenVpnTransportOverride switch
+        {
+            StormshieldOpenVpnTransportOverride.ForceTcp => 1,
+            StormshieldOpenVpnTransportOverride.ForceUdp => 2,
+            _ => 0,
+        };
+        StormshieldCompressionFramingOverrideBox.SelectedIndex = ss.OpenVpnCompressionFramingOverride switch
+        {
+            StormshieldOpenVpnCompressionFramingOverride.ForceLegacyStub => 1,
+            _ => 0,
+        };
         StormshieldAppTokenBox.Text = string.IsNullOrWhiteSpace(ss.AppToken) ? StormshieldSettings.DefaultAppToken : ss.AppToken;
         UpdateStormshieldModePanels();
 
@@ -325,6 +351,8 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         ProfileOvpn = StormshieldProfileOvpnBox.Text,
         CaPem = string.IsNullOrWhiteSpace(StormshieldCaPemBox.Text) ? null : StormshieldCaPemBox.Text,
         TrustServerCertificate = StormshieldTrustCertCheck.IsChecked == true,
+        OpenVpnTransportOverride = StormshieldSelectedTransportOverride,
+        OpenVpnCompressionFramingOverride = StormshieldSelectedCompressionFramingOverride,
         AppToken = string.IsNullOrWhiteSpace(StormshieldAppTokenBox.Text)
             ? StormshieldSettings.DefaultAppToken
             : StormshieldAppTokenBox.Text.Trim(),

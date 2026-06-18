@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Wormhole.Models;
 using Wormhole.Services.Tunneling.Stormshield;
 using Xunit;
 
@@ -131,6 +132,142 @@ public class StormshieldProfileNormalizerTests
     }
 
     [Fact]
+    public void ApplyTransportOverride_Auto_ReturnsProfileUnchanged()
+    {
+        const string ovpn = "client\nproto udp\nremote fw.example.com 1194 udp\n";
+
+        var result = StormshieldProfileNormalizer.ApplyTransportOverride(
+            ovpn, StormshieldOpenVpnTransportOverride.Auto);
+
+        Assert.Equal(ovpn, result);
+    }
+
+    [Fact]
+    public void ApplyTransportOverride_ForceTcp_KeepsTcpRemoteAndRewritesGlobalProto()
+    {
+        const string ovpn =
+            "client\nproto udp\nremote fw.example.com 1194 udp\nremote fw.example.com 443 tcp\n"
+            + "<ca>\nremote text inside cert\n</ca>\n";
+
+        var result = StormshieldProfileNormalizer.ApplyTransportOverride(
+            ovpn, StormshieldOpenVpnTransportOverride.ForceTcp);
+
+        Assert.Contains("proto tcp-client\n", result);
+        Assert.DoesNotContain("remote fw.example.com 1194 udp", result);
+        Assert.Contains("remote fw.example.com 443 tcp", result);
+        Assert.Contains("<ca>\nremote text inside cert\n</ca>", result);
+    }
+
+    [Fact]
+    public void ApplyTransportOverride_ForceUdp_KeepsUdpRemoteAndDropsTcpRemote()
+    {
+        const string ovpn = "client\nremote fw.example.com 1194 udp\nremote fw.example.com 443 tcp\n";
+
+        var result = StormshieldProfileNormalizer.ApplyTransportOverride(
+            ovpn, StormshieldOpenVpnTransportOverride.ForceUdp);
+
+        Assert.Contains("remote fw.example.com 1194 udp", result);
+        Assert.DoesNotContain("remote fw.example.com 443 tcp", result);
+    }
+
+    [Fact]
+    public void ApplyTransportOverride_UnqualifiedRemote_AddsProtoWhenMissing()
+    {
+        const string ovpn = "client\nremote fw.example.com 443\n";
+
+        var result = StormshieldProfileNormalizer.ApplyTransportOverride(
+            ovpn, StormshieldOpenVpnTransportOverride.ForceTcp);
+
+        Assert.Contains("remote fw.example.com 443", result);
+        Assert.Contains("proto tcp-client\n", result);
+    }
+
+    [Fact]
+    public void ApplyTransportOverride_NoMatchingRemote_Throws()
+    {
+        const string ovpn = "client\nremote fw.example.com 1194 udp\n";
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            StormshieldProfileNormalizer.ApplyTransportOverride(
+                ovpn, StormshieldOpenVpnTransportOverride.ForceTcp));
+
+        Assert.Contains("no TCP remote", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ApplyTransportOverride_ConnectionBlocks_DropsOppositeTransportBlock()
+    {
+        const string ovpn =
+            "client\n"
+            + "<connection>\nremote fw.example.com 1194 udp\n</connection>\n"
+            + "<connection>\nremote fw.example.com 443 tcp\n</connection>\n"
+            + "<ca>\nremote should-stay-opaque 1194 udp\n</ca>\n";
+
+        var result = StormshieldProfileNormalizer.ApplyTransportOverride(
+            ovpn, StormshieldOpenVpnTransportOverride.ForceTcp);
+
+        Assert.DoesNotContain("remote fw.example.com 1194 udp", result);
+        Assert.Contains("<connection>\nremote fw.example.com 443 tcp\n</connection>", result);
+        Assert.Contains("<ca>\nremote should-stay-opaque 1194 udp\n</ca>", result);
+    }
+
+    [Fact]
+    public void ApplyTransportOverride_ConnectionBlockWithMixedRemotes_KeepsDesiredRemote()
+    {
+        const string ovpn =
+            "client\n"
+            + "<connection>\n"
+            + "proto udp\n"
+            + "remote fw.example.com 1194 udp\n"
+            + "remote fw.example.com 443 tcp\n"
+            + "</connection>\n";
+
+        var result = StormshieldProfileNormalizer.ApplyTransportOverride(
+            ovpn, StormshieldOpenVpnTransportOverride.ForceTcp);
+
+        Assert.Contains("<connection>\nproto tcp-client\nremote fw.example.com 443 tcp\n</connection>", result);
+        Assert.DoesNotContain("remote fw.example.com 1194 udp", result);
+    }
+
+    [Fact]
+    public void ApplyTransportOverride_ConnectionBlockUnqualifiedRemote_InsertsProtoInsideBlock()
+    {
+        const string ovpn = "client\n<connection>\nremote fw.example.com 443\n</connection>\n";
+
+        var result = StormshieldProfileNormalizer.ApplyTransportOverride(
+            ovpn, StormshieldOpenVpnTransportOverride.ForceTcp);
+
+        Assert.Contains("<connection>\nremote fw.example.com 443\nproto tcp-client\n</connection>", result);
+    }
+
+    [Fact]
+    public void ApplyTransportOverride_ConnectionBlockProto_FiltersUnqualifiedRemote()
+    {
+        const string ovpn =
+            "client\n"
+            + "<connection>\nremote fw.example.com 1194\nproto udp\n</connection>\n"
+            + "<connection>\nremote fw.example.com 443\nproto tcp\n</connection>\n";
+
+        var result = StormshieldProfileNormalizer.ApplyTransportOverride(
+            ovpn, StormshieldOpenVpnTransportOverride.ForceTcp);
+
+        Assert.DoesNotContain("remote fw.example.com 1194", result);
+        Assert.Contains("<connection>\nremote fw.example.com 443\nproto tcp-client\n</connection>", result);
+    }
+
+    [Fact]
+    public void ApplyTransportOverride_ConnectionBlockProtoWithoutMatchingTransport_Throws()
+    {
+        const string ovpn = "client\n<connection>\nremote fw.example.com 1194\nproto udp\n</connection>\n";
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            StormshieldProfileNormalizer.ApplyTransportOverride(
+                ovpn, StormshieldOpenVpnTransportOverride.ForceTcp));
+
+        Assert.Contains("no TCP remote", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Normalize_DoesNotInjectDataCiphers_WhenAlreadyPresent()
     {
         const string ovpn = "client\ncipher AES-256-CBC\ndata-ciphers AES-256-GCM:AES-256-CBC\n";
@@ -155,16 +292,73 @@ public class StormshieldProfileNormalizerTests
     [InlineData("compress lz4")]
     [InlineData("comp-lzo yes")]
     [InlineData("comp-noadapt")]
-    public void Normalize_StripsCompressionDirectives(string compressionLine)
+    public void Normalize_StripsRealCompressionDirectives(string compressionLine)
     {
         // Stormshield itself recommends disabling compression (VORACLE), so any compression directive
-        // is removed regardless of which variant the firewall emitted.
+        // that can enable real compression is removed regardless of which variant the firewall emitted.
         var ovpn = $"client\ndev tun\nremote fw.example.com 443\n{compressionLine}\n";
 
         var result = StormshieldProfileNormalizer.Normalize(ovpn);
 
         Assert.DoesNotContain(compressionLine, result);
         Assert.Contains("remote fw.example.com 443", result);
+    }
+
+    [Theory]
+    [InlineData("comp-lzo no")]
+    [InlineData("compress")]
+    [InlineData("compress stub")]
+    [InlineData("compress stub-v2")]
+    public void Normalize_PreservesNoCompressionFramingDirectives(string compressionLine)
+    {
+        // These directives do not enable payload compression. They preserve legacy OpenVPN framing
+        // where data-channel packets carry a NO_COMPRESS marker byte; old Stormshield gateways still
+        // require that marker even though compression itself is disabled.
+        var ovpn = $"client\ndev tun\nremote fw.example.com 443\n{compressionLine}\n";
+
+        var result = StormshieldProfileNormalizer.Normalize(ovpn);
+
+        Assert.Contains(compressionLine, result);
+        Assert.Contains("remote fw.example.com 443", result);
+    }
+
+    [Fact]
+    public void ApplyLegacyCompressionStub_AddsCompLzoNo_WhenMissing()
+    {
+        const string ovpn = "client\ndev tun\nremote fw.example.com 443 tcp\n";
+
+        var result = StormshieldProfileNormalizer.ApplyLegacyCompressionStub(ovpn);
+
+        Assert.Contains("comp-lzo no\n", result);
+    }
+
+    [Theory]
+    [InlineData("comp-lzo no")]
+    [InlineData("compress")]
+    [InlineData("compress stub")]
+    public void ApplyLegacyCompressionStub_DoesNotDuplicateExistingFraming(string compressionLine)
+    {
+        var ovpn = $"client\ndev tun\n{compressionLine}\n";
+
+        var result = StormshieldProfileNormalizer.ApplyLegacyCompressionStub(ovpn);
+
+        Assert.Equal(1, result.Split('\n').Count(l => l.Trim().Equals(compressionLine, StringComparison.OrdinalIgnoreCase)));
+        Assert.DoesNotContain("comp-lzo no\ncomp-lzo no", result);
+    }
+
+    [Fact]
+    public void ApplyLegacyCompressionStub_IgnoresInlineBlockContent()
+    {
+        const string ovpn =
+            "client\n" +
+            "<ca>\n" +
+            "compress\n" +
+            "</ca>\n";
+
+        var result = StormshieldProfileNormalizer.ApplyLegacyCompressionStub(ovpn);
+
+        Assert.Contains("<ca>\ncompress\n</ca>", result);
+        Assert.Contains("comp-lzo no\n", result);
     }
 
     [Fact]

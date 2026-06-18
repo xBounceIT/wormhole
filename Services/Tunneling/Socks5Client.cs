@@ -112,25 +112,19 @@ public static class Socks5Client
             var head = new byte[4];
             await stream.ReadExactlyAsync(head, cancellationToken).ConfigureAwait(false);
             if (head[0] != 0x05) throw new IOException($"SOCKS5: unexpected version 0x{head[0]:x2} in connect reply");
-            if (head[1] != 0x00) throw new IOException($"SOCKS5: CONNECT failed with reply code 0x{head[1]:x2} ({DescribeReply(head[1])})");
 
             // Consume BND.ADDR + BND.PORT (we don't use them). DOMAINNAME (0x03) carries a
             // 1-byte length prefix that has to be read out-of-band to size the skip buffer.
-            int addrSkip;
-            switch (head[3])
+            var failureDetail = await ReadBoundAddressOrDetailAsync(stream, head[3], cancellationToken).ConfigureAwait(false);
+            if (head[1] != 0x00)
             {
-                case 0x01: addrSkip = 4; break;
-                case 0x04: addrSkip = 16; break;
-                case 0x03:
-                    var lenBuf = new byte[1];
-                    await stream.ReadExactlyAsync(lenBuf, cancellationToken).ConfigureAwait(false);
-                    addrSkip = lenBuf[0];
-                    break;
-                default:
-                    throw new IOException($"SOCKS5: unknown bound address type 0x{head[3]:x2}");
+                var message = $"SOCKS5: CONNECT failed with reply code 0x{head[1]:x2} ({DescribeReply(head[1])})";
+                if (!string.IsNullOrWhiteSpace(failureDetail))
+                {
+                    message += $": {failureDetail}";
+                }
+                throw new IOException(message);
             }
-            var skipBuf = new byte[addrSkip + 2];
-            await stream.ReadExactlyAsync(skipBuf, cancellationToken).ConfigureAwait(false);
 
             return stream;
         }
@@ -140,6 +134,33 @@ public static class Socks5Client
             else socket.Dispose();
             throw;
         }
+    }
+
+    private static async Task<string?> ReadBoundAddressOrDetailAsync(Stream stream, byte atyp, CancellationToken cancellationToken)
+    {
+        int addrLength;
+        switch (atyp)
+        {
+            case 0x01:
+                addrLength = 4;
+                break;
+            case 0x04:
+                addrLength = 16;
+                break;
+            case 0x03:
+                var lenBuf = new byte[1];
+                await stream.ReadExactlyAsync(lenBuf, cancellationToken).ConfigureAwait(false);
+                addrLength = lenBuf[0];
+                var addressAndPortBytes = new byte[addrLength + 2];
+                await stream.ReadExactlyAsync(addressAndPortBytes, cancellationToken).ConfigureAwait(false);
+                return addrLength == 0 ? null : Encoding.UTF8.GetString(addressAndPortBytes, 0, addrLength);
+            default:
+                throw new IOException($"SOCKS5: unknown bound address type 0x{atyp:x2}");
+        }
+
+        var skipBuf = new byte[addrLength + 2];
+        await stream.ReadExactlyAsync(skipBuf, cancellationToken).ConfigureAwait(false);
+        return null;
     }
 
     private static string DescribeReply(byte code) => code switch
