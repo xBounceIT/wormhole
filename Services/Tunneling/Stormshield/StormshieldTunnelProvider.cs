@@ -103,6 +103,8 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             StormshieldConnectionMode.Automatic => await ResolveAutomaticAsync(config, settings, cancellationToken, progress).ConfigureAwait(false),
             _ => throw new InvalidOperationException($"Tunnel config '{config.Name}' has an unsupported Stormshield mode '{settings.Mode}'."),
         };
+        profile = ApplyCompressionFramingOverride(config.Name, settings, profile);
+        profile = ApplyTransportOverride(config.Name, settings, profile);
 
         var sidecar = new OpenVpnSidecarConfig
         {
@@ -186,6 +188,30 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
                 + "Paste the .ovpn downloaded from the firewall's /auth \"Personal data\" page, or switch to Automatic mode.");
         }
         return StormshieldProfileNormalizer.Normalize(settings.ProfileOvpn);
+    }
+
+    private string ApplyTransportOverride(string configName, StormshieldSettings settings, string profile)
+    {
+        if (settings.OpenVpnTransportOverride == StormshieldOpenVpnTransportOverride.Auto)
+            return profile;
+
+        var filtered = StormshieldProfileNormalizer.ApplyTransportOverride(profile, settings.OpenVpnTransportOverride);
+        _logger.LogInformation(
+            "Stormshield '{Name}': forcing OpenVPN transport override {Transport}.",
+            configName, settings.OpenVpnTransportOverride);
+        return filtered;
+    }
+
+    private string ApplyCompressionFramingOverride(string configName, StormshieldSettings settings, string profile)
+    {
+        if (settings.OpenVpnCompressionFramingOverride == StormshieldOpenVpnCompressionFramingOverride.Auto)
+            return profile;
+
+        var framed = StormshieldProfileNormalizer.ApplyLegacyCompressionStub(profile);
+        _logger.LogInformation(
+            "Stormshield '{Name}': forcing OpenVPN legacy no-compression framing {Framing}.",
+            configName, settings.OpenVpnCompressionFramingOverride);
+        return framed;
     }
 
     internal static string SummarizeOpenVpnRemotes(string profile)

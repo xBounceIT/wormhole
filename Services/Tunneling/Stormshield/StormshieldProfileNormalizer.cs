@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using Wormhole.Models;
 
 namespace Wormhole.Services.Tunneling.Stormshield;
 
@@ -18,7 +19,9 @@ namespace Wormhole.Services.Tunneling.Stormshield;
 ///   (This mirrors what <c>WatchguardProfileBuilder</c> emits for the same reason.)</item>
 ///   <item><b>Compression.</b> Stormshield profiles historically carry <c>compress lz4</c>, but
 ///   Stormshield itself now recommends disabling compression because of the VORACLE class of attacks.
-///   Any <c>compress</c> / <c>comp-lzo</c> / <c>comp-noadapt</c> directive is stripped.</item>
+///   Real compression directives are stripped. No-compression legacy framing such as <c>comp-lzo no</c>
+///   is preserved because older gateways still put the OpenVPN <c>NO_COMPRESS</c> marker in front of
+///   every data-channel payload even though they are not compressing it.</item>
 ///   <item><b>Control-channel cipher pin.</b> Some firewalls pin a single TLS cipher with an
 ///   OpenSSL/IANA-style name, e.g. <c>tls-cipher TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA256</c>. OpenVPN's
 ///   OpenSSL backend honors that, but the sidecar's <b>mbedTLS</b> backend can't resolve that name to
@@ -45,6 +48,7 @@ public static class StormshieldProfileNormalizer
     // AES-128-CBC (and AES-192-CBC), not just AES-256-CBC.
     private const string AeadDataCiphers = "AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305";
     private const string DefaultCbcCipher = "AES-256-CBC";
+    private static readonly char[] s_tokenSeparators = new[] { ' ', '\t' };
 
     public static string Normalize(string ovpn)
     {
@@ -83,8 +87,11 @@ public static class StormshieldProfileNormalizer
 
             var firstToken = FirstToken(trimmed);
 
-            // Drop compression directives (VORACLE — Stormshield recommends disabling).
-            if (Eq(firstToken, "compress") || Eq(firstToken, "comp-lzo") || Eq(firstToken, "comp-noadapt"))
+            // Drop real compression directives (VORACLE), but keep no-compression framing markers
+            // such as `comp-lzo no`. Older Stormshield gateways still frame data-channel payloads with
+            // the 0xFA NO_COMPRESS marker; stripping the directive makes OpenVPN3 treat those bytes as
+            // raw IP and the tunnel reaches CONNECTED with a dead data plane.
+            if (IsCompressionDirectiveToStrip(trimmed, firstToken))
                 continue;
 
             // Drop the control-channel TLS cipher pin (see class remarks): the sidecar's mbedTLS
@@ -116,6 +123,234 @@ public static class StormshieldProfileNormalizer
         }
 
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Adds legacy OpenVPN no-compression framing (<c>comp-lzo no</c>) when the profile does not
+    /// already declare any compression/framing directive. This does not enable payload compression;
+    /// it only makes OpenVPN3 add/remove the historical <c>NO_COMPRESS</c> marker byte.
+    /// </summary>
+    public static string ApplyLegacyCompressionStub(string ovpn)
+    {
+        if (string.IsNullOrWhiteSpace(ovpn))
+            throw new InvalidOperationException("The Stormshield OpenVPN profile is empty.");
+
+        var sb = new StringBuilder(ovpn.Length + 16);
+        string? openBlock = null;
+        var hasCompressionDirective = false;
+
+        foreach (var rawLine in EnumerateLines(ovpn))
+        {
+            var trimmed = rawLine.Trim();
+
+            if (openBlock is not null)
+            {
+                sb.Append(rawLine).Append('\n');
+                if (IsCloseTag(trimmed, openBlock)) openBlock = null;
+                continue;
+            }
+
+            if (TryReadOpenTag(trimmed, out var blockName))
+            {
+                openBlock = blockName;
+                sb.Append(rawLine).Append('\n');
+                continue;
+            }
+
+            var firstToken = FirstToken(trimmed);
+            hasCompressionDirective |= Eq(firstToken, "compress") || Eq(firstToken, "comp-lzo");
+            sb.Append(rawLine).Append('\n');
+        }
+
+        if (!hasCompressionDirective)
+            sb.Append("comp-lzo no\n");
+
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Applies a user-selected OpenVPN transport override to a normalized Stormshield profile.
+    /// Inline key/certificate blocks are preserved verbatim.
+    /// </summary>
+    public static string ApplyTransportOverride(string ovpn, StormshieldOpenVpnTransportOverride transportOverride)
+    {
+        if (transportOverride == StormshieldOpenVpnTransportOverride.Auto)
+            return ovpn;
+        if (string.IsNullOrWhiteSpace(ovpn))
+            throw new InvalidOperationException("The Stormshield OpenVPN profile is empty.");
+
+        var desired = transportOverride == StormshieldOpenVpnTransportOverride.ForceTcp
+            ? OpenVpnRemoteTransport.Tcp
+            : OpenVpnRemoteTransport.Udp;
+        var desiredProto = desired == OpenVpnRemoteTransport.Tcp ? "tcp-client" : "udp";
+
+        var sb = new StringBuilder(ovpn.Length + 32);
+        string? openBlock = null;
+        var sawRemote = false;
+        var keptRemote = false;
+        var sawProto = false;
+        var keptUnqualifiedRemote = false;
+
+        var lines = EnumerateLines(ovpn);
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var rawLine = lines[i];
+            var trimmed = rawLine.Trim();
+
+            if (openBlock is not null)
+            {
+                sb.Append(rawLine).Append('\n');
+                if (IsCloseTag(trimmed, openBlock)) openBlock = null;
+                continue;
+            }
+            if (TryReadOpenTag(trimmed, out var blockName))
+            {
+                if (blockName.Equals("connection", StringComparison.OrdinalIgnoreCase))
+                {
+                    var blockLines = new List<string> { rawLine };
+                    while (i + 1 < lines.Length)
+                    {
+                        var nextLine = lines[++i];
+                        blockLines.Add(nextLine);
+                        if (IsCloseTag(nextLine.Trim(), blockName)) break;
+                    }
+
+                    if (TryApplyTransportOverrideToConnectionBlock(
+                        blockLines,
+                        desired,
+                        desiredProto,
+                        ref sawRemote,
+                        ref keptRemote,
+                        out var rewrittenBlock))
+                    {
+                        foreach (var line in rewrittenBlock)
+                            sb.Append(line).Append('\n');
+                    }
+                }
+                else
+                {
+                    openBlock = blockName;
+                    sb.Append(rawLine).Append('\n');
+                }
+                continue;
+            }
+
+            var firstToken = FirstToken(trimmed);
+            if (Eq(firstToken, "proto"))
+            {
+                sawProto = true;
+                sb.Append("proto ").Append(desiredProto).Append('\n');
+                continue;
+            }
+
+            if (Eq(firstToken, "remote"))
+            {
+                sawRemote = true;
+                var remoteTransport = ParseRemoteTransport(trimmed);
+                if (remoteTransport is null || remoteTransport == desired)
+                {
+                    keptRemote = true;
+                    keptUnqualifiedRemote |= remoteTransport is null;
+                    sb.Append(rawLine).Append('\n');
+                }
+                continue;
+            }
+
+            sb.Append(rawLine).Append('\n');
+        }
+
+        if (sawRemote && !keptRemote)
+        {
+            var label = desired == OpenVpnRemoteTransport.Tcp ? "TCP" : "UDP";
+            throw new InvalidOperationException(
+                $"The Stormshield OpenVPN profile has no {label} remote to use with the selected transport override.");
+        }
+
+        if (keptUnqualifiedRemote && !sawProto)
+            sb.Append("proto ").Append(desiredProto).Append('\n');
+
+        return sb.ToString();
+    }
+
+    private static bool TryApplyTransportOverrideToConnectionBlock(
+        List<string> blockLines,
+        OpenVpnRemoteTransport desired,
+        string desiredProto,
+        ref bool sawRemote,
+        ref bool keptRemote,
+        out List<string> rewrittenBlock)
+    {
+        rewrittenBlock = new List<string>(blockLines.Count + 1);
+        string? openBlock = null;
+        var blockSawRemote = false;
+        var blockKeptRemote = false;
+        var blockSawProto = false;
+        var blockKeptUnqualifiedRemote = false;
+
+        foreach (var rawLine in blockLines)
+        {
+            var trimmed = rawLine.Trim();
+
+            if (openBlock is not null)
+            {
+                rewrittenBlock.Add(rawLine);
+                if (IsCloseTag(trimmed, openBlock)) openBlock = null;
+                continue;
+            }
+            if (TryReadOpenTag(trimmed, out var blockName) && IsOpaqueInlineBlock(blockName))
+            {
+                openBlock = blockName;
+                rewrittenBlock.Add(rawLine);
+                continue;
+            }
+
+            var firstToken = FirstToken(trimmed);
+            if (Eq(firstToken, "proto"))
+            {
+                blockSawProto = true;
+                rewrittenBlock.Add("proto " + desiredProto);
+                continue;
+            }
+
+            if (Eq(firstToken, "remote"))
+            {
+                sawRemote = true;
+                blockSawRemote = true;
+                var remoteTransport = ParseRemoteTransport(trimmed);
+                if (remoteTransport is null || remoteTransport == desired)
+                {
+                    keptRemote = true;
+                    blockKeptRemote = true;
+                    blockKeptUnqualifiedRemote |= remoteTransport is null;
+                    rewrittenBlock.Add(rawLine);
+                }
+                continue;
+            }
+
+            rewrittenBlock.Add(rawLine);
+        }
+
+        if (blockSawRemote && !blockKeptRemote)
+            return false;
+
+        if (blockKeptUnqualifiedRemote && !blockSawProto)
+            InsertBeforeConnectionClose(rewrittenBlock, desiredProto);
+
+        return true;
+    }
+
+    private static void InsertBeforeConnectionClose(List<string> blockLines, string desiredProto)
+    {
+        for (var i = blockLines.Count - 1; i >= 0; i--)
+        {
+            if (IsCloseTag(blockLines[i].Trim(), "connection"))
+            {
+                blockLines.Insert(i, "proto " + desiredProto);
+                return;
+            }
+        }
+
+        blockLines.Add("proto " + desiredProto);
     }
 
     /// <summary>
@@ -224,6 +459,9 @@ public static class StormshieldProfileNormalizer
         || Eq(directive, "tls-crypt") || Eq(directive, "tls-auth")
         || Eq(directive, "tls-crypt-v2") || Eq(directive, "extra-certs");
 
+    private static bool IsOpaqueInlineBlock(string blockName) =>
+        IsInlinable(blockName) || Eq(blockName, "pkcs12") || Eq(blockName, "secret");
+
     // Split on LF after collapsing CRLF/CR to LF, so the normalized profile is byte-stable
     // regardless of where the input was pasted from (Windows clipboard, Unix file, HTTP body).
     private static string[] EnumerateLines(string text) =>
@@ -259,6 +497,24 @@ public static class StormshieldProfileNormalizer
 
     private static bool Eq(string a, string b) => a.Equals(b, StringComparison.OrdinalIgnoreCase);
 
+    private static bool IsCompressionDirectiveToStrip(string trimmedLine, string firstToken)
+    {
+        if (Eq(firstToken, "comp-noadapt")) return true;
+        if (Eq(firstToken, "comp-lzo"))
+        {
+            var value = ParseDirectiveValue(trimmedLine, "comp-lzo");
+            return !string.Equals(value, "no", StringComparison.OrdinalIgnoreCase);
+        }
+        if (Eq(firstToken, "compress"))
+        {
+            var value = ParseDirectiveValue(trimmedLine, "compress");
+            return value is not null
+                && !value.Equals("stub", StringComparison.OrdinalIgnoreCase)
+                && !value.Equals("stub-v2", StringComparison.OrdinalIgnoreCase);
+        }
+        return false;
+    }
+
     // Reads the first argument of a directive from an already-trimmed line whose first token is
     // <paramref name="directive"/> (e.g. "AES-128-CBC" from "cipher AES-128-CBC"). Returns null when
     // the directive has no argument.
@@ -284,4 +540,22 @@ public static class StormshieldProfileNormalizer
 
     private static bool IsAeadSuite(string cipher) =>
         Eq(cipher, "AES-256-GCM") || Eq(cipher, "AES-128-GCM") || Eq(cipher, "CHACHA20-POLY1305");
+
+    private enum OpenVpnRemoteTransport
+    {
+        Tcp,
+        Udp,
+    }
+
+    private static OpenVpnRemoteTransport? ParseRemoteTransport(string trimmedLine)
+    {
+        var parts = trimmedLine.Split(s_tokenSeparators, StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 4) return null;
+
+        var proto = parts[3];
+        if (proto.Length == 0 || proto[0] == '#' || proto[0] == ';') return null;
+        if (proto.StartsWith("tcp", StringComparison.OrdinalIgnoreCase)) return OpenVpnRemoteTransport.Tcp;
+        if (proto.StartsWith("udp", StringComparison.OrdinalIgnoreCase)) return OpenVpnRemoteTransport.Udp;
+        return null;
+    }
 }

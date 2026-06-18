@@ -16,6 +16,20 @@ namespace Wormhole.Tests.ViewModels;
 public class TunnelTestDialogViewModelTests
 {
     [Fact]
+    public void Prepare_DoesNotStartTunnel()
+    {
+        var provider = new FakeTunnelProvider(TunnelKind.WireGuard);
+        var (vm, config) = CreateVm(provider, new byte[] { 1, 2, 3 });
+
+        vm.Prepare(config);
+
+        Assert.Equal("Ready to test.", vm.Status);
+        Assert.True(vm.CanStart);
+        Assert.False(vm.HasResult);
+        Assert.Equal(0, provider.EstablishCount);
+    }
+
+    [Fact]
     public async Task Run_Success_EstablishesDisposesAndReportsSuccess()
     {
         var provider = new FakeTunnelProvider(TunnelKind.WireGuard);
@@ -35,6 +49,41 @@ public class TunnelTestDialogViewModelTests
         // The log streamed the establish phases plus the closing line.
         Assert.Contains(vm.Log, l => l.Contains("Bringing up the VPN tunnel", StringComparison.Ordinal));
         Assert.Contains(vm.Log, l => l.Contains("established successfully", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Run_WithProbeTarget_DialsThroughTunnelBeforeSuccess()
+    {
+        var provider = new FakeTunnelProvider(TunnelKind.WireGuard);
+        var (vm, config) = CreateVm(provider, new byte[] { 1, 2, 3 });
+        vm.TargetHost = "192.0.2.10";
+        vm.TargetPort = "22";
+
+        await vm.RunAsync(config);
+
+        Assert.True(vm.IsSuccess);
+        Assert.Equal(1, provider.LastInstance!.DialCount);
+        Assert.Equal("192.0.2.10", provider.LastInstance.LastDialHost);
+        Assert.Equal(22, provider.LastInstance.LastDialPort);
+        Assert.Contains("reached the target", vm.ResultMessage, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Run_WithProbeTargetFailure_ReportsTargetProbeFailed()
+    {
+        var provider = new FakeTunnelProvider(TunnelKind.WireGuard);
+        var (vm, config) = CreateVm(provider, new byte[] { 1, 2, 3 });
+        vm.TargetHost = "192.0.2.10";
+        vm.TargetPort = "22";
+        provider.InstanceDialFailure = new IOException("SOCKS5: Host unreachable.");
+
+        await vm.RunAsync(config);
+
+        Assert.False(vm.IsSuccess);
+        Assert.Equal("Target probe failed.", vm.Status);
+        Assert.Equal("Target probe failed", vm.ResultTitle);
+        Assert.Contains("started, but the target could not be reached", vm.ResultMessage, StringComparison.Ordinal);
+        Assert.Equal(1, provider.LastInstance!.DisposeCount);
     }
 
     [Fact]
@@ -161,6 +210,7 @@ public class TunnelTestDialogViewModelTests
         public byte[]? LastSecret { get; private set; }
         public FakeTunnelInstance? LastInstance { get; private set; }
         public Exception? EstablishFailure { get; set; }
+        public Exception? InstanceDialFailure { get; set; }
         public bool BlockUntilCancelled { get; set; }
 
         public async Task<ITunnelInstance> EstablishAsync(
@@ -178,7 +228,7 @@ public class TunnelTestDialogViewModelTests
                 await Task.Delay(Timeout.Infinite, cancellationToken).ConfigureAwait(false);
             }
             if (EstablishFailure is not null) throw EstablishFailure;
-            LastInstance = new FakeTunnelInstance();
+            LastInstance = new FakeTunnelInstance { DialFailure = InstanceDialFailure };
             return LastInstance;
         }
     }
@@ -186,11 +236,21 @@ public class TunnelTestDialogViewModelTests
     private sealed class FakeTunnelInstance : ITunnelInstance
     {
         public int DisposeCount { get; private set; }
+        public int DialCount { get; private set; }
+        public string? LastDialHost { get; private set; }
+        public int LastDialPort { get; private set; }
+        public Exception? DialFailure { get; set; }
         public TunnelState State { get; private set; } = TunnelState.Up;
         public event EventHandler<TunnelStateChangedEventArgs>? StateChanged;
         public IPEndPoint? Socks5Endpoint => new(IPAddress.Loopback, 0);
-        public Task<Stream> DialAsync(string host, int port, CancellationToken cancellationToken) =>
-            throw new NotSupportedException();
+        public Task<Stream> DialAsync(string host, int port, CancellationToken cancellationToken)
+        {
+            DialCount++;
+            LastDialHost = host;
+            LastDialPort = port;
+            if (DialFailure is not null) throw DialFailure;
+            return Task.FromResult<Stream>(new MemoryStream());
+        }
         public Task<int> BindLocalForwarderAsync(string host, int port, CancellationToken cancellationToken) =>
             throw new NotSupportedException();
         public ValueTask DisposeAsync()

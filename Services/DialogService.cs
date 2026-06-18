@@ -175,6 +175,7 @@ public sealed class DialogService : IDialogService
 
         var control = new TunnelTestDialog();
         var vm = control.ViewModel;
+        vm.Prepare(config);
 
         // Completes when the overlay is actually dismissed, so callers can await this like the old
         // ContentDialog did.
@@ -206,10 +207,6 @@ public sealed class DialogService : IDialogService
 
         control.CloseRequested += OnCloseRequested;
         mainWindow.ShowModalOverlay(control);
-        // Kick the test off. RunAsync never throws — every outcome flows into the bound state — so
-        // fire-and-forget is safe. HeaderText is set synchronously at its start, before the first
-        // render, so the title shows immediately.
-        _ = vm.RunAsync(config);
 
         try
         {

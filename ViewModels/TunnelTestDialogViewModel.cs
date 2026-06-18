@@ -17,8 +17,8 @@ namespace Wormhole.ViewModels;
 /// <summary>
 /// Drives <see cref="Views.Dialogs.TunnelTestDialog"/>: establishes a saved tunnel config once as a
 /// diagnostic, streaming each <see cref="TunnelProgress"/> phase into a live, timestamped log and
-/// surfacing the eventual success/failure. The established tunnel is closed immediately — the test
-/// only proves the tunnel can come up and must never leave a diagnostic tunnel running.
+/// surfacing the eventual success/failure. When a target probe is configured, the tunnel remains open
+/// only long enough to dial that target, then closes; diagnostics must never leave a tunnel running.
 /// State machine: idle -> IsBusy (log streams) -> result (<see cref="Succeeded"/> non-null).
 /// </summary>
 public sealed partial class TunnelTestDialogViewModel : ObservableObject, IDisposable
@@ -27,6 +27,7 @@ public sealed partial class TunnelTestDialogViewModel : ObservableObject, IDispo
     private readonly ILogger<TunnelTestDialogViewModel> _logger;
     private CancellationTokenSource? _cts;
     private TaskCompletionSource? _runTcs;
+    private TunnelConfig? _config;
     // Captured on the UI thread when RunAsync starts so progress callbacks (which arrive on the
     // provider's background thread) can hop back before touching the bound Log/Status. Null in unit
     // tests, where the marshal falls through to synchronous execution. Mirrors SessionTabViewModel.
@@ -52,11 +53,18 @@ public sealed partial class TunnelTestDialogViewModel : ObservableObject, IDispo
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(CanClose))]
+    [NotifyCanExecuteChangedFor(nameof(StartCommand))]
     [NotifyCanExecuteChangedFor(nameof(CancelCommand))]
     private bool isBusy;
 
     [ObservableProperty]
     private string status = string.Empty;
+
+    [ObservableProperty]
+    private string targetHost = string.Empty;
+
+    [ObservableProperty]
+    private string targetPort = string.Empty;
 
     // null while running / not started; true on success; false on failure or cancellation. Drives
     // the result InfoBar's visibility (HasResult) and severity (IsSuccess).
@@ -85,9 +93,32 @@ public sealed partial class TunnelTestDialogViewModel : ObservableObject, IDispo
     public bool CanClose => !IsBusy;
     public bool HasResult => Succeeded.HasValue;
     public bool IsSuccess => Succeeded == true;
+    public bool CanStart => !IsBusy && _config is not null;
+
+    public void Prepare(TunnelConfig config)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        _config = config;
+        HeaderText = $"Test tunnel: {config.Name}";
+        Status = "Ready to test.";
+        Log.Clear();
+        Succeeded = null;
+        WasCancelled = false;
+        WasInformational = false;
+        ResultTitle = string.Empty;
+        ResultMessage = string.Empty;
+        StartCommand.NotifyCanExecuteChanged();
+    }
+
+    [RelayCommand(CanExecute = nameof(CanStart))]
+    private async Task StartAsync()
+    {
+        if (_config is null) return;
+        await RunAsync(_config);
+    }
 
     /// <summary>
-    /// Run the diagnostic for <paramref name="config"/>. Invoked once when the dialog opens. Never
+    /// Run the diagnostic for <paramref name="config"/>. Invoked by the dialog's Start command. Never
     /// throws — every outcome (success, cancel, failure) is reported through the bound state.
     /// </summary>
     public async Task RunAsync(TunnelConfig config)
@@ -96,6 +127,7 @@ public sealed partial class TunnelTestDialogViewModel : ObservableObject, IDispo
         if (IsBusy) return;
 
         _dispatcher = TryGetDispatcher();
+        _config = config;
         HeaderText = $"Test tunnel: {config.Name}";
         IsBusy = true;
         Succeeded = null;
@@ -113,19 +145,33 @@ public sealed partial class TunnelTestDialogViewModel : ObservableObject, IDispo
         _runTcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var token = _cts.Token;
 
+        var probeRequested = false;
         var progress = new ProgressBridge(Report);
         try
         {
-            await using (await _tunnelManager.EstablishConfigAsync(config, token, progress).ConfigureAwait(true))
+            if (!TryReadProbeTarget(out var probeHost, out var probePort, out var validationError))
+                throw new InvalidOperationException(validationError);
+
+            await using (var tunnel = await _tunnelManager.EstablishConfigAsync(config, token, progress).ConfigureAwait(true))
             {
-                // Reaching here means the tunnel came up. Closing the instance immediately (the
-                // using scope) tears it down so the diagnostic never leaves a tunnel running.
+                // Reaching here means the tunnel came up. If the user supplied a target, prove the
+                // data plane reaches that host before closing the diagnostic tunnel.
+                if (!string.IsNullOrEmpty(probeHost))
+                {
+                    probeRequested = true;
+                    Status = "Testing target reachability…";
+                    AppendLog($"Testing target {probeHost}:{probePort} through the tunnel…");
+                    await using var stream = await tunnel.DialAsync(probeHost, probePort, token).ConfigureAwait(true);
+                    AppendLog($"Target {probeHost}:{probePort} is reachable through the tunnel.");
+                }
             }
 
             Status = "Tunnel test succeeded.";
             AppendLog("Tunnel established successfully. Test tunnel closed.");
             ResultTitle = "Tunnel test succeeded";
-            ResultMessage = $"'{config.Name}' started successfully. The test tunnel has been closed.";
+            ResultMessage = probeRequested
+                ? $"'{config.Name}' started successfully and reached the target. The test tunnel has been closed."
+                : $"'{config.Name}' started successfully. The test tunnel has been closed.";
             Succeeded = true;
         }
         catch (OperationCanceledException)
@@ -153,16 +199,26 @@ public sealed partial class TunnelTestDialogViewModel : ObservableObject, IDispo
         {
             _logger.LogError(ex, "Tunnel test failed for '{Name}'", config.Name);
             var lastStep = DescribeLastProgress(Volatile.Read(ref _lastProgress));
-            Status = "Tunnel test failed.";
             AppendLog($"Failed: {ex.Message}{lastStep}");
-            ResultTitle = "Tunnel test failed";
-            ResultMessage = $"'{config.Name}' failed to start: {ex.Message}{lastStep}";
+            if (probeRequested)
+            {
+                Status = "Target probe failed.";
+                ResultTitle = "Target probe failed";
+                ResultMessage = $"'{config.Name}' started, but the target could not be reached through the tunnel: {ex.Message}";
+            }
+            else
+            {
+                Status = "Tunnel test failed.";
+                ResultTitle = "Tunnel test failed";
+                ResultMessage = $"'{config.Name}' failed to start: {ex.Message}{lastStep}";
+            }
             Succeeded = false;
         }
         finally
         {
             IsBusy = false;
             _runTcs.TrySetResult();
+            StartCommand.NotifyCanExecuteChanged();
         }
     }
 
@@ -199,6 +255,27 @@ public sealed partial class TunnelTestDialogViewModel : ObservableObject, IDispo
 
     private void AppendLog(string line) =>
         Log.Add($"[{DateTime.Now.ToString("HH:mm:ss", CultureInfo.CurrentCulture)}] {line}");
+
+    private bool TryReadProbeTarget(out string host, out int port, out string error)
+    {
+        host = TargetHost.Trim();
+        port = 0;
+        error = string.Empty;
+        var portText = TargetPort.Trim();
+        if (host.Length == 0 && portText.Length == 0)
+            return true;
+        if (host.Length == 0)
+        {
+            error = "Target host is required when a target port is provided.";
+            return false;
+        }
+        if (!int.TryParse(portText, out port) || port is < 1 or > 65535)
+        {
+            error = "Target port must be between 1 and 65535.";
+            return false;
+        }
+        return true;
+    }
 
     private void MarshalToUi(Action action)
     {

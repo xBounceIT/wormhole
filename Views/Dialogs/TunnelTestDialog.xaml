@@ -32,13 +32,30 @@
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
                 </Grid.RowDefinitions>
 
-                <!-- Live status: spinner + current phase + cancel (while running). -->
+                <Grid Grid.Row="1" ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="120" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox Grid.Column="0"
+                             Header="Target host (optional)"
+                             PlaceholderText="server.internal"
+                             Text="{x:Bind ViewModel.TargetHost, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                    <TextBox Grid.Column="1"
+                             Header="Port"
+                             PlaceholderText="22"
+                             Text="{x:Bind ViewModel.TargetPort, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                </Grid>
+
+                <!-- Live status: spinner + current phase + start/cancel. -->
                 <Grid Grid.Row="0" ColumnSpacing="12">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
                     <ProgressRing Grid.Column="0"
@@ -51,6 +68,10 @@
                                TextWrapping="Wrap"
                                VerticalAlignment="Center" />
                     <Button Grid.Column="2"
+                            Content="Start"
+                            Command="{x:Bind ViewModel.StartCommand}"
+                            VerticalAlignment="Center" />
+                    <Button Grid.Column="3"
                             Content="Cancel"
                             Command="{x:Bind ViewModel.CancelCommand}"
                             VerticalAlignment="Center"
@@ -58,7 +79,7 @@
                 </Grid>
 
                 <!-- Streaming log. -->
-                <Border Grid.Row="1"
+                <Border Grid.Row="2"
                         CornerRadius="6"
                         Background="{ThemeResource LayerFillColorDefaultBrush}"
                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
@@ -88,7 +109,7 @@
                 </Border>
 
                 <!-- Eventual result. -->
-                <InfoBar Grid.Row="2"
+                <InfoBar Grid.Row="3"
                          IsOpen="{x:Bind ViewModel.HasResult, Mode=OneWay}"
                          IsClosable="False"
                          Severity="{x:Bind local:TunnelTestDialog.ResultSeverity(ViewModel.IsSuccess, ViewModel.WasCancelled, ViewModel.WasInformational), Mode=OneWay}"

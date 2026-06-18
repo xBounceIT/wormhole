@@ -35,6 +35,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdint>
 #include <cstring>
 #include <deque>
 #include <memory>
@@ -246,6 +247,9 @@ class WormholeTunClient : public openvpn::TunClient {
   // Inbound queue — drained by Go via ovpn_tun_recv.
   int dequeue_inbound(char* buf, int buf_len, int timeout_ms);
 
+  void set_dial_id(std::uint64_t dial_id);
+  std::string stats_string() const;
+
   // Surface session info to the C ABI; the WormholeClient asks us when
   // wait_connected is invoked. address_cidr is the v4 CIDR if present, else v6.
   // fields_m_ makes the tun_start (io_context thread) → C ABI (Go thread) handoff a
@@ -302,6 +306,20 @@ class WormholeTunClient : public openvpn::TunClient {
 
   // Stopping flag — set by stop() to suppress further outbound injection.
   std::atomic<bool> stopping_{false};
+
+  std::atomic<std::uint64_t> active_dial_id_{0};
+  std::atomic<std::uint64_t> active_dial_log_count_{0};
+  std::atomic<std::uint64_t> go_inject_calls_{0};
+  std::atomic<std::uint64_t> go_inject_bytes_{0};
+  std::atomic<std::uint64_t> core_inject_posts_{0};
+  std::atomic<std::uint64_t> core_inject_exceptions_{0};
+  std::atomic<std::uint64_t> core_tun_send_packets_{0};
+  std::atomic<std::uint64_t> core_tun_send_bytes_{0};
+  std::atomic<std::uint64_t> go_dequeue_packets_{0};
+  std::atomic<std::uint64_t> go_dequeue_bytes_{0};
+  std::atomic<std::uint64_t> go_dequeue_truncations_{0};
+
+  void log_dial_packet_event(const char* event, std::size_t len);
 };
 
 // ---------------------------------------------------------------------------
@@ -613,6 +631,17 @@ class WormholeClient final : public OpenVPNClient {
     return tc->inject_from_go(buf, buf_len);
   }
 
+  void set_dial_id(std::uint64_t dial_id) {
+    auto* tc = current_tun_.load(std::memory_order_acquire);
+    if (tc) tc->set_dial_id(dial_id);
+  }
+
+  std::string tun_stats() {
+    auto* tc = current_tun_.load(std::memory_order_acquire);
+    if (!tc) return "active_tun=0";
+    return tc->stats_string();
+  }
+
   // Space-separated pushed DNS resolver list ("" when none / tunnel not up).
   std::string pushed_dns() {
     auto* tc = current_tun_.load(std::memory_order_acquire);
@@ -746,6 +775,9 @@ bool WormholeTunClient::tun_send(openvpn::BufferAllocated& buf) {
   const char* data = reinterpret_cast<const char*>(buf.c_data());
   const std::size_t len = buf.size();
   if (len == 0) return true;
+  core_tun_send_packets_.fetch_add(1, std::memory_order_relaxed);
+  core_tun_send_bytes_.fetch_add(static_cast<std::uint64_t>(len), std::memory_order_relaxed);
+  log_dial_packet_event("core_tun_send", len);
   {
     std::lock_guard<std::mutex> lk(inbound_m_);
     inbound_q_.emplace_back(data, data + len);
@@ -757,6 +789,9 @@ bool WormholeTunClient::tun_send(openvpn::BufferAllocated& buf) {
 int WormholeTunClient::inject_from_go(const char* buf, int len) {
   if (len <= 0 || !buf) return 1;
   if (stopping_.load(std::memory_order_acquire)) return 1;
+  go_inject_calls_.fetch_add(1, std::memory_order_relaxed);
+  go_inject_bytes_.fetch_add(static_cast<std::uint64_t>(len), std::memory_order_relaxed);
+  log_dial_packet_event("go_inject_from_go", static_cast<std::size_t>(len));
 
   // Critical: copy NOW. The Go runtime pins the pointer only for the duration of
   // the C call. Once we return from ovpn_tun_send, the next dev.Read on the Go
@@ -775,9 +810,12 @@ int WormholeTunClient::inject_from_go(const char* buf, int len) {
       openvpn::BufferAllocated outbuf;
       frame->prepare(openvpn::Frame::READ_TUN, outbuf);
       outbuf.write(pkt.data(), pkt.size());
+      core_inject_posts_.fetch_add(1, std::memory_order_relaxed);
+      log_dial_packet_event("core_tun_recv_post", pkt.size());
       parent_.tun_recv(outbuf); // encrypt + transport_send
     } catch (const std::exception&) {
-      // Drop the packet on any unexpected exception; a future iteration logs.
+      core_inject_exceptions_.fetch_add(1, std::memory_order_relaxed);
+      log_dial_packet_event("core_tun_recv_exception", pkt.size());
     }
   });
   return 0;
@@ -794,8 +832,54 @@ int WormholeTunClient::dequeue_inbound(char* buf, int buf_len, int timeout_ms) {
   auto pkt = std::move(inbound_q_.front());
   inbound_q_.pop_front();
   int n = std::min<int>(static_cast<int>(pkt.size()), buf_len);
+  if (n < static_cast<int>(pkt.size())) {
+    go_dequeue_truncations_.fetch_add(1, std::memory_order_relaxed);
+  }
   std::memcpy(buf, pkt.data(), n);
+  go_dequeue_packets_.fetch_add(1, std::memory_order_relaxed);
+  go_dequeue_bytes_.fetch_add(static_cast<std::uint64_t>(n), std::memory_order_relaxed);
+  log_dial_packet_event("go_ovpn_tun_recv_dequeue", static_cast<std::size_t>(n));
   return n;
+}
+
+void WormholeTunClient::set_dial_id(std::uint64_t dial_id) {
+  active_dial_id_.store(dial_id, std::memory_order_release);
+  active_dial_log_count_.store(0, std::memory_order_release);
+  if (dial_id != 0) {
+    std::fprintf(stderr, "[ovpn3-tun] dial_id=%llu active\n",
+                 static_cast<unsigned long long>(dial_id));
+    std::fflush(stderr);
+  }
+}
+
+std::string WormholeTunClient::stats_string() const {
+  char buf[512];
+  std::snprintf(
+      buf,
+      sizeof(buf),
+      "active_tun=1 go_inject_calls=%llu go_inject_bytes=%llu core_inject_posts=%llu core_inject_exceptions=%llu core_tun_send_packets=%llu core_tun_send_bytes=%llu go_dequeue_packets=%llu go_dequeue_bytes=%llu go_dequeue_truncations=%llu",
+      static_cast<unsigned long long>(go_inject_calls_.load(std::memory_order_relaxed)),
+      static_cast<unsigned long long>(go_inject_bytes_.load(std::memory_order_relaxed)),
+      static_cast<unsigned long long>(core_inject_posts_.load(std::memory_order_relaxed)),
+      static_cast<unsigned long long>(core_inject_exceptions_.load(std::memory_order_relaxed)),
+      static_cast<unsigned long long>(core_tun_send_packets_.load(std::memory_order_relaxed)),
+      static_cast<unsigned long long>(core_tun_send_bytes_.load(std::memory_order_relaxed)),
+      static_cast<unsigned long long>(go_dequeue_packets_.load(std::memory_order_relaxed)),
+      static_cast<unsigned long long>(go_dequeue_bytes_.load(std::memory_order_relaxed)),
+      static_cast<unsigned long long>(go_dequeue_truncations_.load(std::memory_order_relaxed)));
+  return std::string(buf);
+}
+
+void WormholeTunClient::log_dial_packet_event(const char* event, std::size_t len) {
+  const std::uint64_t dial_id = active_dial_id_.load(std::memory_order_acquire);
+  if (dial_id == 0) return;
+  const std::uint64_t n = active_dial_log_count_.fetch_add(1, std::memory_order_acq_rel);
+  if (n >= 32) return;
+  std::fprintf(stderr, "[ovpn3-tun] dial_id=%llu event=%s len=%llu\n",
+               static_cast<unsigned long long>(dial_id),
+               event,
+               static_cast<unsigned long long>(len));
+  std::fflush(stderr);
 }
 
 #endif // HAVE_OPENVPN3
@@ -907,6 +991,28 @@ int ovpn_tun_send(ovpn_client_t* c, const char* buf, int buf_len) {
   return reinterpret_cast<ClientWrapper*>(c)->client->tun_send(buf, buf_len);
 #else
   (void)c; (void)buf; (void)buf_len;
+  return 100;
+#endif
+}
+
+void ovpn_set_dial_id(ovpn_client_t* c, unsigned long long dial_id) {
+#if HAVE_OPENVPN3
+  if (!c) return;
+  reinterpret_cast<ClientWrapper*>(c)->client->set_dial_id(static_cast<std::uint64_t>(dial_id));
+#else
+  (void)c; (void)dial_id;
+#endif
+}
+
+int ovpn_tun_stats(ovpn_client_t* c, char* out_buf, int out_len) {
+#if HAVE_OPENVPN3
+  if (!c || !out_buf || out_len < 1) return 1;
+  const std::string stats = reinterpret_cast<ClientWrapper*>(c)->client->tun_stats();
+  std::strncpy(out_buf, stats.c_str(), out_len - 1);
+  out_buf[out_len - 1] = '\0';
+  return 0;
+#else
+  (void)c; (void)out_buf; (void)out_len;
   return 100;
 #endif
 }

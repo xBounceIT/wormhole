@@ -58,6 +58,33 @@ public class Socks5ClientTests
     }
 
     [Fact]
+    public async Task ConnectAsync_IncludesServerFailureDetailWhenPresent()
+    {
+        using var server = new FakeSocksServer
+        {
+            ReplyCode = 0x04 /* host unreachable */,
+            ReplyDetail = "no data-plane response from tunnel (dial_id=7 target=192.0.2.10:22 root=context deadline exceeded counters_delta=in_packets=0 out_packets=4)",
+        };
+        server.Start();
+
+        IOException ex;
+        try
+        {
+            ex = await Assert.ThrowsAsync<IOException>(() =>
+                Socks5Client.ConnectAsync(server.LocalEndpoint, "192.0.2.10", 22, CancellationToken.None));
+        }
+        finally
+        {
+            await server.StopAsync();
+        }
+
+        Assert.Contains("reply code 0x04", ex.Message);
+        Assert.Contains("no data-plane response from tunnel", ex.Message);
+        Assert.Contains("context deadline exceeded", ex.Message);
+        Assert.Contains("out_packets=4", ex.Message);
+    }
+
+    [Fact]
     public async Task ConnectAsync_SendsIPv4LiteralAsAtyp1()
     {
         using var server = new FakeSocksServer();
@@ -139,6 +166,7 @@ public class Socks5ClientTests
 
         public IPEndPoint LocalEndpoint => (IPEndPoint)_listener.LocalEndpoint;
         public byte ReplyCode { get; set; }
+        public string? ReplyDetail { get; set; }
         public byte LastAtyp { get; private set; }
         public string? LastRequestedHost { get; private set; }
         public int LastRequestedPort { get; private set; }
@@ -214,7 +242,23 @@ public class Socks5ClientTests
                 LastRequestedHost = parsedHost;
                 LastRequestedPort = (portBuf[0] << 8) | portBuf[1];
 
-                await s.WriteAsync(new byte[] { 0x05, ReplyCode, 0x00, 0x01, 0, 0, 0, 0, 0, 0 });
+                if (ReplyCode != 0x00 && !string.IsNullOrEmpty(ReplyDetail))
+                {
+                    var detail = Encoding.UTF8.GetBytes(ReplyDetail);
+                    Assert.True(detail.Length <= 255);
+                    var reply = new byte[4 + 1 + detail.Length + 2];
+                    reply[0] = 0x05;
+                    reply[1] = ReplyCode;
+                    reply[2] = 0x00;
+                    reply[3] = 0x03;
+                    reply[4] = (byte)detail.Length;
+                    Buffer.BlockCopy(detail, 0, reply, 5, detail.Length);
+                    await s.WriteAsync(reply);
+                }
+                else
+                {
+                    await s.WriteAsync(new byte[] { 0x05, ReplyCode, 0x00, 0x01, 0, 0, 0, 0, 0, 0 });
+                }
 
                 if (ReplyCode == 0x00)
                 {

@@ -78,6 +78,14 @@ int ovpn_tun_recv(ovpn_client_t* c, char* buf, int buf_len, int timeout_ms);
 // the packet and hands it to the transport for delivery to the server.
 int ovpn_tun_send(ovpn_client_t* c, const char* buf, int buf_len);
 
+// Attach the current SOCKS CONNECT correlation id to short-lived TUN diagnostics. This is
+// diagnostic-only; packet delivery does not depend on it. Passing 0 clears the id.
+void ovpn_set_dial_id(ovpn_client_t* c, unsigned long long dial_id);
+
+// Copy a one-line snapshot of shim packet counters into out_buf (NUL-terminated).
+// Counters are header/path diagnostics only; no packet payload is copied or retained.
+int ovpn_tun_stats(ovpn_client_t* c, char* out_buf, int out_len);
+
 // Signal the client to disconnect. Returns immediately; ovpn_tun_recv will start
 // returning -1 once the C++ event loop has unwound.
 void ovpn_stop(ovpn_client_t* c);
