@@ -464,16 +464,17 @@ func (d tnetDialer) DialContext(ctx context.Context, network, address string) (c
 	defer func() {
 		after := d.snapshotCounters()
 		shimAfter := d.snapshotShimStats()
+		delta := after.Sub(before)
 		if d.diag != nil && dialID != 0 {
 			packetSummary = d.diag.endDial(dialID)
 		}
 		if err != nil {
-			err = d.enrichDialError(address, dialID, before, after, err)
+			err = d.enrichDialError(address, dialID, delta, err)
 			logf("openvpn: dial_id=%d target=%s duration=%s result=failed error=%v counters_before=%s counters_after=%s counters_delta=%s shim_before=%s shim_after=%s packet_summary=%s",
-				dialID, address, time.Since(start).Round(time.Millisecond), err, before, after, after.Sub(before), shimBefore, shimAfter, packetSummary)
+				dialID, address, time.Since(start).Round(time.Millisecond), err, before, after, delta, shimBefore, shimAfter, packetSummary)
 		} else {
 			logf("openvpn: dial_id=%d target=%s duration=%s result=success counters_before=%s counters_after=%s counters_delta=%s shim_before=%s shim_after=%s packet_summary=%s",
-				dialID, address, time.Since(start).Round(time.Millisecond), before, after, after.Sub(before), shimBefore, shimAfter, packetSummary)
+				dialID, address, time.Since(start).Round(time.Millisecond), before, after, delta, shimBefore, shimAfter, packetSummary)
 		}
 	}()
 
@@ -592,8 +593,7 @@ func (d tnetDialer) snapshotShimStats() string {
 	return string(buf[:end])
 }
 
-func (d tnetDialer) enrichDialError(target string, dialID uint64, before, after ovpnTrafficSnapshot, err error) error {
-	delta := after.Sub(before)
+func (d tnetDialer) enrichDialError(target string, dialID uint64, delta ovpnTrafficSnapshot, err error) error {
 	if delta.outPackets > 0 && delta.inPackets == 0 {
 		return fmt.Errorf("no data-plane response from tunnel (dial_id=%d target=%s root=%w counters_delta=%s)", dialID, target, err, delta)
 	}

@@ -151,9 +151,9 @@ public static class Socks5Client
                 var lenBuf = new byte[1];
                 await stream.ReadExactlyAsync(lenBuf, cancellationToken).ConfigureAwait(false);
                 addrLength = lenBuf[0];
-                var domainBytes = new byte[addrLength + 2];
-                await stream.ReadExactlyAsync(domainBytes, cancellationToken).ConfigureAwait(false);
-                return addrLength == 0 ? null : Encoding.UTF8.GetString(domainBytes, 0, addrLength);
+                var addressAndPortBytes = new byte[addrLength + 2];
+                await stream.ReadExactlyAsync(addressAndPortBytes, cancellationToken).ConfigureAwait(false);
+                return addrLength == 0 ? null : Encoding.UTF8.GetString(addressAndPortBytes, 0, addrLength);
             default:
                 throw new IOException($"SOCKS5: unknown bound address type 0x{atyp:x2}");
         }

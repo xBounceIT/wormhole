@@ -235,6 +235,20 @@ const (
 	tcpFlagCwr uint8 = 0x80
 )
 
+var tcpFlagNames = [...]struct {
+	bit  uint8
+	name string
+}{
+	{tcpFlagSyn, "SYN"},
+	{tcpFlagAck, "ACK"},
+	{tcpFlagRst, "RST"},
+	{tcpFlagFin, "FIN"},
+	{tcpFlagPsh, "PSH"},
+	{tcpFlagUrg, "URG"},
+	{tcpFlagEce, "ECE"},
+	{tcpFlagCwr, "CWR"},
+}
+
 func summarizeIPPacket(pkt []byte) string {
 	return parsePacketSummary(pkt).text
 }
@@ -380,20 +394,8 @@ func packetLengthFromHeader(version int, payload []byte) int {
 }
 
 func tcpFlagString(flags uint8) string {
-	parts := make([]string, 0, 8)
-	for _, flag := range []struct {
-		bit  uint8
-		name string
-	}{
-		{tcpFlagSyn, "SYN"},
-		{tcpFlagAck, "ACK"},
-		{tcpFlagRst, "RST"},
-		{tcpFlagFin, "FIN"},
-		{tcpFlagPsh, "PSH"},
-		{tcpFlagUrg, "URG"},
-		{tcpFlagEce, "ECE"},
-		{tcpFlagCwr, "CWR"},
-	} {
+	parts := make([]string, 0, len(tcpFlagNames))
+	for _, flag := range tcpFlagNames {
 		if flags&flag.bit != 0 {
 			parts = append(parts, flag.name)
 		}
