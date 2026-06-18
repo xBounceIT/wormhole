@@ -241,6 +241,33 @@ public class StormshieldProfileNormalizerTests
     }
 
     [Fact]
+    public void ApplyTransportOverride_ConnectionBlockProto_FiltersUnqualifiedRemote()
+    {
+        const string ovpn =
+            "client\n"
+            + "<connection>\nremote fw.example.com 1194\nproto udp\n</connection>\n"
+            + "<connection>\nremote fw.example.com 443\nproto tcp\n</connection>\n";
+
+        var result = StormshieldProfileNormalizer.ApplyTransportOverride(
+            ovpn, StormshieldOpenVpnTransportOverride.ForceTcp);
+
+        Assert.DoesNotContain("remote fw.example.com 1194", result);
+        Assert.Contains("<connection>\nremote fw.example.com 443\nproto tcp-client\n</connection>", result);
+    }
+
+    [Fact]
+    public void ApplyTransportOverride_ConnectionBlockProtoWithoutMatchingTransport_Throws()
+    {
+        const string ovpn = "client\n<connection>\nremote fw.example.com 1194\nproto udp\n</connection>\n";
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            StormshieldProfileNormalizer.ApplyTransportOverride(
+                ovpn, StormshieldOpenVpnTransportOverride.ForceTcp));
+
+        Assert.Contains("no TCP remote", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Normalize_DoesNotInjectDataCiphers_WhenAlreadyPresent()
     {
         const string ovpn = "client\ncipher AES-256-CBC\ndata-ciphers AES-256-GCM:AES-256-CBC\n";

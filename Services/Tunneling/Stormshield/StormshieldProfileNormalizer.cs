@@ -281,14 +281,66 @@ public static class StormshieldProfileNormalizer
         out List<string> rewrittenBlock)
     {
         rewrittenBlock = new List<string>(blockLines.Count + 1);
-        string? openBlock = null;
+        var remotes = new List<BlockRemote>();
         var blockSawRemote = false;
         var blockKeptRemote = false;
         var blockSawProto = false;
         var blockKeptUnqualifiedRemote = false;
+        OpenVpnRemoteTransport? blockProto = null;
 
-        foreach (var rawLine in blockLines)
+        string? openBlock = null;
+        for (var i = 0; i < blockLines.Count; i++)
         {
+            var rawLine = blockLines[i];
+            var trimmed = rawLine.Trim();
+
+            if (openBlock is not null)
+            {
+                if (IsCloseTag(trimmed, openBlock)) openBlock = null;
+                continue;
+            }
+            if (TryReadOpenTag(trimmed, out var blockName) && IsOpaqueInlineBlock(blockName))
+            {
+                openBlock = blockName;
+                continue;
+            }
+
+            var firstToken = FirstToken(trimmed);
+            if (Eq(firstToken, "proto"))
+            {
+                blockSawProto = true;
+                blockProto = ParseProtoTransport(trimmed) ?? blockProto;
+                continue;
+            }
+
+            if (Eq(firstToken, "remote"))
+            {
+                sawRemote = true;
+                blockSawRemote = true;
+                remotes.Add(new BlockRemote(i, ParseRemoteTransport(trimmed)));
+            }
+        }
+
+        var keepRemote = new bool[blockLines.Count];
+        foreach (var remote in remotes)
+        {
+            var effectiveTransport = remote.Transport ?? blockProto;
+            if (effectiveTransport is not null && effectiveTransport != desired)
+                continue;
+
+            keptRemote = true;
+            blockKeptRemote = true;
+            blockKeptUnqualifiedRemote |= remote.Transport is null && blockProto is null;
+            keepRemote[remote.LineIndex] = true;
+        }
+
+        if (blockSawRemote && !blockKeptRemote)
+            return false;
+
+        openBlock = null;
+        for (var i = 0; i < blockLines.Count; i++)
+        {
+            var rawLine = blockLines[i];
             var trimmed = rawLine.Trim();
 
             if (openBlock is not null)
@@ -307,37 +359,27 @@ public static class StormshieldProfileNormalizer
             var firstToken = FirstToken(trimmed);
             if (Eq(firstToken, "proto"))
             {
-                blockSawProto = true;
                 rewrittenBlock.Add("proto " + desiredProto);
                 continue;
             }
 
             if (Eq(firstToken, "remote"))
             {
-                sawRemote = true;
-                blockSawRemote = true;
-                var remoteTransport = ParseRemoteTransport(trimmed);
-                if (remoteTransport is null || remoteTransport == desired)
-                {
-                    keptRemote = true;
-                    blockKeptRemote = true;
-                    blockKeptUnqualifiedRemote |= remoteTransport is null;
+                if (keepRemote[i])
                     rewrittenBlock.Add(rawLine);
-                }
                 continue;
             }
 
             rewrittenBlock.Add(rawLine);
         }
 
-        if (blockSawRemote && !blockKeptRemote)
-            return false;
-
         if (blockKeptUnqualifiedRemote && !blockSawProto)
             InsertBeforeConnectionClose(rewrittenBlock, desiredProto);
 
         return true;
     }
+
+    private readonly record struct BlockRemote(int LineIndex, OpenVpnRemoteTransport? Transport);
 
     private static void InsertBeforeConnectionClose(List<string> blockLines, string desiredProto)
     {
@@ -554,6 +596,16 @@ public static class StormshieldProfileNormalizer
 
         var proto = parts[3];
         if (proto.Length == 0 || proto[0] == '#' || proto[0] == ';') return null;
+        if (proto.StartsWith("tcp", StringComparison.OrdinalIgnoreCase)) return OpenVpnRemoteTransport.Tcp;
+        if (proto.StartsWith("udp", StringComparison.OrdinalIgnoreCase)) return OpenVpnRemoteTransport.Udp;
+        return null;
+    }
+
+    private static OpenVpnRemoteTransport? ParseProtoTransport(string trimmedLine)
+    {
+        var proto = ParseDirectiveValue(trimmedLine, "proto");
+        if (string.IsNullOrEmpty(proto)) return null;
+        if (proto[0] == '#' || proto[0] == ';') return null;
         if (proto.StartsWith("tcp", StringComparison.OrdinalIgnoreCase)) return OpenVpnRemoteTransport.Tcp;
         if (proto.StartsWith("udp", StringComparison.OrdinalIgnoreCase)) return OpenVpnRemoteTransport.Udp;
         return null;
