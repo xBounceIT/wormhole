@@ -27,17 +27,39 @@ internal static class UpdateChangelogFormatter
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <style>
         :root {
-          color-scheme: light dark;
+          color-scheme: light;
+          --wh-bg: #ffffff;
+          --wh-text: #1f242b;
+          --wh-muted: #5f6875;
+          --wh-link: #005fb8;
+          --wh-code-bg: #eef1f5;
+          --wh-border: #d8dee8;
           font-family: "Segoe UI", Arial, sans-serif;
           font-size: 14px;
           line-height: 1.45;
         }
+        @media (prefers-color-scheme: dark) {
+          :root {
+            color-scheme: dark;
+            --wh-bg: #1e1f22;
+            --wh-text: #f2f5f9;
+            --wh-muted: #b5beca;
+            --wh-link: #8ec5ff;
+            --wh-code-bg: #2b2d31;
+            --wh-border: #444b57;
+          }
+        }
+        html {
+          min-height: 100%;
+          background: var(--wh-bg);
+        }
         body {
           box-sizing: border-box;
+          min-height: 100vh;
           margin: 0;
           padding: 14px 16px;
-          background: Canvas;
-          color: CanvasText;
+          background: var(--wh-bg);
+          color: var(--wh-text);
         }
         :first-child { margin-top: 0; }
         :last-child { margin-bottom: 0; }
@@ -52,20 +74,20 @@ internal static class UpdateChangelogFormatter
         p, ul, ol, pre, blockquote, table { margin: 0 0 12px; }
         ul, ol { padding-left: 22px; }
         li + li { margin-top: 4px; }
-        a { color: LinkText; text-decoration: none; }
+        a { color: var(--wh-link); text-decoration: none; }
         a:hover { text-decoration: underline; }
         code {
           font-family: Consolas, "Cascadia Mono", monospace;
           font-size: 0.92em;
           padding: 1px 4px;
           border-radius: 4px;
-          background: color-mix(in srgb, CanvasText 10%, Canvas);
+          background: var(--wh-code-bg);
         }
         pre {
           overflow-x: auto;
           padding: 10px 12px;
           border-radius: 6px;
-          background: color-mix(in srgb, CanvasText 10%, Canvas);
+          background: var(--wh-code-bg);
         }
         pre code {
           padding: 0;
@@ -73,8 +95,8 @@ internal static class UpdateChangelogFormatter
         }
         blockquote {
           padding-left: 12px;
-          border-left: 3px solid color-mix(in srgb, CanvasText 30%, Canvas);
-          color: color-mix(in srgb, CanvasText 75%, Canvas);
+          border-left: 3px solid var(--wh-border);
+          color: var(--wh-muted);
         }
         table {
           width: 100%;
@@ -82,7 +104,7 @@ internal static class UpdateChangelogFormatter
         }
         th, td {
           padding: 6px 8px;
-          border: 1px solid color-mix(in srgb, CanvasText 20%, Canvas);
+          border: 1px solid var(--wh-border);
           text-align: left;
         }
         </style>

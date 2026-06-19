@@ -8,7 +8,7 @@
     <Grid MinHeight="300"
           Background="Transparent">
         <controls:WebView2 x:Name="ChangelogWebView"
-                           DefaultBackgroundColor="Transparent"
+                           DefaultBackgroundColor="#1e1f22"
                            HorizontalAlignment="Stretch"
                            VerticalAlignment="Stretch"
                            MinHeight="300" />
