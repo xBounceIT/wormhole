@@ -91,54 +91,50 @@ public class StormshieldTunnelProviderTests
     }
 
     [Theory]
-    [InlineData(StormshieldOpenVpnCompressionFramingOverride.Auto)]
-    [InlineData(StormshieldOpenVpnCompressionFramingOverride.ForceLegacyStub)]
-    public void ApplyCompressionFramingPolicy_AddsLegacyStub_WhenMissing(
-        StormshieldOpenVpnCompressionFramingOverride framingOverride)
+    [InlineData("client\ndev tun\nremote fw.example.com 443 tcp\n")]
+    [InlineData("client\ndev tun\nremote fw.example.com 443\ncompress lz4\n")]
+    [InlineData("client\ndev tun\nremote fw.example.com 443\ncomp-lzo yes\n")]
+    [InlineData("client\ndev tun\nremote fw.example.com 443\ncomp-noadapt\n")]
+    public void ApplyCompressionFramingPolicy_PreserveProfile_ReturnsProfileUnchanged(string profile)
+    {
+        var result = StormshieldTunnelProvider.ApplyCompressionFramingPolicy(
+            profile,
+            StormshieldOpenVpnCompressionFramingOverride.PreserveProfile);
+
+        Assert.Equal(profile, result);
+    }
+
+    [Fact]
+    public void ApplyCompressionFramingPolicy_ForceLegacyStub_AddsLegacyStub_WhenMissing()
     {
         const string profile = "client\ndev tun\nremote fw.example.com 443 tcp\n";
 
         var result = StormshieldTunnelProvider.ApplyCompressionFramingPolicy(
             profile,
-            framingOverride);
+            StormshieldOpenVpnCompressionFramingOverride.ForceLegacyStub);
 
         Assert.Equal(1, CountDirectiveLine(result, "comp-lzo no"));
     }
 
     [Theory]
     [InlineData("comp-lzo no")]
+    [InlineData("compress lz4")]
+    [InlineData("comp-lzo yes")]
     [InlineData("compress")]
     [InlineData("compress stub")]
     [InlineData("compress stub-v2")]
-    public void ApplyCompressionFramingPolicy_Auto_DoesNotDuplicateExistingFraming(string compressionLine)
+    public void ApplyCompressionFramingPolicy_ForceLegacyStub_DoesNotDuplicateExistingCompressionOrFraming(string compressionLine)
     {
         var profile = $"client\ndev tun\n{compressionLine}\n";
 
         var result = StormshieldTunnelProvider.ApplyCompressionFramingPolicy(
             profile,
-            StormshieldOpenVpnCompressionFramingOverride.Auto);
+            StormshieldOpenVpnCompressionFramingOverride.ForceLegacyStub);
 
         Assert.Equal(1, CountDirectiveLine(result, compressionLine));
         Assert.Equal(
             compressionLine.Equals("comp-lzo no", StringComparison.OrdinalIgnoreCase) ? 1 : 0,
             CountDirectiveLine(result, "comp-lzo no"));
-    }
-
-    [Theory]
-    [InlineData("compress lz4")]
-    [InlineData("comp-lzo yes")]
-    [InlineData("comp-noadapt")]
-    public void ApplyCompressionFramingPolicy_Auto_AddsLegacyStub_AfterNormalizeStripsRealCompression(string compressionLine)
-    {
-        var rawProfile = $"client\ndev tun\nremote fw.example.com 443\n{compressionLine}\n";
-        var normalized = StormshieldProfileNormalizer.Normalize(rawProfile);
-
-        var result = StormshieldTunnelProvider.ApplyCompressionFramingPolicy(
-            normalized,
-            StormshieldOpenVpnCompressionFramingOverride.Auto);
-
-        Assert.DoesNotContain(compressionLine, result);
-        Assert.Equal(1, CountDirectiveLine(result, "comp-lzo no"));
     }
 
     // Shared valid Automatic-mode settings for the ResolveAutomaticCoreAsync tests below.

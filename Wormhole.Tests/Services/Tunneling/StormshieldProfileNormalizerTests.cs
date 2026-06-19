@@ -292,28 +292,14 @@ public class StormshieldProfileNormalizerTests
     [InlineData("compress lz4")]
     [InlineData("comp-lzo yes")]
     [InlineData("comp-noadapt")]
-    public void Normalize_StripsRealCompressionDirectives(string compressionLine)
-    {
-        // Stormshield itself recommends disabling compression (VORACLE), so any compression directive
-        // that can enable real compression is removed regardless of which variant the firewall emitted.
-        var ovpn = $"client\ndev tun\nremote fw.example.com 443\n{compressionLine}\n";
-
-        var result = StormshieldProfileNormalizer.Normalize(ovpn);
-
-        Assert.DoesNotContain(compressionLine, result);
-        Assert.Contains("remote fw.example.com 443", result);
-    }
-
-    [Theory]
     [InlineData("comp-lzo no")]
     [InlineData("compress")]
     [InlineData("compress stub")]
     [InlineData("compress stub-v2")]
-    public void Normalize_PreservesNoCompressionFramingDirectives(string compressionLine)
+    public void Normalize_PreservesCompressionAndFramingDirectives(string compressionLine)
     {
-        // These directives do not enable payload compression. They preserve legacy OpenVPN framing
-        // where data-channel packets carry a NO_COMPRESS marker byte; old Stormshield gateways still
-        // require that marker even though compression itself is disabled.
+        // Stormshield appliances vary by firmware; preserve the profile-provided compression/framing
+        // shape and let the OpenVPN sidecar's asymmetric mode handle inbound compatibility.
         var ovpn = $"client\ndev tun\nremote fw.example.com 443\n{compressionLine}\n";
 
         var result = StormshieldProfileNormalizer.Normalize(ovpn);
@@ -365,8 +351,8 @@ public class StormshieldProfileNormalizerTests
     public void Normalize_PreservesInlineBlockContentVerbatim()
     {
         // A base64 body line can collide with a directive keyword (lowercase letters are valid
-        // base64), so content inside <ca>/<cert>/<key> blocks must NEVER be filtered. Here a lone
-        // "compress" line lives inside <ca>; only the top-level "compress lz4" must be stripped.
+        // base64), so content inside <ca>/<cert>/<key> blocks must NEVER be filtered. Here both the
+        // inline-block "compress" line and the top-level "compress lz4" line are preserved.
         const string ovpn =
             "client\n" +
             "dev tun\n" +
@@ -379,9 +365,7 @@ public class StormshieldProfileNormalizerTests
 
         var result = StormshieldProfileNormalizer.Normalize(ovpn);
 
-        // Top-level compression directive removed...
-        Assert.DoesNotContain("compress lz4", result);
-        // ...but the identical-looking line inside the inline block survived verbatim.
+        Assert.Contains("compress lz4", result);
         Assert.Contains("<ca>\ncompress\nMIIBlevelbase64==\n</ca>", result);
     }
 

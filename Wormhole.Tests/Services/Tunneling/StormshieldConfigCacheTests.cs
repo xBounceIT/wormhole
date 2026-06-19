@@ -168,10 +168,10 @@ public sealed class StormshieldConfigCacheTests : IDisposable
         Assert.Contains("remote new 443", record.ProfileOvpn);
     }
 
-    // ----- Schema migration: an older normalization-only record is re-normalized in place, NOT discarded -----
+    // ----- Schema compatibility: pre-v3 records are discarded, not migrated -----
     //
-    // The point is to spare the user an OTP-spending re-download just because the app updated to a build whose
-    // normalizer changed (the v1->v2 bump that began stripping tls-cipher caused exactly that cold-start pain).
+    // v1/v2 cached profiles may already have had compression/framing directives removed before they were
+    // written. That loss is unrecoverable from the cache body, so old schemas must miss and re-download.
 
     // Writes a record at an arbitrary schema version straight to disk in the cache's own on-disk format
     // (DPAPI-protected, tunnel-Id entropy) so tests can stage a "previous version wrote this" record — the
@@ -183,55 +183,21 @@ public sealed class StormshieldConfigCacheTests : IDisposable
         File.WriteAllBytes(CachePath(_dir, id), blob);
     }
 
-    [Fact]
-    public async Task Read_OlderSchema_NormalizationOnly_MigratesInPlace_StripsTlsCipher_AndPersists()
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public async Task Read_OlderSchema_ReturnsNull(int schemaVersion)
     {
         var cache = NewCache();
         var id = Guid.NewGuid();
         var settings = Settings();
-        // A v1 record: the profile still carries the tls-cipher pin that the current normalizer strips (the
-        // exact reason v2 invalidated v1). Re-normalizing must recover a usable profile without a re-download.
-        const string v1Profile =
-            "client\ndev tun\nremote fw 443\ntls-cipher TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA256\n<ca>cert</ca>\n";
         SeedRawRecord(id, new StormshieldCacheRecord
         {
-            SchemaVersion = 1,
+            SchemaVersion = schemaVersion,
             SiteIdentityHash = StormshieldConfigCache.ComputeSiteIdentity(settings),
             ConfigHash = "HASH123",
-            ProfileOvpn = v1Profile,
-            CachedAtUtc = DateTimeOffset.UtcNow,
-        });
-
-        var record = await cache.TryReadAsync(id, settings, CancellationToken.None);
-
-        Assert.NotNull(record);
-        Assert.Equal(StormshieldCacheRecord.CurrentSchemaVersion, record!.SchemaVersion);           // upgraded
-        Assert.Equal("HASH123", record.ConfigHash);                                                  // hash preserved
-        Assert.DoesNotContain("tls-cipher", record.ProfileOvpn, StringComparison.OrdinalIgnoreCase); // re-normalized
-        Assert.Contains("remote fw 443", record.ProfileOvpn);
-
-        // The upgrade was written back: a second read finds a current-schema record already on disk.
-        var again = await cache.TryReadAsync(id, settings, CancellationToken.None);
-        Assert.NotNull(again);
-        Assert.Equal(StormshieldCacheRecord.CurrentSchemaVersion, again!.SchemaVersion);
-        Assert.DoesNotContain("tls-cipher", again.ProfileOvpn, StringComparison.OrdinalIgnoreCase);
-    }
-
-    [Fact]
-    public async Task Read_OlderSchema_PreservesCachedAt_SoExpiredRecordStillMisses()
-    {
-        // Migration must NOT re-date the record (that would extend the cached private key's lease). An old v1
-        // record past max-age re-normalizes but then still fails the age gate → miss → fresh download.
-        var cache = NewCache(maxAge: TimeSpan.FromMinutes(5));
-        var id = Guid.NewGuid();
-        var settings = Settings();
-        SeedRawRecord(id, new StormshieldCacheRecord
-        {
-            SchemaVersion = 1,
-            SiteIdentityHash = StormshieldConfigCache.ComputeSiteIdentity(settings),
-            ConfigHash = "H",
             ProfileOvpn = SampleProfile,
-            CachedAtUtc = DateTimeOffset.UtcNow - TimeSpan.FromHours(1),
+            CachedAtUtc = DateTimeOffset.UtcNow,
         });
 
         Assert.Null(await cache.TryReadAsync(id, settings, CancellationToken.None));
@@ -240,7 +206,7 @@ public sealed class StormshieldConfigCacheTests : IDisposable
     [Fact]
     public async Task Read_NewerSchemaThanCurrent_ReturnsNull()
     {
-        // A record written by a FUTURE build (downgrade scenario) is outside the migratable range → miss,
+        // A record written by a FUTURE build (downgrade scenario) is outside this build's schema → miss,
         // never a blind reuse of a shape we don't understand.
         var cache = NewCache();
         var id = Guid.NewGuid();

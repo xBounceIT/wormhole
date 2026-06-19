@@ -34,7 +34,8 @@ namespace Wormhole.Services.Tunneling.Stormshield;
 /// </list>
 ///
 /// <para>Both modes run the fetched/pasted profile through <see cref="StormshieldProfileNormalizer"/>
-/// to fix the modern-OpenVPN cipher-negotiation gotcha and strip VORACLE-risk compression.</para>
+/// to fix the modern-OpenVPN cipher-negotiation gotcha while preserving the firewall's
+/// compression/framing directives by default.</para>
 ///
 /// <para>Out of scope (deliberately surfaced as actionable errors rather than faked): the v5 "Connect
 /// with single sign-on" browser/OIDC flow cannot be reduced to a silent POST; and a firewall with
@@ -220,8 +221,7 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
     {
         return framingOverride switch
         {
-            StormshieldOpenVpnCompressionFramingOverride.Auto
-                or StormshieldOpenVpnCompressionFramingOverride.ForceLegacyStub
+            StormshieldOpenVpnCompressionFramingOverride.ForceLegacyStub
                 => StormshieldProfileNormalizer.ApplyLegacyCompressionStub(profile),
             _ => profile,
         };

@@ -95,14 +95,13 @@ public sealed class StormshieldSettings
         StormshieldOpenVpnTransportOverride.Auto;
 
     /// <summary>
-    /// Compatibility policy for old OpenVPN data-channel framing. Some Stormshield gateways still
-    /// exchange no-compression payloads with the legacy <c>NO_COMPRESS</c> marker byte even when the
-    /// downloaded profile omits <c>comp-lzo no</c>. Auto adds that safe framing marker when missing;
-    /// it does not enable payload compression.
+    /// Compatibility policy for OpenVPN compression/framing directives. By default Wormhole preserves
+    /// the firewall-provided profile exactly; the explicit legacy-stub option is only for gateways
+    /// whose diagnostics show missing no-compression framing.
     /// </summary>
     [JsonPropertyName("OpenVpnCompressionFramingOverride")]
     public StormshieldOpenVpnCompressionFramingOverride OpenVpnCompressionFramingOverride { get; set; } =
-        StormshieldOpenVpnCompressionFramingOverride.Auto;
+        StormshieldOpenVpnCompressionFramingOverride.PreserveProfile;
 
     /// <summary>
     /// The self-contained OpenVPN profile for <see cref="StormshieldConnectionMode.Import"/> mode
