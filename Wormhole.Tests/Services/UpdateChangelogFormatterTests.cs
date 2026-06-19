@@ -43,6 +43,23 @@ public class UpdateChangelogFormatterTests
         Assert.Contains("<pre><code class=\"language-powershell\">dotnet test", html);
     }
 
+    [Fact]
+    public void ToHtmlDocument_UsesExplicitReadableColors()
+    {
+        var html = UpdateChangelogFormatter.ToHtmlDocument("- Fixed update checks");
+
+        Assert.Contains("--wh-bg: #ffffff;", html);
+        Assert.Contains("--wh-text: #1f242b;", html);
+        Assert.Contains("@media (prefers-color-scheme: dark)", html);
+        Assert.Contains("--wh-bg: #1e1f22;", html);
+        Assert.Contains("--wh-text: #f2f5f9;", html);
+        Assert.Contains("min-height: 100vh;", html);
+        Assert.DoesNotContain("Canvas", html);
+        Assert.DoesNotContain("CanvasText", html);
+        Assert.DoesNotContain("LinkText", html);
+        Assert.DoesNotContain("color-mix", html);
+    }
+
     [Theory]
     [InlineData(null)]
     [InlineData("")]
