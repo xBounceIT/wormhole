@@ -204,14 +204,27 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
 
     private string ApplyCompressionFramingOverride(string configName, StormshieldSettings settings, string profile)
     {
-        if (settings.OpenVpnCompressionFramingOverride == StormshieldOpenVpnCompressionFramingOverride.Auto)
-            return profile;
+        if (settings.OpenVpnCompressionFramingOverride == StormshieldOpenVpnCompressionFramingOverride.ForceLegacyStub)
+        {
+            _logger.LogInformation(
+                "Stormshield '{Name}': forcing OpenVPN legacy no-compression framing {Framing}.",
+                configName, settings.OpenVpnCompressionFramingOverride);
+        }
 
-        var framed = StormshieldProfileNormalizer.ApplyLegacyCompressionStub(profile);
-        _logger.LogInformation(
-            "Stormshield '{Name}': forcing OpenVPN legacy no-compression framing {Framing}.",
-            configName, settings.OpenVpnCompressionFramingOverride);
-        return framed;
+        return ApplyCompressionFramingPolicy(profile, settings.OpenVpnCompressionFramingOverride);
+    }
+
+    internal static string ApplyCompressionFramingPolicy(
+        string profile,
+        StormshieldOpenVpnCompressionFramingOverride framingOverride)
+    {
+        return framingOverride switch
+        {
+            StormshieldOpenVpnCompressionFramingOverride.Auto
+                or StormshieldOpenVpnCompressionFramingOverride.ForceLegacyStub
+                => StormshieldProfileNormalizer.ApplyLegacyCompressionStub(profile),
+            _ => profile,
+        };
     }
 
     internal static string SummarizeOpenVpnRemotes(string profile)
