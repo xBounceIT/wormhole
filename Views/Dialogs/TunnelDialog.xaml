@@ -442,7 +442,7 @@
                               Header="OpenVPN legacy compression framing"
                               HorizontalAlignment="Stretch"
                               SelectedIndex="0">
-                        <ComboBoxItem Content="Auto" />
+                        <ComboBoxItem Content="Auto — add legacy no-compression stub" />
                         <ComboBoxItem Content="Force legacy no-compression stub" />
                     </ComboBox>
                     <TextBox x:Name="StormshieldAppTokenBox"

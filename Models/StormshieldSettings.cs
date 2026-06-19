@@ -95,10 +95,10 @@ public sealed class StormshieldSettings
         StormshieldOpenVpnTransportOverride.Auto;
 
     /// <summary>
-    /// Compatibility override for old OpenVPN data-channel framing. Some Stormshield gateways still
+    /// Compatibility policy for old OpenVPN data-channel framing. Some Stormshield gateways still
     /// exchange no-compression payloads with the legacy <c>NO_COMPRESS</c> marker byte even when the
-    /// downloaded profile omits <c>comp-lzo no</c>. Leave at Auto unless diagnostics show inbound
-    /// non-IP packets such as <c>unknown_ip_version=15 len=17</c>.
+    /// downloaded profile omits <c>comp-lzo no</c>. Auto adds that safe framing marker when missing;
+    /// it does not enable payload compression.
     /// </summary>
     [JsonPropertyName("OpenVpnCompressionFramingOverride")]
     public StormshieldOpenVpnCompressionFramingOverride OpenVpnCompressionFramingOverride { get; set; } =
