@@ -521,6 +521,53 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task ShowCredentials_ConnectionWithInlinePassword_RevealsViaDialog()
+    {
+        var node = MakeConnectionDraft("prod-web", ProtocolType.Ssh, "host", 22, "alice");
+        node.UseInlinePassword = true;
+        await _repo.AddAsync(node);
+
+        var dialog = new FakeDialogService();
+        var creds = new FakeCredentialService();
+        creds.Passwords[node.Id] = "inline-secret";
+        var vm = CreateVm(dialog, creds);
+        await vm.RefreshAsync();
+
+        await vm.ShowCredentialsCommand.ExecuteAsync(vm.Roots.Single());
+
+        Assert.Equal(1, dialog.ShowCredentialsCount);
+        Assert.Equal("inline-secret", dialog.LastShownSecret);
+        Assert.Equal("alice", dialog.LastShownUsername);
+        Assert.Equal("Password", dialog.LastShownSecretLabel);
+    }
+
+    [Fact]
+    public async Task ShowCredentials_InlinePasswordOverridesInheritedSavedCredential()
+    {
+        var inheritedCredentialId = Guid.NewGuid();
+        var folder = new ConnectionNode { Kind = NodeKind.Folder, Name = "prod", CredentialId = inheritedCredentialId };
+        await _repo.AddAsync(folder);
+        var child = MakeConnectionDraft("web", ProtocolType.Ssh, "host", 22, "alice");
+        child.ParentId = folder.Id;
+        child.UseInlinePassword = true;
+        await _repo.AddAsync(child);
+
+        var dialog = new FakeDialogService();
+        var creds = new FakeCredentialService();
+        creds.Passwords[inheritedCredentialId] = "inherited-secret";
+        creds.Passwords[child.Id] = "inline-secret";
+        var vm = CreateVm(dialog, creds);
+        await vm.RefreshAsync();
+
+        var childVm = vm.Roots.Single().Children.Single();
+        await vm.ShowCredentialsCommand.ExecuteAsync(childVm);
+
+        Assert.Equal(1, dialog.ShowCredentialsCount);
+        Assert.Equal("inline-secret", dialog.LastShownSecret);
+        Assert.NotEqual("inherited-secret", dialog.LastShownSecret);
+    }
+
+    [Fact]
     public async Task ShowCredentials_ConnectionInheritsCredentialFromFolder_RevealsInheritedPassword()
     {
         var credentialId = Guid.NewGuid();

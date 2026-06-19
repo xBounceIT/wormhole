@@ -253,34 +253,24 @@ public partial class ConnectionTreeViewModel : ObservableObject
             // matching what OpenConnectionAsync would actually authenticate with.
             var profile = _inheritanceResolver.Resolve(node, _lastSnapshotById);
 
+            if (profile.UseInlinePassword)
+            {
+                await ShowStoredCredentialSecretAsync(clicked.Name, profile.Username, profile.NodeId, "Password");
+                return;
+            }
+
             if (profile.CredentialId is not { } credId)
             {
-                await _dialog.ShowMessageAsync(
-                    "No credentials",
-                    "This connection has no stored password or key passphrase.");
+                await ShowNoStoredCredentialsAsync();
                 return;
             }
 
             // The stored secret for an SshKey credential is the private-key passphrase, not a
             // login password — fetch the credential to label the field honestly.
             var credential = await _credentialRepository.GetByIdAsync(credId);
-            var secret = await _credentialService.ReadPasswordAsync(credId);
-
-            if (string.IsNullOrEmpty(secret))
-            {
-                await _dialog.ShowMessageAsync(
-                    "No credentials",
-                    "This connection has no stored password or key passphrase.");
-                return;
-            }
-
             var secretLabel = credential?.Kind == CredentialKind.SshKey ? "Key passphrase" : "Password";
 
-            await _dialog.ShowCredentialsAsync(
-                $"Credentials — {clicked.Name}",
-                profile.Username ?? string.Empty,
-                secretLabel,
-                secret);
+            await ShowStoredCredentialSecretAsync(clicked.Name, profile.Username, credId, secretLabel);
         }
         catch (Exception ex)
         {
@@ -291,6 +281,31 @@ public partial class ConnectionTreeViewModel : ObservableObject
             await _dialog.ShowMessageAsync("Couldn't show credentials", ex.Message);
         }
     }
+
+    private async Task ShowStoredCredentialSecretAsync(
+        string connectionName,
+        string? username,
+        Guid secretId,
+        string secretLabel)
+    {
+        var secret = await _credentialService.ReadPasswordAsync(secretId);
+        if (string.IsNullOrEmpty(secret))
+        {
+            await ShowNoStoredCredentialsAsync();
+            return;
+        }
+
+        await _dialog.ShowCredentialsAsync(
+            $"Credentials — {connectionName}",
+            username ?? string.Empty,
+            secretLabel,
+            secret);
+    }
+
+    private Task ShowNoStoredCredentialsAsync() =>
+        _dialog.ShowMessageAsync(
+            "No credentials",
+            "This connection has no stored password or key passphrase.");
 
     [RelayCommand]
     private async Task AddFolder(TreeNodeViewModel? clicked)
