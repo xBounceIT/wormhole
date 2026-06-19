@@ -19,24 +19,11 @@ public sealed class StormshieldCacheRecord
 {
     /// <summary>
     /// Bumped if the persisted shape — or the normalization applied to <see cref="ProfileOvpn"/> — changes;
-    /// a record with a different version reads as a miss. v2: <see cref="StormshieldProfileNormalizer"/> now
-    /// strips the <c>tls-cipher</c> pin (the sidecar's mbedTLS backend can't negotiate the firewall's
-    /// OpenSSL-named suite), so a v1 cache holding a profile that still carries <c>tls-cipher</c> would keep
-    /// failing the TLS handshake on reconnect — invalidate it so the next connect re-downloads and re-normalizes.
+    /// a record with a different version reads as a miss. v3 preserves Stormshield compression/framing
+    /// directives after v2-era profiles may have stripped them; those older records cannot be repaired in
+    /// place because the lost directives are not recoverable from the cached profile.
     /// </summary>
-    public const int CurrentSchemaVersion = 2;
-
-    /// <summary>
-    /// The oldest on-disk <see cref="SchemaVersion"/> the current build can MIGRATE in place (by
-    /// re-running <see cref="StormshieldProfileNormalizer"/> on the stored profile) instead of discarding.
-    /// Every bump so far has been normalization-only — the persisted <em>shape</em> is unchanged, only the
-    /// transform applied to <see cref="ProfileOvpn"/> moved on (v2 began stripping the <c>tls-cipher</c> pin) —
-    /// so an older record can be recovered without a re-download, which is what spares the user from spending a
-    /// one-time OTP just because the app updated. Raise this to the version of the first bump that ever changes
-    /// the persisted shape STRUCTURALLY (so a pre-change record genuinely can't be re-normalized into the new
-    /// shape); records older than it then correctly read as a miss.
-    /// </summary>
-    public const int MinMigratableSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 3;
 
     public int SchemaVersion { get; set; } = CurrentSchemaVersion;
 

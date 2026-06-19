@@ -439,11 +439,11 @@
                         <ComboBoxItem Content="Force UDP" />
                     </ComboBox>
                     <ComboBox x:Name="StormshieldCompressionFramingOverrideBox"
-                              Header="OpenVPN legacy compression framing"
+                              Header="OpenVPN compression/framing"
                               HorizontalAlignment="Stretch"
                               SelectedIndex="0">
-                        <ComboBoxItem Content="Auto — add legacy no-compression stub" />
-                        <ComboBoxItem Content="Force legacy no-compression stub" />
+                        <ComboBoxItem Content="Preserve profile compression/framing" />
+                        <ComboBoxItem Content="Add legacy no-compression stub" />
                     </ComboBox>
                     <TextBox x:Name="StormshieldAppTokenBox"
                              Header="Portal app token (advanced)"

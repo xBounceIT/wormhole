@@ -54,7 +54,7 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         StormshieldCompressionFramingOverrideBox.SelectedIndex switch
         {
             1 => StormshieldOpenVpnCompressionFramingOverride.ForceLegacyStub,
-            _ => StormshieldOpenVpnCompressionFramingOverride.Auto,
+            _ => StormshieldOpenVpnCompressionFramingOverride.PreserveProfile,
         };
 
     private WatchguardAuthMode WatchguardSelectedAuthMode =>

@@ -17,11 +17,10 @@ namespace Wormhole.Services.Tunneling.Stormshield;
 ///   <c>cipher</c> but carries no <c>data-ciphers</c>, we append a negotiation list that offers the
 ///   modern AEAD suites first and keeps CBC as the fallback so both old and new firewalls connect.
 ///   (This mirrors what <c>WatchguardProfileBuilder</c> emits for the same reason.)</item>
-///   <item><b>Compression.</b> Stormshield profiles historically carry <c>compress lz4</c>, but
-///   Stormshield itself now recommends disabling compression because of the VORACLE class of attacks.
-///   Real compression directives are stripped. No-compression legacy framing such as <c>comp-lzo no</c>
-///   is preserved because older gateways still put the OpenVPN <c>NO_COMPRESS</c> marker in front of
-///   every data-channel payload even though they are not compressing it.</item>
+///   <item><b>Compression/framing.</b> Stormshield profiles vary by appliance and firmware: some rely
+///   on legacy no-compression framing markers, and some still advertise real compression. Wormhole
+///   preserves those directives by default and lets the OpenVPN sidecar's asymmetric compression mode
+///   handle server-to-client compatibility without inventing a different profile shape.</item>
 ///   <item><b>Control-channel cipher pin.</b> Some firewalls pin a single TLS cipher with an
 ///   OpenSSL/IANA-style name, e.g. <c>tls-cipher TLS-ECDHE-RSA-WITH-AES-128-CBC-SHA256</c>. OpenVPN's
 ///   OpenSSL backend honors that, but the sidecar's <b>mbedTLS</b> backend can't resolve that name to
@@ -87,13 +86,6 @@ public static class StormshieldProfileNormalizer
 
             var firstToken = FirstToken(trimmed);
 
-            // Drop real compression directives (VORACLE), but keep no-compression framing markers
-            // such as `comp-lzo no`. Older Stormshield gateways still frame data-channel payloads with
-            // the 0xFA NO_COMPRESS marker; stripping the directive makes OpenVPN3 treat those bytes as
-            // raw IP and the tunnel reaches CONNECTED with a dead data plane.
-            if (IsCompressionDirectiveToStrip(trimmed, firstToken))
-                continue;
-
             // Drop the control-channel TLS cipher pin (see class remarks): the sidecar's mbedTLS
             // backend can't parse the OpenSSL/IANA-style suite name the firewall emits, so leaving it
             // in makes the TLS handshake fail. Stripping it lets mbedTLS negotiate from its defaults
@@ -127,8 +119,9 @@ public static class StormshieldProfileNormalizer
 
     /// <summary>
     /// Adds legacy OpenVPN no-compression framing (<c>comp-lzo no</c>) when the profile does not
-    /// already declare any compression/framing directive. This does not enable payload compression;
-    /// it only makes OpenVPN3 add/remove the historical <c>NO_COMPRESS</c> marker byte.
+    /// already declare a <c>compress</c> or <c>comp-lzo</c> framing directive. This does not enable
+    /// payload compression; it only makes OpenVPN3 add/remove the historical <c>NO_COMPRESS</c>
+    /// marker byte.
     /// </summary>
     public static string ApplyLegacyCompressionStub(string ovpn)
     {
@@ -137,7 +130,7 @@ public static class StormshieldProfileNormalizer
 
         var sb = new StringBuilder(ovpn.Length + 16);
         string? openBlock = null;
-        var hasCompressionDirective = false;
+        var hasCompressionFramingDirective = false;
 
         foreach (var rawLine in EnumerateLines(ovpn))
         {
@@ -158,11 +151,11 @@ public static class StormshieldProfileNormalizer
             }
 
             var firstToken = FirstToken(trimmed);
-            hasCompressionDirective |= Eq(firstToken, "compress") || Eq(firstToken, "comp-lzo");
+            hasCompressionFramingDirective |= Eq(firstToken, "compress") || Eq(firstToken, "comp-lzo");
             sb.Append(rawLine).Append('\n');
         }
 
-        if (!hasCompressionDirective)
+        if (!hasCompressionFramingDirective)
             sb.Append("comp-lzo no\n");
 
         return sb.ToString();
@@ -538,24 +531,6 @@ public static class StormshieldProfileNormalizer
     }
 
     private static bool Eq(string a, string b) => a.Equals(b, StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsCompressionDirectiveToStrip(string trimmedLine, string firstToken)
-    {
-        if (Eq(firstToken, "comp-noadapt")) return true;
-        if (Eq(firstToken, "comp-lzo"))
-        {
-            var value = ParseDirectiveValue(trimmedLine, "comp-lzo");
-            return !string.Equals(value, "no", StringComparison.OrdinalIgnoreCase);
-        }
-        if (Eq(firstToken, "compress"))
-        {
-            var value = ParseDirectiveValue(trimmedLine, "compress");
-            return value is not null
-                && !value.Equals("stub", StringComparison.OrdinalIgnoreCase)
-                && !value.Equals("stub-v2", StringComparison.OrdinalIgnoreCase);
-        }
-        return false;
-    }
 
     // Reads the first argument of a directive from an already-trimmed line whose first token is
     // <paramref name="directive"/> (e.g. "AES-128-CBC" from "cipher AES-128-CBC"). Returns null when

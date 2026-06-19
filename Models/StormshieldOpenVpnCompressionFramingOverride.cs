@@ -1,13 +1,13 @@
 namespace Wormhole.Models;
 
 /// <summary>
-/// Compatibility policy for legacy OpenVPN no-compression framing.
+/// Compatibility policy for OpenVPN compression/framing directives.
 /// </summary>
 public enum StormshieldOpenVpnCompressionFramingOverride
 {
-    /// <summary>Add the legacy no-compression framing marker when the profile omits one.</summary>
-    Auto = 0,
+    /// <summary>Leave the firewall-provided profile directives unchanged.</summary>
+    PreserveProfile = 0,
 
-    /// <summary>Explicitly add the legacy no-compression framing marker when the profile omits one.</summary>
+    /// <summary>Add the legacy no-compression framing marker when the profile has no compression framing directive.</summary>
     ForceLegacyStub = 1,
 }
