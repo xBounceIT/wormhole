@@ -32,6 +32,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     private readonly IRdpSessionService _rdpService;
     private readonly ICredentialService _credentialService;
     private readonly ICredentialRepository _credentialRepository;
+    private readonly IConnectionCredentialBindingService _credentialBindings;
     private readonly TunnelManager _tunnels;
     private readonly ITunnelRoutePrompter _tunnelPrompter;
     private readonly IConnectionProfileResolver _profileResolver;
@@ -65,6 +66,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         IRdpSessionService rdpService,
         ICredentialService credentialService,
         ICredentialRepository credentialRepository,
+        IConnectionCredentialBindingService credentialBindings,
         TunnelManager tunnels,
         ITunnelRoutePrompter tunnelPrompter,
         IConnectionProfileResolver profileResolver,
@@ -75,6 +77,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         _rdpService = rdpService;
         _credentialService = credentialService;
         _credentialRepository = credentialRepository;
+        _credentialBindings = credentialBindings;
         _tunnels = tunnels;
         _tunnelPrompter = tunnelPrompter;
         _profileResolver = profileResolver;
@@ -925,22 +928,31 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
         if (username is null)
         {
-            var prompted = await _dialog.PromptCredentialsAsync(
+            var prompted = await _dialog.PromptAccountCredentialsAsync(
                 "RDP credentials",
                 $"Enter credentials for {profile.Host}",
+                ProtocolType.Rdp,
+                requireUsername: true,
                 initialUsername: null,
                 cancellationToken: token).ConfigureAwait(true);
             token.ThrowIfCancellationRequested();
             if (prompted is null) return null;
+            if (prompted.SelectedCredential is not null)
+            {
+                return await ResolveSelectedRdpCredentialAsync(profile, prompted, token).ConfigureAwait(true);
+            }
+
+            var promptedUsername = NullIfWhiteSpace(prompted.Username);
+            if (promptedUsername is null) return null;
 
             var parsedPrompt = SplitDomainUsername(
-                prompted.Value.Username,
+                promptedUsername,
                 explicitDomain ?? credentialDomain,
                 allowDomainFromUsername: explicitDomain is null && credentialDomain is null);
             return new ResolvedRdpCredentials(
                 parsedPrompt.Username,
                 parsedPrompt.Domain,
-                prompted.Value.Password,
+                prompted.Password,
                 RdpCredentialValueSource.Prompt,
                 parsedPrompt.DomainSourceWasPrompt
                     ? RdpCredentialValueSource.Prompt
@@ -956,17 +968,64 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             ? $"{domain}\\{username}"
             : username;
         var promptMsg = $"Enter password for {prefix}@{profile.Host}";
-        var password = await _dialog.PromptPasswordAsync("RDP credentials", promptMsg, token).ConfigureAwait(true);
+        var passwordPrompt = await _dialog.PromptAccountCredentialsAsync(
+            "RDP credentials",
+            promptMsg,
+            ProtocolType.Rdp,
+            requireUsername: false,
+            initialUsername: prefix,
+            cancellationToken: token).ConfigureAwait(true);
         token.ThrowIfCancellationRequested();
-        return password is null
+        if (passwordPrompt?.SelectedCredential is not null)
+        {
+            return await ResolveSelectedRdpCredentialAsync(profile, passwordPrompt, token).ConfigureAwait(true);
+        }
+
+        return passwordPrompt is null
             ? null
             : new ResolvedRdpCredentials(
                 username,
                 domain,
-                password,
+                passwordPrompt.Password,
                 usernameSource,
                 domainSource,
                 RdpCredentialPasswordSource.Prompt);
+    }
+
+    private async Task<ResolvedRdpCredentials?> ResolveSelectedRdpCredentialAsync(
+        ConnectionProfile profile,
+        AccountCredentialPromptResult prompt,
+        CancellationToken token)
+    {
+        if (prompt.SelectedCredential is not { } selectedCredential) return null;
+
+        if (prompt.SaveCredentialToConnection)
+        {
+            await _credentialBindings.SaveCredentialBindingAsync(
+                profile.NodeId,
+                selectedCredential,
+                token).ConfigureAwait(true);
+            token.ThrowIfCancellationRequested();
+        }
+
+        var selectedUsername = NullIfWhiteSpace(prompt.Username) ?? NullIfWhiteSpace(selectedCredential.Username);
+        if (selectedUsername is null) return null;
+
+        var selectedDomain = NullIfWhiteSpace(selectedCredential.Domain);
+        var parsed = SplitDomainUsername(
+            selectedUsername,
+            selectedDomain,
+            allowDomainFromUsername: selectedDomain is null);
+
+        return new ResolvedRdpCredentials(
+            parsed.Username,
+            parsed.Domain,
+            prompt.Password,
+            RdpCredentialValueSource.Credential,
+            parsed.DomainSourceWasPrompt || selectedDomain is not null
+                ? RdpCredentialValueSource.Credential
+                : RdpCredentialValueSource.None,
+            RdpCredentialPasswordSource.SavedCredential);
     }
 
     private static string? NullIfWhiteSpace(string? value) =>
