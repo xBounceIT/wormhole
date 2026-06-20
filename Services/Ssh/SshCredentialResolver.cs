@@ -19,6 +19,7 @@ public interface ISshCredentialResolver
 /// </summary>
 public sealed record SshCredentials(string? Password, string? KeyPassphrase, byte[]? PrivateKey)
 {
+    public string? UsernameOverride { get; init; }
     public bool HasAny => !string.IsNullOrEmpty(Password) || PrivateKey is { Length: > 0 };
     public static SshCredentials Empty { get; } = new(null, null, null);
 }
@@ -27,17 +28,20 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
 {
     private readonly ICredentialRepository _credentialRepo;
     private readonly ICredentialService _credentialService;
+    private readonly IConnectionCredentialBindingService _credentialBindings;
     private readonly IDialogService _dialogs;
     private readonly IPrivateKeyInspector _keyInspector;
 
     public SshCredentialResolver(
         ICredentialRepository credentialRepo,
         ICredentialService credentialService,
+        IConnectionCredentialBindingService credentialBindings,
         IDialogService dialogs,
         IPrivateKeyInspector keyInspector)
     {
         _credentialRepo = credentialRepo;
         _credentialService = credentialService;
+        _credentialBindings = credentialBindings;
         _dialogs = dialogs;
         _keyInspector = keyInspector;
     }
@@ -135,13 +139,33 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
     {
         cancellationToken.ThrowIfCancellationRequested();
         var user = string.IsNullOrEmpty(profile.Username) ? profile.Host : profile.Username + "@" + profile.Host;
-        var password = await _dialogs.PromptPasswordAsync(
+        var result = await _dialogs.PromptAccountCredentialsAsync(
             "SSH password",
             "Enter the password for " + user + ":",
+            ProtocolType.Ssh,
+            requireUsername: false,
+            initialUsername: profile.Username,
             cancellationToken).ConfigureAwait(true);
         // Re-check after the await: the user may have closed the tab (canceling the
         // connect CTS) while the dialog was open. Don't act on a stale password.
         cancellationToken.ThrowIfCancellationRequested();
-        return string.IsNullOrEmpty(password) ? SshCredentials.Empty : new SshCredentials(password, null, null);
+        if (result is null || string.IsNullOrEmpty(result.Password))
+        {
+            return SshCredentials.Empty;
+        }
+
+        if (result.SelectedCredential is { } selectedCredential && result.SaveCredentialToConnection)
+        {
+            await _credentialBindings.SaveCredentialBindingAsync(
+                profile.NodeId,
+                selectedCredential,
+                cancellationToken).ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        return new SshCredentials(result.Password, null, null)
+        {
+            UsernameOverride = result.SelectedCredential?.Username,
+        };
     }
 }
