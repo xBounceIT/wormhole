@@ -1,0 +1,24 @@
+<Project>
+  <Target Name="FetchSqliteNative"
+          BeforeTargets="BeforeBuild"
+          Condition="'$(WormholeUsePinnedSqliteNative)' == 'true'">
+    <PropertyGroup>
+      <_WormholeSqliteNativeArch Condition="'$(RuntimeIdentifier)' == 'win-arm64' Or '$(PlatformTarget)' == 'ARM64' Or '$(PlatformTarget)' == 'arm64' Or '$(Platform)' == 'ARM64' Or '$(Platform)' == 'arm64'">arm64</_WormholeSqliteNativeArch>
+      <_WormholeSqliteNativeArch Condition="'$(_WormholeSqliteNativeArch)' == '' And '$(PROCESSOR_ARCHITECTURE)' == 'ARM64'">arm64</_WormholeSqliteNativeArch>
+      <_WormholeSqliteNativeArch Condition="'$(_WormholeSqliteNativeArch)' == ''">x64</_WormholeSqliteNativeArch>
+      <_WormholeSqliteNativePath>$(MSBuildThisFileDirectory)obj\sqlite-native\$(_WormholeSqliteNativeArch)\e_sqlite3.dll</_WormholeSqliteNativePath>
+    </PropertyGroup>
+
+    <Exec Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)scripts\Fetch-SqliteNative.ps1&quot; -Arch $(_WormholeSqliteNativeArch) -Quiet" />
+
+    <ItemGroup>
+      <None Include="$(_WormholeSqliteNativePath)"
+            Condition="Exists('$(_WormholeSqliteNativePath)')">
+        <Link>e_sqlite3.dll</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        <Visible>false</Visible>
+      </None>
+    </ItemGroup>
+  </Target>
+</Project>
