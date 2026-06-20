@@ -9,6 +9,7 @@ public sealed class SessionContentSelector : DataTemplateSelector
     public DataTemplate? SshTemplate { get; set; }
     public DataTemplate? RdpTemplate { get; set; }
     public DataTemplate? HttpTemplate { get; set; }
+    public DataTemplate? VncTemplate { get; set; }
     public DataTemplate? PlaceholderTemplate { get; set; }
 
     protected override DataTemplate SelectTemplateCore(object item) => item switch
@@ -16,6 +17,7 @@ public sealed class SessionContentSelector : DataTemplateSelector
         SshSessionViewModel when SshTemplate is not null => SshTemplate,
         RdpSessionViewModel when RdpTemplate is not null => RdpTemplate,
         HttpSessionViewModel when HttpTemplate is not null => HttpTemplate,
+        VncSessionViewModel when VncTemplate is not null => VncTemplate,
         _ => PlaceholderTemplate!,
     };
 

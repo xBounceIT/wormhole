@@ -83,7 +83,7 @@ public class MRemoteNgXmlReaderTests
 
         MRemoteNgXmlReader.Parse(stream, out var roots);
 
-        // VNC leaf is preserved verbatim — the caller (import service) decides to skip it.
+        // VNC leaf is preserved verbatim; the import service maps it to ProtocolType.Vnc.
         Assert.Equal("VNC", roots[1].Protocol);
     }
 

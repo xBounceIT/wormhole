@@ -1,0 +1,588 @@
+using System.Buffers;
+using System.Collections.Immutable;
+using System.Runtime.InteropServices;
+using System.Runtime.InteropServices.WindowsRuntime;
+using MarcusW.VncClient;
+using MarcusW.VncClient.Rendering;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.UI.Input;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media.Imaging;
+using Windows.Foundation;
+using Windows.System;
+using Windows.UI.Core;
+using Wormhole.Services;
+using Wormhole.ViewModels.Sessions;
+using UIDispatcherQueue = Microsoft.UI.Dispatching.DispatcherQueue;
+using VncPixelFormat = MarcusW.VncClient.PixelFormat;
+using VncScreen = MarcusW.VncClient.Screen;
+using VncSize = MarcusW.VncClient.Size;
+
+namespace Wormhole.Views.Sessions;
+
+// CA1001 suppressed deliberately: UserControl has no deterministic dispose hook. The render target
+// owns only a coalesced pooled frame buffer, which is replaced/released as new frames arrive and dies
+// with the view instance.
+#pragma warning disable CA1001
+public sealed partial class VncView : UserControl
+#pragma warning restore CA1001
+{
+    private readonly VncRenderTarget _renderTarget;
+    private VncSessionViewModel? _viewModel;
+    private int _framebufferWidth;
+    private int _framebufferHeight;
+    private int _lastPointerX;
+    private int _lastPointerY;
+    private bool _hasLastPointer;
+    private VncPointerButtons _pressedButtons;
+
+    public VncView()
+    {
+        InitializeComponent();
+        _renderTarget = new VncRenderTarget(DispatcherQueue);
+        Loaded += OnLoaded;
+        Unloaded += OnUnloaded;
+    }
+
+    private async void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        FramebufferHost.Visibility = Visibility.Visible;
+        var newVm = DataContext as VncSessionViewModel;
+        if (newVm is null) return;
+
+        if (!ReferenceEquals(newVm, _viewModel))
+        {
+            _viewModel = newVm;
+            FramebufferImage.Source = null;
+            WaitingFrameText.Visibility = Visibility.Visible;
+            _framebufferWidth = 0;
+            _framebufferHeight = 0;
+            _hasLastPointer = false;
+            _pressedButtons = VncPointerButtons.None;
+        }
+
+        _renderTarget.FrameReady -= OnFrameReady;
+        _renderTarget.FrameReady += OnFrameReady;
+
+        try
+        {
+            await newVm.AttachAsync(_renderTarget).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            newVm.ReportFailure(ex.Message);
+        }
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        FramebufferHost.Visibility = Visibility.Collapsed;
+        _renderTarget.FrameReady -= OnFrameReady;
+        ReleaseAllPointerCaptures();
+        _hasLastPointer = false;
+        _pressedButtons = VncPointerButtons.None;
+    }
+
+    private void OnFrameReady(object? sender, VncFrameReadyEventArgs e)
+    {
+        _framebufferWidth = e.Width;
+        _framebufferHeight = e.Height;
+        FramebufferImage.Source = e.Bitmap;
+        WaitingFrameText.Visibility = Visibility.Collapsed;
+    }
+
+    private async void OnPointerPressed(object sender, PointerRoutedEventArgs e)
+    {
+        Focus(FocusState.Pointer);
+        FramebufferHost.CapturePointer(e.Pointer);
+        _pressedButtons = ButtonsFromPoint(e.GetCurrentPoint(FramebufferHost));
+        await SendPointerFromEventAsync(e, _pressedButtons).ConfigureAwait(true);
+    }
+
+    private async void OnPointerReleased(object sender, PointerRoutedEventArgs e)
+    {
+        _pressedButtons = ButtonsFromPoint(e.GetCurrentPoint(FramebufferHost));
+        await SendPointerFromEventAsync(e, _pressedButtons).ConfigureAwait(true);
+        if (_pressedButtons == VncPointerButtons.None)
+        {
+            ReleaseAllPointerCaptures();
+        }
+    }
+
+    private async void OnPointerMoved(object sender, PointerRoutedEventArgs e)
+    {
+        await SendPointerFromEventAsync(e, _pressedButtons).ConfigureAwait(true);
+    }
+
+    private async void OnPointerWheelChanged(object sender, PointerRoutedEventArgs e)
+    {
+        var point = e.GetCurrentPoint(FramebufferHost);
+        var wheel = point.Properties.MouseWheelDelta >= 0
+            ? VncPointerButtons.WheelUp
+            : VncPointerButtons.WheelDown;
+        if (point.Properties.IsHorizontalMouseWheel)
+        {
+            wheel = point.Properties.MouseWheelDelta >= 0
+                ? VncPointerButtons.WheelRight
+                : VncPointerButtons.WheelLeft;
+        }
+
+        await SendPointerAtPointAsync(point.Position, _pressedButtons | wheel).ConfigureAwait(true);
+        await SendPointerAtPointAsync(point.Position, _pressedButtons).ConfigureAwait(true);
+        e.Handled = true;
+    }
+
+    private async void OnPointerCanceled(object sender, PointerRoutedEventArgs e)
+    {
+        await ReleasePointerButtonsAsync(e).ConfigureAwait(true);
+    }
+
+    private async void OnPointerCaptureLost(object sender, PointerRoutedEventArgs e)
+    {
+        await ReleasePointerButtonsAsync(e).ConfigureAwait(true);
+    }
+
+    private async void OnPointerExited(object sender, PointerRoutedEventArgs e)
+    {
+        await SendPointerFromEventAsync(e, _pressedButtons).ConfigureAwait(true);
+    }
+
+    private async void OnKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (!TryMapKey(e.Key, out var keySymbol))
+        {
+            LogUnsupportedKey(e.Key);
+            return;
+        }
+        e.Handled = true;
+        await SendKeyAsync(isDown: true, keySymbol).ConfigureAwait(true);
+    }
+
+    private async void OnKeyUp(object sender, KeyRoutedEventArgs e)
+    {
+        if (!TryMapKey(e.Key, out var keySymbol))
+        {
+            LogUnsupportedKey(e.Key);
+            return;
+        }
+        e.Handled = true;
+        await SendKeyAsync(isDown: false, keySymbol).ConfigureAwait(true);
+    }
+
+    private async Task SendPointerFromEventAsync(PointerRoutedEventArgs e, VncPointerButtons buttons)
+    {
+        var point = e.GetCurrentPoint(FramebufferHost);
+        await SendPointerAtPointAsync(point.Position, buttons).ConfigureAwait(true);
+        e.Handled = true;
+    }
+
+    private async Task SendPointerAtPointAsync(
+        Point point,
+        VncPointerButtons buttons,
+        bool useLastPointOnMiss = false)
+    {
+        if (_viewModel is null) return;
+        if (!TryMapToFramebuffer(point, out var x, out var y))
+        {
+            if (!useLastPointOnMiss || !_hasLastPointer) return;
+            x = _framebufferWidth > 0 ? Math.Clamp(_lastPointerX, 0, _framebufferWidth - 1) : _lastPointerX;
+            y = _framebufferHeight > 0 ? Math.Clamp(_lastPointerY, 0, _framebufferHeight - 1) : _lastPointerY;
+        }
+        else
+        {
+            _lastPointerX = x;
+            _lastPointerY = y;
+            _hasLastPointer = true;
+        }
+
+        try
+        {
+            await _viewModel.SendPointerAsync(x, y, buttons).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            LogDebug(ex, "VNC pointer event send failed.");
+        }
+    }
+
+    private async Task ReleasePointerButtonsAsync(PointerRoutedEventArgs e)
+    {
+        _pressedButtons = VncPointerButtons.None;
+        var point = e.GetCurrentPoint(FramebufferHost);
+        await SendPointerAtPointAsync(
+            point.Position,
+            VncPointerButtons.None,
+            useLastPointOnMiss: true).ConfigureAwait(true);
+        ReleaseAllPointerCaptures();
+        e.Handled = true;
+    }
+
+    private async Task SendKeyAsync(bool isDown, int keySymbol)
+    {
+        if (_viewModel is null) return;
+        try
+        {
+            await _viewModel.SendKeyAsync(isDown, keySymbol).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            LogDebug(ex, "VNC key event send failed.");
+        }
+    }
+
+    private bool TryMapToFramebuffer(Point point, out int x, out int y)
+    {
+        x = 0;
+        y = 0;
+        if (_framebufferWidth <= 0 || _framebufferHeight <= 0) return false;
+        var hostWidth = FramebufferHost.ActualWidth;
+        var hostHeight = FramebufferHost.ActualHeight;
+        if (hostWidth <= 0 || hostHeight <= 0) return false;
+
+        var scale = Math.Min(hostWidth / _framebufferWidth, hostHeight / _framebufferHeight);
+        if (scale <= 0) return false;
+        var displayWidth = _framebufferWidth * scale;
+        var displayHeight = _framebufferHeight * scale;
+        var left = (hostWidth - displayWidth) / 2;
+        var top = (hostHeight - displayHeight) / 2;
+        if (point.X < left || point.X > left + displayWidth || point.Y < top || point.Y > top + displayHeight)
+        {
+            return false;
+        }
+
+        x = Math.Clamp((int)((point.X - left) / scale), 0, _framebufferWidth - 1);
+        y = Math.Clamp((int)((point.Y - top) / scale), 0, _framebufferHeight - 1);
+        return true;
+    }
+
+    private static VncPointerButtons ButtonsFromPoint(PointerPoint point)
+    {
+        var props = point.Properties;
+        var buttons = VncPointerButtons.None;
+        if (props.IsLeftButtonPressed) buttons |= VncPointerButtons.Left;
+        if (props.IsMiddleButtonPressed) buttons |= VncPointerButtons.Middle;
+        if (props.IsRightButtonPressed) buttons |= VncPointerButtons.Right;
+        return buttons;
+    }
+
+    private void ReleaseAllPointerCaptures()
+    {
+        try { FramebufferHost.ReleasePointerCaptures(); }
+        catch (Exception ex) { LogDebug(ex, "VNC pointer capture release failed."); }
+    }
+
+    private static bool TryMapKey(VirtualKey key, out int keySymbol)
+    {
+        var shift = IsKeyDown(VirtualKey.Shift);
+        if (key is >= VirtualKey.A and <= VirtualKey.Z)
+        {
+            var offset = key - VirtualKey.A;
+            keySymbol = (shift ? 'A' : 'a') + (int)offset;
+            return true;
+        }
+
+        if (key is >= VirtualKey.Number0 and <= VirtualKey.Number9)
+        {
+            const string shiftedDigits = ")!@#$%^&*(";
+            var offset = (int)(key - VirtualKey.Number0);
+            keySymbol = shift ? shiftedDigits[offset] : '0' + offset;
+            return true;
+        }
+
+        if (key is >= VirtualKey.NumberPad0 and <= VirtualKey.NumberPad9)
+        {
+            keySymbol = '0' + (int)(key - VirtualKey.NumberPad0);
+            return true;
+        }
+
+        if (TryMapOemKey((int)key, shift, out keySymbol))
+        {
+            return true;
+        }
+
+        keySymbol = key switch
+        {
+            VirtualKey.Space => (int)KeySymbol.space,
+            VirtualKey.Back => (int)KeySymbol.BackSpace,
+            VirtualKey.Tab => (int)KeySymbol.Tab,
+            VirtualKey.Enter => (int)KeySymbol.Return,
+            VirtualKey.Escape => (int)KeySymbol.Escape,
+            VirtualKey.Delete => (int)KeySymbol.Delete,
+            VirtualKey.Home => (int)KeySymbol.Home,
+            VirtualKey.End => (int)KeySymbol.End,
+            VirtualKey.PageUp => (int)KeySymbol.Page_Up,
+            VirtualKey.PageDown => (int)KeySymbol.Page_Down,
+            VirtualKey.Left => (int)KeySymbol.Left,
+            VirtualKey.Right => (int)KeySymbol.Right,
+            VirtualKey.Up => (int)KeySymbol.Up,
+            VirtualKey.Down => (int)KeySymbol.Down,
+            VirtualKey.Insert => (int)KeySymbol.Insert,
+            VirtualKey.Shift => (int)KeySymbol.Shift_L,
+            VirtualKey.Control => (int)KeySymbol.Control_L,
+            VirtualKey.Menu => (int)KeySymbol.Alt_L,
+            VirtualKey.F1 => (int)KeySymbol.F1,
+            VirtualKey.F2 => (int)KeySymbol.F2,
+            VirtualKey.F3 => (int)KeySymbol.F3,
+            VirtualKey.F4 => (int)KeySymbol.F4,
+            VirtualKey.F5 => (int)KeySymbol.F5,
+            VirtualKey.F6 => (int)KeySymbol.F6,
+            VirtualKey.F7 => (int)KeySymbol.F7,
+            VirtualKey.F8 => (int)KeySymbol.F8,
+            VirtualKey.F9 => (int)KeySymbol.F9,
+            VirtualKey.F10 => (int)KeySymbol.F10,
+            VirtualKey.F11 => (int)KeySymbol.F11,
+            VirtualKey.F12 => (int)KeySymbol.F12,
+            VirtualKey.Add => (int)KeySymbol.plus,
+            VirtualKey.Subtract => (int)KeySymbol.minus,
+            VirtualKey.Multiply => (int)KeySymbol.asterisk,
+            VirtualKey.Divide => (int)KeySymbol.slash,
+            VirtualKey.Decimal => (int)KeySymbol.period,
+            _ => 0,
+        };
+        return keySymbol != 0;
+    }
+
+    private static bool TryMapOemKey(int virtualKey, bool shift, out int keySymbol)
+    {
+        keySymbol = virtualKey switch
+        {
+            186 => shift ? ':' : ';',
+            187 => shift ? '+' : '=',
+            188 => shift ? '<' : ',',
+            189 => shift ? '_' : '-',
+            190 => shift ? '>' : '.',
+            191 => shift ? '?' : '/',
+            192 => shift ? '~' : '`',
+            219 => shift ? '{' : '[',
+            220 => shift ? '|' : '\\',
+            221 => shift ? '}' : ']',
+            222 => shift ? '"' : '\'',
+            _ => 0,
+        };
+        return keySymbol != 0;
+    }
+
+    private static bool IsKeyDown(VirtualKey key)
+    {
+        try
+        {
+            return InputKeyboardSource.GetKeyStateForCurrentThread(key).HasFlag(CoreVirtualKeyStates.Down);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void LogDebug(Exception ex, string message) =>
+        App.Current?.Services?.GetService<ILogger<VncView>>()?.LogDebug(ex, "{Message}", message);
+
+    private static void LogUnsupportedKey(VirtualKey key) =>
+        App.Current?.Services?.GetService<ILogger<VncView>>()?.LogDebug(
+            "Ignoring unsupported VNC key {Key}.", key);
+
+    private sealed class VncRenderTarget : IVncRenderTarget, IDisposable
+    {
+        private static readonly VncPixelFormat Bgra32 = new(
+            "BGRA32",
+            bitsPerPixel: 32,
+            depth: 32,
+            bigEndian: false,
+            trueColor: true,
+            hasAlpha: true,
+            redMax: 255,
+            greenMax: 255,
+            blueMax: 255,
+            alphaMax: 255,
+            redShift: 16,
+            greenShift: 8,
+            blueShift: 0,
+            alphaShift: 24);
+
+        private readonly UIDispatcherQueue _dispatcher;
+        private readonly object _gate = new();
+        private byte[]? _pendingPixels;
+        private int _pendingLength;
+        private int _pendingWidth;
+        private int _pendingHeight;
+        private int _publishQueued;
+        private bool _disposed;
+
+        public VncRenderTarget(UIDispatcherQueue dispatcher)
+        {
+            _dispatcher = dispatcher;
+        }
+
+        public event EventHandler<VncFrameReadyEventArgs>? FrameReady;
+
+        public IFramebufferReference GrabFramebufferReference(VncSize size, IImmutableSet<VncScreen> layout)
+        {
+            return new FramebufferReference(this, size);
+        }
+
+        public void Dispose()
+        {
+            _disposed = true;
+            byte[]? pending = null;
+            lock (_gate)
+            {
+                pending = _pendingPixels;
+                _pendingPixels = null;
+                _pendingLength = 0;
+            }
+            if (pending is not null)
+            {
+                ArrayPool<byte>.Shared.Return(pending);
+            }
+        }
+
+        private void Present(VncSize size, IntPtr address, int length)
+        {
+            if (_disposed || length <= 0) return;
+
+            var pixels = ArrayPool<byte>.Shared.Rent(length);
+            Marshal.Copy(address, pixels, 0, length);
+            for (var i = 3; i < length; i += 4)
+            {
+                pixels[i] = 0xFF;
+            }
+
+            byte[]? previous = null;
+            lock (_gate)
+            {
+                previous = _pendingPixels;
+                _pendingPixels = pixels;
+                _pendingLength = length;
+                _pendingWidth = size.Width;
+                _pendingHeight = size.Height;
+            }
+            if (previous is not null)
+            {
+                ArrayPool<byte>.Shared.Return(previous);
+            }
+
+            QueuePublish();
+        }
+
+        private void QueuePublish()
+        {
+            if (Interlocked.Exchange(ref _publishQueued, 1) != 0) return;
+            if (!_dispatcher.TryEnqueue(PublishPending))
+            {
+                Interlocked.Exchange(ref _publishQueued, 0);
+                DropPending();
+            }
+        }
+
+        private void PublishPending()
+        {
+            byte[]? pixels;
+            int length;
+            int width;
+            int height;
+            lock (_gate)
+            {
+                pixels = _pendingPixels;
+                length = _pendingLength;
+                width = _pendingWidth;
+                height = _pendingHeight;
+                _pendingPixels = null;
+                _pendingLength = 0;
+                _pendingWidth = 0;
+                _pendingHeight = 0;
+            }
+            Interlocked.Exchange(ref _publishQueued, 0);
+
+            try
+            {
+                if (_disposed || pixels is null || width <= 0 || height <= 0)
+                {
+                    return;
+                }
+
+                var bitmap = new WriteableBitmap(width, height);
+                using (var stream = bitmap.PixelBuffer.AsStream())
+                {
+                    stream.Write(pixels, 0, length);
+                }
+                bitmap.Invalidate();
+                FrameReady?.Invoke(this, new VncFrameReadyEventArgs(bitmap, width, height));
+            }
+            finally
+            {
+                if (pixels is not null)
+                {
+                    ArrayPool<byte>.Shared.Return(pixels);
+                }
+
+                if (!_disposed && HasPendingFrame())
+                {
+                    QueuePublish();
+                }
+            }
+        }
+
+        private bool HasPendingFrame()
+        {
+            lock (_gate)
+            {
+                return _pendingPixels is not null;
+            }
+        }
+
+        private void DropPending()
+        {
+            byte[]? pending = null;
+            lock (_gate)
+            {
+                pending = _pendingPixels;
+                _pendingPixels = null;
+                _pendingLength = 0;
+            }
+            if (pending is not null)
+            {
+                ArrayPool<byte>.Shared.Return(pending);
+            }
+        }
+
+        private sealed class FramebufferReference : IFramebufferReference
+        {
+            private readonly VncRenderTarget _owner;
+            private readonly int _length;
+            private bool _disposed;
+
+            public FramebufferReference(VncRenderTarget owner, VncSize size)
+            {
+                _owner = owner;
+                Size = size;
+                _length = checked(size.Width * size.Height * Bgra32.BytesPerPixel);
+                Address = Marshal.AllocHGlobal(_length);
+            }
+
+            public IntPtr Address { get; }
+            public VncSize Size { get; }
+            public VncPixelFormat Format => Bgra32;
+            public double HorizontalDpi => 96;
+            public double VerticalDpi => 96;
+
+            public void Dispose()
+            {
+                if (_disposed) return;
+                _disposed = true;
+                try
+                {
+                    _owner.Present(Size, Address, _length);
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(Address);
+                }
+            }
+        }
+    }
+
+    private sealed record VncFrameReadyEventArgs(WriteableBitmap Bitmap, int Width, int Height);
+}

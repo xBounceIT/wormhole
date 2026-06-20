@@ -79,7 +79,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private string name = string.Empty;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsRdp), nameof(IsSsh), nameof(IsHttp), nameof(IsHttps), nameof(ShowCredentialSection), nameof(IsValid), nameof(CanUseSshAutoSudo), nameof(ShowInlinePassword), nameof(ShowRdpDomain), nameof(HttpAddressError), nameof(IsHttpAddressErrorOpen))]
+    [NotifyPropertyChangedFor(nameof(IsRdp), nameof(IsSsh), nameof(IsVnc), nameof(IsHttp), nameof(IsHttps), nameof(ShowCredentialSection), nameof(IsValid), nameof(CanUseSshAutoSudo), nameof(ShowInlinePassword), nameof(ShowConnectionUsername), nameof(ShowRdpDomain), nameof(HttpAddressError), nameof(IsHttpAddressErrorOpen))]
     private ProtocolType protocol = ProtocolType.Ssh;
 
     [ObservableProperty]
@@ -113,7 +113,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// Maps to <see cref="ConnectionNode.UseInlinePassword"/> (inverted) in WriteTo.
     /// </summary>
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(ShowInlinePassword), nameof(ShowRdpDomain), nameof(CanUseSshAutoSudo))]
+    [NotifyPropertyChangedFor(nameof(ShowInlinePassword), nameof(ShowConnectionUsername), nameof(ShowRdpDomain), nameof(CanUseSshAutoSudo))]
     private bool useSavedCredentials = true;
 
     /// <summary>The inline login password (bound to the editor's PasswordBox). SSH-only,
@@ -125,6 +125,12 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// saved credential. RDP keeps its existing behavior (saved credential or connect-time
     /// prompt), so no inline password control is surfaced for it.</summary>
     public bool ShowInlinePassword => IsSsh && !UseSavedCredentials;
+
+    /// <summary>
+    /// Connection-level username is meaningful for SSH/RDP prompt mode. VNC v1 uses no-auth or
+    /// password-only auth, so the username field stays hidden even when saved credentials are off.
+    /// </summary>
+    public bool ShowConnectionUsername => !UseSavedCredentials && (IsSsh || IsRdp);
 
     /// <summary>
     /// Drives the connection-level Domain field's visibility. Hidden only when a resolved RDP
@@ -314,6 +320,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     public bool IsRdp => Protocol == ProtocolType.Rdp;
     public bool IsSsh => Protocol == ProtocolType.Ssh;
+    public bool IsVnc => Protocol == ProtocolType.Vnc;
 
     /// <summary>True for the web protocols (<see cref="ProtocolType.Http"/> / <see cref="ProtocolType.Https"/>),
     /// which render in an embedded browser and need no credentials.</summary>
@@ -322,8 +329,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// <summary>True only for HTTPS — gates the "ignore certificate errors" control.</summary>
     public bool IsHttps => Protocol == ProtocolType.Https;
 
-    /// <summary>The credential block (saved credentials, inline username/password, domain, auto-sudo) is
-    /// shown for SSH/RDP but hidden for the credential-less web protocols.</summary>
+    /// <summary>The credential block is shown for SSH/RDP/VNC but hidden for the credential-less web protocols.</summary>
     public bool ShowCredentialSection => !IsHttp;
 
     /// <summary>
@@ -629,7 +635,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// </summary>
     private void RebuildAvailableCredentials()
     {
-        var connectionIsRdp = Protocol == ProtocolType.Rdp;
+        var connectionNeedsPasswordCredential = Protocol is ProtocolType.Rdp or ProtocolType.Vnc;
 
         var available = new List<CredentialProfile>(_allCredentials.Count + 3)
         {
@@ -645,7 +651,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
             if (c.Protocol != Protocol) continue;
             // RDP login only consumes the password secret — SSH-key credentials would force the
             // user into a misleading prompt path. Filter them out.
-            if (connectionIsRdp && c.Kind == CredentialKind.SshKey) continue;
+            if (connectionNeedsPasswordCredential && c.Kind == CredentialKind.SshKey) continue;
             available.Add(c);
             gatewayAvailable.Add(c);
         }
@@ -820,9 +826,9 @@ public partial class ConnectionEditorViewModel : ObservableObject
         // a stale entry — would silently expose a protocol-incompatible binding on save.
         if (CredentialId is { } id && _allCredentialsById.TryGetValue(id, out var cred))
         {
-            var connectionIsRdp = value == ProtocolType.Rdp;
+            var connectionNeedsPasswordCredential = value is ProtocolType.Rdp or ProtocolType.Vnc;
             var stillCompatible = cred.Protocol == value
-                && (!connectionIsRdp || cred.Kind != CredentialKind.SshKey);
+                && (!connectionNeedsPasswordCredential || cred.Kind != CredentialKind.SshKey);
             if (!stillCompatible) SelectedCredential = InheritCredential;
         }
         // Gateway credential is RDP-only — switching away from RDP makes it meaningless.
@@ -1034,12 +1040,17 @@ public partial class ConnectionEditorViewModel : ObservableObject
             node.Host = Host.Trim();
             node.Port = Port;
         }
-        // The free-text Username field is shown alongside the credential picker so users can
-        // override the credential's stored username on a per-connection basis. When the field
-        // is blank, fall back to the selected credential's username — without this fallback,
-        // a credential-backed SSH connection with a blank Username field would persist a
-        // null username and SshSessionService would reject the connect.
-        if (!string.IsNullOrWhiteSpace(Username))
+        // The free-text Username field is shown alongside the credential picker for SSH/RDP so
+        // users can override the credential's stored username on a per-connection basis. VNC v1
+        // is password-only and web sessions are credential-less, so both clear stale username data.
+        // When the visible field is blank, fall back to the selected credential's username —
+        // without this fallback, a credential-backed SSH/RDP connection with a blank Username
+        // field would persist a null username and the session service would reject the connect.
+        if (IsVnc || IsHttp)
+        {
+            node.Username = null;
+        }
+        else if (!string.IsNullOrWhiteSpace(Username))
         {
             node.Username = Username.Trim();
         }
@@ -1053,8 +1064,8 @@ public partial class ConnectionEditorViewModel : ObservableObject
         }
 
         // Credential mode. "Use saved credentials" unchecked means "don't use a saved credential"
-        // for BOTH protocols, so the picked CredentialId is always cleared in that case (else an
-        // RDP connection would silently keep authenticating with the now-hidden saved credential).
+        // for every credentialed protocol, so the picked CredentialId is always cleared in that case
+        // (else a connection would silently keep authenticating with the now-hidden saved credential).
         // SSH additionally gets an inline per-connection password: the plaintext is handed to the
         // tree VM via the transient PendingInlinePassword (it writes Credential Manager after the
         // row commits). RDP unchecked falls back to a connect-time prompt (CredentialId null,

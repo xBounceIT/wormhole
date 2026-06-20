@@ -138,7 +138,7 @@ public partial class FolderEditorViewModel : ObservableObject
         _loadedCredentialIds.Clear();
         foreach (var credential in credentials)
         {
-            if (credential.Protocol is not (ProtocolType.Ssh or ProtocolType.Rdp)) continue;
+            if (credential.Protocol is not (ProtocolType.Ssh or ProtocolType.Rdp or ProtocolType.Vnc)) continue;
             _loadedCredentialIds.Add(credential.Id);
             available.Add(credential);
         }

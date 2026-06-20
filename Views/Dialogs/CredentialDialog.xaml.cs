@@ -13,18 +13,18 @@ public sealed partial class CredentialDialog : UserControl, IDraftForm<Credentia
         this.InitializeComponent();
     }
 
-    // Credentials are scoped per protocol (Ssh/Rdp). SFTP is not a protocol — file transfer
+    // Credentials are scoped per protocol (Ssh/Rdp/Vnc). SFTP is not a protocol — file transfer
     // runs over an SSH session and reuses that connection's SSH credential. The HTTP/HTTPS web
     // protocols are credential-less, so they're deliberately excluded here (an explicit list, NOT
     // Enum.GetValues, so new protocols don't silently appear as credential types).
-    public ProtocolType[] Protocols { get; } = { ProtocolType.Ssh, ProtocolType.Rdp };
+    public ProtocolType[] Protocols { get; } = { ProtocolType.Ssh, ProtocolType.Rdp, ProtocolType.Vnc };
 
     private ProtocolType SelectedProtocol =>
         ProtocolBox.SelectedItem is ProtocolType p ? p : ProtocolType.Ssh;
 
     public bool IsValid =>
         !string.IsNullOrWhiteSpace(NameBox.Text) &&
-        !string.IsNullOrWhiteSpace(UsernameBox.Text) &&
+        (SelectedProtocol == ProtocolType.Vnc || !string.IsNullOrWhiteSpace(UsernameBox.Text)) &&
         !string.IsNullOrEmpty(PasswordField.Password) &&
         (SelectedProtocol != ProtocolType.Rdp || !string.IsNullOrWhiteSpace(DomainBox.Text));
 
@@ -35,12 +35,13 @@ public sealed partial class CredentialDialog : UserControl, IDraftForm<Credentia
         UsernameBox.Text = initial.Username;
         DomainBox.Text = initial.Domain ?? string.Empty;
         PasswordField.Password = initial.Password;
-        UpdateDomainVisibility();
+        UpdateProtocolFieldVisibility();
     }
 
     public CredentialDraft BuildDraft()
     {
         var protocol = SelectedProtocol;
+        var username = protocol == ProtocolType.Vnc ? string.Empty : UsernameBox.Text.Trim();
         var domain = protocol == ProtocolType.Rdp && !string.IsNullOrWhiteSpace(DomainBox.Text)
             ? DomainBox.Text.Trim()
             : null;
@@ -48,7 +49,7 @@ public sealed partial class CredentialDialog : UserControl, IDraftForm<Credentia
         return new CredentialDraft(
             NameBox.Text.Trim(),
             protocol,
-            UsernameBox.Text.Trim(),
+            username,
             domain,
             PasswordField.Password);
     }
@@ -71,14 +72,17 @@ public sealed partial class CredentialDialog : UserControl, IDraftForm<Credentia
 
     private void OnProtocolChanged(object sender, SelectionChangedEventArgs e)
     {
-        UpdateDomainVisibility();
+        UpdateProtocolFieldVisibility();
         ValidityChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    private void UpdateDomainVisibility()
+    private void UpdateProtocolFieldVisibility()
     {
         DomainBox.Visibility = SelectedProtocol == ProtocolType.Rdp
             ? Visibility.Visible
             : Visibility.Collapsed;
+        UsernameBox.Visibility = SelectedProtocol == ProtocolType.Vnc
+            ? Visibility.Collapsed
+            : Visibility.Visible;
     }
 }

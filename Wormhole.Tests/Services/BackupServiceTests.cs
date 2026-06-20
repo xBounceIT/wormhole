@@ -167,6 +167,55 @@ public sealed class BackupServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ExportImport_VncConnectionAndCredential_RoundTrips()
+    {
+        var src = await CreateEnvAsync();
+        var credential = new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Name = "kvm-console",
+            Kind = CredentialKind.Password,
+            Protocol = ProtocolType.Vnc,
+            CreatedAt = DateTime.UtcNow,
+        };
+        await src.Credentials.AddAsync(credential);
+        await src.Secrets.StorePasswordAsync(credential.Id, "vnc-secret");
+
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "console",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Vnc,
+            Host = "kvm.example.com",
+            Port = 5900,
+            CredentialId = credential.Id,
+            CredentialMode = CredentialBindingMode.Saved,
+        };
+        await src.Connections.AddAsync(node);
+
+        var path = Path.Combine(_scratchDir, "vnc.json");
+        await src.Service.ExportAsync(path, password: null);
+
+        var dst = await CreateEnvAsync();
+        var result = await dst.Service.ImportAsync(path, password: null);
+
+        Assert.Equal(1, result.NodesImported);
+        Assert.Equal(1, result.CredentialsImported);
+        Assert.Equal(1, result.PasswordsImported);
+
+        var importedNode = Assert.Single(await dst.Connections.GetAllAsync());
+        Assert.Equal(ProtocolType.Vnc, importedNode.Protocol);
+        Assert.Equal("kvm.example.com", importedNode.Host);
+        Assert.Equal(5900, importedNode.Port);
+        Assert.Equal(credential.Id, importedNode.CredentialId);
+
+        var importedCredential = Assert.Single(await dst.Credentials.GetAllAsync());
+        Assert.Equal(ProtocolType.Vnc, importedCredential.Protocol);
+        Assert.Equal("vnc-secret", dst.Secrets.Passwords[credential.Id]);
+    }
+
+    [Fact]
     public async Task ExportImport_Encrypted_RoundTrips()
     {
         var src = await CreateEnvAsync();

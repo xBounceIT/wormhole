@@ -340,6 +340,11 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
                 : string.Empty;
             var resolution = raw.InheritResolution ? null : NullIfEmpty(raw.Resolution);
             if (raw.InheritProtocol) protocol = null;
+            if (credentialProtocol == ProtocolType.Vnc)
+            {
+                username = null;
+                domain = null;
+            }
 
             string? plaintext = null;
             if (!string.IsNullOrEmpty(passwordCipher))
@@ -698,6 +703,12 @@ public sealed class MRemoteNgImportService : IMRemoteNgImportService
         if (normalized.Equals("RDP", StringComparison.OrdinalIgnoreCase))
         {
             protocol = ProtocolType.Rdp;
+            return true;
+        }
+
+        if (normalized.Equals("VNC", StringComparison.OrdinalIgnoreCase))
+        {
+            protocol = ProtocolType.Vnc;
             return true;
         }
 

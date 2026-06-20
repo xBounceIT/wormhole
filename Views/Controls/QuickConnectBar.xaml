@@ -15,11 +15,10 @@
 
         <ComboBox Grid.Column="0"
                   x:Name="ProtocolPicker"
-                  SelectedIndex="{x:Bind ViewModel.ProtocolIndex, Mode=TwoWay}"
-                  MinWidth="80">
-            <ComboBoxItem Content="SSH" Tag="Ssh" />
-            <ComboBoxItem Content="RDP" Tag="Rdp" />
-        </ComboBox>
+                  ItemsSource="{x:Bind ViewModel.ProtocolChoices}"
+                  SelectedItem="{x:Bind ViewModel.SelectedProtocolChoice, Mode=TwoWay}"
+                  DisplayMemberPath="Label"
+                  MinWidth="80" />
 
         <TextBox Grid.Column="1"
                  PlaceholderText="user@host"

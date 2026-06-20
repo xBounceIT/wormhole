@@ -30,6 +30,7 @@
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.8" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="SSH.NET" Version="2025.1.0" />
+    <PackageReference Include="Community.MarcusW.VncClient" Version="2.0.4" />
     <PackageReference Include="Markdig" Version="1.3.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
@@ -150,6 +151,7 @@
     <Compile Include="..\Services\ICredentialService.cs" Link="Services\ICredentialService.cs" />
     <Compile Include="..\Services\IDialogService.cs" Link="Services\IDialogService.cs" />
     <Compile Include="..\Services\ISshSessionService.cs" Link="Services\ISshSessionService.cs" />
+    <Compile Include="..\Services\IVncSessionService.cs" Link="Services\IVncSessionService.cs" />
     <Compile Include="..\Services\Ssh\SshSession.cs" Link="Services\Ssh\SshSession.cs" />
     <Compile Include="..\Services\Ssh\SshHostKeyValidator.cs" Link="Services\Ssh\SshHostKeyValidator.cs" />
     <Compile Include="..\Services\Ssh\SshHostKeyMismatchException.cs" Link="Services\Ssh\SshHostKeyMismatchException.cs" />
@@ -186,6 +188,7 @@
     <Compile Include="..\ViewModels\TunnelPickerViewModel.cs" Link="ViewModels\TunnelPickerViewModel.cs" />
     <Compile Include="..\ViewModels\FolderEditorViewModel.cs" Link="ViewModels\FolderEditorViewModel.cs" />
     <Compile Include="..\ViewModels\ConnectionTreeViewModel.cs" Link="ViewModels\ConnectionTreeViewModel.cs" />
+    <Compile Include="..\ViewModels\QuickConnectViewModel.cs" Link="ViewModels\QuickConnectViewModel.cs" />
     <Compile Include="..\ViewModels\ShellViewModel.cs" Link="ViewModels\ShellViewModel.cs" />
     <Compile Include="..\ViewModels\UpdateViewModel.cs" Link="ViewModels\UpdateViewModel.cs" />
     <Compile Include="..\ViewModels\CredentialsViewModel.cs" Link="ViewModels\CredentialsViewModel.cs" />
@@ -196,6 +199,7 @@
     <Compile Include="..\ViewModels\Sessions\SshSessionViewModel.cs" Link="ViewModels\Sessions\SshSessionViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\RdpSessionViewModel.cs" Link="ViewModels\Sessions\RdpSessionViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\HttpSessionViewModel.cs" Link="ViewModels\Sessions\HttpSessionViewModel.cs" />
+    <Compile Include="..\ViewModels\Sessions\VncSessionViewModel.cs" Link="ViewModels\Sessions\VncSessionViewModel.cs" />
     <Compile Include="..\Helpers\WebViewBrowserArguments.cs" Link="Helpers\WebViewBrowserArguments.cs" />
     <Compile Include="..\Helpers\Win32Interop.cs" Link="Helpers\Win32Interop.cs" />
     <Compile Include="..\Services\IRdpSessionService.cs" Link="Services\IRdpSessionService.cs" />

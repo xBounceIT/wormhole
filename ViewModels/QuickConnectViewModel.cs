@@ -13,19 +13,24 @@ public partial class QuickConnectViewModel : ObservableObject
     [ObservableProperty]
     private ProtocolType protocol = ProtocolType.Ssh;
 
-    // Bound to the ComboBox.SelectedIndex (which doesn't speak ProtocolType natively).
-    // Enum members are ordered Ssh, Rdp — same order as the ComboBoxItems.
-    public int ProtocolIndex
+    public IReadOnlyList<QuickConnectProtocolChoice> ProtocolChoices { get; } = new[]
     {
-        get => (int)Protocol;
+        new QuickConnectProtocolChoice(ProtocolType.Ssh, "SSH"),
+        new QuickConnectProtocolChoice(ProtocolType.Rdp, "RDP"),
+        new QuickConnectProtocolChoice(ProtocolType.Vnc, "VNC"),
+    };
+
+    public QuickConnectProtocolChoice? SelectedProtocolChoice
+    {
+        get => ProtocolChoices.FirstOrDefault(c => c.Protocol == Protocol);
         set
         {
-            if (value < 0) return;
-            Protocol = (ProtocolType)value;
+            if (value is null) return;
+            Protocol = value.Protocol;
         }
     }
 
-    partial void OnProtocolChanged(ProtocolType value) => OnPropertyChanged(nameof(ProtocolIndex));
+    partial void OnProtocolChanged(ProtocolType value) => OnPropertyChanged(nameof(SelectedProtocolChoice));
 
     [ObservableProperty]
     private string host = string.Empty;
@@ -68,7 +73,9 @@ public partial class QuickConnectViewModel : ObservableObject
             Protocol = Protocol,
             Host = spec.Host,
             Port = spec.Port ?? Port ?? DefaultPort(Protocol),
-            Username = !string.IsNullOrEmpty(spec.User) ? spec.User : (string.IsNullOrEmpty(Username) ? null : Username),
+            Username = Protocol == ProtocolType.Vnc
+                ? null
+                : !string.IsNullOrEmpty(spec.User) ? spec.User : (string.IsNullOrEmpty(Username) ? null : Username),
         };
 
         _tabFactory.Open(profile);
@@ -78,6 +85,9 @@ public partial class QuickConnectViewModel : ObservableObject
     {
         ProtocolType.Ssh => 22,
         ProtocolType.Rdp => 3389,
+        ProtocolType.Vnc => 5900,
         _ => 22,
     };
 }
+
+public sealed record QuickConnectProtocolChoice(ProtocolType Protocol, string Label);

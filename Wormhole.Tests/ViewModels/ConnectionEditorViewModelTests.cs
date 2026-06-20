@@ -407,6 +407,65 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task AvailableCredentials_FiltersVncToPasswordCredentials()
+    {
+        var sshCred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };
+        var vncPwd = new CredentialProfile { Name = "vnc-pwd", Protocol = ProtocolType.Vnc, Kind = CredentialKind.Password };
+        var vncKey = new CredentialProfile { Name = "vnc-key", Protocol = ProtocolType.Vnc, Kind = CredentialKind.SshKey };
+        var repo = new MultiCredentialRepository(sshCred, vncPwd, vncKey);
+        var vm = new ConnectionEditorViewModel(repo, EmptyTunnelRepo(), new FakeCredentialService());
+        vm.Protocol = ProtocolType.Vnc;
+
+        await vm.LoadCredentialsAsync();
+
+        Assert.Equal(3, vm.AvailableCredentials.Count);
+        Assert.Equal(ConnectionEditorViewModel.InheritCredential.Id, vm.AvailableCredentials[0].Id);
+        Assert.Equal(Guid.Empty, vm.AvailableCredentials[1].Id);
+        Assert.Equal("vnc-pwd", vm.AvailableCredentials[2].Name);
+    }
+
+    [Fact]
+    public async Task VncEditor_ShowsOnlySharedConnectionFields()
+    {
+        var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository(), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+
+        vm.Protocol = ProtocolType.Vnc;
+        vm.UseSavedCredentials = false;
+
+        Assert.True(vm.IsVnc);
+        Assert.True(vm.ShowCredentialSection);
+        Assert.False(vm.ShowConnectionUsername);
+        Assert.False(vm.ShowInlinePassword);
+        Assert.False(vm.ShowRdpDomain);
+        Assert.False(vm.CanUseSshAutoSudo);
+        Assert.False(vm.IsHttp);
+        Assert.False(vm.IsHttps);
+    }
+
+    [Fact]
+    public async Task WriteTo_Vnc_ClearsHiddenUsernameAndInlinePasswordState()
+    {
+        var vm = new ConnectionEditorViewModel(new EmptyCredentialRepository(), EmptyTunnelRepo(), new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        vm.Name = "console";
+        vm.Protocol = ProtocolType.Vnc;
+        vm.Host = "kvm.example.com";
+        vm.Username = "stale-user";
+        vm.UseSavedCredentials = false;
+        vm.InlinePassword = "stale-inline";
+
+        var node = new ConnectionNode();
+        vm.WriteTo(node);
+
+        Assert.Null(node.Username);
+        Assert.Equal(CredentialBindingMode.None, node.CredentialMode);
+        Assert.Null(node.CredentialId);
+        Assert.False(node.UseInlinePassword);
+        Assert.Null(node.PendingInlinePassword);
+    }
+
+    [Fact]
     public async Task NoneSentinel_ClearsCredentialBindingBackToPromptEveryTime()
     {
         var cred = new CredentialProfile { Name = "ssh", Protocol = ProtocolType.Ssh, Kind = CredentialKind.Password };

@@ -96,7 +96,7 @@
                                    Text="Accept self-signed or otherwise untrusted certificates — typical for firewall and appliance GUIs."
                                    Visibility="{x:Bind ViewModel.IsHttps, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
 
-                        <!-- Credentials (SSH/RDP). Hidden entirely for the credential-less web protocols. -->
+                        <!-- Credentials (SSH/RDP/VNC). Hidden entirely for the credential-less web protocols. -->
                         <StackPanel Spacing="10"
                                     Visibility="{x:Bind ViewModel.ShowCredentialSection, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
 
@@ -126,7 +126,7 @@
                         <TextBox Header="Username"
                                  PlaceholderText="(optional)"
                                  Text="{x:Bind ViewModel.Username, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                 Visibility="{x:Bind ViewModel.UseSavedCredentials, Mode=OneWay, Converter={StaticResource InverseBoolToVisibilityConverter}}" />
+                                 Visibility="{x:Bind ViewModel.ShowConnectionUsername, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
 
                         <!-- Inline password is SSH-only (ShowInlinePassword = IsSsh AND not using a
                              saved credential). Stored in Credential Manager keyed by the node Id.
@@ -164,7 +164,7 @@
                                        Text="{x:Bind ViewModel.SshAutoSudoDescription, Mode=OneWay}" />
                         </StackPanel>
                         </StackPanel>
-                        <!-- /Credentials (SSH/RDP) -->
+                        <!-- /Credentials (SSH/RDP/VNC) -->
 
                         <StackPanel Spacing="4">
                             <TextBlock Text="VPN tunnel"

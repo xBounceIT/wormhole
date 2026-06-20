@@ -13,4 +13,7 @@ public enum ProtocolType
     // Web protocols rendered in an embedded WebView2 browser surface. The enum value IS the scheme.
     Http = 3,
     Https = 4,
+
+    // Embedded VNC client. Value 2 remains reserved for retired SFTP.
+    Vnc = 5,
 }

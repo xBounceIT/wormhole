@@ -327,7 +327,8 @@ public class InheritanceResolverTests
     [Theory]
     [InlineData(ProtocolType.Http, 80)]
     [InlineData(ProtocolType.Https, 443)]
-    public void Resolve_DefaultsWebPortFromProtocol(ProtocolType protocol, int expectedPort)
+    [InlineData(ProtocolType.Vnc, 5900)]
+    public void Resolve_DefaultsPortFromProtocol(ProtocolType protocol, int expectedPort)
     {
         var node = new ConnectionNode
         {
@@ -425,6 +426,8 @@ public class InheritanceResolverTests
     [Theory]
     [InlineData(ProtocolType.Ssh, ProtocolType.Rdp, 3389, 22)]
     [InlineData(ProtocolType.Rdp, ProtocolType.Ssh, 22, 3389)]
+    [InlineData(ProtocolType.Vnc, ProtocolType.Rdp, 3389, 5900)]
+    [InlineData(ProtocolType.Vnc, ProtocolType.Ssh, 22, 5900)]
     public void Resolve_DoesNotInheritPortConfiguredForADifferentProtocol(
         ProtocolType leafProtocol, ProtocolType folderProtocol, int folderPort, int expectedPort)
     {
@@ -681,6 +684,46 @@ public class InheritanceResolverTests
         // A credential-less web node must not carry the parent folder's credential identity or
         // SSH key metadata into the resolved web profile.
         Assert.Null(profile.CredentialId);
+        Assert.Null(profile.Username);
+        Assert.Null(profile.SshKeyFileName);
+        Assert.Null(profile.SshKnownHostFingerprint);
+        Assert.False(profile.UseInlinePassword);
+    }
+
+    [Fact]
+    public void Resolve_VncConnection_InheritsPasswordCredentialButDropsAuthIdentityMaterial()
+    {
+        var credentialId = Guid.NewGuid();
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "kvm",
+            Kind = NodeKind.Folder,
+            CredentialId = credentialId,
+            CredentialMode = CredentialBindingMode.Saved,
+            Username = "admin",
+            SshKeyFileName = "shared-admin-key",
+            SshKnownHostFingerprint = "SHA256:inherited-pin",
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "console",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Vnc,
+            Host = "kvm.example.com",
+            UseInlinePassword = true,
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        };
+        var profile = new InheritanceResolver().Resolve(node, nodes);
+
+        Assert.Equal(credentialId, profile.CredentialId);
         Assert.Null(profile.Username);
         Assert.Null(profile.SshKeyFileName);
         Assert.Null(profile.SshKnownHostFingerprint);
