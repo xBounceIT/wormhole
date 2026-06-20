@@ -43,6 +43,18 @@ public sealed partial class NewConnectionDialog : UserControl
         }
     }
 
+    public double SerialBaudRateBindable
+    {
+        get => ViewModel.SerialBaudRate;
+        set
+        {
+            if (double.IsNaN(value)) return;
+            var baudRate = Math.Max(1, (int)value);
+            if (ViewModel.SerialBaudRate == baudRate) return;
+            ViewModel.SerialBaudRate = baudRate;
+        }
+    }
+
     public bool IsValid => ViewModel.IsValid;
 
     /// <summary>Load credentials and tunnel configs, then copy field values from
@@ -54,6 +66,9 @@ public sealed partial class NewConnectionDialog : UserControl
         var tunnels = ViewModel.TunnelPicker.LoadAsync();
         await Task.WhenAll(credentials, tunnels);
         ViewModel.LoadFrom(initial);
+        // Refresh x:Bind bridges such as PortBindable and SerialBaudRateBindable after
+        // the async load mutates the VM behind the already-initialized control.
+        Bindings.Update();
         // Pull the existing inline password (if any) from Credential Manager so an edit shows it.
         // Done after LoadFrom because reading the secret is async and LoadFrom is synchronous.
         await ViewModel.LoadInlineSecretAsync();

@@ -335,6 +335,95 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task Serial_IsCredentiallessLocalProtocol_WithNoNetworkPort()
+    {
+        var vm = await NewEditorAsync();
+        vm.Name = "console";
+        vm.Protocol = ProtocolType.Serial;
+        vm.Host = "COM4";
+        vm.Port = 0; // ignored for serial; baud lives in SerialBaudRate.
+
+        Assert.True(vm.IsValid);
+        Assert.True(vm.IsSerial);
+        Assert.False(vm.ShowCredentialSection);
+        Assert.False(vm.ShowTunnelSection);
+        Assert.False(vm.ShowPortBox);
+        Assert.Equal("Serial line", vm.HostHeader);
+    }
+
+    [Fact]
+    public async Task Serial_WriteTo_PersistsPuttySerialSettings_AndClearsNetworkOnlyFields()
+    {
+        var vm = await NewEditorAsync();
+        vm.Name = "switch-console";
+        vm.Protocol = ProtocolType.Serial;
+        vm.Host = "COM9";
+        vm.Port = 22;
+        vm.SerialBaudRate = 115200;
+        vm.SerialDataBits = 7;
+        vm.SerialStopBits = SerialStopBitsMode.Two;
+        vm.SerialParity = SerialParityMode.Even;
+        vm.SerialFlowControl = SerialFlowControlMode.DsrDtr;
+
+        var node = new ConnectionNode
+        {
+            Username = "stale-user",
+            CredentialId = Guid.NewGuid(),
+            CredentialMode = CredentialBindingMode.Saved,
+            UseInlinePassword = true,
+            PendingInlinePassword = "stale-secret",
+            SshAutoSudo = true,
+            TunnelEnabled = true,
+            TunnelConfigId = Guid.NewGuid(),
+        };
+        vm.WriteTo(node);
+
+        Assert.Equal(ProtocolType.Serial, node.Protocol);
+        Assert.Equal("COM9", node.Host);
+        Assert.Null(node.Port);
+        Assert.Equal(115200, node.SerialBaudRate);
+        Assert.Equal(7, node.SerialDataBits);
+        Assert.Equal(SerialStopBitsMode.Two, node.SerialStopBits);
+        Assert.Equal(SerialParityMode.Even, node.SerialParity);
+        Assert.Equal(SerialFlowControlMode.DsrDtr, node.SerialFlowControl);
+        Assert.Null(node.Username);
+        Assert.Null(node.CredentialId);
+        Assert.Null(node.CredentialMode);
+        Assert.False(node.UseInlinePassword);
+        Assert.Null(node.PendingInlinePassword);
+        Assert.Null(node.SshAutoSudo);
+        Assert.False(node.TunnelEnabled);
+        Assert.Null(node.TunnelConfigId);
+    }
+
+    [Fact]
+    public async Task Serial_LoadFrom_RoundTripsSettings()
+    {
+        var vm = await NewEditorAsync();
+        var source = new ConnectionNode
+        {
+            Name = "console",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Serial,
+            Host = "COM12",
+            SerialBaudRate = 57600,
+            SerialDataBits = 6,
+            SerialStopBits = SerialStopBitsMode.OnePointFive,
+            SerialParity = SerialParityMode.Mark,
+            SerialFlowControl = SerialFlowControlMode.XonXoff,
+        };
+
+        vm.LoadFrom(source);
+
+        Assert.Equal("COM12", vm.Host);
+        Assert.Equal(57600, vm.SerialBaudRate);
+        Assert.Equal(6, vm.SerialDataBits);
+        Assert.Equal(SerialStopBitsMode.OnePointFive, vm.SerialStopBits);
+        Assert.Equal(SerialParityMode.Mark, vm.SerialParity);
+        Assert.Equal(SerialFlowControlMode.XonXoff, vm.SerialFlowControl);
+    }
+
+    [Fact]
     public async Task WriteTo_BlankUsernameWithSelectedCredential_FallsBackToCredentialUsername()
     {
         // Regression for the credential-backed connect path: if the user picks a saved

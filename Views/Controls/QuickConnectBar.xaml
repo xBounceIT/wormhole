@@ -19,10 +19,11 @@
                   MinWidth="80">
             <ComboBoxItem Content="SSH" Tag="Ssh" />
             <ComboBoxItem Content="RDP" Tag="Rdp" />
+            <ComboBoxItem Content="SERIAL" Tag="Serial" />
         </ComboBox>
 
         <TextBox Grid.Column="1"
-                 PlaceholderText="user@host"
+                 PlaceholderText="{x:Bind ViewModel.HostPlaceholder, Mode=OneWay}"
                  Margin="6,0,6,0"
                  Text="{x:Bind ViewModel.Host, Mode=TwoWay}" />
 

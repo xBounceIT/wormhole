@@ -59,8 +59,8 @@
 
                             <TextBox x:Name="HostBox"
                                      Grid.Column="1"
-                                     Header="Host"
-                                     PlaceholderText="example.com"
+                                     Header="{x:Bind ViewModel.HostHeader, Mode=OneWay}"
+                                     PlaceholderText="{x:Bind ViewModel.HostPlaceholder, Mode=OneWay}"
                                      Text="{x:Bind ViewModel.Host, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
 
                             <NumberBox Grid.Column="2"
@@ -70,7 +70,7 @@
                                        Minimum="1"
                                        Maximum="65535"
                                        SpinButtonPlacementMode="Hidden"
-                                       Visibility="{x:Bind ViewModel.IsHttp, Mode=OneWay, Converter={StaticResource InverseBoolToVisibilityConverter}}"
+                                       Visibility="{x:Bind ViewModel.ShowPortBox, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
                                        Value="{x:Bind PortBindable, Mode=TwoWay, FallbackValue=NaN}" />
                         </Grid>
 
@@ -166,7 +166,8 @@
                         </StackPanel>
                         <!-- /Credentials (SSH/RDP) -->
 
-                        <StackPanel Spacing="4">
+                        <StackPanel Spacing="4"
+                                    Visibility="{x:Bind ViewModel.ShowTunnelSection, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
                             <TextBlock Text="VPN tunnel"
                                        Style="{StaticResource CaptionTextBlockStyle}" />
                             <ComboBox HorizontalAlignment="Stretch"
@@ -184,6 +185,54 @@
                                  IsOpen="{x:Bind ViewModel.IsAzureAdCredential, Mode=OneWay}"
                                  Title="Azure AD target"
                                  Message="Wormhole detected an Azure AD signal (credential, username, or domain) and will open this connection in the system Remote Desktop client (mstsc.exe). The embedded host can't load the WAM broker in our unpackaged build and crashes mid-handshake on AAD auth — for safety, this routing is enforced even if you uncheck the box below." />
+                    </StackPanel>
+                </ScrollViewer>
+            </TabViewItem>
+
+            <!-- Serial -->
+            <TabViewItem Header="Serial" IsClosable="False"
+                         Visibility="{x:Bind ViewModel.IsSerial, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+                <ScrollViewer Padding="16">
+                    <StackPanel Spacing="10">
+                        <NumberBox Header="Speed (baud)"
+                                   MinWidth="160"
+                                   HorizontalAlignment="Left"
+                                   Minimum="1"
+                                   Maximum="4000000"
+                                   SmallChange="1200"
+                                   LargeChange="9600"
+                                   SpinButtonPlacementMode="Hidden"
+                                   Value="{x:Bind SerialBaudRateBindable, Mode=TwoWay, FallbackValue=9600}" />
+
+                        <ComboBox Header="Data bits"
+                                  HorizontalAlignment="Left"
+                                  MinWidth="160"
+                                  ItemsSource="{x:Bind ViewModel.SerialDataBitChoices}"
+                                  SelectedItem="{x:Bind ViewModel.SerialDataBits, Mode=TwoWay}" />
+
+                        <ComboBox Header="Stop bits"
+                                  HorizontalAlignment="Left"
+                                  MinWidth="160"
+                                  ItemsSource="{x:Bind ViewModel.SerialStopBitChoices}"
+                                  SelectedValuePath="Key"
+                                  DisplayMemberPath="Value"
+                                  SelectedValue="{x:Bind ViewModel.SerialStopBits, Mode=TwoWay}" />
+
+                        <ComboBox Header="Parity"
+                                  HorizontalAlignment="Left"
+                                  MinWidth="160"
+                                  ItemsSource="{x:Bind ViewModel.SerialParityChoices}"
+                                  SelectedValuePath="Key"
+                                  DisplayMemberPath="Value"
+                                  SelectedValue="{x:Bind ViewModel.SerialParity, Mode=TwoWay}" />
+
+                        <ComboBox Header="Flow control"
+                                  HorizontalAlignment="Left"
+                                  MinWidth="180"
+                                  ItemsSource="{x:Bind ViewModel.SerialFlowControlChoices}"
+                                  SelectedValuePath="Key"
+                                  DisplayMemberPath="Value"
+                                  SelectedValue="{x:Bind ViewModel.SerialFlowControl, Mode=TwoWay}" />
                     </StackPanel>
                 </ScrollViewer>
             </TabViewItem>
