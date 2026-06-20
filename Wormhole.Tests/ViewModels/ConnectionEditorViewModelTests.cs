@@ -461,12 +461,39 @@ public class ConnectionEditorViewModelTests
         };
 
         vm.LoadFrom(source);
+        vm.SerialBaudRateInherits = false;
         vm.SerialBaudRate = 115200;
         var sink = new ConnectionNode();
 
         vm.WriteTo(sink);
 
         Assert.Equal(115200, sink.SerialBaudRate);
+        Assert.Null(sink.SerialDataBits);
+        Assert.Null(sink.SerialStopBits);
+        Assert.Null(sink.SerialParity);
+        Assert.Null(sink.SerialFlowControl);
+    }
+
+    [Fact]
+    public async Task Serial_WriteTo_PersistsDefaultOverrideWhenInherited()
+    {
+        var vm = await NewEditorAsync();
+        var source = new ConnectionNode
+        {
+            Name = "console",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Serial,
+            Host = "COM12",
+        };
+
+        vm.LoadFrom(source);
+        Assert.True(vm.SerialBaudRateInherits);
+        vm.SerialBaudRateInherits = false;
+        var sink = new ConnectionNode();
+
+        vm.WriteTo(sink);
+
+        Assert.Equal(SerialDefaults.BaudRate, sink.SerialBaudRate);
         Assert.Null(sink.SerialDataBits);
         Assert.Null(sink.SerialStopBits);
         Assert.Null(sink.SerialParity);

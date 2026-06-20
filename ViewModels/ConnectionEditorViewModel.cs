@@ -42,15 +42,6 @@ public partial class ConnectionEditorViewModel : ObservableObject
     // The node's own UseInlinePassword as loaded, so LoadInlineSecretAsync only reads a secret
     // for a connection that actually has one.
     private bool _loadedUseInlinePassword;
-    private ProtocolType? _loadedProtocol;
-    // The node's own serial setting values as loaded. Null means the connection inherits the
-    // setting from an ancestor; WriteTo preserves that null unless the user changes the displayed
-    // value.
-    private int? _loadedSerialBaudRate;
-    private int? _loadedSerialDataBits;
-    private SerialStopBitsMode? _loadedSerialStopBits;
-    private SerialParityMode? _loadedSerialParity;
-    private SerialFlowControlMode? _loadedSerialFlowControl;
 
     public ConnectionEditorViewModel(
         ICredentialRepository credentialRepository,
@@ -383,16 +374,33 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsValid))]
+    private bool serialBaudRateInherits;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsValid))]
     private int serialDataBits = SerialDefaults.DataBits;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsValid))]
+    private bool serialDataBitsInherits;
 
     [ObservableProperty]
     private SerialStopBitsMode serialStopBits = SerialDefaults.StopBits;
 
     [ObservableProperty]
+    private bool serialStopBitsInherits;
+
+    [ObservableProperty]
     private SerialParityMode serialParity = SerialDefaults.Parity;
 
     [ObservableProperty]
+    private bool serialParityInherits;
+
+    [ObservableProperty]
     private SerialFlowControlMode serialFlowControl = SerialDefaults.FlowControl;
+
+    [ObservableProperty]
+    private bool serialFlowControlInherits;
 
     public IReadOnlyList<int> SerialDataBitChoices { get; } = new[] { 5, 6, 7, 8 };
 
@@ -651,8 +659,8 @@ public partial class ConnectionEditorViewModel : ObservableObject
             // treats null as not matching either side, so this only rejects an explicit
             // out-of-range value — not null.
             if (!IsSerial && Port is < 1 or > 65535) return false;
-            if (IsSerial && SerialBaudRate <= 0) return false;
-            if (IsSerial && SerialDataBits is < 5 or > 8) return false;
+            if (IsSerial && !SerialBaudRateInherits && SerialBaudRate <= 0) return false;
+            if (IsSerial && !SerialDataBitsInherits && SerialDataBits is < 5 or > 8) return false;
             if (IsRdp)
             {
                 if (GatewayHostnameError is not null) return false;
@@ -1004,7 +1012,6 @@ public partial class ConnectionEditorViewModel : ObservableObject
                 ? CredentialBindingMode.Inherit
                 : CredentialBindingMode.Saved);
             _editingNodeId = node.Id;
-            _loadedProtocol = node.Protocol;
             _loadedUseInlinePassword = node.UseInlinePassword ?? false;
             UseSavedCredentials = !_loadedUseInlinePassword;
             // The plaintext is fetched lazily from Credential Manager by LoadInlineSecretAsync
@@ -1072,16 +1079,16 @@ public partial class ConnectionEditorViewModel : ObservableObject
             RdpGatewayUseSameCreds = node.RdpGatewayUseSameCreds ?? false;
             RdpUseExternalClient = node.RdpUseExternalClient ?? false;
 
-            _loadedSerialBaudRate = node.SerialBaudRate;
-            _loadedSerialDataBits = node.SerialDataBits;
-            _loadedSerialStopBits = node.SerialStopBits;
-            _loadedSerialParity = node.SerialParity;
-            _loadedSerialFlowControl = node.SerialFlowControl;
-            SerialBaudRate = SerialDefaults.NormalizeBaudRate(_loadedSerialBaudRate);
-            SerialDataBits = SerialDefaults.NormalizeDataBits(_loadedSerialDataBits);
-            SerialStopBits = SerialDefaults.NormalizeStopBits(_loadedSerialStopBits);
-            SerialParity = SerialDefaults.NormalizeParity(_loadedSerialParity);
-            SerialFlowControl = SerialDefaults.NormalizeFlowControl(_loadedSerialFlowControl);
+            SerialBaudRateInherits = node.SerialBaudRate is null;
+            SerialDataBitsInherits = node.SerialDataBits is null;
+            SerialStopBitsInherits = node.SerialStopBits is null;
+            SerialParityInherits = node.SerialParity is null;
+            SerialFlowControlInherits = node.SerialFlowControl is null;
+            SerialBaudRate = SerialDefaults.NormalizeBaudRate(node.SerialBaudRate);
+            SerialDataBits = SerialDefaults.NormalizeDataBits(node.SerialDataBits);
+            SerialStopBits = SerialDefaults.NormalizeStopBits(node.SerialStopBits);
+            SerialParity = SerialDefaults.NormalizeParity(node.SerialParity);
+            SerialFlowControl = SerialDefaults.NormalizeFlowControl(node.SerialFlowControl);
 
             HttpIgnoreCertErrors = node.HttpIgnoreCertErrors ?? false;
 
@@ -1243,26 +1250,11 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
         if (IsSerial)
         {
-            node.SerialBaudRate = SerialSettingToPersist(
-                _loadedSerialBaudRate,
-                SerialBaudRate,
-                SerialDefaults.NormalizeBaudRate(_loadedSerialBaudRate));
-            node.SerialDataBits = SerialSettingToPersist(
-                _loadedSerialDataBits,
-                SerialDataBits,
-                SerialDefaults.NormalizeDataBits(_loadedSerialDataBits));
-            node.SerialStopBits = SerialSettingToPersist(
-                _loadedSerialStopBits,
-                SerialStopBits,
-                SerialDefaults.NormalizeStopBits(_loadedSerialStopBits));
-            node.SerialParity = SerialSettingToPersist(
-                _loadedSerialParity,
-                SerialParity,
-                SerialDefaults.NormalizeParity(_loadedSerialParity));
-            node.SerialFlowControl = SerialSettingToPersist(
-                _loadedSerialFlowControl,
-                SerialFlowControl,
-                SerialDefaults.NormalizeFlowControl(_loadedSerialFlowControl));
+            node.SerialBaudRate = SerialBaudRateInherits ? null : SerialBaudRate;
+            node.SerialDataBits = SerialDataBitsInherits ? null : SerialDataBits;
+            node.SerialStopBits = SerialStopBitsInherits ? null : SerialStopBits;
+            node.SerialParity = SerialParityInherits ? null : SerialParity;
+            node.SerialFlowControl = SerialFlowControlInherits ? null : SerialFlowControl;
         }
         else
         {
@@ -1285,18 +1277,6 @@ public partial class ConnectionEditorViewModel : ObservableObject
         }
     }
 
-
-    private T? SerialSettingToPersist<T>(T? loadedValue, T currentValue, T loadedDisplayValue)
-        where T : struct =>
-        ShouldPreserveInheritedSerialSetting(loadedValue, currentValue, loadedDisplayValue)
-            ? null
-            : currentValue;
-
-    private bool ShouldPreserveInheritedSerialSetting<T>(T? loadedValue, T currentValue, T loadedDisplayValue)
-        where T : struct =>
-        _loadedProtocol == ProtocolType.Serial
-        && loadedValue is null
-        && EqualityComparer<T>.Default.Equals(currentValue, loadedDisplayValue);
 
     /// <summary>
     /// Parse the web "address" field into a bare host + optional port. Accepts <c>host</c>,

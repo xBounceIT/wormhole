@@ -194,45 +194,100 @@
                          Visibility="{x:Bind ViewModel.IsSerial, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
                 <ScrollViewer Padding="16">
                     <StackPanel Spacing="10">
-                        <NumberBox Header="Speed (baud)"
-                                   MinWidth="160"
-                                   HorizontalAlignment="Left"
-                                   Minimum="1"
-                                   Maximum="4000000"
-                                   SmallChange="1200"
-                                   LargeChange="9600"
-                                   SpinButtonPlacementMode="Hidden"
-                                   Value="{x:Bind SerialBaudRateBindable, Mode=TwoWay, FallbackValue=9600}" />
+                        <Grid ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <NumberBox Header="Speed (baud)"
+                                       MinWidth="160"
+                                       HorizontalAlignment="Left"
+                                       Minimum="1"
+                                       Maximum="4000000"
+                                       SmallChange="1200"
+                                       LargeChange="9600"
+                                       SpinButtonPlacementMode="Hidden"
+                                       IsEnabled="{x:Bind ViewModel.SerialBaudRateInherits, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}"
+                                       Value="{x:Bind SerialBaudRateBindable, Mode=TwoWay, FallbackValue=9600}" />
+                            <CheckBox Grid.Column="1"
+                                      Content="Inherit"
+                                      VerticalAlignment="Bottom"
+                                      IsChecked="{x:Bind ViewModel.SerialBaudRateInherits, Mode=TwoWay}" />
+                        </Grid>
 
-                        <ComboBox Header="Data bits"
-                                  HorizontalAlignment="Left"
-                                  MinWidth="160"
-                                  ItemsSource="{x:Bind ViewModel.SerialDataBitChoices}"
-                                  SelectedItem="{x:Bind ViewModel.SerialDataBits, Mode=TwoWay}" />
+                        <Grid ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <ComboBox Header="Data bits"
+                                      HorizontalAlignment="Left"
+                                      MinWidth="160"
+                                      ItemsSource="{x:Bind ViewModel.SerialDataBitChoices}"
+                                      IsEnabled="{x:Bind ViewModel.SerialDataBitsInherits, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}"
+                                      SelectedItem="{x:Bind ViewModel.SerialDataBits, Mode=TwoWay}" />
+                            <CheckBox Grid.Column="1"
+                                      Content="Inherit"
+                                      VerticalAlignment="Bottom"
+                                      IsChecked="{x:Bind ViewModel.SerialDataBitsInherits, Mode=TwoWay}" />
+                        </Grid>
 
-                        <ComboBox Header="Stop bits"
-                                  HorizontalAlignment="Left"
-                                  MinWidth="160"
-                                  ItemsSource="{x:Bind ViewModel.SerialStopBitChoices}"
-                                  SelectedValuePath="Key"
-                                  DisplayMemberPath="Value"
-                                  SelectedValue="{x:Bind ViewModel.SerialStopBits, Mode=TwoWay}" />
+                        <Grid ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <ComboBox Header="Stop bits"
+                                      HorizontalAlignment="Left"
+                                      MinWidth="160"
+                                      ItemsSource="{x:Bind ViewModel.SerialStopBitChoices}"
+                                      SelectedValuePath="Key"
+                                      DisplayMemberPath="Value"
+                                      IsEnabled="{x:Bind ViewModel.SerialStopBitsInherits, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}"
+                                      SelectedValue="{x:Bind ViewModel.SerialStopBits, Mode=TwoWay}" />
+                            <CheckBox Grid.Column="1"
+                                      Content="Inherit"
+                                      VerticalAlignment="Bottom"
+                                      IsChecked="{x:Bind ViewModel.SerialStopBitsInherits, Mode=TwoWay}" />
+                        </Grid>
 
-                        <ComboBox Header="Parity"
-                                  HorizontalAlignment="Left"
-                                  MinWidth="160"
-                                  ItemsSource="{x:Bind ViewModel.SerialParityChoices}"
-                                  SelectedValuePath="Key"
-                                  DisplayMemberPath="Value"
-                                  SelectedValue="{x:Bind ViewModel.SerialParity, Mode=TwoWay}" />
+                        <Grid ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <ComboBox Header="Parity"
+                                      HorizontalAlignment="Left"
+                                      MinWidth="160"
+                                      ItemsSource="{x:Bind ViewModel.SerialParityChoices}"
+                                      SelectedValuePath="Key"
+                                      DisplayMemberPath="Value"
+                                      IsEnabled="{x:Bind ViewModel.SerialParityInherits, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}"
+                                      SelectedValue="{x:Bind ViewModel.SerialParity, Mode=TwoWay}" />
+                            <CheckBox Grid.Column="1"
+                                      Content="Inherit"
+                                      VerticalAlignment="Bottom"
+                                      IsChecked="{x:Bind ViewModel.SerialParityInherits, Mode=TwoWay}" />
+                        </Grid>
 
-                        <ComboBox Header="Flow control"
-                                  HorizontalAlignment="Left"
-                                  MinWidth="180"
-                                  ItemsSource="{x:Bind ViewModel.SerialFlowControlChoices}"
-                                  SelectedValuePath="Key"
-                                  DisplayMemberPath="Value"
-                                  SelectedValue="{x:Bind ViewModel.SerialFlowControl, Mode=TwoWay}" />
+                        <Grid ColumnSpacing="10">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <ComboBox Header="Flow control"
+                                      HorizontalAlignment="Left"
+                                      MinWidth="180"
+                                      ItemsSource="{x:Bind ViewModel.SerialFlowControlChoices}"
+                                      SelectedValuePath="Key"
+                                      DisplayMemberPath="Value"
+                                      IsEnabled="{x:Bind ViewModel.SerialFlowControlInherits, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}"
+                                      SelectedValue="{x:Bind ViewModel.SerialFlowControl, Mode=TwoWay}" />
+                            <CheckBox Grid.Column="1"
+                                      Content="Inherit"
+                                      VerticalAlignment="Bottom"
+                                      IsChecked="{x:Bind ViewModel.SerialFlowControlInherits, Mode=TwoWay}" />
+                        </Grid>
                     </StackPanel>
                 </ScrollViewer>
             </TabViewItem>
