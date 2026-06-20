@@ -42,6 +42,15 @@ public partial class ConnectionEditorViewModel : ObservableObject
     // The node's own UseInlinePassword as loaded, so LoadInlineSecretAsync only reads a secret
     // for a connection that actually has one.
     private bool _loadedUseInlinePassword;
+    private ProtocolType? _loadedProtocol;
+    // The node's own serial setting values as loaded. Null means the connection inherits the
+    // setting from an ancestor; WriteTo preserves that null unless the user changes the displayed
+    // value.
+    private int? _loadedSerialBaudRate;
+    private int? _loadedSerialDataBits;
+    private SerialStopBitsMode? _loadedSerialStopBits;
+    private SerialParityMode? _loadedSerialParity;
+    private SerialFlowControlMode? _loadedSerialFlowControl;
 
     public ConnectionEditorViewModel(
         ICredentialRepository credentialRepository,
@@ -995,6 +1004,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
                 ? CredentialBindingMode.Inherit
                 : CredentialBindingMode.Saved);
             _editingNodeId = node.Id;
+            _loadedProtocol = node.Protocol;
             _loadedUseInlinePassword = node.UseInlinePassword ?? false;
             UseSavedCredentials = !_loadedUseInlinePassword;
             // The plaintext is fetched lazily from Credential Manager by LoadInlineSecretAsync
@@ -1062,11 +1072,16 @@ public partial class ConnectionEditorViewModel : ObservableObject
             RdpGatewayUseSameCreds = node.RdpGatewayUseSameCreds ?? false;
             RdpUseExternalClient = node.RdpUseExternalClient ?? false;
 
-            SerialBaudRate = SerialDefaults.NormalizeBaudRate(node.SerialBaudRate);
-            SerialDataBits = SerialDefaults.NormalizeDataBits(node.SerialDataBits);
-            SerialStopBits = SerialDefaults.NormalizeStopBits(node.SerialStopBits);
-            SerialParity = SerialDefaults.NormalizeParity(node.SerialParity);
-            SerialFlowControl = SerialDefaults.NormalizeFlowControl(node.SerialFlowControl);
+            _loadedSerialBaudRate = node.SerialBaudRate;
+            _loadedSerialDataBits = node.SerialDataBits;
+            _loadedSerialStopBits = node.SerialStopBits;
+            _loadedSerialParity = node.SerialParity;
+            _loadedSerialFlowControl = node.SerialFlowControl;
+            SerialBaudRate = SerialDefaults.NormalizeBaudRate(_loadedSerialBaudRate);
+            SerialDataBits = SerialDefaults.NormalizeDataBits(_loadedSerialDataBits);
+            SerialStopBits = SerialDefaults.NormalizeStopBits(_loadedSerialStopBits);
+            SerialParity = SerialDefaults.NormalizeParity(_loadedSerialParity);
+            SerialFlowControl = SerialDefaults.NormalizeFlowControl(_loadedSerialFlowControl);
 
             HttpIgnoreCertErrors = node.HttpIgnoreCertErrors ?? false;
 
@@ -1226,11 +1241,37 @@ public partial class ConnectionEditorViewModel : ObservableObject
         // doesn't linger on a connection switched away from HTTPS.
         node.HttpIgnoreCertErrors = IsHttps ? HttpIgnoreCertErrors : (bool?)null;
 
-        node.SerialBaudRate = IsSerial ? SerialBaudRate : null;
-        node.SerialDataBits = IsSerial ? SerialDataBits : null;
-        node.SerialStopBits = IsSerial ? SerialStopBits : null;
-        node.SerialParity = IsSerial ? SerialParity : null;
-        node.SerialFlowControl = IsSerial ? SerialFlowControl : null;
+        if (IsSerial)
+        {
+            node.SerialBaudRate = SerialSettingToPersist(
+                _loadedSerialBaudRate,
+                SerialBaudRate,
+                SerialDefaults.NormalizeBaudRate(_loadedSerialBaudRate));
+            node.SerialDataBits = SerialSettingToPersist(
+                _loadedSerialDataBits,
+                SerialDataBits,
+                SerialDefaults.NormalizeDataBits(_loadedSerialDataBits));
+            node.SerialStopBits = SerialSettingToPersist(
+                _loadedSerialStopBits,
+                SerialStopBits,
+                SerialDefaults.NormalizeStopBits(_loadedSerialStopBits));
+            node.SerialParity = SerialSettingToPersist(
+                _loadedSerialParity,
+                SerialParity,
+                SerialDefaults.NormalizeParity(_loadedSerialParity));
+            node.SerialFlowControl = SerialSettingToPersist(
+                _loadedSerialFlowControl,
+                SerialFlowControl,
+                SerialDefaults.NormalizeFlowControl(_loadedSerialFlowControl));
+        }
+        else
+        {
+            node.SerialBaudRate = null;
+            node.SerialDataBits = null;
+            node.SerialStopBits = null;
+            node.SerialParity = null;
+            node.SerialFlowControl = null;
+        }
 
         // Tunnel fields apply to network protocols only; serial ports are local devices.
         if (IsSerial)
@@ -1243,6 +1284,19 @@ public partial class ConnectionEditorViewModel : ObservableObject
             TunnelPicker.WriteTo(node);
         }
     }
+
+
+    private T? SerialSettingToPersist<T>(T? loadedValue, T currentValue, T loadedDisplayValue)
+        where T : struct =>
+        ShouldPreserveInheritedSerialSetting(loadedValue, currentValue, loadedDisplayValue)
+            ? null
+            : currentValue;
+
+    private bool ShouldPreserveInheritedSerialSetting<T>(T? loadedValue, T currentValue, T loadedDisplayValue)
+        where T : struct =>
+        _loadedProtocol == ProtocolType.Serial
+        && loadedValue is null
+        && EqualityComparer<T>.Default.Equals(currentValue, loadedDisplayValue);
 
     /// <summary>
     /// Parse the web "address" field into a bare host + optional port. Accepts <c>host</c>,

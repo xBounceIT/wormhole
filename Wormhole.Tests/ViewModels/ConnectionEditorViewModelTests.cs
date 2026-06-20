@@ -424,6 +424,56 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task Serial_WriteTo_PreservesInheritedSettingsWhenUnchanged()
+    {
+        var vm = await NewEditorAsync();
+        var source = new ConnectionNode
+        {
+            Name = "console",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Serial,
+            Host = "COM12",
+        };
+
+        vm.LoadFrom(source);
+        vm.Name = "renamed-console";
+        var sink = new ConnectionNode();
+
+        vm.WriteTo(sink);
+
+        Assert.Null(sink.SerialBaudRate);
+        Assert.Null(sink.SerialDataBits);
+        Assert.Null(sink.SerialStopBits);
+        Assert.Null(sink.SerialParity);
+        Assert.Null(sink.SerialFlowControl);
+    }
+
+    [Fact]
+    public async Task Serial_WriteTo_PersistsChangedInheritedSettingOnly()
+    {
+        var vm = await NewEditorAsync();
+        var source = new ConnectionNode
+        {
+            Name = "console",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Serial,
+            Host = "COM12",
+        };
+
+        vm.LoadFrom(source);
+        vm.SerialBaudRate = 115200;
+        var sink = new ConnectionNode();
+
+        vm.WriteTo(sink);
+
+        Assert.Equal(115200, sink.SerialBaudRate);
+        Assert.Null(sink.SerialDataBits);
+        Assert.Null(sink.SerialStopBits);
+        Assert.Null(sink.SerialParity);
+        Assert.Null(sink.SerialFlowControl);
+    }
+
+    [Fact]
     public async Task WriteTo_BlankUsernameWithSelectedCredential_FallsBackToCredentialUsername()
     {
         // Regression for the credential-backed connect path: if the user picks a saved
