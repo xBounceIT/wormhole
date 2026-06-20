@@ -21,7 +21,7 @@ namespace Wormhole.ViewModels.Sessions;
 // The bridge / session / tunnel / CTS pair are torn down explicitly via DetachAsync /
 // SafeDisposeSessionAsync / CancelRemoteOutputWaitTimer on the documented teardown path.
 #pragma warning disable CA1001
-public sealed partial class SshSessionViewModel : SessionTabViewModel
+public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminalSessionViewModel
 #pragma warning restore CA1001
 {
     private static readonly TimeSpan RemoteOutputWaitDelay = TimeSpan.FromSeconds(2);

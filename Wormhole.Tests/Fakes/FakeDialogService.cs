@@ -116,6 +116,11 @@ public class FakeDialogService : IDialogService
         output.RdpGatewayBypassLocal = src.RdpGatewayBypassLocal;
         output.RdpGatewayUseSameCreds = src.RdpGatewayUseSameCreds;
         output.RdpUseExternalClient = src.RdpUseExternalClient;
+        output.SerialBaudRate = src.SerialBaudRate;
+        output.SerialDataBits = src.SerialDataBits;
+        output.SerialStopBits = src.SerialStopBits;
+        output.SerialParity = src.SerialParity;
+        output.SerialFlowControl = src.SerialFlowControl;
         output.TunnelEnabled = src.TunnelEnabled;
         output.TunnelConfigId = src.TunnelConfigId;
         return Task.FromResult<ConnectionNode?>(output);

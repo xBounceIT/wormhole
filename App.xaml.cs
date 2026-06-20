@@ -274,6 +274,7 @@ public partial class App : Application
         services.AddSingleton<INavigationService, NavigationService>();
         services.AddSingleton<IDialogService, DialogService>();
         services.AddSingleton<ISshSessionService, SshSessionService>();
+        services.AddSingleton<ISerialSessionService, SerialSessionService>();
         services.AddSingleton<IPrivateKeyInspector, SshNetPrivateKeyInspector>();
         services.AddSingleton<ISshCredentialResolver, SshCredentialResolver>();
         services.AddSingleton<ISessionTabFactory, SessionTabFactory>();
@@ -317,6 +318,7 @@ public partial class App : Application
         services.AddTransient<ConnectionEditorViewModel>();
         services.AddTransient<FolderEditorViewModel>();
         services.AddTransient<SshSessionViewModel>();
+        services.AddTransient<SerialSessionViewModel>();
         services.AddTransient<RdpSessionViewModel>();
         services.AddTransient<HttpSessionViewModel>();
         services.AddTransient<MRemoteNgImportDialogViewModel>();
