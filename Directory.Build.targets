@@ -3,6 +3,7 @@
           BeforeTargets="BeforeBuild"
           Condition="'$(WormholeUsePinnedSqliteNative)' == 'true'">
     <PropertyGroup>
+      <_WormholeSqliteNativeArch Condition="'$(RuntimeIdentifier)' == 'win-x64' Or '$(PlatformTarget)' == 'x64' Or '$(PlatformTarget)' == 'X64' Or '$(Platform)' == 'x64' Or '$(Platform)' == 'X64'">x64</_WormholeSqliteNativeArch>
       <_WormholeSqliteNativeArch Condition="'$(RuntimeIdentifier)' == 'win-arm64' Or '$(PlatformTarget)' == 'ARM64' Or '$(PlatformTarget)' == 'arm64' Or '$(Platform)' == 'ARM64' Or '$(Platform)' == 'arm64'">arm64</_WormholeSqliteNativeArch>
       <_WormholeSqliteNativeArch Condition="'$(_WormholeSqliteNativeArch)' == '' And '$(PROCESSOR_ARCHITECTURE)' == 'ARM64'">arm64</_WormholeSqliteNativeArch>
       <_WormholeSqliteNativeArch Condition="'$(_WormholeSqliteNativeArch)' == ''">x64</_WormholeSqliteNativeArch>
