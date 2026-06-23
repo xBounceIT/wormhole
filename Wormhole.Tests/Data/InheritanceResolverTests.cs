@@ -1096,6 +1096,39 @@ public class InheritanceResolverTests
     }
 
     [Theory]
+    [InlineData(ProtocolType.Ssh)]
+    [InlineData(ProtocolType.Rdp)]
+    public void Resolve_NonVncConnection_DropsCredentialInheritedFromVncProtocol(ProtocolType protocol)
+    {
+        var credentialId = Guid.NewGuid();
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "vnc-folder",
+            Kind = NodeKind.Folder,
+            Protocol = ProtocolType.Vnc,
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = credentialId,
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "server",
+            Kind = NodeKind.Connection,
+            Protocol = protocol,
+            Host = "server.example.com",
+        };
+
+        var profile = new InheritanceResolver().Resolve(node, new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        });
+
+        Assert.Null(profile.CredentialId);
+    }
+    [Theory]
     [InlineData(ProtocolType.Http)]
     [InlineData(ProtocolType.Https)]
     public void Resolve_WebProtocol_DropsOwnAuthMaterial(ProtocolType webProtocol)

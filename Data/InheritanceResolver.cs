@@ -202,7 +202,7 @@ public sealed class InheritanceResolver
         }
 
         // Web and serial protocols are credential-less, so they drop inherited credentials and SSH identity
-        // material. VNC keeps saved credentials only from a VNC or protocol-agnostic context; it is
+        // material. Saved credentials are only inherited across matching protocol contexts; VNC is
         // password-only in v1, so it also drops inherited username and SSH-key metadata.
         var isWeb = protocol.Value is ProtocolType.Http or ProtocolType.Https;
         var isSerial = protocol.Value == ProtocolType.Serial;
@@ -212,7 +212,7 @@ public sealed class InheritanceResolver
         var useInlinePassword = leafUsesInlinePassword;
         var canUseResolvedCredential = !isCredentialless &&
             !useInlinePassword &&
-            (!isVnc || credentialContextProtocol is null or ProtocolType.Vnc);
+            (credentialContextProtocol is null || credentialContextProtocol == protocol.Value);
         var parentFolderName = node.ParentId is Guid parentIdForDisplay &&
             nodesById.TryGetValue(parentIdForDisplay, out var parentForDisplay) &&
             parentForDisplay.Kind == NodeKind.Folder &&
