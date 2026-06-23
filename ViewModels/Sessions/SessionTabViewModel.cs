@@ -88,8 +88,13 @@ public abstract partial class SessionTabViewModel : ObservableObject
         OnPropertyChanged(nameof(Profile));
     }
 
-    protected static string GetProfileTitle(ConnectionProfile profile) =>
-        string.IsNullOrEmpty(profile.Name) ? profile.Host : profile.Name;
+    protected static string GetProfileTitle(ConnectionProfile profile)
+    {
+        var connectionTitle = string.IsNullOrEmpty(profile.Name) ? profile.Host : profile.Name;
+        return string.IsNullOrWhiteSpace(profile.ParentFolderName)
+            ? connectionTitle
+            : $"{profile.ParentFolderName} / {connectionTitle}";
+    }
 
     /// <summary>
     /// Whether this tab holds a live connection that closing the app would actually tear down —

@@ -717,14 +717,14 @@ public class RdpSessionViewModelTests
             launchCount++;
             return Process.GetCurrentProcess();
         };
-        vm.Initialize(MakeProfile() with { RdpUseExternalClient = true });
+        vm.Initialize(MakeProfile() with { ParentFolderName = "prod", RdpUseExternalClient = true });
 
         await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
         await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
 
         Assert.Equal(SessionStatus.Connected, vm.Status);
         Assert.True(vm.IsExternalClientActive);
-        Assert.Contains("(external)", vm.Title);
+        Assert.Equal("prod / rdp-test (external)", vm.Title);
         Assert.Equal(1, launchCount);
         Assert.Equal(0, svc.ConnectCount);
 
@@ -732,7 +732,7 @@ public class RdpSessionViewModelTests
 
         Assert.Equal(SessionStatus.Disconnected, vm.Status);
         Assert.False(vm.IsExternalClientActive);
-        Assert.Equal("rdp-test", vm.Title);
+        Assert.Equal("prod / rdp-test", vm.Title);
     }
 
     [Fact]

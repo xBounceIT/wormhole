@@ -4,6 +4,7 @@ public sealed record ConnectionProfile
 {
     public required Guid NodeId { get; init; }
     public required string Name { get; init; }
+    public string? ParentFolderName { get; init; }
     public required ProtocolType Protocol { get; init; }
     public required string Host { get; init; }
     public required int Port { get; init; }

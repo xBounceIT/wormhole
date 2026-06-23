@@ -203,11 +203,18 @@ public sealed class InheritanceResolver
         // expose - an unrelated parent's password or stale private-key metadata.
         var isWeb = protocol.Value is ProtocolType.Http or ProtocolType.Https;
         var isCredentialless = isWeb || protocol.Value == ProtocolType.Serial;
+        var parentFolderName = node.ParentId is Guid parentIdForDisplay &&
+            nodesById.TryGetValue(parentIdForDisplay, out var parentForDisplay) &&
+            parentForDisplay.Kind == NodeKind.Folder &&
+            !string.IsNullOrWhiteSpace(parentForDisplay.Name)
+                ? parentForDisplay.Name
+                : null;
 
         return new ConnectionProfile
         {
             NodeId = node.Id,
             Name = node.Name,
+            ParentFolderName = parentFolderName,
             Protocol = protocol.Value,
             Host = host,
             Port = port ?? DefaultPortFor(protocol.Value),
