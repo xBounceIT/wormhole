@@ -274,8 +274,10 @@ public class InheritanceResolverTests
         Assert.Equal(childCredId, profile.CredentialId);
     }
 
-    [Fact]
-    public void Resolve_InlinePassword_OnChildSuppressesInheritedSavedCredential()
+    [Theory]
+    [InlineData(ProtocolType.Ssh)]
+    [InlineData(ProtocolType.Rdp)]
+    public void Resolve_InlinePassword_OnChildSuppressesInheritedSavedCredential(ProtocolType protocol)
     {
         var folder = new ConnectionNode
         {
@@ -291,7 +293,7 @@ public class InheritanceResolverTests
             ParentId = folder.Id,
             Name = "web-1",
             Kind = NodeKind.Connection,
-            Protocol = ProtocolType.Ssh,
+            Protocol = protocol,
             Host = "web-1.prod",
             UseInlinePassword = true,
         };

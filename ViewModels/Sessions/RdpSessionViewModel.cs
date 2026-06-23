@@ -893,6 +893,36 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             }
         }
 
+        if (!forcePrompt && profile.UseInlinePassword && username is not null)
+        {
+            try
+            {
+                var stored = await _credentialService.ReadPasswordAsync(profile.NodeId).ConfigureAwait(true);
+                if (!string.IsNullOrEmpty(stored))
+                {
+                    return new ResolvedRdpCredentials(
+                        username,
+                        domain,
+                        stored,
+                        usernameSource,
+                        domainSource,
+                        RdpCredentialPasswordSource.InlineConnection);
+                }
+                // Missing/empty secret: prompt rather than handing the OCX partial credentials.
+                // Inline mode treats an empty entry like no entry, matching SSH inline behavior
+                // and the editor/tree path that never stores blank secrets.
+                if (string.IsNullOrEmpty(stored))
+                {
+                    _logger.LogInformation("Inline RDP password for node {NodeId} not available in Credential Manager - prompting.", profile.NodeId);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Failed to read inline RDP password for node {NodeId} - prompting.", profile.NodeId);
+            }
+        }
+        token.ThrowIfCancellationRequested();
+
         if (!forcePrompt && profile.CredentialId is { } credId)
         {
             try
@@ -1005,6 +1035,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
     private enum RdpCredentialPasswordSource
     {
+        InlineConnection,
         SavedCredential,
         Prompt,
     }

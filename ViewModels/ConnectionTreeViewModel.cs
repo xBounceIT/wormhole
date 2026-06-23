@@ -794,8 +794,8 @@ public partial class ConnectionTreeViewModel : ObservableObject
                 // Delete (never store an empty entry) when there's no usable inline password — the
                 // connection switched to a saved credential / prompt-every-time, OR it's inline mode
                 // with a blank password. An empty Credential Manager entry reads back as a real ""
-                // password that yields no SSH auth method and fails the connect; deleting it instead
-                // lets SshCredentialResolver fall back to prompting. Keyed by node Id, so it never
+                // password that yields no useful inline auth and fails the connect; deleting it instead
+                // lets the session credential resolver fall back to prompting. Keyed by node Id, so it never
                 // touches a saved credential's secret (those are keyed by credential Id).
                 // DeletePasswordAsync self-swallows not-found, so this is also the idempotent purge.
                 await _credentialService.DeletePasswordAsync(node.Id);

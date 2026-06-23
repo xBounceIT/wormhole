@@ -25,7 +25,7 @@ public class ConnectionNode
     /// user typed in the editor rather than a saved <see cref="CredentialId"/> or a
     /// connect-time prompt. The password is stored in Windows Credential Manager keyed by
     /// <see cref="Id"/> (NOT in this row); this flag only records that such a secret exists.
-    /// SSH-only today; mutually exclusive with <see cref="CredentialId"/>. Null/false means
+    /// Applies to SSH/RDP; mutually exclusive with <see cref="CredentialId"/>. Null/false means
     /// "no inline password". Not inherited from folders (resolved from the leaf node only).
     /// </summary>
     public bool? UseInlinePassword { get; set; }

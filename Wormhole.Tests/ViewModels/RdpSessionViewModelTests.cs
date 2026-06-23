@@ -1105,6 +1105,127 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public async Task AttachAsync_InlinePassword_ConnectsWithoutPrompt()
+    {
+        var nodeId = Guid.NewGuid();
+        var secrets = new FakeCredentialService(new Dictionary<Guid, string> { [nodeId] = "inline-secret" });
+        var (vm, svc, _, dlg, _) = CreateVm(creds: secrets);
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with
+        {
+            NodeId = nodeId,
+            UseInlinePassword = true,
+            CredentialId = null,
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(0, dlg.PasswordPromptCount);
+        Assert.Equal(0, dlg.CredentialsPromptCount);
+        Assert.Equal("inline-secret", svc.LastPassword);
+    }
+
+    [Fact]
+    public async Task AttachAsync_InlinePasswordMissingSecret_FallsBackToPasswordPrompt()
+    {
+        var nodeId = Guid.NewGuid();
+        var (vm, svc, _, dlg, _) = CreateVm();
+        dlg.PasswordPromptResult = "typed-password";
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with
+        {
+            NodeId = nodeId,
+            UseInlinePassword = true,
+            CredentialId = null,
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(1, dlg.PasswordPromptCount);
+        Assert.Equal(0, dlg.CredentialsPromptCount);
+        Assert.Equal("typed-password", svc.LastPassword);
+    }
+
+    [Fact]
+    public async Task AttachAsync_InlinePasswordEmptySecret_FallsBackToPasswordPrompt()
+    {
+        var nodeId = Guid.NewGuid();
+        var secrets = new FakeCredentialService(new Dictionary<Guid, string> { [nodeId] = string.Empty });
+        var (vm, svc, _, dlg, _) = CreateVm(creds: secrets);
+        dlg.PasswordPromptResult = "typed-password";
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with
+        {
+            NodeId = nodeId,
+            UseInlinePassword = true,
+            CredentialId = null,
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(1, dlg.PasswordPromptCount);
+        Assert.Equal(0, dlg.CredentialsPromptCount);
+        Assert.Equal("typed-password", svc.LastPassword);
+    }
+
+    [Fact]
+    public async Task AttachAsync_InlinePasswordWithoutUsername_PromptsForCredentials()
+    {
+        var nodeId = Guid.NewGuid();
+        var secrets = new FakeCredentialService(new Dictionary<Guid, string> { [nodeId] = "inline-secret" });
+        var (vm, svc, _, dlg, _) = CreateVm(creds: secrets);
+        dlg.CredentialsPromptResult = ("typed-user", "typed-password");
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with
+        {
+            NodeId = nodeId,
+            Username = null,
+            UseInlinePassword = true,
+            CredentialId = null,
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(0, dlg.PasswordPromptCount);
+        Assert.Equal(1, dlg.CredentialsPromptCount);
+        Assert.Equal("typed-user", svc.LastProfile?.Username);
+        Assert.Equal("typed-password", svc.LastPassword);
+    }
+
+    [Fact]
+    public async Task RetryAsync_AfterCredentialFailure_IgnoresInlinePasswordAndPrompts()
+    {
+        var nodeId = Guid.NewGuid();
+        var secrets = new FakeCredentialService(new Dictionary<Guid, string> { [nodeId] = "bad-inline-secret" });
+        var (vm, svc, _, dlg, _) = CreateVm(creds: secrets);
+        var firstSession = new FakeRdpSession();
+        svc.NextSession = firstSession;
+
+        vm.Initialize(MakeProfile() with
+        {
+            NodeId = nodeId,
+            UseInlinePassword = true,
+            CredentialId = null,
+        });
+        await vm.AttachAsync((IntPtr)0x1234, HostBounds.Seed);
+        Assert.Equal("bad-inline-secret", svc.LastPassword);
+
+        firstSession.RaiseDisconnected(new RdpDisconnectInfo(2055, 0, "Login failed.", IsClean: false));
+        dlg.PasswordPromptResult = "typed-password";
+        svc.NextSession = new FakeRdpSession();
+
+        await vm.RetryAsync();
+
+        Assert.Equal(2, svc.ConnectCount);
+        Assert.Equal(1, dlg.PasswordPromptCount);
+        Assert.Equal("typed-password", svc.LastPassword);
+    }
+
+    [Fact]
     public async Task AttachAsync_MissingSavedSecret_UserCancelsPrompt_TransitionsToDisconnected()
     {
         var credId = Guid.NewGuid();
