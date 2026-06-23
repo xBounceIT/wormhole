@@ -14,9 +14,10 @@ public enum ProtocolType
     Http = 3,
     Https = 4,
 
-    // Embedded VNC client. Value 2 remains reserved for retired SFTP.
-    Vnc = 5,
+    // Local serial-port terminal sessions. Serial shipped on main as value 5, so keep it stable for
+    // existing databases and backups.
+    Serial = 5,
 
-    // Local serial-port terminal sessions. Value 2 remains retired; keep adding new protocols above it.
-    Serial = 6,
+    // Embedded VNC client. Value 2 remains reserved for retired SFTP.
+    Vnc = 6,
 }

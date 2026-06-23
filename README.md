@@ -30,7 +30,7 @@ everything else.
   credential reference or an inline per-connection username/password.
 - Embedded RDP session via the `mstscax` ActiveX control, with an external
   `mstsc.exe` fallback for Azure AD / WAM-sensitive targets.
-- Embedded VNC session support (`ProtocolType.Vnc = 5`, with enum value `2`
+- Embedded VNC session support (`ProtocolType.Vnc = 6`, with enum value `2`
   still reserved for retired SFTP) using `Community.MarcusW.VncClient`.
   VNC v1 supports no-auth servers and classic password authentication; VNC
   credentials are password-only.
