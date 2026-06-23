@@ -232,7 +232,6 @@ public sealed class BackupService : IBackupService
             var node = nodes[i];
             ct.ThrowIfCancellationRequested();
             if (node.Kind != NodeKind.Connection || node.UseInlinePassword != true) return;
-            if (node.Protocol is not (ProtocolType.Ssh or ProtocolType.Rdp)) return;
 
             var pwd = await _credentialService.ReadPasswordAsync(node.Id).ConfigureAwait(false);
             if (!string.IsNullOrEmpty(pwd))

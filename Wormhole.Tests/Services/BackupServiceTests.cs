@@ -212,6 +212,54 @@ public sealed class BackupServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ExportImport_InlineConnectionPassword_WithInheritedProtocol_RoundTrips()
+    {
+        var src = await CreateEnvAsync();
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "rdp-folder",
+            Kind = NodeKind.Folder,
+            Protocol = ProtocolType.Rdp,
+            SortOrder = 0,
+        };
+        var leaf = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "rdp-inline-inherited",
+            Kind = NodeKind.Connection,
+            Protocol = null,
+            Host = "inherited.example.com",
+            Port = 3389,
+            Username = "rdp-user",
+            CredentialMode = CredentialBindingMode.None,
+            UseInlinePassword = true,
+            SortOrder = 1,
+        };
+        await src.Connections.AddAsync(folder);
+        await src.Connections.AddAsync(leaf);
+        await src.Secrets.StorePasswordAsync(leaf.Id, "inherited-inline-secret");
+
+        var path = Path.Combine(_scratchDir, "inline-rdp-inherited.json");
+        var exportResult = await src.Service.ExportAsync(path, password: null);
+
+        Assert.Equal(2, exportResult.NodeCount);
+        Assert.Equal(1, exportResult.PasswordCount);
+
+        var dst = await CreateEnvAsync();
+        var importResult = await dst.Service.ImportAsync(path, password: null);
+
+        Assert.Equal(2, importResult.NodesImported);
+        Assert.Equal(1, importResult.PasswordsImported);
+        Assert.Equal("inherited-inline-secret", dst.Secrets.Passwords[leaf.Id]);
+
+        var importedLeaf = (await dst.Connections.GetAllAsync()).Single(n => n.Id == leaf.Id);
+        Assert.Null(importedLeaf.Protocol);
+        Assert.True(importedLeaf.UseInlinePassword);
+    }
+
+    [Fact]
     public async Task ExportImport_Encrypted_RoundTrips()
     {
         var src = await CreateEnvAsync();
