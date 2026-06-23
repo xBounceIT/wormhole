@@ -88,6 +88,7 @@ public sealed class BackupService : IBackupService
         // the export resilient to that state.
         Report(progress, 40, "Reading secrets...");
         await ExportCredentialSecretsAsync(credentials, payload, cancellationToken).ConfigureAwait(false);
+        await ExportInlinePasswordSecretsAsync(nodes, payload, cancellationToken).ConfigureAwait(false);
         await ExportTunnelSecretsAsync(tunnels, payload, cancellationToken).ConfigureAwait(false);
 
         Report(progress, 70, "Serializing...");
@@ -148,7 +149,7 @@ public sealed class BackupService : IBackupService
             NodeCount = payload.Nodes.Count,
             CredentialCount = payload.Credentials.Count,
             TunnelCount = payload.Tunnels.Count,
-            PasswordCount = payload.Passwords.Count,
+            PasswordCount = payload.Passwords.Count + payload.InlinePasswords.Count,
             PrivateKeyCount = payload.PrivateKeys.Count,
             TunnelPayloadCount = payload.TunnelPayloads.Count,
             Encrypted = encrypt,
@@ -211,6 +212,38 @@ public sealed class BackupService : IBackupService
         foreach (var entry in keyEntries)
         {
             if (entry is not null) payload.PrivateKeys.Add(entry);
+        }
+    }
+
+    private async Task ExportInlinePasswordSecretsAsync(
+        IReadOnlyList<ConnectionNode> nodes,
+        BackupPayload payload,
+        CancellationToken cancellationToken)
+    {
+        var entries = new BackupInlinePasswordEntry?[nodes.Count];
+        var options = new ParallelOptions
+        {
+            CancellationToken = cancellationToken,
+            MaxDegreeOfParallelism = SecretExportMaxConcurrency,
+        };
+
+        await Parallel.ForAsync(0, nodes.Count, options, async (i, ct) =>
+        {
+            var node = nodes[i];
+            ct.ThrowIfCancellationRequested();
+            if (node.Kind != NodeKind.Connection || node.UseInlinePassword != true) return;
+            if (node.Protocol is not (ProtocolType.Ssh or ProtocolType.Rdp)) return;
+
+            var pwd = await _credentialService.ReadPasswordAsync(node.Id).ConfigureAwait(false);
+            if (!string.IsNullOrEmpty(pwd))
+            {
+                entries[i] = new BackupInlinePasswordEntry { NodeId = node.Id, Password = pwd };
+            }
+        }).ConfigureAwait(false);
+
+        foreach (var entry in entries)
+        {
+            if (entry is not null) payload.InlinePasswords.Add(entry);
         }
     }
 
@@ -339,6 +372,7 @@ public sealed class BackupService : IBackupService
         payload.Tunnels ??= new List<TunnelConfig>();
         payload.Nodes ??= new List<ConnectionNode>();
         payload.Passwords ??= new List<BackupPasswordEntry>();
+        payload.InlinePasswords ??= new List<BackupInlinePasswordEntry>();
         payload.PrivateKeys ??= new List<BackupPrivateKeyEntry>();
         payload.TunnelPayloads ??= new List<BackupTunnelPayloadEntry>();
 
@@ -350,6 +384,7 @@ public sealed class BackupService : IBackupService
         nullDrops += FilterNullsInPlace(payload.Tunnels);
         nullDrops += FilterNullsInPlace(payload.Nodes);
         nullDrops += FilterNullsInPlace(payload.Passwords);
+        nullDrops += FilterNullsInPlace(payload.InlinePasswords);
         nullDrops += FilterNullsInPlace(payload.PrivateKeys);
         nullDrops += FilterNullsInPlace(payload.TunnelPayloads);
         if (nullDrops > 0)
@@ -478,6 +513,7 @@ public sealed class BackupService : IBackupService
             nodesById.TryAdd(node.Id, node);
         }
 
+        var insertedNodeIds = new HashSet<Guid>();
         foreach (var node in ordered)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -493,12 +529,13 @@ public sealed class BackupService : IBackupService
             // which is acceptable.
             await _connectionRepo.AddAsync(node, cancellationToken);
             existingNodeIds.Add(node.Id);
+            insertedNodeIds.Add(node.Id);
             result.NodesImported++;
         }
 
         // Secret-restoration policy:
-        //   * Just-inserted row (insertedCredentialIds / insertedTunnelIds) → always store.
-        //   * Pre-existing row (in existingCredentialIds but NOT just-inserted) → store ONLY if
+        //   * Just-inserted row (insertedCredentialIds / insertedNodeIds / insertedTunnelIds) → always store.
+        //   * Pre-existing row (in the matching existing-id set but NOT just-inserted) → store ONLY if
         //     the existing row has no secret yet. This recovers from a prior partial import that
         //     wrote rows but cancelled/crashed before writing secrets — without it, the user's
         //     second attempt skips the IDs as duplicates and the missing secrets are never
@@ -510,7 +547,7 @@ public sealed class BackupService : IBackupService
         foreach (var entry in payload.Passwords)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!await ShouldRestoreCredentialSecretAsync(
+            if (!await ShouldRestoreSecretAsync(
                     entry.CredentialId, insertedCredentialIds, existingCredentialIds,
                     _credentialService.ReadPasswordAsync, p => p is null)) continue;
             // Hostile JSON can deserialize Password to null even though the property is
@@ -520,12 +557,21 @@ public sealed class BackupService : IBackupService
             await _credentialService.StorePasswordAsync(entry.CredentialId, entry.Password ?? string.Empty);
             result.PasswordsImported++;
         }
+        foreach (var entry in payload.InlinePasswords)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!await ShouldRestoreSecretAsync(
+                    entry.NodeId, insertedNodeIds, existingNodeIds,
+                    _credentialService.ReadPasswordAsync, p => p is null)) continue;
+            await _credentialService.StorePasswordAsync(entry.NodeId, entry.Password ?? string.Empty);
+            result.PasswordsImported++;
+        }
 
         Report(progress, 87, "Restoring SSH keys...");
         foreach (var entry in payload.PrivateKeys)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!await ShouldRestoreCredentialSecretAsync(
+            if (!await ShouldRestoreSecretAsync(
                     entry.CredentialId, insertedCredentialIds, existingCredentialIds,
                     _credentialService.ReadPrivateKeyAsync,
                     bytes =>
@@ -557,7 +603,7 @@ public sealed class BackupService : IBackupService
         foreach (var entry in payload.TunnelPayloads)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (!await ShouldRestoreCredentialSecretAsync(
+            if (!await ShouldRestoreSecretAsync(
                     entry.TunnelConfigId, insertedTunnelIds, existingTunnelIds,
                     _credentialService.ReadTunnelConfigAsync,
                     bytes =>
@@ -902,7 +948,7 @@ public sealed class BackupService : IBackupService
     /// predicate is responsible for inspecting (and, for byte buffers, zeroing) the value
     /// returned by <paramref name="read"/>.
     /// </summary>
-    private static async Task<bool> ShouldRestoreCredentialSecretAsync<T>(
+    private static async Task<bool> ShouldRestoreSecretAsync<T>(
         Guid id,
         HashSet<Guid> insertedIds,
         HashSet<Guid> existingIds,

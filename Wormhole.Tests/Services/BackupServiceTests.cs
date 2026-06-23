@@ -172,6 +172,46 @@ public sealed class BackupServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task ExportImport_InlineConnectionPassword_RoundTrips()
+    {
+        var src = await CreateEnvAsync();
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "rdp-inline",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Rdp,
+            Host = "vm.example.com",
+            Port = 3389,
+            Username = "rdp-user",
+            CredentialMode = CredentialBindingMode.None,
+            UseInlinePassword = true,
+            SortOrder = 1,
+        };
+        await src.Connections.AddAsync(node);
+        await src.Secrets.StorePasswordAsync(node.Id, "rdp-inline-secret");
+
+        var path = Path.Combine(_scratchDir, "inline-rdp.json");
+        var exportResult = await src.Service.ExportAsync(path, password: null);
+
+        Assert.Equal(1, exportResult.NodeCount);
+        Assert.Equal(0, exportResult.CredentialCount);
+        Assert.Equal(1, exportResult.PasswordCount);
+
+        var dst = await CreateEnvAsync();
+        var importResult = await dst.Service.ImportAsync(path, password: null);
+
+        Assert.Equal(1, importResult.NodesImported);
+        Assert.Equal(1, importResult.PasswordsImported);
+        Assert.Equal("rdp-inline-secret", dst.Secrets.Passwords[node.Id]);
+
+        var imported = Assert.Single(await dst.Connections.GetAllAsync());
+        Assert.True(imported.UseInlinePassword);
+        Assert.Null(imported.CredentialId);
+        Assert.Equal(CredentialBindingMode.None, imported.CredentialMode);
+    }
+
+    [Fact]
     public async Task ExportImport_Encrypted_RoundTrips()
     {
         var src = await CreateEnvAsync();
