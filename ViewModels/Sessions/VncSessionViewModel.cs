@@ -147,6 +147,7 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
     public override async ValueTask CloseAsync()
     {
         await FullTeardownAsync().ConfigureAwait(true);
+        DisposeRenderTargetForClose();
     }
 
     public Task SendPointerAsync(int x, int y, VncPointerButtons buttons) =>
@@ -363,6 +364,15 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
         if (tunnel is null) return;
         try { await tunnel.DisposeAsync().ConfigureAwait(true); }
         catch (Exception ex) { _logger.LogWarning(ex, "Tunnel dispose threw during VNC teardown."); }
+    }
+
+    private void DisposeRenderTargetForClose()
+    {
+        var renderTarget = Interlocked.Exchange(ref _renderTarget, null);
+        _sessionRenderTarget = null;
+        if (renderTarget is not IDisposable disposable) return;
+        try { disposable.Dispose(); }
+        catch (Exception ex) { _logger.LogWarning(ex, "VNC render target dispose threw during tab close."); }
     }
 
     private bool IsAttemptCurrent(int teardownGeneration) =>

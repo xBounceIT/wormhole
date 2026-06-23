@@ -204,12 +204,30 @@ public class VncSessionViewModelTests
     {
         var service = new FakeVncSessionService();
         var vm = CreateVm(service);
+        var renderTarget = new DisposableRenderTarget();
         vm.Initialize(Profile());
-        await vm.AttachAsync(new FakeRenderTarget());
+        await vm.AttachAsync(renderTarget);
 
         await vm.DisconnectAsync();
 
         Assert.Equal(1, service.Session.DisposeCount);
+        Assert.Equal(0, renderTarget.DisposeCount);
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+    }
+
+    [Fact]
+    public async Task CloseAsync_DisposesRenderTargetAfterSessionTeardown()
+    {
+        var service = new FakeVncSessionService();
+        var vm = CreateVm(service);
+        var renderTarget = new DisposableRenderTarget();
+        vm.Initialize(Profile());
+        await vm.AttachAsync(renderTarget);
+
+        await vm.CloseAsync();
+
+        Assert.Equal(1, service.Session.DisposeCount);
+        Assert.Equal(1, renderTarget.DisposeCount);
         Assert.Equal(SessionStatus.Disconnected, vm.Status);
     }
 
@@ -424,6 +442,16 @@ public class VncSessionViewModelTests
     {
         public IFramebufferReference GrabFramebufferReference(Size size, IImmutableSet<Screen> layout) =>
             throw new NotSupportedException();
+    }
+
+    private sealed class DisposableRenderTarget : IVncRenderTarget, IDisposable
+    {
+        public int DisposeCount { get; private set; }
+
+        public IFramebufferReference GrabFramebufferReference(Size size, IImmutableSet<Screen> layout) =>
+            throw new NotSupportedException();
+
+        public void Dispose() => DisposeCount++;
     }
 
     private sealed class FakeRoutePrompter : ITunnelRoutePrompter
