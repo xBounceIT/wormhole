@@ -80,7 +80,6 @@ public sealed partial class VncView : UserControl
     {
         FramebufferHost.Visibility = Visibility.Collapsed;
         _renderTarget.FrameReady -= OnFrameReady;
-        _renderTarget.ReleaseFramebuffer();
         ReleaseAllPointerCaptures();
         _hasLastPointer = false;
         _pressedButtons = VncPointerButtons.None;
@@ -408,10 +407,7 @@ public sealed partial class VncView : UserControl
         private int _pendingLength;
         private int _pendingWidth;
         private int _pendingHeight;
-        private IntPtr _framebufferAddress;
-        private int _framebufferLength;
-        private int _framebufferWidth;
-        private int _framebufferHeight;
+        private NativeFramebuffer? _framebuffer;
         private int _publishQueued;
         private bool _disposed;
 
@@ -424,70 +420,97 @@ public sealed partial class VncView : UserControl
 
         public IFramebufferReference GrabFramebufferReference(VncSize size, IImmutableSet<VncScreen> layout)
         {
-            var (address, length) = EnsureFramebuffer(size);
-            return new FramebufferReference(this, size, address, length);
+            var framebuffer = RentFramebuffer(size);
+            return new FramebufferReference(this, framebuffer, size);
         }
 
         public void Dispose()
         {
-            _disposed = true;
-            ReleaseFramebuffer();
-        }
-
-        public void ReleaseFramebuffer()
-        {
+            NativeFramebuffer? framebufferToFree = null;
             byte[]? pending = null;
-            var framebufferAddress = IntPtr.Zero;
             lock (_gate)
             {
+                if (_disposed) return;
+
+                _disposed = true;
                 pending = _pendingPixels;
                 _pendingPixels = null;
                 _pendingLength = 0;
                 _pendingWidth = 0;
                 _pendingHeight = 0;
-                framebufferAddress = _framebufferAddress;
-                _framebufferAddress = IntPtr.Zero;
-                _framebufferLength = 0;
-                _framebufferWidth = 0;
-                _framebufferHeight = 0;
+
+                framebufferToFree = _framebuffer;
+                _framebuffer = null;
+                if (framebufferToFree is { RefCount: > 0 })
+                {
+                    framebufferToFree.ReleaseWhenIdle = true;
+                    framebufferToFree = null;
+                }
             }
-            if (pending is not null)
-            {
-                ArrayPool<byte>.Shared.Return(pending);
-            }
-            if (framebufferAddress != IntPtr.Zero)
-            {
-                Marshal.FreeHGlobal(framebufferAddress);
-            }
+
+            ReturnPending(pending);
+            framebufferToFree?.Free();
         }
 
-        private (IntPtr Address, int Length) EnsureFramebuffer(VncSize size)
+        private NativeFramebuffer RentFramebuffer(VncSize size)
         {
             var length = checked(size.Width * size.Height * Bgra32.BytesPerPixel);
+            NativeFramebuffer? framebufferToFree = null;
+            NativeFramebuffer framebuffer;
             lock (_gate)
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
 
-                if (_framebufferAddress != IntPtr.Zero &&
-                    _framebufferLength == length &&
-                    _framebufferWidth == size.Width &&
-                    _framebufferHeight == size.Height)
-                {
-                    return (_framebufferAddress, _framebufferLength);
-                }
-
-                if (_framebufferAddress != IntPtr.Zero)
-                {
-                    Marshal.FreeHGlobal(_framebufferAddress);
-                }
-
-                _framebufferAddress = Marshal.AllocHGlobal(length);
-                _framebufferLength = length;
-                _framebufferWidth = size.Width;
-                _framebufferHeight = size.Height;
-                ClearNativeBuffer(_framebufferAddress, length);
-                return (_framebufferAddress, _framebufferLength);
+                framebuffer = _framebuffer is { } current &&
+                    current.Length == length &&
+                    current.Width == size.Width &&
+                    current.Height == size.Height
+                        ? current
+                        : CreateReplacementFramebuffer(size, length, out framebufferToFree);
+                framebuffer.RefCount++;
             }
+
+            framebufferToFree?.Free();
+            return framebuffer;
+        }
+
+        private NativeFramebuffer CreateReplacementFramebuffer(
+            VncSize size,
+            int length,
+            out NativeFramebuffer? framebufferToFree)
+        {
+            framebufferToFree = null;
+            if (_framebuffer is { } old)
+            {
+                if (old.RefCount == 0)
+                {
+                    framebufferToFree = old;
+                }
+                else
+                {
+                    old.ReleaseWhenIdle = true;
+                }
+            }
+
+            var replacement = new NativeFramebuffer(size.Width, size.Height, length);
+            ClearNativeBuffer(replacement.Address, replacement.Length);
+            _framebuffer = replacement;
+            return replacement;
+        }
+
+        private void ReleaseReference(NativeFramebuffer framebuffer)
+        {
+            NativeFramebuffer? framebufferToFree = null;
+            lock (_gate)
+            {
+                framebuffer.RefCount--;
+                if (framebuffer.RefCount == 0 && framebuffer.ReleaseWhenIdle)
+                {
+                    framebufferToFree = framebuffer;
+                }
+            }
+
+            framebufferToFree?.Free();
         }
 
         private static void ClearNativeBuffer(IntPtr address, int length)
@@ -524,10 +547,7 @@ public sealed partial class VncView : UserControl
                 _pendingWidth = size.Width;
                 _pendingHeight = size.Height;
             }
-            if (previous is not null)
-            {
-                ArrayPool<byte>.Shared.Return(previous);
-            }
+            ReturnPending(previous);
 
             QueuePublish();
         }
@@ -578,10 +598,7 @@ public sealed partial class VncView : UserControl
             }
             finally
             {
-                if (pixels is not null)
-                {
-                    ArrayPool<byte>.Shared.Return(pixels);
-                }
+                ReturnPending(pixels);
 
                 if (!_disposed && HasPendingFrame())
                 {
@@ -607,24 +624,56 @@ public sealed partial class VncView : UserControl
                 _pendingPixels = null;
                 _pendingLength = 0;
             }
+            ReturnPending(pending);
+        }
+
+        private static void ReturnPending(byte[]? pending)
+        {
             if (pending is not null)
             {
                 ArrayPool<byte>.Shared.Return(pending);
             }
         }
 
+        private sealed class NativeFramebuffer
+        {
+            public NativeFramebuffer(int width, int height, int length)
+            {
+                Width = width;
+                Height = height;
+                Length = length;
+                Address = Marshal.AllocHGlobal(length);
+            }
+
+            public int Width { get; }
+            public int Height { get; }
+            public int Length { get; }
+            public IntPtr Address { get; private set; }
+            public int RefCount { get; set; }
+            public bool ReleaseWhenIdle { get; set; }
+
+            public void Free()
+            {
+                if (Address == IntPtr.Zero) return;
+                Marshal.FreeHGlobal(Address);
+                Address = IntPtr.Zero;
+            }
+        }
+
         private sealed class FramebufferReference : IFramebufferReference
         {
             private readonly VncRenderTarget _owner;
+            private readonly NativeFramebuffer _framebuffer;
             private readonly int _length;
             private bool _disposed;
 
-            public FramebufferReference(VncRenderTarget owner, VncSize size, IntPtr address, int length)
+            public FramebufferReference(VncRenderTarget owner, NativeFramebuffer framebuffer, VncSize size)
             {
                 _owner = owner;
+                _framebuffer = framebuffer;
                 Size = size;
-                _length = length;
-                Address = address;
+                _length = framebuffer.Length;
+                Address = framebuffer.Address;
             }
 
             public IntPtr Address { get; }
@@ -637,7 +686,14 @@ public sealed partial class VncView : UserControl
             {
                 if (_disposed) return;
                 _disposed = true;
-                _owner.Present(Size, Address, _length);
+                try
+                {
+                    _owner.Present(Size, Address, _length);
+                }
+                finally
+                {
+                    _owner.ReleaseReference(_framebuffer);
+                }
             }
         }
     }
