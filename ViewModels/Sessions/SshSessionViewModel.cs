@@ -289,9 +289,9 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         // already shows the prior render.
         if (_session is not null)
         {
-            // Snapshot and publish the new bridge under one lock: bytes before the lock are
-            // included in the chosen replay, while bytes after the lock render live through
-            // the new bridge instead of being stranded until a later reattach.
+            // Snapshot and enqueue replay before publishing the new bridge: bytes before
+            // the lock are replayed first, while bytes after the lock render live through
+            // the new bridge and cannot overtake the older replay batch.
             //
             // Replay the full buffer for a fresh WebView (empty xterm.js) or a session that
             // connected while detached. For a normal same-WebView tab switch, replay only
@@ -299,15 +299,14 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
             // output that xterm.js already rendered before the tab was hidden.
             var newBridge = CreateTerminalBridge(webView);
             TerminalBridge? oldBridge;
-            byte[]? snapshot;
             lock (_terminalReplayLock)
             {
-                snapshot = TakeReattachReplaySnapshotUnderLock(xtermIsFresh);
+                var snapshot = TakeReattachReplaySnapshotUnderLock(xtermIsFresh);
                 oldBridge = _bridge;
+                if (snapshot is not null) newBridge.Replay(snapshot);
                 _bridge = newBridge;
             }
             oldBridge?.Dispose();
-            if (snapshot is not null) newBridge.Replay(snapshot);
             await _session.ResizeAsync(initialSize.Columns, initialSize.Rows).ConfigureAwait(true);
             newBridge.RequestFocus();
             EnsureRemoteOutputWaitTimer();
