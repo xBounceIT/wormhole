@@ -6,6 +6,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MarcusW.VncClient.Rendering;
 using Microsoft.Extensions.Logging;
+using Microsoft.UI.Dispatching;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
@@ -212,6 +213,7 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
                 _credentialService,
                 _credentialRepository,
                 _dialog,
+                UiDispatcher,
                 _logger);
             pendingSession = await _vncService.ConnectAsync(
                 profile,
@@ -415,6 +417,7 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
         private readonly ICredentialService _credentialService;
         private readonly ICredentialRepository _credentialRepository;
         private readonly IDialogService _dialog;
+        private readonly DispatcherQueue? _dispatcher;
         private readonly ILogger _logger;
         private bool _resolved;
         private string? _password;
@@ -424,12 +427,14 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
             ICredentialService credentialService,
             ICredentialRepository credentialRepository,
             IDialogService dialog,
+            DispatcherQueue? dispatcher,
             ILogger logger)
         {
             _profile = profile;
             _credentialService = credentialService;
             _credentialRepository = credentialRepository;
             _dialog = dialog;
+            _dispatcher = dispatcher;
             _logger = logger;
         }
 
@@ -470,11 +475,44 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
                 }
             }
 
-            _password = await _dialog.PromptPasswordAsync(
-                "VNC password",
-                $"Enter the password for {_profile.Host}:{_profile.Port}.",
-                cancellationToken).ConfigureAwait(true);
+            _password = await PromptPasswordOnUiAsync(cancellationToken).ConfigureAwait(false);
             return _password;
+        }
+
+        private async Task<string?> PromptPasswordOnUiAsync(CancellationToken cancellationToken)
+        {
+            const string title = "VNC password";
+            var message = $"Enter the password for {_profile.Host}:{_profile.Port}.";
+            if (_dispatcher is null || _dispatcher.HasThreadAccess)
+            {
+                return await _dialog.PromptPasswordAsync(title, message, cancellationToken).ConfigureAwait(true);
+            }
+
+            var tcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var registration = cancellationToken.Register(
+                static state => ((TaskCompletionSource<string?>)state!).TrySetCanceled(),
+                tcs);
+            if (!_dispatcher.TryEnqueue(async () =>
+            {
+                try
+                {
+                    var result = await _dialog.PromptPasswordAsync(title, message, cancellationToken).ConfigureAwait(true);
+                    tcs.TrySetResult(result);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    tcs.TrySetCanceled();
+                }
+                catch (Exception ex)
+                {
+                    tcs.TrySetException(ex);
+                }
+            }))
+            {
+                throw new InvalidOperationException("Unable to show the VNC password prompt because the UI dispatcher is unavailable.");
+            }
+
+            return await tcs.Task.ConfigureAwait(false);
         }
     }
 }

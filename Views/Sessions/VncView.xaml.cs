@@ -63,6 +63,7 @@ public sealed partial class VncView : UserControl
             _pressedButtons = VncPointerButtons.None;
         }
 
+        _renderTarget.SetActive(true);
         _renderTarget.FrameReady -= OnFrameReady;
         _renderTarget.FrameReady += OnFrameReady;
 
@@ -80,6 +81,7 @@ public sealed partial class VncView : UserControl
     {
         FramebufferHost.Visibility = Visibility.Collapsed;
         _renderTarget.FrameReady -= OnFrameReady;
+        _renderTarget.SetActive(false);
         ReleaseAllPointerCaptures();
         _hasLastPointer = false;
         _pressedButtons = VncPointerButtons.None;
@@ -409,6 +411,7 @@ public sealed partial class VncView : UserControl
         private int _pendingHeight;
         private NativeFramebuffer? _framebuffer;
         private int _publishQueued;
+        private bool _active = true;
         private bool _disposed;
 
         public VncRenderTarget(UIDispatcherQueue dispatcher)
@@ -422,6 +425,30 @@ public sealed partial class VncView : UserControl
         {
             var framebuffer = RentFramebuffer(size);
             return new FramebufferReference(this, framebuffer, size);
+        }
+
+        public void SetActive(bool active)
+        {
+            byte[]? pending = null;
+            lock (_gate)
+            {
+                if (_disposed || _active == active) return;
+                _active = active;
+                if (!active)
+                {
+                    pending = _pendingPixels;
+                    _pendingPixels = null;
+                    _pendingLength = 0;
+                    _pendingWidth = 0;
+                    _pendingHeight = 0;
+                }
+            }
+
+            ReturnPending(pending);
+            if (active)
+            {
+                QueueCurrentFramebufferSnapshot();
+            }
         }
 
         public void Dispose()
@@ -529,8 +556,37 @@ public sealed partial class VncView : UserControl
 
         private void Present(VncSize size, IntPtr address, int length)
         {
-            if (_disposed || length <= 0) return;
+            if (length <= 0) return;
+            lock (_gate)
+            {
+                if (_disposed || !_active) return;
+            }
 
+            QueueFrameSnapshot(size.Width, size.Height, address, length);
+        }
+
+        private void QueueCurrentFramebufferSnapshot()
+        {
+            NativeFramebuffer framebuffer;
+            lock (_gate)
+            {
+                if (_disposed || !_active || _framebuffer is null || _framebuffer.Address == IntPtr.Zero) return;
+                framebuffer = _framebuffer;
+                framebuffer.RefCount++;
+            }
+
+            try
+            {
+                QueueFrameSnapshot(framebuffer.Width, framebuffer.Height, framebuffer.Address, framebuffer.Length);
+            }
+            finally
+            {
+                ReleaseReference(framebuffer);
+            }
+        }
+
+        private void QueueFrameSnapshot(int width, int height, IntPtr address, int length)
+        {
             var pixels = ArrayPool<byte>.Shared.Rent(length);
             Marshal.Copy(address, pixels, 0, length);
             for (var i = 3; i < length; i += 4)
@@ -541,13 +597,21 @@ public sealed partial class VncView : UserControl
             byte[]? previous = null;
             lock (_gate)
             {
-                previous = _pendingPixels;
-                _pendingPixels = pixels;
-                _pendingLength = length;
-                _pendingWidth = size.Width;
-                _pendingHeight = size.Height;
+                if (_disposed || !_active)
+                {
+                    previous = pixels;
+                }
+                else
+                {
+                    previous = _pendingPixels;
+                    _pendingPixels = pixels;
+                    _pendingLength = length;
+                    _pendingWidth = width;
+                    _pendingHeight = height;
+                }
             }
             ReturnPending(previous);
+            if (ReferenceEquals(previous, pixels)) return;
 
             QueuePublish();
         }
@@ -583,7 +647,7 @@ public sealed partial class VncView : UserControl
 
             try
             {
-                if (_disposed || pixels is null || width <= 0 || height <= 0)
+                if (_disposed || !_active || pixels is null || width <= 0 || height <= 0)
                 {
                     return;
                 }
@@ -600,7 +664,7 @@ public sealed partial class VncView : UserControl
             {
                 ReturnPending(pixels);
 
-                if (!_disposed && HasPendingFrame())
+                if (!_disposed && _active && HasPendingFrame())
                 {
                     QueuePublish();
                 }
