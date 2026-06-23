@@ -1232,6 +1232,7 @@ public class RdpSessionViewModelTests
         var connectionRepo = new StubConnectionRepository(new ConnectionNode
         {
             Id = nodeId,
+            Name = "renamed-rdp",
             Kind = NodeKind.Connection,
             Protocol = ProtocolType.Rdp,
             Host = "host",
@@ -1268,6 +1269,7 @@ public class RdpSessionViewModelTests
         Assert.Equal(1, provider.EstablishCount);
         Assert.Equal("host", svc.LastProfile?.Host);
         Assert.Equal(3389, svc.LastProfile?.Port);
+        Assert.Equal("renamed-rdp", vm.Title);
         Assert.False(vm.Profile!.TunnelEnabled);
         Assert.Null(vm.Profile.TunnelConfigId);
     }

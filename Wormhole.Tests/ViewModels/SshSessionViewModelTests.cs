@@ -686,7 +686,7 @@ public sealed class SshSessionViewModelTests
             TunnelConfigId = Guid.NewGuid(),
         };
         // The user has since edited the connection to drop the tunnel; the resolver reflects the DB.
-        var edited = stale with { TunnelEnabled = false, TunnelConfigId = null };
+        var edited = stale with { Name = "renamed-test", TunnelEnabled = false, TunnelConfigId = null };
         var resolver = new StubProfileResolver(edited);
         var vm = CreateViewModel(profileResolver: resolver);
         vm.Initialize(stale);
@@ -696,6 +696,7 @@ public sealed class SshSessionViewModelTests
         await vm.RetryAsync();
 
         Assert.Equal(nodeId, resolver.RequestedNodeId);
+        Assert.Equal("renamed-test", vm.Title);
         Assert.False(vm.Profile!.TunnelEnabled);
         Assert.Null(vm.Profile.TunnelConfigId);
     }
