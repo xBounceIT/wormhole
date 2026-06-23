@@ -45,6 +45,67 @@ public class SshCredentialResolverTests
     }
 
     [Fact]
+    public async Task Resolve_NoCredentialId_SelectedSavedCredential_UsesCredentialPasswordAndUsername()
+    {
+        var credential = new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Name = "prod",
+            Protocol = ProtocolType.Ssh,
+            Kind = CredentialKind.Password,
+            Username = "saved-user",
+        };
+        var bindings = new FakeConnectionCredentialBindingService();
+        var dialogs = new FakeDialogService
+        {
+            AccountCredentialPromptResult = new AccountCredentialPromptResult(
+                credential.Username,
+                "stored-pwd",
+                credential,
+                SaveCredentialToConnection: false),
+        };
+        var resolver = NewResolver(dialogs, credentialBindings: bindings);
+
+        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: null));
+
+        Assert.Equal("stored-pwd", creds.Password);
+        Assert.Equal("saved-user", creds.UsernameOverride);
+        Assert.Equal(1, dialogs.AccountCredentialPromptCount);
+        Assert.Equal(ProtocolType.Ssh, dialogs.LastAccountCredentialPromptProtocol);
+        Assert.Equal(0, bindings.SaveCount);
+    }
+
+    [Fact]
+    public async Task Resolve_NoCredentialId_SelectedSavedCredential_WithSave_PersistsBinding()
+    {
+        var nodeId = Guid.NewGuid();
+        var credential = new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Name = "prod",
+            Protocol = ProtocolType.Ssh,
+            Kind = CredentialKind.Password,
+            Username = "saved-user",
+        };
+        var bindings = new FakeConnectionCredentialBindingService();
+        var dialogs = new FakeDialogService
+        {
+            AccountCredentialPromptResult = new AccountCredentialPromptResult(
+                credential.Username,
+                "stored-pwd",
+                credential,
+                SaveCredentialToConnection: true),
+        };
+        var resolver = NewResolver(dialogs, credentialBindings: bindings);
+
+        await resolver.ResolveAsync(MakeProfile(credentialId: null, nodeId: nodeId));
+
+        Assert.Equal(1, bindings.SaveCount);
+        Assert.Equal(nodeId, bindings.LastNodeId);
+        Assert.Same(credential, bindings.LastCredential);
+    }
+
+    [Fact]
     public async Task Resolve_PasswordCredential_Stored_NoPrompt()
     {
         var credId = Guid.NewGuid();
@@ -168,6 +229,7 @@ public class SshCredentialResolverTests
         Assert.Equal("typed-passphrase", creds.KeyPassphrase);
         Assert.NotNull(creds.PrivateKey);
         Assert.Equal(1, dialogs.PasswordPromptCount);
+        Assert.Equal(0, dialogs.AccountCredentialPromptCount);
     }
 
     [Fact]
@@ -265,10 +327,12 @@ public class SshCredentialResolverTests
         FakeDialogService dialogs,
         FakeCredentialRepository? repo = null,
         ICredentialService? creds = null,
-        FakePrivateKeyInspector? inspector = null)
+        FakePrivateKeyInspector? inspector = null,
+        IConnectionCredentialBindingService? credentialBindings = null)
         => new(
             repo ?? new FakeCredentialRepository(),
             creds ?? new FakeCredentialService(),
+            credentialBindings ?? new FakeConnectionCredentialBindingService(),
             dialogs,
             inspector ?? new FakePrivateKeyInspector());
 

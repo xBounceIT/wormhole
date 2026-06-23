@@ -27,6 +27,7 @@ public sealed class ConnectionRepository : IConnectionRepository
         "RdpGatewayCredentialId", "RdpGatewayBypassLocal", "RdpGatewayUseSameCreds",
         "RdpUseExternalClient",
         "SshKeyFileName", "SshKnownHostFingerprint", "SshAutoSudo",
+        "SerialBaudRate", "SerialDataBits", "SerialStopBits", "SerialParity", "SerialFlowControl",
         "HttpIgnoreCertErrors",
         "TunnelEnabled", "TunnelConfigId",
         "CreatedAt", "UpdatedAt",

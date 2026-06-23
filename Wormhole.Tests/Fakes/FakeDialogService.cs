@@ -15,6 +15,7 @@ public class FakeDialogService : IDialogService
 {
     public string? TextPromptResult { get; set; }
     public string? PasswordPromptResult { get; set; }
+    public AccountCredentialPromptResult? AccountCredentialPromptResult { get; set; }
     public string? SecretPromptResult { get; set; }
     public (string Secret, string Confirmation)? NewSecretPromptResult { get; set; }
     public (string Username, string Password)? CredentialsPromptResult { get; set; }
@@ -39,6 +40,7 @@ public class FakeDialogService : IDialogService
     public MRemoteNgImportResult? MRemoteNgImportResult { get; set; }
 
     public int PasswordPromptCount { get; private set; }
+    public int AccountCredentialPromptCount { get; private set; }
     public int SecretPromptCount { get; private set; }
     public int NewSecretPromptCount { get; private set; }
     public int CredentialsPromptCount { get; private set; }
@@ -114,6 +116,11 @@ public class FakeDialogService : IDialogService
         output.RdpGatewayBypassLocal = src.RdpGatewayBypassLocal;
         output.RdpGatewayUseSameCreds = src.RdpGatewayUseSameCreds;
         output.RdpUseExternalClient = src.RdpUseExternalClient;
+        output.SerialBaudRate = src.SerialBaudRate;
+        output.SerialDataBits = src.SerialDataBits;
+        output.SerialStopBits = src.SerialStopBits;
+        output.SerialParity = src.SerialParity;
+        output.SerialFlowControl = src.SerialFlowControl;
         output.TunnelEnabled = src.TunnelEnabled;
         output.TunnelConfigId = src.TunnelConfigId;
         return Task.FromResult<ConnectionNode?>(output);
@@ -180,12 +187,51 @@ public class FakeDialogService : IDialogService
     }
 
     public CancellationToken LastPasswordPromptCancellationToken { get; private set; }
+    public ProtocolType? LastAccountCredentialPromptProtocol { get; private set; }
+    public bool LastAccountCredentialPromptRequiredUsername { get; private set; }
+    public string? LastAccountCredentialPromptInitialUsername { get; private set; }
 
     public virtual Task<string?> PromptPasswordAsync(string title, string message, CancellationToken cancellationToken = default)
     {
         PasswordPromptCount++;
         LastPasswordPromptCancellationToken = cancellationToken;
         return Task.FromResult(PasswordPromptResult);
+    }
+
+    public virtual Task<AccountCredentialPromptResult?> PromptAccountCredentialsAsync(
+        string title,
+        string message,
+        ProtocolType protocol,
+        bool requireUsername,
+        string? initialUsername = null,
+        CancellationToken cancellationToken = default)
+    {
+        AccountCredentialPromptCount++;
+        LastAccountCredentialPromptProtocol = protocol;
+        LastAccountCredentialPromptRequiredUsername = requireUsername;
+        LastAccountCredentialPromptInitialUsername = initialUsername;
+        LastPasswordPromptCancellationToken = cancellationToken;
+
+        if (requireUsername)
+        {
+            CredentialsPromptCount++;
+            if (AccountCredentialPromptResult is not null)
+            {
+                return Task.FromResult<AccountCredentialPromptResult?>(AccountCredentialPromptResult);
+            }
+
+            return Task.FromResult<AccountCredentialPromptResult?>(
+                CredentialsPromptResult is { } credentials
+                    ? new AccountCredentialPromptResult(credentials.Username, credentials.Password, null, false)
+                    : null);
+        }
+
+        PasswordPromptCount++;
+        return Task.FromResult<AccountCredentialPromptResult?>(
+            AccountCredentialPromptResult
+            ?? (PasswordPromptResult is null
+                ? null
+                : new AccountCredentialPromptResult(null, PasswordPromptResult, null, false)));
     }
 
     public virtual Task<string?> PromptSecretAsync(string title, string message, string label, string primaryText = "OK")

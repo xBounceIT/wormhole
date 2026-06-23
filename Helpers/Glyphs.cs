@@ -11,5 +11,6 @@ public static class Glyphs
     public const string Ssh = ""; // CommandPrompt
     public const string Rdp = ""; // TVMonitor
     public const string Web = ""; // Globe (HTTP/HTTPS)
+    public const string Serial = ""; // Connectors
     public const string Generic = ""; // Devices
 }

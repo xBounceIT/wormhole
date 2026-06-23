@@ -13,4 +13,7 @@ public enum ProtocolType
     // Web protocols rendered in an embedded WebView2 browser surface. The enum value IS the scheme.
     Http = 3,
     Https = 4,
+
+    // Local serial-port terminal sessions. Value 2 remains retired; keep adding new protocols above it.
+    Serial = 5,
 }
