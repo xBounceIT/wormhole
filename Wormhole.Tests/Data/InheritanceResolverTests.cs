@@ -346,6 +346,86 @@ public class InheritanceResolverTests
         Assert.Equal(expectedPort, profile.Port);
     }
 
+    [Fact]
+    public void Resolve_Serial_DefaultsToPuttySerialSettings()
+    {
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "console",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Serial,
+            Host = "COM3",
+        };
+
+        var profile = new InheritanceResolver().Resolve(node, new Dictionary<Guid, ConnectionNode>
+        {
+            [node.Id] = node,
+        });
+
+        Assert.Equal(ProtocolType.Serial, profile.Protocol);
+        Assert.Equal("COM3", profile.Host);
+        Assert.Equal(0, profile.Port);
+        Assert.Equal(SerialDefaults.BaudRate, profile.SerialBaudRate);
+        Assert.Equal(SerialDefaults.DataBits, profile.SerialDataBits);
+        Assert.Equal(SerialDefaults.StopBits, profile.SerialStopBits);
+        Assert.Equal(SerialDefaults.Parity, profile.SerialParity);
+        Assert.Equal(SerialDefaults.FlowControl, profile.SerialFlowControl);
+    }
+
+    [Fact]
+    public void Resolve_Serial_InheritsSerialSettingsAndDropsCredentials()
+    {
+        var credentialId = Guid.NewGuid();
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "serial-folder",
+            Kind = NodeKind.Folder,
+            Protocol = ProtocolType.Serial,
+            TunnelEnabled = true,
+            TunnelConfigId = Guid.NewGuid(),
+            SerialBaudRate = 115200,
+            SerialDataBits = 7,
+            SerialStopBits = SerialStopBitsMode.Two,
+            SerialParity = SerialParityMode.Even,
+            SerialFlowControl = SerialFlowControlMode.RtsCts,
+            CredentialId = credentialId,
+            Username = "ignored",
+            SshKeyFileName = "key.pem",
+            SshKnownHostFingerprint = "SHA256:ignored",
+            SshAutoSudo = true,
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "switch-console",
+            Kind = NodeKind.Connection,
+            Host = "COM7",
+        };
+
+        var profile = new InheritanceResolver().Resolve(node, new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        });
+
+        Assert.Equal(ProtocolType.Serial, profile.Protocol);
+        Assert.Equal(115200, profile.SerialBaudRate);
+        Assert.Equal(7, profile.SerialDataBits);
+        Assert.Equal(SerialStopBitsMode.Two, profile.SerialStopBits);
+        Assert.Equal(SerialParityMode.Even, profile.SerialParity);
+        Assert.Equal(SerialFlowControlMode.RtsCts, profile.SerialFlowControl);
+        Assert.Null(profile.Username);
+        Assert.Null(profile.CredentialId);
+        Assert.Null(profile.SshKeyFileName);
+        Assert.Null(profile.SshKnownHostFingerprint);
+        Assert.False(profile.SshAutoSudo);
+        Assert.False(profile.TunnelEnabled);
+        Assert.Null(profile.TunnelConfigId);
+    }
+
     // Repro for the reported bug: an appliance-GUI web connection (own Port unset) dropped into an
     // mRemoteNG-imported RDP folder that carries Protocol=Rdp + Port=3389. The web connection must
     // NOT inherit the folder's RDP port — it should fall back to the protocol default (443/80),
@@ -662,6 +742,7 @@ public class InheritanceResolverTests
             Username = "admin",
             SshKeyFileName = "shared-admin-key",
             SshKnownHostFingerprint = "SHA256:inherited-pin",
+            SshAutoSudo = true,
         };
         var node = new ConnectionNode
         {
@@ -686,6 +767,7 @@ public class InheritanceResolverTests
         Assert.Null(profile.Username);
         Assert.Null(profile.SshKeyFileName);
         Assert.Null(profile.SshKnownHostFingerprint);
+        Assert.False(profile.SshAutoSudo);
         Assert.False(profile.UseInlinePassword);
     }
 
@@ -707,6 +789,7 @@ public class InheritanceResolverTests
             UseInlinePassword = true,
             SshKeyFileName = "stale-admin-key",
             SshKnownHostFingerprint = "SHA256:stale-pin",
+            SshAutoSudo = true,
         };
 
         var nodes = new Dictionary<Guid, ConnectionNode> { [node.Id] = node };
@@ -716,6 +799,7 @@ public class InheritanceResolverTests
         Assert.Null(profile.Username);
         Assert.Null(profile.SshKeyFileName);
         Assert.Null(profile.SshKnownHostFingerprint);
+        Assert.False(profile.SshAutoSudo);
         Assert.False(profile.UseInlinePassword);
     }
 

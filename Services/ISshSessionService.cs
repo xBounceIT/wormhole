@@ -19,19 +19,16 @@ public interface ISshSessionService
         CancellationToken cancellationToken = default);
 }
 
-public interface ISshSession : IAsyncDisposable
+public interface ITerminalSession : IAsyncDisposable
 {
-    string? HostFingerprint { get; }
-
     /// <summary>
-    /// Raised synchronously from the SSH read pump with the bytes just read from the shell.
+    /// Raised synchronously from the terminal read pump with the bytes just read.
     /// The memory is valid only for the duration of the event callback; subscribers that need
     /// to retain data must copy it before returning.
     /// </summary>
     event EventHandler<ReadOnlyMemory<byte>>? DataReceived;
     /// <summary>
-    /// Raised once when the underlying SSH stream closes (EOF, network drop, or remote
-    /// shell exit) — distinct from disposal initiated by the consumer. Fires from a
+    /// Raised once when the underlying terminal stream closes — distinct from disposal initiated by the consumer. Fires from a
     /// background thread; subscribers must marshal to the UI thread if they touch UI.
     /// </summary>
     event EventHandler? Closed;
@@ -60,4 +57,9 @@ public interface ISshSession : IAsyncDisposable
     /// from any thread; a no-op if the pump is not paused.
     /// </summary>
     void ResumeReading();
+}
+
+public interface ISshSession : ITerminalSession
+{
+    string? HostFingerprint { get; }
 }

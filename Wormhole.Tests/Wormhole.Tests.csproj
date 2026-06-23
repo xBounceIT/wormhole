@@ -6,6 +6,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
+    <WormholeUsePinnedSqliteNative>true</WormholeUsePinnedSqliteNative>
     <!-- Suppress IDE0005 in the test project because shared <Compile Include="..\main\file.cs">
          links cause dotnet format to see conflicting using-removal proposals across compilation
          contexts. Main project still enforces IDE0005. -->
@@ -23,13 +24,15 @@
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.1.3" />
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3967.48" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.5.1" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.8" />
+    <PackageReference Include="Microsoft.Data.Sqlite.Core" Version="10.0.8" />
+    <PackageReference Include="SQLitePCLRaw.config.e_sqlite3" Version="3.0.3" />
     <PackageReference Include="Dapper" Version="2.1.79" />
     <PackageReference Include="BouncyCastle.Cryptography" Version="2.6.2" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.8" />
     <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="10.0.8" />
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="SSH.NET" Version="2025.1.0" />
+    <PackageReference Include="System.IO.Ports" Version="10.0.0" />
     <PackageReference Include="Markdig" Version="1.3.0" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
@@ -41,11 +44,13 @@
   <ItemGroup>
     <Compile Include="..\Models\ConnectionNode.cs" Link="Models\ConnectionNode.cs" />
     <Compile Include="..\Models\ConnectionProfile.cs" Link="Models\ConnectionProfile.cs" />
+    <Compile Include="..\Models\AccountCredentialPromptResult.cs" Link="Models\AccountCredentialPromptResult.cs" />
     <Compile Include="..\Models\CredentialProfile.cs" Link="Models\CredentialProfile.cs" />
     <Compile Include="..\Models\CredentialBindingMode.cs" Link="Models\CredentialBindingMode.cs" />
     <Compile Include="..\Models\CredentialDraft.cs" Link="Models\CredentialDraft.cs" />
     <Compile Include="..\Models\NodeKind.cs" Link="Models\NodeKind.cs" />
     <Compile Include="..\Models\ProtocolType.cs" Link="Models\ProtocolType.cs" />
+    <Compile Include="..\Models\SerialSettings.cs" Link="Models\SerialSettings.cs" />
     <Compile Include="..\Models\AppSettings.cs" Link="Models\AppSettings.cs" />
     <Compile Include="..\Models\AppAuthenticationMode.cs" Link="Models\AppAuthenticationMode.cs" />
     <Compile Include="..\Models\GitHubRelease.cs" Link="Models\GitHubRelease.cs" />
@@ -150,6 +155,9 @@
     <Compile Include="..\Services\ICredentialService.cs" Link="Services\ICredentialService.cs" />
     <Compile Include="..\Services\IDialogService.cs" Link="Services\IDialogService.cs" />
     <Compile Include="..\Services\ISshSessionService.cs" Link="Services\ISshSessionService.cs" />
+    <Compile Include="..\Services\ISerialSessionService.cs" Link="Services\ISerialSessionService.cs" />
+    <Compile Include="..\Services\SerialSessionService.cs" Link="Services\SerialSessionService.cs" />
+    <Compile Include="..\Services\Serial\SerialSession.cs" Link="Services\Serial\SerialSession.cs" />
     <Compile Include="..\Services\Ssh\SshSession.cs" Link="Services\Ssh\SshSession.cs" />
     <Compile Include="..\Services\Ssh\SshHostKeyValidator.cs" Link="Services\Ssh\SshHostKeyValidator.cs" />
     <Compile Include="..\Services\Ssh\SshHostKeyMismatchException.cs" Link="Services\Ssh\SshHostKeyMismatchException.cs" />
@@ -162,6 +170,8 @@
     <Compile Include="..\Services\ISessionTabFactory.cs" Link="Services\ISessionTabFactory.cs" />
     <Compile Include="..\Services\IConnectionProfileResolver.cs" Link="Services\IConnectionProfileResolver.cs" />
     <Compile Include="..\Services\ConnectionProfileResolver.cs" Link="Services\ConnectionProfileResolver.cs" />
+    <Compile Include="..\Services\IConnectionCredentialBindingService.cs" Link="Services\IConnectionCredentialBindingService.cs" />
+    <Compile Include="..\Services\ConnectionCredentialBindingService.cs" Link="Services\ConnectionCredentialBindingService.cs" />
     <Compile Include="..\Services\Mcp\IMcpSessionRegistry.cs" Link="Services\Mcp\IMcpSessionRegistry.cs" />
     <Compile Include="..\Services\Mcp\McpSessionRegistry.cs" Link="Services\Mcp\McpSessionRegistry.cs" />
     <Compile Include="..\Data\InheritanceResolver.cs" Link="Data\InheritanceResolver.cs" />
@@ -182,6 +192,7 @@
     <Compile Include="..\Data\SqliteTypeHandlers.cs" Link="Data\SqliteTypeHandlers.cs" />
     <Compile Include="..\Data\MigrationRunner.cs" Link="Data\MigrationRunner.cs" />
     <Compile Include="..\ViewModels\ConnectionEditorViewModel.cs" Link="ViewModels\ConnectionEditorViewModel.cs" />
+    <Compile Include="..\ViewModels\QuickConnectViewModel.cs" Link="ViewModels\QuickConnectViewModel.cs" />
     <Compile Include="..\ViewModels\BulkObservableCollection.cs" Link="ViewModels\BulkObservableCollection.cs" />
     <Compile Include="..\ViewModels\TunnelPickerViewModel.cs" Link="ViewModels\TunnelPickerViewModel.cs" />
     <Compile Include="..\ViewModels\FolderEditorViewModel.cs" Link="ViewModels\FolderEditorViewModel.cs" />
@@ -193,7 +204,9 @@
     <Compile Include="..\ViewModels\TunnelTestDialogViewModel.cs" Link="ViewModels\TunnelTestDialogViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\ConnectionProgress.cs" Link="ViewModels\Sessions\ConnectionProgress.cs" />
     <Compile Include="..\ViewModels\Sessions\SessionTabViewModel.cs" Link="ViewModels\Sessions\SessionTabViewModel.cs" />
+    <Compile Include="..\ViewModels\Sessions\ITerminalSessionViewModel.cs" Link="ViewModels\Sessions\ITerminalSessionViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\SshSessionViewModel.cs" Link="ViewModels\Sessions\SshSessionViewModel.cs" />
+    <Compile Include="..\ViewModels\Sessions\SerialSessionViewModel.cs" Link="ViewModels\Sessions\SerialSessionViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\RdpSessionViewModel.cs" Link="ViewModels\Sessions\RdpSessionViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\HttpSessionViewModel.cs" Link="ViewModels\Sessions\HttpSessionViewModel.cs" />
     <Compile Include="..\Helpers\WebViewBrowserArguments.cs" Link="Helpers\WebViewBrowserArguments.cs" />
