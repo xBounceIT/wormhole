@@ -11,7 +11,7 @@ public sealed record ConnectionProfile
     public Guid? CredentialId { get; init; }
 
     /// <summary>
-    /// When true, the SSH login password is read from Credential Manager keyed by
+    /// When true, the SSH/RDP login password is read from Credential Manager keyed by
     /// <see cref="NodeId"/> rather than a saved credential or a prompt. Resolved from the
     /// leaf node only — inline passwords never inherit from a folder.
     /// </summary>

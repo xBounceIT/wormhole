@@ -37,6 +37,7 @@ public sealed class BackupPayload
     public List<CredentialProfile> Credentials { get; set; } = new();
     public List<TunnelConfig> Tunnels { get; set; } = new();
     public List<BackupPasswordEntry> Passwords { get; set; } = new();
+    public List<BackupInlinePasswordEntry> InlinePasswords { get; set; } = new();
     public List<BackupPrivateKeyEntry> PrivateKeys { get; set; } = new();
     public List<BackupTunnelPayloadEntry> TunnelPayloads { get; set; } = new();
 }
@@ -44,6 +45,12 @@ public sealed class BackupPayload
 public sealed class BackupPasswordEntry
 {
     public Guid CredentialId { get; set; }
+    public string Password { get; set; } = string.Empty;
+}
+
+public sealed class BackupInlinePasswordEntry
+{
+    public Guid NodeId { get; set; }
     public string Password { get; set; } = string.Empty;
 }
 

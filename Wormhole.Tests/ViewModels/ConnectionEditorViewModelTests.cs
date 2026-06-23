@@ -1599,11 +1599,10 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
-    public async Task WriteTo_Rdp_UncheckedSavedCredentials_NeverUsesInlineAndClearsCredential()
+    public async Task WriteTo_Rdp_UncheckedSavedCredentials_UsesInlineAndClearsCredential()
     {
-        // The inline Password control is SSH-only (ShowInlinePassword gates on IsSsh), so an RDP
-        // connection with "Use saved credentials" unchecked must not persist an inline secret —
-        // and it must still drop the previously-picked saved credential (don't silently keep auth).
+        // RDP inline mode must drop the previously-picked saved credential (don't silently keep auth)
+        // and hand the password off through the same transient path SSH uses.
         var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
         var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(rdpCred), EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
@@ -1612,16 +1611,16 @@ public class ConnectionEditorViewModelTests
         vm.Host = "h";
         vm.SelectedCredential = rdpCred;
         vm.UseSavedCredentials = false;
-        vm.InlinePassword = "ignored-for-rdp";
+        vm.InlinePassword = "inline-rdp-secret";
 
         var node = new ConnectionNode();
         vm.WriteTo(node);
 
-        Assert.False(node.UseInlinePassword);
-        Assert.Null(node.PendingInlinePassword);
+        Assert.True(node.UseInlinePassword);
+        Assert.Equal("inline-rdp-secret", node.PendingInlinePassword);
         Assert.Null(node.CredentialId);
         Assert.Equal(CredentialBindingMode.None, node.CredentialMode);
-        Assert.False(vm.ShowInlinePassword);
+        Assert.True(vm.ShowInlinePassword);
     }
 
     [Fact]
@@ -1735,7 +1734,7 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
-    public async Task ShowInlinePassword_TrueOnlyForSshWithoutSavedCredentials()
+    public async Task ShowInlinePassword_TrueForSshAndRdpWithoutSavedCredentials()
     {
         var vm = await NewEditorAsync();
         vm.Protocol = ProtocolType.Ssh;
@@ -1747,6 +1746,9 @@ public class ConnectionEditorViewModelTests
         Assert.True(vm.ShowInlinePassword);
 
         vm.Protocol = ProtocolType.Rdp;
+        Assert.True(vm.ShowInlinePassword);
+
+        vm.Protocol = ProtocolType.Http;
         Assert.False(vm.ShowInlinePassword);
     }
 
