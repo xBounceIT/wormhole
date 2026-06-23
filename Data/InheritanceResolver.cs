@@ -234,7 +234,7 @@ public sealed class InheritanceResolver
             RdpGatewayBypassLocal = rdpGatewayBypassLocal ?? true,
             RdpGatewayUseSameCreds = rdpGatewayUseSameCreds ?? false,
             RdpUseExternalClient = rdpUseExternalClient ?? false,
-SshKeyFileName = clearsSshIdentity ? null : sshKeyFileName,
+            SshKeyFileName = clearsSshIdentity ? null : sshKeyFileName,
             SshKnownHostFingerprint = clearsSshIdentity ? null : sshKnownHostFingerprint,
             SshAutoSudo = clearsSshIdentity ? false : sshAutoSudo ?? false,
             SerialBaudRate = SerialDefaults.NormalizeBaudRate(serialBaudRate),
