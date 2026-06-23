@@ -27,19 +27,36 @@ public sealed class SessionTabViewModelTests
     }
 
     [Fact]
-    public void UpdateProfile_RefreshesTitle()
+    public void UpdateProfile_ReplacesProfileAndRefreshesTitle()
     {
         var vm = new TestSessionTab();
-        vm.Initialize(CreateProfile());
-
-        vm.UpdateProfile(CreateProfile() with
+        var initial = CreateProfile(name: "old-name", host: "old-host");
+        var updated = CreateProfile(name: "new-name", host: "new-host") with
         {
+            NodeId = initial.NodeId,
             ParentFolderName = "prod",
-            Name = "web-2",
-            Host = "web-2.prod",
-        });
+        };
+        var changed = new List<string?>();
+        vm.Initialize(initial);
+        vm.PropertyChanged += (_, args) => changed.Add(args.PropertyName);
 
-        Assert.Equal("prod / web-2", vm.Title);
+        vm.UpdateProfile(updated);
+
+        Assert.Same(updated, vm.Profile);
+        Assert.Equal("prod / new-name", vm.Title);
+        Assert.Contains(nameof(SessionTabViewModel.Title), changed);
+        Assert.Contains(nameof(SessionTabViewModel.Profile), changed);
+    }
+
+    [Fact]
+    public void UpdateProfile_UsesHostWhenNameIsEmpty()
+    {
+        var vm = new TestSessionTab();
+        vm.Initialize(CreateProfile(name: "old-name", host: "old-host"));
+
+        vm.UpdateProfile(CreateProfile(name: string.Empty, host: "fallback-host"));
+
+        Assert.Equal("fallback-host", vm.Title);
     }
 
     [Fact]
@@ -73,4 +90,14 @@ public sealed class SessionTabViewModelTests
 
         protected override void OnDispatchedException(Exception ex) => DispatchedException = ex;
     }
+
+    private static ConnectionProfile CreateProfile(string name, string host) =>
+        new()
+        {
+            NodeId = Guid.NewGuid(),
+            Name = name,
+            Protocol = ProtocolType.Ssh,
+            Host = host,
+            Port = 22,
+        };
 }

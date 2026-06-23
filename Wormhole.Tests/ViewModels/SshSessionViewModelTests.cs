@@ -689,7 +689,7 @@ public sealed class SshSessionViewModelTests
             TunnelConfigId = Guid.NewGuid(),
         };
         // The user has since edited the connection to drop the tunnel; the resolver reflects the DB.
-        var edited = stale with { TunnelEnabled = false, TunnelConfigId = null };
+        var edited = stale with { Name = "renamed-test", TunnelEnabled = false, TunnelConfigId = null };
         var resolver = new StubProfileResolver(edited);
         var vm = CreateViewModel(profileResolver: resolver);
         vm.Initialize(stale);
@@ -699,6 +699,7 @@ public sealed class SshSessionViewModelTests
         await vm.RetryAsync();
 
         Assert.Equal(nodeId, resolver.RequestedNodeId);
+        Assert.Equal("renamed-test", vm.Title);
         Assert.False(vm.Profile!.TunnelEnabled);
         Assert.Null(vm.Profile.TunnelConfigId);
     }
@@ -996,7 +997,7 @@ public sealed class SshSessionViewModelTests
     public void RegisterAttachedWebView_SameInstance_ReportsNotFresh()
     {
         // Tab-switch case: same WebView2 reattaches; replay would duplicate the
-        // already-rendered screen, so the decision is "not fresh, skip replay".
+        // existing xterm.js buffer, so the decision is "not fresh, skip replay".
         var vm = CreateViewModel();
         var webView = new object();
         vm.RegisterAttachedWebView(webView);

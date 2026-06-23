@@ -2,7 +2,7 @@
 //
 // Wire format (must stay in sync with Interop/Terminal/TerminalBridge.cs):
 //   C# -> JS: "d:" + base64(shell-output-bytes)   (arbitrary bytes including ANSI escapes)
-//   C# -> JS: "f:"                                (focus the terminal)
+//   C# -> JS: "f:"                                (focus and repaint the terminal)
 //   C# -> JS: "clear:"                            (full xterm.js reset incl. scrollback)
 //   C# -> JS: "paste:" + base64(utf8(text))       (clipboard text in reply to a "p:" request)
 //   JS -> C#: "b:" + base64(raw-input-bytes)      (user keystrokes / binary terminal input)
@@ -127,6 +127,13 @@
     function scheduleControlKeyRepaint() {
       window.setTimeout(function () { refreshVisibleRows(false); }, 25);
       window.setTimeout(function () { refreshVisibleRows(true); }, 120);
+    }
+
+    function scheduleHostFocusRepaint() {
+      window.requestAnimationFrame(function () { refreshVisibleRows(false); });
+      window.setTimeout(function () { refreshVisibleRows(false); }, 50);
+      window.setTimeout(function () { refreshVisibleRows(true); }, 150);
+      window.setTimeout(function () { refreshVisibleRows(false); }, 300);
     }
 
     term.onData(function (data) {
@@ -319,6 +326,10 @@
           scheduleFit(0, true, true);
           scheduleFit(100, true, true);
           scheduleFit(300, true, true);
+          // A WebView2 surface can come back from a TabView hide/show with xterm's
+          // buffer intact but its canvas compositor black. Repaint only the display
+          // layer so reactivating a tab restores pixels without replaying scrollback.
+          scheduleHostFocusRepaint();
           window.setTimeout(function () { term.focus(); }, 50);
           window.setTimeout(function () { term.focus(); }, 250);
           return;
