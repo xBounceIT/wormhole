@@ -62,8 +62,16 @@ public abstract partial class SessionTabViewModel : ObservableObject
     public virtual void Initialize(ConnectionProfile profile)
     {
         Profile = profile;
-        Title = string.IsNullOrEmpty(profile.Name) ? profile.Host : profile.Name;
+        Title = FormatTabTitle(profile);
         Status = SessionStatus.Disconnected;
+    }
+
+    protected static string FormatTabTitle(ConnectionProfile profile)
+    {
+        var connectionTitle = string.IsNullOrEmpty(profile.Name) ? profile.Host : profile.Name;
+        return string.IsNullOrWhiteSpace(profile.ParentFolderName)
+            ? connectionTitle
+            : $"{profile.ParentFolderName} / {connectionTitle}";
     }
 
     /// <summary>
@@ -82,6 +90,7 @@ public abstract partial class SessionTabViewModel : ObservableObject
     public void UpdateProfile(ConnectionProfile profile)
     {
         Profile = profile;
+        Title = FormatTabTitle(profile);
         // Notify so any future reactive consumer of Profile (none today, but the
         // surface is now public) sees the new value. ObservableObject.OnPropertyChanged
         // is the standard accessor.

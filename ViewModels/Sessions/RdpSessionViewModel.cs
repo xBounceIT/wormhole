@@ -1538,8 +1538,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         }
     }
 
-    private static string GetBaseTitle(ConnectionProfile profile) =>
-        string.IsNullOrEmpty(profile.Name) ? profile.Host : profile.Name;
+    private static string GetBaseTitle(ConnectionProfile profile) => FormatTabTitle(profile);
 
     private static string FormatMstscTarget(string host, int port)
     {

@@ -143,6 +143,44 @@ public class InheritanceResolverTests
     }
 
     [Fact]
+    public void Resolve_ParentFolderName_UsesImmediateParentOnly()
+    {
+        var root = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "root",
+            Kind = NodeKind.Folder,
+        };
+        var mid = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = root.Id,
+            Name = "prod",
+            Kind = NodeKind.Folder,
+        };
+        var leaf = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = mid.Id,
+            Name = "edge",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            Host = "edge.prod",
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode>
+        {
+            [root.Id] = root,
+            [mid.Id] = mid,
+            [leaf.Id] = leaf,
+        };
+
+        var profile = new InheritanceResolver().Resolve(leaf, nodes);
+
+        Assert.Equal("prod", profile.ParentFolderName);
+    }
+
+    [Fact]
     public void Resolve_CredentialModeSaved_InheritsFromParentFolder()
     {
         var credId = Guid.NewGuid();
