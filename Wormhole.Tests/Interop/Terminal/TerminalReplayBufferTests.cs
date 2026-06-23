@@ -105,6 +105,31 @@ public sealed class TerminalReplayBufferTests
     }
 
     [Fact]
+    public void Drain_ReturnsSnapshotAndClearsBuffer()
+    {
+        var buffer = new TerminalReplayBuffer(4);
+        buffer.Append(new byte[] { 1, 2, 3 });
+
+        var drained = buffer.Drain();
+
+        Assert.Equal(new byte[] { 1, 2, 3 }, drained);
+        Assert.Empty(buffer.Snapshot());
+    }
+
+    [Fact]
+    public void Drain_AfterWrap_ReturnsBytesInOrder()
+    {
+        var buffer = new TerminalReplayBuffer(4);
+        buffer.Append(new byte[] { 1, 2, 3 });
+        buffer.Append(new byte[] { 4, 5 });
+
+        var drained = buffer.Drain();
+
+        Assert.Equal(new byte[] { 2, 3, 4, 5 }, drained);
+        Assert.Empty(buffer.Snapshot());
+    }
+
+    [Fact]
     public void Clear_AfterWrap_AllowsCleanAppendAgain()
     {
         var buffer = new TerminalReplayBuffer(4);

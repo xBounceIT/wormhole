@@ -986,6 +986,92 @@ public sealed class SshSessionViewModelTests
     }
 
     [Fact]
+    public void ReattachReplay_SameWebViewWithoutDetachedOutput_ReturnsNull()
+    {
+        var vm = CreateViewModel();
+        vm.AppendReplayBufferForTesting((byte)'o', (byte)'l', (byte)'d');
+
+        var snapshot = vm.TakeReattachReplaySnapshotForTesting(xtermIsFresh: false);
+
+        Assert.Null(snapshot);
+        Assert.Equal(new byte[] { (byte)'o', (byte)'l', (byte)'d' }, vm.PeekReplayBufferForTesting());
+    }
+
+    [Fact]
+    public void ReattachReplay_SameWebView_ReplaysOnlyDetachedDelta()
+    {
+        var (vm, session) = CreateConnectedVm();
+        vm.AppendReplayBufferForTesting((byte)'o', (byte)'l', (byte)'d');
+
+        session.RaiseData((byte)'n', (byte)'e', (byte)'w');
+
+        var snapshot = vm.TakeReattachReplaySnapshotForTesting(xtermIsFresh: false);
+
+        Assert.Equal(new byte[] { (byte)'n', (byte)'e', (byte)'w' }, snapshot);
+        Assert.Equal(
+            new byte[] { (byte)'o', (byte)'l', (byte)'d', (byte)'n', (byte)'e', (byte)'w' },
+            vm.PeekReplayBufferForTesting());
+        Assert.Empty(vm.PeekDetachedReplayBufferForTesting());
+    }
+
+    [Fact]
+    public void ReattachReplay_DetachedDelta_IsNotReplayedTwice()
+    {
+        var (vm, session) = CreateConnectedVm();
+        session.RaiseData((byte)'n', (byte)'e', (byte)'w');
+
+        Assert.Equal(new byte[] { (byte)'n', (byte)'e', (byte)'w' }, vm.TakeReattachReplaySnapshotForTesting(false));
+        Assert.Null(vm.TakeReattachReplaySnapshotForTesting(false));
+    }
+
+    [Fact]
+    public void ReattachReplay_FreshWebView_ReplaysFullBufferAndClearsDetachedDelta()
+    {
+        var (vm, session) = CreateConnectedVm();
+        vm.AppendReplayBufferForTesting((byte)'o', (byte)'l', (byte)'d');
+        session.RaiseData((byte)'n', (byte)'e', (byte)'w');
+
+        var snapshot = vm.TakeReattachReplaySnapshotForTesting(xtermIsFresh: true);
+
+        Assert.Equal(
+            new byte[] { (byte)'o', (byte)'l', (byte)'d', (byte)'n', (byte)'e', (byte)'w' },
+            snapshot);
+        Assert.Empty(vm.PeekDetachedReplayBufferForTesting());
+        Assert.Null(vm.TakeReattachReplaySnapshotForTesting(xtermIsFresh: false));
+    }
+
+    [Fact]
+    public void ReattachReplay_ConnectedWhileDetached_ReplaysFullBufferOnSameWebView()
+    {
+        var (vm, session) = CreateConnectedVm();
+        vm.AppendReplayBufferForTesting((byte)'o', (byte)'l', (byte)'d');
+        session.RaiseData((byte)'n', (byte)'e', (byte)'w');
+        vm.SetConnectedWhileDetachedForTesting();
+
+        var snapshot = vm.TakeReattachReplaySnapshotForTesting(xtermIsFresh: false);
+
+        Assert.Equal(
+            new byte[] { (byte)'o', (byte)'l', (byte)'d', (byte)'n', (byte)'e', (byte)'w' },
+            snapshot);
+        Assert.Empty(vm.PeekDetachedReplayBufferForTesting());
+        Assert.Null(vm.TakeReattachReplaySnapshotForTesting(xtermIsFresh: false));
+    }
+
+    [Fact]
+    public async Task ReattachReplay_DetachedDelta_ClearsOnSessionTeardown()
+    {
+        var (vm, session) = CreateConnectedVm();
+        session.RaiseData((byte)'n', (byte)'e', (byte)'w');
+        Assert.NotEmpty(vm.PeekDetachedReplayBufferForTesting());
+
+        await vm.DetachAsync();
+
+        Assert.Empty(vm.PeekReplayBufferForTesting());
+        Assert.Empty(vm.PeekDetachedReplayBufferForTesting());
+        Assert.Null(vm.TakeReattachReplaySnapshotForTesting(xtermIsFresh: false));
+    }
+
+    [Fact]
     public void RegisterAttachedWebView_FirstCall_ReportsFresh()
     {
         var vm = CreateViewModel();

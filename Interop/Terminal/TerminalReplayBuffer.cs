@@ -4,9 +4,9 @@ namespace Wormhole.Interop.Terminal;
 
 /// <summary>
 /// Fixed-capacity ring buffer of recent terminal output bytes. Append on the SSH
-/// read-pump thread; snapshot on the UI thread for replay into a freshly-created
-/// xterm.js after a view detach/reattach. Thread-safe via a single intrinsic lock —
-/// uncontended in the common case (one writer thread; reads are rare).
+/// read-pump thread; snapshot or drain on the UI thread for replay after a view
+/// detach/reattach. Thread-safe via a single intrinsic lock — uncontended in the
+/// common case (one writer thread; reads are rare).
 /// </summary>
 internal sealed class TerminalReplayBuffer
 {
@@ -53,18 +53,17 @@ internal sealed class TerminalReplayBuffer
     {
         lock (_lock)
         {
-            if (_count == 0) return Array.Empty<byte>();
-            var result = new byte[_count];
-            if (_count < _buffer.Length)
-            {
-                Array.Copy(_buffer, 0, result, 0, _count);
-            }
-            else
-            {
-                var firstPart = _buffer.Length - _head;
-                Array.Copy(_buffer, _head, result, 0, firstPart);
-                Array.Copy(_buffer, 0, result, firstPart, _head);
-            }
+            return SnapshotUnderLock();
+        }
+    }
+
+    public byte[] Drain()
+    {
+        lock (_lock)
+        {
+            var result = SnapshotUnderLock();
+            _head = 0;
+            _count = 0;
             return result;
         }
     }
@@ -76,5 +75,22 @@ internal sealed class TerminalReplayBuffer
             _head = 0;
             _count = 0;
         }
+    }
+
+    private byte[] SnapshotUnderLock()
+    {
+        if (_count == 0) return Array.Empty<byte>();
+        var result = new byte[_count];
+        if (_count < _buffer.Length)
+        {
+            Array.Copy(_buffer, 0, result, 0, _count);
+        }
+        else
+        {
+            var firstPart = _buffer.Length - _head;
+            Array.Copy(_buffer, _head, result, 0, firstPart);
+            Array.Copy(_buffer, 0, result, firstPart, _head);
+        }
+        return result;
     }
 }
