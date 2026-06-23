@@ -597,6 +597,53 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task ShowCredentials_InheritedCredentialUsesCredentialUsernameWhenProfileHasNone()
+    {
+        var root = new ConnectionNode
+        {
+            Kind = NodeKind.Folder,
+            Name = "all",
+            Username = "root-user",
+        };
+        await _repo.AddAsync(root);
+
+        var credentialId = Guid.NewGuid();
+        var closest = new ConnectionNode
+        {
+            Kind = NodeKind.Folder,
+            ParentId = root.Id,
+            Name = "prod",
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = credentialId,
+        };
+        await _repo.AddAsync(closest);
+
+        var child = MakeConnectionDraft("web", ProtocolType.Ssh, "host", 22, username: null);
+        child.ParentId = closest.Id;
+        child.CredentialMode = CredentialBindingMode.Inherit;
+        await _repo.AddAsync(child);
+
+        var dialog = new FakeDialogService();
+        var creds = new FakeCredentialService();
+        creds.Passwords[credentialId] = "inherited-pw";
+        var credRepo = new FakeCredentialRepository(new CredentialProfile
+        {
+            Id = credentialId,
+            Kind = CredentialKind.Password,
+            Username = "credential-user",
+        });
+        var vm = CreateVm(dialog, creds, credRepo);
+        await vm.RefreshAsync();
+
+        var childVm = vm.Roots.Single().Children.Single().Children.Single();
+        await vm.ShowCredentialsCommand.ExecuteAsync(childVm);
+
+        Assert.Equal(1, dialog.ShowCredentialsCount);
+        Assert.Equal("inherited-pw", dialog.LastShownSecret);
+        Assert.Equal("credential-user", dialog.LastShownUsername);
+    }
+
+    [Fact]
     public async Task Host_ConnectionWithOwnHost_ReturnsOwnHost()
     {
         var node = MakeConnectionDraft("web", ProtocolType.Ssh, "10.0.0.5", 22, "alice");

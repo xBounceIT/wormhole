@@ -26,6 +26,7 @@ public sealed class InheritanceResolver
         string? username = null;
         Guid? credentialId = null;
         var credentialResolved = node.UseInlinePassword ?? false;
+        var credentialIdentityBoundaryReached = false;
         string? rdpDomain = null;
         string? rdpScreenSize = null;
         bool? rdpFullScreen = null;
@@ -87,9 +88,14 @@ public sealed class InheritanceResolver
             {
                 portContextProtocol ??= current.Protocol;
             }
-            username ??= current.Username;
+            if (!credentialIdentityBoundaryReached)
+            {
+                username ??= current.Username;
+                rdpDomain ??= current.RdpDomain;
+            }
             if (!credentialResolved)
             {
+                var resolvesSavedCredential = false;
                 var mode = current.CredentialMode;
                 if (mode is null)
                 {
@@ -97,15 +103,24 @@ public sealed class InheritanceResolver
                     {
                         credentialId = legacyCredentialId;
                         credentialResolved = true;
+                        resolvesSavedCredential = true;
                     }
                 }
                 else if (mode != CredentialBindingMode.Inherit)
                 {
                     credentialResolved = true;
                     credentialId = mode == CredentialBindingMode.Saved ? current.CredentialId : null;
+                    resolvesSavedCredential = mode == CredentialBindingMode.Saved && current.CredentialId is not null;
+                }
+
+                if (resolvesSavedCredential)
+                {
+                    // A saved credential is an auth identity boundary. Use this node's own
+                    // Username/RdpDomain if it has them, but do not mix its password with
+                    // identity fields from more distant ancestors.
+                    credentialIdentityBoundaryReached = true;
                 }
             }
-            rdpDomain ??= current.RdpDomain;
             rdpScreenSize ??= current.RdpScreenSize ??
                 (current.RdpFullScreen == true ? RdpScreenSizes.FullConnectionContent : null);
             rdpFullScreen ??= current.RdpFullScreen;
