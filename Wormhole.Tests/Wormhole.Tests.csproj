@@ -157,6 +157,7 @@
     <Compile Include="..\Services\IDialogService.cs" Link="Services\IDialogService.cs" />
     <Compile Include="..\Services\ISshSessionService.cs" Link="Services\ISshSessionService.cs" />
     <Compile Include="..\Services\IVncSessionService.cs" Link="Services\IVncSessionService.cs" />
+    <Compile Include="..\Services\VncSessionClosedEventReplay.cs" Link="Services\VncSessionClosedEventReplay.cs" />
     <Compile Include="..\Services\ISerialSessionService.cs" Link="Services\ISerialSessionService.cs" />
     <Compile Include="..\Services\SerialSessionService.cs" Link="Services\SerialSessionService.cs" />
     <Compile Include="..\Services\Serial\SerialSession.cs" Link="Services\Serial\SerialSession.cs" />

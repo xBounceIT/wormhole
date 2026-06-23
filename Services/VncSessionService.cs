@@ -121,17 +121,22 @@ public sealed class VncSessionService : IVncSessionService
     {
         private readonly RfbConnection _connection;
         private readonly ILogger _logger;
-        private int _terminalEventRaised;
+        private readonly VncSessionClosedEventReplay _closedEvents;
         private bool _disposed;
 
         public VncSessionAdapter(RfbConnection connection, ILogger logger)
         {
             _connection = connection;
             _logger = logger;
+            _closedEvents = new(this);
             _connection.ConnectionStateChanged += OnConnectionStateChanged;
         }
 
-        public event EventHandler<VncSessionClosedEventArgs>? Closed;
+        public event EventHandler<VncSessionClosedEventArgs>? Closed
+        {
+            add => _closedEvents.Closed += value;
+            remove => _closedEvents.Closed -= value;
+        }
 
         public void SetRenderTarget(IVncRenderTarget renderTarget)
         {
@@ -158,6 +163,7 @@ public sealed class VncSessionService : IVncSessionService
         public async ValueTask DisposeAsync()
         {
             _disposed = true;
+            _closedEvents.Dispose();
             _connection.ConnectionStateChanged -= OnConnectionStateChanged;
             try
             {
@@ -189,11 +195,11 @@ public sealed class VncSessionService : IVncSessionService
 
         private void RaiseTerminalClosed(bool isClean, string? reason, Exception? exception)
         {
-            if (Interlocked.Exchange(ref _terminalEventRaised, 1) != 0) return;
             var message = !string.IsNullOrWhiteSpace(reason)
                 ? reason!
                 : exception?.Message ?? (isClean ? "VNC connection closed." : "VNC connection was interrupted.");
-            Closed?.Invoke(this, new VncSessionClosedEventArgs(isClean, message, exception));
+            var args = new VncSessionClosedEventArgs(isClean, message, exception);
+            _closedEvents.TryRaise(args);
         }
 
         private static MouseButtons ToMouseButtons(VncPointerButtons buttons)
