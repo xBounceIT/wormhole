@@ -24,7 +24,7 @@ public sealed partial class SshTerminalView : UserControl
     // callers race via CompareExchange and the loser drops its instance.
     private static CoreWebView2Environment? s_sharedEnvironment;
 
-    private SshSessionViewModel? _viewModel;
+    private ITerminalSessionViewModel? _viewModel;
     private bool _handshakeReceived;
     private bool _terminalInitializationFailed;
     private int _handshakeGeneration;
@@ -46,7 +46,7 @@ public sealed partial class SshTerminalView : UserControl
         // Loaded later to recover it).
         TerminalView.Visibility = Visibility.Visible;
 
-        var newVm = DataContext as SshSessionViewModel;
+        var newVm = DataContext as ITerminalSessionViewModel;
         if (newVm is null) return;
 
         if (!ReferenceEquals(newVm, _viewModel))
@@ -177,7 +177,7 @@ public sealed partial class SshTerminalView : UserControl
         return winner ?? created;
     }
 
-    private async Task ScheduleHandshakeTimeoutAsync(SshSessionViewModel vm, int handshakeGeneration)
+    private async Task ScheduleHandshakeTimeoutAsync(ITerminalSessionViewModel vm, int handshakeGeneration)
     {
         await Task.Delay(HandshakeTimeout).ConfigureAwait(true);
         if (handshakeGeneration != _handshakeGeneration) return;

@@ -15,10 +15,12 @@ namespace Wormhole.Services;
 public sealed class DialogService : IDialogService
 {
     private readonly ICredentialRepository _credentialRepository;
+    private readonly ICredentialService _credentialService;
 
-    public DialogService(ICredentialRepository credentialRepository)
+    public DialogService(ICredentialRepository credentialRepository, ICredentialService credentialService)
     {
         _credentialRepository = credentialRepository;
+        _credentialService = credentialService;
     }
 
     public Task ShowMessageAsync(string title, string message)
@@ -302,6 +304,303 @@ public sealed class DialogService : IDialogService
         cancellationToken.ThrowIfCancellationRequested();
         var accepted = result == ContentDialogResult.Primary || submittedViaEnter;
         return accepted ? passwordBox.Password : null;
+    }
+
+    public async Task<AccountCredentialPromptResult?> PromptAccountCredentialsAsync(
+        string title,
+        string message,
+        ProtocolType protocol,
+        bool requireUsername,
+        string? initialUsername = null,
+        CancellationToken cancellationToken = default)
+    {
+        var credentialLoadFailed = false;
+        IReadOnlyList<AccountCredentialChoice> choices;
+        try
+        {
+            choices = await LoadAccountCredentialChoicesAsync(protocol, cancellationToken).ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            credentialLoadFailed = true;
+            choices = AccountCredentialChoice.ManualOnly;
+        }
+
+        TextBox? userBox = null;
+        if (requireUsername)
+        {
+            userBox = new TextBox
+            {
+                Header = "Username",
+                PlaceholderText = "user or DOMAIN\\user",
+                Text = initialUsername ?? string.Empty,
+                Width = 320,
+            };
+        }
+
+        var passwordBox = new PasswordBox
+        {
+            Header = "Password",
+            PlaceholderText = "Password",
+            Width = 320,
+        };
+
+        var panel = new StackPanel { Spacing = 10, MinWidth = 320 };
+        if (!string.IsNullOrWhiteSpace(message))
+        {
+            panel.Children.Add(new TextBlock { Text = message, TextWrapping = TextWrapping.Wrap });
+        }
+
+        if (userBox is not null)
+        {
+            panel.Children.Add(userBox);
+        }
+        panel.Children.Add(passwordBox);
+
+        var captionStyle = App.Current.Resources["CaptionTextBlockStyle"] as Style;
+        var savedCredentialSection = new StackPanel { Spacing = 6 };
+        savedCredentialSection.Children.Add(new TextBlock
+        {
+            Text = "Saved credentials",
+            Style = captionStyle,
+        });
+
+        var credentialBox = new ComboBox
+        {
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            DisplayMemberPath = nameof(AccountCredentialChoice.DisplayName),
+            ItemsSource = choices,
+            SelectedIndex = 0,
+        };
+        savedCredentialSection.Children.Add(credentialBox);
+
+        if (choices.Count == 1)
+        {
+            savedCredentialSection.Children.Add(new TextBlock
+            {
+                Text = credentialLoadFailed
+                    ? "Saved credentials could not be loaded. Enter the password manually."
+                    : $"No saved {protocol.ToString().ToUpperInvariant()} password credentials are available.",
+                TextWrapping = TextWrapping.Wrap,
+                Opacity = 0.7,
+                Style = captionStyle,
+            });
+        }
+
+        var saveBindingBox = new CheckBox
+        {
+            Content = "Save this credential to the connection",
+            IsChecked = false,
+            IsEnabled = false,
+        };
+        savedCredentialSection.Children.Add(saveBindingBox);
+
+        var errorInfo = new InfoBar
+        {
+            Severity = InfoBarSeverity.Error,
+            IsClosable = false,
+            IsOpen = false,
+            Title = "Credential unavailable",
+        };
+        savedCredentialSection.Children.Add(errorInfo);
+
+        panel.Children.Add(savedCredentialSection);
+
+        AccountCredentialPromptResult? promptResult = null;
+        var submittedViaEnter = false;
+
+        var dialog = new ContentDialog
+        {
+            Title = title,
+            Content = panel,
+            PrimaryButtonText = "Connect",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = RequireXamlRoot(),
+        };
+
+        AccountCredentialChoice CurrentChoice() =>
+            credentialBox.SelectedItem as AccountCredentialChoice ?? choices[0];
+
+        bool ManualUsernameValid() =>
+            !requireUsername || !string.IsNullOrWhiteSpace(userBox?.Text);
+
+        void UpdatePrimaryButton()
+        {
+            var selectedCredential = CurrentChoice().Credential;
+            dialog.IsPrimaryButtonEnabled = selectedCredential is not null || ManualUsernameValid();
+        }
+
+        void UpdateCredentialMode()
+        {
+            var selectedCredential = CurrentChoice().Credential;
+            var usingSavedCredential = selectedCredential is not null;
+            if (userBox is not null) userBox.IsEnabled = !usingSavedCredential;
+            passwordBox.IsEnabled = !usingSavedCredential;
+            saveBindingBox.IsEnabled = usingSavedCredential;
+            if (!usingSavedCredential)
+            {
+                saveBindingBox.IsChecked = false;
+            }
+            errorInfo.IsOpen = false;
+            UpdatePrimaryButton();
+        }
+
+        AccountCredentialPromptResult? BuildManualResult()
+        {
+            if (!ManualUsernameValid()) return null;
+            return new AccountCredentialPromptResult(
+                requireUsername ? userBox!.Text.Trim() : null,
+                passwordBox.Password,
+                null,
+                false);
+        }
+
+        if (userBox is not null)
+        {
+            userBox.TextChanged += (_, _) => UpdatePrimaryButton();
+        }
+        credentialBox.SelectionChanged += (_, _) => UpdateCredentialMode();
+
+        if (userBox is not null)
+        {
+            userBox.KeyDown += (_, args) =>
+            {
+                if (args.Key != Windows.System.VirtualKey.Enter || !ManualUsernameValid()) return;
+                passwordBox.Focus(FocusState.Programmatic);
+                args.Handled = true;
+            };
+        }
+
+        passwordBox.KeyDown += (_, args) =>
+        {
+            if (args.Key != Windows.System.VirtualKey.Enter || !dialog.IsPrimaryButtonEnabled) return;
+            if (CurrentChoice().Credential is not null) return;
+            promptResult = BuildManualResult();
+            submittedViaEnter = promptResult is not null;
+            if (submittedViaEnter)
+            {
+                dialog.Hide();
+                args.Handled = true;
+            }
+        };
+
+        UpdateCredentialMode();
+        dialog.Opened += (_, _) =>
+        {
+            if (userBox is not null && string.IsNullOrWhiteSpace(userBox.Text))
+            {
+                userBox.Focus(FocusState.Programmatic);
+            }
+            else
+            {
+                passwordBox.Focus(FocusState.Programmatic);
+            }
+        };
+
+        dialog.PrimaryButtonClick += async (_, args) =>
+        {
+            var selectedCredential = CurrentChoice().Credential;
+            if (selectedCredential is null)
+            {
+                promptResult = BuildManualResult();
+                args.Cancel = promptResult is null;
+                return;
+            }
+
+            var deferral = args.GetDeferral();
+            try
+            {
+                string? password;
+                try
+                {
+                    password = await _credentialService.ReadPasswordAsync(selectedCredential.Id).ConfigureAwait(true);
+                }
+                catch
+                {
+                    args.Cancel = true;
+                    errorInfo.Message = "Wormhole could not read this saved credential. Try another credential or enter the password manually.";
+                    errorInfo.IsOpen = true;
+                    return;
+                }
+
+                if (password is null || (protocol == ProtocolType.Ssh && password.Length == 0))
+                {
+                    args.Cancel = true;
+                    errorInfo.Message = "This saved credential does not have a usable password on this Windows account.";
+                    errorInfo.IsOpen = true;
+                    return;
+                }
+
+                promptResult = new AccountCredentialPromptResult(
+                    selectedCredential.Username?.Trim(),
+                    password,
+                    selectedCredential,
+                    saveBindingBox.IsChecked == true);
+            }
+            finally
+            {
+                deferral.Complete();
+            }
+        };
+
+        var result = await ShowDialogAsync(dialog, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        var accepted = result == ContentDialogResult.Primary || submittedViaEnter;
+        return accepted ? promptResult : null;
+    }
+
+    private async Task<IReadOnlyList<AccountCredentialChoice>> LoadAccountCredentialChoicesAsync(
+        ProtocolType protocol,
+        CancellationToken cancellationToken)
+    {
+        var credentials = await _credentialRepository.GetAllAsync(cancellationToken).ConfigureAwait(true);
+        var choices = new List<AccountCredentialChoice>(credentials.Count + 1)
+        {
+            AccountCredentialChoice.Manual,
+        };
+        foreach (var credential in credentials)
+        {
+            if (credential.Protocol != protocol) continue;
+            if (credential.Kind != CredentialKind.Password) continue;
+            if (string.IsNullOrWhiteSpace(credential.Username)) continue;
+            choices.Add(new AccountCredentialChoice(credential));
+        }
+        return choices;
+    }
+
+    private sealed class AccountCredentialChoice
+    {
+        public static AccountCredentialChoice Manual { get; } = new(null);
+        public static IReadOnlyList<AccountCredentialChoice> ManualOnly { get; } = new[] { Manual };
+
+        public AccountCredentialChoice(CredentialProfile? credential)
+        {
+            Credential = credential;
+            DisplayName = credential is null
+                ? "Manual password entry"
+                : BuildDisplayName(credential);
+        }
+
+        public CredentialProfile? Credential { get; }
+        public string DisplayName { get; }
+
+        private static string BuildDisplayName(CredentialProfile credential)
+        {
+            var name = credential.Name ?? string.Empty;
+            var protocol = credential.Protocol.ToString().ToUpperInvariant();
+            var identity = string.IsNullOrWhiteSpace(credential.Domain)
+                ? credential.Username
+                : $"{credential.Domain}\\{credential.Username}";
+            return string.IsNullOrWhiteSpace(identity)
+                ? $"{name} ({protocol})"
+                : $"{name} ({protocol}) - {identity}";
+        }
     }
 
     public async Task<string?> PromptSecretAsync(

@@ -71,6 +71,12 @@ public sealed record ConnectionProfile
     public string? SshKnownHostFingerprint { get; init; }
     public bool SshAutoSudo { get; init; }
 
+    public int SerialBaudRate { get; init; } = SerialDefaults.BaudRate;
+    public int SerialDataBits { get; init; } = SerialDefaults.DataBits;
+    public SerialStopBitsMode SerialStopBits { get; init; } = SerialDefaults.StopBits;
+    public SerialParityMode SerialParity { get; init; } = SerialDefaults.Parity;
+    public SerialFlowControlMode SerialFlowControl { get; init; } = SerialDefaults.FlowControl;
+
     /// <summary>
     /// For the <see cref="ProtocolType.Https"/> web protocol: accept certificate errors
     /// (self-signed, name mismatch, untrusted chain) when navigating. Targets appliance GUIs —

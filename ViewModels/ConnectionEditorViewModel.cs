@@ -79,7 +79,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     private string name = string.Empty;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(IsRdp), nameof(IsSsh), nameof(IsHttp), nameof(IsHttps), nameof(ShowCredentialSection), nameof(IsValid), nameof(CanUseSshAutoSudo), nameof(ShowInlinePassword), nameof(ShowRdpDomain), nameof(HttpAddressError), nameof(IsHttpAddressErrorOpen))]
+    [NotifyPropertyChangedFor(nameof(IsRdp), nameof(IsSsh), nameof(IsSerial), nameof(IsHttp), nameof(IsHttps), nameof(ShowCredentialSection), nameof(ShowTunnelSection), nameof(ShowPortBox), nameof(HostHeader), nameof(HostPlaceholder), nameof(IsValid), nameof(CanUseSshAutoSudo), nameof(ShowInlinePassword), nameof(ShowRdpDomain), nameof(HttpAddressError), nameof(IsHttpAddressErrorOpen))]
     private ProtocolType protocol = ProtocolType.Ssh;
 
     [ObservableProperty]
@@ -314,6 +314,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     public bool IsRdp => Protocol == ProtocolType.Rdp;
     public bool IsSsh => Protocol == ProtocolType.Ssh;
+    public bool IsSerial => Protocol == ProtocolType.Serial;
 
     /// <summary>True for the web protocols (<see cref="ProtocolType.Http"/> / <see cref="ProtocolType.Https"/>),
     /// which render in an embedded browser and need no credentials.</summary>
@@ -322,9 +323,18 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// <summary>True only for HTTPS — gates the "ignore certificate errors" control.</summary>
     public bool IsHttps => Protocol == ProtocolType.Https;
 
+    public bool ShowPortBox => !IsHttp && !IsSerial;
+
+    public string HostHeader => IsSerial ? "Serial line" : IsHttp ? "Address" : "Host";
+
+    public string HostPlaceholder => IsSerial ? "COM1" : IsHttp ? "10.0.0.1:8443" : "example.com";
+
     /// <summary>The credential block (saved credentials, inline username/password, domain, auto-sudo) is
-    /// shown for SSH/RDP but hidden for the credential-less web protocols.</summary>
-    public bool ShowCredentialSection => !IsHttp;
+    /// shown for SSH/RDP but hidden for credential-less web and serial protocols.</summary>
+    public bool ShowCredentialSection => IsSsh || IsRdp;
+
+    /// <summary>VPN routing is meaningful for network protocols only; serial ports are local devices.</summary>
+    public bool ShowTunnelSection => !IsSerial;
 
     /// <summary>
     /// Validation error for the web "address" field: non-null when the entered host (after stripping any
@@ -353,6 +363,70 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// </summary>
     [ObservableProperty]
     private bool httpIgnoreCertErrors;
+
+    #endregion
+
+    #region Serial
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsValid))]
+    private int serialBaudRate = SerialDefaults.BaudRate;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsValid))]
+    private bool serialBaudRateInherits;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsValid))]
+    private int serialDataBits = SerialDefaults.DataBits;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsValid))]
+    private bool serialDataBitsInherits;
+
+    [ObservableProperty]
+    private SerialStopBitsMode serialStopBits = SerialDefaults.StopBits;
+
+    [ObservableProperty]
+    private bool serialStopBitsInherits;
+
+    [ObservableProperty]
+    private SerialParityMode serialParity = SerialDefaults.Parity;
+
+    [ObservableProperty]
+    private bool serialParityInherits;
+
+    [ObservableProperty]
+    private SerialFlowControlMode serialFlowControl = SerialDefaults.FlowControl;
+
+    [ObservableProperty]
+    private bool serialFlowControlInherits;
+
+    public IReadOnlyList<int> SerialDataBitChoices { get; } = new[] { 5, 6, 7, 8 };
+
+    public IReadOnlyList<KeyValuePair<SerialStopBitsMode, string>> SerialStopBitChoices { get; } = new[]
+    {
+        new KeyValuePair<SerialStopBitsMode, string>(SerialStopBitsMode.One, "1"),
+        new KeyValuePair<SerialStopBitsMode, string>(SerialStopBitsMode.OnePointFive, "1.5"),
+        new KeyValuePair<SerialStopBitsMode, string>(SerialStopBitsMode.Two, "2"),
+    };
+
+    public IReadOnlyList<KeyValuePair<SerialParityMode, string>> SerialParityChoices { get; } = new[]
+    {
+        new KeyValuePair<SerialParityMode, string>(SerialParityMode.None, "None"),
+        new KeyValuePair<SerialParityMode, string>(SerialParityMode.Odd, "Odd"),
+        new KeyValuePair<SerialParityMode, string>(SerialParityMode.Even, "Even"),
+        new KeyValuePair<SerialParityMode, string>(SerialParityMode.Mark, "Mark"),
+        new KeyValuePair<SerialParityMode, string>(SerialParityMode.Space, "Space"),
+    };
+
+    public IReadOnlyList<KeyValuePair<SerialFlowControlMode, string>> SerialFlowControlChoices { get; } = new[]
+    {
+        new KeyValuePair<SerialFlowControlMode, string>(SerialFlowControlMode.None, "None"),
+        new KeyValuePair<SerialFlowControlMode, string>(SerialFlowControlMode.XonXoff, "XON/XOFF"),
+        new KeyValuePair<SerialFlowControlMode, string>(SerialFlowControlMode.RtsCts, "RTS/CTS"),
+        new KeyValuePair<SerialFlowControlMode, string>(SerialFlowControlMode.DsrDtr, "DSR/DTR"),
+    };
 
     #endregion
 
@@ -584,7 +658,9 @@ public partial class ConnectionEditorViewModel : ObservableObject
             // "Default for protocol" NumberBox placeholder). C# property pattern matching
             // treats null as not matching either side, so this only rejects an explicit
             // out-of-range value — not null.
-            if (Port is < 1 or > 65535) return false;
+            if (!IsSerial && Port is < 1 or > 65535) return false;
+            if (IsSerial && !SerialBaudRateInherits && SerialBaudRate <= 0) return false;
+            if (IsSerial && !SerialDataBitsInherits && SerialDataBits is < 5 or > 8) return false;
             if (IsRdp)
             {
                 if (GatewayHostnameError is not null) return false;
@@ -1003,9 +1079,20 @@ public partial class ConnectionEditorViewModel : ObservableObject
             RdpGatewayUseSameCreds = node.RdpGatewayUseSameCreds ?? false;
             RdpUseExternalClient = node.RdpUseExternalClient ?? false;
 
+            SerialBaudRateInherits = node.SerialBaudRate is null;
+            SerialDataBitsInherits = node.SerialDataBits is null;
+            SerialStopBitsInherits = node.SerialStopBits is null;
+            SerialParityInherits = node.SerialParity is null;
+            SerialFlowControlInherits = node.SerialFlowControl is null;
+            SerialBaudRate = SerialDefaults.NormalizeBaudRate(node.SerialBaudRate);
+            SerialDataBits = SerialDefaults.NormalizeDataBits(node.SerialDataBits);
+            SerialStopBits = SerialDefaults.NormalizeStopBits(node.SerialStopBits);
+            SerialParity = SerialDefaults.NormalizeParity(node.SerialParity);
+            SerialFlowControl = SerialDefaults.NormalizeFlowControl(node.SerialFlowControl);
+
             HttpIgnoreCertErrors = node.HttpIgnoreCertErrors ?? false;
 
-            // Tunnel fields are protocol-agnostic — every connection type can pre-start a VPN.
+            // Tunnel fields are protocol-agnostic across network connections. Serial stays local.
             // Delegated to TunnelPicker, which owns the atomic two-field write that protects a
             // TwoWay SelectedTunnel binding from observing the intermediate (one-set, one-unset)
             // state.
@@ -1029,6 +1116,11 @@ public partial class ConnectionEditorViewModel : ObservableObject
             node.Host = httpHost;
             node.Port = httpPort;
         }
+        else if (IsSerial)
+        {
+            node.Host = Host.Trim();
+            node.Port = null;
+        }
         else
         {
             node.Host = Host.Trim();
@@ -1038,8 +1130,13 @@ public partial class ConnectionEditorViewModel : ObservableObject
         // override the credential's stored username on a per-connection basis. When the field
         // is blank, fall back to the selected credential's username — without this fallback,
         // a credential-backed SSH connection with a blank Username field would persist a
-        // null username and SshSessionService would reject the connect.
-        if (!string.IsNullOrWhiteSpace(Username))
+        // null username and SshSessionService would reject the connect. Credential-less
+        // protocols always clear hidden username state.
+        if (!ShowCredentialSection)
+        {
+            node.Username = null;
+        }
+        else if (!string.IsNullOrWhiteSpace(Username))
         {
             node.Username = Username.Trim();
         }
@@ -1053,14 +1150,20 @@ public partial class ConnectionEditorViewModel : ObservableObject
         }
 
         // Credential mode. "Use saved credentials" unchecked means "don't use a saved credential"
-        // for BOTH protocols, so the picked CredentialId is always cleared in that case (else an
-        // RDP connection would silently keep authenticating with the now-hidden saved credential).
-        // SSH additionally gets an inline per-connection password: the plaintext is handed to the
-        // tree VM via the transient PendingInlinePassword (it writes Credential Manager after the
-        // row commits). RDP unchecked falls back to a connect-time prompt (CredentialId null,
-        // no inline). When checked, persist the picked credential and clear any inline state so
-        // switching off purges the stale secret (see ConnectionTreeViewModel.ApplyInlineSecretAsync).
-        if (!UseSavedCredentials)
+        // for BOTH credential-bearing protocols, so the picked CredentialId is always cleared in that
+        // case (else an RDP connection would silently keep authenticating with the now-hidden saved
+        // credential). SSH additionally gets an inline per-connection password: the plaintext is handed
+        // to the tree VM via the transient PendingInlinePassword (it writes Credential Manager after
+        // the row commits). RDP unchecked falls back to a connect-time prompt (CredentialId null,
+        // no inline). Credential-less protocols clear hidden auth state on save.
+        if (!ShowCredentialSection)
+        {
+            node.CredentialId = null;
+            node.CredentialMode = null;
+            node.UseInlinePassword = false;
+            node.PendingInlinePassword = null;
+        }
+        else if (!UseSavedCredentials)
         {
             node.CredentialId = null;
             node.CredentialMode = CredentialBindingMode.None;
@@ -1078,20 +1181,20 @@ public partial class ConnectionEditorViewModel : ObservableObject
                 : null;
         }
 
-        // Persist the tri-state Auto sudo choice (inherit→null / on→true / off→false) only when the
-        // control was actually usable. When it's hidden — non-SSH, no credential, a key-only
-        // credential, or an inherited credential (CredentialId is null here because the editor
-        // doesn't resolve folder inheritance) — leave the loaded value untouched so saving never
-        // clobbers a value the user couldn't see (an explicit true relying on an inherited
-        // credential, or a null that inherits a folder default).
-        node.SshAutoSudo = CanUseSshAutoSudo
-            ? SshAutoSudoMode switch
-            {
-                SshAutoSudoOn => true,
-                SshAutoSudoOff => false,
-                _ => (bool?)null,
-            }
-            : _loadedSshAutoSudo;
+        // Persist the tri-state Auto sudo choice (inherit→null / on→true / off→false) only for SSH.
+        // When the SSH control is hidden because the selected credential cannot supply a password,
+        // leave the loaded value untouched so saving never clobbers a value the user could not see.
+        // Credential-less protocols clear this hidden SSH-only state instead.
+        node.SshAutoSudo = IsSsh
+            ? CanUseSshAutoSudo
+                ? SshAutoSudoMode switch
+                {
+                    SshAutoSudoOn => true,
+                    SshAutoSudoOff => false,
+                    _ => (bool?)null,
+                }
+                : _loadedSshAutoSudo
+            : null;
 
         if (IsRdp)
         {
@@ -1145,9 +1248,35 @@ public partial class ConnectionEditorViewModel : ObservableObject
         // doesn't linger on a connection switched away from HTTPS.
         node.HttpIgnoreCertErrors = IsHttps ? HttpIgnoreCertErrors : (bool?)null;
 
-        // Tunnel fields apply to every protocol — write them outside the RDP block.
-        TunnelPicker.WriteTo(node);
+        if (IsSerial)
+        {
+            node.SerialBaudRate = SerialBaudRateInherits ? null : SerialBaudRate;
+            node.SerialDataBits = SerialDataBitsInherits ? null : SerialDataBits;
+            node.SerialStopBits = SerialStopBitsInherits ? null : SerialStopBits;
+            node.SerialParity = SerialParityInherits ? null : SerialParity;
+            node.SerialFlowControl = SerialFlowControlInherits ? null : SerialFlowControl;
+        }
+        else
+        {
+            node.SerialBaudRate = null;
+            node.SerialDataBits = null;
+            node.SerialStopBits = null;
+            node.SerialParity = null;
+            node.SerialFlowControl = null;
+        }
+
+        // Tunnel fields apply to network protocols only; serial ports are local devices.
+        if (IsSerial)
+        {
+            node.TunnelEnabled = false;
+            node.TunnelConfigId = null;
+        }
+        else
+        {
+            TunnelPicker.WriteTo(node);
+        }
     }
+
 
     /// <summary>
     /// Parse the web "address" field into a bare host + optional port. Accepts <c>host</c>,

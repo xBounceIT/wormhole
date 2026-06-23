@@ -30,7 +30,7 @@ public sealed class TerminalBridge : IDisposable
     private const int LowWatermarkBytes = 128 * 1024;
 
     private readonly CoreWebView2 _webView;
-    private readonly ISshSession _session;
+    private readonly ITerminalSession _session;
     private readonly ILogger<TerminalBridge> _logger;
     private readonly IAppSettingsService _settingsService;
     private readonly DispatcherQueue _dispatcher;
@@ -44,7 +44,7 @@ public sealed class TerminalBridge : IDisposable
 
     public TerminalBridge(
         CoreWebView2 webView,
-        ISshSession session,
+        ITerminalSession session,
         ILogger<TerminalBridge> logger,
         IAppSettingsService settingsService)
     {
@@ -70,7 +70,7 @@ public sealed class TerminalBridge : IDisposable
         if (!_firstOutputLogged && data.Length > 0)
         {
             _firstOutputLogged = true;
-            _logger.LogInformation("First SSH shell output received: {ByteCount} bytes.", data.Length);
+            _logger.LogInformation("First terminal output received: {ByteCount} bytes.", data.Length);
         }
 
         // SSH read pump fires on a background thread. The coalescer posts small prompt /
@@ -162,14 +162,14 @@ public sealed class TerminalBridge : IDisposable
     {
         // Coalescer invokes us on the UI thread via the dispatcher timer tick.
         if (_disposed || data.Length == 0) return false;
-        PostDataBytesToWebView(data, "posting SSH output");
+        PostDataBytesToWebView(data, "posting terminal output");
         return true;
     }
 
     private void PostBytesToWebView(ReadOnlyMemory<byte> data)
     {
         if (_disposed) return;
-        PostDataBytesToWebView(data, "posting SSH output");
+        PostDataBytesToWebView(data, "posting terminal output");
     }
 
     private void PostFocusToWebView()

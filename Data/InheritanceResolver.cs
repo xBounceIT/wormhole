@@ -59,6 +59,11 @@ public sealed class InheritanceResolver
         string? sshKeyFileName = null;
         string? sshKnownHostFingerprint = null;
         bool? sshAutoSudo = null;
+        int? serialBaudRate = null;
+        int? serialDataBits = null;
+        SerialStopBitsMode? serialStopBits = null;
+        SerialParityMode? serialParity = null;
+        SerialFlowControlMode? serialFlowControl = null;
         bool? tunnelEnabled = null;
         Guid? tunnelConfigId = null;
 
@@ -134,6 +139,11 @@ public sealed class InheritanceResolver
             sshKeyFileName ??= current.SshKeyFileName;
             sshKnownHostFingerprint ??= current.SshKnownHostFingerprint;
             sshAutoSudo ??= current.SshAutoSudo;
+            serialBaudRate ??= current.SerialBaudRate;
+            serialDataBits ??= current.SerialDataBits;
+            serialStopBits ??= current.SerialStopBits;
+            serialParity ??= current.SerialParity;
+            serialFlowControl ??= current.SerialFlowControl;
             tunnelEnabled ??= current.TunnelEnabled;
             tunnelConfigId ??= current.TunnelConfigId;
 
@@ -172,11 +182,12 @@ public sealed class InheritanceResolver
             port = null;
         }
 
-        // The web protocols are credential-less (the editor hides credentials and CredentialDialog won't
-        // create them). Drop any credential and SSH identity inherited from an ancestor folder, so a web
-        // node under an SSH/RDP folder can't carry - and, via the tree's "Show credentials", expose - an
-        // unrelated parent's password or stale private-key metadata.
+        // Web and serial protocols are credential-less (the editor hides credentials and CredentialDialog
+        // won't create them). Drop any credential and SSH identity inherited from an ancestor folder, so a
+        // credential-less node under an SSH/RDP folder can't carry - and, via the tree's "Show credentials",
+        // expose - an unrelated parent's password or stale private-key metadata.
         var isWeb = protocol.Value is ProtocolType.Http or ProtocolType.Https;
+        var isCredentialless = isWeb || protocol.Value == ProtocolType.Serial;
         var parentFolderName = node.ParentId is Guid parentIdForDisplay &&
             nodesById.TryGetValue(parentIdForDisplay, out var parentForDisplay) &&
             parentForDisplay.Kind == NodeKind.Folder &&
@@ -192,11 +203,11 @@ public sealed class InheritanceResolver
             Protocol = protocol.Value,
             Host = host,
             Port = port ?? DefaultPortFor(protocol.Value),
-            Username = isWeb ? null : username,
-            CredentialId = isWeb ? null : credentialId,
+            Username = isCredentialless ? null : username,
+            CredentialId = isCredentialless ? null : credentialId,
             // Inline password is strictly per-connection - read from the leaf `node`, never
             // inherited up the folder chain. When set, it suppresses any inherited saved credential.
-            UseInlinePassword = !isWeb && (node.UseInlinePassword ?? false),
+            UseInlinePassword = !isCredentialless && (node.UseInlinePassword ?? false),
             RdpDomain = rdpDomain,
             RdpScreenSize = rdpScreenSize,
             RdpFullScreen = rdpFullScreen ?? false,
@@ -227,16 +238,21 @@ public sealed class InheritanceResolver
             RdpGatewayBypassLocal = rdpGatewayBypassLocal ?? true,
             RdpGatewayUseSameCreds = rdpGatewayUseSameCreds ?? false,
             RdpUseExternalClient = rdpUseExternalClient ?? false,
-            SshKeyFileName = isWeb ? null : sshKeyFileName,
-            SshKnownHostFingerprint = isWeb ? null : sshKnownHostFingerprint,
-            SshAutoSudo = sshAutoSudo ?? false,
+            SshKeyFileName = isCredentialless ? null : sshKeyFileName,
+            SshKnownHostFingerprint = isCredentialless ? null : sshKnownHostFingerprint,
+            SshAutoSudo = isCredentialless ? false : sshAutoSudo ?? false,
+            SerialBaudRate = SerialDefaults.NormalizeBaudRate(serialBaudRate),
+            SerialDataBits = SerialDefaults.NormalizeDataBits(serialDataBits),
+            SerialStopBits = SerialDefaults.NormalizeStopBits(serialStopBits),
+            SerialParity = SerialDefaults.NormalizeParity(serialParity),
+            SerialFlowControl = SerialDefaults.NormalizeFlowControl(serialFlowControl),
             // Per-connection (leaf-only), like UseInlinePassword — NOT inherited up the folder chain.
             // The editor surfaces it as a 2-state checkbox that can't express "inherit", so inheriting it
             // would let an unrelated edit silently sever an inherited value; and the folder editor
             // exposes no control to set it anyway.
             HttpIgnoreCertErrors = node.HttpIgnoreCertErrors ?? false,
-            TunnelEnabled = tunnelEnabled ?? false,
-            TunnelConfigId = tunnelConfigId,
+            TunnelEnabled = protocol.Value == ProtocolType.Serial ? false : tunnelEnabled ?? false,
+            TunnelConfigId = protocol.Value == ProtocolType.Serial ? null : tunnelConfigId,
         };
     }
 
@@ -246,6 +262,7 @@ public sealed class InheritanceResolver
         ProtocolType.Rdp => 3389,
         ProtocolType.Http => 80,
         ProtocolType.Https => 443,
+        ProtocolType.Serial => 0,
         _ => throw new ArgumentOutOfRangeException(nameof(protocol)),
     };
 }
