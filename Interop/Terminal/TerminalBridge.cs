@@ -96,10 +96,9 @@ public sealed class TerminalBridge : IDisposable
     }
 
     /// <summary>
-    /// Posts a captured run of SSH output bytes to xterm.js using the same protocol
-    /// as live output. Used to repaint a freshly-recreated xterm.js with prior
-    /// scrollback after a view detach/reattach, since an idle shell won't send
-    /// anything new to render against.
+    /// Posts captured SSH output bytes to xterm.js using the same protocol as live
+    /// output. Used to repaint a freshly-recreated xterm.js, or to replay bytes that
+    /// arrived while no bridge was attached during a same-WebView reattach.
     /// </summary>
     public void Replay(ReadOnlyMemory<byte> data)
     {
@@ -174,7 +173,7 @@ public sealed class TerminalBridge : IDisposable
 
     private void PostFocusToWebView()
     {
-        PostStringToWebView("f:", "requesting terminal focus");
+        PostStringToWebView("f:", "requesting terminal focus/repaint");
     }
 
     private bool PostStringToWebView(string message, string operation)

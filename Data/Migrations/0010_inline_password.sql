@@ -3,7 +3,7 @@
 -- picking a saved credential or being prompted every time). The password itself is NOT
 -- stored here — it lives in Windows Credential Manager keyed by the node Id
 -- (key "Wormhole:<nodeId>"), exactly like a saved credential's secret. This column only
--- records whether such a secret exists. SSH-only today; RDP ignores it.
+-- records whether such a secret exists. Applies to SSH/RDP connection rows.
 -- INTEGER NULL matches the existing boolean convention (treated as false when unset).
 -- MigrationRunner already wraps this in a transaction.
 

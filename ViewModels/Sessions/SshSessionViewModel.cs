@@ -55,7 +55,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     private CancellationTokenSource? _cts;
     private CoreWebView2? _webView;
     // Survives DetachView so AttachAsync can tell a same-WebView reattach (tab
-    // switch — xterm.js still rendering) from a fresh-WebView attach (Sessions ↔
+    // switch — xterm.js still owns the same buffer) from a fresh-WebView attach (Sessions ↔
     // Settings nav — new control). Used by ReferenceEquals only.
     private object? _lastAttachedWebView;
     // UI dispatcher lives on the SessionTabViewModel base class (captured via
@@ -75,8 +75,9 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     // Set when a connect reaches Connected while no view is attached (tab backgrounded mid-connect):
     // the session's banner/prompt lands only in _replayBuffer, so the live xterm.js — cleared at
     // connect start and never fed since — is empty. The next AttachAsync must replay even on a
-    // same-WebView reattach (where it normally skips replay because xterm.js already shows the
-    // session). Cleared once a bridge is rebound, and reset whenever the buffer is cleared on teardown.
+    // same-WebView reattach (where it normally skips replay because xterm.js already owns the
+    // session buffer and the focus request can repaint it). Cleared once a bridge is rebound, and
+    // reset whenever the buffer is cleared on teardown.
     private bool _connectedWhileDetached;
 
     // Auto-reconnect after an UNEXPECTED drop of an already-established session (host reboot, network
@@ -124,6 +125,11 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     // and an idle prompt sends nothing new. AttachAsync's rebind path replays this
     // buffer so the user doesn't see a black void.
     private readonly TerminalReplayBuffer _replayBuffer = new(256 * 1024);
+    // Bytes that arrived while no TerminalBridge was attached. Same-WebView tab reattach keeps
+    // xterm.js alive, so only this delta should be replayed; full _replayBuffer replay would
+    // duplicate already-visible output.
+    private readonly TerminalReplayBuffer _detachedReplayBuffer = new(256 * 1024);
+    private readonly object _terminalReplayLock = new();
 
     public SshSessionViewModel(
         ISshSessionService sshService,
@@ -226,8 +232,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
 
         // A fresh WebView2 (new control after Sessions↔Settings nav) means xterm.js
         // was just navigated to terminal.html and has an empty screen. A same-WebView
-        // reattach (tab switch) means xterm.js is still rendering the prior session;
-        // replaying onto it would duplicate every byte the user already sees.
+        // reattach (tab switch) means xterm.js still owns the prior session buffer;
+        // replaying onto it would duplicate bytes, so the focus request repaints it instead.
         var xtermIsFresh = RegisterAttachedWebView(webView);
         _webView = webView;
         _initialSize = initialSize;
@@ -281,30 +287,29 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         // VM survives view rebuilds while the SSH pump keeps running. Skip credential
         // prompt + connect — rebind the bridge to the (possibly new) WebView and
         // resync geometry. Replay only when xterm.js is fresh; same-WebView reattach
-        // already shows the prior render.
+        // keeps the prior buffer and lets the focus request repaint its existing canvas.
         if (_session is not null)
         {
-            // Snapshot BEFORE subscribing the new bridge: a byte that lands on the SSH
-            // read pump after the new bridge subscribes would otherwise be rendered
-            // live AND included in the snapshot, duplicating on replay (e.g. tail -f
-            // mid-reattach). The reverse race — bytes between snapshot and subscribe —
-            // stays in the ring buffer and surfaces on the next reattach; a far less
-            // visible cosmetic issue than the duplicated stream.
+            // Snapshot and enqueue replay before publishing the new bridge: bytes before
+            // the lock are replayed first, while bytes after the lock render live through
+            // the new bridge and cannot overtake the older replay batch.
             //
-            // Replay on a fresh WebView (empty xterm.js) OR when the session connected while detached:
-            // there the live xterm.js never received the banner/prompt (it went only to the buffer), so
-            // a same-WebView reattach must replay too — otherwise the tab shows Connected over a blank
-            // terminal until the next remote byte arrives. xterm.js is empty in that state (cleared at
-            // connect start, never fed), so replaying the full buffer can't duplicate.
-            var replayNeeded = xtermIsFresh || _connectedWhileDetached;
-            _connectedWhileDetached = false;
-            var snapshot = replayNeeded ? _replayBuffer.Snapshot() : null;
-            var oldBridge = _bridge;
-            _bridge = CreateTerminalBridge(webView);
+            // Replay the full buffer for a fresh WebView (empty xterm.js) or a session that
+            // connected while detached. For a normal same-WebView tab switch, replay only
+            // bytes captured while no bridge existed; replaying the full buffer would duplicate
+            // output that xterm.js already rendered before the tab was hidden.
+            var newBridge = CreateTerminalBridge(webView);
+            TerminalBridge? oldBridge;
+            lock (_terminalReplayLock)
+            {
+                var snapshot = TakeReattachReplaySnapshotUnderLock(xtermIsFresh);
+                oldBridge = _bridge;
+                if (snapshot is not null) newBridge.Replay(snapshot);
+                _bridge = newBridge;
+            }
             oldBridge?.Dispose();
-            if (snapshot is not null) _bridge.Replay(snapshot);
             await _session.ResizeAsync(initialSize.Columns, initialSize.Rows).ConfigureAwait(true);
-            _bridge.RequestFocus();
+            newBridge.RequestFocus();
             EnsureRemoteOutputWaitTimer();
             return;
         }
@@ -576,8 +581,12 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     /// </summary>
     public void DetachView()
     {
-        var bridge = _bridge;
-        _bridge = null;
+        TerminalBridge? bridge;
+        lock (_terminalReplayLock)
+        {
+            bridge = _bridge;
+            _bridge = null;
+        }
         if (bridge is not null)
         {
             try { bridge.Dispose(); }
@@ -589,7 +598,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     internal void AttachConnectedSessionForTesting(ISshSession session, ITunnelInstance? tunnel = null)
     {
         ResetOutputState();
-        _replayBuffer.Clear();
+        ClearTerminalReplayBuffers();
         if (_session is not null)
         {
             _session.DataReceived -= OnSessionDataReceived;
@@ -969,13 +978,23 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             var liveWebView = _webView;
             if (liveWebView is not null)
             {
-                _bridge = CreateTerminalBridge(liveWebView);
+                var bridge = CreateTerminalBridge(liveWebView);
+                TerminalBridge? oldBridge;
+                lock (_terminalReplayLock)
+                {
+                    oldBridge = _bridge;
+                    _bridge = bridge;
+                }
+                oldBridge?.Dispose();
             }
             else
             {
                 // No view to bind: the banner/prompt below lands only in _replayBuffer, so flag that the
                 // next AttachAsync must replay it even on a same-WebView reattach (which normally skips).
-                _connectedWhileDetached = true;
+                lock (_terminalReplayLock)
+                {
+                    _connectedWhileDetached = true;
+                }
             }
 
             // Auto sudo: once the shell is up, run "sudo su" and feed the saved password at the
@@ -1145,8 +1164,17 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     private void AppendVisibleTerminalData(ReadOnlyMemory<byte> data, ISshSession? sourceSession = null)
     {
         if (data.Length == 0) return;
-        _replayBuffer.Append(data.Span);
-        _bridge?.AppendOutput(data);
+        TerminalBridge? bridge;
+        lock (_terminalReplayLock)
+        {
+            _replayBuffer.Append(data.Span);
+            bridge = _bridge;
+            if (bridge is null)
+            {
+                _detachedReplayBuffer.Append(data.Span);
+            }
+        }
+        bridge?.AppendOutput(data);
 
         if (HasReceivedOutput) return;
 
@@ -1229,8 +1257,12 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         _autoSudo = null;
         autoSudo?.Dispose();
 
-        var bridge = _bridge;
-        _bridge = null;
+        TerminalBridge? bridge;
+        lock (_terminalReplayLock)
+        {
+            bridge = _bridge;
+            _bridge = null;
+        }
         if (bridge is not null)
         {
             try { bridge.Dispose(); }
@@ -1258,9 +1290,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         // DetachView (view-only teardown) deliberately keeps the buffer — replaying
         // across the detach window is the whole point. Session teardown clears it so
         // a same-VM reconnect doesn't bleed the old session's output into the new one.
-        _replayBuffer.Clear();
-        // Buffer is empty now — nothing pending to replay on the next attach.
-        _connectedWhileDetached = false;
+        ClearTerminalReplayBuffers();
 
         // Drop the cached creds: a future reconnect will re-resolve via ConnectAsync so
         // a rotated password / removed key / revoked credential doesn't get silently
@@ -1660,6 +1690,31 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     }
 
     internal byte[] PeekReplayBufferForTesting() => _replayBuffer.Snapshot();
+    internal byte[] PeekDetachedReplayBufferForTesting() => _detachedReplayBuffer.Snapshot();
+
+    internal void AppendReplayBufferForTesting(params byte[] data)
+    {
+        lock (_terminalReplayLock)
+        {
+            _replayBuffer.Append(data);
+        }
+    }
+
+    internal void SetConnectedWhileDetachedForTesting()
+    {
+        lock (_terminalReplayLock)
+        {
+            _connectedWhileDetached = true;
+        }
+    }
+
+    internal byte[]? TakeReattachReplaySnapshotForTesting(bool xtermIsFresh)
+    {
+        lock (_terminalReplayLock)
+        {
+            return TakeReattachReplaySnapshotUnderLock(xtermIsFresh);
+        }
+    }
 
     internal int AutoReconnectAttemptsForTesting => _autoReconnectAttempts;
     internal bool ReconnectRequestedWhileDetachedForTesting => _reconnectRequestedWhileDetached;
@@ -1678,4 +1733,31 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         _lastAttachedWebView = webView;
         return isFresh;
     }
+
+    private byte[]? TakeReattachReplaySnapshotUnderLock(bool xtermIsFresh)
+    {
+        var replayFull = xtermIsFresh || _connectedWhileDetached;
+        _connectedWhileDetached = false;
+
+        if (replayFull)
+        {
+            _detachedReplayBuffer.Clear();
+            return EmptyToNull(_replayBuffer.Snapshot());
+        }
+
+        return EmptyToNull(_detachedReplayBuffer.Drain());
+    }
+
+    private void ClearTerminalReplayBuffers()
+    {
+        lock (_terminalReplayLock)
+        {
+            _replayBuffer.Clear();
+            _detachedReplayBuffer.Clear();
+            // Buffers are empty now — nothing pending to replay on the next attach.
+            _connectedWhileDetached = false;
+        }
+    }
+
+    private static byte[]? EmptyToNull(byte[] data) => data.Length == 0 ? null : data;
 }

@@ -25,7 +25,10 @@ public sealed class InheritanceResolver
         ProtocolType? portContextProtocol = null;
         string? username = null;
         Guid? credentialId = null;
-        var credentialResolved = false;
+        var leafUsesInlinePassword = (node.UseInlinePassword ?? false) &&
+            FindResolvedProtocol(node, nodesById) is ProtocolType.Ssh or ProtocolType.Rdp;
+        var credentialResolved = leafUsesInlinePassword;
+        var credentialIdentityBoundaryReached = false;
         string? rdpDomain = null;
         string? rdpScreenSize = null;
         bool? rdpFullScreen = null;
@@ -87,9 +90,14 @@ public sealed class InheritanceResolver
             {
                 portContextProtocol ??= current.Protocol;
             }
-            username ??= current.Username;
+            if (!credentialIdentityBoundaryReached)
+            {
+                username ??= current.Username;
+                rdpDomain ??= current.RdpDomain;
+            }
             if (!credentialResolved)
             {
+                var resolvesSavedCredential = false;
                 var mode = current.CredentialMode;
                 if (mode is null)
                 {
@@ -97,15 +105,24 @@ public sealed class InheritanceResolver
                     {
                         credentialId = legacyCredentialId;
                         credentialResolved = true;
+                        resolvesSavedCredential = true;
                     }
                 }
                 else if (mode != CredentialBindingMode.Inherit)
                 {
                     credentialResolved = true;
                     credentialId = mode == CredentialBindingMode.Saved ? current.CredentialId : null;
+                    resolvesSavedCredential = mode == CredentialBindingMode.Saved && current.CredentialId is not null;
+                }
+
+                if (resolvesSavedCredential)
+                {
+                    // A saved credential is an auth identity boundary. Use this node's own
+                    // Username/RdpDomain if it has them, but do not mix its password with
+                    // identity fields from more distant ancestors.
+                    credentialIdentityBoundaryReached = true;
                 }
             }
-            rdpDomain ??= current.RdpDomain;
             rdpScreenSize ??= current.RdpScreenSize ??
                 (current.RdpFullScreen == true ? RdpScreenSizes.FullConnectionContent : null);
             rdpFullScreen ??= current.RdpFullScreen;
@@ -190,18 +207,25 @@ public sealed class InheritanceResolver
         var isVnc = protocol.Value == ProtocolType.Vnc;
         var isCredentialless = isWeb || isSerial;
         var clearsSshIdentity = isCredentialless || isVnc;
-        var useInlinePassword = protocol.Value == ProtocolType.Ssh && (node.UseInlinePassword ?? false);
+        var useInlinePassword = leafUsesInlinePassword;
+        var parentFolderName = node.ParentId is Guid parentIdForDisplay &&
+            nodesById.TryGetValue(parentIdForDisplay, out var parentForDisplay) &&
+            parentForDisplay.Kind == NodeKind.Folder &&
+            !string.IsNullOrWhiteSpace(parentForDisplay.Name)
+                ? parentForDisplay.Name
+                : null;
 
         return new ConnectionProfile
         {
             NodeId = node.Id,
             Name = node.Name,
+            ParentFolderName = parentFolderName,
             Protocol = protocol.Value,
             Host = host,
             Port = port ?? DefaultPortFor(protocol.Value),
             Username = clearsSshIdentity ? null : username,
             CredentialId = isCredentialless || useInlinePassword ? null : credentialId,
-            // Inline password is SSH-only and strictly per-connection - read from the leaf `node`, never
+            // Inline password is SSH/RDP-only and strictly per-connection - read from the leaf `node`, never
             // inherited up the folder chain. When set, it suppresses any inherited saved credential.
             UseInlinePassword = useInlinePassword,
             RdpDomain = rdpDomain,
@@ -262,4 +286,34 @@ public sealed class InheritanceResolver
         ProtocolType.Serial => 0,
         _ => throw new ArgumentOutOfRangeException(nameof(protocol)),
     };
+
+    private static ProtocolType? FindResolvedProtocol(
+        ConnectionNode node,
+        IReadOnlyDictionary<Guid, ConnectionNode> nodesById)
+    {
+        HashSet<Guid>? seen = null;
+        var current = node;
+        while (true)
+        {
+            if (current.Protocol is { } protocol)
+            {
+                return protocol;
+            }
+            if (current.ParentId is not Guid parentId || !nodesById.TryGetValue(parentId, out var parent))
+            {
+                return null;
+            }
+            if (seen is null)
+            {
+                seen = new HashSet<Guid>();
+                seen.Add(current.Id);
+            }
+            if (!seen.Add(parent.Id))
+            {
+                throw new InvalidOperationException(
+                    $"Detected a cycle in the node tree at '{parent.Name}' ({parent.Id}).");
+            }
+            current = parent;
+        }
+    }
 }

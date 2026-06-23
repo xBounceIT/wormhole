@@ -109,22 +109,21 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// <summary>
     /// Drives the credential mode toggle. When true (default), the connection uses a saved
     /// credential (the picker is shown, the inline Username/Password hidden). When false, the
-    /// user supplies an inline Username and — for SSH — an inline <see cref="InlinePassword"/>.
+    /// user supplies an inline Username and, for SSH/RDP, an inline <see cref="InlinePassword"/>.
     /// Maps to <see cref="ConnectionNode.UseInlinePassword"/> (inverted) in WriteTo.
     /// </summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(ShowInlinePassword), nameof(ShowConnectionUsername), nameof(ShowRdpDomain), nameof(CanUseSshAutoSudo))]
     private bool useSavedCredentials = true;
 
-    /// <summary>The inline login password (bound to the editor's PasswordBox). SSH-only,
+    /// <summary>The inline login password (bound to the editor's PasswordBox). SSH/RDP,
     /// persisted to Credential Manager keyed by the node Id. Never logged.</summary>
     [ObservableProperty]
     private string inlinePassword = string.Empty;
 
-    /// <summary>The inline Password field is shown only for an SSH connection that isn't using a
-    /// saved credential. RDP keeps its existing behavior (saved credential or connect-time
-    /// prompt), so no inline password control is surfaced for it.</summary>
-    public bool ShowInlinePassword => IsSsh && !UseSavedCredentials;
+    /// <summary>The inline Password field is shown for SSH/RDP connections that aren't using a
+    /// saved credential. Web protocols do not use credentials.</summary>
+    public bool ShowInlinePassword => (IsSsh || IsRdp) && !UseSavedCredentials;
 
     /// <summary>
     /// Connection-level username is meaningful for SSH/RDP prompt mode. VNC v1 uses no-auth or
@@ -1157,9 +1156,9 @@ public partial class ConnectionEditorViewModel : ObservableObject
         // Credential mode. "Use saved credentials" unchecked means "don't use a saved credential"
         // for every credential-capable protocol, so the picked CredentialId is always cleared in that
         // case (else a connection would silently keep authenticating with the now-hidden saved
-        // credential). SSH additionally gets an inline per-connection password: the plaintext is handed
-        // to the tree VM via the transient PendingInlinePassword (it writes Credential Manager after
-        // the row commits). RDP and VNC unchecked fall back to connect-time prompting/no-auth handling
+        // credential). SSH/RDP additionally get an inline per-connection password: the plaintext is
+        // handed to the tree VM via the transient PendingInlinePassword (it writes Credential Manager
+        // after the row commits). VNC unchecked falls back to connect-time prompting/no-auth handling
         // (CredentialId null, no inline). Credential-less protocols clear hidden auth state on save.
         if (!ShowCredentialSection)
         {
@@ -1170,10 +1169,11 @@ public partial class ConnectionEditorViewModel : ObservableObject
         }
         else if (!UseSavedCredentials)
         {
+            var canUseInlinePassword = IsSsh || IsRdp;
             node.CredentialId = null;
             node.CredentialMode = CredentialBindingMode.None;
-            node.UseInlinePassword = IsSsh;
-            node.PendingInlinePassword = IsSsh ? InlinePassword : null; // never logged
+            node.UseInlinePassword = canUseInlinePassword;
+            node.PendingInlinePassword = canUseInlinePassword ? InlinePassword : null; // never logged
         }
         else
         {

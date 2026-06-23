@@ -299,10 +299,12 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         Assert.Equal(credentialId, row.CredentialId);
     }
 
-    [Fact]
-    public async Task AddConnection_InlinePassword_StoresSecretUnderNodeId()
+    [Theory]
+    [InlineData(ProtocolType.Ssh, 22)]
+    [InlineData(ProtocolType.Rdp, 3389)]
+    public async Task AddConnection_InlinePassword_StoresSecretUnderNodeId(ProtocolType protocol, int port)
     {
-        var draft = MakeConnectionDraft("inline", ProtocolType.Ssh, "host", 22, "root");
+        var draft = MakeConnectionDraft("inline", protocol, "host", port, "root");
         draft.UseInlinePassword = true;
         draft.PendingInlinePassword = "s3cret";
         var dialog = new FakeDialogService { EditConnectionResult = draft };
@@ -319,13 +321,15 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         Assert.Equal("s3cret", creds.Passwords[row.Id]);
     }
 
-    [Fact]
-    public async Task AddConnection_InlinePasswordBlank_DoesNotStoreEmptySecret()
+    [Theory]
+    [InlineData(ProtocolType.Ssh, 22)]
+    [InlineData(ProtocolType.Rdp, 3389)]
+    public async Task AddConnection_InlinePasswordBlank_DoesNotStoreEmptySecret(ProtocolType protocol, int port)
     {
         // Inline mode with a blank password: the flag persists, but no empty Credential Manager
-        // entry is written (an empty secret would yield no SSH auth method and fail the connect;
-        // SshCredentialResolver instead prompts when the secret is absent).
-        var draft = MakeConnectionDraft("inline", ProtocolType.Ssh, "host", 22, "root");
+        // entry is written (an empty secret would yield no useful inline auth and fail the connect;
+        // the session credential resolver instead prompts when the secret is absent).
+        var draft = MakeConnectionDraft("inline", protocol, "host", port, "root");
         draft.UseInlinePassword = true;
         draft.PendingInlinePassword = "";
         var dialog = new FakeDialogService { EditConnectionResult = draft };
@@ -340,10 +344,12 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         Assert.False(creds.Passwords.ContainsKey(row.Id));
     }
 
-    [Fact]
-    public async Task Edit_InlinePasswordCleared_PurgesStoredSecret()
+    [Theory]
+    [InlineData(ProtocolType.Ssh, 22)]
+    [InlineData(ProtocolType.Rdp, 3389)]
+    public async Task Edit_InlinePasswordCleared_PurgesStoredSecret(ProtocolType protocol, int port)
     {
-        var draft = MakeConnectionDraft("inline", ProtocolType.Ssh, "host", 22, "root");
+        var draft = MakeConnectionDraft("inline", protocol, "host", port, "root");
         draft.UseInlinePassword = true;
         draft.PendingInlinePassword = "s3cret";
         var dialog = new FakeDialogService { EditConnectionResult = draft };
@@ -355,7 +361,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         Assert.Equal("s3cret", creds.Passwords[row.Id]);
 
         // Still inline, but the password field was cleared → the stale secret must be removed.
-        var next = MakeConnectionDraft("inline", ProtocolType.Ssh, "host", 22, "root");
+        var next = MakeConnectionDraft("inline", protocol, "host", port, "root");
         next.UseInlinePassword = true;
         next.PendingInlinePassword = "";
         dialog.EditConnectionResult = next;
@@ -594,6 +600,53 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
 
         Assert.Equal(1, dialog.ShowCredentialsCount);
         Assert.Equal("inherited-pw", dialog.LastShownSecret);
+    }
+
+    [Fact]
+    public async Task ShowCredentials_InheritedCredentialUsesCredentialUsernameWhenProfileHasNone()
+    {
+        var root = new ConnectionNode
+        {
+            Kind = NodeKind.Folder,
+            Name = "all",
+            Username = "root-user",
+        };
+        await _repo.AddAsync(root);
+
+        var credentialId = Guid.NewGuid();
+        var closest = new ConnectionNode
+        {
+            Kind = NodeKind.Folder,
+            ParentId = root.Id,
+            Name = "prod",
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = credentialId,
+        };
+        await _repo.AddAsync(closest);
+
+        var child = MakeConnectionDraft("web", ProtocolType.Ssh, "host", 22, username: null);
+        child.ParentId = closest.Id;
+        child.CredentialMode = CredentialBindingMode.Inherit;
+        await _repo.AddAsync(child);
+
+        var dialog = new FakeDialogService();
+        var creds = new FakeCredentialService();
+        creds.Passwords[credentialId] = "inherited-pw";
+        var credRepo = new FakeCredentialRepository(new CredentialProfile
+        {
+            Id = credentialId,
+            Kind = CredentialKind.Password,
+            Username = "credential-user",
+        });
+        var vm = CreateVm(dialog, creds, credRepo);
+        await vm.RefreshAsync();
+
+        var childVm = vm.Roots.Single().Children.Single().Children.Single();
+        await vm.ShowCredentialsCommand.ExecuteAsync(childVm);
+
+        Assert.Equal(1, dialog.ShowCredentialsCount);
+        Assert.Equal("inherited-pw", dialog.LastShownSecret);
+        Assert.Equal("credential-user", dialog.LastShownUsername);
     }
 
     [Fact]

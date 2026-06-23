@@ -143,6 +143,44 @@ public class InheritanceResolverTests
     }
 
     [Fact]
+    public void Resolve_ParentFolderName_UsesImmediateParentOnly()
+    {
+        var root = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "root",
+            Kind = NodeKind.Folder,
+        };
+        var mid = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = root.Id,
+            Name = "prod",
+            Kind = NodeKind.Folder,
+        };
+        var leaf = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = mid.Id,
+            Name = "edge",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            Host = "edge.prod",
+        };
+
+        var nodes = new Dictionary<Guid, ConnectionNode>
+        {
+            [root.Id] = root,
+            [mid.Id] = mid,
+            [leaf.Id] = leaf,
+        };
+
+        var profile = new InheritanceResolver().Resolve(leaf, nodes);
+
+        Assert.Equal("prod", profile.ParentFolderName);
+    }
+
+    [Fact]
     public void Resolve_CredentialModeSaved_InheritsFromParentFolder()
     {
         var credId = Guid.NewGuid();
@@ -242,6 +280,216 @@ public class InheritanceResolverTests
     }
 
     [Fact]
+    public void Resolve_MultipleFolderCredentials_ClosestFolderCredentialWins()
+    {
+        var rootCredId = Guid.NewGuid();
+        var closestCredId = Guid.NewGuid();
+        var root = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "all",
+            Kind = NodeKind.Folder,
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = rootCredId,
+            Username = "root-user",
+        };
+        var closest = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = root.Id,
+            Name = "prod",
+            Kind = NodeKind.Folder,
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = closestCredId,
+            Username = "prod-user",
+        };
+        var leaf = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = closest.Id,
+            Name = "web-1",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            Host = "web-1.prod",
+            CredentialMode = CredentialBindingMode.Inherit,
+        };
+
+        var profile = new InheritanceResolver().Resolve(leaf, new Dictionary<Guid, ConnectionNode>
+        {
+            [root.Id] = root,
+            [closest.Id] = closest,
+            [leaf.Id] = leaf,
+        });
+
+        Assert.Equal(closestCredId, profile.CredentialId);
+        Assert.Equal("prod-user", profile.Username);
+    }
+
+    [Fact]
+    public void Resolve_ClosestSavedCredentialWithoutIdentity_DoesNotInheritDistantIdentity()
+    {
+        var root = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "all",
+            Kind = NodeKind.Folder,
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = Guid.NewGuid(),
+            Username = "root-user",
+            RdpDomain = "ROOT",
+        };
+        var closest = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = root.Id,
+            Name = "prod",
+            Kind = NodeKind.Folder,
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = Guid.NewGuid(),
+        };
+        var leaf = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = closest.Id,
+            Name = "vm",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Rdp,
+            Host = "vm.prod",
+            CredentialMode = CredentialBindingMode.Inherit,
+        };
+
+        var profile = new InheritanceResolver().Resolve(leaf, new Dictionary<Guid, ConnectionNode>
+        {
+            [root.Id] = root,
+            [closest.Id] = closest,
+            [leaf.Id] = leaf,
+        });
+
+        Assert.Equal(closest.CredentialId, profile.CredentialId);
+        Assert.Null(profile.Username);
+        Assert.Null(profile.RdpDomain);
+    }
+
+    [Fact]
+    public void Resolve_LegacyClosestCredentialWithoutIdentity_DoesNotInheritDistantUsername()
+    {
+        var root = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "all",
+            Kind = NodeKind.Folder,
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = Guid.NewGuid(),
+            Username = "root-user",
+        };
+        var closest = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = root.Id,
+            Name = "imported-prod",
+            Kind = NodeKind.Folder,
+            CredentialMode = null,
+            CredentialId = Guid.NewGuid(),
+        };
+        var leaf = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = closest.Id,
+            Name = "web-1",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            Host = "web-1.prod",
+        };
+
+        var profile = new InheritanceResolver().Resolve(leaf, new Dictionary<Guid, ConnectionNode>
+        {
+            [root.Id] = root,
+            [closest.Id] = closest,
+            [leaf.Id] = leaf,
+        });
+
+        Assert.Equal(closest.CredentialId, profile.CredentialId);
+        Assert.Null(profile.Username);
+    }
+
+    [Fact]
+    public void Resolve_LeafUsernameOverridesClosestFolderCredentialIdentity()
+    {
+        var root = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "all",
+            Kind = NodeKind.Folder,
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = Guid.NewGuid(),
+            Username = "root-user",
+        };
+        var closest = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = root.Id,
+            Name = "prod",
+            Kind = NodeKind.Folder,
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = Guid.NewGuid(),
+        };
+        var leaf = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = closest.Id,
+            Name = "web-1",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            Host = "web-1.prod",
+            Username = "leaf-user",
+            CredentialMode = CredentialBindingMode.Inherit,
+        };
+
+        var profile = new InheritanceResolver().Resolve(leaf, new Dictionary<Guid, ConnectionNode>
+        {
+            [root.Id] = root,
+            [closest.Id] = closest,
+            [leaf.Id] = leaf,
+        });
+
+        Assert.Equal(closest.CredentialId, profile.CredentialId);
+        Assert.Equal("leaf-user", profile.Username);
+    }
+
+    [Fact]
+    public void Resolve_CredentialModeNone_StillInheritsUsernameForPrompt()
+    {
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "prod",
+            Kind = NodeKind.Folder,
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = Guid.NewGuid(),
+            Username = "deploy",
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "web-1",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            Host = "web-1.prod",
+            CredentialMode = CredentialBindingMode.None,
+        };
+
+        var profile = new InheritanceResolver().Resolve(node, new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        });
+
+        Assert.Null(profile.CredentialId);
+        Assert.Equal("deploy", profile.Username);
+    }
+
+    [Fact]
     public void Resolve_LegacyNullModeWithCredentialId_TreatsNodeAsSavedCredential()
     {
         var childCredId = Guid.NewGuid();
@@ -274,8 +522,10 @@ public class InheritanceResolverTests
         Assert.Equal(childCredId, profile.CredentialId);
     }
 
-    [Fact]
-    public void Resolve_InlinePassword_OnChildSuppressesInheritedSavedCredential()
+    [Theory]
+    [InlineData(ProtocolType.Ssh)]
+    [InlineData(ProtocolType.Rdp)]
+    public void Resolve_InlinePassword_OnChildSuppressesInheritedSavedCredential(ProtocolType protocol)
     {
         var folder = new ConnectionNode
         {
@@ -291,7 +541,7 @@ public class InheritanceResolverTests
             ParentId = folder.Id,
             Name = "web-1",
             Kind = NodeKind.Connection,
-            Protocol = ProtocolType.Ssh,
+            Protocol = protocol,
             Host = "web-1.prod",
             UseInlinePassword = true,
         };

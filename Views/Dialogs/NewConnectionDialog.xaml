@@ -128,8 +128,8 @@
                                  Text="{x:Bind ViewModel.Username, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                  Visibility="{x:Bind ViewModel.ShowConnectionUsername, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
 
-                        <!-- Inline password is SSH-only (ShowInlinePassword = IsSsh AND not using a
-                             saved credential). Stored in Credential Manager keyed by the node Id.
+                        <!-- Inline password is shown for SSH/RDP connections not using a saved
+                             credential. Stored in Credential Manager keyed by the node Id.
                              PasswordBox.Password isn't x:Bind-able, so it syncs via a code-behind
                              PasswordChanged handler. -->
                         <PasswordBox x:Name="InlinePasswordBox"

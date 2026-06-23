@@ -112,13 +112,19 @@ public class SshCredentialResolverTests
         var dialogs = new FakeDialogService();
         var resolver = NewResolver(
             dialogs,
-            repo: new FakeCredentialRepository(new CredentialProfile { Id = credId, Kind = CredentialKind.Password }),
+            repo: new FakeCredentialRepository(new CredentialProfile
+            {
+                Id = credId,
+                Kind = CredentialKind.Password,
+                Username = "credential-user",
+            }),
             creds: new FakeCredentialService(passwords: new() { [credId] = "stored-pwd" }));
 
         var creds = await resolver.ResolveAsync(MakeProfile(credentialId: credId));
 
         Assert.Equal("stored-pwd", creds.Password);
         Assert.Null(creds.PrivateKey);
+        Assert.Equal("credential-user", creds.CredentialUsername);
         Assert.Equal(0, dialogs.PasswordPromptCount);
     }
 
@@ -145,7 +151,12 @@ public class SshCredentialResolverTests
         var dialogs = new FakeDialogService();
         var resolver = NewResolver(
             dialogs,
-            repo: new FakeCredentialRepository(new CredentialProfile { Id = credId, Kind = CredentialKind.SshKey }),
+            repo: new FakeCredentialRepository(new CredentialProfile
+            {
+                Id = credId,
+                Kind = CredentialKind.SshKey,
+                Username = "key-user",
+            }),
             creds: new FakeCredentialService(keys: new() { [credId] = keyBytes }),
             inspector: new FakePrivateKeyInspector(isEncrypted: false));
 
@@ -154,6 +165,7 @@ public class SshCredentialResolverTests
         Assert.Equal(keyBytes, creds.PrivateKey);
         Assert.Null(creds.Password);
         Assert.Null(creds.KeyPassphrase);
+        Assert.Equal("key-user", creds.CredentialUsername);
         Assert.Equal(0, dialogs.PasswordPromptCount);
     }
 

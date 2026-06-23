@@ -62,7 +62,7 @@ public abstract partial class SessionTabViewModel : ObservableObject
     public virtual void Initialize(ConnectionProfile profile)
     {
         Profile = profile;
-        Title = string.IsNullOrEmpty(profile.Name) ? profile.Host : profile.Name;
+        Title = GetProfileTitle(profile);
         Status = SessionStatus.Disconnected;
     }
 
@@ -73,19 +73,27 @@ public abstract partial class SessionTabViewModel : ObservableObject
     /// instead of re-running TOFU). Does NOT persist — the caller is responsible
     /// for writing to the repository.
     /// <para>
-    /// MUST be called on the UI thread: Profile has a protected setter and any future
-    /// XAML binding to it would receive PropertyChanged on the calling thread. The
-    /// only current call sites (SshSessionViewModel.ConnectAsync and
-    /// FileTransferDialogService.ShowAsync) both run on the UI thread.
+    /// MUST be called on the UI thread: Profile has a protected setter and Title is UI-bound,
+    /// so their notifications must be raised from the UI thread. Current call sites are UI-invoked
+    /// reconnect/refresh paths or dialog callbacks.
     /// </para>
     /// </summary>
     public void UpdateProfile(ConnectionProfile profile)
     {
         Profile = profile;
+        Title = GetProfileTitle(profile);
         // Notify so any future reactive consumer of Profile (none today, but the
         // surface is now public) sees the new value. ObservableObject.OnPropertyChanged
         // is the standard accessor.
         OnPropertyChanged(nameof(Profile));
+    }
+
+    protected static string GetProfileTitle(ConnectionProfile profile)
+    {
+        var connectionTitle = string.IsNullOrEmpty(profile.Name) ? profile.Host : profile.Name;
+        return string.IsNullOrWhiteSpace(profile.ParentFolderName)
+            ? connectionTitle
+            : $"{profile.ParentFolderName} / {connectionTitle}";
     }
 
     /// <summary>
