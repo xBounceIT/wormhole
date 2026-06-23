@@ -21,7 +21,7 @@ namespace Wormhole.ViewModels.Sessions;
 // The bridge / session / tunnel / CTS pair are torn down explicitly via DetachAsync /
 // SafeDisposeSessionAsync / CancelRemoteOutputWaitTimer on the documented teardown path.
 #pragma warning disable CA1001
-public sealed partial class SshSessionViewModel : SessionTabViewModel
+public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminalSessionViewModel
 #pragma warning restore CA1001
 {
     private static readonly TimeSpan RemoteOutputWaitDelay = TimeSpan.FromSeconds(2);
@@ -902,6 +902,21 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
                 ReportFailure("No credentials provided.");
                 return;
             }
+
+            if (!string.IsNullOrWhiteSpace(creds.UsernameOverride))
+            {
+                var username = creds.UsernameOverride.Trim();
+                if (!string.Equals(profile.Username, username, StringComparison.Ordinal))
+                {
+                    profile = profile with { Username = username };
+                    Profile = profile;
+                    if (_activeRoutedProfile is not null)
+                    {
+                        _activeRoutedProfile = _activeRoutedProfile with { Username = username };
+                    }
+                }
+            }
+
             // Cache the successfully-resolved credentials so the SFTP pre-warm (kicked off
             // when Status flips to Connected below) and the on-demand file-transfer path
             // can both skip a re-resolve — which would otherwise re-prompt for a key

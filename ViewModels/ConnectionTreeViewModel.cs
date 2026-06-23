@@ -1259,6 +1259,7 @@ public sealed partial class TreeNodeViewModel : ObservableObject
             ProtocolType.Rdp => Glyphs.Rdp,
             ProtocolType.Vnc => Glyphs.Vnc,
             ProtocolType.Http or ProtocolType.Https => Glyphs.Web,
+            ProtocolType.Serial => Glyphs.Serial,
             _ => Glyphs.Generic,
         };
 

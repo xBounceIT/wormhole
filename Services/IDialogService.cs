@@ -40,6 +40,20 @@ public interface IDialogService
 
     Task<string?> PromptPasswordAsync(string title, string message, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Prompt for an account password, optionally letting the user select an existing saved
+    /// credential instead of typing a password manually. Returns null on cancel. When
+    /// <paramref name="requireUsername"/> is true, manual entry requires a username; selected
+    /// saved credentials supply their own username.
+    /// </summary>
+    Task<AccountCredentialPromptResult?> PromptAccountCredentialsAsync(
+        string title,
+        string message,
+        ProtocolType protocol,
+        bool requireUsername,
+        string? initialUsername = null,
+        CancellationToken cancellationToken = default);
+
     Task<string?> PromptSecretAsync(
         string title,
         string message,

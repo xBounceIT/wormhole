@@ -67,7 +67,7 @@
                 MaxWidth="360"
                 IsHitTestVisible="False"
                 Visibility="{Binding IsWaitingForRemoteOutput, Converter={StaticResource BoolToVisibilityConverter}}">
-            <TextBlock Text="Connected. Waiting for remote shell output..."
+            <TextBlock Text="Connected. Waiting for terminal output..."
                        TextWrapping="Wrap"
                        Foreground="#e0e0e0"
                        FontSize="12" />

@@ -82,6 +82,12 @@ public class ConnectionNode
     public string? SshKnownHostFingerprint { get; set; }
     public bool? SshAutoSudo { get; set; }
 
+    public int? SerialBaudRate { get; set; }
+    public int? SerialDataBits { get; set; }
+    public SerialStopBitsMode? SerialStopBits { get; set; }
+    public SerialParityMode? SerialParity { get; set; }
+    public SerialFlowControlMode? SerialFlowControl { get; set; }
+
     /// <summary>
     /// For the HTTPS web protocol: when true, accept certificate errors (self-signed, name
     /// mismatch, untrusted chain) when navigating. Per-connection (leaf-only) — NOT inherited from a
@@ -171,6 +177,11 @@ public class ConnectionNode
         SshKeyFileName = SshKeyFileName,
         SshKnownHostFingerprint = SshKnownHostFingerprint,
         SshAutoSudo = SshAutoSudo,
+        SerialBaudRate = SerialBaudRate,
+        SerialDataBits = SerialDataBits,
+        SerialStopBits = SerialStopBits,
+        SerialParity = SerialParity,
+        SerialFlowControl = SerialFlowControl,
         HttpIgnoreCertErrors = HttpIgnoreCertErrors,
         TunnelEnabled = TunnelEnabled,
         TunnelConfigId = TunnelConfigId,

@@ -16,4 +16,7 @@ public enum ProtocolType
 
     // Embedded VNC client. Value 2 remains reserved for retired SFTP.
     Vnc = 5,
+
+    // Local serial-port terminal sessions. Value 2 remains retired; keep adding new protocols above it.
+    Serial = 6,
 }

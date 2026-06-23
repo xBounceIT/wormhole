@@ -59,6 +59,11 @@ public sealed class InheritanceResolver
         string? sshKeyFileName = null;
         string? sshKnownHostFingerprint = null;
         bool? sshAutoSudo = null;
+        int? serialBaudRate = null;
+        int? serialDataBits = null;
+        SerialStopBitsMode? serialStopBits = null;
+        SerialParityMode? serialParity = null;
+        SerialFlowControlMode? serialFlowControl = null;
         bool? tunnelEnabled = null;
         Guid? tunnelConfigId = null;
 
@@ -134,6 +139,11 @@ public sealed class InheritanceResolver
             sshKeyFileName ??= current.SshKeyFileName;
             sshKnownHostFingerprint ??= current.SshKnownHostFingerprint;
             sshAutoSudo ??= current.SshAutoSudo;
+            serialBaudRate ??= current.SerialBaudRate;
+            serialDataBits ??= current.SerialDataBits;
+            serialStopBits ??= current.SerialStopBits;
+            serialParity ??= current.SerialParity;
+            serialFlowControl ??= current.SerialFlowControl;
             tunnelEnabled ??= current.TunnelEnabled;
             tunnelConfigId ??= current.TunnelConfigId;
 
@@ -172,11 +182,14 @@ public sealed class InheritanceResolver
             port = null;
         }
 
-        // Web protocols are credential-less, so they drop inherited credentials and SSH identity
-        // material. VNC keeps an inherited password credential, but it is password-only in v1, so it
-        // also drops inherited username and SSH-key metadata.
+        // Web and serial protocols are credential-less, so they drop inherited credentials and SSH identity
+        // material. VNC keeps an inherited saved password credential, but it is password-only in v1,
+        // so it also drops inherited username and SSH-key metadata.
         var isWeb = protocol.Value is ProtocolType.Http or ProtocolType.Https;
+        var isSerial = protocol.Value == ProtocolType.Serial;
         var isVnc = protocol.Value == ProtocolType.Vnc;
+        var isCredentialless = isWeb || isSerial;
+        var clearsSshIdentity = isCredentialless || isVnc;
         var useInlinePassword = protocol.Value == ProtocolType.Ssh && (node.UseInlinePassword ?? false);
 
         return new ConnectionProfile
@@ -186,8 +199,8 @@ public sealed class InheritanceResolver
             Protocol = protocol.Value,
             Host = host,
             Port = port ?? DefaultPortFor(protocol.Value),
-            Username = isWeb || isVnc ? null : username,
-            CredentialId = isWeb || useInlinePassword ? null : credentialId,
+            Username = clearsSshIdentity ? null : username,
+            CredentialId = isCredentialless || useInlinePassword ? null : credentialId,
             // Inline password is SSH-only and strictly per-connection - read from the leaf `node`, never
             // inherited up the folder chain. When set, it suppresses any inherited saved credential.
             UseInlinePassword = useInlinePassword,
@@ -221,16 +234,21 @@ public sealed class InheritanceResolver
             RdpGatewayBypassLocal = rdpGatewayBypassLocal ?? true,
             RdpGatewayUseSameCreds = rdpGatewayUseSameCreds ?? false,
             RdpUseExternalClient = rdpUseExternalClient ?? false,
-            SshKeyFileName = isWeb || isVnc ? null : sshKeyFileName,
-            SshKnownHostFingerprint = isWeb || isVnc ? null : sshKnownHostFingerprint,
-            SshAutoSudo = sshAutoSudo ?? false,
+SshKeyFileName = clearsSshIdentity ? null : sshKeyFileName,
+            SshKnownHostFingerprint = clearsSshIdentity ? null : sshKnownHostFingerprint,
+            SshAutoSudo = clearsSshIdentity ? false : sshAutoSudo ?? false,
+            SerialBaudRate = SerialDefaults.NormalizeBaudRate(serialBaudRate),
+            SerialDataBits = SerialDefaults.NormalizeDataBits(serialDataBits),
+            SerialStopBits = SerialDefaults.NormalizeStopBits(serialStopBits),
+            SerialParity = SerialDefaults.NormalizeParity(serialParity),
+            SerialFlowControl = SerialDefaults.NormalizeFlowControl(serialFlowControl),
             // Per-connection (leaf-only), like UseInlinePassword — NOT inherited up the folder chain.
             // The editor surfaces it as a 2-state checkbox that can't express "inherit", so inheriting it
             // would let an unrelated edit silently sever an inherited value; and the folder editor
             // exposes no control to set it anyway.
             HttpIgnoreCertErrors = node.HttpIgnoreCertErrors ?? false,
-            TunnelEnabled = tunnelEnabled ?? false,
-            TunnelConfigId = tunnelConfigId,
+            TunnelEnabled = protocol.Value == ProtocolType.Serial ? false : tunnelEnabled ?? false,
+            TunnelConfigId = protocol.Value == ProtocolType.Serial ? null : tunnelConfigId,
         };
     }
 
@@ -241,6 +259,7 @@ public sealed class InheritanceResolver
         ProtocolType.Http => 80,
         ProtocolType.Https => 443,
         ProtocolType.Vnc => 5900,
+        ProtocolType.Serial => 0,
         _ => throw new ArgumentOutOfRangeException(nameof(protocol)),
     };
 }

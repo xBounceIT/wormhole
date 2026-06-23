@@ -3,8 +3,7 @@
     x:Class="Wormhole.Views.Controls.QuickConnectBar"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-    xmlns:vm="using:Wormhole.ViewModels"
-    xmlns:models="using:Wormhole.Models">
+    xmlns:vm="using:Wormhole.ViewModels">
 
     <Grid>
         <Grid.ColumnDefinitions>
@@ -21,7 +20,7 @@
                   MinWidth="80" />
 
         <TextBox Grid.Column="1"
-                 PlaceholderText="user@host"
+                 PlaceholderText="{x:Bind ViewModel.HostPlaceholder, Mode=OneWay}"
                  Margin="6,0,6,0"
                  Text="{x:Bind ViewModel.Host, Mode=TwoWay}" />
 

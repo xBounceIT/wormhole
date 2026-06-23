@@ -1129,6 +1129,164 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public async Task AttachAsync_PasswordPrompt_SelectedSavedCredential_UsesSavedIdentityAndPassword()
+    {
+        var credential = new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Name = "prod-rdp",
+            Username = "saved-user",
+            Domain = "CORP",
+            Protocol = ProtocolType.Rdp,
+            Kind = CredentialKind.Password,
+        };
+        var bindings = new FakeConnectionCredentialBindingService();
+        var (vm, svc, _, dlg, _) = CreateVm(credentialBindings: bindings);
+        dlg.AccountCredentialPromptResult = new AccountCredentialPromptResult(
+            credential.Username,
+            "saved-password",
+            credential,
+            SaveCredentialToConnection: false);
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with { Username = "profile-user", RdpDomain = "OLD" });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal("saved-user", svc.LastProfile?.Username);
+        Assert.Equal("CORP", svc.LastProfile?.RdpDomain);
+        Assert.Equal("saved-password", svc.LastPassword);
+        Assert.Equal(1, dlg.AccountCredentialPromptCount);
+        Assert.False(dlg.LastAccountCredentialPromptRequiredUsername);
+        Assert.Equal(0, bindings.SaveCount);
+    }
+
+    [Fact]
+    public async Task AttachAsync_PasswordPrompt_SelectedSavedCredential_WithSave_PersistsBinding()
+    {
+        var nodeId = Guid.NewGuid();
+        var credential = new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Name = "prod-rdp",
+            Username = "saved-user",
+            Domain = "CORP",
+            Protocol = ProtocolType.Rdp,
+            Kind = CredentialKind.Password,
+        };
+        var bindings = new FakeConnectionCredentialBindingService();
+        var (vm, svc, _, dlg, _) = CreateVm(credentialBindings: bindings);
+        dlg.AccountCredentialPromptResult = new AccountCredentialPromptResult(
+            credential.Username,
+            "saved-password",
+            credential,
+            SaveCredentialToConnection: true);
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with { NodeId = nodeId });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(1, bindings.SaveCount);
+        Assert.Equal(nodeId, bindings.LastNodeId);
+        Assert.Same(credential, bindings.LastCredential);
+    }
+
+    [Fact]
+    public async Task RetryAsync_AfterCredentialFailure_SelectedSavedCredential_WithSave_UsesSavedIdentityAndPersistsBinding()
+    {
+        var badCredentialId = Guid.NewGuid();
+        var nodeId = Guid.NewGuid();
+        var initialCredential = new CredentialProfile
+        {
+            Id = badCredentialId,
+            Name = "old-rdp",
+            Username = "old-user",
+            Protocol = ProtocolType.Rdp,
+            Kind = CredentialKind.Password,
+        };
+        var selectedCredential = new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Name = "prod-rdp",
+            Username = "saved-user",
+            Domain = "CORP",
+            Protocol = ProtocolType.Rdp,
+            Kind = CredentialKind.Password,
+        };
+        var secrets = new FakeCredentialService(new Dictionary<Guid, string> { [badCredentialId] = "bad-password" });
+        var bindings = new FakeConnectionCredentialBindingService();
+        var (vm, svc, _, dlg, _) = CreateVm(
+            credentialRepository: new SingleCredentialRepository(initialCredential),
+            creds: secrets,
+            credentialBindings: bindings);
+        var firstSession = new FakeRdpSession();
+        svc.NextSession = firstSession;
+
+        vm.Initialize(MakeProfile() with
+        {
+            NodeId = nodeId,
+            CredentialId = badCredentialId,
+            Username = "profile-user",
+            RdpDomain = null,
+        });
+
+        await vm.AttachAsync((IntPtr)0x1234, HostBounds.Seed);
+        firstSession.RaiseLogonError(0);
+        firstSession.RaiseDisconnected(new RdpDisconnectInfo(2055, 0, "The logon credentials are not valid.", IsClean: false));
+        dlg.AccountCredentialPromptResult = new AccountCredentialPromptResult(
+            selectedCredential.Username,
+            "saved-password",
+            selectedCredential,
+            SaveCredentialToConnection: true);
+        svc.NextSession = new FakeRdpSession();
+
+        await vm.RetryAsync();
+
+        Assert.Equal(2, svc.ConnectCount);
+        Assert.Equal("saved-user", svc.LastProfile?.Username);
+        Assert.Equal("CORP", svc.LastProfile?.RdpDomain);
+        Assert.Equal("saved-password", svc.LastPassword);
+        Assert.Equal(1, dlg.AccountCredentialPromptCount);
+        Assert.False(dlg.LastAccountCredentialPromptRequiredUsername);
+        Assert.Equal(1, bindings.SaveCount);
+        Assert.Equal(nodeId, bindings.LastNodeId);
+        Assert.Same(selectedCredential, bindings.LastCredential);
+    }
+
+    [Fact]
+    public async Task AttachAsync_MissingUsernamePrompt_SelectedSavedCredential_UsesSavedIdentityAndPassword()
+    {
+        var credential = new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Name = "prod-rdp",
+            Username = "saved-user",
+            Domain = "CORP",
+            Protocol = ProtocolType.Rdp,
+            Kind = CredentialKind.Password,
+        };
+        var (vm, svc, _, dlg, _) = CreateVm();
+        dlg.AccountCredentialPromptResult = new AccountCredentialPromptResult(
+            credential.Username,
+            "saved-password",
+            credential,
+            SaveCredentialToConnection: false);
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with { Username = null, RdpDomain = null });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal("saved-user", svc.LastProfile?.Username);
+        Assert.Equal("CORP", svc.LastProfile?.RdpDomain);
+        Assert.Equal("saved-password", svc.LastPassword);
+        Assert.Equal(1, dlg.AccountCredentialPromptCount);
+        Assert.True(dlg.LastAccountCredentialPromptRequiredUsername);
+        Assert.Equal(0, dlg.PasswordPromptCount);
+    }
+
+    [Fact]
     public async Task AttachAsync_PromptedDomainSlashUsername_IsNormalizedBeforeConnect()
     {
         var (vm, svc, _, dlg, _) = CreateVm();
@@ -1760,6 +1918,7 @@ public class RdpSessionViewModelTests
         FakeTunnelConfigRepository? tunnelRepo = null,
         IEnumerable<ITunnelProvider>? tunnelProviders = null,
         IConnectionRepository? connectionRepository = null,
+        IConnectionCredentialBindingService? credentialBindings = null,
         FakeAppSettingsService? settings = null)
     {
         var svc = new FakeRdpSessionService();
@@ -1778,6 +1937,7 @@ public class RdpSessionViewModelTests
             svc,
             creds,
             repo,
+            credentialBindings ?? new FakeConnectionCredentialBindingService(),
             BuildTunnelManager(creds, tunnelRepo, tunnelProviders),
             prompter,
             BuildProfileResolver(connectionRepository),
@@ -1803,6 +1963,7 @@ public class RdpSessionViewModelTests
             new FakeRdpSessionService(),
             creds,
             credentialRepository,
+            new FakeConnectionCredentialBindingService(),
             BuildTunnelManager(creds, tunnelRepo),
             prompter,
             BuildProfileResolver(),

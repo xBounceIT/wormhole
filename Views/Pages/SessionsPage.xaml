@@ -20,6 +20,12 @@
                                          MinHeight="240" />
         </DataTemplate>
 
+        <DataTemplate x:Key="SerialSessionTemplate" x:DataType="sessions:SerialSessionViewModel">
+            <sessionViews:SshTerminalView HorizontalAlignment="Stretch"
+                                          VerticalAlignment="Stretch"
+                                          MinHeight="240" />
+        </DataTemplate>
+
         <DataTemplate x:Key="HttpSessionTemplate" x:DataType="sessions:HttpSessionViewModel">
             <sessionViews:WebBrowserView HorizontalAlignment="Stretch"
                                          VerticalAlignment="Stretch"
@@ -45,6 +51,7 @@
 
         <sessionViews:SessionContentSelector x:Key="SessionContentSelector"
                                              SshTemplate="{StaticResource SshSessionTemplate}"
+                                             SerialTemplate="{StaticResource SerialSessionTemplate}"
                                              RdpTemplate="{StaticResource RdpSessionTemplate}"
                                              HttpTemplate="{StaticResource HttpSessionTemplate}"
                                              VncTemplate="{StaticResource VncSessionTemplate}"

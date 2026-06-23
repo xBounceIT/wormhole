@@ -5,10 +5,11 @@ philosophical sequel to [mRemoteNG](https://mremoteng.org).
 
 > **Status:** Active development, UNSTABLE. The WinUI shell,
 > persisted connection tree, connection editor, credential store, mRemoteNG
-> import, SSH terminal, embedded/external RDP, embedded VNC, SFTP file transfer,
-> HTTP/HTTPS web sessions, per-connection VPN across seven providers (including
-> RDP, VNC, and web over VPN), an opt-in MCP server for AI-driven SSH control,
-> installer packaging, and in-app update checks are all implemented.
+> import, SSH terminal, serial terminal, embedded/external RDP, embedded VNC,
+> SFTP file transfer, HTTP/HTTPS web sessions, per-connection VPN across seven
+> providers (including RDP, VNC, and web over VPN), an opt-in MCP server for
+> AI-driven SSH control, installer packaging, and in-app update checks are all
+> implemented.
 
 ## Why
 
@@ -24,7 +25,7 @@ everything else.
 - Connection tree with folders, search, and drag-reorder.
 - **Folder-level inheritance** — set a credential (or VPN tunnel, or any RDP
   setting) on a folder and every child inherits it.
-- Tabbed workspace for SSH, RDP, VNC, and HTTP/HTTPS web sessions.
+- Tabbed workspace for SSH, RDP, VNC, HTTP/HTTPS web, and Serial sessions.
 - SSH terminal (xterm.js in WebView2, driven by SSH.NET), with either a saved
   credential reference or an inline per-connection username/password.
 - Embedded RDP session via the `mstscax` ActiveX control, with an external
@@ -38,6 +39,9 @@ everything else.
   credentials; HTTPS offers an opt-in "ignore certificate errors" toggle for
   self-signed appliance certs. The motivating case is reaching an appliance GUI
   that sits behind a per-connection VPN tunnel.
+- **Serial terminal sessions** using the same xterm.js terminal surface as SSH,
+  with PuTTY-style serial-line settings: baud rate, data bits, stop bits, parity,
+  and None / XON-XOFF / RTS-CTS / DSR-DTR flow control.
 - SFTP dual-pane file-transfer dialog from connected SSH tabs. The SFTP session
   is pre-warmed in the background as soon as the shell connects, so the dialog
   opens instantly.
@@ -47,7 +51,8 @@ everything else.
 - Per-connection userspace VPN tunnels for **WireGuard, OpenVPN, Fortinet SSL
   VPN, WatchGuard Mobile VPN with SSL, Stormshield Network SSL VPN, Azure VPN
   (Microsoft Entra ID P2S), and Cisco Secure Client (AnyConnect)** — used by SSH,
-  SFTP, RDP, VNC, and HTTP/HTTPS sessions.
+  SFTP, RDP, VNC, and HTTP/HTTPS sessions. Serial sessions are local COM-port
+  sessions and are not VPN-routed.
 - Opt-in **MCP server** that lets AI agents drive your already-open SSH sessions
   over an authenticated loopback endpoint.
 - Modern WinUI 3 shell: Mica backdrop, dark mode, per-monitor DPI.

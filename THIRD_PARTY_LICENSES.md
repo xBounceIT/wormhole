@@ -47,7 +47,9 @@ Used by `Wormhole.csproj`.
 | [SSH.NET](https://github.com/sshnet/SSH.NET) | MIT |
 | [ModelContextProtocol.AspNetCore](https://github.com/modelcontextprotocol/csharp-sdk) | Apache-2.0 (the package 1.3.0 declares Apache-2.0; the SDK is transitioning from MIT) |
 | [Meziantou.Framework.Win32.CredentialManager](https://github.com/meziantou/Meziantou.Framework) | MIT |
-| [Microsoft.Data.Sqlite](https://learn.microsoft.com/dotnet/standard/data/sqlite/) | MIT (bundles the [SQLite library](https://www.sqlite.org/copyright.html), public domain) |
+| [Microsoft.Data.Sqlite.Core](https://learn.microsoft.com/dotnet/standard/data/sqlite/) | MIT |
+| [SQLitePCLRaw.config.e_sqlite3](https://github.com/ericsink/SQLitePCL.raw) | Apache-2.0 |
+| [SQLite native DLL](https://www.sqlite.org/download.html) | [Public domain](https://www.sqlite.org/copyright.html) |
 | [Dapper](https://github.com/DapperLib/Dapper) | Apache-2.0 |
 | [Markdig](https://github.com/xoofx/markdig) | BSD-2-Clause |
 | [BouncyCastle.Cryptography](https://github.com/bcgit/bc-csharp) | MIT (based on the MIT X Consortium license; bundles a modified Bzip2 under Apache-2.0) |
