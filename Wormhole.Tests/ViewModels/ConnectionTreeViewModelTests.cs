@@ -603,6 +603,42 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task ShowCredentials_VncConnectionInheritsNonVncCredential_DoesNotRevealSecret()
+    {
+        var credentialId = Guid.NewGuid();
+        var folder = new ConnectionNode
+        {
+            Kind = NodeKind.Folder,
+            Name = "ssh-folder",
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = credentialId,
+        };
+        await _repo.AddAsync(folder);
+        var child = MakeConnectionDraft("console", ProtocolType.Vnc, "kvm.example.com", 5900, username: null);
+        child.ParentId = folder.Id;
+        await _repo.AddAsync(child);
+
+        var dialog = new FakeDialogService();
+        var creds = new FakeCredentialService();
+        creds.Passwords[credentialId] = "ssh-secret";
+        var credRepo = new FakeCredentialRepository(new CredentialProfile
+        {
+            Id = credentialId,
+            Protocol = ProtocolType.Ssh,
+            Kind = CredentialKind.Password,
+            Username = "ssh-user",
+        });
+        var vm = CreateVm(dialog, creds, credRepo);
+        await vm.RefreshAsync();
+
+        var childVm = vm.Roots.Single().Children.Single();
+        await vm.ShowCredentialsCommand.ExecuteAsync(childVm);
+
+        Assert.Equal(0, dialog.ShowCredentialsCount);
+        Assert.NotEqual("ssh-secret", dialog.LastShownSecret);
+    }
+
+    [Fact]
     public async Task ShowCredentials_InheritedCredentialUsesCredentialUsernameWhenProfileHasNone()
     {
         var root = new ConnectionNode

@@ -1062,6 +1062,39 @@ public class InheritanceResolverTests
         Assert.False(profile.UseInlinePassword);
     }
 
+    [Fact]
+    public void Resolve_VncConnection_DropsCredentialInheritedFromNonVncProtocol()
+    {
+        var credentialId = Guid.NewGuid();
+        var folder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "ssh-folder",
+            Kind = NodeKind.Folder,
+            Protocol = ProtocolType.Ssh,
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = credentialId,
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = folder.Id,
+            Name = "console",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Vnc,
+            Host = "kvm.example.com",
+        };
+
+        var profile = new InheritanceResolver().Resolve(node, new Dictionary<Guid, ConnectionNode>
+        {
+            [folder.Id] = folder,
+            [node.Id] = node,
+        });
+
+        Assert.Null(profile.CredentialId);
+        Assert.Null(profile.Username);
+    }
+
     [Theory]
     [InlineData(ProtocolType.Http)]
     [InlineData(ProtocolType.Https)]

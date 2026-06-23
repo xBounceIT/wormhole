@@ -24,8 +24,7 @@ using VncSize = MarcusW.VncClient.Size;
 namespace Wormhole.Views.Sessions;
 
 // CA1001 suppressed deliberately: UserControl has no deterministic dispose hook. The render target
-// owns only a coalesced pooled frame buffer, which is replaced/released as new frames arrive and dies
-// with the view instance.
+// owns a native framebuffer plus coalesced pooled frame snapshots, both tied to the view instance.
 #pragma warning disable CA1001
 public sealed partial class VncView : UserControl
 #pragma warning restore CA1001
@@ -81,6 +80,7 @@ public sealed partial class VncView : UserControl
     {
         FramebufferHost.Visibility = Visibility.Collapsed;
         _renderTarget.FrameReady -= OnFrameReady;
+        _renderTarget.ReleaseFramebuffer();
         ReleaseAllPointerCaptures();
         _hasLastPointer = false;
         _pressedButtons = VncPointerButtons.None;
@@ -408,6 +408,10 @@ public sealed partial class VncView : UserControl
         private int _pendingLength;
         private int _pendingWidth;
         private int _pendingHeight;
+        private IntPtr _framebufferAddress;
+        private int _framebufferLength;
+        private int _framebufferWidth;
+        private int _framebufferHeight;
         private int _publishQueued;
         private bool _disposed;
 
@@ -420,22 +424,83 @@ public sealed partial class VncView : UserControl
 
         public IFramebufferReference GrabFramebufferReference(VncSize size, IImmutableSet<VncScreen> layout)
         {
-            return new FramebufferReference(this, size);
+            var (address, length) = EnsureFramebuffer(size);
+            return new FramebufferReference(this, size, address, length);
         }
 
         public void Dispose()
         {
             _disposed = true;
+            ReleaseFramebuffer();
+        }
+
+        public void ReleaseFramebuffer()
+        {
             byte[]? pending = null;
+            var framebufferAddress = IntPtr.Zero;
             lock (_gate)
             {
                 pending = _pendingPixels;
                 _pendingPixels = null;
                 _pendingLength = 0;
+                _pendingWidth = 0;
+                _pendingHeight = 0;
+                framebufferAddress = _framebufferAddress;
+                _framebufferAddress = IntPtr.Zero;
+                _framebufferLength = 0;
+                _framebufferWidth = 0;
+                _framebufferHeight = 0;
             }
             if (pending is not null)
             {
                 ArrayPool<byte>.Shared.Return(pending);
+            }
+            if (framebufferAddress != IntPtr.Zero)
+            {
+                Marshal.FreeHGlobal(framebufferAddress);
+            }
+        }
+
+        private (IntPtr Address, int Length) EnsureFramebuffer(VncSize size)
+        {
+            var length = checked(size.Width * size.Height * Bgra32.BytesPerPixel);
+            lock (_gate)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+
+                if (_framebufferAddress != IntPtr.Zero &&
+                    _framebufferLength == length &&
+                    _framebufferWidth == size.Width &&
+                    _framebufferHeight == size.Height)
+                {
+                    return (_framebufferAddress, _framebufferLength);
+                }
+
+                if (_framebufferAddress != IntPtr.Zero)
+                {
+                    Marshal.FreeHGlobal(_framebufferAddress);
+                }
+
+                _framebufferAddress = Marshal.AllocHGlobal(length);
+                _framebufferLength = length;
+                _framebufferWidth = size.Width;
+                _framebufferHeight = size.Height;
+                ClearNativeBuffer(_framebufferAddress, length);
+                return (_framebufferAddress, _framebufferLength);
+            }
+        }
+
+        private static void ClearNativeBuffer(IntPtr address, int length)
+        {
+            var zeroes = ArrayPool<byte>.Shared.Rent(length);
+            try
+            {
+                Array.Clear(zeroes, 0, length);
+                Marshal.Copy(zeroes, 0, address, length);
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(zeroes);
             }
         }
 
@@ -554,12 +619,12 @@ public sealed partial class VncView : UserControl
             private readonly int _length;
             private bool _disposed;
 
-            public FramebufferReference(VncRenderTarget owner, VncSize size)
+            public FramebufferReference(VncRenderTarget owner, VncSize size, IntPtr address, int length)
             {
                 _owner = owner;
                 Size = size;
-                _length = checked(size.Width * size.Height * Bgra32.BytesPerPixel);
-                Address = Marshal.AllocHGlobal(_length);
+                _length = length;
+                Address = address;
             }
 
             public IntPtr Address { get; }
@@ -572,14 +637,7 @@ public sealed partial class VncView : UserControl
             {
                 if (_disposed) return;
                 _disposed = true;
-                try
-                {
-                    _owner.Present(Size, Address, _length);
-                }
-                finally
-                {
-                    Marshal.FreeHGlobal(Address);
-                }
+                _owner.Present(Size, Address, _length);
             }
         }
     }

@@ -25,6 +25,7 @@ public sealed class InheritanceResolver
         ProtocolType? portContextProtocol = null;
         string? username = null;
         Guid? credentialId = null;
+        ProtocolType? credentialContextProtocol = null;
         var leafUsesInlinePassword = (node.UseInlinePassword ?? false) &&
             FindResolvedProtocol(node, nodesById) is ProtocolType.Ssh or ProtocolType.Rdp;
         var credentialResolved = leafUsesInlinePassword;
@@ -120,6 +121,7 @@ public sealed class InheritanceResolver
                     // A saved credential is an auth identity boundary. Use this node's own
                     // Username/RdpDomain if it has them, but do not mix its password with
                     // identity fields from more distant ancestors.
+                    credentialContextProtocol ??= current.Protocol ?? protocol;
                     credentialIdentityBoundaryReached = true;
                 }
             }
@@ -200,14 +202,17 @@ public sealed class InheritanceResolver
         }
 
         // Web and serial protocols are credential-less, so they drop inherited credentials and SSH identity
-        // material. VNC keeps an inherited saved password credential, but it is password-only in v1,
-        // so it also drops inherited username and SSH-key metadata.
+        // material. VNC keeps saved credentials only from a VNC or protocol-agnostic context; it is
+        // password-only in v1, so it also drops inherited username and SSH-key metadata.
         var isWeb = protocol.Value is ProtocolType.Http or ProtocolType.Https;
         var isSerial = protocol.Value == ProtocolType.Serial;
         var isVnc = protocol.Value == ProtocolType.Vnc;
         var isCredentialless = isWeb || isSerial;
         var clearsSshIdentity = isCredentialless || isVnc;
         var useInlinePassword = leafUsesInlinePassword;
+        var canUseResolvedCredential = !isCredentialless &&
+            !useInlinePassword &&
+            (!isVnc || credentialContextProtocol is null or ProtocolType.Vnc);
         var parentFolderName = node.ParentId is Guid parentIdForDisplay &&
             nodesById.TryGetValue(parentIdForDisplay, out var parentForDisplay) &&
             parentForDisplay.Kind == NodeKind.Folder &&
@@ -224,7 +229,7 @@ public sealed class InheritanceResolver
             Host = host,
             Port = port ?? DefaultPortFor(protocol.Value),
             Username = clearsSshIdentity ? null : username,
-            CredentialId = isCredentialless || useInlinePassword ? null : credentialId,
+            CredentialId = canUseResolvedCredential ? credentialId : null,
             // Inline password is SSH/RDP-only and strictly per-connection - read from the leaf `node`, never
             // inherited up the folder chain. When set, it suppresses any inherited saved credential.
             UseInlinePassword = useInlinePassword,

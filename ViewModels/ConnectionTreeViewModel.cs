@@ -268,6 +268,13 @@ public partial class ConnectionTreeViewModel : ObservableObject
             // The stored secret for an SshKey credential is the private-key passphrase, not a
             // login password — fetch the credential to label the field honestly.
             var credential = await _credentialRepository.GetByIdAsync(credId);
+            if (profile.Protocol == ProtocolType.Vnc &&
+                (credential is null || credential.Protocol != ProtocolType.Vnc || credential.Kind != CredentialKind.Password))
+            {
+                await ShowNoStoredCredentialsAsync();
+                return;
+            }
+
             var secretLabel = credential?.Kind == CredentialKind.SshKey ? "Key passphrase" : "Password";
             var username = string.IsNullOrWhiteSpace(profile.Username)
                 ? credential?.Username
