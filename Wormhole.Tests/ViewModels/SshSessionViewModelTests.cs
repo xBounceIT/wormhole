@@ -993,7 +993,7 @@ public sealed class SshSessionViewModelTests
     public void RegisterAttachedWebView_SameInstance_ReportsNotFresh()
     {
         // Tab-switch case: same WebView2 reattaches; replay would duplicate the
-        // already-rendered screen, so the decision is "not fresh, skip replay".
+        // existing xterm.js buffer, so the decision is "not fresh, skip replay".
         var vm = CreateViewModel();
         var webView = new object();
         vm.RegisterAttachedWebView(webView);

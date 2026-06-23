@@ -55,7 +55,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     private CancellationTokenSource? _cts;
     private CoreWebView2? _webView;
     // Survives DetachView so AttachAsync can tell a same-WebView reattach (tab
-    // switch — xterm.js still rendering) from a fresh-WebView attach (Sessions ↔
+    // switch — xterm.js still owns the same buffer) from a fresh-WebView attach (Sessions ↔
     // Settings nav — new control). Used by ReferenceEquals only.
     private object? _lastAttachedWebView;
     // UI dispatcher lives on the SessionTabViewModel base class (captured via
@@ -75,8 +75,9 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
     // Set when a connect reaches Connected while no view is attached (tab backgrounded mid-connect):
     // the session's banner/prompt lands only in _replayBuffer, so the live xterm.js — cleared at
     // connect start and never fed since — is empty. The next AttachAsync must replay even on a
-    // same-WebView reattach (where it normally skips replay because xterm.js already shows the
-    // session). Cleared once a bridge is rebound, and reset whenever the buffer is cleared on teardown.
+    // same-WebView reattach (where it normally skips replay because xterm.js already owns the
+    // session buffer and the focus request can repaint it). Cleared once a bridge is rebound, and
+    // reset whenever the buffer is cleared on teardown.
     private bool _connectedWhileDetached;
 
     // Auto-reconnect after an UNEXPECTED drop of an already-established session (host reboot, network
@@ -226,8 +227,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
 
         // A fresh WebView2 (new control after Sessions↔Settings nav) means xterm.js
         // was just navigated to terminal.html and has an empty screen. A same-WebView
-        // reattach (tab switch) means xterm.js is still rendering the prior session;
-        // replaying onto it would duplicate every byte the user already sees.
+        // reattach (tab switch) means xterm.js still owns the prior session buffer;
+        // replaying onto it would duplicate bytes, so the focus request repaints it instead.
         var xtermIsFresh = RegisterAttachedWebView(webView);
         _webView = webView;
         _initialSize = initialSize;
@@ -281,7 +282,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel
         // VM survives view rebuilds while the SSH pump keeps running. Skip credential
         // prompt + connect — rebind the bridge to the (possibly new) WebView and
         // resync geometry. Replay only when xterm.js is fresh; same-WebView reattach
-        // already shows the prior render.
+        // keeps the prior buffer and lets the focus request repaint its existing canvas.
         if (_session is not null)
         {
             // Snapshot BEFORE subscribing the new bridge: a byte that lands on the SSH

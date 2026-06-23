@@ -174,7 +174,7 @@ public sealed class TerminalBridge : IDisposable
 
     private void PostFocusToWebView()
     {
-        PostStringToWebView("f:", "requesting terminal focus");
+        PostStringToWebView("f:", "requesting terminal focus/repaint");
     }
 
     private bool PostStringToWebView(string message, string operation)
