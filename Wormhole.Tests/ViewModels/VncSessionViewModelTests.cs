@@ -232,6 +232,21 @@ public class VncSessionViewModelTests
     }
 
     [Fact]
+    public async Task SessionClosed_CleanRemoteClose_SetsFailedStatusAndMessage()
+    {
+        var service = new FakeVncSessionService();
+        var vm = CreateVm(service);
+        vm.Initialize(Profile());
+        await vm.AttachAsync(new FakeRenderTarget());
+
+        service.Session.RaiseClosed(clean: true, message: string.Empty);
+        await WaitForAsync(() => vm.Status == SessionStatus.Failed);
+
+        Assert.Equal("VNC connection closed by the remote host.", vm.ErrorMessage);
+        Assert.Equal(1, service.Session.DisposeCount);
+    }
+
+    [Fact]
     public async Task RetryAsync_RefreshesProfileBeforeReconnecting()
     {
         var first = Profile(host: "old.example.com");

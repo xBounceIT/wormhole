@@ -309,17 +309,14 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
             _session = null;
             await DisposeSessionSilentlyAsync(session).ConfigureAwait(true);
             await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
-            if (args.IsClean)
-            {
-                Progress.Reset();
-                ErrorMessage = null;
-                Status = SessionStatus.Disconnected;
-            }
-            else
-            {
-                ReportFailure(args.Message);
-                _logger.LogInformation(args.Exception, "VNC session closed unexpectedly.");
-            }
+            var message = string.IsNullOrWhiteSpace(args.Message)
+                ? "VNC connection closed by the remote host."
+                : args.Message;
+            ReportFailure(message);
+            _logger.LogInformation(
+                args.Exception,
+                "VNC session closed unexpectedly. Clean={IsClean}",
+                args.IsClean);
         });
     }
 
