@@ -469,9 +469,9 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
         UpdateProfile(refreshed);
 
-        // UpdateProfile only raises Profile; the tunnel-gated affordances ("Use external client")
-        // derive from Profile.TunnelEnabled and aren't re-broadcast on Status changes, so refresh
-        // them explicitly — otherwise disabling the tunnel wouldn't re-enable the menu entry.
+        // The tunnel-gated affordances ("Use external client") derive from Profile.TunnelEnabled
+        // and aren't re-broadcast on Status changes, so refresh them explicitly — otherwise
+        // disabling the tunnel wouldn't re-enable the menu entry.
         OnPropertyChanged(nameof(CanUseExternalClient));
         OnPropertyChanged(nameof(CanTabUseExternalClient));
         UseExternalClientCommand.NotifyCanExecuteChanged();
@@ -1597,8 +1597,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         }
     }
 
-    private static string GetBaseTitle(ConnectionProfile profile) =>
-        string.IsNullOrEmpty(profile.Name) ? profile.Host : profile.Name;
+    private static string GetBaseTitle(ConnectionProfile profile) => GetProfileTitle(profile);
 
     private static string FormatMstscTarget(string host, int port)
     {

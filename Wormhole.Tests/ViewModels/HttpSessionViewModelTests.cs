@@ -200,6 +200,32 @@ public class HttpSessionViewModelTests
     }
 
     [Fact]
+    public async Task RetryAsync_ReResolvesProfileFromRepository_RefreshesTitle()
+    {
+        var nodeId = Guid.NewGuid();
+        var initial = Profile(ProtocolType.Https, "fw.local", 443) with
+        {
+            NodeId = nodeId,
+            Name = "old-firewall",
+        };
+        var edited = initial with { Name = "new-firewall" };
+        var resolver = new FakeProfileResolver(edited);
+        var vm = CreateVm(profileResolver: resolver);
+        var navigateCount = 0;
+        vm.Initialize(initial);
+        vm.NavigateRequested += _ => navigateCount++;
+
+        await vm.AttachAsync();
+        vm.ReportNavigationFailed("boom");
+        await vm.RetryAsync();
+
+        Assert.Equal(nodeId, resolver.RequestedNodeId);
+        Assert.Equal(2, navigateCount);
+        Assert.Equal("new-firewall", vm.Title);
+        Assert.Equal("new-firewall", vm.Profile!.Name);
+    }
+
+    [Fact]
     public async Task CloseAsync_DuringInFlightConnect_IgnoresLateRouteResolution()
     {
         var prompter = new BlockingRoutePrompter();
@@ -450,13 +476,16 @@ public class HttpSessionViewModelTests
 
     // ---- helpers -------------------------------------------------------------------------------
 
-    private static HttpSessionViewModel CreateVm(ITunnelRoutePrompter? prompter = null, TunnelManager? tunnels = null)
+    private static HttpSessionViewModel CreateVm(
+        ITunnelRoutePrompter? prompter = null,
+        TunnelManager? tunnels = null,
+        IConnectionProfileResolver? profileResolver = null)
     {
         tunnels ??= BuildTunnelManager(new FakeCredentialService(), new FakeTunnelConfigRepository());
         return new HttpSessionViewModel(
             tunnels,
             prompter ?? new FakeRoutePrompter(),
-            new FakeProfileResolver(),
+            profileResolver ?? new FakeProfileResolver(),
             NullLoggerFactory.Instance);
     }
 
@@ -513,8 +542,15 @@ public class HttpSessionViewModelTests
 
     private sealed class FakeProfileResolver : IConnectionProfileResolver
     {
-        public Task<ConnectionProfile?> ResolveAsync(Guid nodeId, CancellationToken cancellationToken = default) =>
-            Task.FromResult<ConnectionProfile?>(null);
+        private readonly ConnectionProfile? _result;
+        public FakeProfileResolver(ConnectionProfile? result = null) => _result = result;
+        public Guid? RequestedNodeId { get; private set; }
+
+        public Task<ConnectionProfile?> ResolveAsync(Guid nodeId, CancellationToken cancellationToken = default)
+        {
+            RequestedNodeId = nodeId;
+            return Task.FromResult(_result);
+        }
     }
 
     private sealed class FakeWebTunnel : ITunnelInstance
