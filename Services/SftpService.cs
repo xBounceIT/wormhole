@@ -25,11 +25,12 @@ public sealed class SftpService : ISftpService
     {
         if (string.IsNullOrWhiteSpace(profile.Host))
             throw new ArgumentException("Connection profile must have a host.", nameof(profile));
-        if (string.IsNullOrWhiteSpace(profile.Username))
+        var username = credentials.ResolveUsername(profile);
+        if (string.IsNullOrWhiteSpace(username))
             throw new InvalidOperationException(
                 $"Connection '{profile.Name}' has no username; provide one before connecting.");
 
-        var authMethods = SshAuthMethodsBuilder.Build(profile.Username!, credentials);
+        var authMethods = SshAuthMethodsBuilder.Build(username, credentials);
         if (authMethods.Length == 0)
         {
             throw new InvalidOperationException(
@@ -39,7 +40,7 @@ public sealed class SftpService : ISftpService
         ConnectionInfo connectionInfo;
         if (tunnel is null)
         {
-            connectionInfo = new ConnectionInfo(profile.Host, profile.Port, profile.Username, authMethods);
+            connectionInfo = new ConnectionInfo(profile.Host, profile.Port, username, authMethods);
         }
         else
         {
@@ -49,7 +50,7 @@ public sealed class SftpService : ISftpService
                 ?? throw new InvalidOperationException(
                     $"Tunnel for '{profile.Name}' does not expose a SOCKS5 endpoint; SFTP cannot route through it.");
             connectionInfo = new ConnectionInfo(
-                profile.Host, profile.Port, profile.Username,
+                profile.Host, profile.Port, username,
                 ProxyTypes.Socks5, socks.Address.ToString(), socks.Port,
                 proxyUsername: string.Empty, proxyPassword: string.Empty,
                 authMethods);
@@ -113,7 +114,7 @@ public sealed class SftpService : ISftpService
 
         _logger.LogInformation(
             "SFTP connected to {Host}:{Port} as {User}; fingerprint {Fingerprint}.",
-            profile.Host, profile.Port, profile.Username, capturedFingerprint);
+            profile.Host, profile.Port, username, capturedFingerprint);
 
         return new SftpSession(client, capturedFingerprint, _loggerFactory.CreateLogger<SftpSession>());
     }

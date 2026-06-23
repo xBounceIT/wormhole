@@ -269,8 +269,11 @@ public partial class ConnectionTreeViewModel : ObservableObject
             // login password — fetch the credential to label the field honestly.
             var credential = await _credentialRepository.GetByIdAsync(credId);
             var secretLabel = credential?.Kind == CredentialKind.SshKey ? "Key passphrase" : "Password";
+            var username = string.IsNullOrWhiteSpace(profile.Username)
+                ? credential?.Username
+                : profile.Username;
 
-            await ShowStoredCredentialSecretAsync(clicked.Name, profile.Username, credId, secretLabel);
+            await ShowStoredCredentialSecretAsync(clicked.Name, username, credId, secretLabel);
         }
         catch (Exception ex)
         {

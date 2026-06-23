@@ -15,12 +15,29 @@ public interface ISshCredentialResolver
 /// <paramref name="KeyPassphrase"/> is used only to decrypt <paramref name="PrivateKey"/> and is
 /// NEVER sent as a password to the server. Mixing them risks leaking the key passphrase as
 /// a login attempt and tripping account lockouts.
+/// <paramref name="CredentialUsername"/> is the username stored on the selected credential profile;
+/// SSH/SFTP use it only when the resolved connection profile has no explicit/inherited username.
 /// </para>
 /// </summary>
-public sealed record SshCredentials(string? Password, string? KeyPassphrase, byte[]? PrivateKey)
+public sealed record SshCredentials(
+    string? Password,
+    string? KeyPassphrase,
+    byte[]? PrivateKey,
+    string? CredentialUsername = null)
 {
     public bool HasAny => !string.IsNullOrEmpty(Password) || PrivateKey is { Length: > 0 };
     public static SshCredentials Empty { get; } = new(null, null, null);
+
+    public string? ResolveUsername(ConnectionProfile profile)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        return string.IsNullOrWhiteSpace(profile.Username)
+            ? NullIfWhiteSpace(CredentialUsername)
+            : profile.Username;
+    }
+
+    private static string? NullIfWhiteSpace(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value;
 }
 
 public sealed class SshCredentialResolver : ISshCredentialResolver
@@ -91,7 +108,7 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
             if (key is null || key.Length == 0)
             {
                 _ = ObserveCredentialReadAsync(passphraseTask);
-                return await PromptForPasswordAsync(profile, cancellationToken).ConfigureAwait(true);
+                return await PromptForPasswordAsync(profile, cancellationToken, credential.Username).ConfigureAwait(true);
             }
             // Any stored secret for a key credential is the passphrase used to *decrypt the
             // key*, not a login password. Surface it in KeyPassphrase so the service won't
@@ -113,16 +130,16 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
                     return SshCredentials.Empty;
                 }
             }
-            return new SshCredentials(null, passphrase, key);
+            return new SshCredentials(null, passphrase, key, credential.Username);
         }
 
         var stored = await _credentialService.ReadPasswordAsync(credential.Id).ConfigureAwait(true);
         cancellationToken.ThrowIfCancellationRequested();
         if (!string.IsNullOrEmpty(stored))
         {
-            return new SshCredentials(stored, null, null);
+            return new SshCredentials(stored, null, null, credential.Username);
         }
-        return await PromptForPasswordAsync(profile, cancellationToken).ConfigureAwait(true);
+        return await PromptForPasswordAsync(profile, cancellationToken, credential.Username).ConfigureAwait(true);
     }
 
     private static async Task ObserveCredentialReadAsync(Task<string?> task)
@@ -131,10 +148,14 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
         catch { /* best-effort observer for an abandoned overlapping read */ }
     }
 
-    private async Task<SshCredentials> PromptForPasswordAsync(ConnectionProfile profile, CancellationToken cancellationToken)
+    private async Task<SshCredentials> PromptForPasswordAsync(
+        ConnectionProfile profile,
+        CancellationToken cancellationToken,
+        string? credentialUsername = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var user = string.IsNullOrEmpty(profile.Username) ? profile.Host : profile.Username + "@" + profile.Host;
+        var username = string.IsNullOrWhiteSpace(profile.Username) ? credentialUsername : profile.Username;
+        var user = string.IsNullOrWhiteSpace(username) ? profile.Host : username + "@" + profile.Host;
         var password = await _dialogs.PromptPasswordAsync(
             "SSH password",
             "Enter the password for " + user + ":",
@@ -142,6 +163,6 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
         // Re-check after the await: the user may have closed the tab (canceling the
         // connect CTS) while the dialog was open. Don't act on a stale password.
         cancellationToken.ThrowIfCancellationRequested();
-        return string.IsNullOrEmpty(password) ? SshCredentials.Empty : new SshCredentials(password, null, null);
+        return string.IsNullOrEmpty(password) ? SshCredentials.Empty : new SshCredentials(password, null, null, credentialUsername);
     }
 }
