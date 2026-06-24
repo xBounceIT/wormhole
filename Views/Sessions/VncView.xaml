@@ -6,7 +6,8 @@
     xmlns:views="using:Wormhole.Views.Sessions"
     IsTabStop="True"
     KeyDown="OnKeyDown"
-    KeyUp="OnKeyUp">
+    KeyUp="OnKeyUp"
+    LostFocus="OnLostFocus">
 
     <Grid Background="#0c0c0c"
           HorizontalAlignment="Stretch"

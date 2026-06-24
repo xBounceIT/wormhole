@@ -33,6 +33,7 @@ public sealed partial class VncView : UserControl
     private VncRenderTarget _renderTarget;
     private readonly Dictionary<VirtualKey, int> _pressedKeySymbols = new();
     private VncSessionViewModel? _viewModel;
+    private Window? _ownerWindow;
     private int _framebufferWidth;
     private int _framebufferHeight;
     private int _lastPointerX;
@@ -51,6 +52,7 @@ public sealed partial class VncView : UserControl
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
+        AttachOwnerWindowActivation();
         await AttachCurrentViewModelAsync().ConfigureAwait(true);
     }
 
@@ -102,6 +104,7 @@ public sealed partial class VncView : UserControl
 
     private async void OnUnloaded(object sender, RoutedEventArgs e)
     {
+        DetachOwnerWindowActivation();
         FramebufferHost.Visibility = Visibility.Collapsed;
         await DetachCurrentRenderTargetAsync(replaceRenderTarget: false).ConfigureAwait(true);
     }
@@ -118,6 +121,39 @@ public sealed partial class VncView : UserControl
         {
             _renderTarget = new VncRenderTarget(DispatcherQueue);
         }
+    }
+
+    private void AttachOwnerWindowActivation()
+    {
+        var ownerWindow = App.Current?.MainWindow;
+        if (ReferenceEquals(_ownerWindow, ownerWindow)) return;
+
+        DetachOwnerWindowActivation();
+        _ownerWindow = ownerWindow;
+        if (_ownerWindow is not null)
+        {
+            _ownerWindow.Activated += OnOwnerWindowActivated;
+        }
+    }
+
+    private void DetachOwnerWindowActivation()
+    {
+        if (_ownerWindow is null) return;
+        _ownerWindow.Activated -= OnOwnerWindowActivated;
+        _ownerWindow = null;
+    }
+
+    private async void OnOwnerWindowActivated(object sender, Microsoft.UI.Xaml.WindowActivatedEventArgs e)
+    {
+        if (e.WindowActivationState == Microsoft.UI.Xaml.WindowActivationState.Deactivated)
+        {
+            await ReleasePressedKeysAsync().ConfigureAwait(true);
+        }
+    }
+
+    private async void OnLostFocus(object sender, RoutedEventArgs e)
+    {
+        await ReleasePressedKeysAsync().ConfigureAwait(true);
     }
 
     private void OnFrameReady(object? sender, VncFrameReadyEventArgs e)
