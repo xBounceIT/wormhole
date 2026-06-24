@@ -36,6 +36,19 @@ public class UpdateViewModelTests
     }
 
     [Fact]
+    public void ApplyResult_RenderEmptyReleaseNotes_DoesNotShowChangelog()
+    {
+        var (vm, updates) = NewHarness();
+
+        updates.Raise(UpdateWithNotes("[release]: https://example.com"));
+
+        Assert.False(vm.HasChangelog);
+        Assert.False(vm.ShowChangelog);
+        Assert.Equal(string.Empty, vm.ChangelogTitle);
+        Assert.Equal(string.Empty, vm.ChangelogHtml);
+    }
+
+    [Fact]
     public void ApplyResult_NoUpdate_ClearsPreviousChangelog()
     {
         var (vm, updates) = NewHarness();
@@ -78,6 +91,19 @@ public class UpdateViewModelTests
         Assert.Equal(string.Empty, vm.ChangelogHtml);
     }
 
+    [Fact]
+    public async Task RunStartupCheckAsync_RecentLastCheck_DoesNotCheck()
+    {
+        var updates = new FakeUpdateService();
+        var settings = new FakeAppSettingsService();
+        settings.Current.LastUpdateCheck = DateTimeOffset.UtcNow;
+        var vm = new UpdateViewModel(updates, settings, NullLogger<UpdateViewModel>.Instance);
+
+        await vm.RunStartupCheckAsync();
+
+        Assert.Equal(0, updates.CheckCount);
+    }
+
     private static (UpdateViewModel ViewModel, FakeUpdateService Updates) NewHarness()
     {
         var updates = new FakeUpdateService();
@@ -103,6 +129,7 @@ public class UpdateViewModelTests
     private sealed class FakeUpdateService : IUpdateService
     {
         public UpdateCheckResult? LatestKnown { get; private set; }
+        public int CheckCount { get; private set; }
         public event EventHandler<UpdateCheckResult>? UpdateAvailable;
         public void Raise(UpdateCheckResult result)
         {
@@ -110,8 +137,11 @@ public class UpdateViewModelTests
                 LatestKnown = result;
             UpdateAvailable?.Invoke(this, result);
         }
-        public Task<UpdateCheckResult> CheckAsync(CancellationToken cancellationToken = default) =>
-            Task.FromResult(UpdateCheckResult.NoUpdate(new Version(0, 4, 0)));
+        public Task<UpdateCheckResult> CheckAsync(CancellationToken cancellationToken = default)
+        {
+            CheckCount++;
+            return Task.FromResult(UpdateCheckResult.NoUpdate(new Version(0, 4, 0)));
+        }
         public Task<string> DownloadInstallerAsync(UpdateCheckResult update, IProgress<double>? progress, CancellationToken cancellationToken = default) =>
             Task.FromResult(string.Empty);
         public Task LaunchInstallerAndExitAsync(string installerPath) => Task.CompletedTask;

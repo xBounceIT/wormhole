@@ -70,6 +70,12 @@ public class UpdateChangelogFormatterTests
     }
 
     [Fact]
+    public void ToHtmlDocument_ReturnsEmptyStringForRenderEmptyNotes()
+    {
+        Assert.Equal(string.Empty, UpdateChangelogFormatter.ToHtmlDocument("[release]: https://example.com"));
+    }
+
+    [Fact]
     public void ToHtmlDocument_DoesNotRenderRawHtmlOrScripts()
     {
         var html = UpdateChangelogFormatter.ToHtmlDocument(

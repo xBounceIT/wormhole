@@ -123,8 +123,11 @@
 
             <!-- Updates -->
             <TabViewItem Header="Updates" IsClosable="False">
-                <ScrollViewer Style="{StaticResource TabContentScrollStyle}">
-                    <StackPanel Style="{StaticResource TabContentPanelStyle}">
+                <ScrollViewer Style="{StaticResource TabContentScrollStyle}"
+                              HorizontalScrollMode="Disabled"
+                              HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel Spacing="16"
+                                HorizontalAlignment="Stretch">
                         <TextBlock Text="{x:Bind ViewModel.Update.CurrentVersionText, Mode=OneWay}"
                                    Style="{StaticResource BodyTextBlockStyle}" />
                         <TextBlock Text="{x:Bind ViewModel.Update.LastCheckText, Mode=OneWay}"
@@ -150,19 +153,23 @@
                                    Opacity="0.7" />
                         <ProgressBar Minimum="0" Maximum="1"
                                      Value="{x:Bind ViewModel.Update.DownloadProgress, Mode=OneWay}"
+                                     HorizontalAlignment="Stretch"
                                      Visibility="{x:Bind ViewModel.Update.IsBusy, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}" />
                         <StackPanel Spacing="8"
+                                    HorizontalAlignment="Stretch"
                                     Margin="0,8,0,0"
                                     Visibility="{x:Bind ViewModel.Update.ShowChangelog, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
                             <TextBlock Text="{x:Bind ViewModel.Update.ChangelogTitle, Mode=OneWay}"
                                        Style="{StaticResource SubtitleTextBlockStyle}" />
                             <Border MinHeight="300"
+                                    HorizontalAlignment="Stretch"
                                     BorderBrush="#40606A78"
                                     BorderThickness="1"
                                     CornerRadius="6"
                                     Background="{ThemeResource LayerFillColorDefaultBrush}">
                                 <controls:UpdateChangelogView
                                     MinHeight="300"
+                                    HorizontalAlignment="Stretch"
                                     HtmlDocument="{x:Bind ViewModel.Update.ChangelogHtml, Mode=OneWay}" />
                             </Border>
                         </StackPanel>
