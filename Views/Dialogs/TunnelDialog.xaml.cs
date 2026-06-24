@@ -7,6 +7,7 @@ using Windows.Storage.Pickers;
 using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Services.Tunneling.AzureVpn;
+using Wormhole.Services.Tunneling.CiscoSecureClient;
 using Wormhole.Services.Tunneling.Watchguard;
 
 namespace Wormhole.Views.Dialogs;
@@ -725,6 +726,63 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         }
     }
 
+    private async void OnCiscoSecureClientImportClicked(object sender, RoutedEventArgs e)
+    {
+        // async void + COM-backed FileOpenPicker: failures surface through the inline InfoBar
+        // because TunnelDialog is already hosted inside a ContentDialog.
+        try
+        {
+            CiscoImportStatus.IsOpen = false;
+
+            var mainWindow = App.Current.MainWindow
+                ?? throw new InvalidOperationException("Main window is not available.");
+            var hwnd = mainWindow.GetHwnd();
+
+            var picker = new FileOpenPicker
+            {
+                ViewMode = PickerViewMode.List,
+                SuggestedStartLocation = PickerLocationId.Downloads,
+            };
+            picker.FileTypeFilter.Add(".xml");
+            WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+
+            var file = await picker.PickSingleFileAsync();
+            if (file is null) return;
+
+            var xml = await File.ReadAllTextAsync(file.Path);
+            var imported = CiscoSecureClientProfileParser.Parse(xml);
+
+            CiscoHostBox.Text = imported.Settings.Host;
+            CiscoPortBox.Text = imported.Settings.Port.ToString();
+            CiscoGroupBox.Text = imported.Settings.Group ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(NameBox.Text) && !string.IsNullOrWhiteSpace(imported.ProfileName))
+                NameBox.Text = imported.ProfileName;
+
+            UpdateValidationHint();
+            ValidityChanged?.Invoke(this, EventArgs.Empty);
+
+            CiscoImportStatus.Severity = InfoBarSeverity.Success;
+            CiscoImportStatus.Title = "Imported";
+            CiscoImportStatus.Message = $"Loaded gateway '{imported.Settings.Host}:{imported.Settings.Port}' from {file.Name}.";
+            CiscoImportStatus.IsOpen = true;
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                if (CiscoImportStatus is null) return;
+                CiscoImportStatus.Severity = InfoBarSeverity.Error;
+                CiscoImportStatus.Title = "Couldn't import AnyConnect profile";
+                CiscoImportStatus.Message = ex.Message;
+                CiscoImportStatus.IsOpen = true;
+            }
+            catch
+            {
+                // Visual tree gone (parent dialog closed mid-await); nothing meaningful to do.
+            }
+        }
+    }
+
     private void OnKindChanged(object sender, SelectionChangedEventArgs e)
     {
         UpdateKindPanels();
@@ -767,6 +825,7 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         OvpnImportErrorBar.IsOpen = false;
         StormshieldImportErrorBar.IsOpen = false;
         AzureVpnImportStatus.IsOpen = false;
+        CiscoImportStatus.IsOpen = false;
         UpdateValidationHint();
     }
 

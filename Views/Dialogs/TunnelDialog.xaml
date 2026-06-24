@@ -551,6 +551,14 @@
              the installed Cisco client). SAML SSO, client-certificate auth, and posture
              (CSD/HostScan) are not supported in this version. -->
         <StackPanel x:Name="CiscoSecureClientPanel" Spacing="10" Visibility="Collapsed">
+            <Button Content="Import AnyConnect profile XML…"
+                    ToolTipService.ToolTip="Load a Cisco Secure Client / AnyConnect XML profile"
+                    Click="OnCiscoSecureClientImportClicked"
+                    HorizontalAlignment="Left" />
+            <InfoBar x:Name="CiscoImportStatus"
+                     IsOpen="False"
+                     IsClosable="True"
+                     Severity="Error" />
             <Grid ColumnSpacing="16">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*" />
