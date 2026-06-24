@@ -26,6 +26,7 @@ public sealed class InheritanceResolver
         string? username = null;
         Guid? credentialId = null;
         ProtocolType? credentialContextProtocol = null;
+        var credentialContextProtocolPending = false;
         var leafUsesInlinePassword = (node.UseInlinePassword ?? false) &&
             FindResolvedProtocol(node, nodesById) is ProtocolType.Ssh or ProtocolType.Rdp;
         var credentialResolved = leafUsesInlinePassword;
@@ -121,9 +122,13 @@ public sealed class InheritanceResolver
                     // A saved credential is an auth identity boundary. Use this node's own
                     // Username/RdpDomain if it has them, but do not mix its password with
                     // identity fields from more distant ancestors.
-                    credentialContextProtocol ??= current.Protocol ?? protocol;
+                    credentialContextProtocolPending = true;
                     credentialIdentityBoundaryReached = true;
                 }
+            }
+            if (credentialContextProtocolPending && credentialContextProtocol is null)
+            {
+                credentialContextProtocol = current.Protocol;
             }
             rdpScreenSize ??= current.RdpScreenSize ??
                 (current.RdpFullScreen == true ? RdpScreenSizes.FullConnectionContent : null);

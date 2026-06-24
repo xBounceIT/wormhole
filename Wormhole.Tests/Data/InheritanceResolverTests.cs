@@ -1095,6 +1095,47 @@ public class InheritanceResolverTests
         Assert.Null(profile.Username);
     }
 
+    [Fact]
+    public void Resolve_VncConnection_DropsUntypedCredentialGovernedByAncestorSshProtocol()
+    {
+        var credentialId = Guid.NewGuid();
+        var root = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Name = "ssh-root",
+            Kind = NodeKind.Folder,
+            Protocol = ProtocolType.Ssh,
+        };
+        var credentialFolder = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = root.Id,
+            Name = "shared-credentials",
+            Kind = NodeKind.Folder,
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = credentialId,
+        };
+        var node = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            ParentId = credentialFolder.Id,
+            Name = "console",
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Vnc,
+            Host = "kvm.example.com",
+        };
+
+        var profile = new InheritanceResolver().Resolve(node, new Dictionary<Guid, ConnectionNode>
+        {
+            [root.Id] = root,
+            [credentialFolder.Id] = credentialFolder,
+            [node.Id] = node,
+        });
+
+        Assert.Null(profile.CredentialId);
+        Assert.Null(profile.Username);
+    }
+
     [Theory]
     [InlineData(ProtocolType.Ssh)]
     [InlineData(ProtocolType.Rdp)]
