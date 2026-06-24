@@ -184,7 +184,7 @@ public class VncSessionViewModelTests
         };
         var vm = CreateVm(service);
         vm.Initialize(Profile());
-        var firstTarget = new FakeRenderTarget();
+        var firstTarget = new DisposableRenderTarget();
         var secondTarget = new FakeRenderTarget();
 
         var firstAttach = vm.AttachAsync(firstTarget);
@@ -196,7 +196,39 @@ public class VncSessionViewModelTests
         await firstAttach;
 
         Assert.Same(secondTarget, Assert.Single(service.Session.RenderTargets));
+        Assert.Equal(1, firstTarget.DisposeCount);
         Assert.Equal(SessionStatus.Connected, vm.Status);
+    }
+
+    [Fact]
+    public async Task AttachAsync_ConnectedSessionReplacesRenderTarget_DisposesPrevious()
+    {
+        var service = new FakeVncSessionService();
+        var vm = CreateVm(service);
+        var firstTarget = new DisposableRenderTarget();
+        var secondTarget = new DisposableRenderTarget();
+        vm.Initialize(Profile());
+        await vm.AttachAsync(firstTarget);
+
+        await vm.AttachAsync(secondTarget);
+
+        Assert.Equal(1, firstTarget.DisposeCount);
+        Assert.Equal(0, secondTarget.DisposeCount);
+        Assert.Same(secondTarget, service.Session.RenderTargets.Last());
+    }
+
+    [Fact]
+    public async Task AttachAsync_SameRenderTarget_DoesNotDisposeTarget()
+    {
+        var service = new FakeVncSessionService();
+        var vm = CreateVm(service);
+        var renderTarget = new DisposableRenderTarget();
+        vm.Initialize(Profile());
+        await vm.AttachAsync(renderTarget);
+
+        await vm.AttachAsync(renderTarget);
+
+        Assert.Equal(0, renderTarget.DisposeCount);
     }
 
     [Fact]

@@ -30,7 +30,7 @@ namespace Wormhole.Views.Sessions;
 public sealed partial class VncView : UserControl
 #pragma warning restore CA1001
 {
-    private readonly VncRenderTarget _renderTarget;
+    private VncRenderTarget _renderTarget;
     private readonly Dictionary<VirtualKey, int> _pressedKeySymbols = new();
     private VncSessionViewModel? _viewModel;
     private int _framebufferWidth;
@@ -46,16 +46,37 @@ public sealed partial class VncView : UserControl
         _renderTarget = new VncRenderTarget(DispatcherQueue);
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
+        DataContextChanged += OnDataContextChanged;
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
+        await AttachCurrentViewModelAsync().ConfigureAwait(true);
+    }
+
+    private async void OnDataContextChanged(FrameworkElement sender, DataContextChangedEventArgs args)
+    {
+        if (!IsLoaded) return;
+        await AttachCurrentViewModelAsync().ConfigureAwait(true);
+    }
+
+    private async Task AttachCurrentViewModelAsync()
+    {
         FramebufferHost.Visibility = Visibility.Visible;
         var newVm = DataContext as VncSessionViewModel;
-        if (newVm is null) return;
+        if (newVm is null)
+        {
+            if (_viewModel is not null)
+            {
+                await DetachCurrentRenderTargetAsync(replaceRenderTarget: true).ConfigureAwait(true);
+                _viewModel = null;
+            }
+            return;
+        }
 
         if (!ReferenceEquals(newVm, _viewModel))
         {
+            await DetachCurrentRenderTargetAsync(replaceRenderTarget: _viewModel is not null).ConfigureAwait(true);
             _viewModel = newVm;
             FramebufferImage.Source = null;
             WaitingFrameText.Visibility = Visibility.Visible;
@@ -82,12 +103,21 @@ public sealed partial class VncView : UserControl
     private async void OnUnloaded(object sender, RoutedEventArgs e)
     {
         FramebufferHost.Visibility = Visibility.Collapsed;
+        await DetachCurrentRenderTargetAsync(replaceRenderTarget: false).ConfigureAwait(true);
+    }
+
+    private async Task DetachCurrentRenderTargetAsync(bool replaceRenderTarget)
+    {
         _renderTarget.FrameReady -= OnFrameReady;
         _renderTarget.SetActive(false);
         ReleaseAllPointerCaptures();
         _hasLastPointer = false;
         _pressedButtons = VncPointerButtons.None;
         await ReleasePressedKeysAsync().ConfigureAwait(true);
+        if (replaceRenderTarget)
+        {
+            _renderTarget = new VncRenderTarget(DispatcherQueue);
+        }
     }
 
     private void OnFrameReady(object? sender, VncFrameReadyEventArgs e)

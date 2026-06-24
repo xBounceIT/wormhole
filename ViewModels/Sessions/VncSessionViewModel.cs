@@ -103,7 +103,7 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
         ArgumentNullException.ThrowIfNull(renderTarget);
 
         EnsureDispatcher();
-        _renderTarget = renderTarget;
+        var previousRenderTarget = ReplaceRenderTarget(renderTarget);
 
         _sessionRenderTarget?.SetTarget(renderTarget);
 
@@ -111,8 +111,11 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
         {
             _session.SetRenderTarget(renderTarget);
             _sessionRenderTarget = null;
+            DisposeRenderTargetSilently(previousRenderTarget, "render target replacement");
             return;
         }
+
+        DisposeRenderTargetSilently(previousRenderTarget, "render target replacement");
 
         if (_initialAutoConnectStarted)
         {
@@ -372,9 +375,20 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
     {
         var renderTarget = Interlocked.Exchange(ref _renderTarget, null);
         _sessionRenderTarget = null;
+        DisposeRenderTargetSilently(renderTarget, "tab close");
+    }
+
+    private IVncRenderTarget? ReplaceRenderTarget(IVncRenderTarget renderTarget)
+    {
+        var previous = Interlocked.Exchange(ref _renderTarget, renderTarget);
+        return ReferenceEquals(previous, renderTarget) ? null : previous;
+    }
+
+    private void DisposeRenderTargetSilently(IVncRenderTarget? renderTarget, string context)
+    {
         if (renderTarget is not IDisposable disposable) return;
         try { disposable.Dispose(); }
-        catch (Exception ex) { _logger.LogWarning(ex, "VNC render target dispose threw during tab close."); }
+        catch (Exception ex) { _logger.LogWarning(ex, "VNC render target dispose threw during {Context}.", context); }
     }
 
     private bool IsAttemptCurrent(int teardownGeneration) =>
