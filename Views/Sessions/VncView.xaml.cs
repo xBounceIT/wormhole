@@ -79,7 +79,7 @@ public sealed partial class VncView : UserControl
         }
     }
 
-    private void OnUnloaded(object sender, RoutedEventArgs e)
+    private async void OnUnloaded(object sender, RoutedEventArgs e)
     {
         FramebufferHost.Visibility = Visibility.Collapsed;
         _renderTarget.FrameReady -= OnFrameReady;
@@ -87,7 +87,7 @@ public sealed partial class VncView : UserControl
         ReleaseAllPointerCaptures();
         _hasLastPointer = false;
         _pressedButtons = VncPointerButtons.None;
-        _pressedKeySymbols.Clear();
+        await ReleasePressedKeysAsync().ConfigureAwait(true);
     }
 
     private void OnFrameReady(object? sender, VncFrameReadyEventArgs e)
@@ -240,6 +240,17 @@ public sealed partial class VncView : UserControl
         catch (Exception ex)
         {
             LogDebug(ex, "VNC key event send failed.");
+        }
+    }
+
+    private async Task ReleasePressedKeysAsync()
+    {
+        if (_pressedKeySymbols.Count == 0) return;
+        var keySymbols = new List<int>(_pressedKeySymbols.Values);
+        _pressedKeySymbols.Clear();
+        foreach (var keySymbol in keySymbols)
+        {
+            await SendKeyAsync(isDown: false, keySymbol).ConfigureAwait(true);
         }
     }
 

@@ -45,6 +45,7 @@ Used by `Wormhole.csproj`.
 | [Microsoft.AspNetCore.App](https://github.com/dotnet/aspnetcore) & [Microsoft.WindowsDesktop.App.WindowsForms](https://github.com/dotnet/winforms) (.NET shared frameworks — Kestrel hosts the in-app MCP server; WinForms hosts the RDP ActiveX) | MIT |
 | [Serilog](https://github.com/serilog/serilog), Serilog.Sinks.File, Serilog.Extensions.Logging | Apache-2.0 |
 | [SSH.NET](https://github.com/sshnet/SSH.NET) | MIT |
+| [Community.MarcusW.VncClient](https://github.com/karbonbaron/MarcusW.VncClient) | [MIT](https://licenses.nuget.org/MIT) |
 | [ModelContextProtocol.AspNetCore](https://github.com/modelcontextprotocol/csharp-sdk) | Apache-2.0 (the package 1.3.0 declares Apache-2.0; the SDK is transitioning from MIT) |
 | [Meziantou.Framework.Win32.CredentialManager](https://github.com/meziantou/Meziantou.Framework) | MIT |
 | [Microsoft.Data.Sqlite.Core](https://learn.microsoft.com/dotnet/standard/data/sqlite/) | MIT |
