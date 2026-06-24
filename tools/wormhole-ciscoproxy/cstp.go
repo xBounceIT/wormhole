@@ -58,7 +58,8 @@ func ciscoLogin(ctx context.Context, cfg config) (*session, error) {
 	// is called below with this same cfg. Hostnames and IPv4 literals pass through unchanged.
 	cfg.Host = stripHostBrackets(cfg.Host)
 
-	tlsCfg, err := buildTLSConfig(cfg)
+	tlsMode := tlsModeModern
+	tlsCfg, err := buildTLSConfig(cfg, tlsMode)
 	if err != nil {
 		return nil, fmt.Errorf("tls config: %w", err)
 	}
@@ -66,21 +67,8 @@ func ciscoLogin(ctx context.Context, cfg config) (*session, error) {
 	authCtx, authCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer authCancel()
 
-	netDialer := &net.Dialer{Timeout: 10 * time.Second}
-	transport := &http.Transport{
-		TLSClientConfig:     tlsCfg,
-		DialContext:         netDialer.DialContext,
-		MaxIdleConns:        2,
-		MaxIdleConnsPerHost: 2,
-		IdleConnTimeout:     30 * time.Second,
-	}
+	client, transport, jar := newAuthHTTPClient(tlsCfg)
 	defer transport.CloseIdleConnections()
-	jar, _ := cookiejar.New(nil)
-	client := &http.Client{
-		Transport: transport,
-		Jar:       jar,
-		Timeout:   20 * time.Second,
-	}
 
 	baseURL := &url.URL{Scheme: "https", Host: net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)), Path: "/"}
 	loginURL := baseURL.String()
@@ -88,6 +76,18 @@ func ciscoLogin(ctx context.Context, cfg config) (*session, error) {
 	// Step 1: POST the init request. The gateway answers with the primary auth form (and any
 	// group list / opaque blob to echo back).
 	body, err := postAuthXML(authCtx, client, "auth-init", loginURL, buildInitXML(cfg))
+	if isTLSHandshakeFailure(err) {
+		logf("auth-init TLS handshake failed; retrying with legacy RSA TLS compatibility mode")
+		transport.CloseIdleConnections()
+		tlsMode = tlsModeLegacyRSA
+		tlsCfg, err = buildTLSConfig(cfg, tlsMode)
+		if err != nil {
+			return nil, fmt.Errorf("legacy tls config: %w", err)
+		}
+		client, transport, jar = newAuthHTTPClient(tlsCfg)
+		defer transport.CloseIdleConnections()
+		body, err = postAuthXML(authCtx, client, "auth-init-legacy-rsa", loginURL, buildInitXML(cfg))
+	}
 	if err != nil {
 		return nil, fmt.Errorf("auth init POST: %w", err)
 	}
@@ -108,7 +108,16 @@ func ciscoLogin(ctx context.Context, cfg config) (*session, error) {
 			if cookie == "" {
 				return nil, errors.New("gateway reported auth success but no webvpn session cookie was issued")
 			}
-			return cstpConnect(ctx, cfg, tlsCfg, cookie)
+			sess, err := cstpConnect(ctx, cfg, tlsCfg, cookie)
+			if err != nil && tlsMode == tlsModeModern && isTLSHandshakeFailure(err) {
+				logf("CSTP TLS handshake failed; retrying with legacy RSA TLS compatibility mode")
+				legacyCfg, cfgErr := buildTLSConfig(cfg, tlsModeLegacyRSA)
+				if cfgErr != nil {
+					return nil, fmt.Errorf("legacy tls config: %w", cfgErr)
+				}
+				return cstpConnect(ctx, cfg, legacyCfg, cookie)
+			}
+			return sess, err
 		case "error":
 			return nil, fmt.Errorf("gateway rejected authentication: %s", firstNonEmpty(resp.Auth.Error, resp.Auth.Message, "unspecified error"))
 		}
@@ -129,10 +138,44 @@ func ciscoLogin(ctx context.Context, cfg config) (*session, error) {
 	return nil, fmt.Errorf("authentication did not complete after %d forms (last form id=%q)", maxAuthForms, resp.Auth.ID)
 }
 
-func buildTLSConfig(cfg config) (*tls.Config, error) {
+type tlsCompatibilityMode int
+
+const (
+	tlsModeModern tlsCompatibilityMode = iota
+	tlsModeLegacyRSA
+)
+
+func newAuthHTTPClient(tlsCfg *tls.Config) (*http.Client, *http.Transport, *cookiejar.Jar) {
+	netDialer := &net.Dialer{Timeout: 10 * time.Second}
+	transport := &http.Transport{
+		TLSClientConfig:     tlsCfg,
+		DialContext:         netDialer.DialContext,
+		MaxIdleConns:        2,
+		MaxIdleConnsPerHost: 2,
+		IdleConnTimeout:     30 * time.Second,
+	}
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{
+		Transport: transport,
+		Jar:       jar,
+		Timeout:   20 * time.Second,
+	}
+	return client, transport, jar
+}
+
+func buildTLSConfig(cfg config, mode tlsCompatibilityMode) (*tls.Config, error) {
 	t := &tls.Config{
 		ServerName: cfg.Host,
 		MinVersion: tls.VersionTLS12,
+	}
+	if mode == tlsModeLegacyRSA {
+		t.MaxVersion = tls.VersionTLS12
+		t.CipherSuites = []uint16{
+			tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+			tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+			tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+		}
 	}
 	if cfg.TrustServerCertificate {
 		t.InsecureSkipVerify = true
@@ -163,6 +206,18 @@ func buildTLSConfig(cfg config) (*tls.Config, error) {
 		}
 	}
 	return t, nil
+}
+
+func isTLSHandshakeFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if strings.Contains(e.Error(), "tls: handshake failure") {
+			return true
+		}
+	}
+	return strings.Contains(err.Error(), "tls: handshake failure")
 }
 
 // cstpConnect opens a fresh TLS connection and performs the CSTP CONNECT upgrade, parsing the

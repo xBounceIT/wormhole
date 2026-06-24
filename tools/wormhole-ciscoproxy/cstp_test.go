@@ -2,6 +2,9 @@ package main
 
 import (
 	"bufio"
+	"crypto/tls"
+	"errors"
+	"fmt"
 	"net/netip"
 	"strings"
 	"testing"
@@ -189,6 +192,57 @@ func TestRedactAuthBody_TerminatesAndMasks(t *testing.T) {
 	}
 	if !strings.Contains(out, "<redacted>") {
 		t.Fatalf("redactAuthBody did not mask anything: %s", out)
+	}
+}
+
+func TestBuildTLSConfig_LegacyRSACompatibilityMode(t *testing.T) {
+	modern, err := buildTLSConfig(config{Host: "vpn.example.com"}, tlsModeModern)
+	if err != nil {
+		t.Fatalf("modern tls config: %v", err)
+	}
+	if modern.MinVersion != tls.VersionTLS12 {
+		t.Fatalf("modern MinVersion = 0x%x, want TLS 1.2", modern.MinVersion)
+	}
+	if modern.MaxVersion != 0 {
+		t.Fatalf("modern MaxVersion = 0x%x, want runtime default", modern.MaxVersion)
+	}
+	if len(modern.CipherSuites) != 0 {
+		t.Fatalf("modern CipherSuites should use Go defaults, got %#v", modern.CipherSuites)
+	}
+
+	legacy, err := buildTLSConfig(config{Host: "vpn.example.com", TrustServerCertificate: true}, tlsModeLegacyRSA)
+	if err != nil {
+		t.Fatalf("legacy tls config: %v", err)
+	}
+	if legacy.MinVersion != tls.VersionTLS12 || legacy.MaxVersion != tls.VersionTLS12 {
+		t.Fatalf("legacy TLS bounds = min 0x%x max 0x%x, want TLS 1.2 only", legacy.MinVersion, legacy.MaxVersion)
+	}
+	want := []uint16{
+		tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+		tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+		tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+		tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+	}
+	if len(legacy.CipherSuites) != len(want) {
+		t.Fatalf("legacy CipherSuites length = %d, want %d", len(legacy.CipherSuites), len(want))
+	}
+	for i := range want {
+		if legacy.CipherSuites[i] != want[i] {
+			t.Fatalf("legacy CipherSuites[%d] = 0x%x, want 0x%x", i, legacy.CipherSuites[i], want[i])
+		}
+	}
+	if !legacy.InsecureSkipVerify {
+		t.Fatal("legacy config should preserve TrustServerCertificate")
+	}
+}
+
+func TestIsTLSHandshakeFailure(t *testing.T) {
+	wrapped := fmt.Errorf("auth init POST: %w", errors.New("remote error: tls: handshake failure"))
+	if !isTLSHandshakeFailure(wrapped) {
+		t.Fatal("expected wrapped TLS handshake failure to be detected")
+	}
+	if isTLSHandshakeFailure(errors.New("remote error: tls: bad certificate")) {
+		t.Fatal("non-handshake TLS errors must not trigger legacy fallback")
 	}
 }
 

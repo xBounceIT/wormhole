@@ -91,6 +91,7 @@
     <Compile Include="..\Services\Tunneling\CiscoSecureClient\CiscoSecureClientTunnelProvider.cs" Link="Services\Tunneling\CiscoSecureClient\CiscoSecureClientTunnelProvider.cs" />
     <Compile Include="..\Services\Tunneling\CiscoSecureClient\CiscoSecureClientProcessHost.cs" Link="Services\Tunneling\CiscoSecureClient\CiscoSecureClientProcessHost.cs" />
     <Compile Include="..\Services\Tunneling\CiscoSecureClient\CiscoSecureClientSidecarConfig.cs" Link="Services\Tunneling\CiscoSecureClient\CiscoSecureClientSidecarConfig.cs" />
+    <Compile Include="..\Services\Tunneling\CiscoSecureClient\CiscoSecureClientProfileParser.cs" Link="Services\Tunneling\CiscoSecureClient\CiscoSecureClientProfileParser.cs" />
     <Compile Include="..\Services\Tunneling\OpenVpn\OpenVpnProcessHost.cs" Link="Services\Tunneling\OpenVpn\OpenVpnProcessHost.cs" />
     <Compile Include="..\Services\Tunneling\OpenVpn\OpenVpnSidecarConfig.cs" Link="Services\Tunneling\OpenVpn\OpenVpnSidecarConfig.cs" />
     <Compile Include="..\Services\Tunneling\IOtpPromptService.cs" Link="Services\Tunneling\IOtpPromptService.cs" />
