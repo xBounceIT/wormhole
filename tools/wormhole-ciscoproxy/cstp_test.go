@@ -38,6 +38,26 @@ func TestParseConfigAuth_PrimaryForm(t *testing.T) {
 		t.Fatalf("inputs: got %d want 2", len(ca.Auth.Form.Inputs))
 	}
 }
+func TestAuthFailureMessage_MainFormError(t *testing.T) {
+	body := []byte(`<?xml version="1.0" encoding="UTF-8"?>
+<config-auth client="vpn" type="auth-request" aggregate-auth-version="2">
+  <auth id="main">
+    <message>Please enter your username and password.</message>
+    <error id="15" param1="" param2="">Login failed.</error>
+    <form>
+      <input type="text" name="username" label="Username:"/>
+      <input type="password" name="password" label="Password:"/>
+    </form>
+  </auth>
+</config-auth>`)
+	ca, err := parseConfigAuth(body)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := authFailureMessage(ca); got != "Login failed." {
+		t.Fatalf("authFailureMessage = %q, want Login failed.", got)
+	}
+}
 
 func TestAnswerForm_PrimaryCredentials(t *testing.T) {
 	cfg := config{Username: "alice", Password: "s3cret"}
@@ -255,7 +275,7 @@ func TestBuildInitXML_IncludesGroup(t *testing.T) {
 	if !strings.Contains(xml, "<group-select>Contractors</group-select>") {
 		t.Fatalf("missing group-select: %s", xml)
 	}
-	if !strings.Contains(xml, "<group-access>https://vpn.example.com</group-access>") {
+	if !strings.Contains(xml, "<group-access>https://vpn.example.com/Contractors</group-access>") {
 		t.Fatalf("group-access wrong for default port: %s", xml)
 	}
 }
@@ -281,6 +301,14 @@ func TestGroupAccessURL(t *testing.T) {
 	}
 }
 
+func TestGroupAccessURL_IncludesEscapedGroupPath(t *testing.T) {
+	group := "Contractors EU"
+	got := groupAccessURL(config{Host: "vpn.example.com", Port: 443, Group: &group})
+	want := "https://vpn.example.com/Contractors%20EU"
+	if got != want {
+		t.Fatalf("groupAccessURL with group = %q, want %q", got, want)
+	}
+}
 func TestBuildInitXML_PreservesNonDefaultPort(t *testing.T) {
 	xml := buildInitXML(config{Host: "vpn.example.com", Port: 8443})
 	if !strings.Contains(xml, "<group-access>https://vpn.example.com:8443</group-access>") {
@@ -289,7 +317,7 @@ func TestBuildInitXML_PreservesNonDefaultPort(t *testing.T) {
 }
 
 func TestBuildAuthReplyXML_EchoesOpaque(t *testing.T) {
-	cfg := config{Username: "alice", Password: "p@ss<>&"}
+	cfg := config{Username: "alice", Password: "p@ss<>&", Group: strptr("Contractors")}
 	resp := &xmlConfigAuth{
 		Opaque: &xmlRaw{IsFor: "sg", Inner: "<aggauth-handle>9</aggauth-handle>"},
 		Auth: xmlAuth{
@@ -313,6 +341,11 @@ func TestBuildAuthReplyXML_EchoesOpaque(t *testing.T) {
 	// The password contains XML metacharacters and must be escaped.
 	if !strings.Contains(out, "p@ss&lt;&gt;&amp;") {
 		t.Fatalf("password not XML-escaped: %s", out)
+	}
+	for _, forbidden := range []string{"<session-token>", "<session-id>", "<group-select>"} {
+		if strings.Contains(out, forbidden) {
+			t.Fatalf("auth reply should not contain %s: %s", forbidden, out)
+		}
 	}
 }
 

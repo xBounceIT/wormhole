@@ -102,6 +102,10 @@ func ciscoLogin(ctx context.Context, cfg config) (*session, error) {
 	// text or password — are answered with the generated TOTP / static secondary password rather
 	// than re-sending the primary credentials.
 	for form := 0; form < maxAuthForms; form++ {
+		if msg := authFailureMessage(resp); msg != "" {
+			return nil, fmt.Errorf("gateway rejected authentication: %s", msg)
+		}
+
 		switch strings.ToLower(resp.Auth.ID) {
 		case "success":
 			cookie := captureWebvpnCookie(jar, baseURL, resp)
@@ -119,7 +123,7 @@ func ciscoLogin(ctx context.Context, cfg config) (*session, error) {
 			}
 			return sess, err
 		case "error":
-			return nil, fmt.Errorf("gateway rejected authentication: %s", firstNonEmpty(resp.Auth.Error, resp.Auth.Message, "unspecified error"))
+			return nil, fmt.Errorf("gateway rejected authentication: %s", authMessage(resp))
 		}
 
 		reply, err := buildAuthReplyXML(cfg, resp, form == 0 /* isPrimaryForm */)
@@ -412,10 +416,24 @@ func parseConfigAuth(body []byte) (*xmlConfigAuth, error) {
 	return &ca, nil
 }
 
+func authFailureMessage(resp *xmlConfigAuth) string {
+	if resp == nil || strings.TrimSpace(resp.Auth.Error) == "" {
+		return ""
+	}
+	return authMessage(resp)
+}
+
+func authMessage(resp *xmlConfigAuth) string {
+	if resp == nil {
+		return "unspecified error"
+	}
+	return firstNonEmpty(resp.Auth.Error, resp.Auth.Message, "unspecified error")
+}
+
 func buildInitXML(cfg config) string {
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
-	b.WriteString(`<config-auth client="vpn" type="init" aggregate-auth-version="2">`)
+	b.WriteString(`<config-auth client="vpn" type="init">`)
 	fmt.Fprintf(&b, `<version who="vpn">%s</version>`, clientVersion)
 	b.WriteString(`<device-id>win</device-id>`)
 	fmt.Fprintf(&b, `<group-access>%s</group-access>`, xmlEscape(groupAccessURL(cfg)))
@@ -440,7 +458,14 @@ func groupAccessURL(cfg config) string {
 	if cfg.Port != 0 && cfg.Port != 443 {
 		authority = fmt.Sprintf("%s:%d", authority, cfg.Port)
 	}
-	return "https://" + authority
+
+	path := ""
+	if cfg.Group != nil {
+		if group := strings.TrimSpace(*cfg.Group); group != "" {
+			path = "/" + url.PathEscape(group)
+		}
+	}
+	return "https://" + authority + path
 }
 
 // buildAuthReplyXML answers the current auth form with the configured credentials. On the primary
@@ -455,11 +480,9 @@ func buildAuthReplyXML(cfg config, resp *xmlConfigAuth, isPrimaryForm bool) (str
 
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>`)
-	b.WriteString(`<config-auth client="vpn" type="auth-reply" aggregate-auth-version="2">`)
+	b.WriteString(`<config-auth client="vpn" type="auth-reply">`)
 	fmt.Fprintf(&b, `<version who="vpn">%s</version>`, clientVersion)
 	b.WriteString(`<device-id>win</device-id>`)
-	b.WriteString(`<session-token></session-token>`)
-	b.WriteString(`<session-id></session-id>`)
 	if resp.Opaque != nil {
 		isFor := resp.Opaque.IsFor
 		if isFor == "" {
@@ -472,9 +495,6 @@ func buildAuthReplyXML(cfg config, resp *xmlConfigAuth, isPrimaryForm bool) (str
 		fmt.Fprintf(&b, `<%s>%s</%s>`, kv.name, xmlEscape(kv.value), kv.name)
 	}
 	b.WriteString(`</auth>`)
-	if cfg.Group != nil && *cfg.Group != "" {
-		fmt.Fprintf(&b, `<group-select>%s</group-select>`, xmlEscape(*cfg.Group))
-	}
 	b.WriteString(`</config-auth>`)
 	return b.String(), nil
 }

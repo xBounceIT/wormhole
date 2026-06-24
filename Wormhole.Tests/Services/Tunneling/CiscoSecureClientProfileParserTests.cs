@@ -14,9 +14,9 @@ public class CiscoSecureClientProfileParserTests
             </ClientInitialization>
             <ServerList>
                 <HostEntry>
-                    <HostName>C-102673.19954</HostName>
-                    <HostAddress>vpn.reevo.it</HostAddress>
-                    <UserGroup>C-102673.19954</UserGroup>
+                    <HostName>Example.Profile</HostName>
+                    <HostAddress>vpn.example.com</HostAddress>
+                    <UserGroup>Example.Profile</UserGroup>
                 </HostEntry>
             </ServerList>
         </AnyConnectProfile>
@@ -27,10 +27,10 @@ public class CiscoSecureClientProfileParserTests
     {
         var result = CiscoSecureClientProfileParser.Parse(ProvidedProfileXml);
 
-        Assert.Equal("C-102673.19954", result.ProfileName);
-        Assert.Equal("vpn.reevo.it", result.Settings.Host);
+        Assert.Equal("Example.Profile", result.ProfileName);
+        Assert.Equal("vpn.example.com", result.Settings.Host);
         Assert.Equal(443, result.Settings.Port);
-        Assert.Equal("C-102673.19954", result.Settings.Group);
+        Assert.Equal("Example.Profile", result.Settings.Group);
         Assert.Equal(string.Empty, result.Settings.Username);
         Assert.Equal(string.Empty, result.Settings.Password);
         Assert.Null(result.Settings.TotpSecret);
