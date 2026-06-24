@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Runtime.InteropServices;
 using System.Runtime.InteropServices.WindowsRuntime;
@@ -30,6 +31,7 @@ public sealed partial class VncView : UserControl
 #pragma warning restore CA1001
 {
     private readonly VncRenderTarget _renderTarget;
+    private readonly Dictionary<VirtualKey, int> _pressedKeySymbols = new();
     private VncSessionViewModel? _viewModel;
     private int _framebufferWidth;
     private int _framebufferHeight;
@@ -85,6 +87,7 @@ public sealed partial class VncView : UserControl
         ReleaseAllPointerCaptures();
         _hasLastPointer = false;
         _pressedButtons = VncPointerButtons.None;
+        _pressedKeySymbols.Clear();
     }
 
     private void OnFrameReady(object? sender, VncFrameReadyEventArgs e)
@@ -105,12 +108,17 @@ public sealed partial class VncView : UserControl
 
     private async void OnPointerReleased(object sender, PointerRoutedEventArgs e)
     {
-        _pressedButtons = ButtonsFromPoint(e.GetCurrentPoint(FramebufferHost));
-        await SendPointerFromEventAsync(e, _pressedButtons).ConfigureAwait(true);
+        var point = e.GetCurrentPoint(FramebufferHost);
+        _pressedButtons = ButtonsFromPoint(point);
+        await SendPointerAtPointAsync(
+            point.Position,
+            _pressedButtons,
+            useLastPointOnMiss: true).ConfigureAwait(true);
         if (_pressedButtons == VncPointerButtons.None)
         {
             ReleaseAllPointerCaptures();
         }
+        e.Handled = true;
     }
 
     private async void OnPointerMoved(object sender, PointerRoutedEventArgs e)
@@ -159,12 +167,13 @@ public sealed partial class VncView : UserControl
             return;
         }
         e.Handled = true;
+        _pressedKeySymbols[e.Key] = keySymbol;
         await SendKeyAsync(isDown: true, keySymbol).ConfigureAwait(true);
     }
 
     private async void OnKeyUp(object sender, KeyRoutedEventArgs e)
     {
-        if (!TryMapKey(e.Key, out var keySymbol))
+        if (!_pressedKeySymbols.Remove(e.Key, out var keySymbol) && !TryMapKey(e.Key, out keySymbol))
         {
             LogUnsupportedKey(e.Key);
             return;
