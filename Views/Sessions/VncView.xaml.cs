@@ -462,6 +462,7 @@ public sealed partial class VncView : UserControl
         private bool _snapshotInProgress;
         private bool _snapshotDirty;
         private NativeFramebuffer? _framebuffer;
+        private WriteableBitmap? _bitmap;
         private int _publishQueued;
         private bool _active = true;
         private bool _disposed;
@@ -498,6 +499,10 @@ public sealed partial class VncView : UserControl
             }
 
             ReturnPending(pending);
+            if (!active)
+            {
+                _bitmap = null;
+            }
             if (active)
             {
                 QueueCurrentFramebufferSnapshot();
@@ -530,6 +535,7 @@ public sealed partial class VncView : UserControl
             }
 
             ReturnPending(pending);
+            _bitmap = null;
             framebufferToFree?.Free();
         }
 
@@ -760,7 +766,7 @@ public sealed partial class VncView : UserControl
                     return;
                 }
 
-                var bitmap = new WriteableBitmap(width, height);
+                var bitmap = GetOrCreateBitmap(width, height);
                 using (var stream = bitmap.PixelBuffer.AsStream())
                 {
                     stream.Write(pixels, 0, length);
@@ -785,6 +791,16 @@ public sealed partial class VncView : UserControl
                     }
                 }
             }
+        }
+
+        private WriteableBitmap GetOrCreateBitmap(int width, int height)
+        {
+            if (_bitmap is null || _bitmap.PixelWidth != width || _bitmap.PixelHeight != height)
+            {
+                _bitmap = new WriteableBitmap(width, height);
+            }
+
+            return _bitmap;
         }
 
         private bool HasPendingFrame()
