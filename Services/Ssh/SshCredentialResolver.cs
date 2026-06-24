@@ -94,6 +94,11 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
             return await PromptForPasswordAsync(profile, cancellationToken).ConfigureAwait(true);
         }
 
+        if (credential.Protocol != ProtocolType.Ssh)
+        {
+            return await PromptForPasswordAsync(profile, cancellationToken).ConfigureAwait(true);
+        }
+
         if (credential.Kind == CredentialKind.SshKey)
         {
             var passphraseTask = _credentialService.ReadPasswordAsync(credential.Id);

@@ -276,17 +276,16 @@ public class MRemoteNgImportServiceTests : IDisposable
         var result = await _service.CommitAsync(plan);
 
         Assert.Equal(2, result.FoldersCreated);  // "Top" + "Inner"
-        Assert.Equal(2, result.ConnectionsCreated);  // ssh + rdp leaves (VNC skipped)
-        Assert.Equal(1, result.SkippedUnsupportedProtocols);
-        // Two leaves with the same credentials (alice/dom/pwd, SSH) and (bob/ACME/pwd, RDP) so
-        // they don't dedupe — different protocols. Result should be 2 credentials.
-        Assert.Equal(2, result.CredentialsCreated);
+        Assert.Equal(3, result.ConnectionsCreated);  // ssh + rdp + vnc leaves
+        Assert.Equal(0, result.SkippedUnsupportedProtocols);
+        // Three leaves with credentials on distinct protocols, so they don't dedupe.
+        Assert.Equal(3, result.CredentialsCreated);
 
         var nodes = await _connectionRepo.GetAllAsync();
-        Assert.Equal(4, nodes.Count);  // 2 folders + 2 connections
+        Assert.Equal(5, nodes.Count);  // 2 folders + 3 connections
 
         // Hierarchy: "Top" is a root folder, "Inner" is its child, "leaf-ssh" is under Top,
-        // "leaf-rdp" is under Inner.
+        // "leaf-rdp" is under Inner, and "leaf-vnc" is at the import root.
         var top = Assert.Single(nodes, n => n.Name == "Top");
         Assert.Null(top.ParentId);
         Assert.Equal(NodeKind.Folder, top.Kind);
@@ -301,16 +300,26 @@ public class MRemoteNgImportServiceTests : IDisposable
         Assert.Equal(ProtocolType.Rdp, rdp.Protocol);
         Assert.Equal("ACME", rdp.RdpDomain);
         Assert.Equal("1920x1080", rdp.RdpScreenSize);
+        var vnc = Assert.Single(nodes, n => n.Name == "leaf-vnc");
+        Assert.Null(vnc.ParentId);
+        Assert.Equal(ProtocolType.Vnc, vnc.Protocol);
+        Assert.Equal("vnc.example.com", vnc.Host);
+        Assert.Null(vnc.Username);
 
         // Credential profiles created, and the passwords are written to the fake credential
         // manager. The node references its credential, not an inline Username (credentials win).
         var credentials = await _credentialRepo.GetAllAsync();
-        Assert.Equal(2, credentials.Count);
+        Assert.Equal(3, credentials.Count);
         var sshCred = credentials.Single(c => c.Protocol == ProtocolType.Ssh);
         Assert.Equal("alice", sshCred.Username);
         Assert.Equal(ssh.CredentialId, sshCred.Id);
         Assert.True(_credentialService.Passwords.ContainsKey(sshCred.Id));
         Assert.Equal("secret-alice", _credentialService.Passwords[sshCred.Id]);
+        var vncCred = credentials.Single(c => c.Protocol == ProtocolType.Vnc);
+        Assert.Null(vncCred.Username);
+        Assert.Null(vncCred.Domain);
+        Assert.Equal(vnc.CredentialId, vncCred.Id);
+        Assert.Equal("secret-vnc", _credentialService.Passwords[vncCred.Id]);
     }
 
     [Fact]
@@ -436,7 +445,7 @@ public class MRemoteNgImportServiceTests : IDisposable
         var xml = BuildXml(
             ("a", "Connection", new[]
             {
-                NodeAttr.Make("Protocol", "VNC"),
+                NodeAttr.Make("Protocol", "TELNET"),
                 NodeAttr.Make("Hostname", "h1"),
             }));
         var path = WriteFixture(xml);
@@ -772,12 +781,13 @@ public class MRemoteNgImportServiceTests : IDisposable
     }
 
     // Standard fixture: one Top container holding an SSH leaf and an Inner subfolder; Inner
-    // holds an RDP leaf; the export root also contains an unsupported VNC leaf so the skip
-    // path is exercised in the same run. Encrypted with the mRemoteNG default password.
+    // holds an RDP leaf; the export root also contains a VNC leaf. Encrypted with the
+    // mRemoteNG default password.
     private static string BuildFixtureXml()
     {
         var sshPwd = MRemoteNgCryptoTests.Encrypt("secret-alice", DefaultPassword, DefaultIterations);
         var rdpPwd = MRemoteNgCryptoTests.Encrypt("secret-bob", DefaultPassword, DefaultIterations);
+        var vncPwd = MRemoteNgCryptoTests.Encrypt("secret-vnc", DefaultPassword, DefaultIterations);
         var verifier = MRemoteNgCryptoTests.Encrypt(
             MRemoteNgImportService.ProtectedVerifier, DefaultPassword, DefaultIterations);
 
@@ -792,7 +802,7 @@ public class MRemoteNgImportServiceTests : IDisposable
                         <Node Name="leaf-rdp" Type="Connection" Protocol="RDP" Hostname="rdp.example.com" Port="3389" Username="bob" Domain="ACME" Password="{rdpPwd}" Resolution="1920x1080" />
                     </Node>
                 </Node>
-                <Node Name="leaf-vnc" Type="Connection" Protocol="VNC" Hostname="vnc.example.com" />
+                <Node Name="leaf-vnc" Type="Connection" Protocol="VNC" Hostname="vnc.example.com" Username="legacy-user" Domain="ignored" Password="{vncPwd}" />
             </mrng:Connections>
             """;
     }

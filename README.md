@@ -5,10 +5,11 @@ philosophical sequel to [mRemoteNG](https://mremoteng.org).
 
 > **Status:** Active development, UNSTABLE. The WinUI shell,
 > persisted connection tree, connection editor, credential store, mRemoteNG
-> import, SSH terminal, serial terminal, embedded/external RDP, SFTP file transfer, HTTP/HTTPS web
-> sessions, per-connection VPN across seven providers (including RDP and web over
-> VPN), an opt-in MCP server for AI-driven SSH control, installer packaging, and
-> in-app update checks are all implemented.
+> import, SSH terminal, serial terminal, embedded/external RDP, embedded VNC,
+> SFTP file transfer, HTTP/HTTPS web sessions, per-connection VPN across seven
+> providers (including RDP, VNC, and web over VPN), an opt-in MCP server for
+> AI-driven SSH control, installer packaging, and in-app update checks are all
+> implemented.
 
 ## Why
 
@@ -24,11 +25,15 @@ everything else.
 - Connection tree with folders, search, and drag-reorder.
 - **Folder-level inheritance** — set a credential (or VPN tunnel, or any RDP
   setting) on a folder and every child inherits it.
-- Tabbed workspace for SSH, RDP, HTTP/HTTPS web, and Serial sessions.
+- Tabbed workspace for SSH, RDP, VNC, HTTP/HTTPS web, and Serial sessions.
 - SSH terminal (xterm.js in WebView2, driven by SSH.NET), with either a saved
   credential reference or an inline per-connection username/password.
 - Embedded RDP session via the `mstscax` ActiveX control, with an external
   `mstsc.exe` fallback for Azure AD / WAM-sensitive targets.
+- Embedded VNC session support (`ProtocolType.Vnc = 6`, with enum value `2`
+  still reserved for retired SFTP) using `Community.MarcusW.VncClient`.
+  VNC v1 supports no-auth servers and classic password authentication; VNC
+  credentials are password-only.
 - **HTTP / HTTPS web sessions** that render a target web GUI — e.g. a firewall or
   appliance management page — in an embedded WebView2 browser tab. No
   credentials; HTTPS offers an opt-in "ignore certificate errors" toggle for
@@ -46,15 +51,16 @@ everything else.
 - Per-connection userspace VPN tunnels for **WireGuard, OpenVPN, Fortinet SSL
   VPN, WatchGuard Mobile VPN with SSL, Stormshield Network SSL VPN, Azure VPN
   (Microsoft Entra ID P2S), and Cisco Secure Client (AnyConnect)** — used by SSH,
-  SFTP, RDP, and HTTP/HTTPS sessions. Serial sessions are local COM-port sessions
-  and are not VPN-routed.
+  SFTP, RDP, VNC, and HTTP/HTTPS sessions. Serial sessions are local COM-port
+  sessions and are not VPN-routed.
 - Opt-in **MCP server** that lets AI agents drive your already-open SSH sessions
   over an authenticated loopback endpoint.
 - Modern WinUI 3 shell: Mica backdrop, dark mode, per-monitor DPI.
 
 ## Planned
 
-- VNC and Telnet protocols.
+- Telnet protocol.
+- Advanced VNC auth modes beyond no-auth and classic password auth.
 - External Tools with `{host}` / `{user}` templating.
 - Port scan → "add as connection."
 - Windows Hello unlock, optional 1Password / Bitwarden / Azure Key Vault providers.
@@ -102,12 +108,13 @@ and endpoint posture (CSD/HostScan) are not yet supported**, so gateways that
 require them will reject the connection.
 
 SSH terminal sessions and SFTP file-transfer dialogs route through the sidecar's
-loopback SOCKS5 endpoint. RDP cannot speak SOCKS5 directly, so the embedded
-ActiveX client routes through `ITunnelInstance.BindLocalForwarderAsync`, which
+loopback SOCKS5 endpoint. RDP and VNC cannot speak SOCKS5 directly, so the
+embedded clients route through `ITunnelInstance.BindLocalForwarderAsync`, which
 binds a `127.0.0.1` listener that bridges to the real target through the tunnel.
 Three RDP + tunnel combinations are rejected because the loopback bridge can't
 safely handle them: the external `mstsc.exe` client, RD Gateway, and strict
-server authentication.
+server authentication. VNC uses the same loopback-forwarder path without those
+RDP-specific certificate/gateway constraints.
 
 HTTP/HTTPS sessions route through a hybrid of the two. When the tunnel exposes a
 SOCKS5 endpoint, the WebView2 is launched with a `--proxy-server=socks5://…` so
@@ -144,10 +151,12 @@ flowchart TD
     L -- "SFTP file transfer" --> N["SftpClient connects through SOCKS5"]
     L -- "HTTP / HTTPS" --> R["WebView2 proxies through SOCKS5 (real hostname preserved), else shares RDP's loopback bridge"]
     L -- "RDP" --> O["BindLocalForwarderAsync binds a 127.0.0.1 listener; ActiveX connects to it"]
+    L -- "VNC" --> V["BindLocalForwarderAsync binds a 127.0.0.1 listener; VNC client connects to it"]
     M --> P["Session holds a lease on the shared tunnel"]
     N --> P
     R --> P
     O --> P
+    V --> P
     P --> Q["Last tab/dialog using the tunnel closes -> dispose tunnel sidecar"]
 ```
 
@@ -225,6 +234,7 @@ dotnet test Wormhole.Tests.Integration/Wormhole.Tests.Integration.csproj
 | SSH + SFTP | SSH.NET |
 | Terminal renderer | xterm.js inside WebView2 |
 | RDP | `mstscax` ActiveX (in-box) hosted via WinForms |
+| VNC | `Community.MarcusW.VncClient` |
 | Web browser (HTTP/HTTPS) | WebView2 (Chromium); per-session SOCKS5 proxy when tunneled |
 | VPN tunnels | Userspace WireGuard / OpenVPN / Fortinet / WatchGuard / Stormshield / Azure VPN / Cisco Secure Client sidecars exposing loopback SOCKS5 |
 | AI control | ModelContextProtocol.AspNetCore (loopback MCP server over Kestrel) |

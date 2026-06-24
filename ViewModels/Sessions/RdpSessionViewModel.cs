@@ -867,6 +867,15 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         }
         token.ThrowIfCancellationRequested();
 
+        if (credential is not null && credential.Protocol != ProtocolType.Rdp)
+        {
+            _logger.LogInformation(
+                "Ignoring non-RDP credential {CredentialId} for RDP auth: protocol={Protocol}.",
+                credential.Id,
+                credential.Protocol);
+            credential = null;
+        }
+
         var explicitUsername = NullIfWhiteSpace(profile.Username);
         var explicitDomain = NullIfWhiteSpace(profile.RdpDomain);
         var credentialUsername = NullIfWhiteSpace(credential?.Username);
@@ -926,7 +935,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         }
         token.ThrowIfCancellationRequested();
 
-        if (!forcePrompt && profile.CredentialId is { } credId)
+        if (!forcePrompt && credential is not null && profile.CredentialId is { } credId)
         {
             try
             {
@@ -1493,6 +1502,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             _logger.LogWarning(ex, "Credential lookup for AAD detection failed; routing RDP away from embedded mstscax.");
             return true;
         }
+        if (credential is null || credential.Protocol != ProtocolType.Rdp) return false;
         return AzureAdCredentialDetector.IsAzureAd(credential);
     }
 

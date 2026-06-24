@@ -28,6 +28,7 @@ public sealed class SessionTabFactory : ISessionTabFactory
             ProtocolType.Serial => _serviceProvider.GetRequiredService<SerialSessionViewModel>(),
             ProtocolType.Rdp => _serviceProvider.GetRequiredService<RdpSessionViewModel>(),
             ProtocolType.Http or ProtocolType.Https => _serviceProvider.GetRequiredService<HttpSessionViewModel>(),
+            ProtocolType.Vnc => _serviceProvider.GetRequiredService<VncSessionViewModel>(),
             _ => throw new ArgumentOutOfRangeException(nameof(profile),
                 $"Unknown protocol {profile.Protocol}.")
         };

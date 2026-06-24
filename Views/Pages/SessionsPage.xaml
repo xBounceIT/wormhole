@@ -32,6 +32,12 @@
                                          MinHeight="240" />
         </DataTemplate>
 
+        <DataTemplate x:Key="VncSessionTemplate" x:DataType="sessions:VncSessionViewModel">
+            <sessionViews:VncView HorizontalAlignment="Stretch"
+                                  VerticalAlignment="Stretch"
+                                  MinHeight="240" />
+        </DataTemplate>
+
         <DataTemplate x:Key="ProtocolPlaceholderTemplate" x:DataType="sessions:SessionTabViewModel">
             <Grid Padding="16" Background="{ThemeResource LayerFillColorDefaultBrush}">
                 <TextBlock Style="{StaticResource BodyTextBlockStyle}"
@@ -48,6 +54,7 @@
                                              SerialTemplate="{StaticResource SerialSessionTemplate}"
                                              RdpTemplate="{StaticResource RdpSessionTemplate}"
                                              HttpTemplate="{StaticResource HttpSessionTemplate}"
+                                             VncTemplate="{StaticResource VncSessionTemplate}"
                                              PlaceholderTemplate="{StaticResource ProtocolPlaceholderTemplate}" />
     </Page.Resources>
 

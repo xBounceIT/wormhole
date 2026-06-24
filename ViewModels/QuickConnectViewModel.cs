@@ -8,27 +8,27 @@ namespace Wormhole.ViewModels;
 
 public partial class QuickConnectViewModel : ObservableObject
 {
-    private static readonly ProtocolType[] QuickConnectProtocols =
-    {
-        ProtocolType.Ssh,
-        ProtocolType.Rdp,
-        ProtocolType.Serial,
-    };
-
     private readonly ISessionTabFactory _tabFactory;
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(ProtocolIndex), nameof(HostPlaceholder))]
+    [NotifyPropertyChangedFor(nameof(HostPlaceholder))]
     private ProtocolType protocol = ProtocolType.Ssh;
 
-    // Bound to the ComboBox.SelectedIndex (which doesn't speak ProtocolType natively).
-    public int ProtocolIndex
+    public IReadOnlyList<QuickConnectProtocolChoice> ProtocolChoices { get; } = new[]
     {
-        get => Array.IndexOf(QuickConnectProtocols, Protocol);
+        new QuickConnectProtocolChoice(ProtocolType.Ssh, "SSH"),
+        new QuickConnectProtocolChoice(ProtocolType.Rdp, "RDP"),
+        new QuickConnectProtocolChoice(ProtocolType.Vnc, "VNC"),
+        new QuickConnectProtocolChoice(ProtocolType.Serial, "SERIAL"),
+    };
+
+    public QuickConnectProtocolChoice? SelectedProtocolChoice
+    {
+        get => ProtocolChoices.FirstOrDefault(c => c.Protocol == Protocol);
         set
         {
-            if (value < 0 || value >= QuickConnectProtocols.Length) return;
-            Protocol = QuickConnectProtocols[value];
+            if (value is null || value.Protocol == Protocol) return;
+            Protocol = value.Protocol;
         }
     }
 
@@ -50,6 +50,8 @@ public partial class QuickConnectViewModel : ObservableObject
     {
         _tabFactory = tabFactory;
     }
+
+    partial void OnProtocolChanged(ProtocolType value) => OnPropertyChanged(nameof(SelectedProtocolChoice));
 
     [RelayCommand]
     public void Connect()
@@ -99,7 +101,9 @@ public partial class QuickConnectViewModel : ObservableObject
             Protocol = Protocol,
             Host = spec.Host,
             Port = spec.Port ?? Port ?? DefaultPort(Protocol),
-            Username = !string.IsNullOrEmpty(spec.User) ? spec.User : (string.IsNullOrEmpty(Username) ? null : Username),
+            Username = Protocol == ProtocolType.Vnc
+                ? null
+                : !string.IsNullOrEmpty(spec.User) ? spec.User : (string.IsNullOrEmpty(Username) ? null : Username),
         };
 
         _tabFactory.Open(profile);
@@ -136,6 +140,10 @@ public partial class QuickConnectViewModel : ObservableObject
     {
         ProtocolType.Ssh => 22,
         ProtocolType.Rdp => 3389,
+        ProtocolType.Vnc => 5900,
+        ProtocolType.Serial => 0,
         _ => 22,
     };
 }
+
+public sealed record QuickConnectProtocolChoice(ProtocolType Protocol, string Label);

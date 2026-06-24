@@ -1105,6 +1105,34 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public async Task AttachAsync_SavedCredentialWithNonRdpProtocol_PromptsWithoutUsingCredential()
+    {
+        var credId = Guid.NewGuid();
+        var credential = new CredentialProfile
+        {
+            Id = credId,
+            Name = "vnc-password",
+            Username = "vnc-user",
+            Protocol = ProtocolType.Vnc,
+        };
+        var secrets = new FakeCredentialService(new Dictionary<Guid, string> { [credId] = "vnc-secret" });
+        var (vm, svc, _, dlg, _) = CreateVm(
+            credentialRepository: new SingleCredentialRepository(credential),
+            creds: secrets);
+        dlg.PasswordPromptResult = "typed-password";
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with { CredentialId = credId });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(1, dlg.PasswordPromptCount);
+        Assert.Equal(0, dlg.CredentialsPromptCount);
+        Assert.Equal("rdp-user", svc.LastProfile?.Username);
+        Assert.Equal("typed-password", svc.LastPassword);
+    }
+
+    [Fact]
     public async Task AttachAsync_InlinePassword_ConnectsWithoutPrompt()
     {
         var nodeId = Guid.NewGuid();

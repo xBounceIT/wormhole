@@ -7,6 +7,56 @@ namespace Wormhole.Tests.ViewModels;
 
 public class QuickConnectViewModelTests
 {
+    [Fact]
+    public void ProtocolChoices_ExposeSshRdpVncAndSerial()
+    {
+        var vm = new QuickConnectViewModel(new CapturingSessionTabFactory());
+
+        Assert.Collection(
+            vm.ProtocolChoices,
+            item => Assert.Equal(ProtocolType.Ssh, item.Protocol),
+            item => Assert.Equal(ProtocolType.Rdp, item.Protocol),
+            item => Assert.Equal(ProtocolType.Vnc, item.Protocol),
+            item => Assert.Equal(ProtocolType.Serial, item.Protocol));
+    }
+
+    [Fact]
+    public void Connect_Vnc_UsesDefaultPortAndIgnoresUsername()
+    {
+        var tabs = new CapturingSessionTabFactory();
+        var vm = new QuickConnectViewModel(tabs)
+        {
+            Host = "operator@vnc.example.com",
+            Username = "typed-user",
+        };
+        vm.SelectedProtocolChoice = vm.ProtocolChoices.Single(c => c.Protocol == ProtocolType.Vnc);
+
+        vm.Connect();
+
+        var profile = Assert.Single(tabs.Opened);
+        Assert.Equal(ProtocolType.Vnc, profile.Protocol);
+        Assert.Equal("vnc.example.com", profile.Host);
+        Assert.Equal(5900, profile.Port);
+        Assert.Null(profile.Username);
+    }
+
+    [Fact]
+    public void Connect_Rdp_UsesSelectedProtocolChoice()
+    {
+        var tabs = new CapturingSessionTabFactory();
+        var vm = new QuickConnectViewModel(tabs)
+        {
+            Host = "rdp.example.com",
+        };
+        vm.SelectedProtocolChoice = vm.ProtocolChoices.Single(c => c.Protocol == ProtocolType.Rdp);
+
+        vm.Connect();
+
+        var profile = Assert.Single(tabs.Opened);
+        Assert.Equal(ProtocolType.Rdp, profile.Protocol);
+        Assert.Equal(3389, profile.Port);
+    }
+
     [Theory]
     [InlineData("COM1", "COM1", SerialDefaults.BaudRate)]
     [InlineData(" COM3:115200 ", "COM3", 115200)]
@@ -22,7 +72,7 @@ public class QuickConnectViewModelTests
         vm.Connect();
 
         Assert.Null(vm.ErrorMessage);
-        var profile = Assert.IsType<ConnectionProfile>(factory.LastOpened);
+        var profile = Assert.Single(factory.Opened);
         Assert.Equal(ProtocolType.Serial, profile.Protocol);
         Assert.Equal(expectedPortName, profile.Name);
         Assert.Equal(expectedPortName, profile.Host);
@@ -50,14 +100,14 @@ public class QuickConnectViewModelTests
 
         vm.Connect();
 
-        Assert.Null(factory.LastOpened);
+        Assert.Empty(factory.Opened);
         Assert.Equal("Serial quick connect must use COM1 or COM1:115200.", vm.ErrorMessage);
     }
 
     private sealed class CapturingSessionTabFactory : ISessionTabFactory
     {
-        public ConnectionProfile? LastOpened { get; private set; }
+        public List<ConnectionProfile> Opened { get; } = new();
 
-        public void Open(ConnectionProfile profile) => LastOpened = profile;
+        public void Open(ConnectionProfile profile) => Opened.Add(profile);
     }
 }

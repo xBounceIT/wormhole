@@ -25,7 +25,11 @@ public sealed class InheritanceResolver
         ProtocolType? portContextProtocol = null;
         string? username = null;
         Guid? credentialId = null;
-        var credentialResolved = node.UseInlinePassword ?? false;
+        ProtocolType? credentialContextProtocol = null;
+        var credentialContextProtocolPending = false;
+        var leafUsesInlinePassword = (node.UseInlinePassword ?? false) &&
+            FindResolvedProtocol(node, nodesById) is ProtocolType.Ssh or ProtocolType.Rdp;
+        var credentialResolved = leafUsesInlinePassword;
         var credentialIdentityBoundaryReached = false;
         string? rdpDomain = null;
         string? rdpScreenSize = null;
@@ -118,8 +122,13 @@ public sealed class InheritanceResolver
                     // A saved credential is an auth identity boundary. Use this node's own
                     // Username/RdpDomain if it has them, but do not mix its password with
                     // identity fields from more distant ancestors.
+                    credentialContextProtocolPending = true;
                     credentialIdentityBoundaryReached = true;
                 }
+            }
+            if (credentialContextProtocolPending && credentialContextProtocol is null)
+            {
+                credentialContextProtocol = current.Protocol;
             }
             rdpScreenSize ??= current.RdpScreenSize ??
                 (current.RdpFullScreen == true ? RdpScreenSizes.FullConnectionContent : null);
@@ -197,12 +206,18 @@ public sealed class InheritanceResolver
             port = null;
         }
 
-        // Web and serial protocols are credential-less (the editor hides credentials and CredentialDialog
-        // won't create them). Drop any credential and SSH identity inherited from an ancestor folder, so a
-        // credential-less node under an SSH/RDP folder can't carry - and, via the tree's "Show credentials",
-        // expose - an unrelated parent's password or stale private-key metadata.
+        // Web and serial protocols are credential-less, so they drop inherited credentials and SSH identity
+        // material. Saved credentials are only inherited across matching protocol contexts; VNC is
+        // password-only in v1, so it also drops inherited username and SSH-key metadata.
         var isWeb = protocol.Value is ProtocolType.Http or ProtocolType.Https;
-        var isCredentialless = isWeb || protocol.Value == ProtocolType.Serial;
+        var isSerial = protocol.Value == ProtocolType.Serial;
+        var isVnc = protocol.Value == ProtocolType.Vnc;
+        var isCredentialless = isWeb || isSerial;
+        var clearsSshIdentity = isCredentialless || isVnc;
+        var useInlinePassword = leafUsesInlinePassword;
+        var canUseResolvedCredential = !isCredentialless &&
+            !useInlinePassword &&
+            (credentialContextProtocol is null || credentialContextProtocol == protocol.Value);
         var parentFolderName = node.ParentId is Guid parentIdForDisplay &&
             nodesById.TryGetValue(parentIdForDisplay, out var parentForDisplay) &&
             parentForDisplay.Kind == NodeKind.Folder &&
@@ -218,11 +233,11 @@ public sealed class InheritanceResolver
             Protocol = protocol.Value,
             Host = host,
             Port = port ?? DefaultPortFor(protocol.Value),
-            Username = isCredentialless ? null : username,
-            CredentialId = isCredentialless ? null : credentialId,
-            // Inline password is strictly per-connection - read from the leaf `node`, never
+            Username = clearsSshIdentity ? null : username,
+            CredentialId = canUseResolvedCredential ? credentialId : null,
+            // Inline password is SSH/RDP-only and strictly per-connection - read from the leaf `node`, never
             // inherited up the folder chain. When set, it suppresses any inherited saved credential.
-            UseInlinePassword = !isCredentialless && (node.UseInlinePassword ?? false),
+            UseInlinePassword = useInlinePassword,
             RdpDomain = rdpDomain,
             RdpScreenSize = rdpScreenSize,
             RdpFullScreen = rdpFullScreen ?? false,
@@ -253,9 +268,9 @@ public sealed class InheritanceResolver
             RdpGatewayBypassLocal = rdpGatewayBypassLocal ?? true,
             RdpGatewayUseSameCreds = rdpGatewayUseSameCreds ?? false,
             RdpUseExternalClient = rdpUseExternalClient ?? false,
-            SshKeyFileName = isCredentialless ? null : sshKeyFileName,
-            SshKnownHostFingerprint = isCredentialless ? null : sshKnownHostFingerprint,
-            SshAutoSudo = isCredentialless ? false : sshAutoSudo ?? false,
+            SshKeyFileName = clearsSshIdentity ? null : sshKeyFileName,
+            SshKnownHostFingerprint = clearsSshIdentity ? null : sshKnownHostFingerprint,
+            SshAutoSudo = clearsSshIdentity ? false : sshAutoSudo ?? false,
             SerialBaudRate = SerialDefaults.NormalizeBaudRate(serialBaudRate),
             SerialDataBits = SerialDefaults.NormalizeDataBits(serialDataBits),
             SerialStopBits = SerialDefaults.NormalizeStopBits(serialStopBits),
@@ -277,7 +292,38 @@ public sealed class InheritanceResolver
         ProtocolType.Rdp => 3389,
         ProtocolType.Http => 80,
         ProtocolType.Https => 443,
+        ProtocolType.Vnc => 5900,
         ProtocolType.Serial => 0,
         _ => throw new ArgumentOutOfRangeException(nameof(protocol)),
     };
+
+    private static ProtocolType? FindResolvedProtocol(
+        ConnectionNode node,
+        IReadOnlyDictionary<Guid, ConnectionNode> nodesById)
+    {
+        HashSet<Guid>? seen = null;
+        var current = node;
+        while (true)
+        {
+            if (current.Protocol is { } protocol)
+            {
+                return protocol;
+            }
+            if (current.ParentId is not Guid parentId || !nodesById.TryGetValue(parentId, out var parent))
+            {
+                return null;
+            }
+            if (seen is null)
+            {
+                seen = new HashSet<Guid>();
+                seen.Add(current.Id);
+            }
+            if (!seen.Add(parent.Id))
+            {
+                throw new InvalidOperationException(
+                    $"Detected a cycle in the node tree at '{parent.Name}' ({parent.Id}).");
+            }
+            current = parent;
+        }
+    }
 }

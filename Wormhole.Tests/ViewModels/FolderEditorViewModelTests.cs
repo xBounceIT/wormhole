@@ -211,18 +211,20 @@ public class FolderEditorViewModelTests
     }
 
     [Fact]
-    public async Task LoadCredentialsAsync_ListsOnlySshAndRdpCredentials()
+    public async Task LoadCredentialsAsync_ListsOnlySshRdpAndVncCredentials()
     {
         var ssh = new CredentialProfile { Id = Guid.NewGuid(), Name = "ssh", Protocol = ProtocolType.Ssh };
         var rdp = new CredentialProfile { Id = Guid.NewGuid(), Name = "rdp", Protocol = ProtocolType.Rdp };
+        var vnc = new CredentialProfile { Id = Guid.NewGuid(), Name = "vnc", Protocol = ProtocolType.Vnc };
         var http = new CredentialProfile { Id = Guid.NewGuid(), Name = "http", Protocol = ProtocolType.Http };
         var https = new CredentialProfile { Id = Guid.NewGuid(), Name = "https", Protocol = ProtocolType.Https };
-        var vm = NewVm(credentials: new[] { ssh, rdp, http, https });
+        var vm = NewVm(credentials: new[] { ssh, rdp, vnc, http, https });
 
         await vm.LoadCredentialsAsync();
 
         Assert.Contains(vm.AvailableCredentials, c => c.Id == ssh.Id);
         Assert.Contains(vm.AvailableCredentials, c => c.Id == rdp.Id);
+        Assert.Contains(vm.AvailableCredentials, c => c.Id == vnc.Id);
         Assert.DoesNotContain(vm.AvailableCredentials, c => c.Id == http.Id);
         Assert.DoesNotContain(vm.AvailableCredentials, c => c.Id == https.Id);
     }

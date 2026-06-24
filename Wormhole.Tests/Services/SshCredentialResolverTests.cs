@@ -144,6 +144,29 @@ public class SshCredentialResolverTests
     }
 
     [Fact]
+    public async Task Resolve_PasswordCredentialWithNonSshProtocol_PromptsWithoutUsingCredential()
+    {
+        var credId = Guid.NewGuid();
+        var dialogs = new FakeDialogService { PasswordPromptResult = "typed-pwd" };
+        var resolver = NewResolver(
+            dialogs,
+            repo: new FakeCredentialRepository(new CredentialProfile
+            {
+                Id = credId,
+                Protocol = ProtocolType.Vnc,
+                Kind = CredentialKind.Password,
+                Username = "vnc-user",
+            }),
+            creds: new FakeCredentialService(passwords: new() { [credId] = "vnc-secret" }));
+
+        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: credId));
+
+        Assert.Equal("typed-pwd", creds.Password);
+        Assert.Null(creds.CredentialUsername);
+        Assert.Equal(1, dialogs.PasswordPromptCount);
+    }
+
+    [Fact]
     public async Task Resolve_KeyCredential_KeyPresent_NotEncrypted_ReturnsKey_NoPrompt()
     {
         var credId = Guid.NewGuid();
