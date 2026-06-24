@@ -24,6 +24,8 @@ public sealed partial class UpdateChangelogView : UserControl
     private bool _isInitialized;
     private bool _isLoaded;
     private string? _pendingHtmlDocument;
+    private int _navigationGeneration;
+    private int _activeNavigationGeneration;
 
     public string HtmlDocument
     {
@@ -34,6 +36,7 @@ public sealed partial class UpdateChangelogView : UserControl
     public UpdateChangelogView()
     {
         InitializeComponent();
+        ActualThemeChanged += OnActualThemeChanged;
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
     }
@@ -47,13 +50,13 @@ public sealed partial class UpdateChangelogView : UserControl
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
         _isLoaded = true;
-        ChangelogWebView.Visibility = Visibility.Visible;
         _ = NavigateToHtmlAsync(_pendingHtmlDocument ?? HtmlDocument);
     }
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         _isLoaded = false;
+        LoadingHost.Visibility = Visibility.Collapsed;
         ChangelogWebView.Visibility = Visibility.Collapsed;
     }
 
@@ -73,8 +76,11 @@ public sealed partial class UpdateChangelogView : UserControl
         core.Settings.AreDefaultContextMenusEnabled = true;
         core.Settings.AreHostObjectsAllowed = false;
         core.Settings.IsWebMessageEnabled = false;
+        core.NavigationCompleted -= OnNavigationCompleted;
+        core.NavigationCompleted += OnNavigationCompleted;
         core.NavigationStarting -= OnNavigationStarting;
         core.NavigationStarting += OnNavigationStarting;
+        ApplyThemeToWebView(core);
         core.NewWindowRequested -= OnNewWindowRequested;
         core.NewWindowRequested += OnNewWindowRequested;
 
@@ -105,31 +111,74 @@ public sealed partial class UpdateChangelogView : UserControl
     private async Task NavigateToHtmlAsync(string? html)
     {
         _pendingHtmlDocument = html;
-        if (!_isLoaded || string.IsNullOrWhiteSpace(html)) return;
+        var generation = ++_navigationGeneration;
+
+        if (string.IsNullOrWhiteSpace(html))
+        {
+            _pendingHtmlDocument = null;
+            ClearSurface();
+            return;
+        }
+
+        if (!_isLoaded) return;
+
+        ShowLoading();
 
         try
         {
             await EnsureInitializedAsync().ConfigureAwait(true);
+            if (!_isLoaded || generation != _navigationGeneration) return;
+
+            ApplyThemeToWebView(ChangelogWebView.CoreWebView2);
+            _activeNavigationGeneration = generation;
             ChangelogWebView.CoreWebView2.NavigateToString(html);
             _pendingHtmlDocument = null;
-            ErrorHost.Visibility = Visibility.Collapsed;
         }
         catch (Exception ex)
         {
-            ShowError("Could not render the changelog: " + ex.Message);
+            if (generation == _navigationGeneration)
+                ShowError("Could not render the changelog: " + ex.Message);
         }
+    }
+
+    private void OnNavigationCompleted(CoreWebView2 sender, CoreWebView2NavigationCompletedEventArgs args)
+    {
+        if (!_isLoaded || _activeNavigationGeneration != _navigationGeneration) return;
+        if (!args.IsSuccess)
+        {
+            if (ChangelogWebView.Visibility == Visibility.Visible
+                && args.WebErrorStatus == CoreWebView2WebErrorStatus.OperationCanceled)
+            {
+                return;
+            }
+
+            ShowError("Could not render the changelog: " + args.WebErrorStatus);
+            return;
+        }
+
+        LoadingHost.Visibility = Visibility.Collapsed;
+        ErrorHost.Visibility = Visibility.Collapsed;
+        ChangelogWebView.Visibility = Visibility.Visible;
     }
 
     private void OnNavigationStarting(CoreWebView2 sender, CoreWebView2NavigationStartingEventArgs args)
     {
-        if (string.IsNullOrWhiteSpace(args.Uri)
-            || args.Uri.StartsWith("about:blank", StringComparison.OrdinalIgnoreCase))
+        if (string.IsNullOrWhiteSpace(args.Uri))
         {
             return;
         }
 
+        if (!Uri.TryCreate(args.Uri, UriKind.Absolute, out var uri))
+        {
+            args.Cancel = true;
+            return;
+        }
+
+        if (uri.Scheme is "about" or "data")
+            return;
+
         args.Cancel = true;
-        OpenExternalHttpLink(args.Uri);
+        OpenExternalHttpLink(uri.ToString());
     }
 
     private void OnNewWindowRequested(CoreWebView2 sender, CoreWebView2NewWindowRequestedEventArgs args)
@@ -157,9 +206,59 @@ public sealed partial class UpdateChangelogView : UserControl
         }
     }
 
+    private void OnActualThemeChanged(FrameworkElement sender, object args)
+    {
+        if (ChangelogWebView.CoreWebView2 is { } core)
+            ApplyThemeToWebView(core);
+    }
+
+    private void ApplyThemeToWebView(CoreWebView2? core)
+    {
+        var dark = ActualTheme == ElementTheme.Dark;
+        try
+        {
+            ChangelogWebView.DefaultBackgroundColor = dark
+                ? Windows.UI.Color.FromArgb(0xFF, 0x1E, 0x1F, 0x22)
+                : Windows.UI.Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF);
+        }
+        catch
+        {
+            // Cosmetic only; the HTML document still carries explicit colors.
+        }
+
+        if (core is null) return;
+
+        try
+        {
+            core.Profile.PreferredColorScheme = dark
+                ? CoreWebView2PreferredColorScheme.Dark
+                : CoreWebView2PreferredColorScheme.Light;
+        }
+        catch
+        {
+            // Some older runtimes may ignore profile color scheme; explicit CSS remains the fallback.
+        }
+    }
+
+    private void ClearSurface()
+    {
+        LoadingHost.Visibility = Visibility.Collapsed;
+        ErrorHost.Visibility = Visibility.Collapsed;
+        ChangelogWebView.Visibility = Visibility.Collapsed;
+    }
+
+    private void ShowLoading()
+    {
+        ErrorHost.Visibility = Visibility.Collapsed;
+        ChangelogWebView.Visibility = Visibility.Collapsed;
+        LoadingHost.Visibility = Visibility.Visible;
+    }
+
     private void ShowError(string message)
     {
         ErrorText.Text = message;
         ErrorHost.Visibility = Visibility.Visible;
+        LoadingHost.Visibility = Visibility.Collapsed;
+        ChangelogWebView.Visibility = Visibility.Collapsed;
     }
 }

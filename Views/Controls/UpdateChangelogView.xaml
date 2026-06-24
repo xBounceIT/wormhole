@@ -11,7 +11,23 @@
                            DefaultBackgroundColor="#1e1f22"
                            HorizontalAlignment="Stretch"
                            VerticalAlignment="Stretch"
+                           Visibility="Collapsed"
                            MinHeight="300" />
+
+        <Grid x:Name="LoadingHost"
+              Background="{ThemeResource LayerFillColorDefaultBrush}"
+              Visibility="Collapsed">
+            <StackPanel HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Spacing="8">
+                <ProgressRing Width="24"
+                              Height="24"
+                              IsActive="True" />
+                <TextBlock Text="Loading changelog..."
+                           Style="{StaticResource CaptionTextBlockStyle}"
+                           Opacity="0.75" />
+            </StackPanel>
+        </Grid>
 
         <Border x:Name="ErrorHost"
                 Background="{ThemeResource LayerFillColorDefaultBrush}"

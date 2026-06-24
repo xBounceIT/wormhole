@@ -14,6 +14,8 @@ internal static class UpdateChangelogFormatter
         if (string.IsNullOrWhiteSpace(markdown)) return string.Empty;
 
         var body = Markdown.ToHtml(markdown.Trim(), Pipeline);
+        if (string.IsNullOrWhiteSpace(body)) return string.Empty;
+
         return BuildDocument(body);
     }
 
@@ -60,6 +62,7 @@ internal static class UpdateChangelogFormatter
           padding: 14px 16px;
           background: var(--wh-bg);
           color: var(--wh-text);
+          overflow-wrap: anywhere;
         }
         :first-child { margin-top: 0; }
         :last-child { margin-bottom: 0; }
@@ -74,7 +77,12 @@ internal static class UpdateChangelogFormatter
         p, ul, ol, pre, blockquote, table { margin: 0 0 12px; }
         ul, ol { padding-left: 22px; }
         li + li { margin-top: 4px; }
-        a { color: var(--wh-link); text-decoration: none; }
+        a {
+          color: var(--wh-link);
+          text-decoration: none;
+          overflow-wrap: anywhere;
+          word-break: break-word;
+        }
         a:hover { text-decoration: underline; }
         code {
           font-family: Consolas, "Cascadia Mono", monospace;
@@ -84,6 +92,7 @@ internal static class UpdateChangelogFormatter
           background: var(--wh-code-bg);
         }
         pre {
+          max-width: 100%;
           overflow-x: auto;
           padding: 10px 12px;
           border-radius: 6px;
@@ -100,7 +109,12 @@ internal static class UpdateChangelogFormatter
         }
         table {
           width: 100%;
+          max-width: 100%;
           border-collapse: collapse;
+        }
+        img {
+          max-width: 100%;
+          height: auto;
         }
         th, td {
           padding: 6px 8px;
