@@ -61,12 +61,34 @@ public class CiscoSecureClientProfileParserTests
     }
 
     [Fact]
+    public void Parse_MissingHostAddress_UsesHostNameAsGateway()
+    {
+        var xml = """
+            <AnyConnectProfile>
+              <ServerList>
+                <HostEntry>
+                  <HostName>vpn.example.com</HostName>
+                  <UserGroup>Employees</UserGroup>
+                </HostEntry>
+              </ServerList>
+            </AnyConnectProfile>
+            """;
+
+        var result = CiscoSecureClientProfileParser.Parse(xml);
+
+        Assert.Equal("vpn.example.com", result.Settings.Host);
+        Assert.Equal(443, result.Settings.Port);
+        Assert.Equal("Employees", result.Settings.Group);
+        Assert.Equal("vpn.example.com", result.ProfileName);
+    }
+
+    [Fact]
     public void Parse_MultipleEntries_UsesFirstEntryWithHostAddress()
     {
         var xml = """
             <AnyConnectProfile>
               <ServerList>
-                <HostEntry><HostName>Empty</HostName></HostEntry>
+                <HostEntry><UserGroup>No gateway</UserGroup></HostEntry>
                 <HostEntry>
                   <HostName>First usable</HostName>
                   <HostAddress>first.example.com</HostAddress>
@@ -93,16 +115,16 @@ public class CiscoSecureClientProfileParserTests
     }
 
     [Fact]
-    public void Parse_MissingHostAddress_IsRejected()
+    public void Parse_MissingGatewayFields_IsRejected()
     {
         var xml = """
             <AnyConnectProfile>
-              <ServerList><HostEntry><HostName>No address</HostName></HostEntry></ServerList>
+              <ServerList><HostEntry><UserGroup>No address</UserGroup></HostEntry></ServerList>
             </AnyConnectProfile>
             """;
 
         var ex = Assert.Throws<InvalidOperationException>(() => CiscoSecureClientProfileParser.Parse(xml));
-        Assert.Contains("HostAddress", ex.Message);
+        Assert.Contains("HostAddress or HostName", ex.Message);
     }
 
     [Fact]

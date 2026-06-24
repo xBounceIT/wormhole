@@ -44,13 +44,15 @@ public static class CiscoSecureClientProfileParser
 
         foreach (var entry in Children(serverList, "HostEntry"))
         {
-            var address = Value(Child(entry, "HostAddress"));
+            var hostAddress = Value(Child(entry, "HostAddress"));
+            var hostName = Value(Child(entry, "HostName"));
+            var address = string.IsNullOrWhiteSpace(hostAddress) ? hostName : hostAddress;
             if (string.IsNullOrWhiteSpace(address))
                 continue;
 
             var (host, port) = ParseHostAddress(address);
             var group = Value(Child(entry, "UserGroup"));
-            var profileName = Value(Child(entry, "HostName"));
+            var profileName = hostName;
             return new Result(
                 new CiscoSecureClientSettings
                 {
@@ -61,7 +63,7 @@ public static class CiscoSecureClientProfileParser
                 string.IsNullOrWhiteSpace(profileName) ? null : profileName.Trim());
         }
 
-        throw new InvalidOperationException("The profile does not contain a HostEntry with a HostAddress value.");
+        throw new InvalidOperationException("The profile does not contain a HostEntry with a HostAddress or HostName value.");
     }
 
     private static (string Host, int Port) ParseHostAddress(string value)
