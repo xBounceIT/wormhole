@@ -459,6 +459,8 @@ public sealed partial class VncView : UserControl
         private int _pendingLength;
         private int _pendingWidth;
         private int _pendingHeight;
+        private bool _snapshotInProgress;
+        private bool _snapshotDirty;
         private NativeFramebuffer? _framebuffer;
         private int _publishQueued;
         private bool _active = true;
@@ -491,6 +493,7 @@ public sealed partial class VncView : UserControl
                     _pendingLength = 0;
                     _pendingWidth = 0;
                     _pendingHeight = 0;
+                    _snapshotDirty = false;
                 }
             }
 
@@ -515,6 +518,7 @@ public sealed partial class VncView : UserControl
                 _pendingLength = 0;
                 _pendingWidth = 0;
                 _pendingHeight = 0;
+                _snapshotDirty = false;
 
                 framebufferToFree = _framebuffer;
                 _framebuffer = null;
@@ -637,33 +641,84 @@ public sealed partial class VncView : UserControl
 
         private void QueueFrameSnapshot(int width, int height, IntPtr address, int length)
         {
+            if (!TryBeginFrameSnapshot()) return;
+
             var pixels = ArrayPool<byte>.Shared.Rent(length);
-            Marshal.Copy(address, pixels, 0, length);
-            for (var i = 3; i < length; i += 4)
+            var committed = false;
+            var snapshotEnded = false;
+            try
             {
-                pixels[i] = 0xFF;
+                Marshal.Copy(address, pixels, 0, length);
+                for (var i = 3; i < length; i += 4)
+                {
+                    pixels[i] = 0xFF;
+                }
+
+                committed = TryCommitFrameSnapshot(width, height, length, pixels);
+                snapshotEnded = true;
+            }
+            finally
+            {
+                if (!snapshotEnded)
+                {
+                    EndFrameSnapshot();
+                }
+                if (!committed)
+                {
+                    ReturnPending(pixels);
+                }
             }
 
-            byte[]? previous = null;
+            if (committed)
+            {
+                QueuePublish();
+            }
+        }
+
+        private bool TryBeginFrameSnapshot()
+        {
             lock (_gate)
             {
-                if (_disposed || !_active)
+                if (_disposed || !_active) return false;
+                if (_snapshotInProgress || _pendingPixels is not null)
                 {
-                    previous = pixels;
+                    _snapshotDirty = true;
+                    return false;
                 }
-                else
+
+                _snapshotInProgress = true;
+                return true;
+            }
+        }
+
+        private void EndFrameSnapshot()
+        {
+            lock (_gate)
+            {
+                _snapshotInProgress = false;
+            }
+        }
+
+        private bool TryCommitFrameSnapshot(int width, int height, int length, byte[] pixels)
+        {
+            byte[]? previous = null;
+            var committed = false;
+            lock (_gate)
+            {
+                _snapshotInProgress = false;
+                if (!_disposed && _active)
                 {
                     previous = _pendingPixels;
                     _pendingPixels = pixels;
                     _pendingLength = length;
                     _pendingWidth = width;
                     _pendingHeight = height;
+                    committed = true;
                 }
             }
-            ReturnPending(previous);
-            if (ReferenceEquals(previous, pixels)) return;
 
-            QueuePublish();
+            ReturnPending(previous);
+            return committed;
         }
 
         private void QueuePublish()
@@ -682,16 +737,19 @@ public sealed partial class VncView : UserControl
             int length;
             int width;
             int height;
+            bool queueDirtySnapshot;
             lock (_gate)
             {
                 pixels = _pendingPixels;
                 length = _pendingLength;
                 width = _pendingWidth;
                 height = _pendingHeight;
+                queueDirtySnapshot = _snapshotDirty;
                 _pendingPixels = null;
                 _pendingLength = 0;
                 _pendingWidth = 0;
                 _pendingHeight = 0;
+                _snapshotDirty = false;
             }
             Interlocked.Exchange(ref _publishQueued, 0);
 
@@ -714,9 +772,17 @@ public sealed partial class VncView : UserControl
             {
                 ReturnPending(pixels);
 
-                if (!_disposed && _active && HasPendingFrame())
+                if (!_disposed && _active)
                 {
-                    QueuePublish();
+                    if (queueDirtySnapshot)
+                    {
+                        QueueCurrentFramebufferSnapshot();
+                    }
+
+                    if (HasPendingFrame())
+                    {
+                        QueuePublish();
+                    }
                 }
             }
         }
@@ -737,6 +803,7 @@ public sealed partial class VncView : UserControl
                 pending = _pendingPixels;
                 _pendingPixels = null;
                 _pendingLength = 0;
+                _snapshotDirty = false;
             }
             ReturnPending(pending);
         }
