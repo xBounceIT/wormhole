@@ -266,10 +266,10 @@ public partial class ConnectionTreeViewModel : ObservableObject
             }
 
             // The stored secret for an SshKey credential is the private-key passphrase, not a
-            // login password — fetch the credential to label the field honestly.
+            // login password — fetch the credential to label the field honestly and to avoid
+            // revealing credentials that this protocol would not actually use for auth.
             var credential = await _credentialRepository.GetByIdAsync(credId);
-            if (profile.Protocol == ProtocolType.Vnc &&
-                (credential is null || credential.Protocol != ProtocolType.Vnc || credential.Kind != CredentialKind.Password))
+            if (!CanRevealSavedCredential(profile.Protocol, credential))
             {
                 await ShowNoStoredCredentialsAsync();
                 return;
@@ -316,6 +316,15 @@ public partial class ConnectionTreeViewModel : ObservableObject
         _dialog.ShowMessageAsync(
             "No credentials",
             "This connection has no stored password or key passphrase.");
+
+    private static bool CanRevealSavedCredential(ProtocolType protocol, CredentialProfile? credential) =>
+        credential is not null && protocol switch
+        {
+            ProtocolType.Ssh => credential.Protocol == ProtocolType.Ssh,
+            ProtocolType.Rdp => credential.Protocol == ProtocolType.Rdp && credential.Kind == CredentialKind.Password,
+            ProtocolType.Vnc => credential.Protocol == ProtocolType.Vnc && credential.Kind == CredentialKind.Password,
+            _ => false,
+        };
 
     [RelayCommand]
     private async Task AddFolder(TreeNodeViewModel? clicked)

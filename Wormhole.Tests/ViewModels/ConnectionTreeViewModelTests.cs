@@ -592,7 +592,13 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         var dialog = new FakeDialogService();
         var creds = new FakeCredentialService();
         creds.Passwords[credentialId] = "inherited-pw";
-        var vm = CreateVm(dialog, creds);
+        var credRepo = new FakeCredentialRepository(new CredentialProfile
+        {
+            Id = credentialId,
+            Protocol = ProtocolType.Ssh,
+            Kind = CredentialKind.Password,
+        });
+        var vm = CreateVm(dialog, creds, credRepo);
         await vm.RefreshAsync();
 
         var childVm = vm.Roots.Single().Children.Single();
@@ -636,6 +642,41 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
 
         Assert.Equal(0, dialog.ShowCredentialsCount);
         Assert.NotEqual("ssh-secret", dialog.LastShownSecret);
+    }
+
+    [Fact]
+    public async Task ShowCredentials_SshConnectionInheritsVncCredential_DoesNotRevealSecret()
+    {
+        var credentialId = Guid.NewGuid();
+        var folder = new ConnectionNode
+        {
+            Kind = NodeKind.Folder,
+            Name = "shared",
+            CredentialMode = CredentialBindingMode.Saved,
+            CredentialId = credentialId,
+        };
+        await _repo.AddAsync(folder);
+        var child = MakeConnectionDraft("web", ProtocolType.Ssh, "host", 22, "alice");
+        child.ParentId = folder.Id;
+        await _repo.AddAsync(child);
+
+        var dialog = new FakeDialogService();
+        var creds = new FakeCredentialService();
+        creds.Passwords[credentialId] = "vnc-secret";
+        var credRepo = new FakeCredentialRepository(new CredentialProfile
+        {
+            Id = credentialId,
+            Protocol = ProtocolType.Vnc,
+            Kind = CredentialKind.Password,
+        });
+        var vm = CreateVm(dialog, creds, credRepo);
+        await vm.RefreshAsync();
+
+        var childVm = vm.Roots.Single().Children.Single();
+        await vm.ShowCredentialsCommand.ExecuteAsync(childVm);
+
+        Assert.Equal(0, dialog.ShowCredentialsCount);
+        Assert.NotEqual("vnc-secret", dialog.LastShownSecret);
     }
 
     [Fact]
