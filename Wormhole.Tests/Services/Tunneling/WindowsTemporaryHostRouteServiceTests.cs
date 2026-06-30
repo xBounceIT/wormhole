@@ -103,6 +103,33 @@ public class WindowsTemporaryHostRouteServiceTests
     }
 
     [Fact]
+    public async Task PrepareGatewayBypassAsync_BypassEnabled_UsesNonCancelableTokenForRouteAdd()
+    {
+        var ip = IPAddress.Parse("203.0.113.10");
+        var gateway = IPAddress.Parse("192.168.1.1");
+        var system = NewSystem(isAdministrator: true);
+        system.Resolve("rpv.example.com", ip);
+        system.Adapters.Add(VpnAdapter());
+        system.Adapters.Add(PhysicalAdapter(gateway));
+        system.Routes[ip.ToString()] = DefaultRoute(VpnInterfaceIndex);
+        system.ThrowIfAddReceivesCancelableToken = true;
+        using var cts = new CancellationTokenSource();
+
+        var lease = await NewService(system).PrepareGatewayBypassAsync(
+            "cfg", GatewayHosts, enableBypass: true, cts.Token);
+        try
+        {
+            Assert.Single(system.AddedRoutes);
+        }
+        finally
+        {
+            await lease.DisposeAsync();
+        }
+
+        Assert.Single(system.DeletedRoutes);
+    }
+
+    [Fact]
     public async Task PrepareGatewayBypassAsync_BypassEnabled_SkipsFasterVirtualDefaultGateway()
     {
         var ip = IPAddress.Parse("203.0.113.10");
@@ -356,6 +383,7 @@ public class WindowsTemporaryHostRouteServiceTests
         public List<WindowsRouteAdapter> Adapters { get; } = new();
         public List<RouteOperation> AddedRoutes { get; } = new();
         public List<RouteOperation> DeletedRoutes { get; } = new();
+        public bool ThrowIfAddReceivesCancelableToken { get; set; }
         public TaskCompletionSource<object?>? DeleteStarted { get; set; }
         public TaskCompletionSource<object?>? ContinueDelete { get; set; }
 
@@ -384,6 +412,8 @@ public class WindowsTemporaryHostRouteServiceTests
             CancellationToken cancellationToken)
         {
             AddedRoutes.Add(new RouteOperation(destination, gateway, interfaceIndex));
+            if (ThrowIfAddReceivesCancelableToken && cancellationToken.CanBeCanceled)
+                throw new OperationCanceledException(cancellationToken);
             return Task.CompletedTask;
         }
 

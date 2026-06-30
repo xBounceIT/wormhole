@@ -305,7 +305,8 @@ public sealed class WindowsTemporaryHostRouteService : IWindowsTemporaryHostRout
                 return new RouteReference(this, key);
             }
 
-            await _system.AddHostRouteAsync(key.Destination, key.Gateway, key.InterfaceIndex, cancellationToken)
+            cancellationToken.ThrowIfCancellationRequested();
+            await _system.AddHostRouteAsync(key.Destination, key.Gateway, key.InterfaceIndex, CancellationToken.None)
                 .ConfigureAwait(false);
             _activeRoutes[key] = new RefCountedRoute { RefCount = 1 };
             return new RouteReference(this, key);
