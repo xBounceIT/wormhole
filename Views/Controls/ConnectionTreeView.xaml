@@ -189,6 +189,7 @@
                                       Tag="{x:Bind}"
                                       Click="OnSelectionCheckBoxClick"
                                       Tapped="OnSelectionCheckBoxTapped"
+                                      DoubleTapped="OnSelectionCheckBoxDoubleTapped"
                                       Opacity="0"
                                       IsHitTestVisible="False"
                                       IsTabStop="False"

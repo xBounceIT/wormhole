@@ -177,8 +177,13 @@ public sealed partial class ConnectionTreeView : UserControl
         }
     }
 
-#pragma warning disable CA1822 // XAML-wired event handler (Tapped="OnSelectionCheckBoxTapped")
+#pragma warning disable CA1822 // XAML-wired event handlers for checkbox gesture routing
     private void OnSelectionCheckBoxTapped(object sender, TappedRoutedEventArgs e)
+    {
+        e.Handled = true;
+    }
+
+    private void OnSelectionCheckBoxDoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
     {
         e.Handled = true;
     }
