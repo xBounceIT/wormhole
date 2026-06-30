@@ -960,28 +960,6 @@ public sealed class SshSessionViewModelTests
     }
 
     [Fact]
-    public void BuildConnectFailureMessage_WhenNetworkFailureAfterSshConnectStarted_ReportsReachabilityProblem()
-    {
-        var message = SshSessionViewModel.BuildConnectFailureMessage(
-            CreateProfile(),
-            new TimeoutException("socket timed out"),
-            sshConnectStarted: true);
-
-        Assert.Equal(EndpointUnavailableMessageUnderTest, message);
-    }
-
-    [Fact]
-    public void BuildConnectFailureMessage_WhenNonNetworkFailure_KeepsOriginalMessage()
-    {
-        var message = SshSessionViewModel.BuildConnectFailureMessage(
-            CreateProfile(),
-            new InvalidOperationException("unexpected protocol failure"),
-            sshConnectStarted: true);
-
-        Assert.Equal("unexpected protocol failure", message);
-    }
-
-    [Fact]
     public void ReplayBuffer_CapturesDataReceivedFromSession()
     {
         var (vm, session) = CreateConnectedVm();

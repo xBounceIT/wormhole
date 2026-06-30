@@ -863,7 +863,6 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         var token = cts.Token;
         ITunnelInstance? pendingTunnel = null;
         ISshSession? pendingSession = null;
-        var sshConnectStarted = false;
 
         async Task<bool> CleanupPendingConnectArtifactsAndIsCurrentAsync()
         {
@@ -950,7 +949,6 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             pendingTunnel = null;
 
             Progress.Begin(ConnectionPhase.Connect);
-            sshConnectStarted = true;
             pendingSession = await _sshService.ConnectAsync(profile, creds, _initialSize, _tunnel, token).ConfigureAwait(true);
             if (!IsAttemptCurrent(teardownGeneration))
             {
@@ -1096,7 +1094,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         {
             if (!await CleanupPendingConnectArtifactsAndIsCurrentAsync().ConfigureAwait(true)) return;
             await SafeDisposeSessionAsync().ConfigureAwait(true);
-            ReportFailure(BuildConnectFailureMessage(profile, ex, sshConnectStarted));
+            ReportFailure(ex.Message);
             _logger.LogError(ex, "SSH connect failed for {Host}.", profile.Host);
         }
         finally
@@ -1161,42 +1159,6 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     internal static string BuildEndpointUnavailableMessage(ConnectionProfile profile) =>
         $"Could not reach SSH server at {FormatEndpoint(profile)}. " +
         "Check that the VM is powered on and that the host, port, and VPN route are correct.";
-
-    internal static string BuildConnectFailureMessage(
-        ConnectionProfile profile,
-        Exception exception,
-        bool sshConnectStarted) =>
-        sshConnectStarted && LooksLikeEndpointFailure(exception)
-            ? BuildEndpointUnavailableMessage(profile)
-            : exception.Message;
-
-    private static bool LooksLikeEndpointFailure(Exception exception)
-    {
-        for (var current = exception; current is not null; current = current.InnerException)
-        {
-            if (current is TimeoutException or SshOperationTimeoutException or System.Net.Sockets.SocketException)
-            {
-                return true;
-            }
-
-            var message = current.Message;
-            if (ContainsOrdinalIgnoreCase(message, "connection refused") ||
-                ContainsOrdinalIgnoreCase(message, "actively refused") ||
-                ContainsOrdinalIgnoreCase(message, "connection timed out") ||
-                ContainsOrdinalIgnoreCase(message, "host unreachable") ||
-                ContainsOrdinalIgnoreCase(message, "network unreachable") ||
-                ContainsOrdinalIgnoreCase(message, "no route to host") ||
-                ContainsOrdinalIgnoreCase(message, "SOCKS5: CONNECT failed"))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static bool ContainsOrdinalIgnoreCase(string value, string fragment) =>
-        value.Contains(fragment, StringComparison.OrdinalIgnoreCase);
 
     private static string FormatEndpoint(ConnectionProfile profile)
     {
