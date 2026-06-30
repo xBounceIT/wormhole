@@ -292,6 +292,8 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
 
     internal static bool IsRouteSensitiveFailure(Exception ex)
     {
+        if (IsTlsAuthenticationFailure(ex)) return false;
+
         for (Exception? e = ex; e is not null; e = e.InnerException)
         {
             if (e is TimeoutException or TaskCanceledException or HttpRequestException or System.IO.IOException)

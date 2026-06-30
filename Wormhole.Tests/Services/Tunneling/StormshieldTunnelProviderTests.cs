@@ -659,6 +659,15 @@ public class StormshieldTunnelProviderTests
     }
 
     [Fact]
+    public void NativeVpnConflictEnrichment_TlsAuthenticationFailure_IsNotRouteSensitive()
+    {
+        var lease = NativeVpnConflictLease();
+
+        Assert.False(StormshieldTunnelProvider.ShouldEnrichNativeVpnConflict(
+            new[] { lease }, NewTlsValidationException()));
+    }
+
+    [Fact]
     public void NativeVpnConflictEnrichment_OpenVpnSidecarTimeout_IsRouteSensitive()
     {
         var lease = NativeVpnConflictLease();
