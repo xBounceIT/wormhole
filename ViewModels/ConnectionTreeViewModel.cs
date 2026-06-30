@@ -11,6 +11,8 @@ namespace Wormhole.ViewModels;
 
 public partial class ConnectionTreeViewModel : ObservableObject
 {
+    private const int MaxDisplayedSearchMatches = 500;
+
     private readonly IConnectionRepository _repository;
     private readonly InheritanceResolver _inheritanceResolver;
     private readonly ISessionTabFactory _tabFactory;
@@ -21,8 +23,10 @@ public partial class ConnectionTreeViewModel : ObservableObject
     private IReadOnlyList<ConnectionNode> _lastSnapshot = Array.Empty<ConnectionNode>();
     private Dictionary<Guid, ConnectionNode> _lastSnapshotById = new();
     private bool _isLoading;
+    private readonly BulkObservableCollection<TreeNodeViewModel> _searchDisplayRoots = new();
 
     public BulkObservableCollection<TreeNodeViewModel> Roots { get; } = new();
+    public BulkObservableCollection<TreeNodeViewModel> DisplayRoots => IsSearchActive ? _searchDisplayRoots : Roots;
     public BulkObservableCollection<TreeNodeViewModel> SelectedNodes { get; } = new();
 
     [ObservableProperty]
@@ -30,6 +34,14 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     [ObservableProperty]
     private string searchText = string.Empty;
+
+    [ObservableProperty]
+    private bool isSearchActive;
+
+    [ObservableProperty]
+    private string searchStatusText = string.Empty;
+
+    partial void OnIsSearchActiveChanged(bool value) => OnPropertyChanged(nameof(DisplayRoots));
 
     // Captured the moment a filter starts so clearing the search restores the tree
     // to exactly how the user had it expanded before they typed.
@@ -161,6 +173,8 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     public bool ShouldRejectDragSelection(IEnumerable<TreeNodeViewModel> draggedNodes)
     {
+        if (IsSearchActive) return true;
+
         var draggedIds = new HashSet<Guid>();
         foreach (var node in draggedNodes)
         {
@@ -659,6 +673,8 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     public async Task PersistTreeStructureAsync()
     {
+        if (IsSearchActive) return;
+
         // The TreeView has already mutated Roots/Children to reflect the drop. Validate
         // the new shape, then write back any node whose ParentId or SortOrder changed.
         // A folder dropped onto its own descendant can disappear from Roots (TreeView removes
@@ -851,13 +867,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
         Reconcile(Roots, topLevel, byParent);
 
         PruneSelectionToSnapshot();
-
-        // New nodes default to IsVisible=true, so skip the rewalk when no filter is
-        // active — Reconcile already produced the correct state.
-        if (!string.IsNullOrWhiteSpace(SearchText))
-        {
-            ApplyFilter(SearchText);
-        }
+        ApplyFilter(SearchText);
     }
 
     private void ApplyFilter(string query)
@@ -865,88 +875,120 @@ public partial class ConnectionTreeViewModel : ObservableObject
         var trimmed = query.Trim();
         if (trimmed.Length == 0)
         {
-            MarkAllVisible(Roots);
+            ApplyFullProjection();
             return;
         }
 
-        EvaluateFilter(Roots, trimmed);
+        ApplySearchProjection(trimmed);
     }
 
-    private static void MarkAllVisible(IEnumerable<TreeNodeViewModel> level)
+    private void ApplyFullProjection()
     {
-        foreach (var node in EnumerateSubtree(level))
+        foreach (var node in EnumerateSubtree(Roots))
         {
-            node.IsVisible = true;
+            node.UseFullDisplayChildren();
         }
+
+        SearchStatusText = string.Empty;
+        IsSearchActive = false;
     }
 
-    private static bool EvaluateFilter(IEnumerable<TreeNodeViewModel> level, string query)
+    private void ApplySearchProjection(string query)
     {
-        var anyVisible = false;
+        var projection = BuildSearchProjection(Roots, query);
+        foreach (var node in projection.IncludedNodes)
+        {
+            var children = projection.ChildrenByParent.TryGetValue(node.Node.Id, out var projectedChildren)
+                ? projectedChildren
+                : (IReadOnlyList<TreeNodeViewModel>)Array.Empty<TreeNodeViewModel>();
+            node.UseFilteredDisplayChildren(children);
+        }
+
+        _searchDisplayRoots.ReplaceAllIfChanged(projection.Roots);
+        SearchStatusText = BuildSearchStatusText(projection.DisplayedMatches, projection.TotalMatches);
+        IsSearchActive = true;
+    }
+
+    private static SearchProjection BuildSearchProjection(BulkObservableCollection<TreeNodeViewModel> roots, string query)
+    {
+        var projection = new SearchProjection();
+        var path = new List<TreeNodeViewModel>();
         var seen = new HashSet<Guid>();
-        var stack = new Stack<FilterFrame>();
-        PushFilterFramesReverse(stack, level, ancestorMatched: false);
+        var stack = new Stack<SearchWalkFrame>();
+
+        for (var i = roots.Count - 1; i >= 0; i--)
+        {
+            stack.Push(new SearchWalkFrame(roots[i], Depth: 0));
+        }
 
         while (stack.Count > 0)
         {
             var frame = stack.Pop();
             var node = frame.Node;
-            if (frame.Exiting)
-            {
-                var hasVisibleChild = false;
-                foreach (var child in node.Children)
-                {
-                    if (child.IsVisible)
-                    {
-                        hasVisibleChild = true;
-                        break;
-                    }
-                }
-
-                node.IsVisible = hasVisibleChild;
-                if (hasVisibleChild)
-                {
-                    node.IsExpanded = true;
-                    anyVisible = true;
-                }
-                continue;
-            }
-
             if (!seen.Add(node.Node.Id)) continue;
 
-            if (frame.AncestorMatched)
+            while (path.Count > frame.Depth)
             {
-                node.IsVisible = true;
-                anyVisible = true;
-                PushFilterFramesReverse(stack, node.Children, ancestorMatched: true);
-                continue;
+                path.RemoveAt(path.Count - 1);
+            }
+            path.Add(node);
+
+            if (node.Name.Contains(query, StringComparison.OrdinalIgnoreCase))
+            {
+                projection.TotalMatches++;
+                if (projection.DisplayedMatches < MaxDisplayedSearchMatches)
+                {
+                    projection.DisplayedMatches++;
+                    IncludeSearchPath(projection, path);
+                }
             }
 
-            var nameMatches = node.Name.Contains(query, StringComparison.OrdinalIgnoreCase);
-            if (node.Kind == NodeKind.Folder && nameMatches)
+            for (var i = node.Children.Count - 1; i >= 0; i--)
             {
-                // Folder name matched — show the folder and everything beneath it, and
-                // expand this folder so the contents the user searched for are visible.
-                // Descendant expansion is deliberately left alone; clearing the search will
-                // restore the pre-filter snapshot for every folder.
-                node.IsVisible = true;
-                node.IsExpanded = true;
-                anyVisible = true;
-                PushFilterFramesReverse(stack, node.Children, ancestorMatched: true);
-            }
-            else if (node.Kind == NodeKind.Folder)
-            {
-                stack.Push(new FilterFrame(node, AncestorMatched: false, Exiting: true));
-                PushFilterFramesReverse(stack, node.Children, ancestorMatched: false);
-            }
-            else
-            {
-                node.IsVisible = nameMatches;
-                if (nameMatches) anyVisible = true;
+                stack.Push(new SearchWalkFrame(node.Children[i], frame.Depth + 1));
             }
         }
 
-        return anyVisible;
+        return projection;
+    }
+
+    private static void IncludeSearchPath(SearchProjection projection, List<TreeNodeViewModel> path)
+    {
+        for (var i = 0; i < path.Count; i++)
+        {
+            var node = path[i];
+            if (projection.IncludedIds.Add(node.Node.Id))
+            {
+                projection.IncludedNodes.Add(node);
+                if (i == 0)
+                {
+                    projection.Roots.Add(node);
+                }
+                else
+                {
+                    var parent = path[i - 1];
+                    if (!projection.ChildrenByParent.TryGetValue(parent.Node.Id, out var siblings))
+                    {
+                        siblings = new List<TreeNodeViewModel>();
+                        projection.ChildrenByParent[parent.Node.Id] = siblings;
+                    }
+                    siblings.Add(node);
+                }
+            }
+
+            if (i < path.Count - 1 && node.Kind == NodeKind.Folder)
+            {
+                node.IsExpanded = true;
+            }
+        }
+    }
+
+    private static string BuildSearchStatusText(int displayedMatches, int totalMatches)
+    {
+        if (totalMatches == 0) return "No matches";
+        return displayedMatches < totalMatches
+            ? $"Showing first {displayedMatches} of {totalMatches} matches"
+            : string.Empty;
     }
 
     private static Dictionary<Guid, bool> SnapshotExpandState(IEnumerable<TreeNodeViewModel> level)
@@ -1173,30 +1215,19 @@ public partial class ConnectionTreeViewModel : ObservableObject
         }
     }
 
-    private static void PushFilterFramesReverse(
-        Stack<FilterFrame> stack,
-        IEnumerable<TreeNodeViewModel> children,
-        bool ancestorMatched)
-    {
-        if (children is IList<TreeNodeViewModel> list)
-        {
-            for (var i = list.Count - 1; i >= 0; i--)
-            {
-                stack.Push(new FilterFrame(list[i], ancestorMatched, Exiting: false));
-            }
-            return;
-        }
-
-        var snapshot = new List<TreeNodeViewModel>(children);
-        for (var i = snapshot.Count - 1; i >= 0; i--)
-        {
-            stack.Push(new FilterFrame(snapshot[i], ancestorMatched, Exiting: false));
-        }
-    }
-
     private readonly record struct ReorderFrame(TreeNodeViewModel Node, Guid? ParentId, int SortOrder);
 
-    private readonly record struct FilterFrame(TreeNodeViewModel Node, bool AncestorMatched, bool Exiting);
+    private readonly record struct SearchWalkFrame(TreeNodeViewModel Node, int Depth);
+
+    private sealed class SearchProjection
+    {
+        public List<TreeNodeViewModel> Roots { get; } = new();
+        public Dictionary<Guid, List<TreeNodeViewModel>> ChildrenByParent { get; } = new();
+        public HashSet<Guid> IncludedIds { get; } = new();
+        public List<TreeNodeViewModel> IncludedNodes { get; } = new();
+        public int TotalMatches { get; set; }
+        public int DisplayedMatches { get; set; }
+    }
 
     private readonly record struct ReconcileFrame(
         BulkObservableCollection<TreeNodeViewModel> Current,
@@ -1232,6 +1263,8 @@ public sealed partial class TreeNodeViewModel : ObservableObject
     // owning ConnectionTreeViewModel; null in unit tests that construct nodes directly,
     // where Host falls back to the node's own field.
     private readonly Func<ConnectionNode, string?>? resolveEffectiveHost;
+    private readonly BulkObservableCollection<TreeNodeViewModel> filteredDisplayChildren = new();
+    private bool useFilteredDisplayChildren;
 
     public TreeNodeViewModel(ConnectionNode node, Func<ConnectionNode, string?>? resolveEffectiveHost = null)
     {
@@ -1243,6 +1276,7 @@ public sealed partial class TreeNodeViewModel : ObservableObject
     private ConnectionNode node = null!;
 
     public BulkObservableCollection<TreeNodeViewModel> Children { get; } = new();
+    public BulkObservableCollection<TreeNodeViewModel> DisplayChildren => useFilteredDisplayChildren ? filteredDisplayChildren : Children;
     public string Name => Node.Name;
     public NodeKind Kind => Node.Kind;
     public bool IsConnection => Kind == NodeKind.Connection;
@@ -1262,13 +1296,25 @@ public sealed partial class TreeNodeViewModel : ObservableObject
     // reassigning it, so OnNodeChanged doesn't fire.
     public void NotifyHostChanged() => OnPropertyChanged(nameof(Host));
 
+    public void UseFullDisplayChildren()
+    {
+        if (!useFilteredDisplayChildren) return;
+
+        useFilteredDisplayChildren = false;
+        OnPropertyChanged(nameof(DisplayChildren));
+    }
+
+    public void UseFilteredDisplayChildren(IReadOnlyList<TreeNodeViewModel> children)
+    {
+        filteredDisplayChildren.ReplaceAllIfChanged(children);
+        if (useFilteredDisplayChildren) return;
+
+        useFilteredDisplayChildren = true;
+        OnPropertyChanged(nameof(DisplayChildren));
+    }
+
     [ObservableProperty]
     private bool isExpanded;
-
-    // Drives the per-row Visibility binding when a search filter is active.
-    // Default true so unfiltered loads render the whole tree.
-    [ObservableProperty]
-    private bool isVisible = true;
 
     public string Glyph => Kind == NodeKind.Folder
         ? Glyphs.Folder
