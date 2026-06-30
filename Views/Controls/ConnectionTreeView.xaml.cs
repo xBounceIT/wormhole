@@ -1,3 +1,4 @@
+using System.Collections.Specialized;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -5,6 +6,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
+using Windows.System;
 using Wormhole.Models;
 using Wormhole.ViewModels;
 
@@ -12,10 +14,8 @@ namespace Wormhole.Views.Controls;
 
 public sealed partial class ConnectionTreeView : UserControl
 {
-    private const double SelectionCheckBoxScale = 0.86;
-
     private bool _loaded;
-    private readonly HashSet<TreeViewItem> _realizedTreeItems = new();
+    private readonly Dictionary<TreeViewItem, CheckBox> _selectionCheckBoxes = new();
     private TreeViewItem? _hoveredTreeItem;
 
     public ConnectionTreeViewModel ViewModel { get; }
@@ -23,6 +23,7 @@ public sealed partial class ConnectionTreeView : UserControl
     public ConnectionTreeView()
     {
         ViewModel = App.Current.Services.GetRequiredService<ConnectionTreeViewModel>();
+        ViewModel.SelectedNodes.CollectionChanged += OnSelectedNodesChanged;
         this.InitializeComponent();
         this.Loaded += async (_, _) =>
         {
@@ -58,35 +59,25 @@ public sealed partial class ConnectionTreeView : UserControl
 
     private void OnDragItemsStarting(TreeView sender, TreeViewDragItemsStartingEventArgs args)
     {
-        if (ViewModel.ShouldRejectDragSelection(args.Items.OfType<TreeNodeViewModel>()))
+        var draggedNodes = args.Items.OfType<TreeNodeViewModel>().ToList();
+        // With SelectionMode=None, WinUI can only reorder the cursor item;
+        // cancel checked batch drags instead of persisting a partial move.
+        if (ViewModel.ShouldCancelDragSelection(draggedNodes) ||
+            ViewModel.ShouldRejectDragSelection(draggedNodes))
         {
             args.Cancel = true;
         }
-    }
-
-    private void OnTreeSelectionChanged(TreeView sender, TreeViewSelectionChangedEventArgs args)
-    {
-        var selected = new List<TreeNodeViewModel>(sender.SelectedItems.Count);
-        foreach (var item in sender.SelectedItems)
-        {
-            if (item is TreeNodeViewModel node)
-            {
-                selected.Add(node);
-            }
-        }
-
-        ViewModel.SetSelectedNodes(selected);
-        UpdateSelectionCheckboxChrome();
     }
 
     private void OnTreeItemLoaded(object sender, RoutedEventArgs e)
     {
         if (sender is not TreeViewItem item) return;
 
-        _realizedTreeItems.Add(item);
         item.DispatcherQueue.TryEnqueue(() =>
         {
-            ConfigureSelectionCheckBox(item);
+            if (!item.IsLoaded) return;
+
+            SyncSelectionCheckBox(item);
             UpdateSelectionCheckboxChrome();
         });
     }
@@ -95,7 +86,7 @@ public sealed partial class ConnectionTreeView : UserControl
     {
         if (sender is not TreeViewItem item) return;
 
-        _realizedTreeItems.Remove(item);
+        _selectionCheckBoxes.Remove(item);
         if (ReferenceEquals(_hoveredTreeItem, item))
         {
             _hoveredTreeItem = null;
@@ -103,12 +94,38 @@ public sealed partial class ConnectionTreeView : UserControl
         }
     }
 
+    private void OnTreeItemGotFocus(object sender, RoutedEventArgs e)
+    {
+        if (sender is not TreeViewItem { DataContext: TreeNodeViewModel vm } item ||
+            !OwnsOriginalSource(item, e.OriginalSource))
+        {
+            return;
+        }
+
+        ViewModel.SelectedNode = vm;
+    }
+
+    private void OnTreeItemKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != VirtualKey.Space ||
+            e.OriginalSource is CheckBox ||
+            sender is not TreeViewItem { DataContext: TreeNodeViewModel vm } item ||
+            !OwnsOriginalSource(item, e.OriginalSource))
+        {
+            return;
+        }
+
+        ViewModel.SetNodeSelection(vm, !ViewModel.IsSelected(vm));
+        ViewModel.SelectedNode = vm;
+        e.Handled = true;
+    }
+
     private void OnTreeItemPointerEntered(object sender, PointerRoutedEventArgs e)
     {
         if (sender is not TreeViewItem item) return;
 
         _hoveredTreeItem = item;
-        ConfigureSelectionCheckBox(item);
+        SyncSelectionCheckBox(item);
         UpdateSelectionCheckboxChrome();
     }
 
@@ -146,18 +163,38 @@ public sealed partial class ConnectionTreeView : UserControl
         }
     }
 
-#pragma warning disable CA1822 // XAML-wired event handler (ItemInvoked="OnTreeItemInvoked")
     private void OnTreeItemInvoked(TreeView sender, TreeViewItemInvokedEventArgs args)
     {
         // Single-click on a folder toggles expansion so the entire row is a hit target.
-        // Connections fall through to the DoubleTapped handler to avoid accidental opens.
-        if (args.InvokedItem is TreeNodeViewModel vm && vm.Kind == NodeKind.Folder)
+        // Connections still open via DoubleTapped to avoid accidental session opens.
+        if (args.InvokedItem is not TreeNodeViewModel vm) return;
+
+        ViewModel.SelectedNode = vm;
+        if (vm.Kind == NodeKind.Folder)
         {
             vm.IsExpanded = !vm.IsExpanded;
             args.Handled = true;
         }
     }
+
+#pragma warning disable CA1822 // XAML-wired event handlers for checkbox gesture routing
+    private void OnSelectionCheckBoxTapped(object sender, TappedRoutedEventArgs e)
+    {
+        e.Handled = true;
+    }
+
+    private void OnSelectionCheckBoxDoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    {
+        e.Handled = true;
+    }
 #pragma warning restore CA1822
+
+    private void OnSelectionCheckBoxClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not CheckBox { Tag: TreeNodeViewModel vm } checkBox) return;
+
+        ViewModel.SetNodeSelection(vm, checkBox.IsChecked == true);
+    }
 
     // Per-node MenuFlyout items dispatch via Click because ElementName bindings
     // can't reach Root from inside a Popup nested in a DataTemplate.
@@ -219,66 +256,105 @@ public sealed partial class ConnectionTreeView : UserControl
         }
     }
 
+
     private TreeNodeViewModel? SingleSelectedNode()
     {
-        TreeNodeViewModel? selected = null;
-        foreach (var item in Tree.SelectedItems)
+        if (ViewModel.SelectedNodes.Count == 1) return ViewModel.SelectedNodes[0];
+        if (ViewModel.SelectedNodes.Count > 1) return null;
+        return ViewModel.SelectedNode;
+    }
+
+    private void OnSelectedNodesChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        foreach (var item in _selectionCheckBoxes.Keys.ToArray())
         {
-            if (item is not TreeNodeViewModel node) continue;
-            if (selected is not null) return null;
-            selected = node;
+            SyncSelectionCheckBox(item);
         }
 
-        return selected ?? Tree.SelectedItem as TreeNodeViewModel;
+        UpdateSelectionCheckboxChrome();
     }
 
     private void UpdateSelectionCheckboxChrome()
     {
-        var showAll = Tree.SelectedItems.Count > 0;
-        foreach (var item in _realizedTreeItems)
+        var showAll = ViewModel.SelectedNodes.Count > 0;
+        foreach (var pair in _selectionCheckBoxes)
         {
-            var checkBox = ConfigureSelectionCheckBox(item);
-            if (checkBox is null) continue;
-
-            var show = showAll || ReferenceEquals(item, _hoveredTreeItem);
-            checkBox.Opacity = show ? 1 : 0;
-            checkBox.IsHitTestVisible = show;
+            var show = showAll || ReferenceEquals(pair.Key, _hoveredTreeItem);
+            pair.Value.Opacity = show ? 1 : 0;
+            pair.Value.IsHitTestVisible = show;
+            pair.Value.IsTabStop = show;
+            pair.Value.IsEnabled = show;
         }
     }
 
-    private static CheckBox? ConfigureSelectionCheckBox(TreeViewItem item)
+    private static bool OwnsOriginalSource(TreeViewItem item, object originalSource)
     {
-        item.ApplyTemplate();
+        return originalSource is DependencyObject source &&
+               ReferenceEquals(FindOwningTreeViewItem(source), item);
+    }
+
+    private static TreeViewItem? FindOwningTreeViewItem(DependencyObject source)
+    {
+        var current = source;
+        while (current is not null)
+        {
+            if (current is TreeViewItem item) return item;
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return null;
+    }
+
+    private CheckBox? RegisterSelectionCheckBox(TreeViewItem item)
+    {
+        if (_selectionCheckBoxes.TryGetValue(item, out var cached))
+        {
+            return cached;
+        }
 
         var checkBox = FindSelectionCheckBox(item);
         if (checkBox is null) return null;
 
-        checkBox.Width = 32;
-        checkBox.MinWidth = 32;
-        checkBox.MinHeight = 28;
-        checkBox.Margin = new Thickness(10, 0, 0, 0);
-        checkBox.RenderTransformOrigin = new Point(0.5, 0.5);
-        checkBox.RenderTransform = new ScaleTransform
-        {
-            ScaleX = SelectionCheckBoxScale,
-            ScaleY = SelectionCheckBoxScale,
-        };
+        _selectionCheckBoxes[item] = checkBox;
         return checkBox;
+    }
+
+    private void SyncSelectionCheckBox(TreeViewItem item)
+    {
+        var checkBox = RegisterSelectionCheckBox(item);
+        if (checkBox is not null)
+        {
+            SyncSelectionCheckBox(item, checkBox);
+        }
+    }
+
+    private void SyncSelectionCheckBox(TreeViewItem item, CheckBox checkBox)
+    {
+        var node = checkBox.Tag as TreeNodeViewModel ?? item.DataContext as TreeNodeViewModel;
+        var shouldBeChecked = node is not null && ViewModel.IsSelected(node);
+        if (checkBox.IsChecked != shouldBeChecked)
+        {
+            checkBox.IsChecked = shouldBeChecked;
+        }
     }
 
     private static CheckBox? FindSelectionCheckBox(DependencyObject root)
     {
-        var childCount = VisualTreeHelper.GetChildrenCount(root);
-        for (var i = 0; i < childCount; i++)
+        var queue = new Queue<DependencyObject>();
+        queue.Enqueue(root);
+        while (queue.Count > 0)
         {
-            var child = VisualTreeHelper.GetChild(root, i);
-            if (child is CheckBox { Name: "MultiSelectCheckBox" } checkBox)
+            var node = queue.Dequeue();
+            if (node is CheckBox { Name: "SelectCheckBox" } checkBox)
             {
                 return checkBox;
             }
 
-            var result = FindSelectionCheckBox(child);
-            if (result is not null) return result;
+            var childCount = VisualTreeHelper.GetChildrenCount(node);
+            for (var i = 0; i < childCount; i++)
+            {
+                queue.Enqueue(VisualTreeHelper.GetChild(node, i));
+            }
         }
 
         return null;

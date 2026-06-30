@@ -486,6 +486,10 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         Assert.Empty(await _repo.GetAllAsync());
         Assert.False(creds.Passwords.ContainsKey(child.Id));
         Assert.False(creds.Passwords.ContainsKey(leaf.Id));
+        Assert.Empty(vm.SelectedNodes);
+        Assert.Null(vm.SelectedNode);
+        Assert.False(vm.IsSelected(parentVm));
+        Assert.False(vm.IsSelected(leafVm));
     }
 
     [Fact]
@@ -1239,6 +1243,49 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task ShouldCancelDragSelection_DraggingCheckedNodeInBatchReturnsTrue()
+    {
+        var parent = new ConnectionNode { Kind = NodeKind.Folder, Name = "Parent", SortOrder = 0 };
+        var sibling = MakeConnectionDraft("sibling", ProtocolType.Ssh, "sibling.example.com", 22, "bob");
+        sibling.SortOrder = 1;
+
+        await _repo.AddAsync(parent);
+        await _repo.AddAsync(sibling);
+
+        var vm = CreateVm(new FakeDialogService());
+        await vm.RefreshAsync();
+
+        var parentVm = vm.Roots.Single(r => r.Name == "Parent");
+        var siblingVm = vm.Roots.Single(r => r.Name == "sibling");
+        vm.SetSelectedNodes(new[] { parentVm, siblingVm });
+
+        Assert.True(vm.ShouldCancelDragSelection(new[] { parentVm }));
+    }
+
+    [Fact]
+    public async Task ShouldCancelDragSelection_DraggingUncheckedNodeReturnsFalse()
+    {
+        var first = new ConnectionNode { Kind = NodeKind.Folder, Name = "First", SortOrder = 0 };
+        var second = new ConnectionNode { Kind = NodeKind.Folder, Name = "Second", SortOrder = 1 };
+        var third = MakeConnectionDraft("third", ProtocolType.Ssh, "third.example.com", 22, "eve");
+        third.SortOrder = 2;
+
+        await _repo.AddAsync(first);
+        await _repo.AddAsync(second);
+        await _repo.AddAsync(third);
+
+        var vm = CreateVm(new FakeDialogService());
+        await vm.RefreshAsync();
+
+        var firstVm = vm.Roots.Single(r => r.Name == "First");
+        var secondVm = vm.Roots.Single(r => r.Name == "Second");
+        var thirdVm = vm.Roots.Single(r => r.Name == "third");
+        vm.SetSelectedNodes(new[] { firstVm, secondVm });
+
+        Assert.False(vm.ShouldCancelDragSelection(new[] { thirdVm }));
+    }
+
+    [Fact]
     public async Task ShouldRejectDragSelection_RejectsAncestorAndDescendantPayloadOnly()
     {
         var parent = new ConnectionNode { Kind = NodeKind.Folder, Name = "Parent", SortOrder = 0 };
@@ -1519,11 +1566,14 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         var vm = CreateVm(dialog);
         await vm.RefreshAsync();
         await vm.AddFolderCommand.ExecuteAsync(null);
-        vm.SelectedNode = vm.Roots.Single();
+        var node = vm.Roots.Single();
+        vm.SetSelectedNodes(new[] { node });
 
-        await vm.DeleteCommand.ExecuteAsync(vm.Roots.Single());
+        await vm.DeleteCommand.ExecuteAsync(node);
 
         Assert.Null(vm.SelectedNode);
+        Assert.Empty(vm.SelectedNodes);
+        Assert.False(vm.IsSelected(node));
     }
 
     [Fact]
@@ -1565,6 +1615,136 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
 
         Assert.Equal("original", vm.Roots.Single().Name);
         Assert.Equal("original", (await _repo.GetAllAsync()).Single().Name);
+    }
+
+    [Fact]
+    public async Task SelectionHelpers_AddRemoveAndClearSelectionState()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "A";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        dialog.TextPromptResult = "B";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+
+        var first = vm.Roots.Single(r => r.Name == "A");
+        var second = vm.Roots.Single(r => r.Name == "B");
+
+        vm.SetNodeSelection(first, isSelected: true);
+        Assert.True(vm.IsSelected(first));
+        Assert.Equal("A", Assert.Single(vm.SelectedNodes).Name);
+        Assert.Same(first, vm.SelectedNode);
+
+        vm.SetNodeSelection(first, isSelected: true);
+        Assert.Single(vm.SelectedNodes);
+
+        vm.SetNodeSelection(second, isSelected: true);
+        Assert.True(vm.IsSelected(second));
+        Assert.Equal(2, vm.SelectedNodes.Count);
+        Assert.Equal("A", vm.SelectedNodes[0].Name);
+        Assert.Equal("B", vm.SelectedNodes[1].Name);
+        Assert.Same(second, vm.SelectedNode);
+
+        vm.SetNodeSelection(first, isSelected: false);
+        Assert.False(vm.IsSelected(first));
+        Assert.True(vm.IsSelected(second));
+        Assert.Equal("B", Assert.Single(vm.SelectedNodes).Name);
+        Assert.Same(second, vm.SelectedNode);
+
+        vm.ClearSelection();
+        Assert.Empty(vm.SelectedNodes);
+        Assert.Null(vm.SelectedNode);
+        Assert.False(vm.IsSelected(second));
+    }
+
+    [Fact]
+    public async Task SearchText_ChangingClearsSelectedNodes()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Parent";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var parent = vm.Roots.Single();
+        dialog.EditConnectionResult = MakeConnectionDraft(
+            "leaf", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(parent);
+        var leaf = parent.Children.Single();
+
+        vm.SetSelectedNodes(new[] { parent, leaf });
+        Assert.True(vm.IsSelected(parent));
+        Assert.True(vm.IsSelected(leaf));
+
+        vm.SearchText = "leaf";
+
+        Assert.True(vm.IsSearchActive);
+        Assert.Empty(vm.SelectedNodes);
+        Assert.Null(vm.SelectedNode);
+        Assert.False(vm.IsSelected(parent));
+        Assert.False(vm.IsSelected(leaf));
+    }
+
+    [Fact]
+    public async Task SearchText_DebouncedApplyClearsSelectionMadeDuringDelay()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        vm.SearchDebounceDelay = TimeSpan.FromMilliseconds(20);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Parent";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var parent = vm.Roots.Single();
+        dialog.EditConnectionResult = MakeConnectionDraft(
+            "leaf", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(parent);
+        var leaf = parent.Children.Single();
+
+        vm.SearchText = "leaf";
+        vm.SetSelectedNodes(new[] { parent, leaf });
+        Assert.True(vm.IsSelected(parent));
+        Assert.True(vm.IsSelected(leaf));
+
+        for (var attempt = 0; attempt < 20 && vm.SelectedNodes.Count > 0; attempt++)
+        {
+            await Task.Delay(20);
+        }
+
+        Assert.True(vm.IsSearchActive);
+        Assert.Empty(vm.SelectedNodes);
+        Assert.Null(vm.SelectedNode);
+        Assert.False(vm.IsSelected(parent));
+        Assert.False(vm.IsSelected(leaf));
+    }
+
+    [Fact]
+    public async Task SearchText_ClearingActiveSearchClearsSelectedNodes()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Parent";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var parent = vm.Roots.Single();
+        dialog.EditConnectionResult = MakeConnectionDraft(
+            "leaf", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(parent);
+
+        vm.SearchText = "leaf";
+        var displayedLeaf = parent.DisplayChildren.Single();
+        vm.SetNodeSelection(displayedLeaf, isSelected: true);
+        Assert.True(vm.IsSelected(displayedLeaf));
+
+        vm.SearchText = string.Empty;
+
+        Assert.False(vm.IsSearchActive);
+        Assert.Empty(vm.SelectedNodes);
+        Assert.Null(vm.SelectedNode);
+        Assert.False(vm.IsSelected(displayedLeaf));
     }
 
     [Fact]

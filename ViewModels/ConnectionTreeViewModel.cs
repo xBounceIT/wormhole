@@ -1,3 +1,4 @@
+using System.Collections.Specialized;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
@@ -24,6 +25,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
     private Dictionary<Guid, ConnectionNode> _lastSnapshotById = new();
     private bool _isLoading;
     private readonly BulkObservableCollection<TreeNodeViewModel> _searchDisplayRoots = new();
+    private readonly HashSet<Guid> _selectedNodeIds = new();
 
     public BulkObservableCollection<TreeNodeViewModel> Roots { get; } = new();
     public BulkObservableCollection<TreeNodeViewModel> DisplayRoots => IsSearchActive ? _searchDisplayRoots : Roots;
@@ -57,6 +59,8 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     partial void OnSearchTextChanged(string? oldValue, string newValue)
     {
+        ClearSelection();
+
         var wasFiltering = !string.IsNullOrWhiteSpace(oldValue);
         var isFiltering = !string.IsNullOrWhiteSpace(newValue);
 
@@ -130,6 +134,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     private void ApplyFilterAndMaybeRestore(string newValue, bool wasFiltering, bool isFiltering)
     {
+        ClearSelection();
         ApplyFilter(newValue);
 
         if (wasFiltering && !isFiltering && _expandStateBeforeFilter is not null)
@@ -155,6 +160,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
         _credentialService = credentialService;
         _credentialRepository = credentialRepository;
         _logger = logger;
+        SelectedNodes.CollectionChanged += OnSelectedNodesChanged;
     }
 
     public void SetSelectedNodes(IEnumerable<TreeNodeViewModel> nodes)
@@ -169,6 +175,70 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
         SelectedNodes.ReplaceAll(selected);
         SelectedNode = selected.Count == 0 ? null : selected[^1];
+    }
+
+    public bool IsSelected(TreeNodeViewModel node) => _selectedNodeIds.Contains(node.Node.Id);
+
+    public void SetNodeSelection(TreeNodeViewModel node, bool isSelected)
+    {
+        if (isSelected)
+        {
+            if (_selectedNodeIds.Contains(node.Node.Id))
+            {
+                SelectedNode = node;
+                return;
+            }
+
+            var next = new List<TreeNodeViewModel>(SelectedNodes.Count + 1);
+            next.AddRange(SelectedNodes);
+            next.Add(node);
+            SetSelectedNodes(next);
+            return;
+        }
+
+        if (!_selectedNodeIds.Contains(node.Node.Id)) return;
+
+        var remaining = new List<TreeNodeViewModel>(SelectedNodes.Count - 1);
+        foreach (var selected in SelectedNodes)
+        {
+            if (selected.Node.Id != node.Node.Id)
+            {
+                remaining.Add(selected);
+            }
+        }
+
+        SetSelectedNodes(remaining);
+    }
+
+    public void ClearSelection()
+    {
+        if (SelectedNodes.Count > 0)
+        {
+            SelectedNodes.Clear();
+        }
+
+        SelectedNode = null;
+    }
+
+    private void OnSelectedNodesChanged(object? sender, NotifyCollectionChangedEventArgs args)
+    {
+        _selectedNodeIds.Clear();
+        foreach (var node in SelectedNodes)
+        {
+            _selectedNodeIds.Add(node.Node.Id);
+        }
+    }
+
+    public bool ShouldCancelDragSelection(IEnumerable<TreeNodeViewModel> draggedNodes)
+    {
+        if (SelectedNodes.Count <= 1) return false;
+
+        foreach (var node in draggedNodes)
+        {
+            if (_selectedNodeIds.Contains(node.Node.Id)) return true;
+        }
+
+        return false;
     }
 
     public bool ShouldRejectDragSelection(IEnumerable<TreeNodeViewModel> draggedNodes)

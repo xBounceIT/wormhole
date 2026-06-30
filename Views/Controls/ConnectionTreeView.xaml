@@ -90,18 +90,16 @@
         <TreeView Grid.Row="2"
                   x:Name="Tree"
                   ItemsSource="{x:Bind ViewModel.DisplayRoots, Mode=OneWay}"
-                  SelectionMode="Multiple"
+                  SelectionMode="None"
                   CanDragItems="{x:Bind ViewModel.IsSearchActive, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}"
                   CanReorderItems="{x:Bind ViewModel.IsSearchActive, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}"
                   AllowDrop="{x:Bind ViewModel.IsSearchActive, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}"
-                  SelectionChanged="OnTreeSelectionChanged"
                   DragItemsStarting="OnDragItemsStarting"
                   DragItemsCompleted="OnDragItemsCompleted"
                   ItemInvoked="OnTreeItemInvoked">
-            <!-- ItemInvoked fires on single-click: we toggle folder expansion (so the
-                 whole row is a hit target, not just the chevron) but ignore connection
-                 nodes — those still open via DoubleTapped on the item template, since
-                 single-click would cause accidental session opens. -->
+            <!-- ItemInvoked fires on single-click: it records the active row and toggles
+                 folder expansion so the entire row is a hit target. Connection nodes
+                 still open via DoubleTapped to avoid accidental session opens. -->
 
             <TreeView.ContextFlyout>
                 <MenuFlyout>
@@ -127,6 +125,8 @@
                                   ToolTipService.ToolTip="{x:Bind Host, Mode=OneWay}"
                                   Loaded="OnTreeItemLoaded"
                                   Unloaded="OnTreeItemUnloaded"
+                                  GotFocus="OnTreeItemGotFocus"
+                                  KeyDown="OnTreeItemKeyDown"
                                   PointerEntered="OnTreeItemPointerEntered"
                                   PointerExited="OnTreeItemPointerExited"
                                   DoubleTapped="OnNodeDoubleTapped">
@@ -177,6 +177,28 @@
                         </TreeViewItem.ContextFlyout>
 
                         <StackPanel Orientation="Horizontal" Spacing="6">
+                            <CheckBox x:Name="SelectCheckBox"
+                                      Width="32"
+                                      MinWidth="32"
+                                      MinHeight="28"
+                                      Margin="10,0,0,0"
+                                      Padding="0"
+                                      VerticalAlignment="Center"
+                                      ToolTipService.ToolTip="Select"
+                                      AutomationProperties.Name="Select connection tree item"
+                                      Tag="{x:Bind}"
+                                      Click="OnSelectionCheckBoxClick"
+                                      Tapped="OnSelectionCheckBoxTapped"
+                                      DoubleTapped="OnSelectionCheckBoxDoubleTapped"
+                                      Opacity="0"
+                                      IsHitTestVisible="False"
+                                      IsTabStop="False"
+                                      IsEnabled="False"
+                                      RenderTransformOrigin="0.5,0.5">
+                                <CheckBox.RenderTransform>
+                                    <ScaleTransform ScaleX="0.86" ScaleY="0.86" />
+                                </CheckBox.RenderTransform>
+                            </CheckBox>
                             <FontIcon FontSize="14" Glyph="{x:Bind Glyph, Mode=OneWay}" />
                             <TextBlock Text="{x:Bind Name, Mode=OneWay}" VerticalAlignment="Center" />
                         </StackPanel>
