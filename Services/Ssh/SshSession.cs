@@ -1,6 +1,7 @@
 using System.Buffers;
 using Microsoft.Extensions.Logging;
 using Renci.SshNet;
+using Renci.SshNet.Common;
 
 namespace Wormhole.Services.Ssh;
 
@@ -15,8 +16,12 @@ internal sealed class SshSession : ISshSession
     // overlapping callers can't corrupt the shared buffer (see WriteAsync).
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly ILogger<SshSession> _logger;
+    private readonly object _closedHandlersLock = new();
+    private EventHandler? _closedHandlers;
     private Task? _readPump;
     private int _disposed;
+    private int _remoteClosed;
+    private int _closedRaised;
     private int _started;
 
     // Terminal flow-control gate. The read pump awaits this before each read; a *completed* gate
@@ -39,25 +44,60 @@ internal sealed class SshSession : ISshSession
         _logger = logger;
         HostFingerprint = hostFingerprint;
         _disposeToken = _cts.Token;
+        _client.ErrorOccurred += OnClientErrorOccurred;
+        _stream.Closed += OnStreamClosed;
+        _stream.ErrorOccurred += OnStreamErrorOccurred;
     }
 
     public void Start()
     {
         if (Interlocked.Exchange(ref _started, 1) != 0) return;
-        if (IsDisposed) return;
+        if (IsDisposed || IsClosedRaised) return;
         _readPump = Task.Run(ReadPumpAsync);
     }
 
     public string HostFingerprint { get; }
 
     public event EventHandler<ReadOnlyMemory<byte>>? DataReceived;
-    public event EventHandler? Closed;
+    public event EventHandler? Closed
+    {
+        add
+        {
+            if (value is null) return;
+
+            var invokeImmediately = false;
+            lock (_closedHandlersLock)
+            {
+                if (IsClosedRaised && !IsDisposed)
+                {
+                    invokeImmediately = true;
+                }
+                else
+                {
+                    _closedHandlers += value;
+                }
+            }
+
+            if (invokeImmediately)
+            {
+                InvokeClosedHandler(value);
+            }
+        }
+        remove
+        {
+            if (value is null) return;
+            lock (_closedHandlersLock) _closedHandlers -= value;
+        }
+    }
 
     private bool IsDisposed => Volatile.Read(ref _disposed) != 0;
+    private bool IsRemoteClosed => Volatile.Read(ref _remoteClosed) != 0;
+    private bool IsClosedRaised => Volatile.Read(ref _closedRaised) != 0;
+    private bool IsUnavailable => IsDisposed || IsRemoteClosed;
 
     public async Task WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
     {
-        if (IsDisposed) return;
+        if (IsUnavailable) return;
 
         // Writes reach this method from two unsynchronized sources: the WebView2 message
         // handler (TerminalBridge.OnWebMessageReceived is async void, so it yields to the UI
@@ -80,16 +120,24 @@ internal sealed class SshSession : ISshSession
 
         try
         {
-            if (IsDisposed) return;
+            if (IsUnavailable) return;
             await _stream.WriteAsync(data, writeToken).ConfigureAwait(false);
             await _stream.FlushAsync(writeToken).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) when (_disposeToken.IsCancellationRequested || IsDisposed)
+        catch (OperationCanceledException) when (_disposeToken.IsCancellationRequested || IsUnavailable)
         {
             // DisposeAsync cancels the session token so active writes and queued waiters can unwind
             // even when callers used the default, non-cancelable token.
         }
-        catch (ObjectDisposedException) { /* raced with Dispose */ }
+        catch (ObjectDisposedException) when (IsDisposed)
+        {
+            // Raced with DisposeAsync.
+        }
+        catch (Exception ex)
+        {
+            SignalRemoteClosed("write to SSH shell failed", ex);
+            throw;
+        }
         finally
         {
             _writeLock.Release();
@@ -98,15 +146,18 @@ internal sealed class SshSession : ISshSession
 
     public Task ResizeAsync(uint columns, uint rows)
     {
-        if (IsDisposed) return Task.CompletedTask;
+        if (IsUnavailable) return Task.CompletedTask;
         try
         {
             _stream.ChangeWindowSize(columns, rows, 0, 0);
         }
-        catch (ObjectDisposedException) { /* raced with Dispose */ }
+        catch (ObjectDisposedException) when (IsDisposed)
+        {
+            // Raced with DisposeAsync.
+        }
         catch (Exception ex)
         {
-            _logger.LogWarning(ex, "ChangeWindowSize failed for {Cols}x{Rows}.", columns, rows);
+            SignalRemoteClosed($"resize of SSH shell to {columns}x{rows} failed", ex);
         }
         return Task.CompletedTask;
     }
@@ -123,7 +174,7 @@ internal sealed class SshSession : ISshSession
 
     public void PauseReading()
     {
-        if (IsDisposed) return;
+        if (IsDisposed || IsClosedRaised) return;
         lock (_readGateLock)
         {
             if (_readingPaused) return;
@@ -151,7 +202,6 @@ internal sealed class SshSession : ISshSession
     {
         var ct = _cts.Token;
         var buffer = ArrayPool<byte>.Shared.Rent(8192);
-        var remoteClosed = false;
         try
         {
             while (!ct.IsCancellationRequested)
@@ -179,13 +229,12 @@ internal sealed class SshSession : ISshSession
                 {
                     // Treat unexpected I/O failures as a remote-side disconnect so the VM
                     // doesn't lie to the user about an active session.
-                    _logger.LogInformation(ex, "SSH read pump terminated.");
-                    remoteClosed = true;
+                    SignalRemoteClosed("SSH read pump terminated", ex);
                     return;
                 }
                 if (n <= 0)
                 {
-                    remoteClosed = true;
+                    SignalRemoteClosed("SSH shell returned EOF");
                     return;
                 }
 
@@ -206,20 +255,16 @@ internal sealed class SshSession : ISshSession
         finally
         {
             ArrayPool<byte>.Shared.Return(buffer);
-            // Only surface Closed if the *remote* end ended the session. Our own
-            // DisposeAsync cancels the CTS first; we don't want to fire Closed on a
-            // user-initiated tear-down (the VM is already managing that state).
-            if (remoteClosed && !IsDisposed)
-            {
-                try { Closed?.Invoke(this, EventArgs.Empty); }
-                catch (Exception ex) { _logger.LogWarning(ex, "Closed subscriber threw."); }
-            }
         }
     }
 
     public async ValueTask DisposeAsync()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+
+        _client.ErrorOccurred -= OnClientErrorOccurred;
+        _stream.Closed -= OnStreamClosed;
+        _stream.ErrorOccurred -= OnStreamErrorOccurred;
 
         // PuTTY-style teardown: yank the channel first so the read pump's blocked
         // ShellStream.ReadAsync surfaces ObjectDisposedException immediately
@@ -230,7 +275,7 @@ internal sealed class SshSession : ISshSession
         // Release a pump parked on the flow-control gate so it observes cancellation immediately.
         // WaitAsync(ct) would also throw on cancel, but completing the gate avoids depending solely
         // on that and is harmless (TrySetResult no-ops) when the pump isn't parked.
-        lock (_readGateLock) { _readingPaused = false; _readGate.TrySetResult(); }
+        ReleaseReadGate();
         try { _stream.Close(); } catch { /* socket may already be torn down */ }
         try { _stream.Dispose(); } catch { /* idempotent */ }
 
@@ -261,10 +306,84 @@ internal sealed class SshSession : ISshSession
         // strand it. It holds no OS handle unless AvailableWaitHandle is touched (we never do),
         // so GC reclaims it harmlessly. Mirrors FileTransferOrchestrator's gate convention.
     }
+
+    private void OnClientErrorOccurred(object? sender, ExceptionEventArgs e) =>
+        SignalRemoteClosed("SSH client reported an error", e.Exception);
+
+    private void OnStreamClosed(object? sender, EventArgs e) =>
+        SignalRemoteClosed("SSH shell stream closed", drainBufferedOutput: true);
+
+    private void OnStreamErrorOccurred(object? sender, Exception e) =>
+        SignalRemoteClosed("SSH shell stream reported an error", e, drainBufferedOutput: true);
+
+    private void SignalRemoteClosed(string reason, Exception? exception = null, bool drainBufferedOutput = false)
+    {
+        if (IsDisposed) return;
+        if (Interlocked.Exchange(ref _remoteClosed, 1) != 0)
+        {
+            if (!drainBufferedOutput)
+            {
+                CompleteRemoteClosed();
+            }
+            return;
+        }
+
+        if (exception is null)
+        {
+            _logger.LogInformation("SSH session closed: {Reason}.", reason);
+        }
+        else
+        {
+            _logger.LogInformation(exception, "SSH session closed: {Reason}.", reason);
+        }
+
+        if (drainBufferedOutput)
+        {
+            // Preserve terminal backpressure; Start/ResumeReading will let the pump drain buffered bytes.
+            return;
+        }
+
+        CompleteRemoteClosed();
+    }
+
+    private void CompleteRemoteClosed()
+    {
+        if (IsDisposed) return;
+        if (Interlocked.Exchange(ref _closedRaised, 1) != 0) return;
+
+        try { _cts.Cancel(); } catch { /* already disposed */ }
+        ReleaseReadGate();
+        try { _stream.Close(); } catch { /* best effort: stream is already unhealthy */ }
+
+        EventHandler? handlers;
+        lock (_closedHandlersLock) handlers = _closedHandlers;
+        if (handlers is null) return;
+
+        try { handlers.Invoke(this, EventArgs.Empty); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Closed subscriber threw."); }
+    }
+
+    private void ReleaseReadGate()
+    {
+        lock (_readGateLock)
+        {
+            _readingPaused = false;
+            _readGate.TrySetResult();
+        }
+    }
+
+    private void InvokeClosedHandler(EventHandler handler)
+    {
+        if (IsDisposed) return;
+        try { handler(this, EventArgs.Empty); }
+        catch (Exception ex) { _logger.LogWarning(ex, "Closed subscriber threw."); }
+    }
 }
 
 internal interface ISshSessionStream : IDisposable
 {
+    event EventHandler? Closed;
+    event EventHandler<Exception>? ErrorOccurred;
     ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken);
     ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken);
     Task FlushAsync(CancellationToken cancellationToken);
@@ -272,21 +391,44 @@ internal interface ISshSessionStream : IDisposable
     void Close();
 }
 
-internal sealed class ShellStreamAdapter(ShellStream stream) : ISshSessionStream
+internal sealed class ShellStreamAdapter : ISshSessionStream
 {
+    private readonly ShellStream _stream;
+
+    public ShellStreamAdapter(ShellStream stream)
+    {
+        _stream = stream;
+        _stream.Closed += OnClosed;
+        _stream.ErrorOccurred += OnErrorOccurred;
+    }
+
+    public event EventHandler? Closed;
+    public event EventHandler<Exception>? ErrorOccurred;
+
     public ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken) =>
-        stream.ReadAsync(buffer, cancellationToken);
+        _stream.ReadAsync(buffer, cancellationToken);
 
     public ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken) =>
-        stream.WriteAsync(data, cancellationToken);
+        _stream.WriteAsync(data, cancellationToken);
 
     public Task FlushAsync(CancellationToken cancellationToken) =>
-        stream.FlushAsync(cancellationToken);
+        _stream.FlushAsync(cancellationToken);
 
     public void ChangeWindowSize(uint columns, uint rows, uint width, uint height) =>
-        stream.ChangeWindowSize(columns, rows, width, height);
+        _stream.ChangeWindowSize(columns, rows, width, height);
 
-    public void Close() => stream.Close();
+    public void Close() => _stream.Close();
 
-    public void Dispose() => stream.Dispose();
+    public void Dispose()
+    {
+        _stream.Closed -= OnClosed;
+        _stream.ErrorOccurred -= OnErrorOccurred;
+        _stream.Dispose();
+    }
+
+    private void OnClosed(object? sender, EventArgs e) =>
+        Closed?.Invoke(this, EventArgs.Empty);
+
+    private void OnErrorOccurred(object? sender, ExceptionEventArgs e) =>
+        ErrorOccurred?.Invoke(this, e.Exception);
 }
