@@ -62,8 +62,46 @@ public sealed class SshSessionTests
         stream.RaiseError(new IOException("socket lost"));
 
         await closed.Task.WaitAsync(TimeSpan.FromSeconds(1));
-        await stream.ReadCanceled.Task.WaitAsync(TimeSpan.FromSeconds(1));
-        Assert.True(stream.LastReadToken.IsCancellationRequested);
+        await stream.ReadCompletedAfterRemoteClose.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.False(stream.ReadCanceled.Task.IsCompleted);
+        Assert.Equal(1, stream.CloseCalls);
+    }
+
+    [Fact]
+    public async Task StreamClosedWhileReadingPaused_DrainsBufferedOutputBeforeClosed()
+    {
+        var stream = new TestSshSessionStream();
+        stream.EnqueueRead(new byte[] { 0x41, 0x42, 0x43 });
+        await using var session = CreateSession(stream);
+        var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var received = new List<byte>();
+        var events = new List<string>();
+        session.DataReceived += (_, data) =>
+        {
+            received.AddRange(data.ToArray());
+            events.Add("data");
+        };
+        session.Closed += (_, _) =>
+        {
+            events.Add("closed");
+            closed.TrySetResult();
+        };
+
+        session.PauseReading();
+        session.Start();
+
+        stream.RaiseClosed();
+
+        await closed.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.Collection(
+            received,
+            b => Assert.Equal(0x41, b),
+            b => Assert.Equal(0x42, b),
+            b => Assert.Equal(0x43, b));
+        Assert.Collection(
+            events,
+            e => Assert.Equal("data", e),
+            e => Assert.Equal("closed", e));
         Assert.Equal(1, stream.CloseCalls);
     }
 
@@ -139,6 +177,10 @@ public sealed class SshSessionTests
 
     private class TestSshSessionStream : ISshSessionStream
     {
+        private readonly object _readResultsLock = new();
+        private readonly Queue<byte[]> _readResults = new();
+        private readonly TaskCompletionSource _remoteReadReleased =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
         private int _closeCalls;
 
         public event EventHandler? Closed;
@@ -155,14 +197,25 @@ public sealed class SshSessionTests
         public TaskCompletionSource ReadCanceled { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public CancellationToken LastReadToken { get; private set; }
+        public TaskCompletionSource ReadCompletedAfterRemoteClose { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public int CloseCalls => Volatile.Read(ref _closeCalls);
+
+        public void EnqueueRead(byte[] data)
+        {
+            lock (_readResultsLock)
+            {
+                _readResults.Enqueue(data);
+            }
+        }
 
         public virtual ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken)
         {
-            LastReadToken = cancellationToken;
+            ReadStarted.TrySetResult();
+            if (TryReadQueued(buffer, out var read)) return new(read);
             if (!BlockReads) return new(0);
-            return new(ReadUntilCanceledAsync(cancellationToken));
+            return new(ReadUntilRemoteClosedOrCanceledAsync(cancellationToken));
         }
 
         public virtual ValueTask WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken)
@@ -188,16 +241,48 @@ public sealed class SshSessionTests
         {
         }
 
-        public void RaiseClosed() => Closed?.Invoke(this, EventArgs.Empty);
-
-        public void RaiseError(Exception exception) => ErrorOccurred?.Invoke(this, exception);
-
-        private async Task<int> ReadUntilCanceledAsync(CancellationToken cancellationToken)
+        public void RaiseClosed()
         {
-            ReadStarted.TrySetResult();
+            _remoteReadReleased.TrySetResult();
+            Closed?.Invoke(this, EventArgs.Empty);
+        }
+
+        public void RaiseError(Exception exception)
+        {
+            _remoteReadReleased.TrySetResult();
+            ErrorOccurred?.Invoke(this, exception);
+        }
+
+        private bool TryReadQueued(Memory<byte> buffer, out int read)
+        {
+            lock (_readResultsLock)
+            {
+                if (_readResults.Count == 0)
+                {
+                    read = 0;
+                    return false;
+                }
+
+                var data = _readResults.Dequeue();
+                read = Math.Min(data.Length, buffer.Length);
+                data.AsSpan(0, read).CopyTo(buffer.Span);
+                return true;
+            }
+        }
+
+        private async Task<int> ReadUntilRemoteClosedOrCanceledAsync(CancellationToken cancellationToken)
+        {
+            var canceled = Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+            var completed = await Task.WhenAny(_remoteReadReleased.Task, canceled).ConfigureAwait(false);
+            if (completed == _remoteReadReleased.Task)
+            {
+                ReadCompletedAfterRemoteClose.TrySetResult();
+                return 0;
+            }
+
             try
             {
-                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken).ConfigureAwait(false);
+                await canceled.ConfigureAwait(false);
                 return 0;
             }
             catch (OperationCanceledException)

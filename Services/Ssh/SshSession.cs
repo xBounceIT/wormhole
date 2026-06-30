@@ -21,6 +21,7 @@ internal sealed class SshSession : ISshSession
     private Task? _readPump;
     private int _disposed;
     private int _remoteClosed;
+    private int _closedRaised;
     private int _started;
 
     // Terminal flow-control gate. The read pump awaits this before each read; a *completed* gate
@@ -67,7 +68,7 @@ internal sealed class SshSession : ISshSession
             var invokeImmediately = false;
             lock (_closedHandlersLock)
             {
-                if (IsRemoteClosed && !IsDisposed)
+                if (IsClosedRaised && !IsDisposed)
                 {
                     invokeImmediately = true;
                 }
@@ -91,6 +92,7 @@ internal sealed class SshSession : ISshSession
 
     private bool IsDisposed => Volatile.Read(ref _disposed) != 0;
     private bool IsRemoteClosed => Volatile.Read(ref _remoteClosed) != 0;
+    private bool IsClosedRaised => Volatile.Read(ref _closedRaised) != 0;
     private bool IsUnavailable => IsDisposed || IsRemoteClosed;
 
     public async Task WriteAsync(ReadOnlyMemory<byte> data, CancellationToken cancellationToken = default)
@@ -309,15 +311,22 @@ internal sealed class SshSession : ISshSession
         SignalRemoteClosed("SSH client reported an error", e.Exception);
 
     private void OnStreamClosed(object? sender, EventArgs e) =>
-        SignalRemoteClosed("SSH shell stream closed");
+        SignalRemoteClosed("SSH shell stream closed", drainBufferedOutput: true);
 
     private void OnStreamErrorOccurred(object? sender, Exception e) =>
-        SignalRemoteClosed("SSH shell stream reported an error", e);
+        SignalRemoteClosed("SSH shell stream reported an error", e, drainBufferedOutput: true);
 
-    private void SignalRemoteClosed(string reason, Exception? exception = null)
+    private void SignalRemoteClosed(string reason, Exception? exception = null, bool drainBufferedOutput = false)
     {
         if (IsDisposed) return;
-        if (Interlocked.Exchange(ref _remoteClosed, 1) != 0) return;
+        if (Interlocked.Exchange(ref _remoteClosed, 1) != 0)
+        {
+            if (!drainBufferedOutput || _readPump is not { IsCompleted: false })
+            {
+                CompleteRemoteClosed();
+            }
+            return;
+        }
 
         if (exception is null)
         {
@@ -327,6 +336,20 @@ internal sealed class SshSession : ISshSession
         {
             _logger.LogInformation(exception, "SSH session closed: {Reason}.", reason);
         }
+
+        ReleaseReadGate();
+        if (drainBufferedOutput && _readPump is { IsCompleted: false })
+        {
+            return;
+        }
+
+        CompleteRemoteClosed();
+    }
+
+    private void CompleteRemoteClosed()
+    {
+        if (IsDisposed) return;
+        if (Interlocked.Exchange(ref _closedRaised, 1) != 0) return;
 
         try { _cts.Cancel(); } catch { /* already disposed */ }
         ReleaseReadGate();
