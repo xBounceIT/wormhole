@@ -337,9 +337,9 @@ internal sealed class SshSession : ISshSession
             _logger.LogInformation(exception, "SSH session closed: {Reason}.", reason);
         }
 
-        ReleaseReadGate();
         if (drainBufferedOutput && _readPump is { IsCompleted: false })
         {
+            // Preserve terminal backpressure; ResumeReading will let the pump drain buffered bytes.
             return;
         }
 

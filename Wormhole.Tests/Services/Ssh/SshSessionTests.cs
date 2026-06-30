@@ -68,7 +68,7 @@ public sealed class SshSessionTests
     }
 
     [Fact]
-    public async Task StreamClosedWhileReadingPaused_DrainsBufferedOutputBeforeClosed()
+    public async Task StreamClosedWhileReadingPaused_WaitsForResumeThenDrainsBeforeClosed()
     {
         var stream = new TestSshSessionStream();
         stream.EnqueueRead(new byte[] { 0x41, 0x42, 0x43 });
@@ -91,6 +91,11 @@ public sealed class SshSessionTests
         session.Start();
 
         stream.RaiseClosed();
+        await Task.Delay(50);
+        Assert.False(stream.ReadStarted.Task.IsCompleted);
+        Assert.False(closed.Task.IsCompleted);
+
+        session.ResumeReading();
 
         await closed.Task.WaitAsync(TimeSpan.FromSeconds(1));
         Assert.Collection(
