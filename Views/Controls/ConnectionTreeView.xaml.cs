@@ -58,7 +58,10 @@ public sealed partial class ConnectionTreeView : UserControl
 
     private void OnDragItemsStarting(TreeView sender, TreeViewDragItemsStartingEventArgs args)
     {
-        if (ViewModel.ShouldRejectDragSelection(args.Items.OfType<TreeNodeViewModel>()))
+        var draggedNodes = ViewModel.ResolveDragSelection(args.Items.OfType<TreeNodeViewModel>());
+        SyncDragItems(args.Items, draggedNodes);
+
+        if (ViewModel.ShouldRejectDragSelection(draggedNodes))
         {
             args.Cancel = true;
         }
@@ -70,6 +73,8 @@ public sealed partial class ConnectionTreeView : UserControl
 
         item.DispatcherQueue.TryEnqueue(() =>
         {
+            if (!item.IsLoaded) return;
+
             SyncSelectionCheckBox(item);
             UpdateSelectionCheckboxChrome();
         });
@@ -223,6 +228,29 @@ public sealed partial class ConnectionTreeView : UserControl
         {
             ViewModel.OpenConnectionCommand.Execute(vm);
             args.Handled = true;
+        }
+    }
+
+    private static void SyncDragItems(IList<object> dragItems, IReadOnlyList<TreeNodeViewModel> draggedNodes)
+    {
+        if (dragItems.Count == draggedNodes.Count)
+        {
+            var alreadyMatches = true;
+            for (var i = 0; i < draggedNodes.Count; i++)
+            {
+                if (ReferenceEquals(dragItems[i], draggedNodes[i])) continue;
+
+                alreadyMatches = false;
+                break;
+            }
+
+            if (alreadyMatches) return;
+        }
+
+        dragItems.Clear();
+        foreach (var node in draggedNodes)
+        {
+            dragItems.Add(node);
         }
     }
 

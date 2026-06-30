@@ -1243,6 +1243,55 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task ResolveDragSelection_DraggingCheckedNodeUsesCheckedBatch()
+    {
+        var parent = new ConnectionNode { Kind = NodeKind.Folder, Name = "Parent", SortOrder = 0 };
+        var sibling = MakeConnectionDraft("sibling", ProtocolType.Ssh, "sibling.example.com", 22, "bob");
+        sibling.SortOrder = 1;
+
+        await _repo.AddAsync(parent);
+        await _repo.AddAsync(sibling);
+
+        var vm = CreateVm(new FakeDialogService());
+        await vm.RefreshAsync();
+
+        var parentVm = vm.Roots.Single(r => r.Name == "Parent");
+        var siblingVm = vm.Roots.Single(r => r.Name == "sibling");
+        vm.SetSelectedNodes(new[] { parentVm, siblingVm });
+
+        var dragged = vm.ResolveDragSelection(new[] { parentVm });
+
+        Assert.Equal(2, dragged.Count);
+        Assert.Same(parentVm, dragged[0]);
+        Assert.Same(siblingVm, dragged[1]);
+    }
+
+    [Fact]
+    public async Task ResolveDragSelection_DraggingUncheckedNodeKeepsDragPayload()
+    {
+        var first = new ConnectionNode { Kind = NodeKind.Folder, Name = "First", SortOrder = 0 };
+        var second = new ConnectionNode { Kind = NodeKind.Folder, Name = "Second", SortOrder = 1 };
+        var third = MakeConnectionDraft("third", ProtocolType.Ssh, "third.example.com", 22, "eve");
+        third.SortOrder = 2;
+
+        await _repo.AddAsync(first);
+        await _repo.AddAsync(second);
+        await _repo.AddAsync(third);
+
+        var vm = CreateVm(new FakeDialogService());
+        await vm.RefreshAsync();
+
+        var firstVm = vm.Roots.Single(r => r.Name == "First");
+        var secondVm = vm.Roots.Single(r => r.Name == "Second");
+        var thirdVm = vm.Roots.Single(r => r.Name == "third");
+        vm.SetSelectedNodes(new[] { firstVm, secondVm });
+
+        var dragged = vm.ResolveDragSelection(new[] { thirdVm });
+
+        Assert.Same(thirdVm, Assert.Single(dragged));
+    }
+
+    [Fact]
     public async Task ShouldRejectDragSelection_RejectsAncestorAndDescendantPayloadOnly()
     {
         var parent = new ConnectionNode { Kind = NodeKind.Folder, Name = "Parent", SortOrder = 0 };

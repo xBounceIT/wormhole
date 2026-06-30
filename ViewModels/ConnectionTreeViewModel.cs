@@ -228,6 +228,22 @@ public partial class ConnectionTreeViewModel : ObservableObject
         }
     }
 
+    public IReadOnlyList<TreeNodeViewModel> ResolveDragSelection(IEnumerable<TreeNodeViewModel> draggedNodes)
+    {
+        var dragged = draggedNodes.ToList();
+        if (SelectedNodes.Count <= 1) return dragged;
+
+        foreach (var node in dragged)
+        {
+            if (_selectedNodeIds.Contains(node.Node.Id))
+            {
+                return SelectedNodes.ToArray();
+            }
+        }
+
+        return dragged;
+    }
+
     public bool ShouldRejectDragSelection(IEnumerable<TreeNodeViewModel> draggedNodes)
     {
         if (IsSearchActive) return true;
