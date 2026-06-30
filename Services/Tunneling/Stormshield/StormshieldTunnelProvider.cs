@@ -338,23 +338,25 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
 
         for (Exception? e = ex; e is not null; e = e.InnerException)
         {
-            if (e is TimeoutException or TaskCanceledException or HttpRequestException or System.IO.IOException)
+            if (e is TimeoutException or TaskCanceledException or HttpRequestException)
                 return true;
 
-            var message = e.Message;
-            if (message.Contains("timed out", StringComparison.OrdinalIgnoreCase)
-                || message.Contains("could not reach", StringComparison.OrdinalIgnoreCase)
-                || message.Contains("CONNECTION_TIMEOUT", StringComparison.OrdinalIgnoreCase)
-                || message.Contains("TRANSPORT_ERROR", StringComparison.OrdinalIgnoreCase)
-                || message.Contains("NETWORK_RECV_ERROR", StringComparison.OrdinalIgnoreCase)
-                || message.Contains("handshake/auth failure or timeout", StringComparison.OrdinalIgnoreCase)
-                || message.Contains("did not produce a READY line", StringComparison.OrdinalIgnoreCase))
-            {
+            if (IsRouteSensitiveFailureMessage(e.Message))
                 return true;
-            }
         }
         return false;
     }
+
+    private static bool IsRouteSensitiveFailureMessage(string message) =>
+        message.Contains("timed out", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("could not reach", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("CONNECTION_TIMEOUT", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("TRANSPORT_ERROR", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("NETWORK_RECV_ERROR", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("NETWORK_EOF_ERROR", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("handshake/auth failure or timeout", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("did not become ready", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("did not produce a READY", StringComparison.OrdinalIgnoreCase);
 
     internal static InvalidOperationException BuildNativeVpnConflictException(
         string configName,

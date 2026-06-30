@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Security;
@@ -677,6 +678,24 @@ public class StormshieldTunnelProviderTests
         Assert.True(StormshieldTunnelProvider.ShouldEnrichNativeVpnConflict(new[] { lease }, inner));
         Assert.False(StormshieldTunnelProvider.ShouldEnrichNativeVpnConflict(
             Array.Empty<WindowsHostRouteLease>(), inner));
+    }
+
+    [Fact]
+    public void NativeVpnConflictEnrichment_OpenVpnTransportIoFailure_IsRouteSensitive()
+    {
+        var lease = NativeVpnConflictLease();
+        var inner = new IOException("OpenVPN sidecar exited with code 1. Sidecar reported: CONNECTION_TIMEOUT");
+
+        Assert.True(StormshieldTunnelProvider.ShouldEnrichNativeVpnConflict(new[] { lease }, inner));
+    }
+
+    [Fact]
+    public void NativeVpnConflictEnrichment_OpenVpnSidecarSetupIoFailure_IsNotRouteSensitive()
+    {
+        var lease = NativeVpnConflictLease();
+        var inner = new FileNotFoundException("OpenVPN sidecar binary not found at 'wormhole-ovpnproxy.exe'.");
+
+        Assert.False(StormshieldTunnelProvider.ShouldEnrichNativeVpnConflict(new[] { lease }, inner));
     }
 
     [Fact]
