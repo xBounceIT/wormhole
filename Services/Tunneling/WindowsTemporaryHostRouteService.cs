@@ -169,6 +169,21 @@ public sealed class WindowsTemporaryHostRouteService : IWindowsTemporaryHostRout
         List<WindowsHostRouteDiagnostic> diagnostics,
         CancellationToken cancellationToken)
     {
+        if (enableBypass)
+        {
+            var activeRelease = await TryReferenceActiveRouteAsync(address, cancellationToken).ConfigureAwait(false);
+            if (activeRelease is not null)
+            {
+                diagnostics.Add(new WindowsHostRouteDiagnostic(
+                    host,
+                    address,
+                    NativeVpnConflict: true,
+                    BypassRouteInstalled: true,
+                    Message: $"Reusing an existing temporary host route for {host} ({address})."));
+                return activeRelease;
+            }
+        }
+
         var route = _system.GetBestRoute(address);
         if (route is null)
         {
@@ -310,26 +325,28 @@ public sealed class WindowsTemporaryHostRouteService : IWindowsTemporaryHostRout
             existing.RefCount--;
             if (existing.RefCount > 0) return;
 
-            _activeRoutes.Remove(key);
+            try
+            {
+                await _system.DeleteHostRouteAsync(key.Destination, key.Gateway, key.InterfaceIndex, CancellationToken.None)
+                    .ConfigureAwait(false);
+                _logger.LogInformation(
+                    "Removed temporary host route for {Destination} via {Gateway} on interface {InterfaceIndex}.",
+                    key.Destination, key.Gateway, key.InterfaceIndex);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Failed to remove temporary host route for {Destination} via {Gateway} on interface {InterfaceIndex}.",
+                    key.Destination, key.Gateway, key.InterfaceIndex);
+            }
+            finally
+            {
+                _activeRoutes.Remove(key);
+            }
         }
         finally
         {
             _routeGate.Release();
-        }
-
-        try
-        {
-            await _system.DeleteHostRouteAsync(key.Destination, key.Gateway, key.InterfaceIndex, CancellationToken.None)
-                .ConfigureAwait(false);
-            _logger.LogInformation(
-                "Removed temporary host route for {Destination} via {Gateway} on interface {InterfaceIndex}.",
-                key.Destination, key.Gateway, key.InterfaceIndex);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex,
-                "Failed to remove temporary host route for {Destination} via {Gateway} on interface {InterfaceIndex}.",
-                key.Destination, key.Gateway, key.InterfaceIndex);
         }
     }
 

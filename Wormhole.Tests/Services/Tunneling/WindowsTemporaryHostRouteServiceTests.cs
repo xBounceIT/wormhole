@@ -208,6 +208,52 @@ public class WindowsTemporaryHostRouteServiceTests
     }
 
     [Fact]
+    public async Task PrepareGatewayBypassAsync_BypassEnabled_WaitsForInFlightDeleteBeforeReinstalling()
+    {
+        var ip = IPAddress.Parse("203.0.113.10");
+        var gateway = IPAddress.Parse("192.168.1.1");
+        var system = NewSystem(isAdministrator: true);
+        system.Resolve("rpv.example.com", ip);
+        system.Adapters.Add(VpnAdapter());
+        system.Adapters.Add(PhysicalAdapter(gateway));
+        system.Routes[ip.ToString()] = DefaultRoute(VpnInterfaceIndex);
+        system.DeleteStarted = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        system.ContinueDelete = new TaskCompletionSource<object?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var service = NewService(system);
+
+        var first = await service.PrepareGatewayBypassAsync(
+            "cfg", GatewayHosts, enableBypass: true, CancellationToken.None);
+        system.Routes[ip.ToString()] = HostRoute(ip, PhysicalInterfaceIndex);
+
+        var disposeTask = first.DisposeAsync().AsTask();
+        await system.DeleteStarted.Task;
+        var secondTask = service.PrepareGatewayBypassAsync(
+            "cfg", GatewayHosts, enableBypass: true, CancellationToken.None);
+
+        var completedBeforeDeleteFinished = secondTask.IsCompleted;
+        system.Routes[ip.ToString()] = DefaultRoute(VpnInterfaceIndex);
+        system.ContinueDelete.SetResult(null);
+        await disposeTask;
+        Assert.False(completedBeforeDeleteFinished);
+
+        var second = await secondTask;
+        try
+        {
+            Assert.Equal(2, system.AddedRoutes.Count);
+            Assert.Single(system.DeletedRoutes);
+            var diagnostic = Assert.Single(second.Diagnostics);
+            Assert.True(diagnostic.NativeVpnConflict);
+            Assert.True(diagnostic.BypassRouteInstalled);
+        }
+        finally
+        {
+            await second.DisposeAsync();
+        }
+
+        Assert.Equal(2, system.DeletedRoutes.Count);
+    }
+
+    [Fact]
     public async Task PrepareGatewayBypassAsync_BypassEnabled_RequiresAdministrator()
     {
         var ip = IPAddress.Parse("203.0.113.10");
@@ -310,6 +356,8 @@ public class WindowsTemporaryHostRouteServiceTests
         public List<WindowsRouteAdapter> Adapters { get; } = new();
         public List<RouteOperation> AddedRoutes { get; } = new();
         public List<RouteOperation> DeletedRoutes { get; } = new();
+        public TaskCompletionSource<object?>? DeleteStarted { get; set; }
+        public TaskCompletionSource<object?>? ContinueDelete { get; set; }
 
         public void Resolve(string host, params IPAddress[] addresses) => _resolutions[host] = addresses;
 
@@ -339,14 +387,16 @@ public class WindowsTemporaryHostRouteServiceTests
             return Task.CompletedTask;
         }
 
-        public Task DeleteHostRouteAsync(
+        public async Task DeleteHostRouteAsync(
             IPAddress destination,
             IPAddress gateway,
             int interfaceIndex,
             CancellationToken cancellationToken)
         {
             DeletedRoutes.Add(new RouteOperation(destination, gateway, interfaceIndex));
-            return Task.CompletedTask;
+            DeleteStarted?.TrySetResult(null);
+            if (ContinueDelete is not null)
+                await ContinueDelete.Task.ConfigureAwait(false);
         }
     }
 
