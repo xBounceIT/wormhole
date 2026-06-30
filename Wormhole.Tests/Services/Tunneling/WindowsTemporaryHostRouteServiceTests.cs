@@ -14,6 +14,18 @@ namespace Wormhole.Tests.Services.Tunneling;
 public class WindowsTemporaryHostRouteServiceTests
 {
     [Fact]
+    public void GetRouteExePath_UsesWindowsSystemDirectory()
+    {
+        var path = WindowsRouteSystem.GetRouteExePath();
+
+        Assert.True(System.IO.Path.IsPathRooted(path));
+        Assert.EndsWith(
+            System.IO.Path.Combine("System32", "route.exe"),
+            path,
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task PrepareGatewayBypassAsync_PhysicalRoute_NoopsWhenBypassDisabled()
     {
         var ip = IPAddress.Parse("203.0.113.10");

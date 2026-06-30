@@ -635,11 +635,20 @@ internal sealed class WindowsRouteSystem : IWindowsRouteSystem
             gateway.ToString(),
             "IF", interfaceIndex.ToString(System.Globalization.CultureInfo.InvariantCulture));
 
+    internal static string GetRouteExePath()
+    {
+        var systemDirectory = Environment.GetFolderPath(Environment.SpecialFolder.System);
+        if (string.IsNullOrWhiteSpace(systemDirectory))
+            throw new InvalidOperationException("Could not resolve the Windows system directory for route.exe.");
+
+        return System.IO.Path.Combine(systemDirectory, "route.exe");
+    }
+
     private static async Task RunRouteAsync(CancellationToken cancellationToken, params string[] args)
     {
         var psi = new ProcessStartInfo
         {
-            FileName = "route.exe",
+            FileName = GetRouteExePath(),
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardOutput = true,
