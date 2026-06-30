@@ -226,27 +226,35 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         CancellationToken cancellationToken)
     {
         var leases = new List<WindowsHostRouteLease>();
-        foreach (var host in hosts)
+        try
         {
-            try
+            foreach (var host in hosts)
             {
-                leases.Add(await PrepareGatewayRoutesAsync(
-                    configName,
-                    new[] { host },
-                    enableBypass,
-                    "OpenVPN remote",
-                    cancellationToken).ConfigureAwait(false));
+                try
+                {
+                    leases.Add(await PrepareGatewayRoutesAsync(
+                        configName,
+                        new[] { host },
+                        enableBypass,
+                        "OpenVPN remote",
+                        cancellationToken).ConfigureAwait(false));
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException && IsRemoteRouteResolutionFailure(ex))
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Stormshield '{Name}': skipped native-VPN route preparation for unresolved OpenVPN remote '{Host}'. OpenVPN will still try its profile remotes normally.",
+                        configName,
+                        host);
+                }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException && IsRemoteRouteResolutionFailure(ex))
-            {
-                _logger.LogWarning(
-                    ex,
-                    "Stormshield '{Name}': skipped native-VPN route preparation for unresolved OpenVPN remote '{Host}'. OpenVPN will still try its profile remotes normally.",
-                    configName,
-                    host);
-            }
+            return leases;
         }
-        return leases;
+        catch
+        {
+            await DisposeRouteLeasesAsync(leases).ConfigureAwait(false);
+            throw;
+        }
     }
 
     internal static bool IsRemoteRouteResolutionFailure(Exception ex) =>

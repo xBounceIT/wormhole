@@ -727,6 +727,26 @@ public class StormshieldTunnelProviderTests
     }
 
     [Fact]
+    public async Task PrepareOpenVpnRemoteRoutesAsync_DisposesPreparedRoutesWhenLaterRemoteFails()
+    {
+        var routeService = new ScriptedWindowsTemporaryHostRouteService();
+        routeService.FailuresByHost["blocked.example.com"] = new InvalidOperationException(
+            "Native-VPN route bypass cannot override an existing host route owned by a VPN-like adapter.");
+        var provider = NewProvider(routeService: routeService);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            provider.PrepareOpenVpnRemoteRoutesAsync(
+                "cfg",
+                new List<string> { "healthy.example.com", "blocked.example.com" },
+                enableBypass: true,
+                CancellationToken.None));
+
+        Assert.Contains("existing host route", ex.Message, StringComparison.OrdinalIgnoreCase);
+        var release = Assert.Single(routeService.RouteReleases);
+        Assert.True(release.IsDisposed);
+    }
+
+    [Fact]
     public void ExtractOpenVpnRemotes_IncludesTopLevelAndConnectionBlocks_SkipsInlineDataBlocks()
     {
         const string profile =
@@ -791,6 +811,8 @@ public class StormshieldTunnelProviderTests
     {
         public List<string> Hosts { get; } = new();
         public HashSet<string> UnresolvedHosts { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Dictionary<string, Exception> FailuresByHost { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public List<TrackingAsyncDisposable> RouteReleases { get; } = new();
         public Exception? Failure { get; set; }
 
         public Task<WindowsHostRouteLease> PrepareGatewayBypassAsync(
@@ -803,15 +825,29 @@ public class StormshieldTunnelProviderTests
             Hosts.Add(host);
 
             if (Failure is not null) throw Failure;
+            if (FailuresByHost.TryGetValue(host, out var hostFailure)) throw hostFailure;
             if (UnresolvedHosts.Contains(host))
             {
                 throw new InvalidOperationException(
                     $"Native-VPN route bypass is enabled, but Wormhole could not resolve Stormshield gateway '{host}' to an IPv4 address before installing a host route.");
             }
 
+            var release = new TrackingAsyncDisposable();
+            RouteReleases.Add(release);
             return Task.FromResult(new WindowsHostRouteLease(
                 Array.Empty<WindowsHostRouteDiagnostic>(),
-                Array.Empty<IAsyncDisposable>()));
+                new IAsyncDisposable[] { release }));
+        }
+    }
+
+    private sealed class TrackingAsyncDisposable : IAsyncDisposable
+    {
+        public bool IsDisposed { get; private set; }
+
+        public ValueTask DisposeAsync()
+        {
+            IsDisposed = true;
+            return ValueTask.CompletedTask;
         }
     }
 
