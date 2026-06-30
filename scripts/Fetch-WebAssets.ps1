@@ -6,28 +6,48 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+try {
+    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+}
+catch {
+    Write-Warning "Could not force TLS 1.2 for web asset downloads: $_"
+}
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot   = Split-Path -Parent $scriptRoot
 $vendorRoot = Join-Path $repoRoot "Assets\web\vendor"
 $integrityPath = Join-Path $repoRoot "obj\web-assets-integrity.json"
 
-# Pinned versions. Bump deliberately. The integrity hash for each asset is captured on first
-# download into the .integrity.json under the vendor folder; subsequent runs verify against it.
-# Delete that file (or pass -Force) to re-pin after a version bump.
+# Pinned versions. Bump deliberately. Hashes are fixed in this script so clean CI
+# runners verify the same bytes every time instead of trusting the first CDN response.
 $assets = @(
     [pscustomobject]@{
-        Url      = "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js"
+        Urls     = @(
+            "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/lib/xterm.js",
+            "https://unpkg.com/@xterm/xterm@6.0.0/lib/xterm.js"
+        )
         Relative = "xterm\xterm.js"
+        Sha256   = "14903579ff54664cd72f8e8699e6961a6272c21863ec1c3b118cdc8af5d4a972"
     },
     [pscustomobject]@{
-        Url      = "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css"
+        Urls     = @(
+            "https://cdn.jsdelivr.net/npm/@xterm/xterm@6.0.0/css/xterm.css",
+            "https://unpkg.com/@xterm/xterm@6.0.0/css/xterm.css"
+        )
         Relative = "xterm\xterm.css"
+        Sha256   = "854a7c0fb70e8b1a083c16797ab827299fb18744f5ad34f227b48337e33293c6"
     },
     [pscustomobject]@{
-        Url      = "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.js"
+        Urls     = @(
+            "https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.11.0/lib/addon-fit.js",
+            "https://unpkg.com/@xterm/addon-fit@0.11.0/lib/addon-fit.js"
+        )
         Relative = "addon-fit\addon-fit.js"
+        Sha256   = "ba3ea256ce0620a0992a197d6c9baea64823fc93d8da07a9e366ca9943c18527"
     }
 )
+
+$downloadAttemptsPerUrl = 2
+$downloadTimeoutSeconds = 20
 
 $retiredAssets = @(
     [pscustomobject]@{
@@ -42,8 +62,8 @@ function Write-Info($message) {
 
 function Get-FileSha256($path) {
     # Compute via System.Security.Cryptography directly. Avoids depending on the
-    # Get-FileHash cmdlet — which is unexpectedly missing under MSBuild's invocation
-    # of powershell.exe on GitHub-hosted Windows runners (works in interactive PS).
+    # Get-FileHash cmdlet, which is unexpectedly missing under MSBuild's invocation
+    # of powershell.exe on GitHub-hosted Windows runners.
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
         $stream = [System.IO.File]::OpenRead($path)
@@ -58,6 +78,47 @@ function Get-FileSha256($path) {
         $sha.Dispose()
     }
     return -join ($hash | ForEach-Object { $_.ToString("x2") })
+}
+
+function Remove-IfExists($path) {
+    if (Test-Path $path) {
+        Remove-Item -LiteralPath $path -Force
+    }
+}
+
+function Save-VerifiedAsset($asset, $destination) {
+    $destDir = Split-Path -Parent $destination
+    $fileName = [System.IO.Path]::GetFileName($destination)
+    $tempPath = Join-Path $destDir (".$fileName.$([System.Guid]::NewGuid().ToString("N")).tmp")
+    $lastError = $null
+
+    foreach ($url in @($asset.Urls)) {
+        for ($attempt = 1; $attempt -le $downloadAttemptsPerUrl; $attempt++) {
+            Remove-IfExists $tempPath
+            Write-Info "FETCH $url -> $($asset.Relative) (attempt $attempt/$downloadAttemptsPerUrl)"
+
+            try {
+                Invoke-WebRequest -Uri $url -OutFile $tempPath -UseBasicParsing -TimeoutSec $downloadTimeoutSeconds
+                $hash = Get-FileSha256 $tempPath
+                if ($hash -ne $asset.Sha256) {
+                    throw "SHA256 mismatch for $($asset.Relative). Expected $($asset.Sha256), got $hash."
+                }
+
+                Move-Item -LiteralPath $tempPath -Destination $destination -Force
+                return
+            }
+            catch {
+                $lastError = $_
+                Remove-IfExists $tempPath
+                Write-Info "WARN  $($asset.Relative) download failed from ${url}: $_"
+                if ($attempt -lt $downloadAttemptsPerUrl) {
+                    Start-Sleep -Seconds $attempt
+                }
+            }
+        }
+    }
+
+    throw "Failed to download verified $($asset.Relative) from all configured mirrors. Last error: $lastError"
 }
 
 if (-not (Test-Path $vendorRoot)) {
@@ -113,48 +174,27 @@ foreach ($asset in $assets) {
         New-Item -ItemType Directory -Path $destDir -Force | Out-Null
     }
 
-    $expectedHash = $null
-    if ($integrity.ContainsKey($asset.Relative)) { $expectedHash = $integrity[$asset.Relative] }
     $exists = Test-Path $destination
 
-    # Honor existing files even without an integrity manifest entry. This makes the script
-    # idempotent across `dotnet clean` (which wipes obj/) and works on offline machines
-    # that copied the vendor folder in by hand. Hash is captured into the manifest on
-    # first sight so future runs can verify.
     if ($exists -and -not $Force) {
         $actual = Get-FileSha256 $destination
-        if ($expectedHash) {
-            if ($actual -eq $expectedHash) {
-                Write-Info "OK    $($asset.Relative)"
-                continue
-            }
-            Write-Info "STALE $($asset.Relative) - re-downloading"
-        }
-        else {
-            Write-Info "ADOPT $($asset.Relative) (pinning hash from existing file)"
-            $integrity[$asset.Relative] = $actual
+        if ($actual -eq $asset.Sha256) {
+            Write-Info "OK    $($asset.Relative)"
+            $integrity[$asset.Relative] = $asset.Sha256
             continue
         }
+        Write-Info "STALE $($asset.Relative) - re-downloading"
     }
 
-    Write-Info "FETCH $($asset.Url) -> $($asset.Relative)"
     try {
-        Invoke-WebRequest -Uri $asset.Url -OutFile $destination -UseBasicParsing
+        Save-VerifiedAsset $asset $destination
+        $integrity[$asset.Relative] = $asset.Sha256
     }
     catch {
-        Write-Error "Failed to download $($asset.Url): $_"
+        Write-Warning $_
         $allOk = $false
         continue
     }
-
-    $hash = Get-FileSha256 $destination
-    if ($expectedHash -and $hash -ne $expectedHash) {
-        Remove-Item $destination -Force
-        Write-Error "SHA256 mismatch for $($asset.Relative). Expected $expectedHash, got $hash."
-        $allOk = $false
-        continue
-    }
-    $integrity[$asset.Relative] = $hash
 }
 
 if (-not $allOk) {

@@ -11,7 +11,7 @@
 #define MyAppExeName    "Wormhole.exe"
 
 #ifndef MyAppVersion
-  #define MyAppVersion "0.6.1"
+  #error MyAppVersion must be defined by the build script.
 #endif
 
 #ifndef AppArchitecture
