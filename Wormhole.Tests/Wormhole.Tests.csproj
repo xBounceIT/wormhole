@@ -80,6 +80,7 @@
     <Compile Include="..\Services\Tunneling\TunnelManager.cs" Link="Services\Tunneling\TunnelManager.cs" />
     <Compile Include="..\Services\Tunneling\TunnelRecoverableNoticeException.cs" Link="Services\Tunneling\TunnelRecoverableNoticeException.cs" />
     <Compile Include="..\Services\Tunneling\ITunnelRoutePrompter.cs" Link="Services\Tunneling\ITunnelRoutePrompter.cs" />
+    <Compile Include="..\Services\Tunneling\WindowsTemporaryHostRouteService.cs" Link="Services\Tunneling\WindowsTemporaryHostRouteService.cs" />
     <Compile Include="..\Services\Tunneling\TunnelRoutePrompter.cs" Link="Services\Tunneling\TunnelRoutePrompter.cs" />
     <Compile Include="..\Services\Tunneling\SocksTunnelInstance.cs" Link="Services\Tunneling\SocksTunnelInstance.cs" />
     <Compile Include="..\Services\Tunneling\ProcessExitSignal.cs" Link="Services\Tunneling\ProcessExitSignal.cs" />

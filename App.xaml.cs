@@ -258,6 +258,7 @@ public partial class App : Application
         services.AddSingleton<IWatchguardProfileCache, WatchguardProfileCache>();
         services.AddSingleton<ITunnelProvider, WatchguardTunnelProvider>();
         services.AddSingleton<IStormshieldConfigCache, StormshieldConfigCache>();
+        services.AddSingleton<IWindowsTemporaryHostRouteService, WindowsTemporaryHostRouteService>();
         services.AddSingleton<ITunnelProvider, StormshieldTunnelProvider>();
         // The concrete OAuth client is shared: the sign-in popup needs its code-exchange method
         // (not on the interface), while the provider's silent-refresh path uses the interface.

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net.Http;
 using System.Net.Security;
 using System.Security.Authentication;
@@ -50,6 +51,7 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
     private readonly ITlsTrustPromptService _tlsTrustPrompt;
     private readonly ICredentialService _credentials;
     private readonly IStormshieldConfigCache _configCache;
+    private readonly IWindowsTemporaryHostRouteService _routeService;
     private readonly ILogger<StormshieldTunnelProvider> _logger;
     private readonly ILoggerFactory _loggerFactory;
     // Singleton-lived (the provider is registered AddSingleton), so its memory of the last code per tunnel
@@ -62,6 +64,7 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         ITlsTrustPromptService tlsTrustPrompt,
         ICredentialService credentials,
         IStormshieldConfigCache configCache,
+        IWindowsTemporaryHostRouteService routeService,
         ILogger<StormshieldTunnelProvider> logger,
         ILoggerFactory loggerFactory)
     {
@@ -69,6 +72,7 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         _tlsTrustPrompt = tlsTrustPrompt;
         _credentials = credentials;
         _configCache = configCache;
+        _routeService = routeService;
         _logger = logger;
         _loggerFactory = loggerFactory;
     }
@@ -94,91 +98,291 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
                 + "Use username/password (optionally with an OTP), or switch to Import (OpenVPN) mode.");
         }
 
-        // Each mode yields BOTH the profile and the password the OpenVPN data plane should authenticate
-        // with. For Automatic + OTP that password may be `password + otp`: when a current cached profile
-        // lets us skip the download, the single-use code is routed to the data plane instead of being
-        // spent on the HTTPS download (see ResolveAutomaticCoreAsync / the class remarks).
-        var (profile, dataPlanePassword, optimisticCacheHit) = settings.Mode switch
-        {
-            StormshieldConnectionMode.Import => (BuildImportProfile(config, settings), settings.Password, false),
-            StormshieldConnectionMode.Automatic => await ResolveAutomaticAsync(config, settings, cancellationToken, progress).ConfigureAwait(false),
-            _ => throw new InvalidOperationException($"Tunnel config '{config.Name}' has an unsupported Stormshield mode '{settings.Mode}'."),
-        };
-        profile = ApplyCompressionFramingOverride(config.Name, settings, profile);
-        profile = ApplyTransportOverride(config.Name, settings, profile);
-
-        var sidecar = new OpenVpnSidecarConfig
-        {
-            ProfileOvpn = profile,
-            // The OpenVPN auth-user-pass credentials are the user's real username/password (with the OTP
-            // appended on an Automatic cache-hit). Empty in pure cert-only Import profiles, which is fine —
-            // the sidecar only uses them if the profile declares auth-user-pass.
-            Username = string.IsNullOrEmpty(settings.Username) ? null : settings.Username,
-            Password = string.IsNullOrEmpty(dataPlanePassword) ? null : dataPlanePassword,
-            Mock = false,
-        };
-
-        var sidecarPath = AppPaths.GetOvpnProxyExecutablePath();
-        var remoteSummary = SummarizeOpenVpnRemotes(profile);
-        if (!string.IsNullOrEmpty(remoteSummary))
-        {
-            _logger.LogInformation(
-                "Stormshield '{Name}': OpenVPN profile remotes from the fetched/cached profile: {Remotes}.",
-                config.Name, remoteSummary);
-        }
-        _logger.LogDebug("Launching OpenVPN sidecar (Stormshield provider) at {Path}.", sidecarPath);
-
-        progress?.Report(new TunnelProgress(TunnelPhase.StartingTunnel));
-        OpenVpnProcessHost host;
+        var routeLeases = new List<WindowsHostRouteLease>();
         try
         {
-            host = await OpenVpnProcessHost.StartAsync(
-                sidecarPath, sidecar, _loggerFactory.CreateLogger<OpenVpnProcessHost>(), cancellationToken)
-                .ConfigureAwait(false);
+            if (settings.Mode == StormshieldConnectionMode.Automatic && !string.IsNullOrWhiteSpace(settings.Server))
+            {
+                routeLeases.Add(await PrepareGatewayRoutesAsync(
+                    config.Name,
+                    new[] { settings.Server },
+                    settings.BypassNativeVpnGatewayRoute,
+                    "portal",
+                    cancellationToken).ConfigureAwait(false));
+            }
+
+            // Each mode yields BOTH the profile and the password the OpenVPN data plane should authenticate
+            // with. For Automatic + OTP that password may be `password + otp`: when a current cached profile
+            // lets us skip the download, the single-use code is routed to the data plane instead of being
+            // spent on the HTTPS download (see ResolveAutomaticCoreAsync / the class remarks).
+            var (profile, dataPlanePassword, optimisticCacheHit) = settings.Mode switch
+            {
+                StormshieldConnectionMode.Import => (BuildImportProfile(config, settings), settings.Password, false),
+                StormshieldConnectionMode.Automatic => await ResolveAutomaticAsync(config, settings, cancellationToken, progress).ConfigureAwait(false),
+                _ => throw new InvalidOperationException($"Tunnel config '{config.Name}' has an unsupported Stormshield mode '{settings.Mode}'."),
+            };
+            profile = ApplyCompressionFramingOverride(config.Name, settings, profile);
+            profile = ApplyTransportOverride(config.Name, settings, profile);
+
+            var remoteHosts = ExtractOpenVpnRemotes(profile)
+                .Select(r => r.Host)
+                .Where(h => !string.IsNullOrWhiteSpace(h))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            routeLeases.AddRange(await PrepareOpenVpnRemoteRoutesAsync(
+                config.Name,
+                remoteHosts,
+                settings.BypassNativeVpnGatewayRoute,
+                cancellationToken).ConfigureAwait(false));
+
+            var sidecar = new OpenVpnSidecarConfig
+            {
+                ProfileOvpn = profile,
+                // The OpenVPN auth-user-pass credentials are the user's real username/password (with the OTP
+                // appended on an Automatic cache-hit). Empty in pure cert-only Import profiles, which is fine —
+                // the sidecar only uses them if the profile declares auth-user-pass.
+                Username = string.IsNullOrEmpty(settings.Username) ? null : settings.Username,
+                Password = string.IsNullOrEmpty(dataPlanePassword) ? null : dataPlanePassword,
+                Mock = false,
+            };
+
+            var sidecarPath = AppPaths.GetOvpnProxyExecutablePath();
+            var remoteSummary = SummarizeOpenVpnRemotes(profile);
+            if (!string.IsNullOrEmpty(remoteSummary))
+            {
+                _logger.LogInformation(
+                    "Stormshield '{Name}': OpenVPN profile remotes from the fetched/cached profile: {Remotes}.",
+                    config.Name, remoteSummary);
+            }
+            _logger.LogDebug("Launching OpenVPN sidecar (Stormshield provider) at {Path}.", sidecarPath);
+
+            progress?.Report(new TunnelProgress(TunnelPhase.StartingTunnel));
+            OpenVpnProcessHost host;
+            try
+            {
+                host = await OpenVpnProcessHost.StartAsync(
+                    sidecarPath, sidecar, _loggerFactory.CreateLogger<OpenVpnProcessHost>(), cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (
+                ex is not OperationCanceledException
+                && settings.Mode == StormshieldConnectionMode.Automatic
+                && settings.UseOtp)
+            {
+                // With OTP enabled, reaching the sidecar means we took the cache-hit path and routed the
+                // one-time code to the OpenVPN data-plane password (a cache MISS aborts earlier, before the
+                // sidecar starts). The code may have reached the firewall or simply expired while OpenVPN
+                // worked through transport fallbacks. Either way a blind Retry would reuse a stale code, so
+                // tell the user to enter a fresh one. (The reuse guard never recorded this data-plane code — it
+                // only records codes a successful download definitively spent — so the firewall stays the
+                // authority on whether it's still usable; nothing to clear here.)
+
+                // If the profile was reused WITHOUT confirming it against the firewall's current hash (the
+                // change-check was unavailable), the failure may mean the cached profile is stale. Drop it so
+                // the next connect re-downloads a fresh one rather than looping forever on the same stale
+                // profile. A hash-CONFIRMED hit that fails is almost certainly a mistyped/expired code, so we
+                // keep that cache for a cheap re-prompt. Best-effort; DeleteAsync never throws.
+                if (optimisticCacheHit)
+                    await _configCache.DeleteAsync(config.Id, CancellationToken.None).ConfigureAwait(false);
+
+                throw new InvalidOperationException(
+                    "The Stormshield VPN prepared its configuration, but bringing up the OpenVPN tunnel failed: "
+                    + $"{ex.Message} Your one-time code may have been used or expired during this connection attempt — "
+                    + "if you retry, enter a NEW one-time code.", ex);
+            }
+
+            // Wrap-after-start: once StartAsync returns the sidecar is alive, so a construction-time
+            // failure must tear it down. Same pattern as the other providers.
+            try
+            {
+                return new SocksTunnelInstance(
+                    host.SocksEndpoint,
+                    _loggerFactory.CreateLogger<SocksTunnelInstance>(),
+                    onDispose: () => DisposeHostAndRoutesAsync(host, routeLeases),
+                    failureSignal: host.ProcessExited);
+            }
+            catch
+            {
+                await DisposeHostAndRoutesAsync(host, routeLeases).ConfigureAwait(false);
+                throw;
+            }
         }
-        catch (Exception ex) when (
-            ex is not OperationCanceledException
-            && settings.Mode == StormshieldConnectionMode.Automatic
-            && settings.UseOtp)
+        catch (Exception ex) when (ex is not OperationCanceledException && ShouldEnrichNativeVpnConflict(routeLeases, ex))
         {
-            // With OTP enabled, reaching the sidecar means we took the cache-hit path and routed the
-            // one-time code to the OpenVPN data-plane password (a cache MISS aborts earlier, before the
-            // sidecar starts). The code may have reached the firewall or simply expired while OpenVPN
-            // worked through transport fallbacks. Either way a blind Retry would reuse a stale code, so
-            // tell the user to enter a fresh one. (The reuse guard never recorded this data-plane code — it
-            // only records codes a successful download definitively spent — so the firewall stays the
-            // authority on whether it's still usable; nothing to clear here.)
-
-            // If the profile was reused WITHOUT confirming it against the firewall's current hash (the
-            // change-check was unavailable), the failure may mean the cached profile is stale. Drop it so
-            // the next connect re-downloads a fresh one rather than looping forever on the same stale
-            // profile. A hash-CONFIRMED hit that fails is almost certainly a mistyped/expired code, so we
-            // keep that cache for a cheap re-prompt. Best-effort; DeleteAsync never throws.
-            if (optimisticCacheHit)
-                await _configCache.DeleteAsync(config.Id, CancellationToken.None).ConfigureAwait(false);
-
-            throw new InvalidOperationException(
-                "The Stormshield VPN prepared its configuration, but bringing up the OpenVPN tunnel failed: "
-                + $"{ex.Message} Your one-time code may have been used or expired during this connection attempt — "
-                + "if you retry, enter a NEW one-time code.", ex);
-        }
-
-        // Wrap-after-start: once StartAsync returns the sidecar is alive, so a construction-time
-        // failure must tear it down. Same pattern as the other providers.
-        try
-        {
-            return new SocksTunnelInstance(
-                host.SocksEndpoint,
-                _loggerFactory.CreateLogger<SocksTunnelInstance>(),
-                onDispose: host.DisposeAsync,
-                failureSignal: host.ProcessExited);
+            await DisposeRouteLeasesAsync(routeLeases).ConfigureAwait(false);
+            throw BuildNativeVpnConflictException(config.Name, settings, routeLeases, ex);
         }
         catch
         {
-            await host.DisposeAsync().ConfigureAwait(false);
+            await DisposeRouteLeasesAsync(routeLeases).ConfigureAwait(false);
             throw;
         }
     }
+
+    internal async Task<IReadOnlyList<WindowsHostRouteLease>> PrepareOpenVpnRemoteRoutesAsync(
+        string configName,
+        IReadOnlyCollection<string> hosts,
+        bool enableBypass,
+        CancellationToken cancellationToken)
+    {
+        var leases = new List<WindowsHostRouteLease>();
+        try
+        {
+            foreach (var host in hosts)
+            {
+                try
+                {
+                    leases.Add(await PrepareGatewayRoutesAsync(
+                        configName,
+                        new[] { host },
+                        enableBypass,
+                        "OpenVPN remote",
+                        cancellationToken).ConfigureAwait(false));
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException && IsRemoteRouteResolutionFailure(ex))
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Stormshield '{Name}': skipped native-VPN route preparation for unresolved OpenVPN remote '{Host}'. OpenVPN will still try its profile remotes normally.",
+                        configName,
+                        host);
+                }
+            }
+            return leases;
+        }
+        catch
+        {
+            await DisposeRouteLeasesAsync(leases).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    internal static bool IsRemoteRouteResolutionFailure(Exception ex) =>
+        ex is InvalidOperationException
+        && ex.Message.Contains("could not resolve", StringComparison.OrdinalIgnoreCase)
+        && ex.Message.Contains("IPv4 address", StringComparison.OrdinalIgnoreCase);
+
+    private async Task<WindowsHostRouteLease> PrepareGatewayRoutesAsync(
+        string configName,
+        string[] hosts,
+        bool enableBypass,
+        string phase,
+        CancellationToken cancellationToken)
+    {
+        if (hosts.Length == 0)
+            return new WindowsHostRouteLease(Array.Empty<WindowsHostRouteDiagnostic>(), Array.Empty<IAsyncDisposable>());
+
+        var lease = await _routeService.PrepareGatewayBypassAsync(configName, hosts, enableBypass, cancellationToken)
+            .ConfigureAwait(false);
+        LogRouteDiagnostics(configName, phase, lease.Diagnostics, enableBypass);
+        return lease;
+    }
+
+    private void LogRouteDiagnostics(
+        string configName,
+        string phase,
+        IReadOnlyList<WindowsHostRouteDiagnostic> diagnostics,
+        bool enableBypass)
+    {
+        foreach (var diagnostic in diagnostics)
+        {
+            if (diagnostic.BypassRouteInstalled)
+            {
+                _logger.LogInformation("Stormshield '{Name}' {Phase} route bypass: {Message}", configName, phase, diagnostic.Message);
+            }
+            else if (diagnostic.NativeVpnConflict)
+            {
+                _logger.LogWarning(
+                    "Stormshield '{Name}' {Phase} route warning: {Message} {Hint}",
+                    configName,
+                    phase,
+                    diagnostic.Message,
+                    enableBypass
+                        ? "The bypass option is enabled, but no temporary route was installed."
+                        : "Enable the advanced native-VPN route bypass option and run Wormhole as Administrator if this blocks the connection.");
+            }
+            else
+            {
+                _logger.LogDebug("Stormshield '{Name}' {Phase} route diagnostic: {Message}", configName, phase, diagnostic.Message);
+            }
+        }
+    }
+
+    private async ValueTask DisposeHostAndRoutesAsync(OpenVpnProcessHost host, IReadOnlyList<WindowsHostRouteLease> routeLeases)
+    {
+        try
+        {
+            await host.DisposeAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            await DisposeRouteLeasesAsync(routeLeases).ConfigureAwait(false);
+        }
+    }
+
+    private async ValueTask DisposeRouteLeasesAsync(IReadOnlyList<WindowsHostRouteLease> routeLeases)
+    {
+        foreach (var routeLease in routeLeases)
+        {
+            try { await routeLease.DisposeAsync().ConfigureAwait(false); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Failed to dispose a temporary Stormshield gateway route lease."); }
+        }
+    }
+
+    internal static bool ShouldEnrichNativeVpnConflict(IReadOnlyList<WindowsHostRouteLease> routeLeases, Exception ex) =>
+        GetUnresolvedNativeVpnConflicts(routeLeases).Any() && IsRouteSensitiveFailure(ex);
+
+    internal static bool IsRouteSensitiveFailure(Exception ex)
+    {
+        if (IsTlsAuthenticationFailure(ex)) return false;
+
+        for (Exception? e = ex; e is not null; e = e.InnerException)
+        {
+            if (e is TimeoutException or TaskCanceledException or HttpRequestException)
+                return true;
+
+            if (IsRouteSensitiveFailureMessage(e.Message))
+                return true;
+        }
+        return false;
+    }
+
+    private static bool IsRouteSensitiveFailureMessage(string message) =>
+        message.Contains("timed out", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("could not reach", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("CONNECTION_TIMEOUT", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("TRANSPORT_ERROR", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("NETWORK_RECV_ERROR", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("NETWORK_EOF_ERROR", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("handshake/auth failure or timeout", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("did not become ready", StringComparison.OrdinalIgnoreCase)
+        || message.Contains("did not produce a READY", StringComparison.OrdinalIgnoreCase);
+
+    internal static InvalidOperationException BuildNativeVpnConflictException(
+        string configName,
+        StormshieldSettings settings,
+        IReadOnlyList<WindowsHostRouteLease> routeLeases,
+        Exception inner)
+    {
+        var conflicts = GetUnresolvedNativeVpnConflicts(routeLeases)
+            .Select(d => d.Message)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var conflictSummary = conflicts.Length == 0 ? string.Empty : " " + string.Join(" ", conflicts);
+        var hint = settings.BypassNativeVpnGatewayRoute
+            ? "The advanced route bypass option is enabled; Wormhole installed temporary host routes where Windows allowed it. If the connection still fails, disconnect the native VPN or check for an existing host route owned by it."
+            : "Enable the Stormshield advanced option 'Bypass active native VPN route for gateway' and run Wormhole as Administrator, or disconnect the native VPN before connecting this tunnel.";
+
+        return new InvalidOperationException(
+            $"Stormshield '{configName}' could not complete because Windows appears to be routing the VPN gateway through an already-active native VPN.{conflictSummary} {hint} Original error: {inner.Message}",
+            inner);
+    }
+
+    private static IEnumerable<WindowsHostRouteDiagnostic> GetUnresolvedNativeVpnConflicts(
+        IReadOnlyList<WindowsHostRouteLease> routeLeases) =>
+        routeLeases
+            .SelectMany(l => l.Diagnostics)
+            .Where(d => d.NativeVpnConflict && !d.BypassRouteInstalled);
 
     private static string BuildImportProfile(TunnelConfig config, StormshieldSettings settings)
     {
@@ -229,7 +433,21 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
 
     internal static string SummarizeOpenVpnRemotes(string profile)
     {
-        var remotes = new List<string>();
+        var remotes = ExtractOpenVpnRemotes(profile)
+            .Select(remote =>
+            {
+                var summary = remote.Host;
+                if (!string.IsNullOrWhiteSpace(remote.Port)) summary += ":" + remote.Port;
+                if (!string.IsNullOrWhiteSpace(remote.Protocol)) summary += "/" + remote.Protocol;
+                return summary;
+            });
+
+        return string.Join(", ", remotes);
+    }
+
+    internal static IReadOnlyList<OpenVpnRemoteEndpoint> ExtractOpenVpnRemotes(string profile)
+    {
+        var remotes = new List<OpenVpnRemoteEndpoint>();
         string? openBlock = null;
 
         foreach (var rawLine in profile.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n'))
@@ -253,14 +471,16 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             if (parts.Length < 2 || !parts[0].Equals("remote", StringComparison.OrdinalIgnoreCase))
                 continue;
 
-            var summary = parts[1];
-            if (parts.Length >= 3) summary += ":" + parts[2];
-            if (parts.Length >= 4) summary += "/" + parts[3];
-            remotes.Add(summary);
+            remotes.Add(new OpenVpnRemoteEndpoint(
+                parts[1],
+                parts.Length >= 3 ? parts[2] : null,
+                parts.Length >= 4 ? parts[3] : null));
         }
 
-        return string.Join(", ", remotes);
+        return remotes;
     }
+
+    internal sealed record OpenVpnRemoteEndpoint(string Host, string? Port, string? Protocol);
 
     private static bool TryReadOpenTag(string trimmed, out string name)
     {
