@@ -16,6 +16,7 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot   = Split-Path -Parent $scriptRoot
 $vendorRoot = Join-Path $repoRoot "Assets\web\vendor"
 $integrityPath = Join-Path $repoRoot "obj\web-assets-integrity.json"
+$downloadTempRoot = Join-Path $repoRoot "obj\web-assets-downloads"
 
 # Pinned versions. Bump deliberately. Hashes are fixed in this script so clean CI
 # runners verify the same bytes every time instead of trusting the first CDN response.
@@ -87,9 +88,12 @@ function Remove-IfExists($path) {
 }
 
 function Save-VerifiedAsset($asset, $destination) {
-    $destDir = Split-Path -Parent $destination
+    if (-not (Test-Path $downloadTempRoot)) {
+        New-Item -ItemType Directory -Path $downloadTempRoot -Force | Out-Null
+    }
+
     $fileName = [System.IO.Path]::GetFileName($destination)
-    $tempPath = Join-Path $destDir (".$fileName.$([System.Guid]::NewGuid().ToString("N")).tmp")
+    $tempPath = Join-Path $downloadTempRoot ("$fileName.$([System.Guid]::NewGuid().ToString("N")).tmp")
     $lastError = $null
 
     foreach ($url in @($asset.Urls)) {
