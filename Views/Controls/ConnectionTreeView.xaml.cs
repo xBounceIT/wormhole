@@ -279,6 +279,8 @@ public sealed partial class ConnectionTreeView : UserControl
             var show = showAll || ReferenceEquals(pair.Key, _hoveredTreeItem);
             pair.Value.Opacity = show ? 1 : 0;
             pair.Value.IsHitTestVisible = show;
+            pair.Value.IsTabStop = show;
+            pair.Value.IsEnabled = show;
         }
     }
 

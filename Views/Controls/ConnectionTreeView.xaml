@@ -190,6 +190,8 @@
                                       Tapped="OnSelectionCheckBoxTapped"
                                       Opacity="0"
                                       IsHitTestVisible="False"
+                                      IsTabStop="False"
+                                      IsEnabled="False"
                                       RenderTransformOrigin="0.5,0.5">
                                 <CheckBox.RenderTransform>
                                     <ScaleTransform ScaleX="0.86" ScaleY="0.86" />
