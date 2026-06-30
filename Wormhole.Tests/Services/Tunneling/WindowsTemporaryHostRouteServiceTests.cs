@@ -153,6 +153,61 @@ public class WindowsTemporaryHostRouteServiceTests
     }
 
     [Fact]
+    public async Task PrepareGatewayBypassAsync_BypassEnabled_ReferencesActiveRouteWhenWindowsNowPrefersIt()
+    {
+        var ip = IPAddress.Parse("203.0.113.10");
+        var gateway = IPAddress.Parse("192.168.1.1");
+        var system = NewSystem(isAdministrator: true);
+        system.Resolve("rpv.example.com", ip);
+        system.Adapters.Add(VpnAdapter());
+        system.Adapters.Add(PhysicalAdapter(gateway));
+        system.Routes[ip.ToString()] = DefaultRoute(VpnInterfaceIndex);
+        var service = NewService(system);
+
+        var first = await service.PrepareGatewayBypassAsync(
+            "cfg", GatewayHosts, enableBypass: true, CancellationToken.None);
+        system.Routes[ip.ToString()] = HostRoute(ip, PhysicalInterfaceIndex);
+        var second = await service.PrepareGatewayBypassAsync(
+            "cfg", GatewayHosts, enableBypass: true, CancellationToken.None);
+
+        Assert.Single(system.AddedRoutes);
+        var diagnostic = Assert.Single(second.Diagnostics);
+        Assert.True(diagnostic.BypassRouteInstalled);
+        Assert.Contains("existing temporary host route", diagnostic.Message, StringComparison.OrdinalIgnoreCase);
+        await first.DisposeAsync();
+        Assert.Empty(system.DeletedRoutes);
+        await second.DisposeAsync();
+        Assert.Single(system.DeletedRoutes);
+    }
+
+    [Fact]
+    public async Task PrepareGatewayBypassAsync_BypassDisabled_DoesNotReferenceActiveRouteWhenWindowsNowPrefersIt()
+    {
+        var ip = IPAddress.Parse("203.0.113.10");
+        var gateway = IPAddress.Parse("192.168.1.1");
+        var system = NewSystem(isAdministrator: true);
+        system.Resolve("rpv.example.com", ip);
+        system.Adapters.Add(VpnAdapter());
+        system.Adapters.Add(PhysicalAdapter(gateway));
+        system.Routes[ip.ToString()] = DefaultRoute(VpnInterfaceIndex);
+        var service = NewService(system);
+
+        var first = await service.PrepareGatewayBypassAsync(
+            "cfg", GatewayHosts, enableBypass: true, CancellationToken.None);
+        system.Routes[ip.ToString()] = HostRoute(ip, PhysicalInterfaceIndex);
+        var second = await service.PrepareGatewayBypassAsync(
+            "cfg", GatewayHosts, enableBypass: false, CancellationToken.None);
+
+        var diagnostic = Assert.Single(second.Diagnostics);
+        Assert.False(diagnostic.NativeVpnConflict);
+        Assert.False(diagnostic.BypassRouteInstalled);
+        await first.DisposeAsync();
+        Assert.Single(system.DeletedRoutes);
+        await second.DisposeAsync();
+        Assert.Single(system.DeletedRoutes);
+    }
+
+    [Fact]
     public async Task PrepareGatewayBypassAsync_BypassEnabled_RequiresAdministrator()
     {
         var ip = IPAddress.Parse("203.0.113.10");

@@ -187,6 +187,21 @@ public sealed class WindowsTemporaryHostRouteService : IWindowsTemporaryHostRout
         var routeUsesVpn = IsVpnLikeAdapter(routedAdapter);
         if (!routeUsesVpn)
         {
+            if (enableBypass)
+            {
+                var existingRelease = await TryReferenceActiveRouteAsync(address, cancellationToken).ConfigureAwait(false);
+                if (existingRelease is not null)
+                {
+                    diagnostics.Add(new WindowsHostRouteDiagnostic(
+                        host,
+                        address,
+                        NativeVpnConflict: true,
+                        BypassRouteInstalled: true,
+                        Message: $"Reusing an existing temporary host route for {host} ({address}) through {routedName}."));
+                    return existingRelease;
+                }
+            }
+
             diagnostics.Add(new WindowsHostRouteDiagnostic(
                 host,
                 address,
@@ -243,6 +258,25 @@ public sealed class WindowsTemporaryHostRouteService : IWindowsTemporaryHostRout
             "Stormshield '{Name}': temporary host route installed for {Host} ({Address}) via {Gateway} on interface {InterfaceIndex}.",
             configName, host, address, gateway, physical.InterfaceIndex);
         return release;
+    }
+
+    private async Task<IAsyncDisposable?> TryReferenceActiveRouteAsync(
+        IPAddress destination,
+        CancellationToken cancellationToken)
+    {
+        await _routeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var active = _activeRoutes.FirstOrDefault(kvp => kvp.Key.Destination.Equals(destination));
+            if (active.Value is null) return null;
+
+            active.Value.RefCount++;
+            return new RouteReference(this, active.Key);
+        }
+        finally
+        {
+            _routeGate.Release();
+        }
     }
 
     private async Task<IAsyncDisposable> AddOrReferenceRouteAsync(HostRouteKey key, CancellationToken cancellationToken)
