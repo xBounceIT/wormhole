@@ -19,11 +19,14 @@ namespace Wormhole.Tests.Services.Tunneling;
 public class StormshieldTunnelProviderTests
 {
     private static StormshieldTunnelProvider NewProvider(
-        IOtpPromptService? otp = null, FakeCredentialService? credentials = null) =>
+        IOtpPromptService? otp = null,
+        FakeCredentialService? credentials = null,
+        IWindowsTemporaryHostRouteService? routeService = null) =>
         new(otp ?? new NullOtpPromptService(),
             new ScriptedTlsTrustPrompt(),
             credentials ?? new FakeCredentialService(),
             new FakeStormshieldConfigCache(),
+            routeService ?? new NoopWindowsTemporaryHostRouteService(),
             NullLogger<StormshieldTunnelProvider>.Instance,
             NullLoggerFactory.Instance);
 
@@ -31,6 +34,16 @@ public class StormshieldTunnelProviderTests
     public void Kind_IsStormshield()
     {
         Assert.Equal(TunnelKind.Stormshield, NewProvider().Kind);
+    }
+
+    [Fact]
+    public void StormshieldSettings_OldJson_DefaultsNativeVpnBypassOff()
+    {
+        const string json = "{\"Server\":\"rpv.example.com\",\"Mode\":0,\"TrustServerCertificate\":true}";
+
+        var settings = System.Text.Json.JsonSerializer.Deserialize<StormshieldSettings>(json)!;
+
+        Assert.False(settings.BypassNativeVpnGatewayRoute);
     }
 
     [Fact]
@@ -628,10 +641,41 @@ public class StormshieldTunnelProviderTests
     }
 
     [Fact]
-    public void SummarizeOpenVpnRemotes_IncludesConnectionBlocks_SkipsInlineDataBlocks()
+    public void NativeVpnConflictEnrichment_PortalTimeout_BuildsActionableMessage()
+    {
+        var lease = NativeVpnConflictLease();
+        var inner = new InvalidOperationException(
+            "Stormshield configuration download timed out talking to 'rpv.example.com:443'.",
+            new TaskCanceledException("timeout"));
+
+        Assert.True(StormshieldTunnelProvider.ShouldEnrichNativeVpnConflict(new[] { lease }, inner));
+        var enriched = StormshieldTunnelProvider.BuildNativeVpnConflictException(
+            "cfg", new StormshieldSettings(), new[] { lease }, inner);
+
+        Assert.Same(inner, enriched.InnerException);
+        Assert.Contains("native VPN", enriched.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Bypass active native VPN route", enriched.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("rpv.example.com", enriched.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void NativeVpnConflictEnrichment_OpenVpnSidecarTimeout_IsRouteSensitive()
+    {
+        var lease = NativeVpnConflictLease();
+        var inner = new InvalidOperationException(
+            "OpenVPN sidecar did not produce a READY line within the startup timeout.");
+
+        Assert.True(StormshieldTunnelProvider.ShouldEnrichNativeVpnConflict(new[] { lease }, inner));
+        Assert.False(StormshieldTunnelProvider.ShouldEnrichNativeVpnConflict(
+            Array.Empty<WindowsHostRouteLease>(), inner));
+    }
+
+    [Fact]
+    public void ExtractOpenVpnRemotes_IncludesTopLevelAndConnectionBlocks_SkipsInlineDataBlocks()
     {
         const string profile =
             "client\n"
+            + "remote top.example.com 1194 udp\n"
             + "<connection>\n"
             + "remote rpv.example.com 443 tcp\n"
             + "</connection>\n"
@@ -640,11 +684,61 @@ public class StormshieldTunnelProviderTests
             + "</connection>\n"
             + "<ca>\n"
             + "remote should-not-log 1194 udp\n"
-            + "</ca>\n";
+            + "</ca>\n"
+            + "<key>\n"
+            + "remote key-material.example 443 tcp\n"
+            + "</key>\n";
 
-        var summary = StormshieldTunnelProvider.SummarizeOpenVpnRemotes(profile);
+        var remotes = StormshieldTunnelProvider.ExtractOpenVpnRemotes(profile);
 
-        Assert.Equal("rpv.example.com:443/tcp, rpv.example.com:8443/udp", summary);
+        Assert.Collection(
+            remotes,
+            remote =>
+            {
+                Assert.Equal("top.example.com", remote.Host);
+                Assert.Equal("1194", remote.Port);
+                Assert.Equal("udp", remote.Protocol);
+            },
+            remote =>
+            {
+                Assert.Equal("rpv.example.com", remote.Host);
+                Assert.Equal("443", remote.Port);
+                Assert.Equal("tcp", remote.Protocol);
+            },
+            remote =>
+            {
+                Assert.Equal("rpv.example.com", remote.Host);
+                Assert.Equal("8443", remote.Port);
+                Assert.Equal("udp", remote.Protocol);
+            });
+        Assert.Equal(
+            "top.example.com:1194/udp, rpv.example.com:443/tcp, rpv.example.com:8443/udp",
+            StormshieldTunnelProvider.SummarizeOpenVpnRemotes(profile));
+    }
+
+    private static WindowsHostRouteLease NativeVpnConflictLease(string message = "Windows currently routes rpv.example.com (203.0.113.10) through VPN-like adapter 'Stormshield VPN' (interface 7).") =>
+        new(
+            new[]
+            {
+                new WindowsHostRouteDiagnostic(
+                    "rpv.example.com",
+                    System.Net.IPAddress.Parse("203.0.113.10"),
+                    NativeVpnConflict: true,
+                    BypassRouteInstalled: false,
+                    Message: message),
+            },
+            Array.Empty<IAsyncDisposable>());
+
+    private sealed class NoopWindowsTemporaryHostRouteService : IWindowsTemporaryHostRouteService
+    {
+        public Task<WindowsHostRouteLease> PrepareGatewayBypassAsync(
+            string configName,
+            IReadOnlyCollection<string> hosts,
+            bool enableBypass,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(new WindowsHostRouteLease(
+                Array.Empty<WindowsHostRouteDiagnostic>(),
+                Array.Empty<IAsyncDisposable>()));
     }
 
     private sealed class NullOtpPromptService : IOtpPromptService
