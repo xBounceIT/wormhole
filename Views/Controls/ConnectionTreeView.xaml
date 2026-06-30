@@ -126,6 +126,7 @@
                                   Loaded="OnTreeItemLoaded"
                                   Unloaded="OnTreeItemUnloaded"
                                   GotFocus="OnTreeItemGotFocus"
+                                  KeyDown="OnTreeItemKeyDown"
                                   PointerEntered="OnTreeItemPointerEntered"
                                   PointerExited="OnTreeItemPointerExited"
                                   DoubleTapped="OnNodeDoubleTapped">

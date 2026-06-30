@@ -6,6 +6,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
+using Windows.System;
 using Wormhole.Models;
 using Wormhole.ViewModels;
 
@@ -95,10 +96,28 @@ public sealed partial class ConnectionTreeView : UserControl
 
     private void OnTreeItemGotFocus(object sender, RoutedEventArgs e)
     {
-        if (sender is TreeViewItem { DataContext: TreeNodeViewModel vm })
+        if (sender is not TreeViewItem { DataContext: TreeNodeViewModel vm } item ||
+            !OwnsOriginalSource(item, e.OriginalSource))
         {
-            ViewModel.SelectedNode = vm;
+            return;
         }
+
+        ViewModel.SelectedNode = vm;
+    }
+
+    private void OnTreeItemKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != VirtualKey.Space ||
+            e.OriginalSource is CheckBox ||
+            sender is not TreeViewItem { DataContext: TreeNodeViewModel vm } item ||
+            !OwnsOriginalSource(item, e.OriginalSource))
+        {
+            return;
+        }
+
+        ViewModel.SetNodeSelection(vm, !ViewModel.IsSelected(vm));
+        ViewModel.SelectedNode = vm;
+        e.Handled = true;
     }
 
     private void OnTreeItemPointerEntered(object sender, PointerRoutedEventArgs e)
@@ -261,6 +280,24 @@ public sealed partial class ConnectionTreeView : UserControl
             pair.Value.IsTabStop = show;
             pair.Value.IsEnabled = show;
         }
+    }
+
+    private static bool OwnsOriginalSource(TreeViewItem item, object originalSource)
+    {
+        return originalSource is DependencyObject source &&
+               ReferenceEquals(FindOwningTreeViewItem(source), item);
+    }
+
+    private static TreeViewItem? FindOwningTreeViewItem(DependencyObject source)
+    {
+        var current = source;
+        while (current is not null)
+        {
+            if (current is TreeViewItem item) return item;
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return null;
     }
 
     private CheckBox? RegisterSelectionCheckBox(TreeViewItem item)
