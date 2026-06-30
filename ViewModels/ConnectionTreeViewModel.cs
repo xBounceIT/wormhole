@@ -134,6 +134,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     private void ApplyFilterAndMaybeRestore(string newValue, bool wasFiltering, bool isFiltering)
     {
+        ClearSelection();
         ApplyFilter(newValue);
 
         if (wasFiltering && !isFiltering && _expandStateBeforeFilter is not null)

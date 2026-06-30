@@ -1688,6 +1688,39 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task SearchText_DebouncedApplyClearsSelectionMadeDuringDelay()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        vm.SearchDebounceDelay = TimeSpan.FromMilliseconds(20);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Parent";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var parent = vm.Roots.Single();
+        dialog.EditConnectionResult = MakeConnectionDraft(
+            "leaf", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(parent);
+        var leaf = parent.Children.Single();
+
+        vm.SearchText = "leaf";
+        vm.SetSelectedNodes(new[] { parent, leaf });
+        Assert.True(vm.IsSelected(parent));
+        Assert.True(vm.IsSelected(leaf));
+
+        for (var attempt = 0; attempt < 20 && vm.SelectedNodes.Count > 0; attempt++)
+        {
+            await Task.Delay(20);
+        }
+
+        Assert.True(vm.IsSearchActive);
+        Assert.Empty(vm.SelectedNodes);
+        Assert.Null(vm.SelectedNode);
+        Assert.False(vm.IsSelected(parent));
+        Assert.False(vm.IsSelected(leaf));
+    }
+
+    [Fact]
     public async Task SearchText_ClearingActiveSearchClearsSelectedNodes()
     {
         var dialog = new FakeDialogService();
