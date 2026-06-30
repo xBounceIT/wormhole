@@ -25,6 +25,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
 #pragma warning restore CA1001
 {
     private static readonly TimeSpan RemoteOutputWaitDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan AuthenticationFailureEndpointProbeTimeout = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan McpCommandTypingDelay = TimeSpan.FromMilliseconds(18);
     private static readonly TimeSpan McpCommandTypingMaxDuration = TimeSpan.FromMilliseconds(2500);
     // Wait between automatic reconnect attempts after an unexpected drop. Fixed (not escalating) so a
@@ -862,6 +863,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         var token = cts.Token;
         ITunnelInstance? pendingTunnel = null;
         ISshSession? pendingSession = null;
+        var sshConnectStarted = false;
 
         async Task<bool> CleanupPendingConnectArtifactsAndIsCurrentAsync()
         {
@@ -948,6 +950,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             pendingTunnel = null;
 
             Progress.Begin(ConnectionPhase.Connect);
+            sshConnectStarted = true;
             pendingSession = await _sshService.ConnectAsync(profile, creds, _initialSize, _tunnel, token).ConfigureAwait(true);
             if (!IsAttemptCurrent(teardownGeneration))
             {
@@ -1069,10 +1072,12 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         catch (SshAuthenticationException ex)
         {
             if (!await CleanupPendingConnectArtifactsAndIsCurrentAsync().ConfigureAwait(true)) return;
-            // Don't hammer the server with the same bad credentials (and risk account lockout).
-            _lastConnectRetryable = false;
+            var endpointReachable = await ProbeSshEndpointAsync(profile, _tunnel, token).ConfigureAwait(true);
+            if (!IsAttemptCurrent(teardownGeneration)) return;
+            var failure = BuildAuthenticationFailure(profile, ex, endpointReachable);
+            _lastConnectRetryable = failure.Retryable;
             await SafeDisposeSessionAsync().ConfigureAwait(true);
-            ReportFailure("Authentication failed: " + ex.Message);
+            ReportFailure(failure.Message);
         }
         catch (TunnelRecoverableNoticeException ex)
         {
@@ -1091,7 +1096,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         {
             if (!await CleanupPendingConnectArtifactsAndIsCurrentAsync().ConfigureAwait(true)) return;
             await SafeDisposeSessionAsync().ConfigureAwait(true);
-            ReportFailure(ex.Message);
+            ReportFailure(BuildConnectFailureMessage(profile, ex, sshConnectStarted));
             _logger.LogError(ex, "SSH connect failed for {Host}.", profile.Host);
         }
         finally
@@ -1103,6 +1108,104 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
 
     private bool IsAttemptCurrent(int teardownGeneration) =>
         Volatile.Read(ref _teardownGeneration) == teardownGeneration;
+
+    private async Task<bool> ProbeSshEndpointAsync(
+        ConnectionProfile profile,
+        ITunnelInstance? tunnel,
+        CancellationToken cancellationToken)
+    {
+        using var timeout = new CancellationTokenSource(AuthenticationFailureEndpointProbeTimeout);
+        using var probeCts = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token, cancellationToken);
+        var probeToken = probeCts.Token;
+        try
+        {
+            if (tunnel?.Socks5Endpoint is { } socksEndpoint)
+            {
+                await using var stream = await Socks5Client.ConnectAsync(
+                    socksEndpoint,
+                    profile.Host,
+                    profile.Port,
+                    probeToken).ConfigureAwait(true);
+                return true;
+            }
+
+            using var client = new System.Net.Sockets.TcpClient();
+            await client.ConnectAsync(profile.Host, profile.Port, probeToken).ConfigureAwait(true);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "SSH endpoint probe failed for {Host}:{Port}.", profile.Host, profile.Port);
+            return false;
+        }
+    }
+
+    internal readonly record struct SshConnectFailure(string Message, bool Retryable);
+
+    internal static SshConnectFailure BuildAuthenticationFailure(
+        ConnectionProfile profile,
+        SshAuthenticationException exception,
+        bool endpointReachable)
+    {
+        if (!endpointReachable)
+        {
+            return new(BuildEndpointUnavailableMessage(profile), Retryable: true);
+        }
+
+        return new(
+            $"Authentication failed: {exception.Message} SSH server responded at {FormatEndpoint(profile)}; " +
+            "if this VM is powered off, verify that the address or VPN route is reaching the expected machine.",
+            Retryable: false);
+    }
+
+    internal static string BuildEndpointUnavailableMessage(ConnectionProfile profile) =>
+        $"Could not reach SSH server at {FormatEndpoint(profile)}. " +
+        "Check that the VM is powered on and that the host, port, and VPN route are correct.";
+
+    internal static string BuildConnectFailureMessage(
+        ConnectionProfile profile,
+        Exception exception,
+        bool sshConnectStarted) =>
+        sshConnectStarted && LooksLikeEndpointFailure(exception)
+            ? BuildEndpointUnavailableMessage(profile)
+            : exception.Message;
+
+    private static bool LooksLikeEndpointFailure(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is TimeoutException or SshOperationTimeoutException or System.Net.Sockets.SocketException)
+            {
+                return true;
+            }
+
+            var message = current.Message;
+            if (ContainsOrdinalIgnoreCase(message, "connection refused") ||
+                ContainsOrdinalIgnoreCase(message, "actively refused") ||
+                ContainsOrdinalIgnoreCase(message, "connection timed out") ||
+                ContainsOrdinalIgnoreCase(message, "host unreachable") ||
+                ContainsOrdinalIgnoreCase(message, "network unreachable") ||
+                ContainsOrdinalIgnoreCase(message, "no route to host") ||
+                ContainsOrdinalIgnoreCase(message, "SOCKS5: CONNECT failed"))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool ContainsOrdinalIgnoreCase(string value, string fragment) =>
+        value.Contains(fragment, StringComparison.OrdinalIgnoreCase);
+
+    private static string FormatEndpoint(ConnectionProfile profile)
+    {
+        var host = profile.Host.Contains(':') &&
+            !profile.Host.StartsWith('[')
+                ? $"[{profile.Host}]"
+                : profile.Host;
+        return $"{host}:{profile.Port}";
+    }
 
     private async Task DisposeSessionInstanceSilentlyAsync(ISshSession? session)
     {

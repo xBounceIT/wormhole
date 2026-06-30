@@ -6,6 +6,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Renci.SshNet.Common;
 using Wormhole.Data;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
@@ -24,6 +25,8 @@ public sealed class SshSessionViewModelTests
     // Mirrors SshSessionViewModel.MaxAutoReconnectAttempts (private there). Used both as the loop
     // bound and to build the expected exhaustion message, so the two stay in lockstep.
     private const int MaxAutoReconnectAttemptsUnderTest = 3;
+    private const string EndpointUnavailableMessageUnderTest =
+        "Could not reach SSH server at 192.0.2.10:22. Check that the VM is powered on and that the host, port, and VPN route are correct.";
 
     [Fact]
     public void ConnectedSession_StartsWithoutReceivedOutput()
@@ -918,6 +921,64 @@ public sealed class SshSessionViewModelTests
     public void ShouldContinueAutoReconnect_OnlyOnTransientFailure(SessionStatus status, bool retryable, bool expected)
     {
         Assert.Equal(expected, SshSessionViewModel.ShouldContinueAutoReconnect(status, retryable));
+    }
+
+    [Fact]
+    public void BuildAuthenticationFailure_WhenEndpointProbeFails_ReportsReachabilityProblem()
+    {
+        var failure = SshSessionViewModel.BuildAuthenticationFailure(
+            CreateProfile(),
+            new SshAuthenticationException("Permission denied (password)."),
+            endpointReachable: false);
+
+        Assert.True(failure.Retryable);
+        Assert.Equal(EndpointUnavailableMessageUnderTest, failure.Message);
+        Assert.DoesNotContain("Authentication failed", failure.Message);
+    }
+
+    [Fact]
+    public void BuildAuthenticationFailure_WhenEndpointResponds_KeepsAuthenticationContext()
+    {
+        var failure = SshSessionViewModel.BuildAuthenticationFailure(
+            CreateProfile(),
+            new SshAuthenticationException("Permission denied (password)."),
+            endpointReachable: true);
+
+        Assert.False(failure.Retryable);
+        Assert.Contains("Authentication failed: Permission denied (password).", failure.Message);
+        Assert.Contains("SSH server responded at 192.0.2.10:22", failure.Message);
+    }
+
+    [Fact]
+    public void BuildEndpointUnavailableMessage_BracketsIpv6Endpoint()
+    {
+        var profile = CreateProfile() with { Host = "2001:db8::10", Port = 2222 };
+
+        var message = SshSessionViewModel.BuildEndpointUnavailableMessage(profile);
+
+        Assert.Contains("[2001:db8::10]:2222", message);
+    }
+
+    [Fact]
+    public void BuildConnectFailureMessage_WhenNetworkFailureAfterSshConnectStarted_ReportsReachabilityProblem()
+    {
+        var message = SshSessionViewModel.BuildConnectFailureMessage(
+            CreateProfile(),
+            new TimeoutException("socket timed out"),
+            sshConnectStarted: true);
+
+        Assert.Equal(EndpointUnavailableMessageUnderTest, message);
+    }
+
+    [Fact]
+    public void BuildConnectFailureMessage_WhenNonNetworkFailure_KeepsOriginalMessage()
+    {
+        var message = SshSessionViewModel.BuildConnectFailureMessage(
+            CreateProfile(),
+            new InvalidOperationException("unexpected protocol failure"),
+            sshConnectStarted: true);
+
+        Assert.Equal("unexpected protocol failure", message);
     }
 
     [Fact]
