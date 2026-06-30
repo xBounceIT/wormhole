@@ -129,11 +129,10 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
                 .Where(h => !string.IsNullOrWhiteSpace(h))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
-            routeLeases.Add(await PrepareGatewayRoutesAsync(
+            routeLeases.AddRange(await PrepareOpenVpnRemoteRoutesAsync(
                 config.Name,
                 remoteHosts,
                 settings.BypassNativeVpnGatewayRoute,
-                "OpenVPN remote",
                 cancellationToken).ConfigureAwait(false));
 
             var sidecar = new OpenVpnSidecarConfig
@@ -219,6 +218,41 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             throw;
         }
     }
+
+    internal async Task<IReadOnlyList<WindowsHostRouteLease>> PrepareOpenVpnRemoteRoutesAsync(
+        string configName,
+        IReadOnlyCollection<string> hosts,
+        bool enableBypass,
+        CancellationToken cancellationToken)
+    {
+        var leases = new List<WindowsHostRouteLease>();
+        foreach (var host in hosts)
+        {
+            try
+            {
+                leases.Add(await PrepareGatewayRoutesAsync(
+                    configName,
+                    new[] { host },
+                    enableBypass,
+                    "OpenVPN remote",
+                    cancellationToken).ConfigureAwait(false));
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException && IsRemoteRouteResolutionFailure(ex))
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Stormshield '{Name}': skipped native-VPN route preparation for unresolved OpenVPN remote '{Host}'. OpenVPN will still try its profile remotes normally.",
+                    configName,
+                    host);
+            }
+        }
+        return leases;
+    }
+
+    internal static bool IsRemoteRouteResolutionFailure(Exception ex) =>
+        ex is InvalidOperationException
+        && ex.Message.Contains("could not resolve", StringComparison.OrdinalIgnoreCase)
+        && ex.Message.Contains("IPv4 address", StringComparison.OrdinalIgnoreCase);
 
     private async Task<WindowsHostRouteLease> PrepareGatewayRoutesAsync(
         string configName,

@@ -680,6 +680,43 @@ public class StormshieldTunnelProviderTests
     }
 
     [Fact]
+    public async Task PrepareOpenVpnRemoteRoutesAsync_SkipsUnresolvedRemoteAndContinues()
+    {
+        var routeService = new ScriptedWindowsTemporaryHostRouteService();
+        routeService.UnresolvedHosts.Add("stale.example.com");
+        var provider = NewProvider(routeService: routeService);
+        var hosts = new List<string> { "stale.example.com", "healthy.example.com" };
+
+        var leases = await provider.PrepareOpenVpnRemoteRoutesAsync(
+            "cfg",
+            hosts,
+            enableBypass: true,
+            CancellationToken.None);
+
+        Assert.Equal(hosts, routeService.Hosts);
+        Assert.Single(leases);
+    }
+
+    [Fact]
+    public async Task PrepareOpenVpnRemoteRoutesAsync_PropagatesNonResolutionFailures()
+    {
+        var routeService = new ScriptedWindowsTemporaryHostRouteService
+        {
+            Failure = new InvalidOperationException("The Stormshield native-VPN route bypass requires Wormhole to be running as Administrator."),
+        };
+        var provider = NewProvider(routeService: routeService);
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            provider.PrepareOpenVpnRemoteRoutesAsync(
+                "cfg",
+                new List<string> { "healthy.example.com" },
+                enableBypass: true,
+                CancellationToken.None));
+
+        Assert.Contains("Administrator", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void ExtractOpenVpnRemotes_IncludesTopLevelAndConnectionBlocks_SkipsInlineDataBlocks()
     {
         const string profile =
@@ -737,6 +774,34 @@ public class StormshieldTunnelProviderTests
                     Message: message),
             },
             Array.Empty<IAsyncDisposable>());
+
+    private sealed class ScriptedWindowsTemporaryHostRouteService : IWindowsTemporaryHostRouteService
+    {
+        public List<string> Hosts { get; } = new();
+        public HashSet<string> UnresolvedHosts { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public Exception? Failure { get; set; }
+
+        public Task<WindowsHostRouteLease> PrepareGatewayBypassAsync(
+            string configName,
+            IReadOnlyCollection<string> hosts,
+            bool enableBypass,
+            CancellationToken cancellationToken)
+        {
+            var host = Assert.Single(hosts);
+            Hosts.Add(host);
+
+            if (Failure is not null) throw Failure;
+            if (UnresolvedHosts.Contains(host))
+            {
+                throw new InvalidOperationException(
+                    $"Native-VPN route bypass is enabled, but Wormhole could not resolve Stormshield gateway '{host}' to an IPv4 address before installing a host route.");
+            }
+
+            return Task.FromResult(new WindowsHostRouteLease(
+                Array.Empty<WindowsHostRouteDiagnostic>(),
+                Array.Empty<IAsyncDisposable>()));
+        }
+    }
 
     private sealed class NoopWindowsTemporaryHostRouteService : IWindowsTemporaryHostRouteService
     {
