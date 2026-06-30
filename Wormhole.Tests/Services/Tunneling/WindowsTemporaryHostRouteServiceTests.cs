@@ -156,6 +156,38 @@ public class WindowsTemporaryHostRouteServiceTests
     }
 
     [Fact]
+    public async Task PrepareGatewayBypassAsync_BypassEnabled_PrefersLowerMetricPhysicalDefaultGateway()
+    {
+        var ip = IPAddress.Parse("203.0.113.10");
+        var highMetricGateway = IPAddress.Parse("192.168.1.1");
+        var lowMetricGateway = IPAddress.Parse("10.0.0.1");
+        var system = NewSystem(isAdministrator: true);
+        system.Resolve("rpv.example.com", ip);
+        system.Adapters.Add(VpnAdapter());
+        system.Adapters.Add(PhysicalAdapter(highMetricGateway, speed: 10_000_000_000, defaultRouteMetric: 50));
+        system.Adapters.Add(PhysicalAdapter(
+            lowMetricGateway,
+            speed: 100_000_000,
+            defaultRouteMetric: 5,
+            interfaceIndex: PhysicalInterfaceIndex + 1,
+            name: "Wi-Fi"));
+        system.Routes[ip.ToString()] = DefaultRoute(VpnInterfaceIndex);
+
+        var lease = await NewService(system).PrepareGatewayBypassAsync(
+            "cfg", GatewayHosts, enableBypass: true, CancellationToken.None);
+        try
+        {
+            var added = Assert.Single(system.AddedRoutes);
+            Assert.Equal(lowMetricGateway, added.Gateway);
+            Assert.Equal(PhysicalInterfaceIndex + 1, added.InterfaceIndex);
+        }
+        finally
+        {
+            await lease.DisposeAsync();
+        }
+    }
+
+    [Fact]
     public async Task PrepareGatewayBypassAsync_BypassEnabled_RefCountsSharedTemporaryRoutes()
     {
         var ip = IPAddress.Parse("203.0.113.10");
@@ -336,17 +368,24 @@ public class WindowsTemporaryHostRouteServiceTests
             NetworkInterfaceType.Ppp,
             OperationalStatus.Up,
             100_000_000,
-            Array.Empty<IPAddress>());
+            Array.Empty<IPAddress>(),
+            int.MaxValue);
 
-    private static WindowsRouteAdapter PhysicalAdapter(IPAddress? gateway = null, long speed = 1_000_000_000) =>
+    private static WindowsRouteAdapter PhysicalAdapter(
+        IPAddress? gateway = null,
+        long speed = 1_000_000_000,
+        int defaultRouteMetric = 10,
+        int interfaceIndex = PhysicalInterfaceIndex,
+        string name = "Ethernet") =>
         new(
-            PhysicalInterfaceIndex,
-            "Ethernet",
+            interfaceIndex,
+            name,
             "Intel(R) Ethernet Connection",
             NetworkInterfaceType.Ethernet,
             OperationalStatus.Up,
             speed,
-            new[] { gateway ?? IPAddress.Parse("192.168.1.1") });
+            new[] { gateway ?? IPAddress.Parse("192.168.1.1") },
+            defaultRouteMetric);
 
     private static WindowsRouteAdapter VirtualAdapter() =>
         new(
@@ -356,7 +395,8 @@ public class WindowsTemporaryHostRouteServiceTests
             NetworkInterfaceType.Ethernet,
             OperationalStatus.Up,
             10_000_000_000,
-            new[] { IPAddress.Parse("172.20.0.1") });
+            new[] { IPAddress.Parse("172.20.0.1") },
+            1);
 
     private static WindowsBestRoute DefaultRoute(int interfaceIndex) =>
         new(

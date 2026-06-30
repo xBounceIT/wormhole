@@ -356,7 +356,8 @@ public sealed class WindowsTemporaryHostRouteService : IWindowsTemporaryHostRout
             .Where(IsPhysicalGatewayCandidate)
             .Select(a => (Adapter: a, Score: PhysicalAdapterScore(a.InterfaceType)))
             .Where(x => x.Score > 0)
-            .OrderByDescending(x => x.Score)
+            .OrderBy(x => x.Adapter.DefaultRouteMetric)
+            .ThenByDescending(x => x.Score)
             .ThenByDescending(x => x.Adapter.Speed)
             .Select(x => x.Adapter)
             .FirstOrDefault();
@@ -462,7 +463,8 @@ internal sealed record WindowsRouteAdapter(
     NetworkInterfaceType InterfaceType,
     OperationalStatus Status,
     long Speed,
-    IReadOnlyList<IPAddress> IPv4Gateways);
+    IReadOnlyList<IPAddress> IPv4Gateways,
+    int DefaultRouteMetric);
 
 internal sealed record WindowsBestRoute(
     IPAddress Destination,
@@ -490,6 +492,8 @@ internal sealed record WindowsBestRoute(
 
 internal sealed class WindowsRouteSystem : IWindowsRouteSystem
 {
+    private const uint ErrorInsufficientBuffer = 122;
+
     public bool IsAdministrator
     {
         get
@@ -533,6 +537,7 @@ internal sealed class WindowsRouteSystem : IWindowsRouteSystem
 
     public IReadOnlyList<WindowsRouteAdapter> GetAdapters()
     {
+        var defaultRouteMetrics = GetDefaultRouteMetrics();
         var adapters = new List<WindowsRouteAdapter>();
         foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
         {
@@ -562,9 +567,47 @@ internal sealed class WindowsRouteSystem : IWindowsRouteSystem
                 ni.NetworkInterfaceType,
                 ni.OperationalStatus,
                 ni.Speed,
-                gateways));
+                gateways,
+                defaultRouteMetrics.TryGetValue(ipv4.Index, out var metric) ? metric : int.MaxValue));
         }
         return adapters;
+    }
+
+    private static Dictionary<int, int> GetDefaultRouteMetrics()
+    {
+        var metrics = new Dictionary<int, int>();
+        uint bufferSize = 0;
+        var rc = GetIpForwardTable(IntPtr.Zero, ref bufferSize, true);
+        if (rc != ErrorInsufficientBuffer || bufferSize == 0) return metrics;
+
+        var buffer = Marshal.AllocHGlobal((int)bufferSize);
+        try
+        {
+            rc = GetIpForwardTable(buffer, ref bufferSize, true);
+            if (rc != 0) return metrics;
+
+            var count = Marshal.ReadInt32(buffer);
+            var rowSize = Marshal.SizeOf<MibIpForwardRow>();
+            var rowPtr = IntPtr.Add(buffer, sizeof(int));
+            for (var i = 0; i < count; i++)
+            {
+                var row = Marshal.PtrToStructure<MibIpForwardRow>(rowPtr)!;
+                if (row.dwForwardDest == 0 && row.dwForwardMask == 0)
+                {
+                    var interfaceIndex = unchecked((int)row.dwForwardIfIndex);
+                    var metric = unchecked((int)row.dwForwardMetric1);
+                    if (!metrics.TryGetValue(interfaceIndex, out var existing) || metric < existing)
+                        metrics[interfaceIndex] = metric;
+                }
+                rowPtr = IntPtr.Add(rowPtr, rowSize);
+            }
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
+
+        return metrics;
     }
 
     public Task AddHostRouteAsync(
@@ -629,6 +672,9 @@ internal sealed class WindowsRouteSystem : IWindowsRouteSystem
 
     [DllImport("iphlpapi.dll", SetLastError = true)]
     private static extern uint GetBestRoute(uint dwDestAddr, uint dwSourceAddr, out MibIpForwardRow pBestRoute);
+
+    [DllImport("iphlpapi.dll", SetLastError = true)]
+    private static extern uint GetIpForwardTable(IntPtr pIpForwardTable, ref uint pdwSize, bool bOrder);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct MibIpForwardRow
