@@ -87,6 +87,14 @@ public sealed partial class ConnectionTreeView : UserControl
         }
     }
 
+    private void OnTreeItemGotFocus(object sender, RoutedEventArgs e)
+    {
+        if (sender is TreeViewItem { DataContext: TreeNodeViewModel vm })
+        {
+            ViewModel.SelectedNode = vm;
+        }
+    }
+
     private void OnTreeItemPointerEntered(object sender, PointerRoutedEventArgs e)
     {
         if (sender is not TreeViewItem item) return;

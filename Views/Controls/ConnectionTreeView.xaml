@@ -125,6 +125,7 @@
                                   ToolTipService.ToolTip="{x:Bind Host, Mode=OneWay}"
                                   Loaded="OnTreeItemLoaded"
                                   Unloaded="OnTreeItemUnloaded"
+                                  GotFocus="OnTreeItemGotFocus"
                                   PointerEntered="OnTreeItemPointerEntered"
                                   PointerExited="OnTreeItemPointerExited"
                                   DoubleTapped="OnNodeDoubleTapped">
