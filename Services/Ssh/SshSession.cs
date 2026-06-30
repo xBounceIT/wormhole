@@ -52,7 +52,7 @@ internal sealed class SshSession : ISshSession
     public void Start()
     {
         if (Interlocked.Exchange(ref _started, 1) != 0) return;
-        if (IsUnavailable) return;
+        if (IsDisposed || IsClosedRaised) return;
         _readPump = Task.Run(ReadPumpAsync);
     }
 
@@ -174,7 +174,7 @@ internal sealed class SshSession : ISshSession
 
     public void PauseReading()
     {
-        if (IsUnavailable) return;
+        if (IsDisposed || IsClosedRaised) return;
         lock (_readGateLock)
         {
             if (_readingPaused) return;
@@ -321,7 +321,7 @@ internal sealed class SshSession : ISshSession
         if (IsDisposed) return;
         if (Interlocked.Exchange(ref _remoteClosed, 1) != 0)
         {
-            if (!drainBufferedOutput || _readPump is not { IsCompleted: false })
+            if (!drainBufferedOutput)
             {
                 CompleteRemoteClosed();
             }
@@ -337,9 +337,9 @@ internal sealed class SshSession : ISshSession
             _logger.LogInformation(exception, "SSH session closed: {Reason}.", reason);
         }
 
-        if (drainBufferedOutput && _readPump is { IsCompleted: false })
+        if (drainBufferedOutput)
         {
-            // Preserve terminal backpressure; ResumeReading will let the pump drain buffered bytes.
+            // Preserve terminal backpressure; Start/ResumeReading will let the pump drain buffered bytes.
             return;
         }
 

@@ -30,7 +30,7 @@ public sealed class SshSessionTests
     [Fact]
     public async Task StreamClosed_RaisesClosedOnce()
     {
-        var stream = new TestSshSessionStream();
+        var stream = new TestSshSessionStream { BlockReads = true };
         await using var session = CreateSession(stream);
         var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var closedCount = 0;
@@ -38,6 +38,9 @@ public sealed class SshSessionTests
         {
             if (Interlocked.Increment(ref closedCount) == 1) closed.TrySetResult();
         };
+
+        session.Start();
+        await stream.ReadStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
 
         stream.RaiseClosed();
         await closed.Task.WaitAsync(TimeSpan.FromSeconds(1));
@@ -72,14 +75,22 @@ public sealed class SshSessionTests
     {
         var stream = new TestSshSessionStream();
         stream.EnqueueRead(new byte[] { 0x41, 0x42, 0x43 });
+        stream.EnqueueRead(new byte[] { 0x44, 0x45, 0x46 });
         await using var session = CreateSession(stream);
+        var firstData = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var received = new List<byte>();
         var events = new List<string>();
+        var pauseCount = 0;
         session.DataReceived += (_, data) =>
         {
             received.AddRange(data.ToArray());
             events.Add("data");
+            if (Interlocked.Increment(ref pauseCount) == 1)
+            {
+                session.PauseReading();
+                firstData.TrySetResult();
+            }
         };
         session.Closed += (_, _) =>
         {
@@ -96,15 +107,29 @@ public sealed class SshSessionTests
         Assert.False(closed.Task.IsCompleted);
 
         session.ResumeReading();
+        await firstData.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        await Task.Delay(50);
+        Assert.Collection(
+            received,
+            b => Assert.Equal(0x41, b),
+            b => Assert.Equal(0x42, b),
+            b => Assert.Equal(0x43, b));
+        Assert.False(closed.Task.IsCompleted);
+
+        session.ResumeReading();
 
         await closed.Task.WaitAsync(TimeSpan.FromSeconds(1));
         Assert.Collection(
             received,
             b => Assert.Equal(0x41, b),
             b => Assert.Equal(0x42, b),
-            b => Assert.Equal(0x43, b));
+            b => Assert.Equal(0x43, b),
+            b => Assert.Equal(0x44, b),
+            b => Assert.Equal(0x45, b),
+            b => Assert.Equal(0x46, b));
         Assert.Collection(
             events,
+            e => Assert.Equal("data", e),
             e => Assert.Equal("data", e),
             e => Assert.Equal("closed", e));
         Assert.Equal(1, stream.CloseCalls);
@@ -163,14 +188,20 @@ public sealed class SshSessionTests
     public async Task StreamClosedBeforeConsumerSubscribes_IsReplayed()
     {
         var stream = new TestSshSessionStream();
+        stream.EnqueueRead(new byte[] { 0x2A });
         await using var session = CreateSession(stream);
 
         stream.RaiseClosed();
 
         var closed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var received = new List<byte>();
+        session.DataReceived += (_, data) => received.AddRange(data.ToArray());
         session.Closed += (_, _) => closed.TrySetResult();
 
+        session.Start();
+
         await closed.Task.WaitAsync(TimeSpan.FromSeconds(1));
+        Assert.Collection(received, b => Assert.Equal(0x2A, b));
     }
 
     private static SshSession CreateSession(ISshSessionStream stream) =>
