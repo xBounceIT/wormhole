@@ -322,7 +322,7 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
     }
 
     internal static bool ShouldEnrichNativeVpnConflict(IReadOnlyList<WindowsHostRouteLease> routeLeases, Exception ex) =>
-        routeLeases.Any(l => l.HasNativeVpnConflict) && IsRouteSensitiveFailure(ex);
+        GetUnresolvedNativeVpnConflicts(routeLeases).Any() && IsRouteSensitiveFailure(ex);
 
     internal static bool IsRouteSensitiveFailure(Exception ex)
     {
@@ -354,9 +354,7 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         IReadOnlyList<WindowsHostRouteLease> routeLeases,
         Exception inner)
     {
-        var conflicts = routeLeases
-            .SelectMany(l => l.Diagnostics)
-            .Where(d => d.NativeVpnConflict)
+        var conflicts = GetUnresolvedNativeVpnConflicts(routeLeases)
             .Select(d => d.Message)
             .Distinct(StringComparer.Ordinal)
             .ToArray();
@@ -369,6 +367,12 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             $"Stormshield '{configName}' could not complete because Windows appears to be routing the VPN gateway through an already-active native VPN.{conflictSummary} {hint} Original error: {inner.Message}",
             inner);
     }
+
+    private static IEnumerable<WindowsHostRouteDiagnostic> GetUnresolvedNativeVpnConflicts(
+        IReadOnlyList<WindowsHostRouteLease> routeLeases) =>
+        routeLeases
+            .SelectMany(l => l.Diagnostics)
+            .Where(d => d.NativeVpnConflict && !d.BypassRouteInstalled);
 
     private static string BuildImportProfile(TunnelConfig config, StormshieldSettings settings)
     {

@@ -680,6 +680,16 @@ public class StormshieldTunnelProviderTests
     }
 
     [Fact]
+    public void NativeVpnConflictEnrichment_OpenVpnSidecarTimeoutAfterBypassInstall_IsNotRouteSensitive()
+    {
+        var lease = NativeVpnConflictLease(bypassRouteInstalled: true);
+        var inner = new InvalidOperationException(
+            "OpenVPN sidecar did not produce a READY line within the startup timeout.");
+
+        Assert.False(StormshieldTunnelProvider.ShouldEnrichNativeVpnConflict(new[] { lease }, inner));
+    }
+
+    [Fact]
     public async Task PrepareOpenVpnRemoteRoutesAsync_SkipsUnresolvedRemoteAndContinues()
     {
         var routeService = new ScriptedWindowsTemporaryHostRouteService();
@@ -762,7 +772,9 @@ public class StormshieldTunnelProviderTests
             StormshieldTunnelProvider.SummarizeOpenVpnRemotes(profile));
     }
 
-    private static WindowsHostRouteLease NativeVpnConflictLease(string message = "Windows currently routes rpv.example.com (203.0.113.10) through VPN-like adapter 'Stormshield VPN' (interface 7).") =>
+    private static WindowsHostRouteLease NativeVpnConflictLease(
+        string message = "Windows currently routes rpv.example.com (203.0.113.10) through VPN-like adapter 'Stormshield VPN' (interface 7).",
+        bool bypassRouteInstalled = false) =>
         new(
             new[]
             {
@@ -770,7 +782,7 @@ public class StormshieldTunnelProviderTests
                     "rpv.example.com",
                     System.Net.IPAddress.Parse("203.0.113.10"),
                     NativeVpnConflict: true,
-                    BypassRouteInstalled: false,
+                    BypassRouteInstalled: bypassRouteInstalled,
                     Message: message),
             },
             Array.Empty<IAsyncDisposable>());
