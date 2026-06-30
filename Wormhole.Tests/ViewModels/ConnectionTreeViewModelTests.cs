@@ -20,6 +20,10 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     private const int DeepTreeDepth = 5000;
     private static readonly string[] ExpectedReorderAdbc = { "A", "D", "B", "C" };
     private static readonly string[] ExpectedParentSibling = { "Parent", "Sibling" };
+    private static readonly string[] ExpectedProdWeb = { "prod-web" };
+    private static readonly string[] ExpectedChild = { "Child" };
+    private static readonly string[] ExpectedLeaf = { "leaf" };
+    private static readonly string[] ExpectedNeedle = { "needle" };
 
     // Inlined from Data/Migrations/0001_initial.sql + 0003_add_tunnel_config.sql + 0003_rdp_extras.sql
     // + 0004_rdp_use_external_client.sql: the test project links source files rather than
@@ -1564,7 +1568,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
-    public async Task SearchText_EmptyByDefault_AllNodesVisible()
+    public async Task SearchText_EmptyByDefault_UsesFullProjection()
     {
         var dialog = new FakeDialogService();
         var vm = CreateVm(dialog);
@@ -1577,13 +1581,15 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         await vm.AddConnectionCommand.ExecuteAsync(vm.Roots.Single());
 
         Assert.Equal(string.Empty, vm.SearchText);
+        Assert.False(vm.IsSearchActive);
+        Assert.Empty(vm.SearchStatusText);
+        Assert.Same(vm.Roots, vm.DisplayRoots);
         var parent = vm.Roots.Single();
-        Assert.True(parent.IsVisible);
-        Assert.True(parent.Children.Single().IsVisible);
+        Assert.Same(parent.Children, parent.DisplayChildren);
     }
 
     [Fact]
-    public async Task SearchText_MatchesConnectionByName_OnlyThatBranchVisible()
+    public async Task SearchText_MatchesConnectionByName_OnlyThatBranchDisplayed()
     {
         var dialog = new FakeDialogService();
         var vm = CreateVm(dialog);
@@ -1606,10 +1612,10 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
 
         vm.SearchText = "prod";
 
-        Assert.True(servers.IsVisible);
-        Assert.True(servers.Children.Single().IsVisible);
-        Assert.False(other.IsVisible);
-        Assert.False(other.Children.Single().IsVisible);
+        Assert.True(vm.IsSearchActive);
+        Assert.Same(servers, Assert.Single(vm.DisplayRoots));
+        Assert.Equal(ExpectedProdWeb, servers.DisplayChildren.Select(c => c.Name));
+        Assert.DoesNotContain(other, vm.DisplayRoots);
     }
 
     [Fact]
@@ -1631,12 +1637,12 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         vm.SearchText = "prod";
 
         Assert.True(parent.IsExpanded);
-        Assert.True(parent.IsVisible);
-        Assert.True(parent.Children.Single().IsVisible);
+        Assert.Same(parent, Assert.Single(vm.DisplayRoots));
+        Assert.Equal(ExpectedProdWeb, parent.DisplayChildren.Select(c => c.Name));
     }
 
     [Fact]
-    public async Task SearchText_MatchesFolderName_ShowsAndExpandsFolderWithChildren()
+    public async Task SearchText_MatchesFolderName_DisplaysFolderWithoutSubtree()
     {
         var dialog = new FakeDialogService();
         var vm = CreateVm(dialog);
@@ -1656,13 +1662,14 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
 
         vm.SearchText = "Lin";
 
-        Assert.True(folder.IsVisible);
-        Assert.True(folder.IsExpanded);
-        Assert.All(folder.Children, child => Assert.True(child.IsVisible));
+        Assert.Same(folder, Assert.Single(vm.DisplayRoots));
+        Assert.Empty(folder.DisplayChildren);
+        Assert.False(folder.IsExpanded);
+        Assert.Equal(2, folder.Children.Count);
     }
 
     [Fact]
-    public async Task SearchText_FolderNameMatchCleared_RestoresCollapsedState()
+    public async Task SearchText_FolderNameMatchCleared_RestoresFullProjectionAndCollapsedState()
     {
         var dialog = new FakeDialogService();
         var vm = CreateVm(dialog);
@@ -1678,10 +1685,12 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         Assert.False(folder.IsExpanded);
 
         vm.SearchText = "Lin";
-        Assert.True(folder.IsExpanded);
+        Assert.Same(folder, Assert.Single(vm.DisplayRoots));
 
         vm.SearchText = string.Empty;
         Assert.False(folder.IsExpanded);
+        Assert.Same(vm.Roots, vm.DisplayRoots);
+        Assert.Same(folder.Children, folder.DisplayChildren);
     }
 
     [Fact]
@@ -1703,10 +1712,10 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
 
         vm.SearchText = "Linux";
 
-        Assert.True(parent.IsExpanded);
+        Assert.Same(parent, Assert.Single(vm.DisplayRoots));
+        Assert.Empty(parent.DisplayChildren);
+        Assert.False(parent.IsExpanded);
         Assert.False(child.IsExpanded);
-        Assert.True(child.IsVisible);
-        Assert.True(child.Children.Single().IsVisible);
     }
 
     [Fact]
@@ -1719,7 +1728,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
 
         vm.SearchText = "LINUX";
 
-        Assert.True(vm.Roots.Single().IsVisible);
+        Assert.Same(vm.Roots.Single(), Assert.Single(vm.DisplayRoots));
     }
 
     [Fact]
@@ -1736,22 +1745,19 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
             "leaf", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(parent);
 
-        // User left the folder collapsed before searching.
         Assert.False(parent.IsExpanded);
 
-        // Search force-expands the parent so the matching child is visible.
         vm.SearchText = "leaf";
         Assert.True(parent.IsExpanded);
 
-        // Clearing the search must restore the prior collapsed state.
         vm.SearchText = string.Empty;
         Assert.False(parent.IsExpanded);
-        Assert.True(parent.IsVisible);
-        Assert.True(parent.Children.Single().IsVisible);
+        Assert.Same(vm.Roots, vm.DisplayRoots);
+        Assert.Same(parent.Children, parent.DisplayChildren);
     }
 
     [Fact]
-    public async Task SearchText_NoMatches_AllNodesHidden()
+    public async Task SearchText_NoMatches_DisplaysNoRootsAndReportsNoMatches()
     {
         var dialog = new FakeDialogService();
         var vm = CreateVm(dialog);
@@ -1765,13 +1771,13 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
 
         vm.SearchText = "zzz-no-match-zzz";
 
-        var parent = vm.Roots.Single();
-        Assert.False(parent.IsVisible);
-        Assert.False(parent.Children.Single().IsVisible);
+        Assert.True(vm.IsSearchActive);
+        Assert.Empty(vm.DisplayRoots);
+        Assert.Equal("No matches", vm.SearchStatusText);
     }
 
     [Fact]
-    public async Task RefreshAsync_WhileFiltered_ReappliesFilterToNewNodes()
+    public async Task RefreshAsync_WhileFiltered_ReappliesProjectionToNewNodes()
     {
         var dialog = new FakeDialogService();
         var vm = CreateVm(dialog);
@@ -1779,25 +1785,23 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
 
         dialog.TextPromptResult = "Parent";
         await vm.AddFolderCommand.ExecuteAsync(null);
+        var parent = vm.Roots.Single();
 
         vm.SearchText = "prod";
 
-        // Adding a connection triggers RefreshAsync internally. The new node must be
-        // evaluated against the live filter, not appear with its default IsVisible=true.
         dialog.EditConnectionResult = MakeConnectionDraft(
             "prod-web", ProtocolType.Ssh, "host", null, null);
-        await vm.AddConnectionCommand.ExecuteAsync(vm.Roots.Single());
+        await vm.AddConnectionCommand.ExecuteAsync(parent);
 
-        var parent = vm.Roots.Single();
-        Assert.True(parent.IsVisible);
-        Assert.True(parent.Children.Single(c => c.Name == "prod-web").IsVisible);
+        Assert.Same(parent, Assert.Single(vm.DisplayRoots));
+        Assert.Equal(ExpectedProdWeb, parent.DisplayChildren.Select(c => c.Name));
 
-        // And an unrelated new connection added under the same filter must stay hidden.
         dialog.EditConnectionResult = MakeConnectionDraft(
             "other", ProtocolType.Ssh, "host", null, null);
         await vm.AddConnectionCommand.ExecuteAsync(parent);
 
-        Assert.False(parent.Children.Single(c => c.Name == "other").IsVisible);
+        Assert.Equal(ExpectedProdWeb, parent.DisplayChildren.Select(c => c.Name));
+        Assert.Equal(2, parent.Children.Count);
     }
 
     [Fact]
@@ -1810,7 +1814,8 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
 
         vm.SearchText = "   ";
 
-        Assert.True(vm.Roots.Single().IsVisible);
+        Assert.False(vm.IsSearchActive);
+        Assert.Same(vm.Roots, vm.DisplayRoots);
     }
 
     [Fact]
@@ -1823,7 +1828,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
 
         vm.SearchText = "  Lin  ";
 
-        Assert.True(vm.Roots.Single().IsVisible);
+        Assert.Same(vm.Roots.Single(), Assert.Single(vm.DisplayRoots));
     }
 
     [Fact]
@@ -1849,10 +1854,140 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         vm.SearchText = "leaf";
         Assert.True(parent.IsExpanded);
         Assert.True(child.IsExpanded);
+        Assert.Equal(ExpectedChild, parent.DisplayChildren.Select(c => c.Name));
+        Assert.Equal(ExpectedLeaf, child.DisplayChildren.Select(c => c.Name));
 
         vm.SearchText = string.Empty;
         Assert.False(parent.IsExpanded);
         Assert.False(child.IsExpanded);
+        Assert.Same(parent.Children, parent.DisplayChildren);
+        Assert.Same(child.Children, child.DisplayChildren);
+    }
+
+    [Fact]
+    public async Task SearchText_ActiveSearchRejectsDragSelection()
+    {
+        var dialog = new FakeDialogService { TextPromptResult = "Parent" };
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+        await vm.AddFolderCommand.ExecuteAsync(null);
+
+        vm.SearchText = "Parent";
+
+        Assert.True(vm.IsSearchActive);
+        Assert.True(vm.ShouldRejectDragSelection(new[] { vm.DisplayRoots.Single() }));
+    }
+
+    [Fact]
+    public async Task SearchText_FolderNameMatchWithThousandsOfChildren_DisplaysOnlyFolder()
+    {
+        var now = DateTime.UtcNow;
+        var folder = new ConnectionNode
+        {
+            Name = "match-folder",
+            Kind = NodeKind.Folder,
+            SortOrder = 0,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+        var nodes = new List<ConnectionNode> { folder };
+        for (var i = 0; i < 3000; i++)
+        {
+            nodes.Add(new ConnectionNode
+            {
+                Name = $"child-{i:D4}",
+                Kind = NodeKind.Connection,
+                ParentId = folder.Id,
+                SortOrder = i,
+                Protocol = ProtocolType.Ssh,
+                Host = "host",
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+        }
+        await SeedNodesAsync(nodes);
+
+        var vm = CreateVm();
+        await vm.RefreshAsync();
+
+        vm.SearchText = "match-folder";
+
+        var displayedFolder = Assert.Single(vm.DisplayRoots);
+        Assert.Equal("match-folder", displayedFolder.Name);
+        Assert.Empty(displayedFolder.DisplayChildren);
+        Assert.Equal(3000, displayedFolder.Children.Count);
+        Assert.Empty(vm.SearchStatusText);
+    }
+
+    [Fact]
+    public async Task SearchText_ThousandsOfSiblingMatches_CapsDisplayedMatchesAndReportsTruncation()
+    {
+        var now = DateTime.UtcNow;
+        var nodes = new List<ConnectionNode>();
+        for (var i = 0; i < 1000; i++)
+        {
+            nodes.Add(new ConnectionNode
+            {
+                Name = $"prod-{i:D4}",
+                Kind = NodeKind.Connection,
+                SortOrder = i,
+                Protocol = ProtocolType.Ssh,
+                Host = "host",
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+        }
+        await SeedNodesAsync(nodes);
+
+        var vm = CreateVm();
+        await vm.RefreshAsync();
+
+        vm.SearchText = "prod-";
+
+        Assert.Equal(500, vm.DisplayRoots.Count);
+        Assert.Equal("prod-0000", vm.DisplayRoots[0].Name);
+        Assert.Equal("prod-0499", vm.DisplayRoots[^1].Name);
+        Assert.Equal("Showing first 500 of 1000 matches", vm.SearchStatusText);
+    }
+
+    [Fact]
+    public async Task SearchText_SingleMatchAmongManySiblings_DisplaysOnlyMatchingBranch()
+    {
+        var now = DateTime.UtcNow;
+        var folder = new ConnectionNode
+        {
+            Name = "Parent",
+            Kind = NodeKind.Folder,
+            SortOrder = 0,
+            CreatedAt = now,
+            UpdatedAt = now,
+        };
+        var nodes = new List<ConnectionNode> { folder };
+        for (var i = 0; i < 1000; i++)
+        {
+            nodes.Add(new ConnectionNode
+            {
+                Name = i == 777 ? "needle" : $"sibling-{i:D4}",
+                Kind = NodeKind.Connection,
+                ParentId = folder.Id,
+                SortOrder = i,
+                Protocol = ProtocolType.Ssh,
+                Host = "host",
+                CreatedAt = now,
+                UpdatedAt = now,
+            });
+        }
+        await SeedNodesAsync(nodes);
+
+        var vm = CreateVm();
+        await vm.RefreshAsync();
+
+        vm.SearchText = "needle";
+
+        var displayedFolder = Assert.Single(vm.DisplayRoots);
+        Assert.Equal("Parent", displayedFolder.Name);
+        Assert.Equal(ExpectedNeedle, displayedFolder.DisplayChildren.Select(c => c.Name));
+        Assert.Equal(1000, displayedFolder.Children.Count);
     }
 
     [Fact]
@@ -1869,14 +2004,15 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
 
         vm.SearchText = "needle";
 
-        Assert.True(root.IsVisible);
-        Assert.True(leaf.IsVisible);
+        Assert.Same(root, Assert.Single(vm.DisplayRoots));
+        Assert.Same(leaf, GetDeepestDisplayNode(root));
         AssertAllFoldersExpanded(root);
 
         vm.SearchText = string.Empty;
 
-        Assert.True(root.IsVisible);
-        Assert.True(leaf.IsVisible);
+        Assert.Same(vm.Roots, vm.DisplayRoots);
+        Assert.Same(root.Children, root.DisplayChildren);
+        Assert.Same(leaf.Children, leaf.DisplayChildren);
         AssertNoFoldersExpanded(root);
     }
 
@@ -2111,6 +2247,11 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
             UpdatedAt = now,
         });
 
+        await SeedNodesAsync(nodes);
+    }
+
+    private async Task SeedNodesAsync(IReadOnlyList<ConnectionNode> nodes)
+    {
         using var connection = _factory.Open();
         using var tx = connection.BeginTransaction();
         await connection.ExecuteAsync(@"
@@ -2130,6 +2271,16 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         while (current.Children.Count > 0)
         {
             current = current.Children[0];
+        }
+        return current;
+    }
+
+    private static TreeNodeViewModel GetDeepestDisplayNode(TreeNodeViewModel root)
+    {
+        var current = root;
+        while (current.DisplayChildren.Count > 0)
+        {
+            current = current.DisplayChildren[0];
         }
         return current;
     }
