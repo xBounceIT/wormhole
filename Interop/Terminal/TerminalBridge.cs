@@ -247,7 +247,7 @@ public sealed class TerminalBridge : IDisposable
             if (msg.StartsWith("d:", StringComparison.Ordinal))
             {
                 var payload = TerminalBridgeMessages.EncodeUtf8(msg.AsSpan(2));
-                await _session.WriteAsync(payload);
+                await WriteToSessionAsync(payload);
             }
             else if (msg.StartsWith("b:", StringComparison.Ordinal))
             {
@@ -255,7 +255,7 @@ public sealed class TerminalBridge : IDisposable
                 // in the WebView string. This keeps control keys (Ctrl+O, Enter, Ctrl+L)
                 // and legacy mouse reports out of the message framing layer.
                 var payload = TerminalBridgeMessages.DecodeBase64Bytes(msg.AsSpan(2));
-                await _session.WriteAsync(payload);
+                await WriteToSessionAsync(payload);
             }
             else if (msg.StartsWith("r:", StringComparison.Ordinal))
             {
@@ -272,7 +272,7 @@ public sealed class TerminalBridge : IDisposable
                         _lastRows = rows;
                         _logger.LogInformation("Terminal resize requested: {Columns}x{Rows}.", cols, rows);
                     }
-                    await _session.ResizeAsync(cols, rows);
+                    await ResizeSessionAsync(cols, rows);
                 }
             }
             else if (msg.StartsWith("z:collapsed-fit:", StringComparison.Ordinal))
@@ -328,6 +328,36 @@ public sealed class TerminalBridge : IDisposable
         {
             _logger.LogError(ex, "TerminalBridge: failed to handle a WebView2 message.");
         }
+    }
+
+    private async Task WriteToSessionAsync(ReadOnlyMemory<byte> payload)
+    {
+        try
+        {
+            await _session.WriteAsync(payload);
+        }
+        catch (Exception ex)
+        {
+            LogSessionOperationAfterClose(ex, "writing terminal input");
+        }
+    }
+
+    private async Task ResizeSessionAsync(uint columns, uint rows)
+    {
+        try
+        {
+            await _session.ResizeAsync(columns, rows);
+        }
+        catch (Exception ex)
+        {
+            LogSessionOperationAfterClose(ex, "resizing terminal");
+        }
+    }
+
+    private void LogSessionOperationAfterClose(Exception ex, string operation)
+    {
+        if (_disposed) return;
+        _logger.LogDebug(ex, "Terminal session ended while {Operation}; owner will handle the close event.", operation);
     }
 
     public void Dispose()
