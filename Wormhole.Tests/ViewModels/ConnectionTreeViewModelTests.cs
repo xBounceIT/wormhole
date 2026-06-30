@@ -1243,7 +1243,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
-    public async Task ResolveDragSelection_DraggingCheckedNodeUsesCheckedBatch()
+    public async Task ShouldCancelDragSelection_DraggingCheckedNodeInBatchReturnsTrue()
     {
         var parent = new ConnectionNode { Kind = NodeKind.Folder, Name = "Parent", SortOrder = 0 };
         var sibling = MakeConnectionDraft("sibling", ProtocolType.Ssh, "sibling.example.com", 22, "bob");
@@ -1259,15 +1259,11 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         var siblingVm = vm.Roots.Single(r => r.Name == "sibling");
         vm.SetSelectedNodes(new[] { parentVm, siblingVm });
 
-        var dragged = vm.ResolveDragSelection(new[] { parentVm });
-
-        Assert.Equal(2, dragged.Count);
-        Assert.Same(parentVm, dragged[0]);
-        Assert.Same(siblingVm, dragged[1]);
+        Assert.True(vm.ShouldCancelDragSelection(new[] { parentVm }));
     }
 
     [Fact]
-    public async Task ResolveDragSelection_DraggingUncheckedNodeKeepsDragPayload()
+    public async Task ShouldCancelDragSelection_DraggingUncheckedNodeReturnsFalse()
     {
         var first = new ConnectionNode { Kind = NodeKind.Folder, Name = "First", SortOrder = 0 };
         var second = new ConnectionNode { Kind = NodeKind.Folder, Name = "Second", SortOrder = 1 };
@@ -1286,9 +1282,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         var thirdVm = vm.Roots.Single(r => r.Name == "third");
         vm.SetSelectedNodes(new[] { firstVm, secondVm });
 
-        var dragged = vm.ResolveDragSelection(new[] { thirdVm });
-
-        Assert.Same(thirdVm, Assert.Single(dragged));
+        Assert.False(vm.ShouldCancelDragSelection(new[] { thirdVm }));
     }
 
     [Fact]

@@ -58,10 +58,11 @@ public sealed partial class ConnectionTreeView : UserControl
 
     private void OnDragItemsStarting(TreeView sender, TreeViewDragItemsStartingEventArgs args)
     {
-        var draggedNodes = ViewModel.ResolveDragSelection(args.Items.OfType<TreeNodeViewModel>());
-        SyncDragItems(args.Items, draggedNodes);
-
-        if (ViewModel.ShouldRejectDragSelection(draggedNodes))
+        var draggedNodes = args.Items.OfType<TreeNodeViewModel>().ToList();
+        // With SelectionMode=None, WinUI can only reorder the cursor item;
+        // cancel checked batch drags instead of persisting a partial move.
+        if (ViewModel.ShouldCancelDragSelection(draggedNodes) ||
+            ViewModel.ShouldRejectDragSelection(draggedNodes))
         {
             args.Cancel = true;
         }
@@ -231,28 +232,6 @@ public sealed partial class ConnectionTreeView : UserControl
         }
     }
 
-    private static void SyncDragItems(IList<object> dragItems, IReadOnlyList<TreeNodeViewModel> draggedNodes)
-    {
-        if (dragItems.Count == draggedNodes.Count)
-        {
-            var alreadyMatches = true;
-            for (var i = 0; i < draggedNodes.Count; i++)
-            {
-                if (ReferenceEquals(dragItems[i], draggedNodes[i])) continue;
-
-                alreadyMatches = false;
-                break;
-            }
-
-            if (alreadyMatches) return;
-        }
-
-        dragItems.Clear();
-        foreach (var node in draggedNodes)
-        {
-            dragItems.Add(node);
-        }
-    }
 
     private TreeNodeViewModel? SingleSelectedNode()
     {

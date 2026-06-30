@@ -228,20 +228,16 @@ public partial class ConnectionTreeViewModel : ObservableObject
         }
     }
 
-    public IReadOnlyList<TreeNodeViewModel> ResolveDragSelection(IEnumerable<TreeNodeViewModel> draggedNodes)
+    public bool ShouldCancelDragSelection(IEnumerable<TreeNodeViewModel> draggedNodes)
     {
-        var dragged = draggedNodes.ToList();
-        if (SelectedNodes.Count <= 1) return dragged;
+        if (SelectedNodes.Count <= 1) return false;
 
-        foreach (var node in dragged)
+        foreach (var node in draggedNodes)
         {
-            if (_selectedNodeIds.Contains(node.Node.Id))
-            {
-                return SelectedNodes.ToArray();
-            }
+            if (_selectedNodeIds.Contains(node.Node.Id)) return true;
         }
 
-        return dragged;
+        return false;
     }
 
     public bool ShouldRejectDragSelection(IEnumerable<TreeNodeViewModel> draggedNodes)
