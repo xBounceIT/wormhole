@@ -8,15 +8,18 @@ public sealed class ConnectionCredentialBindingService : IConnectionCredentialBi
 {
     private readonly IConnectionRepository _connections;
     private readonly ICredentialService _credentials;
+    private readonly IConnectionNodeChangeNotifier? _connectionNodeChanges;
     private readonly ILogger<ConnectionCredentialBindingService> _logger;
 
     public ConnectionCredentialBindingService(
         IConnectionRepository connections,
         ICredentialService credentials,
-        ILogger<ConnectionCredentialBindingService> logger)
+        ILogger<ConnectionCredentialBindingService> logger,
+        IConnectionNodeChangeNotifier? connectionNodeChanges = null)
     {
         _connections = connections;
         _credentials = credentials;
+        _connectionNodeChanges = connectionNodeChanges;
         _logger = logger;
     }
 
@@ -63,6 +66,7 @@ public sealed class ConnectionCredentialBindingService : IConnectionCredentialBi
             }
 
             await _connections.UpdateAsync(node, cancellationToken).ConfigureAwait(false);
+            _connectionNodeChanges?.PublishConnectionNodeUpdated(node);
             await _credentials.DeletePasswordAsync(nodeId).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
