@@ -126,16 +126,19 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         FakeDialogService? dialog = null,
         FakeCredentialService? creds = null,
         FakeCredentialRepository? credRepo = null,
-        IConnectionRepository? repository = null)
+        IConnectionRepository? repository = null,
+        ISessionTabFactory? tabFactory = null,
+        IConnectionNodeChangeNotifier? connectionNodeChanges = null)
     {
         var vm = new ConnectionTreeViewModel(
             repository ?? _repo,
             new InheritanceResolver(),
-            new NullSessionTabFactory(),
+            tabFactory ?? new NullSessionTabFactory(),
             dialog ?? new FakeDialogService(),
             creds ?? new FakeCredentialService(),
             credRepo ?? new FakeCredentialRepository(),
-            NullLogger<ConnectionTreeViewModel>.Instance);
+            NullLogger<ConnectionTreeViewModel>.Instance,
+            connectionNodeChanges);
         // Tests assert synchronously after assigning SearchText; disable the production
         // 120ms debounce so the filter walk runs inline rather than on a scheduled
         // continuation. Production code uses the default delay.
@@ -1541,6 +1544,105 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task ConnectionNodeUpdateNotification_RefreshesSnapshotForOpenConnection()
+    {
+        var inheritedCredentialId = Guid.NewGuid();
+        var selectedCredentialId = Guid.NewGuid();
+        var folder = new ConnectionNode
+        {
+            Kind = NodeKind.Folder,
+            Name = "Folder",
+            Protocol = ProtocolType.Ssh,
+            CredentialId = inheritedCredentialId,
+            CredentialMode = CredentialBindingMode.Saved,
+            Username = "folder-user",
+        };
+        var leaf = MakeConnectionDraft("leaf", ProtocolType.Ssh, "host", 22, null);
+        leaf.ParentId = folder.Id;
+        leaf.CredentialMode = CredentialBindingMode.Inherit;
+        await _repo.AddAsync(folder);
+        await _repo.AddAsync(leaf);
+
+        var notifier = new ConnectionNodeChangeNotifier();
+        var tabs = new CapturingSessionTabFactory();
+        var vm = CreateVm(tabFactory: tabs, connectionNodeChanges: notifier);
+        await vm.RefreshAsync();
+        var binding = new ConnectionCredentialBindingService(
+            _repo,
+            new FakeCredentialService(),
+            NullLogger<ConnectionCredentialBindingService>.Instance,
+            notifier);
+
+        await binding.SaveCredentialBindingAsync(
+            leaf.Id,
+            new CredentialProfile
+            {
+                Id = selectedCredentialId,
+                Protocol = ProtocolType.Ssh,
+                Kind = CredentialKind.Password,
+                Username = "saved-user",
+            });
+        await vm.OpenConnectionCommand.ExecuteAsync(vm.Roots.Single().Children.Single());
+
+        Assert.NotNull(tabs.LastOpened);
+        Assert.Equal(selectedCredentialId, tabs.LastOpened!.CredentialId);
+        Assert.Equal("saved-user", tabs.LastOpened.Username);
+    }
+
+    [Fact]
+    public async Task Edit_AfterCredentialBindingNotification_DoesNotRestoreInheritedCredentialMode()
+    {
+        var inheritedCredentialId = Guid.NewGuid();
+        var selectedCredentialId = Guid.NewGuid();
+        var folder = new ConnectionNode
+        {
+            Kind = NodeKind.Folder,
+            Name = "Folder",
+            Protocol = ProtocolType.Ssh,
+            CredentialId = inheritedCredentialId,
+            CredentialMode = CredentialBindingMode.Saved,
+            Username = "folder-user",
+        };
+        var leaf = MakeConnectionDraft("leaf", ProtocolType.Ssh, "host", 22, null);
+        leaf.ParentId = folder.Id;
+        leaf.CredentialMode = CredentialBindingMode.Inherit;
+        await _repo.AddAsync(folder);
+        await _repo.AddAsync(leaf);
+
+        var notifier = new ConnectionNodeChangeNotifier();
+        var dialog = new EchoConnectionEditDialogService();
+        var vm = CreateVm(dialog, connectionNodeChanges: notifier);
+        await vm.RefreshAsync();
+        var leafVm = vm.Roots.Single().Children.Single();
+        var binding = new ConnectionCredentialBindingService(
+            _repo,
+            new FakeCredentialService(),
+            NullLogger<ConnectionCredentialBindingService>.Instance,
+            notifier);
+
+        await binding.SaveCredentialBindingAsync(
+            leaf.Id,
+            new CredentialProfile
+            {
+                Id = selectedCredentialId,
+                Protocol = ProtocolType.Ssh,
+                Kind = CredentialKind.Password,
+                Username = "saved-user",
+            });
+        await vm.EditCommand.ExecuteAsync(leafVm);
+
+        var updated = (await _repo.GetAllAsync()).Single(n => n.Id == leaf.Id);
+        Assert.Equal(selectedCredentialId, updated.CredentialId);
+        Assert.Equal(CredentialBindingMode.Saved, updated.CredentialMode);
+        Assert.Equal("saved-user", updated.Username);
+
+        var unchangedFolder = (await _repo.GetAllAsync()).Single(n => n.Id == folder.Id);
+        Assert.Equal(inheritedCredentialId, unchangedFolder.CredentialId);
+        Assert.Equal(CredentialBindingMode.Saved, unchangedFolder.CredentialMode);
+        Assert.Equal("folder-user", unchangedFolder.Username);
+    }
+
+    [Fact]
     public async Task Edit_RaisesNameAndGlyphPropertyChangedOnExistingVm()
     {
         var dialog = new FakeDialogService { TextPromptResult = "old" };
@@ -2553,6 +2655,12 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
             LastDeleteManyIds = ids.ToArray();
             await _inner.DeleteManyAsync(ids, ct);
         }
+    }
+
+    private sealed class EchoConnectionEditDialogService : FakeDialogService
+    {
+        public override Task<ConnectionNode?> EditConnectionAsync(ConnectionNode initial, bool isNew) =>
+            Task.FromResult<ConnectionNode?>(initial.Clone());
     }
 
     private sealed class RecordingConfirmDialogService : FakeDialogService

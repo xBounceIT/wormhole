@@ -176,6 +176,8 @@
     <Compile Include="..\Services\IConnectionProfileResolver.cs" Link="Services\IConnectionProfileResolver.cs" />
     <Compile Include="..\Services\ConnectionProfileResolver.cs" Link="Services\ConnectionProfileResolver.cs" />
     <Compile Include="..\Services\IConnectionCredentialBindingService.cs" Link="Services\IConnectionCredentialBindingService.cs" />
+    <Compile Include="..\Services\IConnectionNodeChangeNotifier.cs" Link="Services\IConnectionNodeChangeNotifier.cs" />
+    <Compile Include="..\Services\ConnectionNodeChangeNotifier.cs" Link="Services\ConnectionNodeChangeNotifier.cs" />
     <Compile Include="..\Services\ConnectionCredentialBindingService.cs" Link="Services\ConnectionCredentialBindingService.cs" />
     <Compile Include="..\Services\Mcp\IMcpSessionRegistry.cs" Link="Services\Mcp\IMcpSessionRegistry.cs" />
     <Compile Include="..\Services\Mcp\McpSessionRegistry.cs" Link="Services\Mcp\McpSessionRegistry.cs" />

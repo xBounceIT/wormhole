@@ -245,6 +245,7 @@ public partial class App : Application
         services.AddSingleton<ICredentialService, CredentialService>();
         services.AddSingleton<IConnectionRepository, ConnectionRepository>();
         services.AddSingleton<ICredentialRepository, CredentialRepository>();
+        services.AddSingleton<IConnectionNodeChangeNotifier, ConnectionNodeChangeNotifier>();
         services.AddSingleton<IConnectionCredentialBindingService, ConnectionCredentialBindingService>();
         services.AddSingleton<ITunnelConfigRepository, TunnelConfigRepository>();
         services.AddSingleton<ICrashDiagnosticsService, CrashDiagnosticsService>();
