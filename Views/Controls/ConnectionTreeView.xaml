@@ -176,12 +176,12 @@
                             </MenuFlyout>
                         </TreeViewItem.ContextFlyout>
 
-                        <StackPanel Orientation="Horizontal" Spacing="6">
+                        <StackPanel Orientation="Horizontal" Spacing="6" Margin="-10,0,0,0">
                             <CheckBox x:Name="SelectCheckBox"
-                                      Width="32"
-                                      MinWidth="32"
-                                      MinHeight="28"
-                                      Margin="10,0,0,0"
+                                      Width="20"
+                                      MinWidth="20"
+                                      MinHeight="24"
+                                      Margin="0"
                                       Padding="0"
                                       VerticalAlignment="Center"
                                       ToolTipService.ToolTip="Select"
