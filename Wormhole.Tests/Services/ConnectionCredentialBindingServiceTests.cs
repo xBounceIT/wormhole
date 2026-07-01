@@ -23,6 +23,7 @@ public class ConnectionCredentialBindingServiceTests
             RdpDomain = "OLD",
             CredentialMode = CredentialBindingMode.None,
             UseInlinePassword = true,
+            PendingInlinePassword = "typed-secret",
         };
         var repo = new RecordingConnectionRepository(node);
         var secrets = new FakeCredentialService(new Dictionary<Guid, string> { [nodeId] = "inline-secret" });
@@ -46,9 +47,93 @@ public class ConnectionCredentialBindingServiceTests
         Assert.Equal(credentialId, node.CredentialId);
         Assert.Equal(CredentialBindingMode.Saved, node.CredentialMode);
         Assert.False(node.UseInlinePassword);
+        Assert.Null(node.PendingInlinePassword);
         Assert.Equal("saved-user", node.Username);
         Assert.Equal("CORP", node.RdpDomain);
         Assert.False(secrets.Passwords.ContainsKey(nodeId));
+    }
+
+    [Fact]
+    public async Task SaveCredentialBindingAsync_InheritedLeafBecomesSavedOverrideAndPublishesUpdatedNode()
+    {
+        var nodeId = Guid.NewGuid();
+        var credentialId = Guid.NewGuid();
+        var node = new ConnectionNode
+        {
+            Id = nodeId,
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            CredentialMode = CredentialBindingMode.Inherit,
+            CredentialId = null,
+            UseInlinePassword = false,
+        };
+        var repo = new RecordingConnectionRepository(node);
+        var secrets = new FakeCredentialService();
+        var notifier = new ConnectionNodeChangeNotifier();
+        ConnectionNode? published = null;
+        notifier.ConnectionNodeUpdated += (_, args) => published = args.Node;
+        var service = new ConnectionCredentialBindingService(
+            repo,
+            secrets,
+            NullLogger<ConnectionCredentialBindingService>.Instance,
+            notifier);
+
+        await service.SaveCredentialBindingAsync(
+            nodeId,
+            new CredentialProfile
+            {
+                Id = credentialId,
+                Protocol = ProtocolType.Ssh,
+                Kind = CredentialKind.Password,
+                Username = "syncsecurity",
+            });
+
+        Assert.Equal(1, repo.UpdateCount);
+        Assert.Equal(credentialId, node.CredentialId);
+        Assert.Equal(CredentialBindingMode.Saved, node.CredentialMode);
+        Assert.NotNull(published);
+        Assert.Equal(credentialId, published!.CredentialId);
+        Assert.Equal(CredentialBindingMode.Saved, published.CredentialMode);
+        Assert.Equal("syncsecurity", published.Username);
+    }
+
+    [Fact]
+    public async Task SaveCredentialBindingAsync_UpdateFails_DoesNotPublishOrClearInlineSecret()
+    {
+        var nodeId = Guid.NewGuid();
+        var credentialId = Guid.NewGuid();
+        var node = new ConnectionNode
+        {
+            Id = nodeId,
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            CredentialMode = CredentialBindingMode.Inherit,
+            UseInlinePassword = true,
+        };
+        var repo = new RecordingConnectionRepository(node) { ThrowOnUpdate = true };
+        var secrets = new FakeCredentialService(new Dictionary<Guid, string> { [nodeId] = "inline-secret" });
+        var notifier = new ConnectionNodeChangeNotifier();
+        var publishCount = 0;
+        notifier.ConnectionNodeUpdated += (_, _) => publishCount++;
+        var service = new ConnectionCredentialBindingService(
+            repo,
+            secrets,
+            NullLogger<ConnectionCredentialBindingService>.Instance,
+            notifier);
+
+        await service.SaveCredentialBindingAsync(
+            nodeId,
+            new CredentialProfile
+            {
+                Id = credentialId,
+                Protocol = ProtocolType.Ssh,
+                Kind = CredentialKind.Password,
+                Username = "syncsecurity",
+            });
+
+        Assert.Equal(1, repo.UpdateCount);
+        Assert.Equal(0, publishCount);
+        Assert.Equal("inline-secret", secrets.Passwords[nodeId]);
     }
 
     private sealed class RecordingConnectionRepository : IConnectionRepository
@@ -58,6 +143,7 @@ public class ConnectionCredentialBindingServiceTests
         public RecordingConnectionRepository(ConnectionNode node) => _node = node;
 
         public int UpdateCount { get; private set; }
+        public bool ThrowOnUpdate { get; init; }
 
         public Task<IReadOnlyList<ConnectionNode>> GetAllAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult<IReadOnlyList<ConnectionNode>>(new[] { _node });
@@ -77,6 +163,7 @@ public class ConnectionCredentialBindingServiceTests
         public Task UpdateAsync(ConnectionNode node, CancellationToken cancellationToken = default)
         {
             UpdateCount++;
+            if (ThrowOnUpdate) throw new InvalidOperationException("simulated");
             return Task.CompletedTask;
         }
 

@@ -2,6 +2,7 @@ using System.Collections.Specialized;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
+using Microsoft.UI.Dispatching;
 using Wormhole.Data;
 using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
@@ -21,6 +22,8 @@ public partial class ConnectionTreeViewModel : ObservableObject
     private readonly ICredentialService _credentialService;
     private readonly ICredentialRepository _credentialRepository;
     private readonly ILogger<ConnectionTreeViewModel> _logger;
+    private readonly DispatcherQueue? _dispatcher;
+    private readonly IConnectionNodeChangeNotifier? _connectionNodeChanges;
     private IReadOnlyList<ConnectionNode> _lastSnapshot = Array.Empty<ConnectionNode>();
     private Dictionary<Guid, ConnectionNode> _lastSnapshotById = new();
     private bool _isLoading;
@@ -151,7 +154,8 @@ public partial class ConnectionTreeViewModel : ObservableObject
         IDialogService dialog,
         ICredentialService credentialService,
         ICredentialRepository credentialRepository,
-        ILogger<ConnectionTreeViewModel> logger)
+        ILogger<ConnectionTreeViewModel> logger,
+        IConnectionNodeChangeNotifier? connectionNodeChanges = null)
     {
         _repository = repository;
         _inheritanceResolver = inheritanceResolver;
@@ -160,6 +164,12 @@ public partial class ConnectionTreeViewModel : ObservableObject
         _credentialService = credentialService;
         _credentialRepository = credentialRepository;
         _logger = logger;
+        _dispatcher = TryGetDispatcher();
+        _connectionNodeChanges = connectionNodeChanges;
+        if (_connectionNodeChanges is not null)
+        {
+            _connectionNodeChanges.ConnectionNodeUpdated += OnConnectionNodeUpdated;
+        }
         SelectedNodes.CollectionChanged += OnSelectedNodesChanged;
     }
 
@@ -1313,6 +1323,59 @@ public partial class ConnectionTreeViewModel : ObservableObject
         {
             currentIndexById[current[i].Node.Id] = i;
         }
+    }
+
+    private void OnConnectionNodeUpdated(object? sender, ConnectionNodeChangedEventArgs e)
+    {
+        var updated = e.Node;
+        var dispatcher = _dispatcher;
+        if (dispatcher is not null && !dispatcher.HasThreadAccess)
+        {
+            if (!dispatcher.TryEnqueue(() => ApplyConnectionNodeUpdated(updated)))
+            {
+                _logger.LogWarning("Could not apply connection node update for {NodeId} because the UI dispatcher rejected the work.", updated.Id);
+            }
+            return;
+        }
+
+        ApplyConnectionNodeUpdated(updated);
+    }
+
+    private void ApplyConnectionNodeUpdated(ConnectionNode updated)
+    {
+        if (!_lastSnapshotById.ContainsKey(updated.Id)) return;
+
+        var replacement = updated.Clone();
+        var next = new ConnectionNode[_lastSnapshot.Count];
+        var replaced = false;
+        for (var i = 0; i < _lastSnapshot.Count; i++)
+        {
+            if (_lastSnapshot[i].Id == replacement.Id)
+            {
+                next[i] = replacement;
+                replaced = true;
+            }
+            else
+            {
+                next[i] = _lastSnapshot[i];
+            }
+        }
+
+        if (!replaced) return;
+
+        SetSnapshot(next);
+        foreach (var node in EnumerateSubtree(Roots))
+        {
+            if (node.Node.Id != replacement.Id) continue;
+            node.Node = replacement;
+            break;
+        }
+    }
+
+    private static DispatcherQueue? TryGetDispatcher()
+    {
+        try { return DispatcherQueue.GetForCurrentThread(); }
+        catch { return null; }
     }
 
     private void SetSnapshot(IReadOnlyList<ConnectionNode> snapshot)
