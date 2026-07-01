@@ -1810,7 +1810,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         Assert.True(vm.IsSelected(parent));
         Assert.True(vm.IsSelected(leaf));
 
-        for (var attempt = 0; attempt < 20 && vm.SelectedNodes.Count > 0; attempt++)
+        for (var attempt = 0; attempt < 20 && (!vm.IsSearchActive || vm.SelectedNodes.Count > 0); attempt++)
         {
             await Task.Delay(20);
         }
