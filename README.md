@@ -6,10 +6,10 @@ philosophical sequel to [mRemoteNG](https://mremoteng.org).
 > **Status:** Active development, UNSTABLE. The WinUI shell,
 > persisted connection tree, connection editor, credential store, mRemoteNG
 > import, SSH terminal, serial terminal, embedded/external RDP, embedded VNC,
-> SFTP file transfer, HTTP/HTTPS web sessions, per-connection VPN across seven
-> providers (including RDP, VNC, and web over VPN), an opt-in MCP server for
-> AI-driven SSH control, installer packaging, and in-app update checks are all
-> implemented.
+> SFTP file transfer, HTTP/HTTPS web sessions, optional Bitwarden integration,
+> per-connection VPN across seven providers (including RDP, VNC, and web over
+> VPN), an opt-in MCP server for AI-driven SSH control, installer packaging,
+> and in-app update checks are all implemented.
 
 ## Why
 
@@ -46,6 +46,9 @@ everything else.
   is pre-warmed in the background as soon as the shell connects, so the dialog
   opens instantly.
 - DPAPI / Credential Manager-backed credential store.
+- Optional **Bitwarden Password Manager** integration for saved credential
+  passwords, plus the official Bitwarden browser extension inside HTTPS
+  WebView2 sessions. Enable it from **Settings -> Extensions -> Bitwarden**.
 - SQLite-backed connection store with a versioned schema.
 - mRemoteNG `confCons.xml` import.
 - Per-connection userspace VPN tunnels for **WireGuard, OpenVPN, Fortinet SSL
@@ -63,9 +66,40 @@ everything else.
 - Advanced VNC auth modes beyond no-auth and classic password auth.
 - External Tools with `{host}` / `{user}` templating.
 - Port scan → "add as connection."
-- Windows Hello unlock, optional 1Password / Bitwarden / Azure Key Vault providers.
+- Windows Hello unlock, optional 1Password / Azure Key Vault providers.
 - SSH local/remote port forwarding UI.
 - Ctrl+K command palette.
+
+## Bitwarden integration
+
+Bitwarden is optional. Windows Credential Manager remains the default credential
+vault, and existing local credentials keep working unchanged.
+
+Enable Bitwarden from **Settings -> Extensions -> Bitwarden**. The settings page
+contains two independent integrations:
+
+- **Credential vault** - Wormhole uses the official Bitwarden Password Manager
+  CLI (`bw`) to resolve saved credential passwords from your personal Bitwarden
+  vault. Wormhole can install/update the CLI automatically, keeps the session key
+  only in memory, and never stores Bitwarden passwords in SQLite, backups, logs,
+  or metadata caches.
+- **Browser extension for HTTPS windows** - Wormhole installs the official
+  Bitwarden browser extension into dedicated persistent WebView2 profiles for
+  HTTPS sessions. The extension owns login, unlock, sync, and autofill exactly
+  like it does in a browser; Wormhole only provides the toolbar button and the
+  WebView2 extension host.
+
+Bitwarden login items appear as read-only virtual credentials in the Credentials
+page and in SSH / RDP / VNC credential pickers after sync. Selecting one stores
+only a Bitwarden item reference on the Wormhole credential or connection. At
+connect time, Wormhole resolves `login.password` live through `bw`; if the vault
+is locked, Wormhole prompts to unlock it.
+
+The HTTPS extension is installed from official Bitwarden Browser releases and is
+kept up to date in the background for official installs. Manual ZIP or unpacked
+folder installs are supported for offline or enterprise environments and remain
+pinned. Backup/export includes Bitwarden item references and metadata cache, but
+never exports Bitwarden passwords, WebView2 profiles, or extension packages.
 
 ## Per-connection VPN
 
@@ -238,7 +272,7 @@ dotnet test Wormhole.Tests.Integration/Wormhole.Tests.Integration.csproj
 | Web browser (HTTP/HTTPS) | WebView2 (Chromium); per-session SOCKS5 proxy when tunneled |
 | VPN tunnels | Userspace WireGuard / OpenVPN / Fortinet / WatchGuard / Stormshield / Azure VPN / Cisco Secure Client sidecars exposing loopback SOCKS5 |
 | AI control | ModelContextProtocol.AspNetCore (loopback MCP server over Kestrel) |
-| Credentials | Meziantou.Framework.Win32.CredentialManager + DPAPI |
+| Credentials | Meziantou.Framework.Win32.CredentialManager + DPAPI, with optional Bitwarden Password Manager via `bw` CLI |
 | Database | SQLite via Microsoft.Data.Sqlite + Dapper |
 | Import | mRemoteNG XML importer with BouncyCastle for legacy AES-GCM shape |
 
