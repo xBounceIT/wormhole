@@ -50,12 +50,12 @@ public sealed class CredentialPasswordResolver : ICredentialPasswordResolver, ID
             throw new BitwardenVaultException("This credential is missing its Bitwarden item reference.");
         }
 
-        var sessionKey = await EnsureSessionKeyAsync(unlockPrompt, cancellationToken).ConfigureAwait(false);
-        var item = await GetItemWithRetryAsync(itemId, sessionKey, unlockPrompt, cancellationToken).ConfigureAwait(false);
+        var sessionKey = await EnsureSessionKeyAsync(unlockPrompt, cancellationToken).ConfigureAwait(true);
+        var item = await GetItemWithRetryAsync(itemId, sessionKey, unlockPrompt, cancellationToken).ConfigureAwait(true);
         if (item is null)
         {
             await _bitwarden.SyncAsync(_bitwardenSession.SessionKey, cancellationToken).ConfigureAwait(false);
-            item = await GetItemWithRetryAsync(itemId, _bitwardenSession.SessionKey, unlockPrompt, cancellationToken).ConfigureAwait(false);
+            item = await GetItemWithRetryAsync(itemId, _bitwardenSession.SessionKey, unlockPrompt, cancellationToken).ConfigureAwait(true);
         }
 
         if (item is null)
@@ -78,14 +78,14 @@ public sealed class CredentialPasswordResolver : ICredentialPasswordResolver, ID
     {
         try
         {
-            return await _bitwarden.GetLoginItemAsync(itemId, sessionKey, cancellationToken).ConfigureAwait(false);
+            return await _bitwarden.GetLoginItemAsync(itemId, sessionKey, cancellationToken).ConfigureAwait(true);
         }
         catch (BitwardenVaultException ex) when (ex.IsAuthenticationError)
         {
             _logger.LogInformation("Bitwarden session key was rejected; requesting a fresh unlock.");
             _bitwardenSession.ClearSessionKey();
-            sessionKey = await EnsureSessionKeyAsync(unlockPrompt, cancellationToken).ConfigureAwait(false);
-            return await _bitwarden.GetLoginItemAsync(itemId, sessionKey, cancellationToken).ConfigureAwait(false);
+            sessionKey = await EnsureSessionKeyAsync(unlockPrompt, cancellationToken).ConfigureAwait(true);
+            return await _bitwarden.GetLoginItemAsync(itemId, sessionKey, cancellationToken).ConfigureAwait(true);
         }
     }
 
@@ -97,12 +97,12 @@ public sealed class CredentialPasswordResolver : ICredentialPasswordResolver, ID
     {
         if (_bitwardenSession.SessionKey is { Length: > 0 } existing) return existing;
 
-        await _unlockGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await _unlockGate.WaitAsync(cancellationToken).ConfigureAwait(true);
         try
         {
             if (_bitwardenSession.SessionKey is { Length: > 0 } cached) return cached;
 
-            var status = await _bitwarden.GetStatusAsync(cancellationToken).ConfigureAwait(false);
+            var status = await _bitwarden.GetStatusAsync(cancellationToken).ConfigureAwait(true);
             if (status.Status == BitwardenVaultStatus.Unauthenticated)
             {
                 throw new BitwardenVaultException("Bitwarden CLI is not logged in. Run bw login, then unlock the vault in Wormhole.", isAuthenticationError: true);
@@ -117,7 +117,7 @@ public sealed class CredentialPasswordResolver : ICredentialPasswordResolver, ID
                 throw new BitwardenVaultException("Bitwarden vault is locked.", isAuthenticationError: true);
             }
 
-            var masterPassword = await unlockPrompt(cancellationToken).ConfigureAwait(false);
+            var masterPassword = await unlockPrompt(cancellationToken).ConfigureAwait(true);
             cancellationToken.ThrowIfCancellationRequested();
             if (masterPassword is null)
             {
