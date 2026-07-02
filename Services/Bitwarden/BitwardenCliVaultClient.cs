@@ -127,10 +127,11 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
         foreach (var element in document.RootElement.EnumerateArray())
         {
             if (!IsLoginItem(element)) continue;
-            if (MapLoginItem(element) is { } item) items.Add(item);
+            if (MapLoginItem(element, includePassword: false) is { } item) items.Add(item);
         }
         return items;
     }
+
     public async Task<BitwardenLoginItem?> GetLoginItemAsync(
         string itemId,
         string? sessionKey,
@@ -146,7 +147,7 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
         }
 
         using var document = ParseJsonDocument(result.StandardOutput, "Bitwarden item output was not valid JSON.");
-        return IsLoginItem(document.RootElement) ? MapLoginItem(document.RootElement) : null;
+        return IsLoginItem(document.RootElement) ? MapLoginItem(document.RootElement, includePassword: true) : null;
     }
 
     public async Task SyncAsync(string? sessionKey, CancellationToken cancellationToken = default)
@@ -246,7 +247,7 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
         login.ValueKind == JsonValueKind.Object &&
         (!element.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.Number || type.GetInt32() == 1);
 
-    private static BitwardenLoginItem? MapLoginItem(JsonElement element)
+    private static BitwardenLoginItem? MapLoginItem(JsonElement element, bool includePassword)
     {
         var id = ReadString(element, "id");
         if (string.IsNullOrWhiteSpace(id)) return null;
@@ -257,7 +258,10 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
         if (element.TryGetProperty("login", out var login) && login.ValueKind == JsonValueKind.Object)
         {
             username = ReadString(login, "username");
-            password = ReadString(login, "password");
+            if (includePassword)
+            {
+                password = ReadString(login, "password");
+            }
         }
         return new BitwardenLoginItem(id, name, username, password, revisionDate);
     }

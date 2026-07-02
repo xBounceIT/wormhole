@@ -125,14 +125,14 @@ public sealed class BitwardenCliVaultClientTests
                 Assert.Equal("1", item.Id);
                 Assert.Equal("Router", item.Name);
                 Assert.Equal("admin", item.Username);
-                Assert.Equal("pw", item.Password);
+                Assert.Null(item.Password);
             },
             item =>
             {
                 Assert.Equal("3", item.Id);
                 Assert.Equal("Server", item.Name);
                 Assert.Equal("root", item.Username);
-                Assert.Equal("secret", item.Password);
+                Assert.Null(item.Password);
             });
     }
 
@@ -147,6 +147,7 @@ public sealed class BitwardenCliVaultClientTests
         var item = await client.GetLoginItemAsync("item-1", sessionKey: null);
 
         Assert.NotNull(item);
+        Assert.Equal("pw", item!.Password);
         var request = runner.Requests.Single();
         Assert.Collection(
             request.Arguments,
@@ -156,6 +157,7 @@ public sealed class BitwardenCliVaultClientTests
         Assert.True(request.Environment.ContainsKey("BW_SESSION"));
         Assert.Null(request.Environment["BW_SESSION"]);
     }
+
     [Fact]
     public async Task Errors_RedactSessionAndPasswordEnvValues()
     {
