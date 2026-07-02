@@ -94,13 +94,13 @@ public sealed class BitwardenCredentialSyncService : IBitwardenCredentialSyncSer
             var status = await _vault.GetStatusAsync(cancellationToken).ConfigureAwait(false);
             if (status.Status == BitwardenVaultStatus.Unauthenticated)
             {
-                StampStatus("Needs Bitwarden login to refresh.", null, availableCount: null);
+                StampStatus("Needs Bitwarden login to refresh.", null, availableCount: null, refreshed: false);
                 return;
             }
 
             if (status.Status == BitwardenVaultStatus.Locked && string.IsNullOrWhiteSpace(sessionKey))
             {
-                StampStatus("Needs Bitwarden unlock to refresh.", null, availableCount: null);
+                StampStatus("Needs Bitwarden unlock to refresh.", null, availableCount: null, refreshed: false);
                 return;
             }
 
@@ -125,20 +125,20 @@ public sealed class BitwardenCredentialSyncService : IBitwardenCredentialSyncSer
             }
 
             await _cache.ReplaceFromFullSyncAsync(entries, now, cancellationToken).ConfigureAwait(false);
-            StampStatus($"Synced {entries.Count} Bitwarden login item(s).", null, entries.Count);
+            StampStatus($"Synced {entries.Count} Bitwarden login item(s).", null, entries.Count, refreshed: true);
             SyncCompleted?.Invoke(this, EventArgs.Empty);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             var message = Redact(ex.Message);
-            StampStatus("Bitwarden sync failed; using cached credentials.", message, availableCount: null);
+            StampStatus("Bitwarden sync failed; using cached credentials.", message, availableCount: null, refreshed: false);
             _logger.LogWarning(ex, "Bitwarden credential sync failed; keeping existing cache.");
         }
     }
 
-    private void StampStatus(string status, string? error, int? availableCount)
+    private void StampStatus(string status, string? error, int? availableCount, bool refreshed)
     {
-        _settings.Current.BitwardenCredentialLastSyncUtc = DateTimeOffset.UtcNow;
+        if (refreshed) _settings.Current.BitwardenCredentialLastSyncUtc = DateTimeOffset.UtcNow;
         _settings.Current.BitwardenCredentialLastSyncStatus = status;
         _settings.Current.BitwardenCredentialLastSyncError = string.IsNullOrWhiteSpace(error) ? null : error;
         if (availableCount is not null)

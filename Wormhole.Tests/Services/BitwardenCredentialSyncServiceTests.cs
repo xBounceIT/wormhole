@@ -60,6 +60,62 @@ public sealed class BitwardenCredentialSyncServiceTests
         Assert.Contains("unlock", settings.Current.BitwardenCredentialLastSyncStatus, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task SyncIfStaleAsync_LockedAttemptDoesNotSuppressRetryAfterUnlock()
+    {
+        var vault = new FakeBitwardenVaultClient
+        {
+            Status = new BitwardenStatus(BitwardenVaultStatus.Locked),
+            Items = [new BitwardenLoginItem("item-1", "Firewall", "admin", "secret-password")],
+        };
+        var cache = new FakeBitwardenCacheRepository();
+        var settings = EnabledSettings();
+        var session = new BitwardenSessionService();
+        var service = NewService(vault, cache, settings, session);
+
+        await service.SyncIfStaleAsync();
+
+        Assert.Null(settings.Current.BitwardenCredentialLastSyncUtc);
+        Assert.Equal(0, vault.SyncCount);
+
+        session.SetSessionKey("SESSION");
+        vault.Status = new BitwardenStatus(BitwardenVaultStatus.Unlocked);
+        await service.SyncIfStaleAsync();
+
+        Assert.Equal(1, vault.SyncCount);
+        Assert.NotNull(settings.Current.BitwardenCredentialLastSyncUtc);
+        Assert.Single(cache.LastFullSync);
+    }
+
+    [Fact]
+    public async Task SyncIfStaleAsync_FailedAttemptDoesNotSuppressRetryAfterRecovery()
+    {
+        var vault = new FakeBitwardenVaultClient
+        {
+            Status = new BitwardenStatus(BitwardenVaultStatus.Unlocked),
+            Items = [new BitwardenLoginItem("item-1", "Firewall", "admin", "secret-password")],
+            SyncException = new BitwardenVaultException("temporary failure"),
+        };
+        var cache = new FakeBitwardenCacheRepository();
+        var settings = EnabledSettings();
+        var session = new BitwardenSessionService();
+        session.SetSessionKey("SESSION");
+        var service = NewService(vault, cache, settings, session);
+
+        await service.SyncIfStaleAsync();
+
+        Assert.Null(settings.Current.BitwardenCredentialLastSyncUtc);
+        Assert.Equal(1, vault.SyncCount);
+        Assert.Empty(cache.LastFullSync);
+
+        vault.SyncException = null;
+        await service.SyncIfStaleAsync();
+
+        Assert.Equal(2, vault.SyncCount);
+        Assert.NotNull(settings.Current.BitwardenCredentialLastSyncUtc);
+        Assert.Single(cache.LastFullSync);
+    }
+
     private static BitwardenCredentialSyncService NewService(
         FakeBitwardenVaultClient vault,
         FakeBitwardenCacheRepository cache,
@@ -106,6 +162,7 @@ public sealed class BitwardenCredentialSyncServiceTests
         public IReadOnlyList<BitwardenLoginItem> Items { get; set; } = Array.Empty<BitwardenLoginItem>();
         public int SyncCount { get; private set; }
         public int ListCount { get; private set; }
+        public Exception? SyncException { get; set; }
 
         public Task<BitwardenStatus> GetStatusAsync(CancellationToken cancellationToken = default) =>
             Task.FromResult(Status);
@@ -143,7 +200,7 @@ public sealed class BitwardenCredentialSyncServiceTests
         public Task SyncAsync(string? sessionKey, CancellationToken cancellationToken = default)
         {
             SyncCount++;
-            return Task.CompletedTask;
+            return SyncException is null ? Task.CompletedTask : Task.FromException(SyncException);
         }
     }
 }
