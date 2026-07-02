@@ -179,6 +179,19 @@ func (e *dnsResponseError) Unwrap() error { return e.err }
 
 var errDNSUDPTruncated = errors.New("DNS UDP response truncated")
 
+// dnsFallbackUDPTimeout reserves part of each per-server slot for TCP fallback so
+// blackholed UDP+TCP resolvers do not starve later healthy DNS servers.
+func dnsFallbackUDPTimeout(timeout time.Duration) time.Duration {
+	if timeout <= 0 {
+		return timeout
+	}
+	udpTimeout := timeout / 2
+	if udpTimeout <= 0 {
+		return timeout
+	}
+	return udpTimeout
+}
+
 // answerOrResponseErr adapts a parseDNSResponse outcome to queryAOne's return convention: a
 // parse/rcode/no-records failure means the server answered with something unusable, so it is
 // marked as a (non-retryable) dnsResponseError rather than transport loss. Shared by the UDP
@@ -331,10 +344,10 @@ func queryServersUntilAnswer(ctx context.Context, servers []netip.Addr, qname dn
 // contains only CNAMEs (caller follows the chain via resolveViaVPNQuery's outer loop), or an
 // error on transport/parse failure. Bounded by the per-try timeout regardless of the caller's
 // ctx deadline (which is the OVERALL lookup budget). UDP is attempted first; if no usable UDP
-// response arrives, DNS-over-TCP is tried against the same VPN-provided resolver before the
-// lookup is handed back to queryServersUntilAnswer for failover/retransmit. The transaction ID
-// is randomly generated per query so responses can't be cross-contaminated between concurrent
-// lookups.
+// response arrives, DNS-over-TCP is tried against the same VPN-provided resolver using the
+// remaining per-server budget before the lookup is handed back to queryServersUntilAnswer for
+// failover/retransmit. The transaction ID is randomly generated per query so responses can't be
+// cross-contaminated between concurrent lookups.
 func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dnsmessage.Name, timeout time.Duration) (netip.Addr, string, error) {
 	if !server.Is4() {
 		return netip.Addr{}, "", fmt.Errorf("DNS server %v is not IPv4", server)
@@ -385,7 +398,8 @@ func queryAOneWithFallback(
 	udp dnsPacketQueryFunc,
 	tcp dnsPacketQueryFunc,
 ) (netip.Addr, string, error) {
-	addr, cname, err := udp(ctx, server, query, txid, timeout)
+	slotStart := time.Now()
+	addr, cname, err := udp(ctx, server, query, txid, dnsFallbackUDPTimeout(timeout))
 	if err == nil {
 		return addr, cname, nil
 	}
@@ -402,7 +416,13 @@ func queryAOneWithFallback(
 		logf("netstack: DNS A query for %q via %s failed over UDP (%v); trying TCP fallback", label, server, err)
 	}
 
-	addr, cname, tcpErr := tcp(ctx, server, query, txid, timeout)
+	tcpTimeout := timeout - time.Since(slotStart)
+	if tcpTimeout <= 0 {
+		logf("netstack: DNS A query for %q via %s skipped TCP fallback because UDP consumed the DNS slot", label, server)
+		return netip.Addr{}, "", fmt.Errorf("UDP failed (%w); TCP fallback skipped after DNS budget exhausted", err)
+	}
+
+	addr, cname, tcpErr := tcp(ctx, server, query, txid, tcpTimeout)
 	if tcpErr == nil {
 		logf("netstack: DNS A query for %q via %s succeeded over TCP fallback", label, server)
 		return addr, cname, nil

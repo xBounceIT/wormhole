@@ -238,6 +238,33 @@ func TestQueryAOneWithFallback_UDPTimeoutThenTCPSuccess(t *testing.T) {
 	}
 }
 
+func TestQueryAOneWithFallback_ReservesPerServerBudgetForTCP(t *testing.T) {
+	server := netip.MustParseAddr("10.72.0.1")
+	qname := dnsmessage.MustNewName("dyn-ar-cdb01.dynartis.local.")
+	query := []byte{0x12, 0x34}
+
+	var udpTimeout, tcpTimeout time.Duration
+	udp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, timeout time.Duration) (netip.Addr, string, error) {
+		udpTimeout = timeout
+		return netip.Addr{}, "", errors.New("DNS read: i/o timeout")
+	}
+	tcp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, timeout time.Duration) (netip.Addr, string, error) {
+		tcpTimeout = timeout
+		return netip.Addr{}, "", errors.New("DNS-TCP read length: i/o timeout")
+	}
+
+	_, _, err := queryAOneWithFallback(context.Background(), server, qname, query, 0x1234, time.Second, udp, tcp)
+	if err == nil {
+		t.Fatal("expected an error when both UDP and TCP DNS fail")
+	}
+	if udpTimeout != 500*time.Millisecond {
+		t.Fatalf("UDP timeout: got %v want %v", udpTimeout, 500*time.Millisecond)
+	}
+	if tcpTimeout <= 0 || tcpTimeout > time.Second {
+		t.Fatalf("TCP timeout: got %v, want within (0s, 1s]", tcpTimeout)
+	}
+}
+
 func TestQueryAOneWithFallback_TruncatedUDPUsesTCPFallback(t *testing.T) {
 	server := netip.MustParseAddr("10.72.0.1")
 	qname := dnsmessage.MustNewName("large.dynartis.local.")
