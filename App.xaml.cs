@@ -467,7 +467,8 @@ public partial class App : Application
             sp.GetRequiredService<ICredentialService>(),
             sp.GetRequiredService<IBitwardenCredentialCatalogService>(),
             sp.GetRequiredService<ICredentialPasswordResolver>(),
-            sp.GetRequiredService<ILogger<ConnectionTreeViewModel>>()));
+            sp.GetRequiredService<ILogger<ConnectionTreeViewModel>>(),
+            sp.GetRequiredService<IConnectionNodeChangeNotifier>()));
         services.AddSingleton<QuickConnectViewModel>();
         services.AddSingleton<SettingsViewModel>();
         services.AddSingleton<CredentialsViewModel>();

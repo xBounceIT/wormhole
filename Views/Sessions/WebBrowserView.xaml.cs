@@ -711,21 +711,6 @@ public sealed partial class WebBrowserView : UserControl
                 LogDebug(ex, "Could not clear origin storage for a Bitwarden-enabled HTTPS tab.");
             }
         }
-
-        try
-        {
-            await core.Profile.ClearBrowsingDataAsync(
-                CoreWebView2BrowsingDataKinds.Cookies
-                | CoreWebView2BrowsingDataKinds.DiskCache
-                | CoreWebView2BrowsingDataKinds.DownloadHistory
-                | CoreWebView2BrowsingDataKinds.GeneralAutofill
-                | CoreWebView2BrowsingDataKinds.PasswordAutosave
-                | CoreWebView2BrowsingDataKinds.BrowsingHistory);
-        }
-        catch (Exception ex)
-        {
-            LogWarning(ex, "Could not clear Bitwarden WebView2 browser data after closing an HTTPS tab.");
-        }
     }
 
     private static HashSet<string> GetWebOrigins(HttpConnectionTarget target, string? currentSource)
