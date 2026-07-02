@@ -206,6 +206,12 @@ public sealed class BackupServiceTests : IDisposable
 
         Assert.Equal(1, exportResult.CredentialCount);
         Assert.Equal(0, exportResult.PasswordCount);
+        await using (var stream = File.OpenRead(path))
+        {
+            var document = await JsonSerializer.DeserializeAsync<BackupDocument>(stream, CamelCaseJsonOptions);
+            Assert.NotNull(document);
+            Assert.Equal(BackupDocument.CurrentSchemaVersion, document!.SchemaVersion);
+        }
 
         var dst = await CreateEnvAsync();
         var importResult = await dst.Service.ImportAsync(path, password: null);
@@ -442,8 +448,13 @@ public sealed class BackupServiceTests : IDisposable
         var encPath = Path.Combine(_scratchDir, "encrypted.json");
         await src.Service.ExportAsync(encPath, "pwd");
 
-        Assert.False((await src.Service.InspectAsync(plainPath)).Encrypted);
-        Assert.True((await src.Service.InspectAsync(encPath)).Encrypted);
+        var plainInspect = await src.Service.InspectAsync(plainPath);
+        var encryptedInspect = await src.Service.InspectAsync(encPath);
+
+        Assert.False(plainInspect.Encrypted);
+        Assert.True(encryptedInspect.Encrypted);
+        Assert.Equal(BackupDocument.CurrentSchemaVersion, plainInspect.SchemaVersion);
+        Assert.Equal(BackupDocument.CurrentSchemaVersion, encryptedInspect.SchemaVersion);
     }
 
     [Fact]

@@ -6,7 +6,9 @@ namespace Wormhole.Models.Backup;
 // Serialized with System.Text.Json (camelCase via JsonSerializerOptions in BackupService).
 public sealed class BackupDocument
 {
-    public int SchemaVersion { get; set; } = 1;
+    public const int CurrentSchemaVersion = 2;
+
+    public int SchemaVersion { get; set; } = CurrentSchemaVersion;
     public string App { get; set; } = "Wormhole";
     public DateTimeOffset ExportedAt { get; set; } = DateTimeOffset.UtcNow;
     public string Encryption { get; set; } = BackupEncryption.None;

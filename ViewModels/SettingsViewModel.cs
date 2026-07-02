@@ -37,6 +37,7 @@ public partial class SettingsViewModel : ObservableObject
     private bool _suppressMcpToggle;
     private bool _suppressSecurityChanges;
     private bool _suppressBitwardenBrowserExtensionToggle;
+    private bool _suppressBitwardenVaultAutoEnable;
 
     [ObservableProperty]
     private ApplicationTheme theme;
@@ -242,7 +243,10 @@ public partial class SettingsViewModel : ObservableObject
         _settingsService.Save();
         if (value)
         {
-            _ = EnableBitwardenVaultAsync();
+            if (!_suppressBitwardenVaultAutoEnable)
+            {
+                _ = EnableBitwardenVaultAsync();
+            }
         }
         else
         {
@@ -398,13 +402,21 @@ public partial class SettingsViewModel : ObservableObject
     {
         if (!EnableBitwardenVault)
         {
-            EnableBitwardenVault = true;
+            _suppressBitwardenVaultAutoEnable = true;
+            try
+            {
+                EnableBitwardenVault = true;
+            }
+            finally
+            {
+                _suppressBitwardenVaultAutoEnable = false;
+            }
         }
 
         await RunBitwardenCliInstallAsync("Installing Bitwarden CLI...", showErrorDialog: true, forceInstall: true).ConfigureAwait(true);
         if (_bitwardenCliInstaller.GetConfiguredInstall() is not null)
         {
-            await RefreshBitwardenStatusAsync().ConfigureAwait(true);
+            await EnableBitwardenVaultAsync().ConfigureAwait(true);
         }
     }
 

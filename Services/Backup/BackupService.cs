@@ -110,7 +110,7 @@ public sealed class BackupService : IBackupService
         Report(progress, 70, "Serializing...");
         var doc = new BackupDocument
         {
-            SchemaVersion = 1,
+            SchemaVersion = BackupDocument.CurrentSchemaVersion,
             App = "Wormhole",
             ExportedAt = DateTimeOffset.UtcNow,
         };
@@ -348,7 +348,7 @@ public sealed class BackupService : IBackupService
                   ?? throw new InvalidDataException("Backup file is empty or malformed.");
         }
 
-        if (doc.SchemaVersion > 1)
+        if (doc.SchemaVersion > BackupDocument.CurrentSchemaVersion)
         {
             throw new InvalidDataException(
                 $"Backup file schema version {doc.SchemaVersion} is newer than this app supports.");
