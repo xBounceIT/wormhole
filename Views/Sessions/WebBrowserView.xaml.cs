@@ -49,6 +49,7 @@ public sealed partial class WebBrowserView : UserControl
     private string? _bitwardenIconPath;
     private bool _bitwardenExtensionReady;
     private BitwardenWebDataOriginLease? _bitwardenWebDataLease;
+    private string? _bitwardenWebDataUserDataFolder;
     // Temp user-data folder backing this tab's isolated environment (a SOCKS-proxy or ignore-cert tab);
     // deleted (best-effort) when that WebView2 is torn down. Null for shared-environment (plain) tabs.
     private string? _isolatedUserDataFolder;
@@ -135,7 +136,11 @@ public sealed partial class WebBrowserView : UserControl
 
         // A live WebView2 already rendering this session (tab switch on the same view instance): keep it
         // so page state is preserved. Only (re)connect when there is nothing live to rebind to.
-        if (_webView?.CoreWebView2 is not null) return;
+        if (_webView?.CoreWebView2 is not null)
+        {
+            ReacquireBitwardenWebDataLease();
+            return;
+        }
 
         try
         {
@@ -162,7 +167,11 @@ public sealed partial class WebBrowserView : UserControl
         var generation = ++_createGeneration;
         if (vm is not null) vm.NavigateRequested -= OnNavigateRequested;
 
-        if (vm is null || IsTabStillOpen(vm)) return;
+        if (vm is null || IsTabStillOpen(vm))
+        {
+            ReleaseBitwardenWebDataLease();
+            return;
+        }
 
         try
         {
@@ -275,6 +284,7 @@ public sealed partial class WebBrowserView : UserControl
             if (environmentSelection.BitwardenExtensionPath is { } extensionPath
                 && environmentSelection.UserDataFolder is { } extensionUserDataFolder)
             {
+                _bitwardenWebDataUserDataFolder = extensionUserDataFolder;
                 _bitwardenWebDataLease = s_bitwardenWebDataOrigins.Register(extensionUserDataFolder, GetWebOrigins(target, core.Source));
                 await TryEnsureBitwardenExtensionAsync(core, extensionPath, extensionUserDataFolder).ConfigureAwait(true);
             }
@@ -588,6 +598,25 @@ public sealed partial class WebBrowserView : UserControl
         UpdateToolbar();
     }
 
+    private void ReacquireBitwardenWebDataLease()
+    {
+        if (_bitwardenWebDataLease is not null) return;
+        if (_bitwardenWebDataUserDataFolder is null || _currentTarget is null) return;
+        var core = _webView?.CoreWebView2;
+        if (core is null) return;
+
+        _bitwardenWebDataLease = s_bitwardenWebDataOrigins.Register(
+            _bitwardenWebDataUserDataFolder,
+            GetWebOrigins(_currentTarget, core.Source));
+    }
+
+    private void ReleaseBitwardenWebDataLease()
+    {
+        var lease = _bitwardenWebDataLease;
+        _bitwardenWebDataLease = null;
+        lease?.Release();
+    }
+
     private void TrackBitwardenWebDataOrigin(string? source)
     {
         if (_bitwardenWebDataLease is null) return;
@@ -744,6 +773,7 @@ public sealed partial class WebBrowserView : UserControl
         _bitwardenPopupUri = null;
         _bitwardenExtensionReady = false;
         _bitwardenWebDataLease = null;
+        _bitwardenWebDataUserDataFolder = null;
         if (webView is not null)
         {
             var core = webView.CoreWebView2;
