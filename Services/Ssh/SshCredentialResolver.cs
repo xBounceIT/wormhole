@@ -1,5 +1,7 @@
+using Microsoft.Extensions.DependencyInjection;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
+using Wormhole.Services.Bitwarden;
 
 namespace Wormhole.Services.Ssh;
 
@@ -43,8 +45,9 @@ public sealed record SshCredentials(
 
 public sealed class SshCredentialResolver : ISshCredentialResolver
 {
-    private readonly ICredentialRepository _credentialRepo;
+    private readonly IBitwardenCredentialCatalogService _credentialCatalog;
     private readonly ICredentialService _credentialService;
+    private readonly ICredentialPasswordResolver _passwordResolver;
     private readonly IConnectionCredentialBindingService _credentialBindings;
     private readonly IDialogService _dialogs;
     private readonly IPrivateKeyInspector _keyInspector;
@@ -52,12 +55,32 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
     public SshCredentialResolver(
         ICredentialRepository credentialRepo,
         ICredentialService credentialService,
+        ICredentialPasswordResolver passwordResolver,
+        IConnectionCredentialBindingService credentialBindings,
+        IDialogService dialogs,
+        IPrivateKeyInspector keyInspector)
+        : this(
+            new RepositoryCredentialCatalogAdapter(credentialRepo),
+            credentialService,
+            passwordResolver,
+            credentialBindings,
+            dialogs,
+            keyInspector)
+    {
+    }
+
+    [ActivatorUtilitiesConstructor]
+    public SshCredentialResolver(
+        IBitwardenCredentialCatalogService credentialCatalog,
+        ICredentialService credentialService,
+        ICredentialPasswordResolver passwordResolver,
         IConnectionCredentialBindingService credentialBindings,
         IDialogService dialogs,
         IPrivateKeyInspector keyInspector)
     {
-        _credentialRepo = credentialRepo;
+        _credentialCatalog = credentialCatalog;
         _credentialService = credentialService;
+        _passwordResolver = passwordResolver;
         _credentialBindings = credentialBindings;
         _dialogs = dialogs;
         _keyInspector = keyInspector;
@@ -87,7 +110,7 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
             return await PromptForPasswordAsync(profile, cancellationToken).ConfigureAwait(true);
         }
 
-        var credential = await _credentialRepo.GetByIdAsync(profile.CredentialId.Value, cancellationToken).ConfigureAwait(true);
+        var credential = await _credentialCatalog.GetByIdAsync(profile.CredentialId.Value, cancellationToken).ConfigureAwait(true);
         cancellationToken.ThrowIfCancellationRequested();
         if (credential is null)
         {
@@ -142,7 +165,15 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
             return new SshCredentials(null, passphrase, key, credential.Username);
         }
 
-        var stored = await _credentialService.ReadPasswordAsync(credential.Id).ConfigureAwait(true);
+        string? stored;
+        try
+        {
+            stored = await _passwordResolver.ReadPasswordAsync(credential, PromptForBitwardenUnlockAsync, cancellationToken).ConfigureAwait(true);
+        }
+        catch (BitwardenVaultException)
+        {
+            return await PromptForPasswordAsync(profile, cancellationToken, credential.Username).ConfigureAwait(true);
+        }
         cancellationToken.ThrowIfCancellationRequested();
         if (!string.IsNullOrEmpty(stored))
         {
@@ -150,6 +181,12 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
         }
         return await PromptForPasswordAsync(profile, cancellationToken, credential.Username).ConfigureAwait(true);
     }
+
+    private Task<string?> PromptForBitwardenUnlockAsync(CancellationToken cancellationToken) =>
+        _dialogs.PromptPasswordAsync(
+            "Unlock Bitwarden vault",
+            "Enter your Bitwarden master password.",
+            cancellationToken);
 
     private static async Task ObserveCredentialReadAsync(Task<string?> task)
     {

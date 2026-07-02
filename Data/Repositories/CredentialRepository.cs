@@ -6,7 +6,9 @@ namespace Wormhole.Data.Repositories;
 public sealed class CredentialRepository : ICredentialRepository
 {
     private const string SelectColumns = @"
-        Id, Name, Username, Domain, Kind, PrivateKeyFileName, Protocol, CreatedAt";
+        Id, Name, Username, Domain, Kind, PrivateKeyFileName, Protocol,
+        SecretProvider, BitwardenItemId, BitwardenItemName, BitwardenFieldPath,
+        CreatedAt";
 
     private readonly ISqliteConnectionFactory _factory;
 
@@ -38,9 +40,11 @@ public sealed class CredentialRepository : ICredentialRepository
         using var connection = _factory.Open();
         await connection.ExecuteAsync(new CommandDefinition(@"
             INSERT INTO CredentialProfiles
-                (Id, Name, Username, Domain, Kind, PrivateKeyFileName, Protocol, CreatedAt)
+                (Id, Name, Username, Domain, Kind, PrivateKeyFileName, Protocol,
+                 SecretProvider, BitwardenItemId, BitwardenItemName, BitwardenFieldPath, CreatedAt)
             VALUES
-                (@Id, @Name, @Username, @Domain, @Kind, @PrivateKeyFileName, @Protocol, @CreatedAt);",
+                (@Id, @Name, @Username, @Domain, @Kind, @PrivateKeyFileName, @Protocol,
+                 @SecretProvider, @BitwardenItemId, @BitwardenItemName, @BitwardenFieldPath, @CreatedAt);",
             profile,
             cancellationToken: cancellationToken));
     }
@@ -55,7 +59,11 @@ public sealed class CredentialRepository : ICredentialRepository
                 Domain = @Domain,
                 Kind = @Kind,
                 PrivateKeyFileName = @PrivateKeyFileName,
-                Protocol = @Protocol
+                Protocol = @Protocol,
+                SecretProvider = @SecretProvider,
+                BitwardenItemId = @BitwardenItemId,
+                BitwardenItemName = @BitwardenItemName,
+                BitwardenFieldPath = @BitwardenFieldPath
             WHERE Id = @Id;",
             profile,
             cancellationToken: cancellationToken));

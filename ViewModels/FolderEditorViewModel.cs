@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
+using Wormhole.Services.Bitwarden;
 
 namespace Wormhole.ViewModels;
 
@@ -17,15 +18,28 @@ namespace Wormhole.ViewModels;
 /// </summary>
 public partial class FolderEditorViewModel : ObservableObject
 {
-    private readonly ICredentialRepository _credentialRepository;
+    private readonly IBitwardenCredentialCatalogService _credentialCatalog;
+    private readonly IBitwardenCredentialSyncService _bitwardenCredentialSync;
     private readonly Dictionary<Guid, CredentialProfile> _availableCredentialsById = new();
     private readonly HashSet<Guid> _loadedCredentialIds = new();
 
     public FolderEditorViewModel(
         ITunnelConfigRepository tunnelConfigRepository,
         ICredentialRepository credentialRepository)
+        : this(
+            tunnelConfigRepository,
+            new RepositoryCredentialCatalogAdapter(credentialRepository),
+            NoOpBitwardenCredentialSyncService.Instance)
     {
-        _credentialRepository = credentialRepository;
+    }
+
+    public FolderEditorViewModel(
+        ITunnelConfigRepository tunnelConfigRepository,
+        IBitwardenCredentialCatalogService credentialCatalog,
+        IBitwardenCredentialSyncService bitwardenCredentialSync)
+    {
+        _credentialCatalog = credentialCatalog;
+        _bitwardenCredentialSync = bitwardenCredentialSync;
         TunnelPicker = new TunnelPickerViewModel(tunnelConfigRepository, inheritLabel: "(Inherit from parent)");
         AvailableCredentials.Add(InheritCredential);
         AvailableCredentials.Add(NoCredential);
@@ -129,7 +143,8 @@ public partial class FolderEditorViewModel : ObservableObject
 
     public async Task LoadCredentialsAsync()
     {
-        var credentials = await _credentialRepository.GetAllAsync().ConfigureAwait(true);
+        await _bitwardenCredentialSync.SyncIfStaleAsync().ConfigureAwait(true);
+        var credentials = await _credentialCatalog.GetPickerProfilesAsync().ConfigureAwait(true);
         var available = new List<CredentialProfile>(credentials.Count + 2)
         {
             InheritCredential,

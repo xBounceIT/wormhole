@@ -1,12 +1,18 @@
 using System.ComponentModel;
 using System.Threading;
+using Microsoft.UI;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Imaging;
 using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Models.Backup;
+using Wormhole.Services.Bitwarden;
 using Wormhole.ViewModels;
 using Wormhole.Views.Dialogs;
 
@@ -14,13 +20,18 @@ namespace Wormhole.Services;
 
 public sealed class DialogService : IDialogService
 {
-    private readonly ICredentialRepository _credentialRepository;
-    private readonly ICredentialService _credentialService;
+    private readonly IBitwardenCredentialCatalogService _credentialCatalog;
+    private readonly IBitwardenCredentialSyncService _bitwardenCredentialSync;
+    private readonly ICredentialPasswordResolver _passwordResolver;
 
-    public DialogService(ICredentialRepository credentialRepository, ICredentialService credentialService)
+    public DialogService(
+        IBitwardenCredentialCatalogService credentialCatalog,
+        IBitwardenCredentialSyncService bitwardenCredentialSync,
+        ICredentialPasswordResolver passwordResolver)
     {
-        _credentialRepository = credentialRepository;
-        _credentialService = credentialService;
+        _credentialCatalog = credentialCatalog;
+        _bitwardenCredentialSync = bitwardenCredentialSync;
+        _passwordResolver = passwordResolver;
     }
 
     public Task ShowMessageAsync(string title, string message)
@@ -32,6 +43,73 @@ public sealed class DialogService : IDialogService
             CloseButtonText = "OK",
             XamlRoot = RequireXamlRoot(),
         };
+        return ShowDialogAsync(dialog);
+    }
+
+    public Task ShowBitwardenOnboardingNoticeAsync(string title, string message)
+    {
+        var icon = new Image
+        {
+            Source = new BitmapImage(new Uri("ms-appx:///Assets/Bitwarden/bitwarden-icon.png")),
+            Stretch = Stretch.Uniform,
+            Width = 50,
+            Height = 50,
+        };
+
+        var iconBadge = new Border
+        {
+            Width = 88,
+            Height = 88,
+            CornerRadius = new CornerRadius(24),
+            Background = new SolidColorBrush(Colors.White),
+            Padding = new Thickness(17),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            Child = icon,
+        };
+
+        var titleBlock = new TextBlock
+        {
+            Text = title,
+            FontSize = 22,
+            FontWeight = FontWeights.SemiBold,
+            TextAlignment = TextAlignment.Center,
+            TextWrapping = TextWrapping.WrapWholeWords,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            Margin = new Thickness(0, 2, 0, 0),
+        };
+
+        var messageBlock = new TextBlock
+        {
+            Text = message,
+            FontSize = 14,
+            Opacity = 0.84,
+            TextAlignment = TextAlignment.Center,
+            TextWrapping = TextWrapping.WrapWholeWords,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+            MaxWidth = 390,
+        };
+
+        var content = new StackPanel
+        {
+            Spacing = 14,
+            MaxWidth = 430,
+            HorizontalAlignment = HorizontalAlignment.Stretch,
+        };
+        content.Children.Add(iconBadge);
+        content.Children.Add(titleBlock);
+        content.Children.Add(messageBlock);
+
+        var xamlRoot = RequireXamlRoot();
+        var targetWidth = xamlRoot.Size.Width > 0 ? Math.Min(480d, xamlRoot.Size.Width) : 480d;
+        var dialog = new ContentDialog
+        {
+            Content = content,
+            CloseButtonText = "OK",
+            DefaultButton = ContentDialogButton.Close,
+            XamlRoot = xamlRoot,
+        };
+        dialog.Resources["ContentDialogMinWidth"] = targetWidth;
+        dialog.Resources["ContentDialogMaxWidth"] = targetWidth;
         return ShowDialogAsync(dialog);
     }
 
@@ -379,6 +457,15 @@ public sealed class DialogService : IDialogService
         };
         savedCredentialSection.Children.Add(credentialBox);
 
+        var bitwardenUnlockBox = new PasswordBox
+        {
+            Header = "Bitwarden master password",
+            PlaceholderText = "Only required when the vault is locked",
+            Width = 320,
+            Visibility = Visibility.Collapsed,
+        };
+        savedCredentialSection.Children.Add(bitwardenUnlockBox);
+
         if (choices.Count == 1)
         {
             savedCredentialSection.Children.Add(new TextBlock
@@ -440,15 +527,28 @@ public sealed class DialogService : IDialogService
         {
             var selectedCredential = CurrentChoice().Credential;
             var usingSavedCredential = selectedCredential is not null;
+            var usingBitwarden = selectedCredential?.IsBitwarden == true;
             if (userBox is not null) userBox.IsEnabled = !usingSavedCredential;
             passwordBox.IsEnabled = !usingSavedCredential;
+            bitwardenUnlockBox.IsEnabled = usingBitwarden;
+            bitwardenUnlockBox.Visibility = usingBitwarden ? Visibility.Visible : Visibility.Collapsed;
             saveBindingBox.IsEnabled = usingSavedCredential;
             if (!usingSavedCredential)
             {
                 saveBindingBox.IsChecked = false;
             }
+            if (!usingBitwarden)
+            {
+                bitwardenUnlockBox.Password = string.Empty;
+            }
             errorInfo.IsOpen = false;
             UpdatePrimaryButton();
+        }
+
+        Task<string?> PromptBitwardenUnlockFromDialogAsync(CancellationToken _)
+        {
+            var password = bitwardenUnlockBox.Password;
+            return Task.FromResult(string.IsNullOrEmpty(password) ? null : password);
         }
 
         AccountCredentialPromptResult? BuildManualResult()
@@ -519,12 +619,17 @@ public sealed class DialogService : IDialogService
                 string? password;
                 try
                 {
-                    password = await _credentialService.ReadPasswordAsync(selectedCredential.Id).ConfigureAwait(true);
+                    password = await _passwordResolver.ReadPasswordAsync(
+                        selectedCredential,
+                        selectedCredential.IsBitwarden ? PromptBitwardenUnlockFromDialogAsync : null,
+                        cancellationToken).ConfigureAwait(true);
                 }
                 catch
                 {
                     args.Cancel = true;
-                    errorInfo.Message = "Wormhole could not read this saved credential. Try another credential or enter the password manually.";
+                    errorInfo.Message = selectedCredential.IsBitwarden
+                        ? "Enter the Bitwarden master password above, unlock from Settings, or enter the password manually."
+                        : "Wormhole could not read this saved credential. Try another credential or enter the password manually.";
                     errorInfo.IsOpen = true;
                     return;
                 }
@@ -559,7 +664,8 @@ public sealed class DialogService : IDialogService
         ProtocolType protocol,
         CancellationToken cancellationToken)
     {
-        var credentials = await _credentialRepository.GetAllAsync(cancellationToken).ConfigureAwait(true);
+        await _bitwardenCredentialSync.SyncIfStaleAsync(cancellationToken).ConfigureAwait(true);
+        var credentials = await _credentialCatalog.GetProfilesForProtocolAsync(protocol, cancellationToken).ConfigureAwait(true);
         var choices = new List<AccountCredentialChoice>(credentials.Count + 1)
         {
             AccountCredentialChoice.Manual,
@@ -593,7 +699,7 @@ public sealed class DialogService : IDialogService
         private static string BuildDisplayName(CredentialProfile credential)
         {
             var name = credential.Name ?? string.Empty;
-            var protocol = credential.Protocol.ToString().ToUpperInvariant();
+            var protocol = credential.IsVirtualBitwarden ? "BITWARDEN" : credential.Protocol.ToString().ToUpperInvariant();
             var identity = string.IsNullOrWhiteSpace(credential.Domain)
                 ? credential.Username
                 : $"{credential.Domain}\\{credential.Username}";
@@ -649,6 +755,90 @@ public sealed class DialogService : IDialogService
         var result = await ShowDialogAsync(dialog);
         var accepted = result == ContentDialogResult.Primary || submittedViaEnter;
         return accepted ? passwordBox.Password : null;
+    }
+
+    [System.Diagnostics.CodeAnalysis.SuppressMessage("Reliability", "CA2016:Forward the CancellationToken parameter to methods", Justification = "ContentDialog has no cancellation-token overload; this prompt checks cancellation before and after the dialog.")]
+    public async Task<(string Email, string MasterPassword, string? AuthenticatorCode)?> PromptBitwardenLoginAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var emailBox = new TextBox
+        {
+            Header = "Email address",
+            PlaceholderText = "name@example.com",
+            Width = 320,
+            InputScope = new InputScope
+            {
+                Names = { new InputScopeName(InputScopeNameValue.EmailSmtpAddress) }
+            }
+        };
+        var passwordBox = new PasswordBox
+        {
+            Header = "Master password",
+            PlaceholderText = "Master password",
+            Width = 320,
+        };
+        var authenticatorCodeBox = new TextBox
+        {
+            Header = "Authenticator code (TOTP, optional)",
+            PlaceholderText = "123456",
+            Width = 320,
+            MaxLength = 32,
+            InputScope = new InputScope
+            {
+                Names = { new InputScopeName(InputScopeNameValue.Number) }
+            }
+        };
+        var panel = new StackPanel { Spacing = 8 };
+        panel.Children.Add(new TextBlock
+        {
+            Text = "Wormhole passes the master password to bw through an environment variable and never stores it.",
+            TextWrapping = TextWrapping.Wrap,
+        });
+        panel.Children.Add(emailBox);
+        panel.Children.Add(passwordBox);
+        panel.Children.Add(authenticatorCodeBox);
+
+        var dialog = new ContentDialog
+        {
+            Title = "Log in to Bitwarden",
+            Content = panel,
+            PrimaryButtonText = "Log in",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = RequireXamlRoot(),
+            IsPrimaryButtonEnabled = false,
+        };
+
+        void UpdatePrimaryButton() =>
+            dialog.IsPrimaryButtonEnabled = !string.IsNullOrWhiteSpace(emailBox.Text) && !string.IsNullOrEmpty(passwordBox.Password);
+
+        emailBox.TextChanged += (_, _) => UpdatePrimaryButton();
+        passwordBox.PasswordChanged += (_, _) => UpdatePrimaryButton();
+
+        var submittedViaEnter = false;
+        emailBox.KeyDown += (_, args) =>
+        {
+            if (args.Key != Windows.System.VirtualKey.Enter) return;
+            if (string.IsNullOrWhiteSpace(emailBox.Text)) return;
+            passwordBox.Focus(FocusState.Programmatic);
+            args.Handled = true;
+        };
+        passwordBox.KeyDown += (_, args) =>
+        {
+            if (args.Key != Windows.System.VirtualKey.Enter) return;
+            if (string.IsNullOrWhiteSpace(emailBox.Text) || string.IsNullOrEmpty(passwordBox.Password)) return;
+            submittedViaEnter = true;
+            dialog.Hide();
+            args.Handled = true;
+        };
+        dialog.Opened += (_, _) => emailBox.Focus(FocusState.Programmatic);
+
+        var result = await ShowDialogAsync(dialog);
+        cancellationToken.ThrowIfCancellationRequested();
+        var accepted = result == ContentDialogResult.Primary || submittedViaEnter;
+        var authenticatorCode = authenticatorCodeBox.Text.Trim();
+        return accepted ? (emailBox.Text.Trim(), passwordBox.Password, string.IsNullOrWhiteSpace(authenticatorCode) ? null : authenticatorCode) : null;
     }
 
     public async Task<(string Secret, string Confirmation)?> PromptNewSecretAsync(

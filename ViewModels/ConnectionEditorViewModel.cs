@@ -7,6 +7,7 @@ using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Services.Bitwarden;
 
 namespace Wormhole.ViewModels;
 
@@ -18,7 +19,8 @@ namespace Wormhole.ViewModels;
 /// </summary>
 public partial class ConnectionEditorViewModel : ObservableObject
 {
-    private readonly ICredentialRepository _credentialRepository;
+    private readonly IBitwardenCredentialCatalogService _credentialCatalog;
+    private readonly IBitwardenCredentialSyncService _bitwardenCredentialSync;
     private readonly ICredentialService _credentialService;
     private readonly List<CredentialProfile> _allCredentials = new();
     private readonly Dictionary<Guid, CredentialProfile> _allCredentialsById = new();
@@ -47,8 +49,22 @@ public partial class ConnectionEditorViewModel : ObservableObject
         ICredentialRepository credentialRepository,
         ITunnelConfigRepository tunnelConfigRepository,
         ICredentialService credentialService)
+        : this(
+            new RepositoryCredentialCatalogAdapter(credentialRepository),
+            NoOpBitwardenCredentialSyncService.Instance,
+            tunnelConfigRepository,
+            credentialService)
     {
-        _credentialRepository = credentialRepository;
+    }
+
+    public ConnectionEditorViewModel(
+        IBitwardenCredentialCatalogService credentialCatalog,
+        IBitwardenCredentialSyncService bitwardenCredentialSync,
+        ITunnelConfigRepository tunnelConfigRepository,
+        ICredentialService credentialService)
+    {
+        _credentialCatalog = credentialCatalog;
+        _bitwardenCredentialSync = bitwardenCredentialSync;
         _credentialService = credentialService;
         TunnelPicker = new TunnelPickerViewModel(tunnelConfigRepository);
     }
@@ -678,7 +694,8 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     public async Task LoadCredentialsAsync()
     {
-        var creds = await _credentialRepository.GetAllAsync().ConfigureAwait(true);
+        await _bitwardenCredentialSync.SyncIfStaleAsync().ConfigureAwait(true);
+        var creds = await _credentialCatalog.GetPickerProfilesAsync().ConfigureAwait(true);
         _allCredentials.Clear();
         _allCredentialsById.Clear();
         foreach (var credential in creds)

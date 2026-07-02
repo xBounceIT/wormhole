@@ -1,9 +1,11 @@
 using System.Text;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Data;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
+using Wormhole.Models.Backup;
 using Wormhole.Services.Backup;
 using Wormhole.Tests.Fakes;
 using Xunit;
@@ -12,6 +14,11 @@ namespace Wormhole.Tests.Services;
 
 public sealed class BackupServiceTests : IDisposable
 {
+    private static readonly JsonSerializerOptions CamelCaseJsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    };
+
     // Mirrors the production migrations 0001-0006 plus the tunnel-config schema. Inlined
     // because the test project links sources but can't reach the main assembly's embedded
     // migration resources.
@@ -82,6 +89,10 @@ public sealed class BackupServiceTests : IDisposable
             Kind                INTEGER  NOT NULL,
             PrivateKeyFileName  TEXT     NULL,
             Protocol            INTEGER  NOT NULL DEFAULT 0,
+            SecretProvider      INTEGER  NOT NULL DEFAULT 0,
+            BitwardenItemId     TEXT     NULL,
+            BitwardenItemName   TEXT     NULL,
+            BitwardenFieldPath  TEXT     NOT NULL DEFAULT 'login.password',
             CreatedAt           TEXT     NOT NULL
         );
         CREATE UNIQUE INDEX UX_CredentialProfiles_Name ON CredentialProfiles(Name);
@@ -169,6 +180,95 @@ public sealed class BackupServiceTests : IDisposable
         var dstLeaf = dstNodes.Single(n => n.Id == leafId);
         Assert.Equal(folderId, dstLeaf.ParentId);
         Assert.Equal("server.example.com", dstLeaf.Host);
+    }
+
+    [Fact]
+    public async Task ExportImport_BitwardenCredential_PreservesReferenceWithoutPassword()
+    {
+        var src = await CreateEnvAsync();
+        var credential = new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Name = "bitwarden-router",
+            Username = "admin",
+            Protocol = ProtocolType.Ssh,
+            Kind = CredentialKind.Password,
+            SecretProvider = CredentialSecretProvider.Bitwarden,
+            BitwardenItemId = "bw-item-1",
+            BitwardenItemName = "Router login",
+            BitwardenFieldPath = BitwardenDefaults.PasswordFieldPath,
+        };
+        await src.Credentials.AddAsync(credential);
+        await src.Secrets.StorePasswordAsync(credential.Id, "must-not-export");
+
+        var path = Path.Combine(_scratchDir, "bitwarden.json");
+        var exportResult = await src.Service.ExportAsync(path, password: null);
+
+        Assert.Equal(1, exportResult.CredentialCount);
+        Assert.Equal(0, exportResult.PasswordCount);
+
+        var dst = await CreateEnvAsync();
+        var importResult = await dst.Service.ImportAsync(path, password: null);
+
+        Assert.Equal(1, importResult.CredentialsImported);
+        Assert.Equal(0, importResult.PasswordsImported);
+        Assert.Empty(dst.Secrets.Passwords);
+
+        var imported = await dst.Credentials.GetByIdAsync(credential.Id);
+        Assert.NotNull(imported);
+        Assert.Equal(CredentialSecretProvider.Bitwarden, imported!.SecretProvider);
+        Assert.Equal("bw-item-1", imported.BitwardenItemId);
+        Assert.Equal("Router login", imported.BitwardenItemName);
+        Assert.Equal(BitwardenDefaults.PasswordFieldPath, imported.BitwardenFieldPath);
+    }
+
+    [Fact]
+    public async Task Import_BitwardenCredentialWithPasswordEntry_SkipsPasswordRestore()
+    {
+        var credential = new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Name = "legacy-bitwarden",
+            Username = "admin",
+            Protocol = ProtocolType.Ssh,
+            Kind = CredentialKind.Password,
+            SecretProvider = CredentialSecretProvider.Bitwarden,
+            BitwardenItemId = "bw-item-legacy",
+            BitwardenItemName = "Legacy item",
+            BitwardenFieldPath = BitwardenDefaults.PasswordFieldPath,
+        };
+        var document = new BackupDocument
+        {
+            Payload = new BackupPayload
+            {
+                Credentials = { credential },
+                Passwords =
+                {
+                    new BackupPasswordEntry
+                    {
+                        CredentialId = credential.Id,
+                        Password = "must-not-import",
+                    },
+                },
+            },
+        };
+        var path = Path.Combine(_scratchDir, "bitwarden-with-password.json");
+        await using (var stream = File.Create(path))
+        {
+            await JsonSerializer.SerializeAsync(stream, document, CamelCaseJsonOptions);
+        }
+
+        var dst = await CreateEnvAsync();
+        var result = await dst.Service.ImportAsync(path, password: null);
+
+        Assert.Equal(1, result.CredentialsImported);
+        Assert.Equal(0, result.PasswordsImported);
+        Assert.Empty(dst.Secrets.Passwords);
+
+        var imported = await dst.Credentials.GetByIdAsync(credential.Id);
+        Assert.NotNull(imported);
+        Assert.Equal(CredentialSecretProvider.Bitwarden, imported!.SecretProvider);
+        Assert.Equal("bw-item-legacy", imported.BitwardenItemId);
     }
 
     [Fact]

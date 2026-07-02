@@ -32,6 +32,11 @@ internal static class AppPaths
     // proxy-configured) WebView2 environments never collide with the SSH terminal's shared env.
     // Isolated tabs get a unique sub-folder; this root is wiped at startup (App.ClearWebBrowserUserData).
     private static readonly string WebBrowserUserDataDirectory = Path.Combine(AppDataDirectory, "webview2-web");
+    private static readonly string BitwardenCliDirectory = Path.Combine(AppDataDirectory, "tools", "bitwarden-cli");
+    private static readonly string BitwardenCliDownloadDirectory = Path.Combine(AppDataDirectory, "cache", "bitwarden-cli");
+    private static readonly string BitwardenBrowserExtensionDirectory = Path.Combine(AppDataDirectory, "extensions", "bitwarden");
+    private static readonly string BitwardenBrowserExtensionDownloadDirectory = Path.Combine(AppDataDirectory, "cache", "bitwarden-browser-extension");
+    private static readonly string BitwardenBrowserExtensionWebView2UserDataDirectory = Path.Combine(AppDataDirectory, "bitwarden-browser-webview2");
     private static readonly string WebAssetsDirectory = Path.Combine(AppContext.BaseDirectory, "Assets", "web");
     private static readonly string WgProxyExecutablePath = Path.Combine(AppContext.BaseDirectory, "wormhole-wgproxy.exe");
     private static readonly string FortiProxyExecutablePath = Path.Combine(AppContext.BaseDirectory, "wormhole-fortiproxy.exe");
@@ -114,6 +119,22 @@ internal static class AppPaths
     // which must not leak to a sibling tab that didn't opt in). Each such session gets its own dir.
     public static string GetWebBrowserIsolatedUserDataDirectory(string id) =>
         Path.Combine(WebBrowserUserDataDirectory, "env-" + id);
+
+    public static string GetBitwardenCliRootDirectory() => BitwardenCliDirectory;
+
+    public static string GetBitwardenCliDownloadDirectory() => BitwardenCliDownloadDirectory;
+
+    public static string GetBitwardenBrowserExtensionRootDirectory() => BitwardenBrowserExtensionDirectory;
+
+    public static string GetBitwardenBrowserExtensionDownloadDirectory() => BitwardenBrowserExtensionDownloadDirectory;
+
+    public static string GetBitwardenBrowserExtensionInstallDirectory(string version) =>
+        Path.Combine(BitwardenBrowserExtensionDirectory, version);
+
+    public static string GetBitwardenBrowserExtensionWebView2UserDataRoot() => BitwardenBrowserExtensionWebView2UserDataDirectory;
+
+    public static string GetBitwardenBrowserExtensionWebView2UserDataDirectory(string contextFolderName) =>
+        Path.Combine(BitwardenBrowserExtensionWebView2UserDataDirectory, contextFolderName);
 
     public static string GetWebAssetsDirectory() => WebAssetsDirectory;
 

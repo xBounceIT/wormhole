@@ -7,6 +7,9 @@ namespace Wormhole.Services;
 public interface IDialogService
 {
     Task ShowMessageAsync(string title, string message);
+
+    Task ShowBitwardenOnboardingNoticeAsync(string title, string message) =>
+        ShowMessageAsync(title, message);
     Task<bool> ConfirmAsync(string title, string message, string primaryText = "Yes", string closeText = "No");
     Task<string?> PromptForTextAsync(string title, string label, string defaultValue = "");
 
@@ -59,6 +62,15 @@ public interface IDialogService
         string message,
         string label,
         string primaryText = "OK");
+
+    async Task<(string Email, string MasterPassword, string? AuthenticatorCode)?> PromptBitwardenLoginAsync(CancellationToken cancellationToken = default)
+    {
+        var credentials = await PromptCredentialsAsync(
+            "Log in to Bitwarden",
+            "Enter your Bitwarden email and master password.",
+            cancellationToken: cancellationToken).ConfigureAwait(true);
+        return credentials is null ? null : (credentials.Value.Username, credentials.Value.Password, null);
+    }
 
     Task<(string Secret, string Confirmation)?> PromptNewSecretAsync(
         string title,

@@ -1,6 +1,7 @@
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Services.Bitwarden;
 using Wormhole.Services.Ssh;
 using Wormhole.Tests.Fakes;
 using Xunit;
@@ -346,18 +347,46 @@ public class SshCredentialResolverTests
         Assert.Equal(1, dialogs.PasswordPromptCount);
     }
 
+    [Fact]
+    public async Task Resolve_BitwardenCredentialUnavailable_FallsBackToPrompt()
+    {
+        var credentialId = Guid.NewGuid();
+        var dialogs = new FakeDialogService { PasswordPromptResult = "typed-pwd" };
+        var resolver = NewResolver(
+            dialogs,
+            repo: new FakeCredentialRepository(new CredentialProfile
+            {
+                Id = credentialId,
+                Protocol = ProtocolType.Ssh,
+                Kind = CredentialKind.Password,
+                Username = "alice",
+                SecretProvider = CredentialSecretProvider.Bitwarden,
+                BitwardenItemId = "missing-item",
+            }),
+            passwordResolver: new ThrowingPasswordResolver());
+
+        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: credentialId));
+
+        Assert.Equal("typed-pwd", creds.Password);
+        Assert.Equal(1, dialogs.PasswordPromptCount);
+    }
     private static SshCredentialResolver NewResolver(
         FakeDialogService dialogs,
         FakeCredentialRepository? repo = null,
         ICredentialService? creds = null,
         FakePrivateKeyInspector? inspector = null,
-        IConnectionCredentialBindingService? credentialBindings = null)
-        => new(
+        IConnectionCredentialBindingService? credentialBindings = null,
+        ICredentialPasswordResolver? passwordResolver = null)
+    {
+        creds ??= new FakeCredentialService();
+        return new SshCredentialResolver(
             repo ?? new FakeCredentialRepository(),
-            creds ?? new FakeCredentialService(),
+            creds,
+            passwordResolver ?? new FakeCredentialPasswordResolver(creds),
             credentialBindings ?? new FakeConnectionCredentialBindingService(),
             dialogs,
             inspector ?? new FakePrivateKeyInspector());
+    }
 
     private static ConnectionProfile MakeProfile(Guid? credentialId, bool useInlinePassword = false, Guid? nodeId = null)
         => new()
@@ -372,6 +401,14 @@ public class SshCredentialResolverTests
             UseInlinePassword = useInlinePassword,
         };
 
+    private sealed class ThrowingPasswordResolver : ICredentialPasswordResolver
+    {
+        public Task<string?> ReadPasswordAsync(
+            CredentialProfile credential,
+            Func<CancellationToken, Task<string?>>? unlockPrompt = null,
+            CancellationToken cancellationToken = default) =>
+            throw new BitwardenVaultException("missing item");
+    }
     private sealed class FakeCredentialRepository : ICredentialRepository
     {
         private readonly Dictionary<Guid, CredentialProfile> _byId;

@@ -14,7 +14,10 @@ public sealed class CredentialProfileDisplayConverter : IValueConverter
         {
             return name;
         }
-        return $"{name} ({credential.Protocol.ToString().ToUpperInvariant()})";
+        var protocol = credential.Protocol.ToString().ToUpperInvariant();
+        return credential.IsVirtualBitwarden
+            ? $"{name} (BITWARDEN {protocol})"
+            : $"{name} ({protocol})";
     }
 
     public object ConvertBack(object value, Type targetType, object parameter, string language)

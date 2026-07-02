@@ -1,10 +1,13 @@
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
+using Windows.Storage.Pickers;
 using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Models.Backup;
 using Wormhole.Services;
+using Wormhole.Services.Bitwarden;
+using Wormhole.Services.BitwardenBrowser;
 using Wormhole.Services.Mcp;
 using Wormhole.Services.Security;
 
@@ -14,6 +17,11 @@ public partial class SettingsViewModel : ObservableObject
 {
     private readonly IAppSettingsService _settingsService;
     private readonly IDialogService _dialog;
+    private readonly IBitwardenVaultClient _bitwardenVault;
+    private readonly IBitwardenSessionService _bitwardenSession;
+    private readonly IBitwardenCliInstaller _bitwardenCliInstaller;
+    private readonly IBitwardenCredentialSyncService _bitwardenCredentialSync;
+    private readonly IBitwardenBrowserExtensionInstaller _bitwardenBrowserExtensionInstaller;
     private readonly ConnectionTreeViewModel _connectionTree;
     private readonly CredentialsViewModel _credentials;
     private readonly TunnelConfigsViewModel _tunnels;
@@ -28,6 +36,7 @@ public partial class SettingsViewModel : ObservableObject
     // start failure.
     private bool _suppressMcpToggle;
     private bool _suppressSecurityChanges;
+    private bool _suppressBitwardenBrowserExtensionToggle;
 
     [ObservableProperty]
     private ApplicationTheme theme;
@@ -43,6 +52,27 @@ public partial class SettingsViewModel : ObservableObject
 
     [ObservableProperty]
     private bool promptBeforeTunnelConnect;
+
+    [ObservableProperty]
+    private bool enableBitwardenVault;
+
+    [ObservableProperty]
+    private string bitwardenCliPath = "bw";
+
+    [ObservableProperty]
+    private string bitwardenStatus = "Disabled";
+
+    [ObservableProperty]
+    private bool isBitwardenBusy;
+
+    [ObservableProperty]
+    private bool enableBitwardenBrowserExtension;
+
+    [ObservableProperty]
+    private string bitwardenBrowserExtensionStatus = "Disabled";
+
+    [ObservableProperty]
+    private bool isBitwardenBrowserExtensionBusy;
 
     [ObservableProperty]
     private bool enableMcpServer;
@@ -123,6 +153,11 @@ public partial class SettingsViewModel : ObservableObject
         IAppSettingsService settingsService,
         UpdateViewModel update,
         IDialogService dialog,
+        IBitwardenVaultClient bitwardenVault,
+        IBitwardenSessionService bitwardenSession,
+        IBitwardenCliInstaller bitwardenCliInstaller,
+        IBitwardenCredentialSyncService bitwardenCredentialSync,
+        IBitwardenBrowserExtensionInstaller bitwardenBrowserExtensionInstaller,
         ConnectionTreeViewModel connectionTree,
         CredentialsViewModel credentials,
         TunnelConfigsViewModel tunnels,
@@ -134,6 +169,11 @@ public partial class SettingsViewModel : ObservableObject
     {
         _settingsService = settingsService;
         _dialog = dialog;
+        _bitwardenVault = bitwardenVault;
+        _bitwardenSession = bitwardenSession;
+        _bitwardenCliInstaller = bitwardenCliInstaller;
+        _bitwardenCredentialSync = bitwardenCredentialSync;
+        _bitwardenBrowserExtensionInstaller = bitwardenBrowserExtensionInstaller;
         _connectionTree = connectionTree;
         _credentials = credentials;
         _tunnels = tunnels;
@@ -148,6 +188,11 @@ public partial class SettingsViewModel : ObservableObject
         autoCheckForUpdates = _settingsService.Current.AutoCheckForUpdates;
         autoCopyOnSelect = _settingsService.Current.AutoCopyOnSelect;
         promptBeforeTunnelConnect = _settingsService.Current.PromptBeforeTunnelConnect;
+        enableBitwardenVault = _settingsService.Current.EnableBitwardenVault;
+        bitwardenCliPath = _settingsService.Current.BitwardenCliPath;
+        BitwardenStatus = EnableBitwardenVault ? "Not checked" : "Disabled";
+        enableBitwardenBrowserExtension = _settingsService.Current.EnableBitwardenBrowserExtension;
+        RefreshBitwardenBrowserExtensionStatus();
         enableMcpServer = _settingsService.Current.EnableMcpServer;
         streamMcpCommandTyping = _settingsService.Current.StreamMcpCommandTyping;
         mcpServerPort = _settingsService.Current.McpServerPort;
@@ -158,6 +203,7 @@ public partial class SettingsViewModel : ObservableObject
         logRetentionDays = LogFiles.NormalizeRetentionDays(_settingsService.Current.LogRetentionDays);
         UpdateMcpStatus();
         _ = RefreshSecurityStatusAsync();
+        if (EnableBitwardenVault) _ = RefreshBitwardenStatusAsync();
     }
 
     partial void OnThemeChanged(ApplicationTheme value)
@@ -187,6 +233,56 @@ public partial class SettingsViewModel : ObservableObject
     partial void OnPromptBeforeTunnelConnectChanged(bool value)
     {
         _settingsService.Current.PromptBeforeTunnelConnect = value;
+        _settingsService.Save();
+    }
+
+    partial void OnEnableBitwardenVaultChanged(bool value)
+    {
+        _settingsService.Current.EnableBitwardenVault = value;
+        _settingsService.Save();
+        if (value)
+        {
+            _ = EnableBitwardenVaultAsync();
+        }
+        else
+        {
+            _bitwardenSession.ClearSessionKey();
+            BitwardenStatus = "Disabled";
+        }
+    }
+
+    private async Task EnableBitwardenVaultAsync()
+    {
+        try
+        {
+            await RefreshBitwardenStatusAsync().ConfigureAwait(true);
+            if (_bitwardenCliInstaller.GetConfiguredInstall() is null) return;
+
+            _bitwardenCredentialSync.Start();
+            await _bitwardenCredentialSync.SyncIfStaleAsync().ConfigureAwait(true);
+            await _credentials.LoadCommand.ExecuteAsync(null).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Bitwarden vault enable flow failed.");
+            BitwardenStatus = ex.Message;
+        }
+    }
+
+    partial void OnBitwardenCliPathChanged(string value)
+    {
+        var normalized = string.IsNullOrWhiteSpace(value) ? "bw" : value.Trim();
+        if (!string.Equals(_settingsService.Current.BitwardenCliPath, normalized, StringComparison.OrdinalIgnoreCase))
+        {
+            _settingsService.Current.BitwardenCliVersion = null;
+            _settingsService.Current.BitwardenCliSha256 = null;
+            _settingsService.Current.BitwardenCliAssetName = null;
+            _settingsService.Current.BitwardenCliDownloadUrl = null;
+            _settingsService.Current.BitwardenCliInstallStatus = null;
+            _settingsService.Current.BitwardenCliInstallError = null;
+        }
+
+        _settingsService.Current.BitwardenCliPath = normalized;
         _settingsService.Save();
     }
 
@@ -260,6 +356,400 @@ public partial class SettingsViewModel : ObservableObject
             _logger.LogWarning(ex, "Failed to open logs folder.");
             await _dialog.ShowMessageAsync("Couldn't open logs folder", ex.Message);
         }
+    }
+
+    // === Bitwarden credential vault ======================================
+
+    [RelayCommand]
+    private async Task RefreshBitwardenStatusAsync()
+    {
+        if (!EnableBitwardenVault)
+        {
+            BitwardenStatus = "Disabled";
+            return;
+        }
+
+        if (_bitwardenCliInstaller.GetConfiguredInstall() is null)
+        {
+            await RunBitwardenCliInstallAsync("Installing Bitwarden CLI...", showErrorDialog: false, forceInstall: false).ConfigureAwait(true);
+            if (_bitwardenCliInstaller.GetConfiguredInstall() is null) return;
+        }
+
+        IsBitwardenBusy = true;
+        try
+        {
+            var status = await _bitwardenVault.GetStatusAsync().ConfigureAwait(true);
+            BitwardenStatus = AppendBitwardenCredentialSyncStatus(
+                DescribeBitwardenStatus(status, _bitwardenSession.HasSessionKey, _bitwardenCliInstaller.GetConfiguredInstall()));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to read Bitwarden vault status.");
+            BitwardenStatus = ex.Message;
+        }
+        finally
+        {
+            IsBitwardenBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task InstallBitwardenCliAsync()
+    {
+        if (!EnableBitwardenVault)
+        {
+            EnableBitwardenVault = true;
+        }
+
+        await RunBitwardenCliInstallAsync("Installing Bitwarden CLI...", showErrorDialog: true, forceInstall: true).ConfigureAwait(true);
+        if (_bitwardenCliInstaller.GetConfiguredInstall() is not null)
+        {
+            await RefreshBitwardenStatusAsync().ConfigureAwait(true);
+        }
+    }
+
+    private async Task RunBitwardenCliInstallAsync(string initialStatus, bool showErrorDialog, bool forceInstall)
+    {
+        if (IsBitwardenBusy) return;
+
+        IsBitwardenBusy = true;
+        BitwardenStatus = initialStatus;
+        var progress = new Progress<string>(message => BitwardenStatus = message);
+        try
+        {
+            _ = forceInstall
+                ? await _bitwardenCliInstaller.InstallLatestAsync(progress).ConfigureAwait(true)
+                : await _bitwardenCliInstaller.EnsureInstalledAsync(progress).ConfigureAwait(true);
+            BitwardenCliPath = _settingsService.Current.BitwardenCliPath;
+            BitwardenStatus = _settingsService.Current.BitwardenCliInstallStatus ?? "Bitwarden CLI installed.";
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Bitwarden CLI install failed.");
+            _settingsService.Current.BitwardenCliInstallError = ex.Message;
+            _settingsService.Current.BitwardenCliInstallStatus = "Bitwarden CLI install failed.";
+            _settingsService.Save();
+            BitwardenStatus = "Bitwarden CLI install failed: " + ex.Message;
+            if (showErrorDialog)
+            {
+                await _dialog.ShowMessageAsync("Couldn't install Bitwarden CLI", ex.Message).ConfigureAwait(true);
+            }
+        }
+        finally
+        {
+            IsBitwardenBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task LoginBitwardenAsync()
+    {
+        if (!EnableBitwardenVault)
+        {
+            await _dialog.ShowMessageAsync("Bitwarden disabled", "Enable Bitwarden before logging in to the vault.");
+            return;
+        }
+
+        if (_bitwardenCliInstaller.GetConfiguredInstall() is null)
+        {
+            await RunBitwardenCliInstallAsync("Installing Bitwarden CLI...", showErrorDialog: true, forceInstall: false).ConfigureAwait(true);
+            if (_bitwardenCliInstaller.GetConfiguredInstall() is null) return;
+        }
+
+        var credentials = await _dialog.PromptBitwardenLoginAsync().ConfigureAwait(true);
+        if (credentials is null) return;
+
+        IsBitwardenBusy = true;
+        BitwardenStatus = "Logging in to Bitwarden...";
+        try
+        {
+            var sessionKey = await _bitwardenVault.LoginAsync(credentials.Value.Email, credentials.Value.MasterPassword, credentials.Value.AuthenticatorCode).ConfigureAwait(true);
+            _bitwardenSession.SetSessionKey(sessionKey);
+            await _bitwardenCredentialSync.SyncNowAsync().ConfigureAwait(true);
+            await _credentials.LoadCommand.ExecuteAsync(null).ConfigureAwait(true);
+            await RefreshBitwardenStatusAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Bitwarden vault login failed.");
+            await _dialog.ShowMessageAsync("Couldn't log in to Bitwarden", ex.Message).ConfigureAwait(true);
+            BitwardenStatus = ex.Message;
+        }
+        finally
+        {
+            IsBitwardenBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task UnlockBitwardenAsync()
+    {
+        if (!EnableBitwardenVault)
+        {
+            await _dialog.ShowMessageAsync("Bitwarden disabled", "Enable Bitwarden before unlocking the vault.");
+            return;
+        }
+
+        var password = await _dialog.PromptSecretAsync(
+            "Unlock Bitwarden vault",
+            "Enter your Bitwarden master password. Wormhole passes it to bw through an environment variable and never stores it.",
+            "Master password",
+            "Unlock").ConfigureAwait(true);
+        if (password is null) return;
+
+        IsBitwardenBusy = true;
+        try
+        {
+            var sessionKey = await _bitwardenVault.UnlockAsync(password).ConfigureAwait(true);
+            _bitwardenSession.SetSessionKey(sessionKey);
+            await _bitwardenCredentialSync.SyncNowAsync().ConfigureAwait(true);
+            await _credentials.LoadCommand.ExecuteAsync(null).ConfigureAwait(true);
+            await RefreshBitwardenStatusAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Bitwarden vault unlock failed.");
+            await _dialog.ShowMessageAsync("Couldn't unlock Bitwarden", ex.Message).ConfigureAwait(true);
+            BitwardenStatus = ex.Message;
+        }
+        finally
+        {
+            IsBitwardenBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task SyncBitwardenAsync()
+    {
+        if (!EnableBitwardenVault)
+        {
+            await _dialog.ShowMessageAsync("Bitwarden disabled", "Enable Bitwarden before syncing the vault.");
+            return;
+        }
+
+        IsBitwardenBusy = true;
+        try
+        {
+            await _bitwardenCredentialSync.SyncNowAsync().ConfigureAwait(true);
+            await _credentials.LoadCommand.ExecuteAsync(null).ConfigureAwait(true);
+            await RefreshBitwardenStatusAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Bitwarden vault sync failed.");
+            await _dialog.ShowMessageAsync("Couldn't sync Bitwarden", ex.Message).ConfigureAwait(true);
+            BitwardenStatus = ex.Message;
+        }
+        finally
+        {
+            IsBitwardenBusy = false;
+        }
+    }
+
+    private string AppendBitwardenCredentialSyncStatus(string status)
+    {
+        var syncStatus = _settingsService.Current.BitwardenCredentialLastSyncStatus;
+        if (string.IsNullOrWhiteSpace(syncStatus)) return status;
+
+        var count = _settingsService.Current.BitwardenCredentialAvailableCount;
+        var suffix = count is null
+            ? syncStatus
+            : $"{syncStatus} Cached logins: {count.Value}.";
+        return $"{status} {suffix}";
+    }
+
+    private static string DescribeBitwardenStatus(BitwardenStatus status, bool hasSessionKey, BitwardenCliInstall? cliInstall)
+    {
+        var state = status.Status switch
+        {
+            BitwardenVaultStatus.Unauthenticated => "Unauthenticated",
+            BitwardenVaultStatus.Locked => "Locked",
+            BitwardenVaultStatus.Unlocked => "Unlocked",
+            _ => "Unknown",
+        };
+        var identity = string.IsNullOrWhiteSpace(status.UserEmail) ? string.Empty : $" ({status.UserEmail})";
+        var session = hasSessionKey ? " Session key is available in memory." : string.Empty;
+        var cli = cliInstall is null || cliInstall.Version == "external" ? string.Empty : $" CLI {cliInstall.Version} installed automatically.";
+        return $"{state}{identity}.{session}{cli}";
+    }
+
+    // === Bitwarden HTTPS browser extension ==============================
+
+    partial void OnEnableBitwardenBrowserExtensionChanged(bool value)
+    {
+        if (_suppressBitwardenBrowserExtensionToggle) return;
+
+        SaveBitwardenBrowserExtensionEnabled(value);
+        RefreshBitwardenBrowserExtensionStatus();
+        if (value && _bitwardenBrowserExtensionInstaller.GetConfiguredInstall() is null)
+        {
+            _ = AutoInstallBitwardenBrowserExtensionAsync();
+        }
+    }
+
+    [RelayCommand]
+    private async Task InstallBitwardenBrowserExtensionAsync()
+    {
+        EnableBitwardenBrowserExtensionWithoutAutoInstall();
+        await RunBitwardenBrowserExtensionInstallAsync(
+            progress => _bitwardenBrowserExtensionInstaller.InstallLatestAsync(progress),
+            "Installing Bitwarden browser extension...").ConfigureAwait(true);
+    }
+
+    [RelayCommand]
+    private async Task ImportBitwardenBrowserExtensionZipAsync()
+    {
+        var zipPath = await PickBitwardenExtensionZipAsync().ConfigureAwait(true);
+        if (zipPath is null) return;
+        EnableBitwardenBrowserExtensionWithoutAutoInstall();
+        await RunBitwardenBrowserExtensionInstallAsync(
+            _ => _bitwardenBrowserExtensionInstaller.ImportZipAsync(zipPath),
+            "Importing Bitwarden browser extension ZIP...").ConfigureAwait(true);
+    }
+
+    [RelayCommand]
+    private async Task ImportBitwardenBrowserExtensionFolderAsync()
+    {
+        var folderPath = await PickBitwardenExtensionFolderAsync().ConfigureAwait(true);
+        if (folderPath is null) return;
+        EnableBitwardenBrowserExtensionWithoutAutoInstall();
+        await RunBitwardenBrowserExtensionInstallAsync(
+            _ => _bitwardenBrowserExtensionInstaller.ImportUnpackedAsync(folderPath),
+            "Importing Bitwarden browser extension folder...").ConfigureAwait(true);
+    }
+
+    private Task AutoInstallBitwardenBrowserExtensionAsync() =>
+        RunBitwardenBrowserExtensionInstallAsync(
+            progress => _bitwardenBrowserExtensionInstaller.InstallLatestAsync(progress),
+            "Installing Bitwarden browser extension...");
+
+    private void EnableBitwardenBrowserExtensionWithoutAutoInstall()
+    {
+        if (!EnableBitwardenBrowserExtension)
+        {
+            _suppressBitwardenBrowserExtensionToggle = true;
+            try
+            {
+                EnableBitwardenBrowserExtension = true;
+            }
+            finally
+            {
+                _suppressBitwardenBrowserExtensionToggle = false;
+            }
+        }
+
+        SaveBitwardenBrowserExtensionEnabled(true);
+        RefreshBitwardenBrowserExtensionStatus();
+    }
+
+    private void SaveBitwardenBrowserExtensionEnabled(bool value)
+    {
+        _settingsService.Current.EnableBitwardenBrowserExtension = value;
+        _settingsService.Save();
+    }
+
+    private async Task RunBitwardenBrowserExtensionInstallAsync(
+        Func<IProgress<string>, Task<BitwardenBrowserExtensionInstall>> installAsync,
+        string initialStatus)
+    {
+        if (IsBitwardenBrowserExtensionBusy) return;
+
+        IsBitwardenBrowserExtensionBusy = true;
+        BitwardenBrowserExtensionStatus = initialStatus;
+        var progress = new Progress<string>(message => BitwardenBrowserExtensionStatus = message);
+        try
+        {
+            _ = await installAsync(progress).ConfigureAwait(true);
+            RefreshBitwardenBrowserExtensionStatus();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Bitwarden browser extension install failed.");
+            BitwardenBrowserExtensionStatus = ex.Message;
+            await _dialog.ShowMessageAsync("Couldn't install Bitwarden extension", ex.Message).ConfigureAwait(true);
+        }
+        finally
+        {
+            IsBitwardenBrowserExtensionBusy = false;
+        }
+    }
+
+    private void RefreshBitwardenBrowserExtensionStatus()
+    {
+        if (!EnableBitwardenBrowserExtension)
+        {
+            BitwardenBrowserExtensionStatus = "Disabled";
+            return;
+        }
+
+        var install = _bitwardenBrowserExtensionInstaller.GetConfiguredInstall();
+        if (install is null)
+        {
+            BitwardenBrowserExtensionStatus = "Not installed. Wormhole will install the official Bitwarden browser extension automatically.";
+            return;
+        }
+
+        var settings = _settingsService.Current;
+        var source = settings.BitwardenBrowserExtensionSource switch
+        {
+            BitwardenBrowserExtensionSource.ManualZip => "manual ZIP, pinned",
+            BitwardenBrowserExtensionSource.ManualFolder => "manual folder, pinned",
+            _ => "official release, auto-update enabled",
+        };
+
+        var parts = new List<string>
+        {
+            $"Installed {install.Version} ({source}). HTTPS tabs will load the Bitwarden extension."
+        };
+
+        if (settings.BitwardenBrowserExtensionLastUpdateCheckUtc is { } lastCheck)
+        {
+            parts.Add($"Last update check: {lastCheck.ToLocalTime():g}.");
+        }
+        if (!string.IsNullOrWhiteSpace(settings.BitwardenBrowserExtensionLastUpdateStatus))
+        {
+            parts.Add(settings.BitwardenBrowserExtensionLastUpdateStatus!);
+        }
+        if (!string.IsNullOrWhiteSpace(settings.BitwardenBrowserExtensionAvailableVersion))
+        {
+            parts.Add($"Available version: {settings.BitwardenBrowserExtensionAvailableVersion}.");
+        }
+        if (!string.IsNullOrWhiteSpace(settings.BitwardenBrowserExtensionLastUpdateError))
+        {
+            parts.Add($"Last update error: {settings.BitwardenBrowserExtensionLastUpdateError}.");
+        }
+
+        BitwardenBrowserExtensionStatus = string.Join(" ", parts);
+    }
+
+    private static async Task<string?> PickBitwardenExtensionZipAsync()
+    {
+        var hwnd = App.Current.MainWindow?.GetHwnd() ?? IntPtr.Zero;
+        if (hwnd == IntPtr.Zero) throw new InvalidOperationException("No active window to host the file picker.");
+
+        var picker = new FileOpenPicker
+        {
+            SuggestedStartLocation = PickerLocationId.Downloads,
+        };
+        picker.FileTypeFilter.Add(".zip");
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+        var file = await picker.PickSingleFileAsync();
+        return file?.Path;
+    }
+
+    private static async Task<string?> PickBitwardenExtensionFolderAsync()
+    {
+        var hwnd = App.Current.MainWindow?.GetHwnd() ?? IntPtr.Zero;
+        if (hwnd == IntPtr.Zero) throw new InvalidOperationException("No active window to host the folder picker.");
+
+        var picker = new FolderPicker
+        {
+            SuggestedStartLocation = PickerLocationId.Downloads,
+        };
+        picker.FileTypeFilter.Add("*");
+        WinRT.Interop.InitializeWithWindow.Initialize(picker, hwnd);
+        var folder = await picker.PickSingleFolderAsync();
+        return folder?.Path;
     }
 
     // === App authentication ==============================================

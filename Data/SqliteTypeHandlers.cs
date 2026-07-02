@@ -20,6 +20,8 @@ public static class SqliteTypeHandlers
             if (_registered) return;
             SqlMapper.AddTypeHandler(new GuidHandler());
             SqlMapper.AddTypeHandler(new NullableGuidHandler());
+            SqlMapper.AddTypeHandler(new DateTimeOffsetHandler());
+            SqlMapper.AddTypeHandler(new NullableDateTimeOffsetHandler());
             _registered = true;
         }
     }
@@ -43,6 +45,31 @@ public static class SqliteTypeHandlers
         {
             parameter.DbType = DbType.String;
             parameter.Value = value?.ToString("D") ?? (object)DBNull.Value;
+        }
+    }
+    private sealed class DateTimeOffsetHandler : SqlMapper.TypeHandler<DateTimeOffset>
+    {
+        public override DateTimeOffset Parse(object value) =>
+            DateTimeOffset.Parse((string)value, null, System.Globalization.DateTimeStyles.RoundtripKind);
+
+        public override void SetValue(IDbDataParameter parameter, DateTimeOffset value)
+        {
+            parameter.DbType = DbType.String;
+            parameter.Value = value.ToString("O");
+        }
+    }
+
+    private sealed class NullableDateTimeOffsetHandler : SqlMapper.TypeHandler<DateTimeOffset?>
+    {
+        public override DateTimeOffset? Parse(object value) =>
+            value is null or DBNull
+                ? null
+                : DateTimeOffset.Parse((string)value, null, System.Globalization.DateTimeStyles.RoundtripKind);
+
+        public override void SetValue(IDbDataParameter parameter, DateTimeOffset? value)
+        {
+            parameter.DbType = DbType.String;
+            parameter.Value = value?.ToString("O") ?? (object)DBNull.Value;
         }
     }
 }

@@ -120,6 +120,7 @@ public sealed class SshSessionViewModelTests
         var vm = new RdpSessionViewModel(
             new NullRdpSessionService(),
             new Fakes.FakeCredentialService(),
+            new Fakes.FakeCredentialPasswordResolver(new Fakes.FakeCredentialService()),
             new NullCredentialRepository(),
             new Fakes.FakeConnectionCredentialBindingService(),
             CreateTunnelManager(),
@@ -139,6 +140,7 @@ public sealed class SshSessionViewModelTests
         var vm = new RdpSessionViewModel(
             new NullRdpSessionService(),
             new Fakes.FakeCredentialService(),
+            new Fakes.FakeCredentialPasswordResolver(new Fakes.FakeCredentialService()),
             new NullCredentialRepository(),
             new Fakes.FakeConnectionCredentialBindingService(),
             CreateTunnelManager(),
@@ -301,6 +303,7 @@ public sealed class SshSessionViewModelTests
         var vm = new RdpSessionViewModel(
             new NullRdpSessionService(),
             new Fakes.FakeCredentialService(),
+            new Fakes.FakeCredentialPasswordResolver(new Fakes.FakeCredentialService()),
             new NullCredentialRepository(),
             new Fakes.FakeConnectionCredentialBindingService(),
             CreateTunnelManager(),

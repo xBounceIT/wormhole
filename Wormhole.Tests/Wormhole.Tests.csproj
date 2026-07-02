@@ -47,6 +47,7 @@
     <Compile Include="..\Models\ConnectionProfile.cs" Link="Models\ConnectionProfile.cs" />
     <Compile Include="..\Models\AccountCredentialPromptResult.cs" Link="Models\AccountCredentialPromptResult.cs" />
     <Compile Include="..\Models\CredentialProfile.cs" Link="Models\CredentialProfile.cs" />
+    <Compile Include="..\Models\BitwardenCredentialCacheEntry.cs" Link="Models\BitwardenCredentialCacheEntry.cs" />
     <Compile Include="..\Models\CredentialBindingMode.cs" Link="Models\CredentialBindingMode.cs" />
     <Compile Include="..\Models\CredentialDraft.cs" Link="Models\CredentialDraft.cs" />
     <Compile Include="..\Models\NodeKind.cs" Link="Models\NodeKind.cs" />
@@ -137,6 +138,8 @@
     <Compile Include="..\Helpers\WebViewNewWindowNavigation.cs" Link="Helpers\WebViewNewWindowNavigation.cs" />
     <Compile Include="..\Services\AppSettingsService.cs" Link="Services\AppSettingsService.cs" />
     <Compile Include="..\Services\IAppSettingsService.cs" Link="Services\IAppSettingsService.cs" />
+    <Compile Include="..\Services\IBitwardenOnboardingNoticeService.cs" Link="Services\IBitwardenOnboardingNoticeService.cs" />
+    <Compile Include="..\Services\BitwardenOnboardingNoticeService.cs" Link="Services\BitwardenOnboardingNoticeService.cs" />
     <Compile Include="..\Services\ICrashDiagnosticsService.cs" Link="Services\ICrashDiagnosticsService.cs" />
     <Compile Include="..\Services\CrashDiagnosticsService.cs" Link="Services\CrashDiagnosticsService.cs" />
     <Compile Include="..\Services\Security\IAppAuthenticationDataProtector.cs" Link="Services\Security\IAppAuthenticationDataProtector.cs" />
@@ -156,6 +159,28 @@
     <Compile Include="..\Services\UpdateService.cs" Link="Services\UpdateService.cs" />
     <Compile Include="..\Services\UpdateChangelogFormatter.cs" Link="Services\UpdateChangelogFormatter.cs" />
     <Compile Include="..\Services\ICredentialService.cs" Link="Services\ICredentialService.cs" />
+    <Compile Include="..\Services\ICredentialPasswordResolver.cs" Link="Services\ICredentialPasswordResolver.cs" />
+    <Compile Include="..\Services\CredentialPasswordResolver.cs" Link="Services\CredentialPasswordResolver.cs" />
+    <Compile Include="..\Services\Bitwarden\BitwardenModels.cs" Link="Services\Bitwarden\BitwardenModels.cs" />
+    <Compile Include="..\Services\Bitwarden\IBitwardenVaultClient.cs" Link="Services\Bitwarden\IBitwardenVaultClient.cs" />
+    <Compile Include="..\Services\Bitwarden\IBitwardenSessionService.cs" Link="Services\Bitwarden\IBitwardenSessionService.cs" />
+    <Compile Include="..\Services\Bitwarden\IBitwardenProcessRunner.cs" Link="Services\Bitwarden\IBitwardenProcessRunner.cs" />
+    <Compile Include="..\Services\Bitwarden\IBitwardenCliInstaller.cs" Link="Services\Bitwarden\IBitwardenCliInstaller.cs" />
+    <Compile Include="..\Services\Bitwarden\BitwardenCliInstaller.cs" Link="Services\Bitwarden\BitwardenCliInstaller.cs" />
+    <Compile Include="..\Services\Bitwarden\BitwardenCliVaultClient.cs" Link="Services\Bitwarden\BitwardenCliVaultClient.cs" />
+    <Compile Include="..\Services\Bitwarden\BitwardenVirtualCredentialIds.cs" Link="Services\Bitwarden\BitwardenVirtualCredentialIds.cs" />
+    <Compile Include="..\Services\Bitwarden\IBitwardenCredentialCatalogService.cs" Link="Services\Bitwarden\IBitwardenCredentialCatalogService.cs" />
+    <Compile Include="..\Services\Bitwarden\BitwardenCredentialCatalogService.cs" Link="Services\Bitwarden\BitwardenCredentialCatalogService.cs" />
+    <Compile Include="..\Services\Bitwarden\IBitwardenCredentialSyncService.cs" Link="Services\Bitwarden\IBitwardenCredentialSyncService.cs" />
+    <Compile Include="..\Services\Bitwarden\BitwardenCredentialSyncService.cs" Link="Services\Bitwarden\BitwardenCredentialSyncService.cs" />
+    <Compile Include="..\Services\Bitwarden\RepositoryCredentialCatalogAdapter.cs" Link="Services\Bitwarden\RepositoryCredentialCatalogAdapter.cs" />
+    <Compile Include="..\Services\BitwardenBrowser\IBitwardenBrowserExtensionInstaller.cs" Link="Services\BitwardenBrowser\IBitwardenBrowserExtensionInstaller.cs" />
+    <Compile Include="..\Services\BitwardenBrowser\IBitwardenBrowserExtensionUpdateService.cs" Link="Services\BitwardenBrowser\IBitwardenBrowserExtensionUpdateService.cs" />
+    <Compile Include="..\Services\BitwardenBrowser\BitwardenBrowserExtensionUpdateService.cs" Link="Services\BitwardenBrowser\BitwardenBrowserExtensionUpdateService.cs" />
+    <Compile Include="..\Services\BitwardenBrowser\BitwardenBrowserExtensionManifest.cs" Link="Services\BitwardenBrowser\BitwardenBrowserExtensionManifest.cs" />
+    <Compile Include="..\Services\BitwardenBrowser\BitwardenBrowserWebViewProfile.cs" Link="Services\BitwardenBrowser\BitwardenBrowserWebViewProfile.cs" />
+    <Compile Include="..\Services\BitwardenBrowser\BitwardenBrowserExtensionMarker.cs" Link="Services\BitwardenBrowser\BitwardenBrowserExtensionMarker.cs" />
+    <Compile Include="..\Services\BitwardenBrowser\BitwardenBrowserExtensionInstaller.cs" Link="Services\BitwardenBrowser\BitwardenBrowserExtensionInstaller.cs" />
     <Compile Include="..\Services\IDialogService.cs" Link="Services\IDialogService.cs" />
     <Compile Include="..\Services\ISshSessionService.cs" Link="Services\ISshSessionService.cs" />
     <Compile Include="..\Services\IVncSessionService.cs" Link="Services\IVncSessionService.cs" />
@@ -183,6 +208,8 @@
     <Compile Include="..\Services\Mcp\McpSessionRegistry.cs" Link="Services\Mcp\McpSessionRegistry.cs" />
     <Compile Include="..\Data\InheritanceResolver.cs" Link="Data\InheritanceResolver.cs" />
     <Compile Include="..\Data\Repositories\ICredentialRepository.cs" Link="Data\Repositories\ICredentialRepository.cs" />
+    <Compile Include="..\Data\Repositories\IBitwardenCredentialCacheRepository.cs" Link="Data\Repositories\IBitwardenCredentialCacheRepository.cs" />
+    <Compile Include="..\Data\Repositories\BitwardenCredentialCacheRepository.cs" Link="Data\Repositories\BitwardenCredentialCacheRepository.cs" />
     <Compile Include="..\Data\Repositories\IConnectionRepository.cs" Link="Data\Repositories\IConnectionRepository.cs" />
     <Compile Include="..\Data\Repositories\ConnectionRepository.cs" Link="Data\Repositories\ConnectionRepository.cs" />
     <Compile Include="..\Data\Repositories\CredentialRepository.cs" Link="Data\Repositories\CredentialRepository.cs" />

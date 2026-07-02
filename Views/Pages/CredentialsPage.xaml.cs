@@ -26,7 +26,7 @@ public sealed partial class CredentialsPage : Page
         // VM is Singleton — subscribe per navigation and unsubscribe in OnNavigatedFrom so
         // visited pages aren't pinned by a handler the VM keeps alive.
         ViewModel.SelectedCredentials.CollectionChanged += OnSelectedCredentialsChanged;
-        _ = ViewModel.EnsureLoadedAsync();
+        _ = ViewModel.LoadCommand.ExecuteAsync(null);
     }
 
     protected override void OnNavigatedFrom(NavigationEventArgs e)

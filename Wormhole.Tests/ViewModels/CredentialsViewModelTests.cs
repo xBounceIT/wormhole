@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Services.Bitwarden;
 using Wormhole.Tests.Fakes;
 using Wormhole.ViewModels;
 using Xunit;
@@ -125,6 +126,40 @@ public class CredentialsViewModelTests
         Assert.Equal(CredentialKind.Password, added.Kind);
         Assert.Equal("hunter2", credService.Passwords[added.Id]);
         Assert.Single(vm.Credentials);
+    }
+
+    [Fact]
+    public async Task AddCredentialAsync_BitwardenLink_ReloadsCatalogAndHidesVirtualDuplicate()
+    {
+        var repo = new FakeCredentialRepository();
+        var cache = new FakeBitwardenCacheRepository(CacheEntry("item-1", "Router", "admin"));
+        var settings = new FakeAppSettingsService { Current = { EnableBitwardenVault = true } };
+        var catalog = new BitwardenCredentialCatalogService(repo, cache, settings);
+        var dialog = new FakeDialogService
+        {
+            CredentialPromptResult = new CredentialDraft(
+                "Router",
+                ProtocolType.Ssh,
+                "admin",
+                null,
+                string.Empty,
+                CredentialSecretProvider.Bitwarden,
+                "item-1",
+                "Router",
+                BitwardenDefaults.PasswordFieldPath),
+        };
+        var vm = NewVm(repo, dialog: dialog, credentialCatalog: catalog);
+        await vm.LoadCommand.ExecuteAsync(null);
+        Assert.Contains(vm.Credentials, c => c.IsVirtualBitwarden && c.BitwardenItemId == "item-1");
+
+        await vm.AddCredentialCommand.ExecuteAsync(null);
+
+        var saved = Assert.Single(repo.Profiles);
+        Assert.Equal(CredentialSecretProvider.Bitwarden, saved.SecretProvider);
+        Assert.Equal("item-1", saved.BitwardenItemId);
+        var row = Assert.Single(vm.Credentials);
+        Assert.False(row.IsVirtualBitwarden);
+        Assert.Equal(saved.Id, row.Id);
     }
 
     [Fact]
@@ -779,13 +814,23 @@ public class CredentialsViewModelTests
     private static CredentialsViewModel NewVm(
         FakeCredentialRepository repo,
         FakeCredentialService? credService = null,
-        FakeDialogService? dialog = null)
+        FakeDialogService? dialog = null,
+        IBitwardenCredentialCatalogService? credentialCatalog = null,
+        IBitwardenCredentialSyncService? bitwardenSync = null)
     {
-        var vm = new CredentialsViewModel(
-            repo,
-            credService ?? new FakeCredentialService(),
-            dialog ?? new FakeDialogService(),
-            NullLogger<CredentialsViewModel>.Instance);
+        var vm = credentialCatalog is null && bitwardenSync is null
+            ? new CredentialsViewModel(
+                repo,
+                credService ?? new FakeCredentialService(),
+                dialog ?? new FakeDialogService(),
+                NullLogger<CredentialsViewModel>.Instance)
+            : new CredentialsViewModel(
+                repo,
+                credentialCatalog ?? new RepositoryCredentialCatalogAdapter(repo),
+                bitwardenSync ?? new FakeBitwardenCredentialSyncService(),
+                credService ?? new FakeCredentialService(),
+                dialog ?? new FakeDialogService(),
+                NullLogger<CredentialsViewModel>.Instance);
         vm.SearchDebounceDelay = TimeSpan.Zero;
         return vm;
     }
@@ -799,6 +844,66 @@ public class CredentialsViewModelTests
         }
     }
 
+    private static BitwardenCredentialCacheEntry CacheEntry(string itemId, string name, string username)
+    {
+        var entry = new BitwardenCredentialCacheEntry
+        {
+            ItemId = itemId,
+            Name = name,
+            Username = username,
+            LastSeenSyncUtc = DateTimeOffset.UtcNow,
+            UpdatedAtUtc = DateTimeOffset.UtcNow,
+        };
+        BitwardenVirtualCredentialIds.EnsureIds(entry);
+        return entry;
+    }
+
+    private sealed class FakeBitwardenCacheRepository : IBitwardenCredentialCacheRepository
+    {
+        private readonly List<BitwardenCredentialCacheEntry> _entries;
+
+        public FakeBitwardenCacheRepository(params BitwardenCredentialCacheEntry[] entries)
+        {
+            _entries = entries.ToList();
+        }
+
+        public Task<IReadOnlyList<BitwardenCredentialCacheEntry>> GetAllAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<BitwardenCredentialCacheEntry>>(_entries.ToList());
+
+        public Task ReplaceFromFullSyncAsync(
+            IReadOnlyList<BitwardenCredentialCacheEntry> entries,
+            DateTimeOffset syncTimeUtc,
+            CancellationToken cancellationToken = default)
+        {
+            _entries.Clear();
+            _entries.AddRange(entries);
+            return Task.CompletedTask;
+        }
+
+        public Task UpsertImportedAsync(
+            IReadOnlyList<BitwardenCredentialCacheEntry> entries,
+            CancellationToken cancellationToken = default)
+        {
+            _entries.AddRange(entries);
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class FakeBitwardenCredentialSyncService : IBitwardenCredentialSyncService
+    {
+        public event EventHandler? SyncCompleted { add { } remove { } }
+
+        public void Start() { }
+        public Task SyncIfStaleAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+        public Task SyncNowAsync(CancellationToken cancellationToken = default) => Task.CompletedTask;
+    }
+
+    private sealed class FakeAppSettingsService : IAppSettingsService
+    {
+        public AppSettings Current { get; } = new();
+        public event EventHandler? SettingsChanged;
+        public void Save() => SettingsChanged?.Invoke(this, EventArgs.Empty);
+    }
     private sealed class FakeCredentialRepository : ICredentialRepository
     {
         public List<CredentialProfile> Profiles { get; }

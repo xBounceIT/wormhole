@@ -39,4 +39,7 @@ public sealed class GitHubReleaseAsset
 
     [JsonPropertyName("content_type")]
     public string? ContentType { get; set; }
+
+    [JsonPropertyName("digest")]
+    public string? Digest { get; set; }
 }

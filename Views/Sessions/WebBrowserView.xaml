@@ -25,6 +25,7 @@
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
             <Button x:Name="BackButton" Grid.Column="0"
@@ -48,7 +49,24 @@
                     ToolTipService.ToolTip="Reload">
                 <FontIcon Glyph="&#xE72C;" FontSize="14" />
             </Button>
-            <TextBlock x:Name="AddressText" Grid.Column="3"
+            <Button x:Name="BitwardenButton" Grid.Column="3"
+                    Click="OnBitwardenClick"
+                    Style="{StaticResource IconButtonStyle}"
+                    Padding="6" MinWidth="0" MinHeight="0"
+                    Visibility="Collapsed"
+                    ToolTipService.ToolTip="Bitwarden">
+                <Grid Width="16" Height="16">
+                    <Image x:Name="BitwardenIconImage"
+                           Width="16"
+                           Height="16"
+                           Stretch="Uniform" />
+                    <FontIcon x:Name="BitwardenFallbackIcon"
+                              Glyph="&#xE192;"
+                              FontSize="14"
+                              Visibility="Collapsed" />
+                </Grid>
+            </Button>
+            <TextBlock x:Name="AddressText" Grid.Column="4"
                        VerticalAlignment="Center"
                        Margin="6,0,4,0"
                        Opacity="0.8"

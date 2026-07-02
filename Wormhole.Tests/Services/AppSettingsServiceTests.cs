@@ -59,6 +59,96 @@ public sealed class AppSettingsServiceTests
         Assert.Equal(AppSettings.CurrentSchemaVersion, saved.SettingsSchemaVersion);
     }
 
+    [Fact]
+    public void LegacySettings_MigratesBitwardenBrowserExtensionReleaseUrl()
+    {
+        using var temp = TempSettingsFile.Create();
+        File.WriteAllText(temp.FilePath, """
+        {
+          "SettingsSchemaVersion": 2,
+          "BitwardenBrowserExtensionReleasesUrl": ""
+        }
+        """);
+
+        var service = new AppSettingsService(temp.FilePath);
+
+        Assert.Equal("repos/bitwarden/clients/releases?per_page=20", service.Current.BitwardenBrowserExtensionReleasesUrl);
+        Assert.Equal(AppSettings.CurrentSchemaVersion, service.Current.SettingsSchemaVersion);
+
+        var saved = JsonSerializer.Deserialize<AppSettings>(File.ReadAllBytes(temp.FilePath));
+        Assert.NotNull(saved);
+        Assert.Equal("repos/bitwarden/clients/releases?per_page=20", saved!.BitwardenBrowserExtensionReleasesUrl);
+        Assert.Equal(AppSettings.CurrentSchemaVersion, saved.SettingsSchemaVersion);
+    }
+
+
+    [Fact]
+    public void LegacySettings_MigratesOfficialBitwardenExtensionSourceFromDownloadUrl()
+    {
+        using var temp = TempSettingsFile.Create();
+        File.WriteAllText(temp.FilePath, """
+        {
+          "SettingsSchemaVersion": 3,
+          "BitwardenBrowserExtensionPath": "C:\\Wormhole\\extensions\\bitwarden\\2026.6.1",
+          "BitwardenBrowserExtensionVersion": "2026.6.1",
+          "BitwardenBrowserExtensionAssetName": "dist-edge-2026.6.1.zip",
+          "BitwardenBrowserExtensionDownloadUrl": "https://github.com/bitwarden/clients/releases/download/browser-v2026.6.1/dist-edge-2026.6.1.zip"
+        }
+        """);
+
+        var service = new AppSettingsService(temp.FilePath);
+
+        Assert.Equal(BitwardenBrowserExtensionSource.OfficialGitHub, service.Current.BitwardenBrowserExtensionSource);
+        Assert.Equal(AppSettings.CurrentSchemaVersion, service.Current.SettingsSchemaVersion);
+    }
+
+    [Fact]
+    public void LegacySettings_MigratesManualBitwardenExtensionSources()
+    {
+        using var zipTemp = TempSettingsFile.Create();
+        File.WriteAllText(zipTemp.FilePath, """
+        {
+          "SettingsSchemaVersion": 3,
+          "BitwardenBrowserExtensionPath": "C:\\Wormhole\\extensions\\bitwarden\\manual-zip",
+          "BitwardenBrowserExtensionAssetName": "bitwarden.zip"
+        }
+        """);
+
+        using var folderTemp = TempSettingsFile.Create();
+        File.WriteAllText(folderTemp.FilePath, """
+        {
+          "SettingsSchemaVersion": 3,
+          "BitwardenBrowserExtensionPath": "C:\\Wormhole\\extensions\\bitwarden\\manual-folder"
+        }
+        """);
+
+        var zipService = new AppSettingsService(zipTemp.FilePath);
+        var folderService = new AppSettingsService(folderTemp.FilePath);
+
+        Assert.Equal(BitwardenBrowserExtensionSource.ManualZip, zipService.Current.BitwardenBrowserExtensionSource);
+        Assert.Equal(BitwardenBrowserExtensionSource.ManualFolder, folderService.Current.BitwardenBrowserExtensionSource);
+    }
+    [Fact]
+    public void LegacySettings_MigratesBitwardenCliReleaseUrl()
+    {
+        using var temp = TempSettingsFile.Create();
+        File.WriteAllText(temp.FilePath, """
+        {
+          "SettingsSchemaVersion": 4,
+          "BitwardenCliReleasesUrl": ""
+        }
+        """);
+
+        var service = new AppSettingsService(temp.FilePath);
+
+        Assert.Equal("repos/bitwarden/clients/releases?per_page=20", service.Current.BitwardenCliReleasesUrl);
+        Assert.Equal(AppSettings.CurrentSchemaVersion, service.Current.SettingsSchemaVersion);
+
+        var saved = JsonSerializer.Deserialize<AppSettings>(File.ReadAllBytes(temp.FilePath));
+        Assert.NotNull(saved);
+        Assert.Equal("repos/bitwarden/clients/releases?per_page=20", saved!.BitwardenCliReleasesUrl);
+        Assert.Equal(AppSettings.CurrentSchemaVersion, saved.SettingsSchemaVersion);
+    }
     private sealed class TempSettingsFile : IDisposable
     {
         private TempSettingsFile(string directory)

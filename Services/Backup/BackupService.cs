@@ -39,6 +39,7 @@ public sealed class BackupService : IBackupService
 
     private readonly IConnectionRepository _connectionRepo;
     private readonly ICredentialRepository _credentialRepo;
+    private readonly IBitwardenCredentialCacheRepository _bitwardenCacheRepo;
     private readonly ITunnelConfigRepository _tunnelRepo;
     private readonly ICredentialService _credentialService;
     private readonly ILogger<BackupService> _logger;
@@ -49,9 +50,21 @@ public sealed class BackupService : IBackupService
         ITunnelConfigRepository tunnelRepo,
         ICredentialService credentialService,
         ILogger<BackupService> logger)
+        : this(connectionRepo, credentialRepo, NullBitwardenCredentialCacheRepository.Instance, tunnelRepo, credentialService, logger)
+    {
+    }
+
+    public BackupService(
+        IConnectionRepository connectionRepo,
+        ICredentialRepository credentialRepo,
+        IBitwardenCredentialCacheRepository bitwardenCacheRepo,
+        ITunnelConfigRepository tunnelRepo,
+        ICredentialService credentialService,
+        ILogger<BackupService> logger)
     {
         _connectionRepo = connectionRepo;
         _credentialRepo = credentialRepo;
+        _bitwardenCacheRepo = bitwardenCacheRepo;
         _tunnelRepo = tunnelRepo;
         _credentialService = credentialService;
         _logger = logger;
@@ -69,11 +82,13 @@ public sealed class BackupService : IBackupService
         var nodesTask = _connectionRepo.GetAllAsync(cancellationToken);
         var credentialsTask = _credentialRepo.GetAllAsync(cancellationToken);
         var tunnelsTask = _tunnelRepo.GetAllAsync(cancellationToken);
-        await Task.WhenAll(nodesTask, credentialsTask, tunnelsTask).ConfigureAwait(false);
+        var bitwardenCacheTask = _bitwardenCacheRepo.GetAllAsync(cancellationToken);
+        await Task.WhenAll(nodesTask, credentialsTask, tunnelsTask, bitwardenCacheTask).ConfigureAwait(false);
 
         var nodes = await nodesTask.ConfigureAwait(false);
         var credentials = await credentialsTask.ConfigureAwait(false);
         var tunnels = await tunnelsTask.ConfigureAwait(false);
+        var bitwardenCache = await bitwardenCacheTask.ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
 
         var payload = new BackupPayload
@@ -81,6 +96,7 @@ public sealed class BackupService : IBackupService
             Nodes = AsPayloadList(nodes),
             Credentials = AsPayloadList(credentials),
             Tunnels = AsPayloadList(tunnels),
+            BitwardenCredentialCache = AsPayloadList(bitwardenCache),
         };
 
         // Pull secrets per row. Missing secrets are not an error — a credential row can exist
@@ -175,6 +191,7 @@ public sealed class BackupService : IBackupService
             ct.ThrowIfCancellationRequested();
             if (cred.Kind == CredentialKind.Password)
             {
+                if (cred.SecretProvider == CredentialSecretProvider.Bitwarden) return;
                 var pwd = await _credentialService.ReadPasswordAsync(cred.Id).ConfigureAwait(false);
                 if (pwd is not null)
                 {
@@ -369,6 +386,7 @@ public sealed class BackupService : IBackupService
         // FilterNullsInPlace would NRE on the null `items.Count` access.
         payload.Credentials ??= new List<CredentialProfile>();
         payload.Tunnels ??= new List<TunnelConfig>();
+        payload.BitwardenCredentialCache ??= new List<BitwardenCredentialCacheEntry>();
         payload.Nodes ??= new List<ConnectionNode>();
         payload.Passwords ??= new List<BackupPasswordEntry>();
         payload.InlinePasswords ??= new List<BackupInlinePasswordEntry>();
@@ -381,6 +399,7 @@ public sealed class BackupService : IBackupService
         var nullDrops = 0;
         nullDrops += FilterNullsInPlace(payload.Credentials);
         nullDrops += FilterNullsInPlace(payload.Tunnels);
+        nullDrops += FilterNullsInPlace(payload.BitwardenCredentialCache);
         nullDrops += FilterNullsInPlace(payload.Nodes);
         nullDrops += FilterNullsInPlace(payload.Passwords);
         nullDrops += FilterNullsInPlace(payload.InlinePasswords);
@@ -399,7 +418,8 @@ public sealed class BackupService : IBackupService
         var existingCredentialsTask = _credentialRepo.GetAllAsync(cancellationToken);
         var existingTunnelsTask = _tunnelRepo.GetAllAsync(cancellationToken);
         var existingNodesTask = _connectionRepo.GetAllAsync(cancellationToken);
-        await Task.WhenAll(existingCredentialsTask, existingTunnelsTask, existingNodesTask).ConfigureAwait(false);
+        var existingBitwardenCacheTask = _bitwardenCacheRepo.GetAllAsync(cancellationToken);
+        await Task.WhenAll(existingCredentialsTask, existingTunnelsTask, existingNodesTask, existingBitwardenCacheTask).ConfigureAwait(false);
 
         Report(progress, 30, "Importing credentials...");
         var existingCredentials = await existingCredentialsTask.ConfigureAwait(false);
@@ -414,10 +434,13 @@ public sealed class BackupService : IBackupService
         // Name, but if that constraint ever relaxes (or some non-Dapper write bypasses it),
         // ToHashSet under Ordinal would otherwise throw ArgumentNullException at construction.
         var existingCredentialNames = new HashSet<string>(existingCredentials.Count, StringComparer.Ordinal);
+        var credentialProvidersById = new Dictionary<Guid, CredentialSecretProvider>(
+            existingCredentials.Count + payload.Credentials.Count);
         foreach (var existingCredential in existingCredentials)
         {
             existingCredentialIds.Add(existingCredential.Id);
             existingCredentialNames.Add(existingCredential.Name ?? string.Empty);
+            credentialProvidersById[existingCredential.Id] = existingCredential.SecretProvider;
         }
         var insertedCredentialIds = new HashSet<Guid>();
         foreach (var cred in payload.Credentials)
@@ -444,8 +467,14 @@ public sealed class BackupService : IBackupService
             // twice doesn't blow up on the second insert with a UNIQUE constraint error.
             existingCredentialIds.Add(cred.Id);
             existingCredentialNames.Add(cred.Name);
+            credentialProvidersById[cred.Id] = cred.SecretProvider;
             insertedCredentialIds.Add(cred.Id);
             result.CredentialsImported++;
+        }
+
+        if (payload.BitwardenCredentialCache.Count > 0)
+        {
+            await _bitwardenCacheRepo.UpsertImportedAsync(payload.BitwardenCredentialCache, cancellationToken).ConfigureAwait(false);
         }
 
         Report(progress, 45, "Importing tunnels...");
@@ -500,7 +529,10 @@ public sealed class BackupService : IBackupService
         // credential was skipped by name-collision (different local Id, same name) would
         // otherwise import with a dangling pointer that produces "credential not found" at
         // connect time. The schema doesn't enforce these as FKs, so SQLite won't catch it.
+        var existingBitwardenCache = await existingBitwardenCacheTask.ConfigureAwait(false);
         var resolvableCredentialIds = new HashSet<Guid>(existingCredentialIds);
+        AddBitwardenVirtualCredentialIds(resolvableCredentialIds, existingBitwardenCache);
+        AddBitwardenVirtualCredentialIds(resolvableCredentialIds, payload.BitwardenCredentialCache);
         var resolvableTunnelIds = new HashSet<Guid>(existingTunnelIds);
         var nodesById = new Dictionary<Guid, ConnectionNode>(existingNodes.Count + ordered.Count);
         foreach (var existingNode in existingNodes)
@@ -546,6 +578,11 @@ public sealed class BackupService : IBackupService
         foreach (var entry in payload.Passwords)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (credentialProvidersById.TryGetValue(entry.CredentialId, out var provider) &&
+                provider == CredentialSecretProvider.Bitwarden)
+            {
+                continue;
+            }
             if (!await ShouldRestoreSecretAsync(
                     entry.CredentialId, insertedCredentialIds, existingCredentialIds,
                     _credentialService.ReadPasswordAsync, p => p is null)) continue;
@@ -858,6 +895,21 @@ public sealed class BackupService : IBackupService
         }
     }
 
+    private static void AddBitwardenVirtualCredentialIds(
+        HashSet<Guid> target,
+        IEnumerable<BitwardenCredentialCacheEntry> entries)
+    {
+        foreach (var entry in entries)
+        {
+            if (string.IsNullOrWhiteSpace(entry.ItemId)) continue;
+            Wormhole.Services.Bitwarden.BitwardenVirtualCredentialIds.EnsureIds(entry);
+            if (entry.SshCredentialId != Guid.Empty) target.Add(entry.SshCredentialId);
+            if (entry.RdpCredentialId != Guid.Empty) target.Add(entry.RdpCredentialId);
+            if (entry.VncCredentialId != Guid.Empty) target.Add(entry.VncCredentialId);
+        }
+    }
+
+
     /// <summary>Null out CredentialId / RdpGatewayCredentialId / TunnelConfigId fields that
     /// don't resolve to any row this import will produce. The DB schema doesn't FK-enforce
     /// these pointers, so without scrubbing the connection would import with a dangling
@@ -1074,5 +1126,22 @@ public sealed class BackupService : IBackupService
     private static void Report(IProgress<BackupProgress>? progress, int percent, string status)
     {
         progress?.Report(new BackupProgress { Percent = percent, Status = status });
+    }
+
+    private sealed class NullBitwardenCredentialCacheRepository : IBitwardenCredentialCacheRepository
+    {
+        public static NullBitwardenCredentialCacheRepository Instance { get; } = new();
+
+        public Task<IReadOnlyList<BitwardenCredentialCacheEntry>> GetAllAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<BitwardenCredentialCacheEntry>>(Array.Empty<BitwardenCredentialCacheEntry>());
+
+        public Task ReplaceFromFullSyncAsync(
+            IReadOnlyList<BitwardenCredentialCacheEntry> entries,
+            DateTimeOffset syncTimeUtc,
+            CancellationToken cancellationToken = default) => Task.CompletedTask;
+
+        public Task UpsertImportedAsync(
+            IReadOnlyList<BitwardenCredentialCacheEntry> entries,
+            CancellationToken cancellationToken = default) => Task.CompletedTask;
     }
 }

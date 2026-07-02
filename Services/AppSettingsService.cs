@@ -81,7 +81,26 @@ public sealed class AppSettingsService : IAppSettingsService
             var settings = JsonSerializer.Deserialize<AppSettings>(json) ?? new AppSettings();
             if (schemaVersion < AppSettings.CurrentSchemaVersion)
             {
-                settings.PromptBeforeTunnelConnect = true;
+                if (schemaVersion < 1)
+                {
+                    settings.PromptBeforeTunnelConnect = true;
+                }
+                if (schemaVersion < 2 && string.IsNullOrWhiteSpace(settings.BitwardenCliPath))
+                {
+                    settings.BitwardenCliPath = "bw";
+                }
+                if (schemaVersion < 3 && string.IsNullOrWhiteSpace(settings.BitwardenBrowserExtensionReleasesUrl))
+                {
+                    settings.BitwardenBrowserExtensionReleasesUrl = "repos/bitwarden/clients/releases?per_page=20";
+                }
+                if (schemaVersion < 4)
+                {
+                    settings.BitwardenBrowserExtensionSource = InferBitwardenBrowserExtensionSource(settings);
+                }
+                if (schemaVersion < 5 && string.IsNullOrWhiteSpace(settings.BitwardenCliReleasesUrl))
+                {
+                    settings.BitwardenCliReleasesUrl = "repos/bitwarden/clients/releases?per_page=20";
+                }
                 settings.SettingsSchemaVersion = AppSettings.CurrentSchemaVersion;
                 migrated = true;
             }
@@ -99,6 +118,23 @@ public sealed class AppSettingsService : IAppSettingsService
         {
             return new AppSettings();
         }
+    }
+
+    private static BitwardenBrowserExtensionSource InferBitwardenBrowserExtensionSource(AppSettings settings)
+    {
+        if (string.IsNullOrWhiteSpace(settings.BitwardenBrowserExtensionPath))
+        {
+            return BitwardenBrowserExtensionSource.OfficialGitHub;
+        }
+
+        if (!string.IsNullOrWhiteSpace(settings.BitwardenBrowserExtensionDownloadUrl))
+        {
+            return BitwardenBrowserExtensionSource.OfficialGitHub;
+        }
+
+        return string.IsNullOrWhiteSpace(settings.BitwardenBrowserExtensionAssetName)
+            ? BitwardenBrowserExtensionSource.ManualFolder
+            : BitwardenBrowserExtensionSource.ManualZip;
     }
 
     private static int ReadSchemaVersion(byte[] json)

@@ -2,7 +2,7 @@ namespace Wormhole.Models;
 
 public sealed class AppSettings
 {
-    public const int CurrentSchemaVersion = 1;
+    public const int CurrentSchemaVersion = 6;
 
     public int SettingsSchemaVersion { get; set; } = CurrentSchemaVersion;
 
@@ -35,6 +35,42 @@ public sealed class AppSettings
     public bool EnableMcpServer { get; set; }
     public int McpServerPort { get; set; } = 8765;
     public bool StreamMcpCommandTyping { get; set; } = true;
+
+    // Optional credential vault provider. Password Manager consumer vaults are accessed via
+    // the official Bitwarden CLI; Wormhole stores only item references and keeps the CLI
+    // session key in memory.
+    public bool EnableBitwardenVault { get; set; }
+    public string BitwardenCliPath { get; set; } = "bw";
+    public string BitwardenCliReleasesUrl { get; set; } =
+        "repos/bitwarden/clients/releases?per_page=20";
+    public string? BitwardenCliVersion { get; set; }
+    public string? BitwardenCliSha256 { get; set; }
+    public string? BitwardenCliAssetName { get; set; }
+    public string? BitwardenCliDownloadUrl { get; set; }
+    public string? BitwardenCliInstallStatus { get; set; }
+    public string? BitwardenCliInstallError { get; set; }
+    public DateTimeOffset? BitwardenCredentialLastSyncUtc { get; set; }
+    public string? BitwardenCredentialLastSyncStatus { get; set; }
+    public string? BitwardenCredentialLastSyncError { get; set; }
+    public int? BitwardenCredentialAvailableCount { get; set; }
+    public int BitwardenOnboardingNoticeSeenVersion { get; set; }
+
+    // Optional Bitwarden browser extension inside HTTPS WebView2 sessions. This is deliberately
+    // separate from the bw CLI credential vault: the browser extension owns its own login/unlock state.
+    public bool EnableBitwardenBrowserExtension { get; set; }
+    public BitwardenBrowserExtensionSource BitwardenBrowserExtensionSource { get; set; } =
+        BitwardenBrowserExtensionSource.OfficialGitHub;
+    public string BitwardenBrowserExtensionReleasesUrl { get; set; } =
+        "repos/bitwarden/clients/releases?per_page=20";
+    public string? BitwardenBrowserExtensionVersion { get; set; }
+    public string? BitwardenBrowserExtensionPath { get; set; }
+    public string? BitwardenBrowserExtensionSha256 { get; set; }
+    public string? BitwardenBrowserExtensionAssetName { get; set; }
+    public string? BitwardenBrowserExtensionDownloadUrl { get; set; }
+    public DateTimeOffset? BitwardenBrowserExtensionLastUpdateCheckUtc { get; set; }
+    public string? BitwardenBrowserExtensionLastUpdateStatus { get; set; }
+    public string? BitwardenBrowserExtensionLastUpdateError { get; set; }
+    public string? BitwardenBrowserExtensionAvailableVersion { get; set; }
 }
 
 public enum ApplicationTheme
@@ -42,4 +78,11 @@ public enum ApplicationTheme
     System,
     Light,
     Dark,
+}
+
+public enum BitwardenBrowserExtensionSource
+{
+    OfficialGitHub,
+    ManualZip,
+    ManualFolder,
 }

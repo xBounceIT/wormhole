@@ -8,6 +8,8 @@ using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Services;
 using Wormhole.Services.Backup;
+using Wormhole.Services.Bitwarden;
+using Wormhole.Services.BitwardenBrowser;
 using Wormhole.Services.Mcp;
 using Wormhole.Services.MRemoteNg;
 using Wormhole.Services.Rdp;
@@ -95,7 +97,70 @@ public partial class App : Application
 
         await MainWindow.RunStartupAuthenticationAsync().ConfigureAwait(true);
 
+        StartBitwardenVaultBackgroundServices();
+        StartBitwardenBrowserExtensionAutoUpdate();
+
         await StartMcpServerIfEnabledAsync().ConfigureAwait(true);
+        await Services.GetRequiredService<IBitwardenOnboardingNoticeService>()
+            .ShowIfNeededAsync()
+            .ConfigureAwait(true);
+    }
+
+    private void StartBitwardenVaultBackgroundServices()
+    {
+        var settings = Services.GetRequiredService<IAppSettingsService>();
+        if (!settings.Current.EnableBitwardenVault) return;
+
+        _ = Task.Run(async () =>
+        {
+            var installer = Services.GetRequiredService<IBitwardenCliInstaller>();
+            try
+            {
+                await installer.EnsureInstalledAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Services.GetService<ILogger<App>>()?.LogWarning(ex, "Bitwarden CLI startup auto-install failed.");
+            }
+
+            if (installer.GetConfiguredInstall() is null) return;
+
+            try
+            {
+                Services.GetRequiredService<IBitwardenCredentialSyncService>().Start();
+            }
+            catch (Exception ex)
+            {
+                Services.GetService<ILogger<App>>()?.LogWarning(ex, "Bitwarden credential startup sync failed.");
+            }
+        });
+    }
+
+    private void StartBitwardenBrowserExtensionAutoUpdate()
+    {
+        var settings = Services.GetRequiredService<IAppSettingsService>();
+        if (!settings.Current.EnableBitwardenBrowserExtension) return;
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var installer = Services.GetRequiredService<IBitwardenBrowserExtensionInstaller>();
+                if (installer.GetConfiguredInstall() is null && settings.Current.BitwardenBrowserExtensionSource == BitwardenBrowserExtensionSource.OfficialGitHub)
+                {
+                    await installer.InstallLatestAsync().ConfigureAwait(false);
+                    return;
+                }
+
+                await Services.GetRequiredService<IBitwardenBrowserExtensionUpdateService>()
+                    .UpdateIfStaleAsync()
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Services.GetService<ILogger<App>>()?.LogWarning(ex, "Bitwarden browser extension startup auto-update failed.");
+            }
+        });
     }
 
     /// <summary>
@@ -243,6 +308,17 @@ public partial class App : Application
         services.AddSingleton<IAppLockState, AppLockState>();
         services.AddSingleton<AppInactivityLockEvaluator>();
         services.AddSingleton<ICredentialService, CredentialService>();
+        services.AddSingleton<IBitwardenProcessRunner, BitwardenProcessRunner>();
+        services.AddSingleton<IBitwardenCliInstaller, BitwardenCliInstaller>();
+        services.AddSingleton<IBitwardenVaultClient, BitwardenCliVaultClient>();
+        services.AddSingleton<IBitwardenSessionService, BitwardenSessionService>();
+        services.AddSingleton<IBitwardenCredentialCacheRepository, BitwardenCredentialCacheRepository>();
+        services.AddSingleton<IBitwardenCredentialCatalogService, BitwardenCredentialCatalogService>();
+        services.AddSingleton<IBitwardenCredentialSyncService, BitwardenCredentialSyncService>();
+        services.AddSingleton<IBitwardenBrowserExtensionInstaller, BitwardenBrowserExtensionInstaller>();
+        services.AddSingleton<IBitwardenBrowserExtensionUpdateService, BitwardenBrowserExtensionUpdateService>();
+        services.AddSingleton<ICredentialPasswordResolver, CredentialPasswordResolver>();
+        services.AddSingleton<IBitwardenOnboardingNoticeService, BitwardenOnboardingNoticeService>();
         services.AddSingleton<IConnectionRepository, ConnectionRepository>();
         services.AddSingleton<ICredentialRepository, CredentialRepository>();
         services.AddSingleton<IConnectionNodeChangeNotifier, ConnectionNodeChangeNotifier>();
@@ -279,7 +355,13 @@ public partial class App : Application
         services.AddSingleton<IVncSessionService, VncSessionService>();
         services.AddSingleton<ISerialSessionService, SerialSessionService>();
         services.AddSingleton<IPrivateKeyInspector, SshNetPrivateKeyInspector>();
-        services.AddSingleton<ISshCredentialResolver, SshCredentialResolver>();
+        services.AddSingleton<ISshCredentialResolver>(sp => new SshCredentialResolver(
+            sp.GetRequiredService<IBitwardenCredentialCatalogService>(),
+            sp.GetRequiredService<ICredentialService>(),
+            sp.GetRequiredService<ICredentialPasswordResolver>(),
+            sp.GetRequiredService<IConnectionCredentialBindingService>(),
+            sp.GetRequiredService<IDialogService>(),
+            sp.GetRequiredService<IPrivateKeyInspector>()));
         services.AddSingleton<ISessionTabFactory, SessionTabFactory>();
         services.AddSingleton<IRdpSessionService, RdpSessionService>();
         services.AddSingleton<IRdpCrashSentinelService, RdpCrashSentinelService>();
@@ -308,11 +390,45 @@ public partial class App : Application
             client.Timeout = TimeSpan.FromMinutes(30);
             client.DefaultRequestHeaders.UserAgent.ParseAdd($"Wormhole/{assemblyVersion}");
         });
+        services.AddHttpClient(BitwardenCliInstaller.ReleaseHttpClientName, client =>
+        {
+            client.BaseAddress = new Uri("https://api.github.com/");
+            client.Timeout = TimeSpan.FromSeconds(30);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd($"Wormhole/{assemblyVersion}");
+            client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+            client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
+        });
+        services.AddHttpClient(BitwardenCliInstaller.DownloadHttpClientName, client =>
+        {
+            client.Timeout = TimeSpan.FromMinutes(5);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd($"Wormhole/{assemblyVersion}");
+        });
+        services.AddHttpClient(BitwardenBrowserExtensionInstaller.ReleaseHttpClientName, client =>
+        {
+            client.BaseAddress = new Uri("https://api.github.com/");
+            client.Timeout = TimeSpan.FromSeconds(30);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd($"Wormhole/{assemblyVersion}");
+            client.DefaultRequestHeaders.Accept.ParseAdd("application/vnd.github+json");
+            client.DefaultRequestHeaders.Add("X-GitHub-Api-Version", "2022-11-28");
+        });
+        services.AddHttpClient(BitwardenBrowserExtensionInstaller.DownloadHttpClientName, client =>
+        {
+            client.Timeout = TimeSpan.FromMinutes(5);
+            client.DefaultRequestHeaders.UserAgent.ParseAdd($"Wormhole/{assemblyVersion}");
+        });
         services.AddSingleton<IInstallerLauncher, DefaultInstallerLauncher>();
         services.AddSingleton<IUpdateService, UpdateService>();
 
         services.AddSingleton<ShellViewModel>();
-        services.AddSingleton<ConnectionTreeViewModel>();
+        services.AddSingleton<ConnectionTreeViewModel>(sp => new ConnectionTreeViewModel(
+            sp.GetRequiredService<IConnectionRepository>(),
+            sp.GetRequiredService<InheritanceResolver>(),
+            sp.GetRequiredService<ISessionTabFactory>(),
+            sp.GetRequiredService<IDialogService>(),
+            sp.GetRequiredService<ICredentialService>(),
+            sp.GetRequiredService<IBitwardenCredentialCatalogService>(),
+            sp.GetRequiredService<ICredentialPasswordResolver>(),
+            sp.GetRequiredService<ILogger<ConnectionTreeViewModel>>()));
         services.AddSingleton<QuickConnectViewModel>();
         services.AddSingleton<SettingsViewModel>();
         services.AddSingleton<CredentialsViewModel>();
@@ -322,9 +438,28 @@ public partial class App : Application
         services.AddTransient<FolderEditorViewModel>();
         services.AddTransient<SshSessionViewModel>();
         services.AddTransient<SerialSessionViewModel>();
-        services.AddTransient<RdpSessionViewModel>();
+        services.AddTransient<RdpSessionViewModel>(sp => new RdpSessionViewModel(
+            sp.GetRequiredService<IRdpSessionService>(),
+            sp.GetRequiredService<ICredentialService>(),
+            sp.GetRequiredService<ICredentialPasswordResolver>(),
+            sp.GetRequiredService<IBitwardenCredentialCatalogService>(),
+            sp.GetRequiredService<IConnectionCredentialBindingService>(),
+            sp.GetRequiredService<TunnelManager>(),
+            sp.GetRequiredService<ITunnelRoutePrompter>(),
+            sp.GetRequiredService<IConnectionProfileResolver>(),
+            sp.GetRequiredService<IDialogService>(),
+            sp.GetRequiredService<IRdpCrashSentinelService>(),
+            sp.GetRequiredService<ILoggerFactory>()));
         services.AddTransient<HttpSessionViewModel>();
-        services.AddTransient<VncSessionViewModel>();
+        services.AddTransient<VncSessionViewModel>(sp => new VncSessionViewModel(
+            sp.GetRequiredService<IVncSessionService>(),
+            sp.GetRequiredService<ICredentialPasswordResolver>(),
+            sp.GetRequiredService<IBitwardenCredentialCatalogService>(),
+            sp.GetRequiredService<IDialogService>(),
+            sp.GetRequiredService<TunnelManager>(),
+            sp.GetRequiredService<ITunnelRoutePrompter>(),
+            sp.GetRequiredService<IConnectionProfileResolver>(),
+            sp.GetRequiredService<ILoggerFactory>()));
         services.AddTransient<MRemoteNgImportDialogViewModel>();
         services.AddTransient<BackupExportDialogViewModel>();
         services.AddTransient<BackupImportDialogViewModel>();

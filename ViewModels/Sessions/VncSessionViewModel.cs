@@ -5,11 +5,13 @@ using System.Windows.Input;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using MarcusW.VncClient.Rendering;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Services.Bitwarden;
 using Wormhole.Services.Tunneling;
 using VncScreen = MarcusW.VncClient.Screen;
 using VncSize = MarcusW.VncClient.Size;
@@ -19,8 +21,8 @@ namespace Wormhole.ViewModels.Sessions;
 public sealed partial class VncSessionViewModel : SessionTabViewModel
 {
     private readonly IVncSessionService _vncService;
-    private readonly ICredentialService _credentialService;
-    private readonly ICredentialRepository _credentialRepository;
+    private readonly ICredentialPasswordResolver _passwordResolver;
+    private readonly IBitwardenCredentialCatalogService _credentialCatalog;
     private readonly IDialogService _dialog;
     private readonly TunnelManager _tunnels;
     private readonly ITunnelRoutePrompter _tunnelPrompter;
@@ -39,8 +41,30 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
 
     public VncSessionViewModel(
         IVncSessionService vncService,
-        ICredentialService credentialService,
+        ICredentialPasswordResolver passwordResolver,
         ICredentialRepository credentialRepository,
+        IDialogService dialog,
+        TunnelManager tunnels,
+        ITunnelRoutePrompter tunnelPrompter,
+        IConnectionProfileResolver profileResolver,
+        ILoggerFactory loggerFactory)
+        : this(
+            vncService,
+            passwordResolver,
+            new RepositoryCredentialCatalogAdapter(credentialRepository),
+            dialog,
+            tunnels,
+            tunnelPrompter,
+            profileResolver,
+            loggerFactory)
+    {
+    }
+
+    [ActivatorUtilitiesConstructor]
+    public VncSessionViewModel(
+        IVncSessionService vncService,
+        ICredentialPasswordResolver passwordResolver,
+        IBitwardenCredentialCatalogService credentialCatalog,
         IDialogService dialog,
         TunnelManager tunnels,
         ITunnelRoutePrompter tunnelPrompter,
@@ -48,8 +72,8 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
         ILoggerFactory loggerFactory)
     {
         _vncService = vncService;
-        _credentialService = credentialService;
-        _credentialRepository = credentialRepository;
+        _passwordResolver = passwordResolver;
+        _credentialCatalog = credentialCatalog;
         _dialog = dialog;
         _tunnels = tunnels;
         _tunnelPrompter = tunnelPrompter;
@@ -213,8 +237,8 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
             Progress.Begin(ConnectionPhase.Connect);
             var passwordProvider = new PromptingVncPasswordProvider(
                 profile,
-                _credentialService,
-                _credentialRepository,
+                _passwordResolver,
+                _credentialCatalog,
                 _dialog,
                 UiDispatcher,
                 _logger);
@@ -428,8 +452,8 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
     private sealed class PromptingVncPasswordProvider : IVncPasswordProvider
     {
         private readonly ConnectionProfile _profile;
-        private readonly ICredentialService _credentialService;
-        private readonly ICredentialRepository _credentialRepository;
+        private readonly ICredentialPasswordResolver _passwordResolver;
+        private readonly IBitwardenCredentialCatalogService _credentialCatalog;
         private readonly IDialogService _dialog;
         private readonly DispatcherQueue? _dispatcher;
         private readonly ILogger _logger;
@@ -438,15 +462,15 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
 
         public PromptingVncPasswordProvider(
             ConnectionProfile profile,
-            ICredentialService credentialService,
-            ICredentialRepository credentialRepository,
+            ICredentialPasswordResolver passwordResolver,
+            IBitwardenCredentialCatalogService credentialCatalog,
             IDialogService dialog,
             DispatcherQueue? dispatcher,
             ILogger logger)
         {
             _profile = profile;
-            _credentialService = credentialService;
-            _credentialRepository = credentialRepository;
+            _passwordResolver = passwordResolver;
+            _credentialCatalog = credentialCatalog;
             _dialog = dialog;
             _dispatcher = dispatcher;
             _logger = logger;
@@ -461,7 +485,7 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
             {
                 try
                 {
-                    var credential = await _credentialRepository.GetByIdAsync(credentialId, cancellationToken).ConfigureAwait(true);
+                    var credential = await _credentialCatalog.GetByIdAsync(credentialId, cancellationToken).ConfigureAwait(true);
                     cancellationToken.ThrowIfCancellationRequested();
                     if (credential is null)
                     {
@@ -477,7 +501,7 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
                     }
                     else
                     {
-                        _password = await _credentialService.ReadPasswordAsync(credentialId).ConfigureAwait(true);
+                        _password = await _passwordResolver.ReadPasswordAsync(credential, PromptBitwardenUnlockOnUiAsync, cancellationToken).ConfigureAwait(true);
                         cancellationToken.ThrowIfCancellationRequested();
                         if (_password is not null) return _password;
                         _logger.LogInformation("VNC credential {CredentialId} password not found in Credential Manager; prompting.", credentialId);
@@ -493,10 +517,14 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
             return _password;
         }
 
-        private async Task<string?> PromptPasswordOnUiAsync(CancellationToken cancellationToken)
+        private Task<string?> PromptBitwardenUnlockOnUiAsync(CancellationToken cancellationToken) =>
+            PromptPasswordOnUiAsync("Unlock Bitwarden vault", "Enter your Bitwarden master password.", cancellationToken);
+
+        private Task<string?> PromptPasswordOnUiAsync(CancellationToken cancellationToken) =>
+            PromptPasswordOnUiAsync("VNC password", $"Enter the password for {_profile.Host}:{_profile.Port}.", cancellationToken);
+
+        private async Task<string?> PromptPasswordOnUiAsync(string title, string message, CancellationToken cancellationToken)
         {
-            const string title = "VNC password";
-            var message = $"Enter the password for {_profile.Host}:{_profile.Port}.";
             if (_dispatcher is null || _dispatcher.HasThreadAccess)
             {
                 return await _dialog.PromptPasswordAsync(title, message, cancellationToken).ConfigureAwait(true);
