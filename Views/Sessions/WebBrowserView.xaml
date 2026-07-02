@@ -63,6 +63,7 @@
                     <FontIcon x:Name="BitwardenFallbackIcon"
                               Glyph="&#xE192;"
                               FontSize="14"
+                              Foreground="#175DDC"
                               Visibility="Collapsed" />
                 </Grid>
             </Button>

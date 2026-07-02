@@ -665,24 +665,35 @@ public sealed partial class WebBrowserView : UserControl
 
     private void UpdateBitwardenButtonIcon()
     {
-        if (_bitwardenIconPath is { } iconPath && File.Exists(iconPath))
+        if (TrySetBitwardenButtonImage(_bitwardenIconPath)
+            || TrySetBitwardenButtonImage(AppPaths.GetBitwardenIconPath()))
+        {
+            return;
+        }
+
+        BitwardenIconImage.Source = null;
+        BitwardenIconImage.Visibility = Visibility.Collapsed;
+        BitwardenFallbackIcon.Visibility = Visibility.Visible;
+    }
+
+    private bool TrySetBitwardenButtonImage(string? iconPath)
+    {
+        if (iconPath is not null && File.Exists(iconPath))
         {
             try
             {
                 BitwardenIconImage.Source = new BitmapImage(new Uri(Path.GetFullPath(iconPath)));
                 BitwardenIconImage.Visibility = Visibility.Visible;
                 BitwardenFallbackIcon.Visibility = Visibility.Collapsed;
-                return;
+                return true;
             }
             catch (Exception ex)
             {
-                LogDebug(ex, "Could not load Bitwarden extension icon; using fallback toolbar icon.");
+                LogDebug(ex, "Could not load Bitwarden icon; using fallback toolbar icon.");
             }
         }
 
-        BitwardenIconImage.Source = null;
-        BitwardenIconImage.Visibility = Visibility.Collapsed;
-        BitwardenFallbackIcon.Visibility = Visibility.Visible;
+        return false;
     }
 
     private void OnBackClick(object sender, RoutedEventArgs e)
