@@ -14,6 +14,7 @@ using Microsoft.Web.WebView2.Core;
 using Wormhole.Helpers;
 using Wormhole.Services;
 using Wormhole.Services.BitwardenBrowser;
+using Wormhole.ViewModels;
 using Wormhole.ViewModels.Sessions;
 using WinUIWebView2 = Microsoft.UI.Xaml.Controls.WebView2;
 
@@ -145,7 +146,7 @@ public sealed partial class WebBrowserView : UserControl
         }
     }
 
-    private void OnUnloaded(object sender, RoutedEventArgs e)
+    private async void OnUnloaded(object sender, RoutedEventArgs e)
     {
         // Collapse the surface so a background tab still painting can't bleed into the selected tab
         // (same airspace issue SshTerminalView guards against). The live WebView2 is kept so a same-
@@ -153,11 +154,40 @@ public sealed partial class WebBrowserView : UserControl
         WebViewHost.Visibility = Visibility.Collapsed;
         if (_webView is not null) _webView.Visibility = Visibility.Collapsed;
 
+        var vm = _viewModel;
         // Invalidate any in-flight create so it bails instead of binding/leaking a WebView2 after the
         // view goes away (e.g. the tab is closed mid-connect). Then drop the VM subscription so a
         // truly-discarded instance is unrooted and GC-eligible (see OnLoaded).
-        _createGeneration++;
-        if (_viewModel is not null) _viewModel.NavigateRequested -= OnNavigateRequested;
+        var generation = ++_createGeneration;
+        if (vm is not null) vm.NavigateRequested -= OnNavigateRequested;
+
+        if (vm is null || IsTabStillOpen(vm)) return;
+
+        try
+        {
+            await _createGate.WaitAsync().ConfigureAwait(true);
+            try
+            {
+                if (generation == _createGeneration)
+                {
+                    await DisposeWebViewAsync().ConfigureAwait(true);
+                }
+            }
+            finally
+            {
+                _createGate.Release();
+            }
+        }
+        catch (Exception ex)
+        {
+            LogWarning(ex, "Failed to dispose a closed HTTPS WebView2 tab.");
+        }
+    }
+
+    private static bool IsTabStillOpen(HttpSessionViewModel vm)
+    {
+        var shell = App.Current?.Services?.GetService<ShellViewModel>();
+        return shell is null || shell.Tabs.Contains(vm);
     }
 
     private async void OnNavigateRequested(HttpConnectionTarget target)

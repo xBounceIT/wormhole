@@ -176,10 +176,8 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
             ? "bw"
             : _settings.Current.BitwardenCliPath.Trim();
 
-    private static Dictionary<string, string?>? BuildSessionEnvironment(string? sessionKey) =>
-        string.IsNullOrWhiteSpace(sessionKey)
-            ? null
-            : new Dictionary<string, string?> { [SessionEnvVar] = sessionKey };
+    private static Dictionary<string, string?> BuildSessionEnvironment(string? sessionKey) =>
+        new() { [SessionEnvVar] = string.IsNullOrWhiteSpace(sessionKey) ? null : sessionKey };
 
     private static string ReadSessionKey(string standardOutput)
     {

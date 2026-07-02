@@ -134,6 +134,26 @@ public sealed class BitwardenCliVaultClientTests
     }
 
     [Fact]
+    public async Task GetLoginItemAsync_WithoutSession_RemovesInheritedSessionEnvironment()
+    {
+        var runner = new FakeRunner(new BitwardenProcessResult(0, """
+        {"id":"item-1","name":"Router","type":1,"login":{"username":"admin","password":"pw"}}
+        """, string.Empty));
+        var client = NewClient(runner);
+
+        var item = await client.GetLoginItemAsync("item-1", sessionKey: null);
+
+        Assert.NotNull(item);
+        var request = runner.Requests.Single();
+        Assert.Collection(
+            request.Arguments,
+            arg => Assert.Equal("get", arg),
+            arg => Assert.Equal("item", arg),
+            arg => Assert.Equal("item-1", arg));
+        Assert.True(request.Environment.ContainsKey("BW_SESSION"));
+        Assert.Null(request.Environment["BW_SESSION"]);
+    }
+    [Fact]
     public async Task Errors_RedactSessionAndPasswordEnvValues()
     {
         var runner = new FakeRunner(new BitwardenProcessResult(
