@@ -1818,7 +1818,7 @@ public class ConnectionEditorViewModelTests
         // so it hides once a real credential is picked — mirroring how the Username field hides under
         // a saved credential. It stays visible for the no-real-credential cases that still need a
         // place to type a domain: "(None) — prompt every time" (the AzureAD workflow) and inline mode.
-        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password };
+        var rdpCred = new CredentialProfile { Name = "rdp", Protocol = ProtocolType.Rdp, Kind = CredentialKind.Password, Domain = "CORP" };
         var vm = new ConnectionEditorViewModel(new SingleCredentialRepository(rdpCred), EmptyTunnelRepo(), new FakeCredentialService());
         await vm.LoadCredentialsAsync();
         vm.Protocol = ProtocolType.Rdp;
@@ -2063,6 +2063,39 @@ public class ConnectionEditorViewModelTests
         vm.UseSavedCredentials = true;
         Assert.Equal("CORP", vm.RdpDomain);
         Assert.True(vm.ShowRdpDomain);
+    }
+
+    [Fact]
+    public async Task ShowRdpDomain_VisibleForDomainlessBitwardenRdpCredential()
+    {
+        // Bitwarden virtual credentials project login metadata only. When the login username is just
+        // "alice", the RDP connection still needs a node-level domain field for "ACME\alice".
+        var bitwardenCred = new CredentialProfile
+        {
+            Name = "bw-rdp",
+            Protocol = ProtocolType.Rdp,
+            Kind = CredentialKind.Password,
+            Username = "alice",
+            SecretProvider = CredentialSecretProvider.Bitwarden,
+            BitwardenItemId = "item-1",
+            IsVirtualBitwarden = true,
+        };
+        var vm = new ConnectionEditorViewModel(
+            new SingleCredentialRepository(bitwardenCred),
+            EmptyTunnelRepo(),
+            new FakeCredentialService());
+        await vm.LoadCredentialsAsync();
+        vm.Protocol = ProtocolType.Rdp;
+        vm.SelectedCredential = bitwardenCred;
+
+        Assert.True(vm.ShowRdpDomain);
+
+        vm.RdpDomain = "ACME";
+        var sink = new ConnectionNode { Kind = NodeKind.Connection };
+        vm.WriteTo(sink);
+
+        Assert.Equal("ACME", sink.RdpDomain);
+        Assert.Equal(bitwardenCred.Id, sink.CredentialId);
     }
 
     [Fact]
