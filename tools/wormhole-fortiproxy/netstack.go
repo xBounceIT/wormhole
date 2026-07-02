@@ -159,6 +159,11 @@ func (d netstackDialer) resolveHostV4(ctx context.Context, host string) (netip.A
 // queryServersUntilAnswer without standing up a live netstack.
 type dnsQueryFunc func(ctx context.Context, server netip.Addr, qname dnsmessage.Name, timeout time.Duration) (netip.Addr, string, error)
 
+// dnsPacketQueryFunc performs a DNS exchange with an already-packed query. queryAOne injects
+// UDP/TCP implementations through this shape so the fallback policy is unit-testable without
+// standing up a live gVisor netstack.
+type dnsPacketQueryFunc func(ctx context.Context, server netip.Addr, query []byte, txid uint16, timeout time.Duration) (netip.Addr, string, error)
+
 // dnsResponseError wraps a failure where the DNS server answered our query (a datagram
 // carrying our transaction ID arrived) but the contents are unusable — NXDOMAIN/SERVFAIL
 // rcode, a malformed body, or an answer with neither A nor CNAME. It is deliberately distinct
@@ -171,6 +176,8 @@ type dnsResponseError struct{ err error }
 
 func (e *dnsResponseError) Error() string { return e.err.Error() }
 func (e *dnsResponseError) Unwrap() error { return e.err }
+
+var errDNSUDPTruncated = errors.New("DNS UDP response truncated")
 
 // answerOrResponseErr adapts a parseDNSResponse outcome to queryAOne's return convention: a
 // parse/rcode/no-records failure means the server answered with something unusable, so it is
@@ -307,6 +314,7 @@ func queryServersUntilAnswer(ctx context.Context, servers []netip.Addr, qname dn
 	}
 
 	if lastErr != nil {
+		logf("netstack: DNS A query for %q failed after exhausting VPN DNS servers: %v", label, lastErr)
 		return netip.Addr{}, "", lastErr
 	}
 	// lastErr is nil only when no query ran at all — i.e. servers was empty (callers guard
@@ -318,12 +326,15 @@ func queryServersUntilAnswer(ctx context.Context, servers []netip.Addr, qname dn
 	return netip.Addr{}, "", errors.New("no DNS servers configured")
 }
 
-// queryAOne sends a single DNS A-record query to one server over UDP via the netstack.
+// queryAOne sends a single DNS A-record query to one server through the VPN netstack.
 // Returns (addr, "", nil) if an A record is found, (zero, cname, nil) if the answer section
 // contains only CNAMEs (caller follows the chain via resolveViaVPNQuery's outer loop), or an
 // error on transport/parse failure. Bounded by the per-try timeout regardless of the caller's
-// ctx deadline (which is the OVERALL lookup budget). The transaction ID is randomly
-// generated per query so responses can't be cross-contaminated between concurrent lookups.
+// ctx deadline (which is the OVERALL lookup budget). UDP is attempted first; if no usable UDP
+// response arrives, DNS-over-TCP is tried against the same VPN-provided resolver before the
+// lookup is handed back to queryServersUntilAnswer for failover/retransmit. The transaction ID
+// is randomly generated per query so responses can't be cross-contaminated between concurrent
+// lookups.
 func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dnsmessage.Name, timeout time.Duration) (netip.Addr, string, error) {
 	if !server.Is4() {
 		return netip.Addr{}, "", fmt.Errorf("DNS server %v is not IPv4", server)
@@ -349,6 +360,67 @@ func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dns
 		return netip.Addr{}, "", fmt.Errorf("DNS pack: %w", err)
 	}
 
+	return queryAOneWithFallback(
+		ctx,
+		server,
+		qname,
+		wire,
+		msg.Header.ID,
+		timeout,
+		func(ctx context.Context, server netip.Addr, query []byte, txid uint16, timeout time.Duration) (netip.Addr, string, error) {
+			return queryAOneUDP(ctx, s, server, query, txid, timeout)
+		},
+		func(ctx context.Context, server netip.Addr, query []byte, txid uint16, timeout time.Duration) (netip.Addr, string, error) {
+			return queryAOneTCP(ctx, s, server, query, txid, timeout)
+		})
+}
+
+func queryAOneWithFallback(
+	ctx context.Context,
+	server netip.Addr,
+	qname dnsmessage.Name,
+	query []byte,
+	txid uint16,
+	timeout time.Duration,
+	udp dnsPacketQueryFunc,
+	tcp dnsPacketQueryFunc,
+) (netip.Addr, string, error) {
+	addr, cname, err := udp(ctx, server, query, txid, timeout)
+	if err == nil {
+		return addr, cname, nil
+	}
+
+	var respErr *dnsResponseError
+	if errors.As(err, &respErr) {
+		return netip.Addr{}, "", err
+	}
+
+	label := strings.TrimSuffix(qname.String(), ".")
+	if errors.Is(err, errDNSUDPTruncated) {
+		logf("netstack: DNS A query for %q via %s returned a truncated UDP response; trying TCP fallback", label, server)
+	} else {
+		logf("netstack: DNS A query for %q via %s failed over UDP (%v); trying TCP fallback", label, server, err)
+	}
+
+	addr, cname, tcpErr := tcp(ctx, server, query, txid, timeout)
+	if tcpErr == nil {
+		logf("netstack: DNS A query for %q via %s succeeded over TCP fallback", label, server)
+		return addr, cname, nil
+	}
+
+	if errors.As(tcpErr, &respErr) {
+		logf("netstack: DNS A query for %q via %s TCP fallback was rejected (%v)", label, server, tcpErr)
+		return netip.Addr{}, "", tcpErr
+	}
+
+	logf("netstack: DNS A query for %q via %s TCP fallback failed (%v)", label, server, tcpErr)
+	return netip.Addr{}, "", fmt.Errorf("UDP failed (%v); TCP fallback failed (%w)", err, tcpErr)
+}
+
+// queryAOneUDP sends one DNS A-record query over UDP via the netstack. It returns
+// errDNSUDPTruncated when the server sets the TC bit so queryAOneWithFallback can retry the
+// same packed query over DNS-over-TCP.
+func queryAOneUDP(ctx context.Context, s *stack.Stack, server netip.Addr, query []byte, txid uint16, timeout time.Duration) (netip.Addr, string, error) {
 	fa := tcpip.FullAddress{
 		NIC:  1,
 		Addr: tcpip.AddrFromSlice(server.AsSlice()),
@@ -371,7 +443,7 @@ func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dns
 		return netip.Addr{}, "", fmt.Errorf("DNS deadline: %w", err)
 	}
 
-	if _, err := conn.Write(wire); err != nil {
+	if _, err := conn.Write(query); err != nil {
 		return netip.Addr{}, "", fmt.Errorf("DNS write: %w", err)
 	}
 
@@ -394,22 +466,22 @@ func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dns
 		// whole lookup with no retransmit, reopening the intermittent-failure hole this
 		// resolver exists to close. The conn deadline bounds the loop, so even a flood of
 		// strays just falls through to a (retryable) read timeout.
-		if n < 2 || binary.BigEndian.Uint16(buf[0:2]) != msg.Header.ID {
+		if n < 2 || binary.BigEndian.Uint16(buf[0:2]) != txid {
 			continue
 		}
 
 		// Peek at the TC (truncation) flag at bit 9 of the 16-bit flags word (byte 2 high bits)
-		// and retry over TCP if set. Without this, large internal records (many A's, big TXT)
-		// silently get truncated answers — the parser would return whatever fit in 4 KB without
-		// signalling truncation.
+		// and let queryAOneWithFallback retry over TCP if set. Without this, large internal
+		// records (many A's, big TXT) silently get truncated answers — the parser would return
+		// whatever fit in 4 KB without signalling truncation.
 		if n >= 3 && buf[2]&0x02 != 0 {
-			return queryAOneTCP(ctx, s, server, wire, msg.Header.ID, timeout)
+			return netip.Addr{}, "", errDNSUDPTruncated
 		}
 
 		// Our reply (txid already matched above). A parse/rcode/no-records failure is an
 		// authoritative response — the server answered — so answerOrResponseErr marks it
 		// non-retryable rather than letting the loop re-query a name already resolved (or denied).
-		return answerOrResponseErr(parseDNSResponse(buf[:n], msg.Header.ID))
+		return answerOrResponseErr(parseDNSResponse(buf[:n], txid))
 	}
 }
 

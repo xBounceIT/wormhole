@@ -207,6 +207,116 @@ func TestParseDNSResponse_TxidMismatch(t *testing.T) {
 	}
 }
 
+func TestQueryAOneWithFallback_UDPTimeoutThenTCPSuccess(t *testing.T) {
+	server := netip.MustParseAddr("10.72.0.1")
+	qname := dnsmessage.MustNewName("dyn-ar-cdb01.dynartis.local.")
+	want := netip.AddrFrom4([4]byte{10, 155, 50, 99})
+	query := []byte{0x12, 0x34}
+
+	var udpCalls, tcpCalls int
+	udp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, _ time.Duration) (netip.Addr, string, error) {
+		udpCalls++
+		return netip.Addr{}, "", errors.New("DNS read: i/o timeout")
+	}
+	tcp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, _ time.Duration) (netip.Addr, string, error) {
+		tcpCalls++
+		return want, "", nil
+	}
+
+	addr, cname, err := queryAOneWithFallback(context.Background(), server, qname, query, 0x1234, time.Second, udp, tcp)
+	if err != nil {
+		t.Fatalf("expected TCP fallback to resolve after UDP timeout, got: %v", err)
+	}
+	if addr != want {
+		t.Errorf("addr: got %v want %v", addr, want)
+	}
+	if cname != "" {
+		t.Errorf("unexpected cname %q", cname)
+	}
+	if udpCalls != 1 || tcpCalls != 1 {
+		t.Errorf("calls: udp=%d tcp=%d, want 1/1", udpCalls, tcpCalls)
+	}
+}
+
+func TestQueryAOneWithFallback_TruncatedUDPUsesTCPFallback(t *testing.T) {
+	server := netip.MustParseAddr("10.72.0.1")
+	qname := dnsmessage.MustNewName("large.dynartis.local.")
+	want := netip.AddrFrom4([4]byte{10, 155, 50, 88})
+	query := []byte{0x12, 0x34}
+
+	var tcpCalls int
+	udp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, _ time.Duration) (netip.Addr, string, error) {
+		return netip.Addr{}, "", errDNSUDPTruncated
+	}
+	tcp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, _ time.Duration) (netip.Addr, string, error) {
+		tcpCalls++
+		return want, "", nil
+	}
+
+	addr, cname, err := queryAOneWithFallback(context.Background(), server, qname, query, 0x1234, time.Second, udp, tcp)
+	if err != nil {
+		t.Fatalf("expected TCP fallback to resolve after truncated UDP response, got: %v", err)
+	}
+	if addr != want {
+		t.Errorf("addr: got %v want %v", addr, want)
+	}
+	if cname != "" {
+		t.Errorf("unexpected cname %q", cname)
+	}
+	if tcpCalls != 1 {
+		t.Fatalf("truncated UDP response must try TCP fallback once; got %d", tcpCalls)
+	}
+}
+
+func TestQueryAOneWithFallback_UDPTimeoutAndTCPTimeoutReportsBoth(t *testing.T) {
+	server := netip.MustParseAddr("10.72.0.1")
+	qname := dnsmessage.MustNewName("dyn-ar-cdb01.dynartis.local.")
+	query := []byte{0x12, 0x34}
+
+	udp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, _ time.Duration) (netip.Addr, string, error) {
+		return netip.Addr{}, "", errors.New("DNS read: i/o timeout")
+	}
+	tcp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, _ time.Duration) (netip.Addr, string, error) {
+		return netip.Addr{}, "", errors.New("DNS-TCP read length: i/o timeout")
+	}
+
+	_, _, err := queryAOneWithFallback(context.Background(), server, qname, query, 0x1234, time.Second, udp, tcp)
+	if err == nil {
+		t.Fatal("expected an error when both UDP and TCP DNS fail")
+	}
+	for _, want := range []string{"UDP failed", "DNS read: i/o timeout", "TCP fallback failed", "DNS-TCP read length"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q does not contain %q", err.Error(), want)
+		}
+	}
+}
+
+func TestQueryAOneWithFallback_AuthoritativeNegativeDoesNotTryTCP(t *testing.T) {
+	server := netip.MustParseAddr("10.72.0.1")
+	qname := dnsmessage.MustNewName("nope.dynartis.local.")
+	query := []byte{0x12, 0x34}
+
+	var tcpCalls int
+	udp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, _ time.Duration) (netip.Addr, string, error) {
+		return netip.Addr{}, "", &dnsResponseError{errors.New("DNS rcode NameError")}
+	}
+	tcp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, _ time.Duration) (netip.Addr, string, error) {
+		tcpCalls++
+		return netip.Addr{}, "", nil
+	}
+
+	_, _, err := queryAOneWithFallback(context.Background(), server, qname, query, 0x1234, time.Second, udp, tcp)
+	if err == nil {
+		t.Fatal("expected authoritative negative response to fail")
+	}
+	if !strings.Contains(err.Error(), "NameError") {
+		t.Fatalf("expected NXDOMAIN-style error to surface, got: %v", err)
+	}
+	if tcpCalls != 0 {
+		t.Fatalf("authoritative UDP response must not try TCP fallback; got %d TCP call(s)", tcpCalls)
+	}
+}
+
 // The core regression test for the "RDP through the Forti tunnel randomly won't connect"
 // bug: a transport timeout (dropped UDP datagram on the PPP link) must NOT fail the lookup —
 // queryServersUntilAnswer has to retransmit until a later attempt gets through.
