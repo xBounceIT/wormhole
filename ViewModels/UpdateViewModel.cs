@@ -11,14 +11,12 @@ namespace Wormhole.ViewModels;
 
 public partial class UpdateViewModel : ObservableObject
 {
-    private static readonly TimeSpan StartupThrottle = TimeSpan.FromHours(24);
-
     // static readonly (not const) so the compiler doesn't mark the
     // post-early-return code as unreachable in either build flavor.
 #if DEBUG
-    private static readonly bool IsDevelopmentBuild = true;
+    private static readonly bool DefaultIsDevelopmentBuild = true;
 #else
-    private static readonly bool IsDevelopmentBuild = false;
+    private static readonly bool DefaultIsDevelopmentBuild = false;
 #endif
 
     private const string DevModeStatus =
@@ -28,6 +26,7 @@ public partial class UpdateViewModel : ObservableObject
     private readonly IAppSettingsService _settings;
     private readonly ILogger<UpdateViewModel> _logger;
     private readonly DispatcherQueue? _dispatcher;
+    private readonly bool _isDevelopmentBuild;
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(ShowChangelog))]
@@ -53,11 +52,21 @@ public partial class UpdateViewModel : ObservableObject
         IUpdateService updateService,
         IAppSettingsService settings,
         ILogger<UpdateViewModel> logger)
+        : this(updateService, settings, logger, DefaultIsDevelopmentBuild)
+    {
+    }
+
+    internal UpdateViewModel(
+        IUpdateService updateService,
+        IAppSettingsService settings,
+        ILogger<UpdateViewModel> logger,
+        bool isDevelopmentBuild)
     {
         _updateService = updateService;
         _settings = settings;
         _logger = logger;
         _dispatcher = TryGetDispatcherQueue();
+        _isDevelopmentBuild = isDevelopmentBuild;
 
         var infoVersion = Assembly.GetEntryAssembly()?
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?
@@ -65,7 +74,7 @@ public partial class UpdateViewModel : ObservableObject
         var assemblyVersion = Assembly.GetEntryAssembly()?.GetName().Version?.ToString();
         currentVersionText = $"Wormhole {infoVersion ?? assemblyVersion ?? "0.0.0"}";
         lastCheckText = FormatLastCheck(_settings.Current.LastUpdateCheck);
-        if (IsDevelopmentBuild)
+        if (_isDevelopmentBuild)
             status = DevModeStatus;
 
         _updateService.UpdateAvailable += OnUpdateAvailable;
@@ -73,15 +82,8 @@ public partial class UpdateViewModel : ObservableObject
 
     public async Task RunStartupCheckAsync()
     {
-        if (IsDevelopmentBuild) return;
+        if (_isDevelopmentBuild) return;
         if (!_settings.Current.AutoCheckForUpdates) return;
-        if (_settings.Current.LastUpdateCheck is { } lastCheck)
-        {
-            // Bail only when the stored timestamp is in the recent past — a future timestamp
-            // (clock skew, NTP correction) would otherwise suppress checks indefinitely.
-            var elapsed = DateTimeOffset.UtcNow - lastCheck;
-            if (elapsed >= TimeSpan.Zero && elapsed < StartupThrottle) return;
-        }
         try { await CheckNowAsync().ConfigureAwait(false); }
         catch (Exception ex) { _logger.LogWarning(ex, "Startup update check failed."); }
     }
@@ -89,7 +91,7 @@ public partial class UpdateViewModel : ObservableObject
     [RelayCommand]
     private async Task CheckNowAsync()
     {
-        if (IsDevelopmentBuild)
+        if (_isDevelopmentBuild)
         {
             Marshal(() => Status = DevModeStatus);
             return;
