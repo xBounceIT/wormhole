@@ -279,6 +279,12 @@ public sealed partial class WebBrowserView : UserControl
                 await TryEnsureBitwardenExtensionAsync(core, extensionPath, extensionUserDataFolder).ConfigureAwait(true);
             }
 
+            if (generation != _createGeneration)
+            {
+                await DisposeWebViewAsync().ConfigureAwait(true);
+                return;
+            }
+
             if (target.IgnoreCertErrors)
             {
                 core.ServerCertificateErrorDetected -= OnServerCertificateErrorDetected;
