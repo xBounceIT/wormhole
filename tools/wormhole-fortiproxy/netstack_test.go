@@ -207,23 +207,24 @@ func TestParseDNSResponse_TxidMismatch(t *testing.T) {
 	}
 }
 
-func TestQueryAOneWithFallback_UDPTimeoutThenTCPSuccess(t *testing.T) {
-	server := netip.MustParseAddr("10.72.0.1")
+func TestQueryServersUntilAnswerWithTCPFallback_UDPTimeoutThenTCPSuccess(t *testing.T) {
+	servers := []netip.Addr{netip.MustParseAddr("10.72.0.1")}
 	qname := dnsmessage.MustNewName("dyn-ar-cdb01.dynartis.local.")
 	want := netip.AddrFrom4([4]byte{10, 155, 50, 99})
-	query := []byte{0x12, 0x34}
 
 	var udpCalls, tcpCalls int
-	udp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, _ time.Duration) (netip.Addr, string, error) {
+	var udpTimeout time.Duration
+	udp := func(_ context.Context, _ netip.Addr, _ dnsmessage.Name, timeout time.Duration) (netip.Addr, string, error) {
 		udpCalls++
+		udpTimeout = timeout
 		return netip.Addr{}, "", errors.New("DNS read: i/o timeout")
 	}
-	tcp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, _ time.Duration) (netip.Addr, string, error) {
+	tcp := func(_ context.Context, _ netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
 		tcpCalls++
 		return want, "", nil
 	}
 
-	addr, cname, err := queryAOneWithFallback(context.Background(), server, qname, query, 0x1234, time.Second, udp, tcp)
+	addr, cname, err := queryServersUntilAnswerWithTCPFallback(context.Background(), servers, qname, "dyn-ar-cdb01.dynartis.local", 5*time.Millisecond, udp, tcp)
 	if err != nil {
 		t.Fatalf("expected TCP fallback to resolve after UDP timeout, got: %v", err)
 	}
@@ -236,51 +237,63 @@ func TestQueryAOneWithFallback_UDPTimeoutThenTCPSuccess(t *testing.T) {
 	if udpCalls != 1 || tcpCalls != 1 {
 		t.Errorf("calls: udp=%d tcp=%d, want 1/1", udpCalls, tcpCalls)
 	}
+	if udpTimeout != 5*time.Millisecond {
+		t.Errorf("UDP timeout: got %v want %v", udpTimeout, 5*time.Millisecond)
+	}
 }
 
-func TestQueryAOneWithFallback_ReservesPerServerBudgetForTCP(t *testing.T) {
-	server := netip.MustParseAddr("10.72.0.1")
+func TestQueryServersUntilAnswerWithTCPFallback_TriesHealthyUDPServerBeforeTCP(t *testing.T) {
+	servers := []netip.Addr{netip.MustParseAddr("10.72.0.1"), netip.MustParseAddr("10.72.0.2")}
 	qname := dnsmessage.MustNewName("dyn-ar-cdb01.dynartis.local.")
-	query := []byte{0x12, 0x34}
-
-	var udpTimeout, tcpTimeout time.Duration
-	udp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, timeout time.Duration) (netip.Addr, string, error) {
-		udpTimeout = timeout
-		return netip.Addr{}, "", errors.New("DNS read: i/o timeout")
-	}
-	tcp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, timeout time.Duration) (netip.Addr, string, error) {
-		tcpTimeout = timeout
-		return netip.Addr{}, "", errors.New("DNS-TCP read length: i/o timeout")
-	}
-
-	_, _, err := queryAOneWithFallback(context.Background(), server, qname, query, 0x1234, time.Second, udp, tcp)
-	if err == nil {
-		t.Fatal("expected an error when both UDP and TCP DNS fail")
-	}
-	if udpTimeout != 500*time.Millisecond {
-		t.Fatalf("UDP timeout: got %v want %v", udpTimeout, 500*time.Millisecond)
-	}
-	if tcpTimeout <= 0 || tcpTimeout > time.Second {
-		t.Fatalf("TCP timeout: got %v, want within (0s, 1s]", tcpTimeout)
-	}
-}
-
-func TestQueryAOneWithFallback_TruncatedUDPUsesTCPFallback(t *testing.T) {
-	server := netip.MustParseAddr("10.72.0.1")
-	qname := dnsmessage.MustNewName("large.dynartis.local.")
-	want := netip.AddrFrom4([4]byte{10, 155, 50, 88})
-	query := []byte{0x12, 0x34}
+	want := netip.AddrFrom4([4]byte{10, 155, 50, 99})
 
 	var tcpCalls int
-	udp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, _ time.Duration) (netip.Addr, string, error) {
+	var udpOrder []netip.Addr
+	udp := func(_ context.Context, server netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
+		udpOrder = append(udpOrder, server)
+		if server == servers[0] {
+			return netip.Addr{}, "", errors.New("DNS read: i/o timeout")
+		}
+		return want, "", nil
+	}
+	tcp := func(_ context.Context, _ netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
+		tcpCalls++
+		return netip.Addr{}, "", errors.New("unexpected TCP fallback")
+	}
+
+	addr, cname, err := queryServersUntilAnswerWithTCPFallback(context.Background(), servers, qname, "dyn-ar-cdb01.dynartis.local", time.Millisecond, udp, tcp)
+	if err != nil {
+		t.Fatalf("expected healthy second UDP server to resolve before TCP fallback, got: %v", err)
+	}
+	if addr != want {
+		t.Errorf("addr: got %v want %v", addr, want)
+	}
+	if cname != "" {
+		t.Errorf("unexpected cname %q", cname)
+	}
+	if tcpCalls != 0 {
+		t.Fatalf("TCP fallback should not run before trying later UDP servers; got %d TCP call(s)", tcpCalls)
+	}
+	if len(udpOrder) != 2 || udpOrder[0] != servers[0] || udpOrder[1] != servers[1] {
+		t.Fatalf("UDP order: got %v want %v", udpOrder, servers)
+	}
+}
+
+func TestQueryServersUntilAnswerWithTCPFallback_TruncatedUDPUsesTCPFallback(t *testing.T) {
+	servers := []netip.Addr{netip.MustParseAddr("10.72.0.1")}
+	qname := dnsmessage.MustNewName("large.dynartis.local.")
+	want := netip.AddrFrom4([4]byte{10, 155, 50, 88})
+
+	var tcpCalls int
+	udp := func(_ context.Context, _ netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
 		return netip.Addr{}, "", errDNSUDPTruncated
 	}
-	tcp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, _ time.Duration) (netip.Addr, string, error) {
+	tcp := func(_ context.Context, _ netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
 		tcpCalls++
 		return want, "", nil
 	}
 
-	addr, cname, err := queryAOneWithFallback(context.Background(), server, qname, query, 0x1234, time.Second, udp, tcp)
+	addr, cname, err := queryServersUntilAnswerWithTCPFallback(context.Background(), servers, qname, "large.dynartis.local", time.Millisecond, udp, tcp)
 	if err != nil {
 		t.Fatalf("expected TCP fallback to resolve after truncated UDP response, got: %v", err)
 	}
@@ -295,19 +308,21 @@ func TestQueryAOneWithFallback_TruncatedUDPUsesTCPFallback(t *testing.T) {
 	}
 }
 
-func TestQueryAOneWithFallback_UDPTimeoutAndTCPTimeoutReportsBoth(t *testing.T) {
-	server := netip.MustParseAddr("10.72.0.1")
+func TestQueryServersUntilAnswerWithTCPFallback_UDPTimeoutAndTCPTimeoutReportsBoth(t *testing.T) {
+	servers := []netip.Addr{netip.MustParseAddr("10.72.0.1")}
 	qname := dnsmessage.MustNewName("dyn-ar-cdb01.dynartis.local.")
-	query := []byte{0x12, 0x34}
 
-	udp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, _ time.Duration) (netip.Addr, string, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	udp := func(_ context.Context, _ netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
 		return netip.Addr{}, "", errors.New("DNS read: i/o timeout")
 	}
-	tcp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, _ time.Duration) (netip.Addr, string, error) {
+	tcp := func(_ context.Context, _ netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
+		cancel()
 		return netip.Addr{}, "", errors.New("DNS-TCP read length: i/o timeout")
 	}
 
-	_, _, err := queryAOneWithFallback(context.Background(), server, qname, query, 0x1234, time.Second, udp, tcp)
+	_, _, err := queryServersUntilAnswerWithTCPFallback(ctx, servers, qname, "dyn-ar-cdb01.dynartis.local", time.Millisecond, udp, tcp)
 	if err == nil {
 		t.Fatal("expected an error when both UDP and TCP DNS fail")
 	}
@@ -318,21 +333,20 @@ func TestQueryAOneWithFallback_UDPTimeoutAndTCPTimeoutReportsBoth(t *testing.T) 
 	}
 }
 
-func TestQueryAOneWithFallback_AuthoritativeNegativeDoesNotTryTCP(t *testing.T) {
-	server := netip.MustParseAddr("10.72.0.1")
+func TestQueryServersUntilAnswerWithTCPFallback_AuthoritativeNegativeDoesNotTryTCP(t *testing.T) {
+	servers := []netip.Addr{netip.MustParseAddr("10.72.0.1")}
 	qname := dnsmessage.MustNewName("nope.dynartis.local.")
-	query := []byte{0x12, 0x34}
 
 	var tcpCalls int
-	udp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, _ time.Duration) (netip.Addr, string, error) {
+	udp := func(_ context.Context, _ netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
 		return netip.Addr{}, "", &dnsResponseError{errors.New("DNS rcode NameError")}
 	}
-	tcp := func(_ context.Context, _ netip.Addr, _ []byte, _ uint16, _ time.Duration) (netip.Addr, string, error) {
+	tcp := func(_ context.Context, _ netip.Addr, _ dnsmessage.Name, _ time.Duration) (netip.Addr, string, error) {
 		tcpCalls++
 		return netip.Addr{}, "", nil
 	}
 
-	_, _, err := queryAOneWithFallback(context.Background(), server, qname, query, 0x1234, time.Second, udp, tcp)
+	_, _, err := queryServersUntilAnswerWithTCPFallback(context.Background(), servers, qname, "nope.dynartis.local", time.Millisecond, udp, tcp)
 	if err == nil {
 		t.Fatal("expected authoritative negative response to fail")
 	}
