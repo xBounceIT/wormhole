@@ -48,3 +48,105 @@ internal static class BitwardenBrowserWebViewProfile
             .ToArray();
     }
 }
+
+internal sealed class BitwardenWebDataOriginLeaseRegistry
+{
+    private readonly object _gate = new();
+    private readonly Dictionary<BitwardenWebDataOriginKey, int> _activeOrigins = new();
+
+    public BitwardenWebDataOriginLease Register(string userDataFolder, IEnumerable<string> origins)
+    {
+        var lease = new BitwardenWebDataOriginLease(this, NormalizeUserDataFolder(userDataFolder));
+        AddOrigins(lease, origins);
+        return lease;
+    }
+
+    internal void AddOrigins(BitwardenWebDataOriginLease lease, IEnumerable<string> origins)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        ArgumentNullException.ThrowIfNull(origins);
+
+        lock (_gate)
+        {
+            AddOriginsLocked(lease, origins);
+        }
+    }
+
+    private void AddOriginsLocked(BitwardenWebDataOriginLease lease, IEnumerable<string> origins)
+    {
+        if (lease.IsReleased) return;
+
+        foreach (var origin in origins)
+        {
+            var normalizedOrigin = NormalizeOrigin(origin);
+            if (normalizedOrigin is null || !lease.Origins.Add(normalizedOrigin)) continue;
+
+            var key = new BitwardenWebDataOriginKey(lease.UserDataFolder, normalizedOrigin);
+            _activeOrigins[key] = _activeOrigins.TryGetValue(key, out var count) ? count + 1 : 1;
+        }
+    }
+
+    internal IReadOnlyList<string> Release(BitwardenWebDataOriginLease lease, IEnumerable<string>? latestOrigins = null)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+
+        lock (_gate)
+        {
+            if (lease.IsReleased) return Array.Empty<string>();
+            if (latestOrigins is not null) AddOriginsLocked(lease, latestOrigins);
+
+            lease.IsReleased = true;
+            var clearableOrigins = new List<string>();
+            foreach (var origin in lease.Origins)
+            {
+                var key = new BitwardenWebDataOriginKey(lease.UserDataFolder, origin);
+                if (!_activeOrigins.TryGetValue(key, out var count)) continue;
+
+                if (count <= 1)
+                {
+                    _activeOrigins.Remove(key);
+                    clearableOrigins.Add(origin);
+                }
+                else
+                {
+                    _activeOrigins[key] = count - 1;
+                }
+            }
+
+            lease.Origins.Clear();
+            return clearableOrigins;
+        }
+    }
+
+    private static string NormalizeUserDataFolder(string userDataFolder)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(userDataFolder);
+        return Path.GetFullPath(userDataFolder)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            .ToUpperInvariant();
+    }
+
+    private static string? NormalizeOrigin(string? origin) =>
+        string.IsNullOrWhiteSpace(origin) ? null : origin.Trim().ToLowerInvariant();
+
+    private readonly record struct BitwardenWebDataOriginKey(string UserDataFolder, string Origin);
+}
+
+internal sealed class BitwardenWebDataOriginLease
+{
+    internal BitwardenWebDataOriginLease(BitwardenWebDataOriginLeaseRegistry registry, string userDataFolder)
+    {
+        Registry = registry;
+        UserDataFolder = userDataFolder;
+    }
+
+    internal BitwardenWebDataOriginLeaseRegistry Registry { get; }
+    internal string UserDataFolder { get; }
+    internal HashSet<string> Origins { get; } = new(StringComparer.OrdinalIgnoreCase);
+    internal bool IsReleased { get; set; }
+
+    public void AddOrigins(IEnumerable<string> origins) => Registry.AddOrigins(this, origins);
+
+    public IReadOnlyList<string> Release(IEnumerable<string>? latestOrigins = null) =>
+        Registry.Release(this, latestOrigins);
+}
