@@ -37,6 +37,7 @@ internal static class AppPaths
     private static readonly string BitwardenBrowserExtensionDirectory = Path.Combine(AppDataDirectory, "extensions", "bitwarden");
     private static readonly string BitwardenBrowserExtensionDownloadDirectory = Path.Combine(AppDataDirectory, "cache", "bitwarden-browser-extension");
     private static readonly string BitwardenBrowserExtensionWebView2UserDataDirectory = Path.Combine(AppDataDirectory, "bitwarden-browser-webview2");
+    private static readonly string BitwardenIconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "Bitwarden", "bitwarden-icon.png");
     private static readonly string WebAssetsDirectory = Path.Combine(AppContext.BaseDirectory, "Assets", "web");
     private static readonly string WgProxyExecutablePath = Path.Combine(AppContext.BaseDirectory, "wormhole-wgproxy.exe");
     private static readonly string FortiProxyExecutablePath = Path.Combine(AppContext.BaseDirectory, "wormhole-fortiproxy.exe");
@@ -135,6 +136,8 @@ internal static class AppPaths
 
     public static string GetBitwardenBrowserExtensionWebView2UserDataDirectory(string contextFolderName) =>
         Path.Combine(BitwardenBrowserExtensionWebView2UserDataDirectory, contextFolderName);
+
+    public static string GetBitwardenIconPath() => BitwardenIconPath;
 
     public static string GetWebAssetsDirectory() => WebAssetsDirectory;
 

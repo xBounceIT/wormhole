@@ -104,14 +104,19 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Remove="Assets\Bitwarden\bitwarden-icon.png" />
+    <None Remove="Assets\Bitwarden\bitwarden-icon.png" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Update="Assets\Wormhole.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </None>
-    <None Update="Assets\Bitwarden\bitwarden-icon.png">
+    <Content Include="Assets\Bitwarden\bitwarden-icon.png">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-    </None>
+    </Content>
     <None Update="Assets\web\**\*">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

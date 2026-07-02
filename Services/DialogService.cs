@@ -48,14 +48,6 @@ public sealed class DialogService : IDialogService
 
     public Task ShowBitwardenOnboardingNoticeAsync(string title, string message)
     {
-        var icon = new Image
-        {
-            Source = new BitmapImage(new Uri("ms-appx:///Assets/Bitwarden/bitwarden-icon.png")),
-            Stretch = Stretch.Uniform,
-            Width = 50,
-            Height = 50,
-        };
-
         var iconBadge = new Border
         {
             Width = 88,
@@ -64,7 +56,7 @@ public sealed class DialogService : IDialogService
             Background = new SolidColorBrush(Colors.White),
             Padding = new Thickness(17),
             HorizontalAlignment = HorizontalAlignment.Center,
-            Child = icon,
+            Child = CreateBitwardenOnboardingIcon(),
         };
 
         var titleBlock = new TextBlock
@@ -111,6 +103,37 @@ public sealed class DialogService : IDialogService
         dialog.Resources["ContentDialogMinWidth"] = targetWidth;
         dialog.Resources["ContentDialogMaxWidth"] = targetWidth;
         return ShowDialogAsync(dialog);
+    }
+
+    private static UIElement CreateBitwardenOnboardingIcon()
+    {
+        var iconPath = AppPaths.GetBitwardenIconPath();
+        if (File.Exists(iconPath))
+        {
+            try
+            {
+                return new Image
+                {
+                    Source = new BitmapImage(new Uri(Path.GetFullPath(iconPath))),
+                    Stretch = Stretch.Uniform,
+                    Width = 50,
+                    Height = 50,
+                };
+            }
+            catch
+            {
+                // Fall through to a visible bundled-asset failure state.
+            }
+        }
+
+        return new FontIcon
+        {
+            Glyph = "\uE192",
+            FontSize = 40,
+            Foreground = new SolidColorBrush(Windows.UI.Color.FromArgb(0xFF, 0x17, 0x5D, 0xDC)),
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
     }
 
     public async Task<bool> ConfirmAsync(string title, string message, string primaryText = "Yes", string closeText = "No")
