@@ -1407,11 +1407,10 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
 
     private async Task<bool> AskMcpApprovalAsync(IDialogService dialog)
     {
-        var host = Profile?.Host ?? "(unknown host)";
-        var user = Profile?.Username ?? "(unknown user)";
+        var connectionTitle = Profile is { } profile ? GetProfileTitle(profile) : "(unknown connection)";
         return await dialog.ConfirmAsync(
             "Allow AI agent control?",
-            $"An AI agent is requesting control of the SSH session to {user}@{host}.\n\n" +
+            $"An AI agent is requesting control of the SSH session \"{connectionTitle}\".\n\n" +
             "If you allow it, the agent can run commands and send keystrokes in this session for " +
             "as long as the tab stays open. Allow?",
             "Allow", "Deny").ConfigureAwait(true);
