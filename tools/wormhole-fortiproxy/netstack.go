@@ -307,9 +307,11 @@ func queryServersUntilAnswerWithTCPFallback(ctx context.Context, servers []netip
 				continue
 			}
 
+			padSlot := true
 			if tcpFallback != nil {
 				tcpCandidates = append(tcpCandidates, dnsTransportFailure{server: srv, err: err})
 				if errors.Is(err, errDNSUDPTruncated) {
+					padSlot = false
 					logf("netstack: DNS A query for %q via %s returned a truncated UDP response; TCP fallback queued", label, srv)
 				} else {
 					logf("netstack: DNS A query for %q via %s failed over UDP (%v); TCP fallback queued", label, srv, err)
@@ -320,7 +322,9 @@ func queryServersUntilAnswerWithTCPFallback(ctx context.Context, servers []netip
 				logf("netstack: DNS A query for %q via %s failed (%v); retransmitting", label, srv, err)
 			}
 
-			waitDNSQuerySlot(ctx, slotStart, perTry)
+			if padSlot {
+				waitDNSQuerySlot(ctx, slotStart, perTry)
+			}
 			if ctx.Err() != nil {
 				break
 			}

@@ -293,7 +293,9 @@ func TestQueryServersUntilAnswerWithTCPFallback_TruncatedUDPUsesTCPFallback(t *t
 		return want, "", nil
 	}
 
-	addr, cname, err := queryServersUntilAnswerWithTCPFallback(context.Background(), servers, qname, "large.dynartis.local", time.Millisecond, udp, tcp)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	addr, cname, err := queryServersUntilAnswerWithTCPFallback(ctx, servers, qname, "large.dynartis.local", 50*time.Millisecond, udp, tcp)
 	if err != nil {
 		t.Fatalf("expected TCP fallback to resolve after truncated UDP response, got: %v", err)
 	}
