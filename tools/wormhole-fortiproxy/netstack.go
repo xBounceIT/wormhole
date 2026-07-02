@@ -172,6 +172,8 @@ type dnsResponseError struct{ err error }
 func (e *dnsResponseError) Error() string { return e.err.Error() }
 func (e *dnsResponseError) Unwrap() error { return e.err }
 
+var errDNSUDPTruncated = errors.New("DNS UDP response truncated")
+
 // answerOrResponseErr adapts a parseDNSResponse outcome to queryAOne's return convention: a
 // parse/rcode/no-records failure means the server answered with something unusable, so it is
 // marked as a (non-retryable) dnsResponseError rather than transport loss. Shared by the UDP
@@ -184,22 +186,33 @@ func answerOrResponseErr(addr netip.Addr, cname string, err error) (netip.Addr, 
 }
 
 // resolveViaVPN resolves a hostname to an IPv4 address using the gateway-pushed DNS servers,
-// retransmitting through dropped datagrams. It wires the production queryAOne into
-// resolveViaVPNQuery; the split exists so the retransmit logic is unit-testable.
+// retransmitting through dropped datagrams. It wires UDP and TCP query functions into
+// resolveViaVPNQueryWithFallback; the split exists so the retransmit logic is unit-testable.
 func resolveViaVPN(ctx context.Context, s *stack.Stack, servers []netip.Addr, host string) (netip.Addr, error) {
-	return resolveViaVPNQuery(ctx, servers, host, func(ctx context.Context, srv netip.Addr, qname dnsmessage.Name, timeout time.Duration) (netip.Addr, string, error) {
-		return queryAOne(ctx, s, srv, qname, timeout)
-	})
+	return resolveViaVPNQueryWithFallback(
+		ctx,
+		servers,
+		host,
+		func(ctx context.Context, srv netip.Addr, qname dnsmessage.Name, timeout time.Duration) (netip.Addr, string, error) {
+			return queryAOne(ctx, s, srv, qname, timeout)
+		},
+		func(ctx context.Context, srv netip.Addr, qname dnsmessage.Name, timeout time.Duration) (netip.Addr, string, error) {
+			return queryAOneTCPByName(ctx, s, srv, qname, timeout)
+		})
 }
 
 // resolveViaVPNQuery drives the CNAME-following lookup loop on top of an injectable query
-// function. Each hop is resolved by queryServersUntilAnswer, which cycles the DNS servers and
-// retransmits on packet loss until one answers or the overall budget elapses.
+// function. Each hop is resolved by queryServersUntilAnswerWithTCPFallback, which cycles the
+// DNS servers and retransmits on packet loss until one answers or the overall budget elapses.
 //
 // The whole lookup is bounded by an OVERALL deadline (well under the SOCKS5 dial budget) so a
 // pathological configuration of many lossy servers can't drag a single hostname resolution
 // past the SLO the SOCKS5 client expects.
 func resolveViaVPNQuery(ctx context.Context, servers []netip.Addr, host string, query dnsQueryFunc) (netip.Addr, error) {
+	return resolveViaVPNQueryWithFallback(ctx, servers, host, query, nil)
+}
+
+func resolveViaVPNQueryWithFallback(ctx context.Context, servers []netip.Addr, host string, query dnsQueryFunc, tcpFallback dnsQueryFunc) (netip.Addr, error) {
 	const (
 		// perTryTimeout is intentionally short: internal DNS over the tunnel answers in well
 		// under a second, so anything past this is almost certainly a lost datagram — re-send
@@ -230,7 +243,7 @@ func resolveViaVPNQuery(ctx context.Context, servers []netip.Addr, host string, 
 			return netip.Addr{}, fmt.Errorf("DNS name %q: %w", current, err)
 		}
 
-		addr, cname, err := queryServersUntilAnswer(ctx, servers, qname, current, perTryTimeout, query)
+		addr, cname, err := queryServersUntilAnswerWithTCPFallback(ctx, servers, qname, current, perTryTimeout, query, tcpFallback)
 		if err != nil {
 			return netip.Addr{}, err
 		}
@@ -261,9 +274,22 @@ func resolveViaVPNQuery(ctx context.Context, servers []netip.Addr, host string, 
 // answered; re-asking it won't help, so once every server has given a response error in a
 // round we stop and fail fast instead of burning the whole budget on a name that doesn't exist.
 func queryServersUntilAnswer(ctx context.Context, servers []netip.Addr, qname dnsmessage.Name, label string, perTry time.Duration, query dnsQueryFunc) (netip.Addr, string, error) {
+	return queryServersUntilAnswerWithTCPFallback(ctx, servers, qname, label, perTry, query, nil)
+}
+
+type dnsTransportFailure struct {
+	server netip.Addr
+	err    error
+}
+
+// queryServersUntilAnswerWithTCPFallback first gives every VPN DNS server a full UDP slot.
+// Only after that UDP round fails does it try DNS-over-TCP for the servers that had transport
+// loss or truncation, so a slow-but-valid UDP resolver is not preempted by TCP fallback.
+func queryServersUntilAnswerWithTCPFallback(ctx context.Context, servers []netip.Addr, qname dnsmessage.Name, label string, perTry time.Duration, query dnsQueryFunc, tcpFallback dnsQueryFunc) (netip.Addr, string, error) {
 	var lastErr error
 	for ctx.Err() == nil {
 		sawLoss := false
+		var tcpCandidates []dnsTransportFailure
 		for _, srv := range servers {
 			slotStart := time.Now()
 			addr, cname, err := query(ctx, srv, qname, perTry)
@@ -281,24 +307,58 @@ func queryServersUntilAnswer(ctx context.Context, servers []netip.Addr, qname dn
 				continue
 			}
 
-			// No reply came back — treat as a dropped datagram and retransmit.
-			sawLoss = true
-			logf("netstack: DNS A query for %q via %s failed (%v); retransmitting", label, srv, err)
-			// Pad out the slot so an *instant* transport failure (a dial error returning well
-			// before perTry) can't busy-spin the loop or hammer the gateway. A genuine read
-			// timeout already consumed the slot, so this is a no-op in the common loss case.
-			if remain := perTry - time.Since(slotStart); remain > 0 {
-				t := time.NewTimer(remain)
-				select {
-				case <-ctx.Done():
-					t.Stop()
-				case <-t.C:
+			padSlot := true
+			if tcpFallback != nil {
+				tcpCandidates = append(tcpCandidates, dnsTransportFailure{server: srv, err: err})
+				if errors.Is(err, errDNSUDPTruncated) {
+					padSlot = false
+					logf("netstack: DNS A query for %q via %s returned a truncated UDP response; TCP fallback queued", label, srv)
+				} else {
+					logf("netstack: DNS A query for %q via %s failed over UDP (%v); TCP fallback queued", label, srv, err)
 				}
+			} else {
+				// No reply came back — treat as a dropped datagram and retransmit.
+				sawLoss = true
+				logf("netstack: DNS A query for %q via %s failed (%v); retransmitting", label, srv, err)
+			}
+
+			if padSlot {
+				waitDNSQuerySlot(ctx, slotStart, perTry)
 			}
 			if ctx.Err() != nil {
 				break
 			}
 		}
+
+		if ctx.Err() == nil && tcpFallback != nil {
+			for _, candidate := range tcpCandidates {
+				slotStart := time.Now()
+				logf("netstack: DNS A query for %q via %s trying TCP fallback", label, candidate.server)
+				addr, cname, err := tcpFallback(ctx, candidate.server, qname, perTry)
+				if err == nil {
+					logf("netstack: DNS A query for %q via %s succeeded over TCP fallback", label, candidate.server)
+					return addr, cname, nil
+				}
+
+				var respErr *dnsResponseError
+				if errors.As(err, &respErr) {
+					lastErr = fmt.Errorf("%s TCP fallback: %w", candidate.server, err)
+					logf("netstack: DNS A query for %q via %s TCP fallback was rejected (%v)", label, candidate.server, err)
+					continue
+				}
+
+				sawLoss = true
+				lastErr = fmt.Errorf("%s: UDP failed (%v); TCP fallback failed (%w)", candidate.server, candidate.err, err)
+				logf("netstack: DNS A query for %q via %s TCP fallback failed (%v)", label, candidate.server, err)
+				waitDNSQuerySlot(ctx, slotStart, perTry)
+				if ctx.Err() != nil {
+					break
+				}
+			}
+		} else if ctx.Err() != nil && len(tcpCandidates) > 0 {
+			sawLoss = true
+		}
+
 		// Only retransmit when at least one server failed to answer at all. If every server
 		// returned an authoritative negative, more rounds can't change the outcome.
 		if !sawLoss {
@@ -307,6 +367,7 @@ func queryServersUntilAnswer(ctx context.Context, servers []netip.Addr, qname dn
 	}
 
 	if lastErr != nil {
+		logf("netstack: DNS A query for %q failed after exhausting VPN DNS servers: %v", label, lastErr)
 		return netip.Addr{}, "", lastErr
 	}
 	// lastErr is nil only when no query ran at all — i.e. servers was empty (callers guard
@@ -318,19 +379,24 @@ func queryServersUntilAnswer(ctx context.Context, servers []netip.Addr, qname dn
 	return netip.Addr{}, "", errors.New("no DNS servers configured")
 }
 
-// queryAOne sends a single DNS A-record query to one server over UDP via the netstack.
-// Returns (addr, "", nil) if an A record is found, (zero, cname, nil) if the answer section
-// contains only CNAMEs (caller follows the chain via resolveViaVPNQuery's outer loop), or an
-// error on transport/parse failure. Bounded by the per-try timeout regardless of the caller's
-// ctx deadline (which is the OVERALL lookup budget). The transaction ID is randomly
-// generated per query so responses can't be cross-contaminated between concurrent lookups.
-func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dnsmessage.Name, timeout time.Duration) (netip.Addr, string, error) {
-	if !server.Is4() {
-		return netip.Addr{}, "", fmt.Errorf("DNS server %v is not IPv4", server)
+func waitDNSQuerySlot(ctx context.Context, slotStart time.Time, perTry time.Duration) {
+	// Pad out the slot so an *instant* transport failure (a dial error returning well
+	// before perTry) can't busy-spin the loop or hammer the gateway. A genuine read
+	// timeout already consumed the slot, so this is a no-op in the common loss case.
+	if remain := perTry - time.Since(slotStart); remain > 0 {
+		t := time.NewTimer(remain)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+		case <-t.C:
+		}
 	}
+}
+
+func packAQuery(qname dnsmessage.Name) ([]byte, uint16, error) {
 	var txid [2]byte
 	if _, err := rand.Read(txid[:]); err != nil {
-		return netip.Addr{}, "", fmt.Errorf("DNS txid: %w", err)
+		return nil, 0, fmt.Errorf("DNS txid: %w", err)
 	}
 	msg := dnsmessage.Message{
 		Header: dnsmessage.Header{
@@ -346,9 +412,38 @@ func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dns
 	}
 	wire, err := msg.Pack()
 	if err != nil {
-		return netip.Addr{}, "", fmt.Errorf("DNS pack: %w", err)
+		return nil, 0, fmt.Errorf("DNS pack: %w", err)
 	}
+	return wire, msg.Header.ID, nil
+}
 
+// queryAOne sends a single DNS A-record query to one server over UDP via the VPN netstack.
+func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dnsmessage.Name, timeout time.Duration) (netip.Addr, string, error) {
+	if !server.Is4() {
+		return netip.Addr{}, "", fmt.Errorf("DNS server %v is not IPv4", server)
+	}
+	wire, txid, err := packAQuery(qname)
+	if err != nil {
+		return netip.Addr{}, "", err
+	}
+	return queryAOneUDP(ctx, s, server, wire, txid, timeout)
+}
+
+func queryAOneTCPByName(ctx context.Context, s *stack.Stack, server netip.Addr, qname dnsmessage.Name, timeout time.Duration) (netip.Addr, string, error) {
+	if !server.Is4() {
+		return netip.Addr{}, "", fmt.Errorf("DNS server %v is not IPv4", server)
+	}
+	wire, txid, err := packAQuery(qname)
+	if err != nil {
+		return netip.Addr{}, "", err
+	}
+	return queryAOneTCP(ctx, s, server, wire, txid, timeout)
+}
+
+// queryAOneUDP sends one DNS A-record query over UDP via the netstack. It returns
+// errDNSUDPTruncated when the server sets the TC bit so queryServersUntilAnswerWithTCPFallback
+// can retry the name over DNS-over-TCP.
+func queryAOneUDP(ctx context.Context, s *stack.Stack, server netip.Addr, query []byte, txid uint16, timeout time.Duration) (netip.Addr, string, error) {
 	fa := tcpip.FullAddress{
 		NIC:  1,
 		Addr: tcpip.AddrFromSlice(server.AsSlice()),
@@ -371,7 +466,7 @@ func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dns
 		return netip.Addr{}, "", fmt.Errorf("DNS deadline: %w", err)
 	}
 
-	if _, err := conn.Write(wire); err != nil {
+	if _, err := conn.Write(query); err != nil {
 		return netip.Addr{}, "", fmt.Errorf("DNS write: %w", err)
 	}
 
@@ -394,22 +489,22 @@ func queryAOne(ctx context.Context, s *stack.Stack, server netip.Addr, qname dns
 		// whole lookup with no retransmit, reopening the intermittent-failure hole this
 		// resolver exists to close. The conn deadline bounds the loop, so even a flood of
 		// strays just falls through to a (retryable) read timeout.
-		if n < 2 || binary.BigEndian.Uint16(buf[0:2]) != msg.Header.ID {
+		if n < 2 || binary.BigEndian.Uint16(buf[0:2]) != txid {
 			continue
 		}
 
 		// Peek at the TC (truncation) flag at bit 9 of the 16-bit flags word (byte 2 high bits)
-		// and retry over TCP if set. Without this, large internal records (many A's, big TXT)
-		// silently get truncated answers — the parser would return whatever fit in 4 KB without
-		// signalling truncation.
+		// and let queryServersUntilAnswerWithTCPFallback retry over TCP if set. Without this, large internal
+		// records (many A's, big TXT) silently get truncated answers — the parser would return
+		// whatever fit in 4 KB without signalling truncation.
 		if n >= 3 && buf[2]&0x02 != 0 {
-			return queryAOneTCP(ctx, s, server, wire, msg.Header.ID, timeout)
+			return netip.Addr{}, "", errDNSUDPTruncated
 		}
 
 		// Our reply (txid already matched above). A parse/rcode/no-records failure is an
 		// authoritative response — the server answered — so answerOrResponseErr marks it
 		// non-retryable rather than letting the loop re-query a name already resolved (or denied).
-		return answerOrResponseErr(parseDNSResponse(buf[:n], msg.Header.ID))
+		return answerOrResponseErr(parseDNSResponse(buf[:n], txid))
 	}
 }
 
