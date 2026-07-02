@@ -106,19 +106,15 @@ public sealed class BitwardenCliVaultClientTests
 
         var items = await client.SearchLoginItemsAsync("srv", "SESSION");
 
-        Assert.Collection(
-            runner.Requests[0].Arguments,
-            arg => Assert.Equal("sync", arg),
-            arg => Assert.Equal("--session", arg),
-            arg => Assert.Equal("SESSION", arg));
+        Assert.Collection(runner.Requests[0].Arguments, arg => Assert.Equal("sync", arg));
+        Assert.Equal("SESSION", runner.Requests[0].Environment["BW_SESSION"]);
         Assert.Collection(
             runner.Requests[1].Arguments,
             arg => Assert.Equal("list", arg),
             arg => Assert.Equal("items", arg),
             arg => Assert.Equal("--search", arg),
-            arg => Assert.Equal("srv", arg),
-            arg => Assert.Equal("--session", arg),
-            arg => Assert.Equal("SESSION", arg));
+            arg => Assert.Equal("srv", arg));
+        Assert.Equal("SESSION", runner.Requests[1].Environment["BW_SESSION"]);
         Assert.Collection(
             items,
             item =>
@@ -143,7 +139,7 @@ public sealed class BitwardenCliVaultClientTests
         var runner = new FakeRunner(new BitwardenProcessResult(
             1,
             string.Empty,
-            "failed command --session SESSION-SECRET --code 123456 WORMHOLE_BW_PASSWORD=master-secret"));
+            "failed command --session SESSION-SECRET --code 123456 BW_SESSION=SESSION-SECRET WORMHOLE_BW_PASSWORD=master-secret"));
         var client = NewClient(runner);
 
         var ex = await Assert.ThrowsAsync<BitwardenVaultException>(() =>
@@ -153,6 +149,7 @@ public sealed class BitwardenCliVaultClientTests
         Assert.DoesNotContain("master-secret", ex.Message);
         Assert.DoesNotContain("123456", ex.Message);
         Assert.Contains("--session [redacted]", ex.Message);
+        Assert.Contains("BW_SESSION=[redacted]", ex.Message);
         Assert.Contains("--code [redacted]", ex.Message);
         Assert.Contains("WORMHOLE_BW_PASSWORD=[redacted]", ex.Message);
     }

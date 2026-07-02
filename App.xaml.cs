@@ -271,6 +271,45 @@ public partial class App : Application
             Services.GetService<ILogger<App>>()?.LogDebug(
                 ex, "Could not clear the web-browser WebView2 user-data folder at startup (best-effort).");
         }
+
+        ClearBitwardenBrowserWebDataAtStartup();
+    }
+
+    private void ClearBitwardenBrowserWebDataAtStartup()
+    {
+        try
+        {
+            var root = AppPaths.GetBitwardenBrowserExtensionWebView2UserDataRoot();
+            if (!Directory.Exists(root)) return;
+
+            foreach (var profileDir in Directory.EnumerateDirectories(root))
+            {
+                foreach (var path in BitwardenBrowserWebViewProfile.GetEphemeralWebDataPaths(profileDir))
+                {
+                    TryDeleteBitwardenBrowserWebDataPath(path);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Services.GetService<ILogger<App>>()?.LogDebug(
+                ex, "Could not clear Bitwarden WebView2 browser data at startup (best-effort).");
+        }
+    }
+
+    private void TryDeleteBitwardenBrowserWebDataPath(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+            else if (File.Exists(path)) File.Delete(path);
+        }
+        catch (Exception ex)
+        {
+            Services.GetService<ILogger<App>>()?.LogDebug(
+                ex, "Could not clear Bitwarden WebView2 browser data path {Path} at startup (best-effort).",
+                path);
+        }
     }
 
     private static ServiceProvider ConfigureServices()

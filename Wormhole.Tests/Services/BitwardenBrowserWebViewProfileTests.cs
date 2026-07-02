@@ -29,4 +29,15 @@ public sealed class BitwardenBrowserWebViewProfileTests
         Assert.NotEqual(direct, directIgnoreCert);
         Assert.NotEqual(direct, proxy);
     }
+
+    [Fact]
+    public void EphemeralWebDataPaths_ClearWebStateWithoutExtensionStorage()
+    {
+        var paths = BitwardenBrowserWebViewProfile.GetEphemeralWebDataPaths(@"C:\profile");
+
+        Assert.Contains(Path.Combine(@"C:\profile", "Default", "Network", "Cookies"), paths);
+        Assert.Contains(Path.Combine(@"C:\profile", "Default", "Cache"), paths);
+        Assert.DoesNotContain(paths, path => path.Contains("Extension", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(paths, path => path.Contains("Local Extension Settings", StringComparison.OrdinalIgnoreCase));
+    }
 }

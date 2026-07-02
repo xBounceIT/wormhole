@@ -8,7 +8,9 @@ namespace Wormhole.Services.Bitwarden;
 public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
 {
     private const string PasswordEnvVar = "WORMHOLE_BW_PASSWORD";
+    private const string SessionEnvVar = "BW_SESSION";
     private static readonly Regex SessionArgumentRegex = new(@"(?i)(--session(?:\s+|=))\S+", RegexOptions.Compiled);
+    private static readonly Regex SessionEnvRegex = new(@"(?i)(BW_SESSION(?:\s*=\s*))\S+", RegexOptions.Compiled);
     private static readonly Regex PasswordEnvRegex = new(@"(?i)(WORMHOLE_BW_PASSWORD(?:\s*=\s*))\S+", RegexOptions.Compiled);
     private static readonly Regex TwoFactorCodeArgumentRegex = new(@"(?i)(--code(?:\s+|=))\S+", RegexOptions.Compiled);
 
@@ -114,9 +116,7 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
             args.Add("--search");
             args.Add(query.Trim());
         }
-        AddSession(args, sessionKey);
-
-        var result = await RunAsync(args, null, cancellationToken).ConfigureAwait(false);
+        var result = await RunAsync(args, BuildSessionEnvironment(sessionKey), cancellationToken).ConfigureAwait(false);
         using var document = ParseJsonDocument(result.StandardOutput, "Bitwarden item list output was not valid JSON.");
         if (document.RootElement.ValueKind != JsonValueKind.Array)
         {
@@ -138,8 +138,7 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(itemId);
         var args = new List<string> { "get", "item", itemId };
-        AddSession(args, sessionKey);
-        var result = await TryRunAsync(args, null, cancellationToken).ConfigureAwait(false);
+        var result = await TryRunAsync(args, BuildSessionEnvironment(sessionKey), cancellationToken).ConfigureAwait(false);
         if (result.ExitCode != 0)
         {
             if (IsNotFound(result.StandardError)) return null;
@@ -153,8 +152,7 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
     public async Task SyncAsync(string? sessionKey, CancellationToken cancellationToken = default)
     {
         var args = new List<string> { "sync" };
-        AddSession(args, sessionKey);
-        await RunAsync(args, null, cancellationToken).ConfigureAwait(false);
+        await RunAsync(args, BuildSessionEnvironment(sessionKey), cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<BitwardenProcessResult> RunAsync(
@@ -178,12 +176,10 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
             ? "bw"
             : _settings.Current.BitwardenCliPath.Trim();
 
-    private static void AddSession(List<string> args, string? sessionKey)
-    {
-        if (string.IsNullOrWhiteSpace(sessionKey)) return;
-        args.Add("--session");
-        args.Add(sessionKey);
-    }
+    private static Dictionary<string, string?>? BuildSessionEnvironment(string? sessionKey) =>
+        string.IsNullOrWhiteSpace(sessionKey)
+            ? null
+            : new Dictionary<string, string?> { [SessionEnvVar] = sessionKey };
 
     private static string ReadSessionKey(string standardOutput)
     {
@@ -210,6 +206,7 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
         if (string.IsNullOrWhiteSpace(value)) return string.Empty;
         var trimmed = value.Trim();
         var redacted = SessionArgumentRegex.Replace(trimmed, "$1[redacted]");
+        redacted = SessionEnvRegex.Replace(redacted, "$1[redacted]");
         redacted = TwoFactorCodeArgumentRegex.Replace(redacted, "$1[redacted]");
         redacted = PasswordEnvRegex.Replace(redacted, "$1[redacted]");
         return redacted.Length <= 500 ? redacted : redacted[..500];
