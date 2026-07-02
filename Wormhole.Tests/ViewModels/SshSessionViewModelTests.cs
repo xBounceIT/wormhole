@@ -1156,6 +1156,28 @@ public sealed class SshSessionViewModelTests
     }
 
     [Fact]
+    public async Task EnsureMcpApproved_DialogIdentifiesConnectionByName()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile() with
+        {
+            Name = "Production Bastion",
+            Username = "daniel",
+            Host = "192.0.2.10",
+        });
+        var dialog = new RecordingConfirmDialogService { ConfirmResult = true };
+
+        Assert.True(await vm.EnsureMcpApprovedAsync(dialog));
+
+        Assert.Equal("Allow AI agent control?", dialog.LastConfirmationTitle);
+        var message = Assert.IsType<string>(dialog.LastConfirmationMessage);
+        Assert.Contains("\"Production Bastion\"", message);
+        Assert.DoesNotContain("daniel@192.0.2.10", message);
+        Assert.Equal("Allow", dialog.LastConfirmationPrimaryText);
+        Assert.Equal("Deny", dialog.LastConfirmationCloseText);
+    }
+
+    [Fact]
     public async Task EnsureMcpApproved_Denied_IsStickyAndMemoized()
     {
         var vm = CreateViewModel();
@@ -1249,6 +1271,27 @@ public sealed class SshSessionViewModelTests
             Port = 22,
             Username = "daniel",
         };
+
+    private sealed class RecordingConfirmDialogService : FakeDialogService
+    {
+        public string? LastConfirmationTitle { get; private set; }
+        public string? LastConfirmationMessage { get; private set; }
+        public string? LastConfirmationPrimaryText { get; private set; }
+        public string? LastConfirmationCloseText { get; private set; }
+
+        public override Task<bool> ConfirmAsync(
+            string title,
+            string message,
+            string primaryText = "Yes",
+            string closeText = "No")
+        {
+            LastConfirmationTitle = title;
+            LastConfirmationMessage = message;
+            LastConfirmationPrimaryText = primaryText;
+            LastConfirmationCloseText = closeText;
+            return base.ConfirmAsync(title, message, primaryText, closeText);
+        }
+    }
 
     private sealed class FakeSshSessionService : ISshSessionService
     {
