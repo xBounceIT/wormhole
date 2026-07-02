@@ -92,16 +92,55 @@ public class UpdateViewModelTests
     }
 
     [Fact]
-    public async Task RunStartupCheckAsync_RecentLastCheck_DoesNotCheck()
+    public async Task RunStartupCheckAsync_RecentLastCheck_ChecksAnyway()
     {
         var updates = new FakeUpdateService();
         var settings = new FakeAppSettingsService();
         settings.Current.LastUpdateCheck = DateTimeOffset.UtcNow;
-        var vm = new UpdateViewModel(updates, settings, NullLogger<UpdateViewModel>.Instance);
+        var vm = new UpdateViewModel(updates, settings, NullLogger<UpdateViewModel>.Instance, isDevelopmentBuild: false);
+
+        await vm.RunStartupCheckAsync();
+
+        Assert.Equal(1, updates.CheckCount);
+    }
+
+    [Fact]
+    public async Task RunStartupCheckAsync_AutoCheckDisabled_DoesNotCheck()
+    {
+        var updates = new FakeUpdateService();
+        var settings = new FakeAppSettingsService();
+        settings.Current.AutoCheckForUpdates = false;
+        var vm = new UpdateViewModel(updates, settings, NullLogger<UpdateViewModel>.Instance, isDevelopmentBuild: false);
 
         await vm.RunStartupCheckAsync();
 
         Assert.Equal(0, updates.CheckCount);
+    }
+
+    [Fact]
+    public async Task RunStartupCheckAsync_DevelopmentBuild_DoesNotCheck()
+    {
+        var updates = new FakeUpdateService();
+        var vm = new UpdateViewModel(updates, new FakeAppSettingsService(), NullLogger<UpdateViewModel>.Instance, isDevelopmentBuild: true);
+
+        await vm.RunStartupCheckAsync();
+
+        Assert.Equal(0, updates.CheckCount);
+        Assert.Equal("Update checks are disabled in development builds.", vm.Status);
+    }
+
+    [Fact]
+    public async Task RunStartupCheckAsync_UpdateAvailable_ShowsInfoBar()
+    {
+        var updates = new FakeUpdateService { NextResult = UpdateWithNotes("## Changes\n\n- Startup checks") };
+        var vm = new UpdateViewModel(updates, new FakeAppSettingsService(), NullLogger<UpdateViewModel>.Instance, isDevelopmentBuild: false);
+
+        await vm.RunStartupCheckAsync();
+
+        Assert.Equal(1, updates.CheckCount);
+        Assert.True(vm.IsUpdateAvailable);
+        Assert.Equal("Wormhole 9.9.9 is available.", vm.InfoBarMessage);
+        Assert.Equal("Update available: 9.9.9", vm.Status);
     }
 
     private static (UpdateViewModel ViewModel, FakeUpdateService Updates) NewHarness()
@@ -130,6 +169,7 @@ public class UpdateViewModelTests
     {
         public UpdateCheckResult? LatestKnown { get; private set; }
         public int CheckCount { get; private set; }
+        public UpdateCheckResult NextResult { get; set; } = UpdateCheckResult.NoUpdate(new Version(0, 4, 0));
         public event EventHandler<UpdateCheckResult>? UpdateAvailable;
         public void Raise(UpdateCheckResult result)
         {
@@ -140,7 +180,9 @@ public class UpdateViewModelTests
         public Task<UpdateCheckResult> CheckAsync(CancellationToken cancellationToken = default)
         {
             CheckCount++;
-            return Task.FromResult(UpdateCheckResult.NoUpdate(new Version(0, 4, 0)));
+            if (!NextResult.CheckFailed)
+                LatestKnown = NextResult;
+            return Task.FromResult(NextResult);
         }
         public Task<string> DownloadInstallerAsync(UpdateCheckResult update, IProgress<double>? progress, CancellationToken cancellationToken = default) =>
             Task.FromResult(string.Empty);
