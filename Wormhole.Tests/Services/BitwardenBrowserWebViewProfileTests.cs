@@ -33,11 +33,29 @@ public sealed class BitwardenBrowserWebViewProfileTests
     [Fact]
     public void EphemeralWebDataPaths_ClearWebStateWithoutExtensionStorage()
     {
-        var paths = BitwardenBrowserWebViewProfile.GetEphemeralWebDataPaths(@"C:\profile");
+        var profile = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
+        var siteIndexedDb = Path.Combine(profile, "Default", "IndexedDB", "https_example.test_0.indexeddb.leveldb");
+        var extensionIndexedDb = Path.Combine(profile, "Default", "IndexedDB", "chrome-extension_abc_0.indexeddb.leveldb");
+        try
+        {
+            Directory.CreateDirectory(siteIndexedDb);
+            Directory.CreateDirectory(extensionIndexedDb);
 
-        Assert.Contains(Path.Combine(@"C:\profile", "Default", "Network", "Cookies"), paths);
-        Assert.Contains(Path.Combine(@"C:\profile", "Default", "Cache"), paths);
-        Assert.DoesNotContain(paths, path => path.Contains("Extension", StringComparison.OrdinalIgnoreCase));
-        Assert.DoesNotContain(paths, path => path.Contains("Local Extension Settings", StringComparison.OrdinalIgnoreCase));
+            var paths = BitwardenBrowserWebViewProfile.GetEphemeralWebDataPaths(profile);
+
+            Assert.Contains(Path.Combine(profile, "Default", "Network", "Cookies"), paths);
+            Assert.Contains(Path.Combine(profile, "Default", "Local Storage"), paths);
+            Assert.Contains(Path.Combine(profile, "Default", "Session Storage"), paths);
+            Assert.Contains(Path.Combine(profile, "Default", "Cache"), paths);
+            Assert.Contains(siteIndexedDb, paths);
+            Assert.DoesNotContain(extensionIndexedDb, paths);
+            Assert.DoesNotContain(Path.Combine(profile, "Default", "IndexedDB"), paths);
+            Assert.DoesNotContain(paths, path => path.Contains("Extension", StringComparison.OrdinalIgnoreCase));
+            Assert.DoesNotContain(paths, path => path.Contains("Local Extension Settings", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            if (Directory.Exists(profile)) Directory.Delete(profile, recursive: true);
+        }
     }
 }

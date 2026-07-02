@@ -16,6 +16,8 @@ internal static class BitwardenBrowserWebViewProfile
         Path.Combine("Default", "History"),
         Path.Combine("Default", "History-journal"),
         Path.Combine("Default", "Visited Links"),
+        Path.Combine("Default", "Local Storage"),
+        Path.Combine("Default", "Session Storage"),
         Path.Combine("Default", "Cache"),
         Path.Combine("Default", "Code Cache"),
         Path.Combine("Default", "GPUCache"),
@@ -43,9 +45,28 @@ internal static class BitwardenBrowserWebViewProfile
     public static IReadOnlyList<string> GetEphemeralWebDataPaths(string userDataFolder)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(userDataFolder);
-        return EphemeralWebDataRelativePaths
+        var paths = EphemeralWebDataRelativePaths
             .Select(relativePath => Path.Combine(userDataFolder, relativePath))
-            .ToArray();
+            .ToList();
+        AddIndexedDbWebDataPaths(userDataFolder, paths);
+        return paths;
+    }
+
+    private static void AddIndexedDbWebDataPaths(string userDataFolder, List<string> paths)
+    {
+        var indexedDbRoot = Path.Combine(userDataFolder, "Default", "IndexedDB");
+        if (!Directory.Exists(indexedDbRoot))
+        {
+            paths.Add(indexedDbRoot);
+            return;
+        }
+
+        foreach (var entry in Directory.EnumerateFileSystemEntries(indexedDbRoot))
+        {
+            var name = Path.GetFileName(entry);
+            if (name.StartsWith("chrome-extension_", StringComparison.OrdinalIgnoreCase)) continue;
+            paths.Add(entry);
+        }
     }
 }
 

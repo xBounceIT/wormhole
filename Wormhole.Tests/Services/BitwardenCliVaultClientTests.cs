@@ -22,7 +22,10 @@ public sealed class BitwardenCliVaultClientTests
         Assert.Equal(BitwardenVaultStatus.Locked, status.Status);
         Assert.Equal("alice@example.com", status.UserEmail);
         Assert.Equal("https://vault.bitwarden.com", status.ServerUrl);
-        Assert.Collection(runner.Requests.Single().Arguments, arg => Assert.Equal("status", arg));
+        var request = runner.Requests.Single();
+        Assert.Collection(request.Arguments, arg => Assert.Equal("status", arg));
+        Assert.True(request.Environment.ContainsKey("BW_SESSION"));
+        Assert.Null(request.Environment["BW_SESSION"]);
     }
 
     [Fact]

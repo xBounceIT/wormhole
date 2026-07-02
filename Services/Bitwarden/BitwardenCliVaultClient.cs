@@ -30,7 +30,7 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
 
     public async Task<BitwardenStatus> GetStatusAsync(CancellationToken cancellationToken = default)
     {
-        var result = await RunAsync(["status"], null, cancellationToken).ConfigureAwait(false);
+        var result = await RunAsync(["status"], BuildSessionEnvironment(sessionKey: null), cancellationToken).ConfigureAwait(false);
         using var document = ParseJsonDocument(result.StandardOutput, "Bitwarden status output was not valid JSON.");
         var root = document.RootElement;
         var status = ReadString(root, "status")?.ToLowerInvariant() switch
