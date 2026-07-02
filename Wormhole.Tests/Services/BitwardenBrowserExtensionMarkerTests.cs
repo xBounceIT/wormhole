@@ -39,6 +39,22 @@ public sealed class BitwardenBrowserExtensionMarkerTests
         Assert.False(BitwardenBrowserExtensionMarker.TryReadInstalledExtensionId(markerPath, extensionPath, out _));
     }
 
+    [Fact]
+    public async Task TryReadInstalledExtensionId_WithoutExpectedPath_ReturnsIdForStalePath()
+    {
+        using var temp = TempDirectory.Create();
+        var markerPath = BitwardenBrowserExtensionMarker.GetPath(Path.Combine(temp.Path, "profile"));
+        var extensionPath = Path.Combine(temp.Path, "extension-v1");
+        var updatedPath = Path.Combine(temp.Path, "extension-v2");
+        Directory.CreateDirectory(extensionPath);
+        Directory.CreateDirectory(updatedPath);
+
+        await BitwardenBrowserExtensionMarker.WriteAsync(markerPath, extensionPath, "old-id");
+
+        Assert.False(BitwardenBrowserExtensionMarker.TryReadInstalledExtensionId(markerPath, updatedPath, out _));
+        Assert.True(BitwardenBrowserExtensionMarker.TryReadInstalledExtensionId(markerPath, out var staleExtensionId));
+        Assert.Equal("old-id", staleExtensionId);
+    }
     private sealed class TempDirectory : IDisposable
     {
         private TempDirectory(string path) => Path = path;

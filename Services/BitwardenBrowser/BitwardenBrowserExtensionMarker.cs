@@ -13,19 +13,18 @@ internal static class BitwardenBrowserExtensionMarker
         out string? extensionId)
     {
         extensionId = null;
-        try
-        {
-            if (!File.Exists(markerPath)) return false;
-            var lines = File.ReadAllLines(markerPath);
-            if (lines.Length < 3 || !string.Equals(lines[0], MarkerVersion, StringComparison.Ordinal)) return false;
-            if (!PathsEqual(lines[1], expectedExtensionPath)) return false;
-            extensionId = string.IsNullOrWhiteSpace(lines[2]) ? null : lines[2].Trim();
-            return extensionId is not null;
-        }
-        catch
-        {
-            return false;
-        }
+        if (!TryReadMarker(markerPath, out var installedExtensionPath, out var installedExtensionId)) return false;
+        if (!PathsEqual(installedExtensionPath, expectedExtensionPath)) return false;
+        extensionId = installedExtensionId;
+        return true;
+    }
+
+    public static bool TryReadInstalledExtensionId(string markerPath, out string? extensionId)
+    {
+        extensionId = null;
+        if (!TryReadMarker(markerPath, out _, out var installedExtensionId)) return false;
+        extensionId = installedExtensionId;
+        return true;
     }
 
     public static async Task WriteAsync(
@@ -42,6 +41,29 @@ internal static class BitwardenBrowserExtensionMarker
             extensionId.Trim(),
         };
         await File.WriteAllLinesAsync(markerPath, lines, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool TryReadMarker(
+        string markerPath,
+        out string installedExtensionPath,
+        out string installedExtensionId)
+    {
+        installedExtensionPath = string.Empty;
+        installedExtensionId = string.Empty;
+        try
+        {
+            if (!File.Exists(markerPath)) return false;
+            var lines = File.ReadAllLines(markerPath);
+            if (lines.Length < 3 || !string.Equals(lines[0], MarkerVersion, StringComparison.Ordinal)) return false;
+            if (string.IsNullOrWhiteSpace(lines[1]) || string.IsNullOrWhiteSpace(lines[2])) return false;
+            installedExtensionPath = lines[1].Trim();
+            installedExtensionId = lines[2].Trim();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static bool PathsEqual(string left, string right) =>

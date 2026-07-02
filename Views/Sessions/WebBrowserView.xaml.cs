@@ -436,15 +436,17 @@ public sealed partial class WebBrowserView : UserControl
     {
         var manifest = BitwardenBrowserExtensionManifest.Read(extensionPath);
         var markerPath = BitwardenBrowserExtensionMarker.GetPath(userDataFolder);
+        var installedExtensions = await core.Profile.GetBrowserExtensionsAsync();
         CoreWebView2BrowserExtension? extension = null;
 
         if (BitwardenBrowserExtensionMarker.TryReadInstalledExtensionId(markerPath, extensionPath, out var extensionId))
         {
-            extension = await FindInstalledBitwardenExtensionAsync(core, extensionId).ConfigureAwait(true);
+            extension = FindInstalledBitwardenExtension(installedExtensions, extensionId);
         }
 
         if (extension is null)
         {
+            await RemoveStaleBitwardenExtensionsAsync(installedExtensions, markerPath).ConfigureAwait(true);
             extension = await core.Profile.AddBrowserExtensionAsync(extensionPath);
             Directory.CreateDirectory(userDataFolder);
             await BitwardenBrowserExtensionMarker.WriteAsync(markerPath, extensionPath, extension.Id).ConfigureAwait(true);
@@ -461,13 +463,39 @@ public sealed partial class WebBrowserView : UserControl
             manifest.IconPath);
     }
 
-    private static async Task<CoreWebView2BrowserExtension?> FindInstalledBitwardenExtensionAsync(CoreWebView2 core, string? extensionId)
+    private static CoreWebView2BrowserExtension? FindInstalledBitwardenExtension(
+        IReadOnlyList<CoreWebView2BrowserExtension> extensions,
+        string? extensionId)
     {
         if (string.IsNullOrWhiteSpace(extensionId)) return null;
-        var extensions = await core.Profile.GetBrowserExtensionsAsync();
         return extensions.FirstOrDefault(extension =>
             string.Equals(extension.Id, extensionId, StringComparison.Ordinal));
     }
+
+    private static async Task RemoveStaleBitwardenExtensionsAsync(
+        IReadOnlyList<CoreWebView2BrowserExtension> extensions,
+        string markerPath)
+    {
+        var staleIds = new HashSet<string>(StringComparer.Ordinal);
+        if (BitwardenBrowserExtensionMarker.TryReadInstalledExtensionId(markerPath, out var markerExtensionId)
+            && markerExtensionId is not null)
+        {
+            staleIds.Add(markerExtensionId);
+        }
+
+        foreach (var installed in extensions)
+        {
+            if (IsBitwardenExtensionName(installed.Name)) staleIds.Add(installed.Id);
+        }
+
+        foreach (var installed in extensions.Where(extension => staleIds.Contains(extension.Id)))
+        {
+            await installed.RemoveAsync();
+        }
+    }
+
+    private static bool IsBitwardenExtensionName(string name) =>
+        name.Contains("Bitwarden", StringComparison.OrdinalIgnoreCase);
 
     private static Uri? BuildBitwardenPopupUri(string extensionId, string? popupPath)
     {
