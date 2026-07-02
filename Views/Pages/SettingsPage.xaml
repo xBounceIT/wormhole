@@ -121,6 +121,76 @@
                 </ScrollViewer>
             </TabViewItem>
 
+
+            <!-- Extensions -->
+            <TabViewItem Header="Extensions" IsClosable="False">
+                <ScrollViewer Style="{StaticResource TabContentScrollStyle}">
+                    <StackPanel Style="{StaticResource TabContentPanelStyle}">
+                        <TextBlock Text="Bitwarden" Style="{StaticResource SubtitleTextBlockStyle}" />
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                                   Opacity="0.75"
+                                   TextWrapping="Wrap"
+                                   Text="Use Bitwarden for Wormhole credential passwords through the bw CLI, and for HTTPS windows through the official browser extension." />
+
+                        <TextBlock Text="Credential vault" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,12,0,0" />
+                        <ToggleSwitch Header="Enable Bitwarden Password Manager"
+                                      IsOn="{x:Bind ViewModel.EnableBitwardenVault, Mode=TwoWay}" />
+                        <TextBox Header="bw.exe path"
+                                 Text="{x:Bind ViewModel.BitwardenCliPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 PlaceholderText="bw"
+                                 IsSpellCheckEnabled="False"
+                                 HorizontalAlignment="Stretch" />
+                        <TextBlock Text="{x:Bind ViewModel.BitwardenStatus, Mode=OneWay}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Opacity="0.75"
+                                   TextWrapping="Wrap" />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Content="Refresh status"
+                                    Command="{x:Bind ViewModel.RefreshBitwardenStatusCommand}"
+                                    IsEnabled="{x:Bind ViewModel.IsBitwardenBusy, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
+                            <Button Content="Install / Update CLI"
+                                    Command="{x:Bind ViewModel.InstallBitwardenCliCommand}"
+                                    IsEnabled="{x:Bind ViewModel.IsBitwardenBusy, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
+                            <Button Content="Log in"
+                                    Command="{x:Bind ViewModel.LoginBitwardenCommand}"
+                                    IsEnabled="{x:Bind ViewModel.IsBitwardenBusy, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
+                            <Button Content="Unlock"
+                                    Command="{x:Bind ViewModel.UnlockBitwardenCommand}"
+                                    IsEnabled="{x:Bind ViewModel.IsBitwardenBusy, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
+                            <Button Content="Sync"
+                                    Command="{x:Bind ViewModel.SyncBitwardenCommand}"
+                                    IsEnabled="{x:Bind ViewModel.IsBitwardenBusy, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
+                            <ProgressRing IsActive="{x:Bind ViewModel.IsBitwardenBusy, Mode=OneWay}"
+                                          Width="20" Height="20" />
+                        </StackPanel>
+
+                        <TextBlock Text="Browser extension" Style="{StaticResource SubtitleTextBlockStyle}" Margin="0,18,0,0" />
+                        <ToggleSwitch Header="Enable Bitwarden in HTTPS windows"
+                                      IsOn="{x:Bind ViewModel.EnableBitwardenBrowserExtension, Mode=TwoWay}" />
+                        <TextBlock Text="{x:Bind ViewModel.BitwardenBrowserExtensionStatus, Mode=OneWay}"
+                                   Style="{StaticResource CaptionTextBlockStyle}"
+                                   Opacity="0.75"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
+                                   Opacity="0.65"
+                                   TextWrapping="Wrap"
+                                   Text="Turning this on installs the official Bitwarden browser extension automatically and keeps official installs updated in the background. Manual ZIP/folder imports stay pinned." />
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button Content="Install / Update"
+                                    Command="{x:Bind ViewModel.InstallBitwardenBrowserExtensionCommand}"
+                                    IsEnabled="{x:Bind ViewModel.IsBitwardenBrowserExtensionBusy, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
+                            <Button Content="Import ZIP"
+                                    Command="{x:Bind ViewModel.ImportBitwardenBrowserExtensionZipCommand}"
+                                    IsEnabled="{x:Bind ViewModel.IsBitwardenBrowserExtensionBusy, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
+                            <Button Content="Use folder"
+                                    Command="{x:Bind ViewModel.ImportBitwardenBrowserExtensionFolderCommand}"
+                                    IsEnabled="{x:Bind ViewModel.IsBitwardenBrowserExtensionBusy, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}" />
+                            <ProgressRing IsActive="{x:Bind ViewModel.IsBitwardenBrowserExtensionBusy, Mode=OneWay}"
+                                          Width="20" Height="20" />
+                        </StackPanel>
+                    </StackPanel>
+                </ScrollViewer>
+            </TabViewItem>
             <!-- Updates -->
             <TabViewItem Header="Updates" IsClosable="False">
                 <ScrollViewer Style="{StaticResource TabContentScrollStyle}"

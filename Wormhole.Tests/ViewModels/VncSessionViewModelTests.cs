@@ -349,7 +349,7 @@ public class VncSessionViewModelTests
         tunnels ??= BuildTunnelManager(credentials, new FakeTunnelConfigRepository());
         return new VncSessionViewModel(
             service,
-            credentials,
+            new FakeCredentialPasswordResolver(credentials),
             credentialRepository,
             dialog ?? new FakeDialogService(),
             tunnels,

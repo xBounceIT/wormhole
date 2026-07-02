@@ -5,12 +5,15 @@ using Microsoft.Extensions.Logging;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Services.Bitwarden;
 
 namespace Wormhole.ViewModels;
 
 public partial class CredentialsViewModel : ObservableObject
 {
     private readonly ICredentialRepository _repository;
+    private readonly IBitwardenCredentialCatalogService _credentialCatalog;
+    private readonly IBitwardenCredentialSyncService _bitwardenCredentialSync;
     private readonly ICredentialService _credentialService;
     private readonly IDialogService _dialog;
     private readonly ILogger<CredentialsViewModel> _logger;
@@ -55,8 +58,27 @@ public partial class CredentialsViewModel : ObservableObject
         ICredentialService credentialService,
         IDialogService dialog,
         ILogger<CredentialsViewModel> logger)
+        : this(
+            repository,
+            new RepositoryCredentialCatalogAdapter(repository),
+            NoOpBitwardenCredentialSyncService.Instance,
+            credentialService,
+            dialog,
+            logger)
+    {
+    }
+
+    public CredentialsViewModel(
+        ICredentialRepository repository,
+        IBitwardenCredentialCatalogService credentialCatalog,
+        IBitwardenCredentialSyncService bitwardenCredentialSync,
+        ICredentialService credentialService,
+        IDialogService dialog,
+        ILogger<CredentialsViewModel> logger)
     {
         _repository = repository;
+        _credentialCatalog = credentialCatalog;
+        _bitwardenCredentialSync = bitwardenCredentialSync;
         _credentialService = credentialService;
         _dialog = dialog;
         _logger = logger;
@@ -210,7 +232,8 @@ public partial class CredentialsViewModel : ObservableObject
     {
         try
         {
-            var rows = await _repository.GetAllAsync();
+            await _bitwardenCredentialSync.SyncIfStaleAsync().ConfigureAwait(true);
+            var rows = await _credentialCatalog.GetCredentialPageProfilesAsync().ConfigureAwait(true);
             // Drop selection before swapping the collection — Singleton VM means stale
             // CredentialProfile references would otherwise survive across reloads/navigations.
             SelectedCredentials.Clear();
@@ -245,15 +268,29 @@ public partial class CredentialsViewModel : ObservableObject
             Domain = draft.Domain,
             Protocol = draft.Protocol,
             Kind = CredentialKind.Password,
+            SecretProvider = draft.SecretProvider,
+            BitwardenItemId = draft.BitwardenItemId,
+            BitwardenItemName = draft.BitwardenItemName,
+            BitwardenFieldPath = NormalizeBitwardenFieldPath(draft.BitwardenFieldPath),
         };
 
         try
         {
             await _repository.AddAsync(profile);
-            await _credentialService.StorePasswordAsync(profile.Id, draft.Password);
-            // In-place insert instead of a full reload: the row's final state is already in
-            // hand, and a reload would clear the user's selection and Reset the grid.
-            Credentials.Insert(SortedIndexFor(profile.Name), profile);
+            if (profile.SecretProvider == CredentialSecretProvider.Local)
+            {
+                await _credentialService.StorePasswordAsync(profile.Id, draft.Password);
+            }
+            if (profile.SecretProvider == CredentialSecretProvider.Bitwarden)
+            {
+                await LoadAsync().ConfigureAwait(true);
+            }
+            else
+            {
+                // In-place insert instead of a full reload: the row's final state is already in
+                // hand, and a reload would clear the user's selection and Reset the grid.
+                Credentials.Insert(SortedIndexFor(profile.Name), profile);
+            }
         }
         catch (Exception ex)
         {
@@ -279,6 +316,14 @@ public partial class CredentialsViewModel : ObservableObject
     {
         if (profile is null) return;
 
+        if (profile.IsReadOnly)
+        {
+            await _dialog.ShowMessageAsync(
+                "Bitwarden credential",
+                "This credential is a read-only Bitwarden login item. Edit or delete it in Bitwarden.");
+            return;
+        }
+
         if (profile.Kind != CredentialKind.Password)
         {
             await _dialog.ShowMessageAsync(
@@ -287,12 +332,16 @@ public partial class CredentialsViewModel : ObservableObject
             return;
         }
 
-        var existingPassword = await _credentialService.ReadPasswordAsync(profile.Id);
-        if (existingPassword is null)
+        var existingPassword = string.Empty;
+        if (profile.SecretProvider == CredentialSecretProvider.Local)
         {
-            _logger.LogWarning(
-                "Stored password missing for credential {Id} ('{Name}'); user will be prompted to re-enter it.",
-                profile.Id, profile.Name);
+            existingPassword = await _credentialService.ReadPasswordAsync(profile.Id) ?? string.Empty;
+            if (existingPassword.Length == 0)
+            {
+                _logger.LogWarning(
+                    "Stored password missing for credential {Id} ('{Name}'); user will be prompted to re-enter it.",
+                    profile.Id, profile.Name);
+            }
         }
 
         var initial = new CredentialDraft(
@@ -300,7 +349,11 @@ public partial class CredentialsViewModel : ObservableObject
             profile.Protocol,
             profile.Username ?? string.Empty,
             profile.Domain,
-            existingPassword ?? string.Empty);
+            existingPassword,
+            profile.SecretProvider,
+            profile.BitwardenItemId,
+            profile.BitwardenItemName,
+            NormalizeBitwardenFieldPath(profile.BitwardenFieldPath));
 
         var draft = await _dialog.PromptForCredentialAsync(initial);
         if (draft is null) return;
@@ -323,13 +376,32 @@ public partial class CredentialsViewModel : ObservableObject
             Kind = profile.Kind,
             PrivateKeyFileName = profile.PrivateKeyFileName,
             CreatedAt = profile.CreatedAt,
+            SecretProvider = draft.SecretProvider,
+            BitwardenItemId = draft.BitwardenItemId,
+            BitwardenItemName = draft.BitwardenItemName,
+            BitwardenFieldPath = NormalizeBitwardenFieldPath(draft.BitwardenFieldPath),
         };
 
         try
         {
             await _repository.UpdateAsync(updated);
-            await _credentialService.StorePasswordAsync(updated.Id, draft.Password);
-            ReplaceInPlace(profile, updated);
+            if (updated.SecretProvider == CredentialSecretProvider.Local)
+            {
+                await _credentialService.StorePasswordAsync(updated.Id, draft.Password);
+            }
+            else
+            {
+                await _credentialService.DeletePasswordAsync(updated.Id);
+            }
+            if (profile.SecretProvider == CredentialSecretProvider.Bitwarden ||
+                updated.SecretProvider == CredentialSecretProvider.Bitwarden)
+            {
+                await LoadAsync().ConfigureAwait(true);
+            }
+            else
+            {
+                ReplaceInPlace(profile, updated);
+            }
         }
         catch (Exception ex)
         {
@@ -375,6 +447,14 @@ public partial class CredentialsViewModel : ObservableObject
     {
         if (profile is null) return;
 
+        if (profile.IsReadOnly)
+        {
+            await _dialog.ShowMessageAsync(
+                "Bitwarden credential",
+                "This credential is a read-only Bitwarden login item. Delete it in Bitwarden.");
+            return;
+        }
+
         var confirmed = await _dialog.ConfirmAsync(
             "Delete credential",
             $"Delete '{profile.Name}'? This cannot be undone.",
@@ -401,19 +481,20 @@ public partial class CredentialsViewModel : ObservableObject
         }
     }
 
-    private bool CanDeleteSelected() => SelectedCredentials.Count > 0;
+    private bool CanDeleteSelected() => SelectedCredentials.Any(c => !c.IsReadOnly);
 
     [RelayCommand(CanExecute = nameof(CanDeleteSelected))]
     private async Task DeleteSelectedAsync()
     {
         // Snapshot first: SelectedCredentials is rebuilt by the GridView when the
         // underlying collection mutates, so iterating live would skip every other item.
-        var snapshot = SelectedCredentials.ToArray();
+        var snapshot = SelectedCredentials.Where(c => !c.IsReadOnly).ToArray();
         if (snapshot.Length == 0) return;
 
         var message = snapshot.Length == 1
             ? $"Delete '{snapshot[0].Name}'? This cannot be undone."
             : $"Delete {snapshot.Length} credentials? This cannot be undone.";
+
 
         var confirmed = await _dialog.ConfirmAsync(
             "Delete credentials",
@@ -483,12 +564,16 @@ public partial class CredentialsViewModel : ObservableObject
         FilteredCredentials.ReplaceAllIfChanged(matches);
     }
 
+    private static string NormalizeBitwardenFieldPath(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? BitwardenDefaults.PasswordFieldPath : value.Trim();
+
     private bool NameExists(string name, Guid? excludingId)
     {
         var hasExcludedId = excludingId.HasValue;
         var excludedId = excludingId.GetValueOrDefault();
         foreach (var credential in Credentials)
         {
+            if (credential.IsVirtualBitwarden) continue;
             if (hasExcludedId && credential.Id == excludedId) continue;
             if (string.Equals(credential.Name, name, StringComparison.OrdinalIgnoreCase)) return true;
         }

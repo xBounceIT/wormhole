@@ -7,11 +7,13 @@ using System.Threading.Tasks;
 using System.Windows.Input;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Services.Bitwarden;
 using Wormhole.Services.Rdp;
 using Wormhole.Services.Tunneling;
 
@@ -31,7 +33,8 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
     private readonly IRdpSessionService _rdpService;
     private readonly ICredentialService _credentialService;
-    private readonly ICredentialRepository _credentialRepository;
+    private readonly ICredentialPasswordResolver _passwordResolver;
+    private readonly IBitwardenCredentialCatalogService _credentialCatalog;
     private readonly IConnectionCredentialBindingService _credentialBindings;
     private readonly TunnelManager _tunnels;
     private readonly ITunnelRoutePrompter _tunnelPrompter;
@@ -65,7 +68,36 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     public RdpSessionViewModel(
         IRdpSessionService rdpService,
         ICredentialService credentialService,
+        ICredentialPasswordResolver passwordResolver,
         ICredentialRepository credentialRepository,
+        IConnectionCredentialBindingService credentialBindings,
+        TunnelManager tunnels,
+        ITunnelRoutePrompter tunnelPrompter,
+        IConnectionProfileResolver profileResolver,
+        IDialogService dialog,
+        IRdpCrashSentinelService crashSentinel,
+        ILoggerFactory loggerFactory)
+        : this(
+            rdpService,
+            credentialService,
+            passwordResolver,
+            new RepositoryCredentialCatalogAdapter(credentialRepository),
+            credentialBindings,
+            tunnels,
+            tunnelPrompter,
+            profileResolver,
+            dialog,
+            crashSentinel,
+            loggerFactory)
+    {
+    }
+
+    [ActivatorUtilitiesConstructor]
+    public RdpSessionViewModel(
+        IRdpSessionService rdpService,
+        ICredentialService credentialService,
+        ICredentialPasswordResolver passwordResolver,
+        IBitwardenCredentialCatalogService credentialCatalog,
         IConnectionCredentialBindingService credentialBindings,
         TunnelManager tunnels,
         ITunnelRoutePrompter tunnelPrompter,
@@ -76,7 +108,8 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     {
         _rdpService = rdpService;
         _credentialService = credentialService;
-        _credentialRepository = credentialRepository;
+        _passwordResolver = passwordResolver;
+        _credentialCatalog = credentialCatalog;
         _credentialBindings = credentialBindings;
         _tunnels = tunnels;
         _tunnelPrompter = tunnelPrompter;
@@ -858,7 +891,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         {
             try
             {
-                credential = await _credentialRepository.GetByIdAsync(lookupId, token).ConfigureAwait(true);
+                credential = await _credentialCatalog.GetByIdAsync(lookupId, token).ConfigureAwait(true);
             }
             catch (Exception ex)
             {
@@ -939,7 +972,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         {
             try
             {
-                var stored = await _credentialService.ReadPasswordAsync(credId).ConfigureAwait(true);
+                var stored = await _passwordResolver.ReadPasswordAsync(credential, PromptForBitwardenUnlockAsync, token).ConfigureAwait(true);
                 if (stored is not null && username is not null)
                 {
                     return new ResolvedRdpCredentials(
@@ -958,7 +991,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                     _logger.LogInformation("Credential {CredentialId} password not found in Credential Manager — prompting.", credId);
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogWarning(ex, "Failed to read credential {CredentialId} — prompting.", credId);
             }
@@ -1115,6 +1148,12 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     /// callers pass the nulls through, and the OCX falls back to its own prompt if the
     /// gateway requires interactive auth.
     /// </summary>
+    private Task<string?> PromptForBitwardenUnlockAsync(CancellationToken cancellationToken) =>
+        _dialog.PromptPasswordAsync(
+            "Unlock Bitwarden vault",
+            "Enter your Bitwarden master password.",
+            cancellationToken);
+
     private async Task<(string? Username, string? Password)> ResolveGatewayCredentialsAsync(ConnectionProfile profile, CancellationToken token)
     {
         if (profile.RdpGatewayUsageMethod == 0) return (null, null);
@@ -1123,7 +1162,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         CredentialProfile? gwProfile = null;
         try
         {
-            gwProfile = await _credentialRepository.GetByIdAsync(gwCredId, token).ConfigureAwait(true);
+            gwProfile = await _credentialCatalog.GetByIdAsync(gwCredId, token).ConfigureAwait(true);
         }
         catch (Exception ex)
         {
@@ -1136,8 +1175,8 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             : $"{gwProfile.Domain}\\{gwProfile.Username}";
 
         string? password = null;
-        try { password = await _credentialService.ReadPasswordAsync(gwCredId).ConfigureAwait(true); }
-        catch (Exception ex) { _logger.LogWarning(ex, "Failed to read gateway credential password."); }
+        try { password = await _passwordResolver.ReadPasswordAsync(gwProfile, PromptForBitwardenUnlockAsync, token).ConfigureAwait(true); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { _logger.LogWarning(ex, "Failed to read gateway credential password."); }
 
         return (username, password);
     }
@@ -1492,7 +1531,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         CredentialProfile? credential;
         try
         {
-            credential = await _credentialRepository.GetByIdAsync(credId).ConfigureAwait(true);
+            credential = await _credentialCatalog.GetByIdAsync(credId).ConfigureAwait(true);
         }
         catch (Exception ex)
         {

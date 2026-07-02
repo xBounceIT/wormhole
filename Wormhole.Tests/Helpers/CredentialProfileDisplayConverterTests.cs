@@ -37,4 +37,21 @@ public sealed class CredentialProfileDisplayConverterTests
 
         Assert.Equal("(Inherit from folder)", text);
     }
+
+    [Fact]
+    public void Convert_VirtualBitwardenCredential_IncludesProviderAndProtocol()
+    {
+        var profile = new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Name = "Firewall",
+            Protocol = ProtocolType.Rdp,
+            SecretProvider = CredentialSecretProvider.Bitwarden,
+            IsVirtualBitwarden = true,
+        };
+
+        var text = _converter.Convert(profile, typeof(string), null!, string.Empty);
+
+        Assert.Equal("Firewall (BITWARDEN RDP)", text);
+    }
 }

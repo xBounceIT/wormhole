@@ -6,6 +6,7 @@ using Wormhole.Data;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Services.Bitwarden;
 using Wormhole.Tests.Fakes;
 using Wormhole.ViewModels;
 using Xunit;
@@ -516,6 +517,48 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         Assert.Equal(1, dialog.ShowCredentialsCount);
         Assert.Equal("s3cret", dialog.LastShownSecret);
         Assert.Equal("alice", dialog.LastShownUsername);
+        Assert.Equal("Password", dialog.LastShownSecretLabel);
+    }
+
+    [Fact]
+    public async Task ShowCredentials_BitwardenVirtualCredential_ResolvesThroughCatalog()
+    {
+        var credentialId = BitwardenVirtualCredentialIds.ForItem("item-1", ProtocolType.Ssh);
+        var node = MakeConnectionDraft("prod-web", ProtocolType.Ssh, "host", 22, username: null);
+        node.CredentialId = credentialId;
+        await _repo.AddAsync(node);
+
+        var virtualCredential = new CredentialProfile
+        {
+            Id = credentialId,
+            Name = "Server",
+            Username = "bitwarden-user",
+            Protocol = ProtocolType.Ssh,
+            Kind = CredentialKind.Password,
+            SecretProvider = CredentialSecretProvider.Bitwarden,
+            BitwardenItemId = "item-1",
+            IsVirtualBitwarden = true,
+        };
+        var dialog = new FakeDialogService();
+        var creds = new FakeCredentialService();
+        creds.Passwords[credentialId] = "bw-secret";
+        var vm = new ConnectionTreeViewModel(
+            _repo,
+            new InheritanceResolver(),
+            new NullSessionTabFactory(),
+            dialog,
+            creds,
+            new StaticCredentialCatalog(virtualCredential),
+            new FakeCredentialPasswordResolver(creds),
+            NullLogger<ConnectionTreeViewModel>.Instance);
+        vm.SearchDebounceDelay = TimeSpan.Zero;
+        await vm.RefreshAsync();
+
+        await vm.ShowCredentialsCommand.ExecuteAsync(vm.Roots.Single());
+
+        Assert.Equal(1, dialog.ShowCredentialsCount);
+        Assert.Equal("bw-secret", dialog.LastShownSecret);
+        Assert.Equal("bitwarden-user", dialog.LastShownUsername);
         Assert.Equal("Password", dialog.LastShownSecretLabel);
     }
 
@@ -1810,16 +1853,25 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         Assert.True(vm.IsSelected(parent));
         Assert.True(vm.IsSelected(leaf));
 
-        for (var attempt = 0; attempt < 20 && (!vm.IsSearchActive || vm.SelectedNodes.Count > 0); attempt++)
-        {
-            await Task.Delay(20);
-        }
+        await WaitForDebouncedSearchSelectionClearAsync(vm, TimeSpan.FromSeconds(5));
 
         Assert.True(vm.IsSearchActive);
         Assert.Empty(vm.SelectedNodes);
         Assert.Null(vm.SelectedNode);
         Assert.False(vm.IsSelected(parent));
         Assert.False(vm.IsSelected(leaf));
+    }
+
+    private static async Task WaitForDebouncedSearchSelectionClearAsync(
+        ConnectionTreeViewModel vm,
+        TimeSpan timeout)
+    {
+        var deadline = DateTimeOffset.UtcNow + timeout;
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            if (vm.IsSearchActive && vm.SelectedNodes.Count == 0) return;
+            await Task.Delay(20);
+        }
     }
 
     [Fact]
@@ -2661,6 +2713,28 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     {
         public override Task<ConnectionNode?> EditConnectionAsync(ConnectionNode initial, bool isNew) =>
             Task.FromResult<ConnectionNode?>(initial.Clone());
+    }
+
+    private sealed class StaticCredentialCatalog : IBitwardenCredentialCatalogService
+    {
+        private readonly IReadOnlyList<CredentialProfile> _profiles;
+
+        public StaticCredentialCatalog(params CredentialProfile[] profiles)
+        {
+            _profiles = profiles;
+        }
+
+        public Task<IReadOnlyList<CredentialProfile>> GetCredentialPageProfilesAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(_profiles);
+
+        public Task<IReadOnlyList<CredentialProfile>> GetPickerProfilesAsync(CancellationToken cancellationToken = default) =>
+            Task.FromResult(_profiles);
+
+        public Task<IReadOnlyList<CredentialProfile>> GetProfilesForProtocolAsync(ProtocolType protocol, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<CredentialProfile>>(_profiles.Where(p => p.Protocol == protocol).ToList());
+
+        public Task<CredentialProfile?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default) =>
+            Task.FromResult(_profiles.FirstOrDefault(p => p.Id == id));
     }
 
     private sealed class RecordingConfirmDialogService : FakeDialogService

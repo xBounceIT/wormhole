@@ -1278,6 +1278,34 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public async Task AttachAsync_SavedCredentialUnlockCancel_CancelsWithoutPasswordFallback()
+    {
+        var credId = Guid.NewGuid();
+        var credential = new CredentialProfile
+        {
+            Id = credId,
+            Name = "bitwarden-rdp",
+            Username = "svc-rdp",
+            Protocol = ProtocolType.Rdp,
+            SecretProvider = CredentialSecretProvider.Bitwarden,
+            BitwardenItemId = "bw-rdp",
+        };
+        var (vm, svc, _, dlg, _) = CreateVm(
+            credentialRepository: new SingleCredentialRepository(credential),
+            passwordResolver: new ThrowingCredentialPasswordResolver(new OperationCanceledException()));
+        dlg.PasswordPromptResult = "typed-password";
+
+        vm.Initialize(MakeProfile() with { Username = null, CredentialId = credId });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(0, dlg.PasswordPromptCount);
+        Assert.Equal(0, dlg.CredentialsPromptCount);
+        Assert.Equal(0, svc.ConnectCount);
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+    }
+
+    [Fact]
     public async Task AttachAsync_PasswordPrompt_SelectedSavedCredential_UsesSavedIdentityAndPassword()
     {
         var credential = new CredentialProfile
@@ -2070,7 +2098,8 @@ public class RdpSessionViewModelTests
         IEnumerable<ITunnelProvider>? tunnelProviders = null,
         IConnectionRepository? connectionRepository = null,
         IConnectionCredentialBindingService? credentialBindings = null,
-        FakeAppSettingsService? settings = null)
+        FakeAppSettingsService? settings = null,
+        ICredentialPasswordResolver? passwordResolver = null)
     {
         var svc = new FakeRdpSessionService();
         creds ??= new FakeCredentialService();
@@ -2087,6 +2116,7 @@ public class RdpSessionViewModelTests
         var vm = new RdpSessionViewModel(
             svc,
             creds,
+            passwordResolver ?? new Fakes.FakeCredentialPasswordResolver(creds),
             repo,
             credentialBindings ?? new FakeConnectionCredentialBindingService(),
             BuildTunnelManager(creds, tunnelRepo, tunnelProviders),
@@ -2113,6 +2143,7 @@ public class RdpSessionViewModelTests
         return new RdpSessionViewModel(
             new FakeRdpSessionService(),
             creds,
+            new Fakes.FakeCredentialPasswordResolver(creds),
             credentialRepository,
             new FakeConnectionCredentialBindingService(),
             BuildTunnelManager(creds, tunnelRepo),
@@ -2150,6 +2181,22 @@ public class RdpSessionViewModelTests
             connectionRepository ?? new StubConnectionRepository(),
             new InheritanceResolver(),
             NullLoggerFactory.Instance.CreateLogger<ConnectionProfileResolver>());
+
+    private sealed class ThrowingCredentialPasswordResolver : ICredentialPasswordResolver
+    {
+        private readonly Exception _exception;
+
+        public ThrowingCredentialPasswordResolver(Exception exception)
+        {
+            _exception = exception;
+        }
+
+        public Task<string?> ReadPasswordAsync(
+            CredentialProfile credential,
+            Func<CancellationToken, Task<string?>>? unlockPrompt = null,
+            CancellationToken cancellationToken = default) =>
+            Task.FromException<string?>(_exception);
+    }
 
     private sealed class FakeRdpSessionService : IRdpSessionService
     {

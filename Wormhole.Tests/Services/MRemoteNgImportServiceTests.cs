@@ -85,6 +85,10 @@ public class MRemoteNgImportServiceTests : IDisposable
             Kind                INTEGER  NOT NULL,
             PrivateKeyFileName  TEXT     NULL,
             Protocol            INTEGER  NOT NULL DEFAULT 0,
+            SecretProvider      INTEGER  NOT NULL DEFAULT 0,
+            BitwardenItemId     TEXT     NULL,
+            BitwardenItemName   TEXT     NULL,
+            BitwardenFieldPath  TEXT     NOT NULL DEFAULT 'login.password',
             CreatedAt           TEXT     NOT NULL
         );
         CREATE UNIQUE INDEX UX_CredentialProfiles_Name ON CredentialProfiles(Name);";

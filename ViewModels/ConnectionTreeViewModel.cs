@@ -1,6 +1,7 @@
 using System.Collections.Specialized;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 using Wormhole.Data;
@@ -8,6 +9,7 @@ using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Services.Bitwarden;
 
 namespace Wormhole.ViewModels;
 
@@ -20,7 +22,8 @@ public partial class ConnectionTreeViewModel : ObservableObject
     private readonly ISessionTabFactory _tabFactory;
     private readonly IDialogService _dialog;
     private readonly ICredentialService _credentialService;
-    private readonly ICredentialRepository _credentialRepository;
+    private readonly IBitwardenCredentialCatalogService _credentialCatalog;
+    private readonly ICredentialPasswordResolver _passwordResolver;
     private readonly ILogger<ConnectionTreeViewModel> _logger;
     private readonly DispatcherQueue? _dispatcher;
     private readonly IConnectionNodeChangeNotifier? _connectionNodeChanges;
@@ -156,13 +159,38 @@ public partial class ConnectionTreeViewModel : ObservableObject
         ICredentialRepository credentialRepository,
         ILogger<ConnectionTreeViewModel> logger,
         IConnectionNodeChangeNotifier? connectionNodeChanges = null)
+        : this(
+            repository,
+            inheritanceResolver,
+            tabFactory,
+            dialog,
+            credentialService,
+            new RepositoryCredentialCatalogAdapter(credentialRepository),
+            new LocalCredentialPasswordResolver(credentialService),
+            logger,
+            connectionNodeChanges)
+    {
+    }
+
+    [ActivatorUtilitiesConstructor]
+    public ConnectionTreeViewModel(
+        IConnectionRepository repository,
+        InheritanceResolver inheritanceResolver,
+        ISessionTabFactory tabFactory,
+        IDialogService dialog,
+        ICredentialService credentialService,
+        IBitwardenCredentialCatalogService credentialCatalog,
+        ICredentialPasswordResolver passwordResolver,
+        ILogger<ConnectionTreeViewModel> logger,
+        IConnectionNodeChangeNotifier? connectionNodeChanges = null)
     {
         _repository = repository;
         _inheritanceResolver = inheritanceResolver;
         _tabFactory = tabFactory;
         _dialog = dialog;
         _credentialService = credentialService;
-        _credentialRepository = credentialRepository;
+        _credentialCatalog = credentialCatalog;
+        _passwordResolver = passwordResolver;
         _logger = logger;
         _dispatcher = TryGetDispatcher();
         _connectionNodeChanges = connectionNodeChanges;
@@ -362,19 +390,26 @@ public partial class ConnectionTreeViewModel : ObservableObject
             // The stored secret for an SshKey credential is the private-key passphrase, not a
             // login password — fetch the credential to label the field honestly and to avoid
             // revealing credentials that this protocol would not actually use for auth.
-            var credential = await _credentialRepository.GetByIdAsync(credId);
-            if (!CanRevealSavedCredential(profile.Protocol, credential))
+            var credential = await _credentialCatalog.GetByIdAsync(credId);
+            if (credential is null || !CanRevealSavedCredential(profile.Protocol, credential))
             {
                 await ShowNoStoredCredentialsAsync();
                 return;
             }
 
-            var secretLabel = credential?.Kind == CredentialKind.SshKey ? "Key passphrase" : "Password";
+            var secretLabel = credential.Kind == CredentialKind.SshKey ? "Key passphrase" : "Password";
             var username = string.IsNullOrWhiteSpace(profile.Username)
-                ? credential?.Username
+                ? credential.Username
                 : profile.Username;
 
-            await ShowStoredCredentialSecretAsync(clicked.Name, username, credId, secretLabel);
+            string? secret = credential.Kind == CredentialKind.SshKey
+                ? await _credentialService.ReadPasswordAsync(credId)
+                : await _passwordResolver.ReadPasswordAsync(credential, PromptForBitwardenUnlockAsync);
+            await ShowResolvedCredentialSecretAsync(clicked.Name, username, secretLabel, secret);
+        }
+        catch (BitwardenUnlockCancelledException)
+        {
+            // User cancelled the unlock prompt; leave the reveal command as a no-op.
         }
         catch (Exception ex)
         {
@@ -386,13 +421,19 @@ public partial class ConnectionTreeViewModel : ObservableObject
         }
     }
 
-    private async Task ShowStoredCredentialSecretAsync(
+
+    private Task<string?> PromptForBitwardenUnlockAsync(CancellationToken cancellationToken) =>
+        _dialog.PromptPasswordAsync(
+            "Unlock Bitwarden vault",
+            "Enter your Bitwarden master password.",
+            cancellationToken);
+
+    private async Task ShowResolvedCredentialSecretAsync(
         string connectionName,
         string? username,
-        Guid secretId,
-        string secretLabel)
+        string secretLabel,
+        string? secret)
     {
-        var secret = await _credentialService.ReadPasswordAsync(secretId);
         if (string.IsNullOrEmpty(secret))
         {
             await ShowNoStoredCredentialsAsync();
@@ -400,10 +441,20 @@ public partial class ConnectionTreeViewModel : ObservableObject
         }
 
         await _dialog.ShowCredentialsAsync(
-            $"Credentials — {connectionName}",
+            $"Credentials - {connectionName}",
             username ?? string.Empty,
             secretLabel,
             secret);
+    }
+
+    private async Task ShowStoredCredentialSecretAsync(
+        string connectionName,
+        string? username,
+        Guid secretId,
+        string secretLabel)
+    {
+        var secret = await _credentialService.ReadPasswordAsync(secretId);
+        await ShowResolvedCredentialSecretAsync(connectionName, username, secretLabel, secret);
     }
 
     private Task ShowNoStoredCredentialsAsync() =>
@@ -1388,6 +1439,23 @@ public partial class ConnectionTreeViewModel : ObservableObject
         }
         _lastSnapshotById = byId;
     }
+
+    private sealed class LocalCredentialPasswordResolver : ICredentialPasswordResolver
+    {
+        private readonly ICredentialService _credentials;
+
+        public LocalCredentialPasswordResolver(ICredentialService credentials)
+        {
+            _credentials = credentials;
+        }
+
+        public Task<string?> ReadPasswordAsync(
+            CredentialProfile credential,
+            Func<CancellationToken, Task<string?>>? unlockPrompt = null,
+            CancellationToken cancellationToken = default) =>
+            _credentials.ReadPasswordAsync(credential.Id);
+    }
+
 }
 
 public sealed partial class TreeNodeViewModel : ObservableObject

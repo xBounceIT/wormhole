@@ -7,6 +7,7 @@ using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Models;
 using Wormhole.Services;
+using Wormhole.Services.Bitwarden;
 
 namespace Wormhole.ViewModels;
 
@@ -18,7 +19,8 @@ namespace Wormhole.ViewModels;
 /// </summary>
 public partial class ConnectionEditorViewModel : ObservableObject
 {
-    private readonly ICredentialRepository _credentialRepository;
+    private readonly IBitwardenCredentialCatalogService _credentialCatalog;
+    private readonly IBitwardenCredentialSyncService _bitwardenCredentialSync;
     private readonly ICredentialService _credentialService;
     private readonly List<CredentialProfile> _allCredentials = new();
     private readonly Dictionary<Guid, CredentialProfile> _allCredentialsById = new();
@@ -47,8 +49,22 @@ public partial class ConnectionEditorViewModel : ObservableObject
         ICredentialRepository credentialRepository,
         ITunnelConfigRepository tunnelConfigRepository,
         ICredentialService credentialService)
+        : this(
+            new RepositoryCredentialCatalogAdapter(credentialRepository),
+            NoOpBitwardenCredentialSyncService.Instance,
+            tunnelConfigRepository,
+            credentialService)
     {
-        _credentialRepository = credentialRepository;
+    }
+
+    public ConnectionEditorViewModel(
+        IBitwardenCredentialCatalogService credentialCatalog,
+        IBitwardenCredentialSyncService bitwardenCredentialSync,
+        ITunnelConfigRepository tunnelConfigRepository,
+        ICredentialService credentialService)
+    {
+        _credentialCatalog = credentialCatalog;
+        _bitwardenCredentialSync = bitwardenCredentialSync;
         _credentialService = credentialService;
         TunnelPicker = new TunnelPickerViewModel(tunnelConfigRepository);
     }
@@ -134,21 +150,21 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// <summary>
     /// Drives the connection-level Domain field's visibility. Hidden only when a resolved RDP
     /// credential fully supplies the domain and the node adds nothing — an RDP connection using a
-    /// real RDP saved credential (<see cref="HasResolvedRdpCredential"/>) whose node-level
-    /// <see cref="RdpDomain"/> is empty or merely duplicates that credential's domain. An RDP saved
-    /// credential always carries its own (mandatory) domain, so a redundant node-level value is just
-    /// clutter; hiding the field here mirrors how the Username field hides under a saved credential.
+    /// saved RDP credential with a non-empty domain (<see cref="HasResolvedRdpCredential"/>) whose
+    /// node-level <see cref="RdpDomain"/> is empty or merely duplicates that credential's domain.
+    /// Such a node-level value is just clutter; hiding the field here mirrors how the Username field
+    /// hides under a saved credential.
     /// <para>
     /// It stays visible whenever the node holds a value the user still needs to see or fix: inline /
     /// connect-time-prompt mode (<see cref="UseSavedCredentials"/> false); the "(None) — prompt every
-    /// time" selection; a non-null <see cref="CredentialId"/> that doesn't resolve to a real RDP
-    /// credential — deleted, unloaded, or a stale protocol-mismatched credential
-    /// (<see cref="HasResolvedRdpCredential"/>); and a distinct override that differs from the
-    /// credential's own domain (<see cref="HasDistinctRdpDomainOverride"/>). Keeping a distinct
-    /// override visible is what stops a value that wins at connect (<c>explicitDomain ?? credentialDomain</c>
-    /// in <see cref="Sessions.RdpSessionViewModel"/>) from becoming an invisible override the user
-    /// can't discover or clear. The "(None)" case is also load-bearing for the AzureAD "prompt every
-    /// time" workflow, where the user types <c>AzureAD</c> into this field to route RDP externally.
+    /// time" selection; a non-null <see cref="CredentialId"/> that doesn't resolve to an RDP password
+    /// credential with a non-empty domain — deleted, unloaded, stale protocol-mismatched, or virtual
+    /// Bitwarden metadata without a domain; and a distinct override that differs from the credential's
+    /// own domain (<see cref="HasDistinctRdpDomainOverride"/>). Keeping a distinct override visible is
+    /// what stops a value that wins at connect (<c>explicitDomain ?? credentialDomain</c> in
+    /// <see cref="Sessions.RdpSessionViewModel"/>) from becoming an invisible override the user can't
+    /// discover or clear. The "(None)" case is also load-bearing for the AzureAD "prompt every time"
+    /// workflow, where the user types <c>AzureAD</c> into this field to route RDP externally.
     /// </para>
     /// </summary>
     public bool ShowRdpDomain =>
@@ -267,19 +283,19 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     /// <summary>
     /// True only when <see cref="CredentialId"/> resolves to a saved credential that actually carries
-    /// the RDP domain: a real <see cref="ProtocolType.Rdp"/> credential whose secret is a password
-    /// (only those store a domain — see <c>CredentialDialog.BuildDraft</c>, and they're the same
-    /// credentials <see cref="RebuildAvailableCredentials"/> offers for RDP). This excludes three
-    /// look-alikes that supply no domain and must therefore leave the Domain field editable: the
-    /// "(None) — prompt every time" sentinel; a dangling id whose credential was deleted or never
-    /// loaded (<see cref="SelectedCredential"/> is null); and a stale, protocol-mismatched credential
-    /// that <see cref="AppendStaleSelection"/> preserved for round-tripping (e.g. an SSH credential
-    /// bound to an RDP node). Gates hiding the node-level Domain field — using this rather than a bare
+    /// the RDP domain: a real <see cref="ProtocolType.Rdp"/> password credential with a non-empty
+    /// domain. This excludes look-alikes that supply no domain and must therefore leave the Domain
+    /// field editable: the "(None) — prompt every time" sentinel; a dangling id whose credential was
+    /// deleted or never loaded (<see cref="SelectedCredential"/> is null); a stale,
+    /// protocol-mismatched credential that <see cref="AppendStaleSelection"/> preserved for
+    /// round-tripping; and virtual Bitwarden RDP credentials whose login item username has no domain.
+    /// Gates hiding the node-level Domain field — using this rather than a bare
     /// <c>CredentialId is not null</c> keeps that field available whenever nothing authoritative can
     /// supply the domain.
     /// </summary>
     private bool HasResolvedRdpCredential =>
-        SelectedCredential is { Protocol: ProtocolType.Rdp, Kind: not CredentialKind.SshKey };
+        SelectedCredential is { Protocol: ProtocolType.Rdp, Kind: not CredentialKind.SshKey } credential
+        && !string.IsNullOrWhiteSpace(credential.Domain);
 
     /// <summary>
     /// True when the node-level <see cref="RdpDomain"/> is a meaningful override of the resolved RDP
@@ -678,7 +694,8 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     public async Task LoadCredentialsAsync()
     {
-        var creds = await _credentialRepository.GetAllAsync().ConfigureAwait(true);
+        await _bitwardenCredentialSync.SyncIfStaleAsync().ConfigureAwait(true);
+        var creds = await _credentialCatalog.GetPickerProfilesAsync().ConfigureAwait(true);
         _allCredentials.Clear();
         _allCredentialsById.Clear();
         foreach (var credential in creds)

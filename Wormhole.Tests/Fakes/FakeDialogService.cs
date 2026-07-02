@@ -55,6 +55,9 @@ public class FakeDialogService : IDialogService
 
     public virtual Task ShowMessageAsync(string title, string message) => Task.CompletedTask;
 
+    public virtual Task ShowBitwardenOnboardingNoticeAsync(string title, string message) =>
+        ShowMessageAsync(title, message);
+
     public virtual Task<bool> ConfirmAsync(string title, string message, string primaryText = "Yes", string closeText = "No")
     {
         ConfirmCount++;
