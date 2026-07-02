@@ -2,7 +2,8 @@ namespace Wormhole.Models;
 
 public sealed class AppSettings
 {
-    public const int CurrentSchemaVersion = 6;
+    public const int CurrentSchemaVersion = 7;
+    public const int BitwardenOnboardingIntroducedSchemaVersion = 6;
 
     public int SettingsSchemaVersion { get; set; } = CurrentSchemaVersion;
 
@@ -54,6 +55,7 @@ public sealed class AppSettings
     public string? BitwardenCredentialLastSyncError { get; set; }
     public int? BitwardenCredentialAvailableCount { get; set; }
     public int BitwardenOnboardingNoticeSeenVersion { get; set; }
+    public int BitwardenOnboardingNoticePendingVersion { get; set; }
 
     // Optional Bitwarden browser extension inside HTTPS WebView2 sessions. This is deliberately
     // separate from the bw CLI credential vault: the browser extension owns its own login/unlock state.

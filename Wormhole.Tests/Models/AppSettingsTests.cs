@@ -37,5 +37,6 @@ public class AppSettingsTests
         Assert.Null(settings.BitwardenBrowserExtensionLastUpdateError);
         Assert.Null(settings.BitwardenBrowserExtensionAvailableVersion);
         Assert.Equal(0, settings.BitwardenOnboardingNoticeSeenVersion);
+        Assert.Equal(0, settings.BitwardenOnboardingNoticePendingVersion);
     }
 }
