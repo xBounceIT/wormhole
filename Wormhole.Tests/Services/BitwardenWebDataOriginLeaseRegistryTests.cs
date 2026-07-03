@@ -64,4 +64,39 @@ public sealed class BitwardenWebDataOriginLeaseRegistryTests
 
         Assert.Equal(["https://stale.example"], inactive);
     }
+
+    [Fact]
+    public void GetInactiveOrigins_ExcludesOriginsUsedByHiddenLiveView()
+    {
+        var registry = new BitwardenWebDataOriginLeaseRegistry();
+        var owner = new object();
+        registry.TrackLiveOrigins(owner, @"C:\Wormhole\Profiles\Default", ["https://hidden.example"]);
+
+        var inactive = registry.GetInactiveOrigins(
+            @"C:\Wormhole\Profiles\Default\",
+            ["https://HIDDEN.example/path", "https://stale.example"]);
+
+        Assert.Equal(["https://stale.example"], inactive);
+
+        registry.UntrackLiveOrigins(owner);
+        Assert.Equal(
+            ["https://hidden.example"],
+            registry.GetInactiveOrigins(@"C:\Wormhole\Profiles\Default", ["https://hidden.example"]));
+    }
+
+    [Fact]
+    public void Release_DoesNotClearOriginUsedByHiddenLiveView()
+    {
+        var registry = new BitwardenWebDataOriginLeaseRegistry();
+        var owner = new object();
+        registry.TrackLiveOrigins(owner, @"C:\Wormhole\Profiles\Default", ["https://hidden.example"]);
+        var lease = registry.Register(@"C:\Wormhole\Profiles\Default", ["https://hidden.example"]);
+
+        Assert.Empty(lease.Release());
+
+        registry.UntrackLiveOrigins(owner);
+        Assert.Equal(
+            ["https://hidden.example"],
+            registry.GetInactiveOrigins(@"C:\Wormhole\Profiles\Default", ["https://hidden.example"]));
+    }
 }

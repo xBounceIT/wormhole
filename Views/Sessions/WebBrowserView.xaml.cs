@@ -139,6 +139,7 @@ public sealed partial class WebBrowserView : UserControl
         // so page state is preserved. Only (re)connect when there is nothing live to rebind to.
         if (_webView?.CoreWebView2 is not null)
         {
+            UntrackHiddenBitwardenWebDataOrigins();
             ReacquireBitwardenWebDataLease();
             return;
         }
@@ -168,8 +169,16 @@ public sealed partial class WebBrowserView : UserControl
         var generation = ++_createGeneration;
         if (vm is not null) vm.NavigateRequested -= OnNavigateRequested;
 
-        if (vm is null || IsTabStillOpen(vm))
+        if (vm is null)
         {
+            UntrackHiddenBitwardenWebDataOrigins();
+            ReleaseBitwardenWebDataLease();
+            return;
+        }
+
+        if (IsTabStillOpen(vm))
+        {
+            TrackHiddenBitwardenWebDataOrigins();
             ReleaseBitwardenWebDataLease();
             return;
         }
@@ -602,6 +611,21 @@ public sealed partial class WebBrowserView : UserControl
         UpdateToolbar();
     }
 
+    private void TrackHiddenBitwardenWebDataOrigins()
+    {
+        if (_bitwardenWebDataUserDataFolder is null || _currentTarget is null) return;
+        var core = _webView?.CoreWebView2;
+        if (core is null) return;
+
+        s_bitwardenWebDataOrigins.TrackLiveOrigins(
+            this,
+            _bitwardenWebDataUserDataFolder,
+            GetWebOrigins(_currentTarget, core.Source));
+    }
+
+    private void UntrackHiddenBitwardenWebDataOrigins() =>
+        s_bitwardenWebDataOrigins.UntrackLiveOrigins(this);
+
     private void ReacquireBitwardenWebDataLease()
     {
         if (_bitwardenWebDataLease is not null) return;
@@ -783,12 +807,14 @@ public sealed partial class WebBrowserView : UserControl
         style.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(0)));
         return style;
     }
+
     private async Task DisposeWebViewAsync()
     {
         var webView = _webView;
         var target = _currentTarget;
         var bitwardenWebDataLease = _bitwardenWebDataLease;
         var bitwardenWebDataUserDataFolder = _bitwardenWebDataUserDataFolder;
+        UntrackHiddenBitwardenWebDataOrigins();
         _webView = null;
         _currentEnvironment = null;
         _currentTarget = null;

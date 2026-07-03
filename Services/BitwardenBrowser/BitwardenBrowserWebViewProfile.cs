@@ -326,6 +326,7 @@ internal sealed class BitwardenWebDataOriginLeaseRegistry
 {
     private readonly object _gate = new();
     private readonly Dictionary<BitwardenWebDataOriginKey, int> _activeOrigins = new();
+    private readonly List<BitwardenLiveWebDataOriginRegistration> _liveOrigins = new();
 
     public BitwardenWebDataOriginLease Register(string userDataFolder, IEnumerable<string> origins)
     {
@@ -345,6 +346,35 @@ internal sealed class BitwardenWebDataOriginLeaseRegistry
         }
     }
 
+    internal void TrackLiveOrigins(object owner, string userDataFolder, IEnumerable<string> origins)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+        ArgumentException.ThrowIfNullOrWhiteSpace(userDataFolder);
+        ArgumentNullException.ThrowIfNull(origins);
+
+        var normalizedUserDataFolder = NormalizeUserDataFolder(userDataFolder);
+        var normalizedOrigins = NormalizeOrigins(origins);
+        lock (_gate)
+        {
+            RemoveLiveOriginsLocked(owner);
+            if (normalizedOrigins.Count == 0) return;
+
+            _liveOrigins.Add(new BitwardenLiveWebDataOriginRegistration(
+                owner,
+                normalizedUserDataFolder,
+                normalizedOrigins));
+        }
+    }
+
+    internal void UntrackLiveOrigins(object owner)
+    {
+        ArgumentNullException.ThrowIfNull(owner);
+        lock (_gate)
+        {
+            RemoveLiveOriginsLocked(owner);
+        }
+    }
+
     internal IReadOnlyList<string> GetInactiveOrigins(string userDataFolder, IEnumerable<string> origins)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(userDataFolder);
@@ -353,6 +383,7 @@ internal sealed class BitwardenWebDataOriginLeaseRegistry
         var normalizedUserDataFolder = NormalizeUserDataFolder(userDataFolder);
         lock (_gate)
         {
+            PruneDeadLiveOriginsLocked();
             var inactiveOrigins = new List<string>();
             foreach (var origin in origins)
             {
@@ -360,12 +391,42 @@ internal sealed class BitwardenWebDataOriginLeaseRegistry
                 if (normalizedOrigin is null) continue;
 
                 var key = new BitwardenWebDataOriginKey(normalizedUserDataFolder, normalizedOrigin);
-                if (!_activeOrigins.ContainsKey(key)) inactiveOrigins.Add(normalizedOrigin);
+                if (!IsOriginActiveLocked(key)) inactiveOrigins.Add(normalizedOrigin);
             }
 
             return inactiveOrigins;
         }
     }
+
+    private static HashSet<string> NormalizeOrigins(IEnumerable<string> origins)
+    {
+        var normalizedOrigins = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var origin in origins)
+        {
+            if (NormalizeOrigin(origin) is { } normalizedOrigin) normalizedOrigins.Add(normalizedOrigin);
+        }
+
+        return normalizedOrigins;
+    }
+
+    private void RemoveLiveOriginsLocked(object owner)
+    {
+        _liveOrigins.RemoveAll(registration =>
+            !registration.Owner.TryGetTarget(out var target) || ReferenceEquals(target, owner));
+    }
+
+    private void PruneDeadLiveOriginsLocked()
+    {
+        _liveOrigins.RemoveAll(registration => !registration.Owner.TryGetTarget(out _));
+    }
+
+    private bool IsOriginActiveLocked(BitwardenWebDataOriginKey key) =>
+        _activeOrigins.ContainsKey(key) || HasLiveOriginLocked(key);
+
+    private bool HasLiveOriginLocked(BitwardenWebDataOriginKey key) =>
+        _liveOrigins.Any(registration =>
+            string.Equals(registration.UserDataFolder, key.UserDataFolder, StringComparison.Ordinal)
+            && registration.Origins.Contains(key.Origin));
 
     private void AddOriginsLocked(BitwardenWebDataOriginLease lease, IEnumerable<string> origins)
     {
@@ -387,6 +448,7 @@ internal sealed class BitwardenWebDataOriginLeaseRegistry
 
         lock (_gate)
         {
+            PruneDeadLiveOriginsLocked();
             if (lease.IsReleased) return Array.Empty<string>();
             if (latestOrigins is not null) AddOriginsLocked(lease, latestOrigins);
 
@@ -400,7 +462,7 @@ internal sealed class BitwardenWebDataOriginLeaseRegistry
                 if (count <= 1)
                 {
                     _activeOrigins.Remove(key);
-                    clearableOrigins.Add(origin);
+                    if (!HasLiveOriginLocked(key)) clearableOrigins.Add(origin);
                 }
                 else
                 {
@@ -423,6 +485,23 @@ internal sealed class BitwardenWebDataOriginLeaseRegistry
 
     private static string? NormalizeOrigin(string? origin) =>
         BitwardenBrowserWebViewProfile.NormalizeWebOrigin(origin);
+
+    private sealed class BitwardenLiveWebDataOriginRegistration
+    {
+        public BitwardenLiveWebDataOriginRegistration(
+            object owner,
+            string userDataFolder,
+            HashSet<string> origins)
+        {
+            Owner = new WeakReference<object>(owner);
+            UserDataFolder = userDataFolder;
+            Origins = origins;
+        }
+
+        public WeakReference<object> Owner { get; }
+        public string UserDataFolder { get; }
+        public HashSet<string> Origins { get; }
+    }
 
     private readonly record struct BitwardenWebDataOriginKey(string UserDataFolder, string Origin);
 }
