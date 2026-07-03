@@ -18,6 +18,9 @@ internal static class BitwardenBrowserWebViewProfile
         Path.Combine("Default", "Cache"),
         Path.Combine("Default", "Code Cache"),
         Path.Combine("Default", "GPUCache"),
+        // DOM storage is site data; Bitwarden state is kept in extension-specific stores copied during profile seeding.
+        Path.Combine("Default", "Local Storage"),
+        Path.Combine("Default", "Session Storage"),
         Path.Combine("Default", "Service Worker", "CacheStorage"),
         Path.Combine("Default", "Service Worker", "ScriptCache"),
     ];
@@ -27,8 +30,6 @@ internal static class BitwardenBrowserWebViewProfile
         Path.Combine("Default", "Network", "Cookies-journal"),
         Path.Combine("Default", "Cookies"),
         Path.Combine("Default", "Cookies-journal"),
-        Path.Combine("Default", "Local Storage"),
-        Path.Combine("Default", "Session Storage"),
     ];
     private static readonly string[] CookieDatabaseRelativePaths =
     [

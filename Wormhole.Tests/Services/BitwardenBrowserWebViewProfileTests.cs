@@ -164,8 +164,8 @@ public sealed class BitwardenBrowserWebViewProfileTests
             Assert.Contains(siteIndexedDb, paths);
             Assert.DoesNotContain(extensionIndexedDb, paths);
             Assert.DoesNotContain(Path.Combine(profile, "Default", "Network", "Cookies"), paths);
-            Assert.DoesNotContain(Path.Combine(profile, "Default", "Local Storage"), paths);
-            Assert.DoesNotContain(Path.Combine(profile, "Default", "Session Storage"), paths);
+            Assert.Contains(Path.Combine(profile, "Default", "Local Storage"), paths);
+            Assert.Contains(Path.Combine(profile, "Default", "Session Storage"), paths);
             Assert.DoesNotContain(paths, path => path.Contains("Extension", StringComparison.OrdinalIgnoreCase));
         }
         finally
