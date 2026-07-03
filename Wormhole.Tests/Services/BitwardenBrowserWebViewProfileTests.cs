@@ -32,6 +32,33 @@ public sealed class BitwardenBrowserWebViewProfileTests
     }
 
     [Fact]
+    public void UserDataFolder_UsesStableSocksProfileKeyAcrossEphemeralPorts()
+    {
+        var target = new Uri("https://router.example/login");
+        var firstProxy = new IPEndPoint(IPAddress.Loopback, 12000);
+        var secondProxy = new IPEndPoint(IPAddress.Loopback, 23000);
+
+        Assert.NotEqual(
+            BitwardenBrowserWebViewProfile.BuildBrowserArguments(firstProxy),
+            BitwardenBrowserWebViewProfile.BuildBrowserArguments(secondProxy));
+
+        var first = BitwardenBrowserWebViewProfile.GetUserDataFolder(firstProxy, false, target, originalUri: null);
+        var second = BitwardenBrowserWebViewProfile.GetUserDataFolder(secondProxy, false, target, originalUri: null);
+        var otherTarget = BitwardenBrowserWebViewProfile.GetUserDataFolder(
+            secondProxy,
+            false,
+            new Uri("https://firewall.example/"),
+            originalUri: null);
+        var direct = BitwardenBrowserWebViewProfile.GetUserDataFolder(null, false, target, originalUri: null);
+        var ignoreCert = BitwardenBrowserWebViewProfile.GetUserDataFolder(firstProxy, true, target, originalUri: null);
+
+        Assert.Equal(first, second);
+        Assert.NotEqual(first, otherTarget);
+        Assert.NotEqual(first, direct);
+        Assert.NotEqual(first, ignoreCert);
+    }
+
+    [Fact]
     public void PendingWebDataOrigins_RoundTripsNormalizedHttpOrigins()
     {
         var profile = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));

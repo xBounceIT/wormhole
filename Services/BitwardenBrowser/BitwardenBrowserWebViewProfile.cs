@@ -53,6 +53,26 @@ internal static class BitwardenBrowserWebViewProfile
         AppPaths.GetBitwardenBrowserExtensionWebView2UserDataDirectory(
             BuildContextFolderName(browserArguments, ignoreCertificateErrors));
 
+    public static string GetUserDataFolder(
+        IPEndPoint? socks5Proxy,
+        bool ignoreCertificateErrors,
+        Uri navigateUri,
+        Uri? originalUri) =>
+        AppPaths.GetBitwardenBrowserExtensionWebView2UserDataDirectory(
+            BuildContextFolderName(
+                BuildProfileKeyMaterial(socks5Proxy, navigateUri, originalUri),
+                ignoreCertificateErrors));
+
+    private static string BuildProfileKeyMaterial(IPEndPoint? socks5Proxy, Uri navigateUri, Uri? originalUri)
+    {
+        if (socks5Proxy is null) return BuildBrowserArguments(null);
+
+        var targetUri = originalUri ?? navigateUri;
+        var targetOrigin = NormalizeWebOrigin(targetUri.ToString())
+            ?? targetUri.GetLeftPart(UriPartial.Authority).ToLowerInvariant();
+        return WebViewBrowserArguments.Hardening + "\0proxy=socks5\0target=" + targetOrigin;
+    }
+
     public static IReadOnlyList<string> ReadPendingWebDataOrigins(string userDataFolder)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(userDataFolder);

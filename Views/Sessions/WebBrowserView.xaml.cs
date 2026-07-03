@@ -345,7 +345,11 @@ public sealed partial class WebBrowserView : UserControl
         var browserArguments = BitwardenBrowserWebViewProfile.BuildBrowserArguments(target.Socks5Proxy);
         if (TryGetBitwardenExtensionInstall(target) is { } bitwardenInstall)
         {
-            var folder = BitwardenBrowserWebViewProfile.GetUserDataFolder(browserArguments, target.IgnoreCertErrors);
+            var folder = BitwardenBrowserWebViewProfile.GetUserDataFolder(
+                target.Socks5Proxy,
+                target.IgnoreCertErrors,
+                target.NavigateUri,
+                target.OriginalUri);
             Directory.CreateDirectory(folder);
             var options = new CoreWebView2EnvironmentOptions
             {
