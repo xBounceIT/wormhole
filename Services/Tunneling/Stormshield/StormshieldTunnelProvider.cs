@@ -131,12 +131,13 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
                 .Where(h => !string.IsNullOrWhiteSpace(h))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
-            routeLeases.AddRange(await PrepareOpenVpnRemoteRoutesAsync(
+            var remoteRouteLeases = await PrepareOpenVpnRemoteRoutesAsync(
                 config.Name,
                 remoteHosts,
                 settings.BypassNativeVpnGatewayRoute,
-                cancellationToken).ConfigureAwait(false));
-            ThrowIfUnresolvedNativeVpnConflict(config.Name, settings, routeLeases);
+                cancellationToken).ConfigureAwait(false);
+            routeLeases.AddRange(remoteRouteLeases);
+            ThrowIfEveryOpenVpnRemoteConflicts(config.Name, settings, remoteHosts, remoteRouteLeases);
 
             var sidecar = new OpenVpnSidecarConfig
             {
@@ -341,6 +342,24 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         IReadOnlyList<WindowsHostRouteLease> routeLeases)
     {
         if (!GetUnresolvedNativeVpnConflicts(routeLeases).Any())
+            return;
+
+        throw BuildNativeVpnConflictException(configName, settings, routeLeases);
+    }
+
+    internal static void ThrowIfEveryOpenVpnRemoteConflicts(
+        string configName,
+        StormshieldSettings settings,
+        IReadOnlyCollection<string> remoteHosts,
+        IReadOnlyList<WindowsHostRouteLease> routeLeases)
+    {
+        if (remoteHosts.Count == 0)
+            return;
+
+        var conflictedHosts = GetUnresolvedNativeVpnConflicts(routeLeases)
+            .Select(d => d.Host)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!remoteHosts.All(conflictedHosts.Contains))
             return;
 
         throw BuildNativeVpnConflictException(configName, settings, routeLeases);

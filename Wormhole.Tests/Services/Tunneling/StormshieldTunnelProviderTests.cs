@@ -696,6 +696,19 @@ public class StormshieldTunnelProviderTests
     }
 
     [Fact]
+    public void ThrowIfEveryOpenVpnRemoteConflicts_ReachableFallback_DoesNotThrow()
+    {
+        var lease = NativeVpnConflictLease(host: "blocked.example.com");
+        var remoteHosts = new[] { "blocked.example.com", "healthy.example.com" };
+
+        StormshieldTunnelProvider.ThrowIfEveryOpenVpnRemoteConflicts(
+            "cfg",
+            new StormshieldSettings(),
+            remoteHosts,
+            new[] { lease });
+    }
+
+    [Fact]
     public void NativeVpnConflictEnrichment_PortalTimeout_BuildsActionableMessage()
     {
         var lease = NativeVpnConflictLease();
@@ -866,17 +879,17 @@ public class StormshieldTunnelProviderTests
     }
 
     private static WindowsHostRouteLease NativeVpnConflictLease(
-        string message = "Windows currently routes rpv.example.com (203.0.113.10) through VPN-like adapter 'Stormshield VPN' (interface 7).",
+        string host = "rpv.example.com",
         bool bypassRouteInstalled = false) =>
         new(
             new[]
             {
                 new WindowsHostRouteDiagnostic(
-                    "rpv.example.com",
+                    host,
                     System.Net.IPAddress.Parse("203.0.113.10"),
                     NativeVpnConflict: true,
                     BypassRouteInstalled: bypassRouteInstalled,
-                    Message: message),
+                    Message: $"Windows currently routes {host} (203.0.113.10) through VPN-like adapter 'Stormshield VPN' (interface 7)."),
             },
             Array.Empty<IAsyncDisposable>());
 
