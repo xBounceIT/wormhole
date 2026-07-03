@@ -199,16 +199,80 @@ public class StormshieldTunnelProviderTests
         var id = Guid.NewGuid();
         cache.Seed(id, configHash: "ABC123", profileOvpn: "client\ndev tun\nremote fw 443\n<ca>cached</ca>\n");
         var otp = new ScriptedOtpPrompt("999111");
+        var downloadPreflightCalls = 0;
 
         var (profile, password, optimistic) = await StormshieldTunnelProvider.ResolveAutomaticCoreAsync(
-            portal, cache, otp, NullLogger.Instance, id, "cfg", ValidSettings(useOtp: true), CancellationToken.None);
+            portal, cache, otp, NullLogger.Instance, id, "cfg", ValidSettings(useOtp: true), CancellationToken.None,
+            assertPortalRouteAvailableForPortalRequest: () => downloadPreflightCalls++);
 
         Assert.Equal(0, portal.DownloadV5Calls);          // cache hit → NO download
+        Assert.Equal(0, downloadPreflightCalls);
         Assert.Equal("stored-password999111", password);  // OTP appended to the data-plane password
         Assert.Contains("cached", profile);               // the cached profile was reused verbatim
         Assert.False(optimistic);                         // hash-CONFIRMED hit → cache kept on a later failure
         Assert.Equal(0, cache.WriteCalls);
         Assert.Equal(1, otp.PromptCount);
+    }
+
+    [Fact]
+    public async Task ResolveAutomatic_Otp_PortalConflictWithCache_SkipsHashAndReusesProfile()
+    {
+        var portal = new ScriptedPortal { ConfigHashResult = "NEW" };
+        var cache = new FakeStormshieldConfigCache();
+        var id = Guid.NewGuid();
+        cache.Seed(id, configHash: "OLD", profileOvpn: "client\ndev tun\nremote fw 443\n<ca>cached</ca>\n");
+        var otp = new ScriptedOtpPrompt("505050");
+
+        var (profile, password, optimistic) = await StormshieldTunnelProvider.ResolveAutomaticCoreAsync(
+            portal, cache, otp, NullLogger.Instance, id, "cfg", ValidSettings(useOtp: true), CancellationToken.None,
+            assertPortalRouteAvailableForPortalRequest: () => throw new InvalidOperationException("portal route conflict"),
+            preferCachedProfileWithoutPortalProbe: true);
+
+        Assert.Equal(0, portal.ConfigHashCalls);
+        Assert.Equal(0, portal.DownloadV5Calls);
+        Assert.Equal("stored-password505050", password);
+        Assert.Contains("cached", profile);
+        Assert.True(optimistic);
+    }
+
+    [Fact]
+    public async Task ResolveAutomatic_Otp_PortalConflictWithoutCache_RunsPreflightBeforeHash()
+    {
+        var portal = new ScriptedPortal { ConfigHashResult = "NEWHASH" };
+        var cache = new FakeStormshieldConfigCache();
+        var id = Guid.NewGuid();
+        var otp = new ScriptedOtpPrompt("424242");
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            StormshieldTunnelProvider.ResolveAutomaticCoreAsync(
+                portal, cache, otp, NullLogger.Instance, id, "cfg", ValidSettings(useOtp: true), CancellationToken.None,
+                assertPortalRouteAvailableForPortalRequest: () => throw new InvalidOperationException("portal route conflict"),
+                preferCachedProfileWithoutPortalProbe: true));
+
+        Assert.Contains("portal route conflict", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, portal.ConfigHashCalls);
+        Assert.Equal(0, otp.PromptCount);
+        Assert.Equal(0, portal.DownloadV5Calls);
+        Assert.Equal(0, cache.WriteCalls);
+    }
+
+    [Fact]
+    public async Task ResolveAutomatic_Otp_CacheMiss_RunsDownloadPreflightBeforePrompt()
+    {
+        var portal = new ScriptedPortal { ConfigHashResult = "NEWHASH" };
+        var cache = new FakeStormshieldConfigCache();
+        var id = Guid.NewGuid();
+        var otp = new ScriptedOtpPrompt("424242");
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            StormshieldTunnelProvider.ResolveAutomaticCoreAsync(
+                portal, cache, otp, NullLogger.Instance, id, "cfg", ValidSettings(useOtp: true), CancellationToken.None,
+                assertPortalRouteAvailableForPortalRequest: () => throw new InvalidOperationException("portal route conflict")));
+
+        Assert.Contains("portal route conflict", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, otp.PromptCount);
+        Assert.Equal(0, portal.DownloadV5Calls);
+        Assert.Equal(0, cache.WriteCalls);
     }
 
     [Fact]
@@ -642,6 +706,102 @@ public class StormshieldTunnelProviderTests
     }
 
     [Fact]
+    public async Task EstablishAsync_AutomaticPortalNativeVpnConflict_FailsBeforeAuthentication()
+    {
+        var routeService = new ScriptedWindowsTemporaryHostRouteService();
+        routeService.NativeVpnConflictHosts.Add("rpv.example.com");
+        var provider = NewProvider(routeService: routeService);
+        var settings = ValidSettings(useOtp: false);
+        var blob = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(settings);
+        var cfg = new TunnelConfig { Id = Guid.NewGuid(), Name = "cfg", Kind = TunnelKind.Stormshield };
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            provider.EstablishAsync(cfg, blob, CancellationToken.None));
+
+        Assert.Contains("native VPN", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Bypass active native VPN route", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Administrator", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("rpv.example.com", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Collection(routeService.Hosts, host => Assert.Equal("rpv.example.com", host));
+        Assert.Empty(routeService.RouteReleases);
+    }
+
+    [Fact]
+    public async Task EstablishAsync_ImportRemoteNativeVpnConflict_FailsBeforeSidecar()
+    {
+        var routeService = new ScriptedWindowsTemporaryHostRouteService();
+        routeService.NativeVpnConflictHosts.Add("other-fw.example.com");
+        var provider = NewProvider(routeService: routeService);
+        var settings = new StormshieldSettings
+        {
+            Mode = StormshieldConnectionMode.Import,
+            ProfileOvpn = "client\ndev tun\nremote other-fw.example.com 443 tcp\n",
+        };
+        var blob = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(settings);
+        var cfg = new TunnelConfig { Id = Guid.NewGuid(), Name = "cfg", Kind = TunnelKind.Stormshield };
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            provider.EstablishAsync(cfg, blob, CancellationToken.None));
+
+        Assert.Contains("native VPN", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("OpenVPN remote", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("other-fw.example.com", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Collection(routeService.Hosts, host => Assert.Equal("other-fw.example.com", host));
+        Assert.Empty(routeService.RouteReleases);
+    }
+
+    [Fact]
+    public void ThrowIfUnresolvedNativeVpnConflict_BypassRouteInstalled_DoesNotThrow()
+    {
+        var lease = NativeVpnConflictLease(bypassRouteInstalled: true);
+        var settings = new StormshieldSettings { BypassNativeVpnGatewayRoute = true };
+
+        StormshieldTunnelProvider.ThrowIfUnresolvedNativeVpnConflict("cfg", settings, new[] { lease });
+    }
+
+    [Fact]
+    public void ThrowIfEveryOpenVpnRemoteConflicts_ReachableFallback_DoesNotThrow()
+    {
+        var lease = NativeVpnConflictLease(host: "blocked.example.com");
+        var remoteHosts = new[] { "blocked.example.com", "healthy.example.com" };
+
+        StormshieldTunnelProvider.ThrowIfEveryOpenVpnRemoteConflicts(
+            "cfg",
+            new StormshieldSettings(),
+            remoteHosts,
+            new[] { lease });
+    }
+
+    [Fact]
+    public void ThrowIfEveryOpenVpnRemoteConflicts_MixedAddressesForSameHost_DoesNotThrow()
+    {
+        var remoteHosts = new[] { "multi.example.com" };
+        var lease = new WindowsHostRouteLease(
+            new[]
+            {
+                new WindowsHostRouteDiagnostic(
+                    "multi.example.com",
+                    System.Net.IPAddress.Parse("203.0.113.10"),
+                    NativeVpnConflict: true,
+                    BypassRouteInstalled: false,
+                    Message: "blocked"),
+                new WindowsHostRouteDiagnostic(
+                    "multi.example.com",
+                    System.Net.IPAddress.Parse("203.0.113.11"),
+                    NativeVpnConflict: false,
+                    BypassRouteInstalled: false,
+                    Message: "reachable"),
+            },
+            Array.Empty<IAsyncDisposable>());
+
+        StormshieldTunnelProvider.ThrowIfEveryOpenVpnRemoteConflicts(
+            "cfg",
+            new StormshieldSettings(),
+            remoteHosts,
+            new[] { lease });
+    }
+
+    [Fact]
     public void NativeVpnConflictEnrichment_PortalTimeout_BuildsActionableMessage()
     {
         var lease = NativeVpnConflictLease();
@@ -812,17 +972,17 @@ public class StormshieldTunnelProviderTests
     }
 
     private static WindowsHostRouteLease NativeVpnConflictLease(
-        string message = "Windows currently routes rpv.example.com (203.0.113.10) through VPN-like adapter 'Stormshield VPN' (interface 7).",
+        string host = "rpv.example.com",
         bool bypassRouteInstalled = false) =>
         new(
             new[]
             {
                 new WindowsHostRouteDiagnostic(
-                    "rpv.example.com",
+                    host,
                     System.Net.IPAddress.Parse("203.0.113.10"),
                     NativeVpnConflict: true,
                     BypassRouteInstalled: bypassRouteInstalled,
-                    Message: message),
+                    Message: $"Windows currently routes {host} (203.0.113.10) through VPN-like adapter 'Stormshield VPN' (interface 7)."),
             },
             Array.Empty<IAsyncDisposable>());
 
@@ -830,6 +990,7 @@ public class StormshieldTunnelProviderTests
     {
         public List<string> Hosts { get; } = new();
         public HashSet<string> UnresolvedHosts { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> NativeVpnConflictHosts { get; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, Exception> FailuresByHost { get; } = new(StringComparer.OrdinalIgnoreCase);
         public List<TrackingAsyncDisposable> RouteReleases { get; } = new();
         public Exception? Failure { get; set; }
@@ -849,6 +1010,21 @@ public class StormshieldTunnelProviderTests
             {
                 throw new InvalidOperationException(
                     $"Native-VPN route bypass is enabled, but Wormhole could not resolve Stormshield gateway '{host}' to an IPv4 address before installing a host route.");
+            }
+
+            if (NativeVpnConflictHosts.Contains(host))
+            {
+                return Task.FromResult(new WindowsHostRouteLease(
+                    new[]
+                    {
+                        new WindowsHostRouteDiagnostic(
+                            host,
+                            System.Net.IPAddress.Parse("203.0.113.10"),
+                            NativeVpnConflict: true,
+                            BypassRouteInstalled: false,
+                            Message: $"Windows currently routes {host} (203.0.113.10) through VPN-like adapter 'Stormshield VPN' (interface 7)."),
+                    },
+                    Array.Empty<IAsyncDisposable>()));
             }
 
             var release = new TrackingAsyncDisposable();
