@@ -31,27 +31,51 @@ public sealed class BitwardenBrowserWebViewProfileTests
     }
 
     [Fact]
-    public void EphemeralWebDataPaths_ClearWebStateWithoutExtensionStorage()
+    public void PendingWebDataOrigins_RoundTripsNormalizedHttpOrigins()
     {
         var profile = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
-        var siteIndexedDb = Path.Combine(profile, "Default", "IndexedDB", "https_example.test_0.indexeddb.leveldb");
-        var extensionIndexedDb = Path.Combine(profile, "Default", "IndexedDB", "chrome-extension_abc_0.indexeddb.leveldb");
         try
         {
-            Directory.CreateDirectory(siteIndexedDb);
-            Directory.CreateDirectory(extensionIndexedDb);
+            BitwardenBrowserWebViewProfile.AddPendingWebDataOrigins(profile,
+            [
+                "https://Example.test/login",
+                "https://example.test/other",
+                "http://127.0.0.1:54321/path",
+                "chrome-extension://abcdef/popup.html",
+                "not a uri",
+            ]);
 
-            var paths = BitwardenBrowserWebViewProfile.GetEphemeralWebDataPaths(profile);
+            var origins = BitwardenBrowserWebViewProfile.ReadPendingWebDataOrigins(profile)
+                .Order(StringComparer.Ordinal)
+                .ToArray();
 
-            Assert.Contains(Path.Combine(profile, "Default", "Network", "Cookies"), paths);
-            Assert.Contains(Path.Combine(profile, "Default", "Local Storage"), paths);
-            Assert.Contains(Path.Combine(profile, "Default", "Session Storage"), paths);
-            Assert.Contains(Path.Combine(profile, "Default", "Cache"), paths);
-            Assert.Contains(siteIndexedDb, paths);
-            Assert.DoesNotContain(extensionIndexedDb, paths);
-            Assert.DoesNotContain(Path.Combine(profile, "Default", "IndexedDB"), paths);
-            Assert.DoesNotContain(paths, path => path.Contains("Extension", StringComparison.OrdinalIgnoreCase));
-            Assert.DoesNotContain(paths, path => path.Contains("Local Extension Settings", StringComparison.OrdinalIgnoreCase));
+            Assert.Equal(["http://127.0.0.1:54321", "https://example.test"], origins);
+        }
+        finally
+        {
+            if (Directory.Exists(profile)) Directory.Delete(profile, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void RemovePendingWebDataOrigins_RemovesOnlyClearedOrigins()
+    {
+        var profile = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            BitwardenBrowserWebViewProfile.AddPendingWebDataOrigins(profile,
+            [
+                "https://first.example",
+                "https://second.example",
+            ]);
+
+            BitwardenBrowserWebViewProfile.RemovePendingWebDataOrigins(profile, ["https://first.example/path"]);
+
+            Assert.Equal(["https://second.example"], BitwardenBrowserWebViewProfile.ReadPendingWebDataOrigins(profile));
+
+            BitwardenBrowserWebViewProfile.RemovePendingWebDataOrigins(profile, ["https://second.example"]);
+
+            Assert.Empty(BitwardenBrowserWebViewProfile.ReadPendingWebDataOrigins(profile));
         }
         finally
         {

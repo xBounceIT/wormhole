@@ -51,4 +51,17 @@ public sealed class BitwardenWebDataOriginLeaseRegistryTests
         Assert.Equal(["https://example.test"], lease.Release());
         Assert.Empty(lease.Release());
     }
+
+    [Fact]
+    public void GetInactiveOrigins_ExcludesOriginsUsedByLiveLeaseInSameProfile()
+    {
+        var registry = new BitwardenWebDataOriginLeaseRegistry();
+        registry.Register(@"C:\Wormhole\Profiles\Default", ["https://active.example"]);
+
+        var inactive = registry.GetInactiveOrigins(
+            @"C:\Wormhole\Profiles\Default\",
+            ["https://ACTIVE.example/path", "https://stale.example"]);
+
+        Assert.Equal(["https://stale.example"], inactive);
+    }
 }

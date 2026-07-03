@@ -254,9 +254,10 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// Wipe the web-browser WebView2 user-data root: no web session is live at launch, and web sessions
-    /// deliberately don't persist across restarts, so this also reclaims any per-tab proxy sub-folders
-    /// orphaned by a Sessions↔Settings navigation (see <c>WebBrowserView</c>). Best-effort — a locked
+    /// Wipe the non-extension web-browser WebView2 user-data root: no regular web session is live at
+    /// launch, and regular web sessions deliberately don't persist across restarts. Bitwarden-enabled
+    /// HTTPS tabs use a separate persistent profile so the extension can keep its login state; their
+    /// visited web origins are cleared selectively by <c>WebBrowserView</c>. Best-effort — a locked
     /// folder or any IO error is swallowed.
     /// </summary>
     private void ClearWebBrowserUserData()
@@ -270,45 +271,6 @@ public partial class App : Application
         {
             Services.GetService<ILogger<App>>()?.LogDebug(
                 ex, "Could not clear the web-browser WebView2 user-data folder at startup (best-effort).");
-        }
-
-        ClearBitwardenBrowserWebDataAtStartup();
-    }
-
-    private void ClearBitwardenBrowserWebDataAtStartup()
-    {
-        try
-        {
-            var root = AppPaths.GetBitwardenBrowserExtensionWebView2UserDataRoot();
-            if (!Directory.Exists(root)) return;
-
-            foreach (var profileDir in Directory.EnumerateDirectories(root))
-            {
-                foreach (var path in BitwardenBrowserWebViewProfile.GetEphemeralWebDataPaths(profileDir))
-                {
-                    TryDeleteBitwardenBrowserWebDataPath(path);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Services.GetService<ILogger<App>>()?.LogDebug(
-                ex, "Could not clear Bitwarden WebView2 browser data at startup (best-effort).");
-        }
-    }
-
-    private void TryDeleteBitwardenBrowserWebDataPath(string path)
-    {
-        try
-        {
-            if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
-            else if (File.Exists(path)) File.Delete(path);
-        }
-        catch (Exception ex)
-        {
-            Services.GetService<ILogger<App>>()?.LogDebug(
-                ex, "Could not clear Bitwarden WebView2 browser data path {Path} at startup (best-effort).",
-                path);
         }
     }
 

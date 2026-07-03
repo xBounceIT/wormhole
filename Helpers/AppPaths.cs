@@ -36,6 +36,8 @@ internal static class AppPaths
     private static readonly string BitwardenCliDownloadDirectory = Path.Combine(AppDataDirectory, "cache", "bitwarden-cli");
     private static readonly string BitwardenBrowserExtensionDirectory = Path.Combine(AppDataDirectory, "extensions", "bitwarden");
     private static readonly string BitwardenBrowserExtensionDownloadDirectory = Path.Combine(AppDataDirectory, "cache", "bitwarden-browser-extension");
+    // Persistent user-data root for HTTPS tabs that load Bitwarden. The extension login state lives
+    // here; WebBrowserView clears recorded web origins selectively instead of wiping the whole root.
     private static readonly string BitwardenBrowserExtensionWebView2UserDataDirectory = Path.Combine(AppDataDirectory, "bitwarden-browser-webview2");
     private static readonly string BitwardenIconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "Bitwarden", "bitwarden-icon.png");
     private static readonly string WebAssetsDirectory = Path.Combine(AppContext.BaseDirectory, "Assets", "web");
@@ -105,7 +107,7 @@ internal static class AppPaths
     public static string GetUpdateChangelogWebView2UserDataDirectory() =>
         Path.Combine(UpdateChangelogWebView2UserDataDirectory, WebViewBrowserArguments.KeyedSharedFolderName);
 
-    // Root for ALL web-tab environments — wiped at startup by App.ClearWebBrowserUserData, and the
+    // Root for regular web-tab environments — wiped at startup by App.ClearWebBrowserUserData, and the
     // parent of both the keyed shared folder and the per-tab isolated env-<id> folders.
     public static string GetWebBrowserUserDataDirectory() => WebBrowserUserDataDirectory;
 

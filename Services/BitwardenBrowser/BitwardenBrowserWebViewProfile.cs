@@ -7,23 +7,8 @@ namespace Wormhole.Services.BitwardenBrowser;
 
 internal static class BitwardenBrowserWebViewProfile
 {
-    private static readonly string[] EphemeralWebDataRelativePaths =
-    [
-        Path.Combine("Default", "Network", "Cookies"),
-        Path.Combine("Default", "Network", "Cookies-journal"),
-        Path.Combine("Default", "Cookies"),
-        Path.Combine("Default", "Cookies-journal"),
-        Path.Combine("Default", "History"),
-        Path.Combine("Default", "History-journal"),
-        Path.Combine("Default", "Visited Links"),
-        Path.Combine("Default", "Local Storage"),
-        Path.Combine("Default", "Session Storage"),
-        Path.Combine("Default", "Cache"),
-        Path.Combine("Default", "Code Cache"),
-        Path.Combine("Default", "GPUCache"),
-        Path.Combine("Default", "Service Worker", "CacheStorage"),
-        Path.Combine("Default", "Service Worker", "ScriptCache"),
-    ];
+    private const string PendingWebDataOriginsFileName = "wormhole-bitwarden-web-origins.txt";
+    private static readonly object PendingWebDataOriginsGate = new();
 
     public static bool IsHttpsTarget(Uri navigateUri, Uri? originalUri) =>
         string.Equals((originalUri ?? navigateUri).Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase);
@@ -42,32 +27,103 @@ internal static class BitwardenBrowserWebViewProfile
         AppPaths.GetBitwardenBrowserExtensionWebView2UserDataDirectory(
             BuildContextFolderName(browserArguments, ignoreCertificateErrors));
 
-    public static IReadOnlyList<string> GetEphemeralWebDataPaths(string userDataFolder)
+    public static IReadOnlyList<string> ReadPendingWebDataOrigins(string userDataFolder)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(userDataFolder);
-        var paths = EphemeralWebDataRelativePaths
-            .Select(relativePath => Path.Combine(userDataFolder, relativePath))
-            .ToList();
-        AddIndexedDbWebDataPaths(userDataFolder, paths);
-        return paths;
+
+        lock (PendingWebDataOriginsGate)
+        {
+            return ReadPendingWebDataOriginsLocked(userDataFolder).ToList();
+        }
     }
 
-    private static void AddIndexedDbWebDataPaths(string userDataFolder, List<string> paths)
+    public static void AddPendingWebDataOrigins(string userDataFolder, IEnumerable<string> origins)
     {
-        var indexedDbRoot = Path.Combine(userDataFolder, "Default", "IndexedDB");
-        if (!Directory.Exists(indexedDbRoot))
-        {
-            paths.Add(indexedDbRoot);
-            return;
-        }
+        ArgumentException.ThrowIfNullOrWhiteSpace(userDataFolder);
+        ArgumentNullException.ThrowIfNull(origins);
 
-        foreach (var entry in Directory.EnumerateFileSystemEntries(indexedDbRoot))
+        lock (PendingWebDataOriginsGate)
         {
-            var name = Path.GetFileName(entry);
-            if (name.StartsWith("chrome-extension_", StringComparison.OrdinalIgnoreCase)) continue;
-            paths.Add(entry);
+            var normalized = NormalizeOrigins(origins);
+            if (normalized.Count == 0) return;
+
+            var existing = ReadPendingWebDataOriginsLocked(userDataFolder);
+            var changed = false;
+            foreach (var origin in normalized)
+            {
+                changed |= existing.Add(origin);
+            }
+
+            if (!changed) return;
+
+            Directory.CreateDirectory(userDataFolder);
+            File.WriteAllLines(GetPendingWebDataOriginsPath(userDataFolder), existing.Order(StringComparer.Ordinal));
         }
     }
+
+    public static void RemovePendingWebDataOrigins(string userDataFolder, IEnumerable<string> origins)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(userDataFolder);
+        ArgumentNullException.ThrowIfNull(origins);
+
+        lock (PendingWebDataOriginsGate)
+        {
+            var normalized = NormalizeOrigins(origins);
+            if (normalized.Count == 0) return;
+
+            var existing = ReadPendingWebDataOriginsLocked(userDataFolder);
+            if (existing.Count == 0) return;
+
+            existing.ExceptWith(normalized);
+            var path = GetPendingWebDataOriginsPath(userDataFolder);
+            if (existing.Count == 0)
+            {
+                if (File.Exists(path)) File.Delete(path);
+                return;
+            }
+
+            Directory.CreateDirectory(userDataFolder);
+            File.WriteAllLines(path, existing.Order(StringComparer.Ordinal));
+        }
+    }
+
+    private static string GetPendingWebDataOriginsPath(string userDataFolder) =>
+        Path.Combine(userDataFolder, PendingWebDataOriginsFileName);
+
+    private static HashSet<string> ReadPendingWebDataOriginsLocked(string userDataFolder)
+    {
+        var path = GetPendingWebDataOriginsPath(userDataFolder);
+        if (!File.Exists(path)) return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            return NormalizeOrigins(File.ReadAllLines(path));
+        }
+        catch
+        {
+            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    private static HashSet<string> NormalizeOrigins(IEnumerable<string> origins)
+    {
+        var normalized = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var origin in origins)
+        {
+            if (NormalizeWebOrigin(origin) is { } normalizedOrigin) normalized.Add(normalizedOrigin);
+        }
+
+        return normalized;
+    }
+
+    internal static string? NormalizeWebOrigin(string? origin)
+    {
+        if (string.IsNullOrWhiteSpace(origin)) return null;
+        if (!Uri.TryCreate(origin.Trim(), UriKind.Absolute, out var uri)) return null;
+        if (uri.Scheme is not ("http" or "https")) return null;
+        return uri.GetLeftPart(UriPartial.Authority).ToLowerInvariant();
+    }
+
 }
 
 internal sealed class BitwardenWebDataOriginLeaseRegistry
@@ -90,6 +146,28 @@ internal sealed class BitwardenWebDataOriginLeaseRegistry
         lock (_gate)
         {
             AddOriginsLocked(lease, origins);
+        }
+    }
+
+    internal IReadOnlyList<string> GetInactiveOrigins(string userDataFolder, IEnumerable<string> origins)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(userDataFolder);
+        ArgumentNullException.ThrowIfNull(origins);
+
+        var normalizedUserDataFolder = NormalizeUserDataFolder(userDataFolder);
+        lock (_gate)
+        {
+            var inactiveOrigins = new List<string>();
+            foreach (var origin in origins)
+            {
+                var normalizedOrigin = NormalizeOrigin(origin);
+                if (normalizedOrigin is null) continue;
+
+                var key = new BitwardenWebDataOriginKey(normalizedUserDataFolder, normalizedOrigin);
+                if (!_activeOrigins.ContainsKey(key)) inactiveOrigins.Add(normalizedOrigin);
+            }
+
+            return inactiveOrigins;
         }
     }
 
@@ -148,7 +226,7 @@ internal sealed class BitwardenWebDataOriginLeaseRegistry
     }
 
     private static string? NormalizeOrigin(string? origin) =>
-        string.IsNullOrWhiteSpace(origin) ? null : origin.Trim().ToLowerInvariant();
+        BitwardenBrowserWebViewProfile.NormalizeWebOrigin(origin);
 
     private readonly record struct BitwardenWebDataOriginKey(string UserDataFolder, string Origin);
 }
