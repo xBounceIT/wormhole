@@ -203,7 +203,7 @@ public class StormshieldTunnelProviderTests
 
         var (profile, password, optimistic) = await StormshieldTunnelProvider.ResolveAutomaticCoreAsync(
             portal, cache, otp, NullLogger.Instance, id, "cfg", ValidSettings(useOtp: true), CancellationToken.None,
-            beforeProfileDownload: () => downloadPreflightCalls++);
+            assertPortalRouteAvailableForPortalRequest: () => downloadPreflightCalls++);
 
         Assert.Equal(0, portal.DownloadV5Calls);          // cache hit → NO download
         Assert.Equal(0, downloadPreflightCalls);
@@ -212,6 +212,48 @@ public class StormshieldTunnelProviderTests
         Assert.False(optimistic);                         // hash-CONFIRMED hit → cache kept on a later failure
         Assert.Equal(0, cache.WriteCalls);
         Assert.Equal(1, otp.PromptCount);
+    }
+
+    [Fact]
+    public async Task ResolveAutomatic_Otp_PortalConflictWithCache_SkipsHashAndReusesProfile()
+    {
+        var portal = new ScriptedPortal { ConfigHashResult = "NEW" };
+        var cache = new FakeStormshieldConfigCache();
+        var id = Guid.NewGuid();
+        cache.Seed(id, configHash: "OLD", profileOvpn: "client\ndev tun\nremote fw 443\n<ca>cached</ca>\n");
+        var otp = new ScriptedOtpPrompt("505050");
+
+        var (profile, password, optimistic) = await StormshieldTunnelProvider.ResolveAutomaticCoreAsync(
+            portal, cache, otp, NullLogger.Instance, id, "cfg", ValidSettings(useOtp: true), CancellationToken.None,
+            assertPortalRouteAvailableForPortalRequest: () => throw new InvalidOperationException("portal route conflict"),
+            preferCachedProfileWithoutPortalProbe: true);
+
+        Assert.Equal(0, portal.ConfigHashCalls);
+        Assert.Equal(0, portal.DownloadV5Calls);
+        Assert.Equal("stored-password505050", password);
+        Assert.Contains("cached", profile);
+        Assert.True(optimistic);
+    }
+
+    [Fact]
+    public async Task ResolveAutomatic_Otp_PortalConflictWithoutCache_RunsPreflightBeforeHash()
+    {
+        var portal = new ScriptedPortal { ConfigHashResult = "NEWHASH" };
+        var cache = new FakeStormshieldConfigCache();
+        var id = Guid.NewGuid();
+        var otp = new ScriptedOtpPrompt("424242");
+
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            StormshieldTunnelProvider.ResolveAutomaticCoreAsync(
+                portal, cache, otp, NullLogger.Instance, id, "cfg", ValidSettings(useOtp: true), CancellationToken.None,
+                assertPortalRouteAvailableForPortalRequest: () => throw new InvalidOperationException("portal route conflict"),
+                preferCachedProfileWithoutPortalProbe: true));
+
+        Assert.Contains("portal route conflict", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, portal.ConfigHashCalls);
+        Assert.Equal(0, otp.PromptCount);
+        Assert.Equal(0, portal.DownloadV5Calls);
+        Assert.Equal(0, cache.WriteCalls);
     }
 
     [Fact]
@@ -225,7 +267,7 @@ public class StormshieldTunnelProviderTests
         var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
             StormshieldTunnelProvider.ResolveAutomaticCoreAsync(
                 portal, cache, otp, NullLogger.Instance, id, "cfg", ValidSettings(useOtp: true), CancellationToken.None,
-                beforeProfileDownload: () => throw new InvalidOperationException("portal route conflict")));
+                assertPortalRouteAvailableForPortalRequest: () => throw new InvalidOperationException("portal route conflict")));
 
         Assert.Contains("portal route conflict", ex.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(0, otp.PromptCount);

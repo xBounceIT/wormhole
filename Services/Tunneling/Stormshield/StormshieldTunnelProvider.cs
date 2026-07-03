@@ -99,7 +99,8 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         }
 
         var routeLeases = new List<WindowsHostRouteLease>();
-        Action? assertPortalRouteAvailableForDownload = null;
+        Action? assertPortalRouteAvailableForPortalRequest = null;
+        bool preferCachedProfileWithoutPortalProbe = false;
         try
         {
             if (settings.Mode == StormshieldConnectionMode.Automatic && !string.IsNullOrWhiteSpace(settings.Server))
@@ -111,8 +112,10 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
                     "portal",
                     cancellationToken).ConfigureAwait(false);
                 routeLeases.Add(portalRouteLease);
-                assertPortalRouteAvailableForDownload = () =>
-                    ThrowIfUnresolvedNativeVpnConflict(config.Name, settings, new[] { portalRouteLease });
+                var portalRouteLeases = new[] { portalRouteLease };
+                preferCachedProfileWithoutPortalProbe = GetUnresolvedNativeVpnConflicts(portalRouteLeases).Any();
+                assertPortalRouteAvailableForPortalRequest = () =>
+                    ThrowIfUnresolvedNativeVpnConflict(config.Name, settings, portalRouteLeases);
             }
 
             // Each mode yields BOTH the profile and the password the OpenVPN data plane should authenticate
@@ -123,7 +126,9 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             {
                 StormshieldConnectionMode.Import => (BuildImportProfile(config, settings), settings.Password, false),
                 StormshieldConnectionMode.Automatic => await ResolveAutomaticAsync(
-                    config, settings, cancellationToken, progress, assertPortalRouteAvailableForDownload).ConfigureAwait(false),
+                    config, settings, cancellationToken, progress,
+                    assertPortalRouteAvailableForPortalRequest,
+                    preferCachedProfileWithoutPortalProbe).ConfigureAwait(false),
                 _ => throw new InvalidOperationException($"Tunnel config '{config.Name}' has an unsupported Stormshield mode '{settings.Mode}'."),
             };
             profile = ApplyCompressionFramingOverride(config.Name, settings, profile);
@@ -559,7 +564,8 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         StormshieldSettings settings,
         CancellationToken cancellationToken,
         IProgress<TunnelProgress>? progress = null,
-        Action? beforeProfileDownload = null)
+        Action? assertPortalRouteAvailableForPortalRequest = null,
+        bool preferCachedProfileWithoutPortalProbe = false)
     {
         // Pre-flight mirrors TunnelConfigsViewModel.ValidateStormshield so a kind/blob mismatch or
         // missing field fails fast with an actionable message instead of a confusing HTTP error.
@@ -594,7 +600,8 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             portal => ResolveAutomaticCoreAsync(
                 portal, _configCache, guardedOtpPrompt, _logger, config.Id, config.Name, settings,
                 cancellationToken, progress, onOtpSpent: code => _otpReuseGuard.Record(config.Id, code),
-                beforeProfileDownload: beforeProfileDownload),
+                assertPortalRouteAvailableForPortalRequest: assertPortalRouteAvailableForPortalRequest,
+                preferCachedProfileWithoutPortalProbe: preferCachedProfileWithoutPortalProbe),
             _tlsTrustPrompt,
             reloadPersistedTrustAsync: async () =>
             {
@@ -890,7 +897,8 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         CancellationToken cancellationToken,
         IProgress<TunnelProgress>? progress = null,
         Action<string>? onOtpSpent = null,
-        Action? beforeProfileDownload = null)
+        Action? assertPortalRouteAvailableForPortalRequest = null,
+        bool preferCachedProfileWithoutPortalProbe = false)
     {
         progress?.Report(new TunnelProgress(TunnelPhase.Authenticating));
 
@@ -898,17 +906,33 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         {
             // No single-use factor to conserve — download fresh every time, real password on the data
             // plane. (Unchanged behavior for non-OTP firewalls; nothing is cached.)
-            beforeProfileDownload?.Invoke();
+            assertPortalRouteAvailableForPortalRequest?.Invoke();
             progress?.Report(new TunnelProgress(TunnelPhase.DownloadingConfiguration));
             var profileNoOtp = await DownloadProfileV5WrappedAsync(portal, settings, otp: null, cancellationToken).ConfigureAwait(false);
             return (StormshieldProfileNormalizer.Normalize(profileNoOtp), settings.Password, false);
         }
 
-        // Ask the firewall whether its SSL VPN config changed (unauthenticated; null when the endpoint is
-        // unsupported or unreachable), and look up any current cached profile for this tunnel.
-        var serverHash = await portal.GetConfigHashAsync(cancellationToken).ConfigureAwait(false);
+        // Look up the cache before the optional portal hash probe. If route diagnostics already show
+        // the portal goes through a native VPN, a cached profile can still bring up the data plane;
+        // without one, fail before any portal HTTP request can time out behind the native client.
         var cached = await cache.TryReadAsync(tunnelId, settings, cancellationToken).ConfigureAwait(false);
+        if (preferCachedProfileWithoutPortalProbe)
+        {
+            if (cached is not null)
+            {
+                var dataPlaneOtp = await PromptOtpAsync(otpPrompt, configName, cancellationToken).ConfigureAwait(false);
+                logger.LogInformation(
+                    "Stormshield '{Name}': reusing the cached configuration (portal route preflight found a native-VPN conflict); routing the one-time code to the OpenVPN data plane.",
+                    configName);
+                return (cached.ProfileOvpn, settings.Password + dataPlaneOtp, true);
+            }
 
+            assertPortalRouteAvailableForPortalRequest?.Invoke();
+        }
+
+        // Ask the firewall whether its SSL VPN config changed (unauthenticated; null when the endpoint is
+        // unsupported or unreachable).
+        var serverHash = await portal.GetConfigHashAsync(cancellationToken).ConfigureAwait(false);
         var hashMatches = cached is not null && serverHash is not null
             && string.Equals(serverHash, cached.ConfigHash, StringComparison.OrdinalIgnoreCase);
         // Change-check unavailable but a cached profile exists: trust the cache rather than re-downloading
@@ -941,7 +965,7 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         }
 
         // Cache MISS: download (spends the OTP on the HTTPS step), persist for next time, then stop.
-        beforeProfileDownload?.Invoke();
+        assertPortalRouteAvailableForPortalRequest?.Invoke();
         var downloadOtp = await PromptOtpAsync(otpPrompt, configName, cancellationToken).ConfigureAwait(false);
         logger.LogInformation(
             "Stormshield '{Name}': {Reason}; downloading a fresh configuration (this uses the one-time code).",
