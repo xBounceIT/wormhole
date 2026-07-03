@@ -200,50 +200,62 @@ public sealed partial class ConnectionTreeView : UserControl
     // can't reach Root from inside a Popup nested in a DataTemplate.
     private void OnAddFolderItemClick(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement fe && fe.DataContext is TreeNodeViewModel vm)
+        if (ResolveNodeMenuTarget(sender) is { } vm)
         {
+            ViewModel.SelectedNode = vm;
             ViewModel.AddFolderCommand.Execute(vm);
         }
     }
 
     private void OnAddConnectionItemClick(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement fe && fe.DataContext is TreeNodeViewModel vm)
+        if (ResolveNodeMenuTarget(sender) is { } vm)
         {
+            ViewModel.SelectedNode = vm;
             ViewModel.AddConnectionCommand.Execute(vm);
         }
     }
 
     private void OnShowCredentialsItemClick(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement fe && fe.DataContext is TreeNodeViewModel vm)
+        if (ResolveNodeMenuTarget(sender) is { } vm)
         {
+            ViewModel.SelectedNode = vm;
             ViewModel.ShowCredentialsCommand.Execute(vm);
         }
     }
 
     private void OnDuplicateItemClick(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement fe && fe.DataContext is TreeNodeViewModel vm)
+        if (ResolveNodeMenuTarget(sender) is { } vm)
         {
+            ViewModel.SelectedNode = vm;
             ViewModel.DuplicateCommand.Execute(vm);
         }
     }
 
     private void OnEditItemClick(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement fe && fe.DataContext is TreeNodeViewModel vm)
+        if (ResolveNodeMenuTarget(sender) is { } vm)
         {
+            ViewModel.SelectedNode = vm;
             ViewModel.EditCommand.Execute(vm);
         }
     }
 
     private void OnDeleteItemClick(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement fe && fe.DataContext is TreeNodeViewModel vm)
+        if (ResolveNodeMenuTarget(sender) is { } vm)
         {
+            ViewModel.SelectedNode = vm;
             ViewModel.DeleteCommand.Execute(vm);
         }
+    }
+
+    private static TreeNodeViewModel? ResolveNodeMenuTarget(object sender)
+    {
+        if (sender is not FrameworkElement fe) return null;
+        return fe.Tag as TreeNodeViewModel ?? fe.DataContext as TreeNodeViewModel;
     }
 
     private void OnOpenAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)

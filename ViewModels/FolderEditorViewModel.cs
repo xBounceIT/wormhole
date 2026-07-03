@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
+using Microsoft.Extensions.DependencyInjection;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
 using Wormhole.Services.Bitwarden;
@@ -23,7 +24,7 @@ public partial class FolderEditorViewModel : ObservableObject
     private readonly Dictionary<Guid, CredentialProfile> _availableCredentialsById = new();
     private readonly HashSet<Guid> _loadedCredentialIds = new();
 
-    public FolderEditorViewModel(
+    internal FolderEditorViewModel(
         ITunnelConfigRepository tunnelConfigRepository,
         ICredentialRepository credentialRepository)
         : this(
@@ -33,6 +34,7 @@ public partial class FolderEditorViewModel : ObservableObject
     {
     }
 
+    [ActivatorUtilitiesConstructor]
     public FolderEditorViewModel(
         ITunnelConfigRepository tunnelConfigRepository,
         IBitwardenCredentialCatalogService credentialCatalog,

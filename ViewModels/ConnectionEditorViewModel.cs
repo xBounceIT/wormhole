@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using CommunityToolkit.Mvvm.ComponentModel;
+using Microsoft.Extensions.DependencyInjection;
 using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Models;
@@ -45,7 +46,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     // for a connection that actually has one.
     private bool _loadedUseInlinePassword;
 
-    public ConnectionEditorViewModel(
+    internal ConnectionEditorViewModel(
         ICredentialRepository credentialRepository,
         ITunnelConfigRepository tunnelConfigRepository,
         ICredentialService credentialService)
@@ -57,6 +58,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     {
     }
 
+    [ActivatorUtilitiesConstructor]
     public ConnectionEditorViewModel(
         IBitwardenCredentialCatalogService credentialCatalog,
         IBitwardenCredentialSyncService bitwardenCredentialSync,
