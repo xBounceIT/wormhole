@@ -647,15 +647,30 @@ public sealed partial class WebBrowserView : UserControl
 
     private void TrackBitwardenWebDataOrigin(string? source)
     {
-        if (_bitwardenWebDataLease is null) return;
-        if (!Uri.TryCreate(source, UriKind.Absolute, out var sourceUri)) return;
-        if (sourceUri.Scheme is not ("http" or "https")) return;
-        var origin = sourceUri.GetLeftPart(UriPartial.Authority);
-        _bitwardenWebDataLease.AddOrigins([origin]);
+        if (!TryGetWebOrigin(source, out var origin)) return;
+
+        if (_bitwardenWebDataLease is not null)
+        {
+            _bitwardenWebDataLease.AddOrigins([origin]);
+        }
+        else
+        {
+            TrackHiddenBitwardenWebDataOrigins();
+        }
+
         if (_bitwardenWebDataUserDataFolder is { } userDataFolder)
         {
             RememberBitwardenWebDataOrigins(userDataFolder, [origin]);
         }
+    }
+
+    private static bool TryGetWebOrigin(string? source, out string origin)
+    {
+        origin = string.Empty;
+        if (!Uri.TryCreate(source, UriKind.Absolute, out var sourceUri)) return false;
+        if (sourceUri.Scheme is not ("http" or "https")) return false;
+        origin = sourceUri.GetLeftPart(UriPartial.Authority);
+        return true;
     }
 
     private void OnCoreHistoryChanged(CoreWebView2 sender, object args) => UpdateToolbar();
