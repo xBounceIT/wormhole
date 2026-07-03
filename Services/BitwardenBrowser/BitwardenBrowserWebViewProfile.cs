@@ -35,6 +35,16 @@ internal static class BitwardenBrowserWebViewProfile
         Path.Combine("Default", "Network", "Cookies"),
         Path.Combine("Default", "Cookies"),
     ];
+    private static readonly string[] ExtensionStateRelativePaths =
+    [
+        Path.Combine("Default", "Extensions"),
+        Path.Combine("Default", "Extension Rules"),
+        Path.Combine("Default", "Extension Scripts"),
+        Path.Combine("Default", "Extension State"),
+        Path.Combine("Default", "Local Extension Settings"),
+        Path.Combine("Default", "Managed Extension Settings"),
+        Path.Combine("Default", "Sync Extension Settings"),
+    ];
 
     public static bool IsHttpsTarget(Uri navigateUri, Uri? originalUri) =>
         string.Equals((originalUri ?? navigateUri).Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase);
@@ -53,24 +63,41 @@ internal static class BitwardenBrowserWebViewProfile
         AppPaths.GetBitwardenBrowserExtensionWebView2UserDataDirectory(
             BuildContextFolderName(browserArguments, ignoreCertificateErrors));
 
-    public static string GetUserDataFolder(
-        IPEndPoint? socks5Proxy,
-        bool ignoreCertificateErrors,
-        Uri navigateUri,
-        Uri? originalUri) =>
-        AppPaths.GetBitwardenBrowserExtensionWebView2UserDataDirectory(
-            BuildContextFolderName(
-                BuildProfileKeyMaterial(socks5Proxy, navigateUri, originalUri),
-                ignoreCertificateErrors));
+    public static bool TrySeedExtensionStateFromExistingProfile(string userDataFolder) =>
+        TrySeedExtensionStateFromExistingProfile(
+            userDataFolder,
+            AppPaths.GetBitwardenBrowserExtensionWebView2UserDataRoot());
 
-    private static string BuildProfileKeyMaterial(IPEndPoint? socks5Proxy, Uri navigateUri, Uri? originalUri)
+    internal static bool TrySeedExtensionStateFromExistingProfile(string userDataFolder, string profileRoot)
     {
-        if (socks5Proxy is null) return BuildBrowserArguments(null);
+        ArgumentException.ThrowIfNullOrWhiteSpace(userDataFolder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(profileRoot);
 
-        var targetUri = originalUri ?? navigateUri;
-        var targetOrigin = NormalizeWebOrigin(targetUri.ToString())
-            ?? targetUri.GetLeftPart(UriPartial.Authority).ToLowerInvariant();
-        return WebViewBrowserArguments.Hardening + "\0proxy=socks5\0target=" + targetOrigin;
+        if (HasInstalledExtensionMarker(userDataFolder) || !Directory.Exists(profileRoot)) return false;
+
+        try
+        {
+            var normalizedDestination = NormalizeUserDataFolder(userDataFolder);
+            var source = Directory.EnumerateDirectories(profileRoot)
+                .Where(candidate => !string.Equals(
+                        NormalizeUserDataFolder(candidate),
+                        normalizedDestination,
+                        StringComparison.Ordinal)
+                    && HasInstalledExtensionMarker(candidate))
+                .Select(candidate => new DirectoryInfo(candidate))
+                .OrderByDescending(directory => GetLastWriteTimeUtcSafe(directory.FullName))
+                .FirstOrDefault()
+                ?.FullName;
+
+            if (source is null) return false;
+
+            CopyBitwardenExtensionState(source, userDataFolder);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     public static IReadOnlyList<string> ReadPendingWebDataOrigins(string userDataFolder)
@@ -206,6 +233,65 @@ internal static class BitwardenBrowserWebViewProfile
         BitwardenBrowserExtensionMarker.TryReadInstalledExtensionId(
             BitwardenBrowserExtensionMarker.GetPath(userDataFolder), out _);
 
+    private static DateTime GetLastWriteTimeUtcSafe(string path)
+    {
+        try { return Directory.GetLastWriteTimeUtc(path); }
+        catch { return DateTime.MinValue; }
+    }
+
+    private static void CopyBitwardenExtensionState(string sourceUserDataFolder, string destinationUserDataFolder)
+    {
+        CopyFileIfExists(
+            BitwardenBrowserExtensionMarker.GetPath(sourceUserDataFolder),
+            BitwardenBrowserExtensionMarker.GetPath(destinationUserDataFolder));
+
+        foreach (var relativePath in ExtensionStateRelativePaths)
+        {
+            CopyDirectoryIfExists(
+                Path.Combine(sourceUserDataFolder, relativePath),
+                Path.Combine(destinationUserDataFolder, relativePath));
+        }
+
+        CopyExtensionIndexedDbDirectories(sourceUserDataFolder, destinationUserDataFolder);
+    }
+
+    private static void CopyExtensionIndexedDbDirectories(string sourceUserDataFolder, string destinationUserDataFolder)
+    {
+        var sourceIndexedDbRoot = Path.Combine(sourceUserDataFolder, "Default", "IndexedDB");
+        if (!Directory.Exists(sourceIndexedDbRoot)) return;
+
+        var destinationIndexedDbRoot = Path.Combine(destinationUserDataFolder, "Default", "IndexedDB");
+        foreach (var sourceEntry in Directory.EnumerateDirectories(sourceIndexedDbRoot, "chrome-extension_*"))
+        {
+            CopyDirectoryIfExists(sourceEntry, Path.Combine(destinationIndexedDbRoot, Path.GetFileName(sourceEntry)));
+        }
+    }
+
+    private static void CopyDirectoryIfExists(string sourceDirectory, string destinationDirectory)
+    {
+        if (!Directory.Exists(sourceDirectory)) return;
+
+        foreach (var sourceFile in Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories))
+        {
+            var relativePath = Path.GetRelativePath(sourceDirectory, sourceFile);
+            CopyFileIfExists(sourceFile, Path.Combine(destinationDirectory, relativePath));
+        }
+    }
+
+    private static void CopyFileIfExists(string sourceFile, string destinationFile)
+    {
+        try
+        {
+            if (!File.Exists(sourceFile)) return;
+            Directory.CreateDirectory(Path.GetDirectoryName(destinationFile)!);
+            File.Copy(sourceFile, destinationFile, overwrite: true);
+        }
+        catch
+        {
+            // Extension profile seeding is best-effort; locked files are skipped and rebuilt by WebView2.
+        }
+    }
+
     private static HashSet<string> GetCookieHosts(IEnumerable<string> origins)
     {
         var hosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -213,10 +299,28 @@ internal static class BitwardenBrowserWebViewProfile
         {
             if (NormalizeWebOrigin(origin) is not { } normalizedOrigin) continue;
             if (!Uri.TryCreate(normalizedOrigin, UriKind.Absolute, out var uri)) continue;
-            if (!string.IsNullOrWhiteSpace(uri.Host)) hosts.Add(uri.Host.ToLowerInvariant());
+            AddCookieHostAndParentDomains(hosts, uri.Host);
         }
 
         return hosts;
+    }
+
+    private static void AddCookieHostAndParentDomains(HashSet<string> hosts, string host)
+    {
+        var normalizedHost = host.TrimEnd('.').ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(normalizedHost)) return;
+
+        hosts.Add(normalizedHost);
+        if (IPAddress.TryParse(normalizedHost, out _)) return;
+
+        var dotIndex = normalizedHost.IndexOf('.');
+        while (dotIndex > 0 && dotIndex < normalizedHost.Length - 1)
+        {
+            var parentDomain = normalizedHost[(dotIndex + 1)..];
+            if (!parentDomain.Contains('.', StringComparison.Ordinal)) return;
+            hosts.Add(parentDomain);
+            dotIndex = normalizedHost.IndexOf('.', dotIndex + 1);
+        }
     }
 
     private static void DeleteCookiesForHosts(string cookieDatabasePath, HashSet<string> hosts)
@@ -338,6 +442,14 @@ internal static class BitwardenBrowserWebViewProfile
         if (!Uri.TryCreate(origin.Trim(), UriKind.Absolute, out var uri)) return null;
         if (uri.Scheme is not ("http" or "https")) return null;
         return uri.GetLeftPart(UriPartial.Authority).ToLowerInvariant();
+    }
+
+    private static string NormalizeUserDataFolder(string userDataFolder)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(userDataFolder);
+        return Path.GetFullPath(userDataFolder)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+            .ToUpperInvariant();
     }
 
 }

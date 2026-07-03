@@ -32,30 +32,61 @@ public sealed class BitwardenBrowserWebViewProfileTests
     }
 
     [Fact]
-    public void UserDataFolder_UsesStableSocksProfileKeyAcrossEphemeralPorts()
+    public void UserDataFolder_IncludesSocksPortInRuntimeProfileKey()
     {
-        var target = new Uri("https://router.example/login");
         var firstProxy = new IPEndPoint(IPAddress.Loopback, 12000);
         var secondProxy = new IPEndPoint(IPAddress.Loopback, 23000);
+        var firstArgs = BitwardenBrowserWebViewProfile.BuildBrowserArguments(firstProxy);
+        var secondArgs = BitwardenBrowserWebViewProfile.BuildBrowserArguments(secondProxy);
 
-        Assert.NotEqual(
-            BitwardenBrowserWebViewProfile.BuildBrowserArguments(firstProxy),
-            BitwardenBrowserWebViewProfile.BuildBrowserArguments(secondProxy));
+        Assert.NotEqual(firstArgs, secondArgs);
 
-        var first = BitwardenBrowserWebViewProfile.GetUserDataFolder(firstProxy, false, target, originalUri: null);
-        var second = BitwardenBrowserWebViewProfile.GetUserDataFolder(secondProxy, false, target, originalUri: null);
-        var otherTarget = BitwardenBrowserWebViewProfile.GetUserDataFolder(
-            secondProxy,
-            false,
-            new Uri("https://firewall.example/"),
-            originalUri: null);
-        var direct = BitwardenBrowserWebViewProfile.GetUserDataFolder(null, false, target, originalUri: null);
-        var ignoreCert = BitwardenBrowserWebViewProfile.GetUserDataFolder(firstProxy, true, target, originalUri: null);
+        var first = BitwardenBrowserWebViewProfile.GetUserDataFolder(firstArgs, ignoreCertificateErrors: false);
+        var second = BitwardenBrowserWebViewProfile.GetUserDataFolder(secondArgs, ignoreCertificateErrors: false);
+        var direct = BitwardenBrowserWebViewProfile.GetUserDataFolder(
+            BitwardenBrowserWebViewProfile.BuildBrowserArguments(null),
+            ignoreCertificateErrors: false);
+        var ignoreCert = BitwardenBrowserWebViewProfile.GetUserDataFolder(firstArgs, ignoreCertificateErrors: true);
 
-        Assert.Equal(first, second);
-        Assert.NotEqual(first, otherTarget);
+        Assert.NotEqual(first, second);
         Assert.NotEqual(first, direct);
         Assert.NotEqual(first, ignoreCert);
+    }
+
+    [Fact]
+    public async Task TrySeedExtensionStateFromExistingProfile_CopiesExtensionStateOnly()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
+        var source = Path.Combine(root, "profile-source");
+        var destination = Path.Combine(root, "profile-destination");
+        var extensionPath = Path.Combine(root, "extension");
+        var extensionSettings = Path.Combine(source, "Default", "Local Extension Settings", "extension-id");
+        var extensionIndexedDb = Path.Combine(source, "Default", "IndexedDB", "chrome-extension_extension-id_0.indexeddb.leveldb");
+        var siteIndexedDb = Path.Combine(source, "Default", "IndexedDB", "https_router.example_0.indexeddb.leveldb");
+        try
+        {
+            Directory.CreateDirectory(extensionSettings);
+            await File.WriteAllTextAsync(Path.Combine(extensionSettings, "state.log"), "state");
+            Directory.CreateDirectory(extensionIndexedDb);
+            await File.WriteAllTextAsync(Path.Combine(extensionIndexedDb, "CURRENT"), "db");
+            Directory.CreateDirectory(siteIndexedDb);
+            await File.WriteAllTextAsync(Path.Combine(siteIndexedDb, "CURRENT"), "site");
+            await BitwardenBrowserExtensionMarker.WriteAsync(
+                BitwardenBrowserExtensionMarker.GetPath(source),
+                extensionPath,
+                "extension-id");
+
+            Assert.True(BitwardenBrowserWebViewProfile.TrySeedExtensionStateFromExistingProfile(destination, root));
+
+            Assert.True(File.Exists(BitwardenBrowserExtensionMarker.GetPath(destination)));
+            Assert.Equal("state", File.ReadAllText(Path.Combine(destination, "Default", "Local Extension Settings", "extension-id", "state.log")));
+            Assert.Equal("db", File.ReadAllText(Path.Combine(destination, "Default", "IndexedDB", "chrome-extension_extension-id_0.indexeddb.leveldb", "CURRENT")));
+            Assert.False(Directory.Exists(Path.Combine(destination, "Default", "IndexedDB", "https_router.example_0.indexeddb.leveldb")));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
     }
 
     [Fact]
@@ -183,13 +214,14 @@ public sealed class BitwardenBrowserWebViewProfileTests
                 using var command = connection.CreateCommand();
                 command.CommandText = "CREATE TABLE cookies(host_key TEXT, name TEXT);"
                     + "INSERT INTO cookies(host_key, name) VALUES "
-                    + "('history.example', 'session'), "
-                    + "('.history.example', 'domain-session'), "
+                    + "('router.example.com', 'session'), "
+                    + "('.router.example.com', 'domain-session'), "
+                    + "('.example.com', 'parent-domain-session'), "
                     + "('vault.bitwarden.example', 'vault-session');";
                 command.ExecuteNonQuery();
             }
 
-            BitwardenBrowserWebViewProfile.ClearStartupWebCookies(profile, ["https://history.example/login"]);
+            BitwardenBrowserWebViewProfile.ClearStartupWebCookies(profile, ["https://router.example.com/login"]);
 
             Assert.Equal(["vault.bitwarden.example"], ReadCookieHosts(cookiesPath));
         }
