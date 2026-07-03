@@ -617,10 +617,16 @@ public sealed partial class WebBrowserView : UserControl
         var core = _webView?.CoreWebView2;
         if (core is null) return;
 
+        var liveOrigins = GetWebOrigins(_currentTarget, core.Source);
+        if (_bitwardenWebDataLease is { } lease)
+        {
+            liveOrigins.UnionWith(lease.Origins);
+        }
+
         s_bitwardenWebDataOrigins.TrackLiveOrigins(
             this,
             _bitwardenWebDataUserDataFolder,
-            GetWebOrigins(_currentTarget, core.Source));
+            liveOrigins);
     }
 
     private void UntrackHiddenBitwardenWebDataOrigins() =>
