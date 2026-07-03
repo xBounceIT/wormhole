@@ -135,12 +135,14 @@
                                  can't escape the DataTemplate's namescope into the MenuFlyout popup. -->
                             <MenuFlyout>
                                 <MenuFlyoutItem Text="New folder"
+                                                Tag="{x:Bind}"
                                                 Click="OnAddFolderItemClick">
                                     <MenuFlyoutItem.Icon>
                                         <FontIcon Glyph="&#xE8F4;" />
                                     </MenuFlyoutItem.Icon>
                                 </MenuFlyoutItem>
                                 <MenuFlyoutItem Text="New connection"
+                                                Tag="{x:Bind}"
                                                 Click="OnAddConnectionItemClick">
                                     <MenuFlyoutItem.Icon>
                                         <FontIcon Glyph="&#xE710;" />
@@ -148,6 +150,7 @@
                                 </MenuFlyoutItem>
                                 <MenuFlyoutSeparator />
                                 <MenuFlyoutItem Text="Show credentials"
+                                                Tag="{x:Bind}"
                                                 Click="OnShowCredentialsItemClick"
                                                 Visibility="{x:Bind IsConnection, Converter={StaticResource BoolToVisibilityConverter}}">
                                     <MenuFlyoutItem.Icon>
@@ -155,6 +158,7 @@
                                     </MenuFlyoutItem.Icon>
                                 </MenuFlyoutItem>
                                 <MenuFlyoutItem Text="Duplicate connection"
+                                                Tag="{x:Bind}"
                                                 Click="OnDuplicateItemClick"
                                                 Visibility="{x:Bind IsConnection, Converter={StaticResource BoolToVisibilityConverter}}">
                                     <MenuFlyoutItem.Icon>
@@ -162,12 +166,14 @@
                                     </MenuFlyoutItem.Icon>
                                 </MenuFlyoutItem>
                                 <MenuFlyoutItem Text="Edit"
+                                                Tag="{x:Bind}"
                                                 Click="OnEditItemClick">
                                     <MenuFlyoutItem.Icon>
                                         <FontIcon Glyph="&#xE70F;" />
                                     </MenuFlyoutItem.Icon>
                                 </MenuFlyoutItem>
                                 <MenuFlyoutItem Text="Delete"
+                                                Tag="{x:Bind}"
                                                 Click="OnDeleteItemClick">
                                     <MenuFlyoutItem.Icon>
                                         <FontIcon Glyph="&#xE74D;" />

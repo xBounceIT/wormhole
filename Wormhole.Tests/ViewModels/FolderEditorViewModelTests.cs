@@ -3,8 +3,10 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
 using Wormhole.Data.Repositories;
 using Wormhole.Models;
+using Wormhole.Services.Bitwarden;
 using Wormhole.ViewModels;
 using Xunit;
 
@@ -12,6 +14,22 @@ namespace Wormhole.Tests.ViewModels;
 
 public class FolderEditorViewModelTests
 {
+    [Fact]
+    public void Di_CreatesEditor_WhenBothConstructorDependencySetsAreRegistered()
+    {
+        var services = new ServiceCollection();
+        var credentialRepository = new CredentialRepo(Array.Empty<CredentialProfile>());
+        services.AddSingleton<ICredentialRepository>(credentialRepository);
+        services.AddSingleton<ITunnelConfigRepository>(new MultiRepo());
+        services.AddSingleton<IBitwardenCredentialCatalogService>(new RepositoryCredentialCatalogAdapter(credentialRepository));
+        services.AddSingleton<IBitwardenCredentialSyncService>(NoOpBitwardenCredentialSyncService.Instance);
+        services.AddTransient<FolderEditorViewModel>();
+
+        using var provider = services.BuildServiceProvider();
+
+        Assert.NotNull(provider.GetRequiredService<FolderEditorViewModel>());
+    }
+
     [Fact]
     public void InheritLabel_IsParentScoped_NotFolderScoped()
     {

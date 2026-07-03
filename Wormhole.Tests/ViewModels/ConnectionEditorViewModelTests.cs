@@ -2,9 +2,12 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
 using Wormhole.Data.Repositories;
 using Wormhole.Helpers;
 using Wormhole.Models;
+using Wormhole.Services;
+using Wormhole.Services.Bitwarden;
 using Wormhole.Tests.Fakes;
 using Wormhole.ViewModels;
 using Xunit;
@@ -13,6 +16,23 @@ namespace Wormhole.Tests.ViewModels;
 
 public class ConnectionEditorViewModelTests
 {
+    [Fact]
+    public void Di_CreatesEditor_WhenBothConstructorDependencySetsAreRegistered()
+    {
+        var services = new ServiceCollection();
+        var credentialRepository = new EmptyCredentialRepository();
+        services.AddSingleton<ICredentialRepository>(credentialRepository);
+        services.AddSingleton<ITunnelConfigRepository>(EmptyTunnelRepo());
+        services.AddSingleton<ICredentialService>(new FakeCredentialService());
+        services.AddSingleton<IBitwardenCredentialCatalogService>(new RepositoryCredentialCatalogAdapter(credentialRepository));
+        services.AddSingleton<IBitwardenCredentialSyncService>(NoOpBitwardenCredentialSyncService.Instance);
+        services.AddTransient<ConnectionEditorViewModel>();
+
+        using var provider = services.BuildServiceProvider();
+
+        Assert.NotNull(provider.GetRequiredService<ConnectionEditorViewModel>());
+    }
+
     [Fact]
     public void ValidateDriveList_EmptyString_Errors()
     {

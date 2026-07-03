@@ -1953,6 +1953,41 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task EditCommand_WhileFiltered_UsesDisplayedSearchMatchAsTarget()
+    {
+        var dialog = new RecordingEditDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Servers";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var parent = vm.Roots.Single();
+
+        dialog.EditConnectionResult = MakeConnectionDraft(
+            "prod-web", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(parent);
+        var leaf = parent.Children.Single();
+        var originalNode = leaf.Node;
+
+        vm.SearchText = "prod";
+        var displayedParent = Assert.Single(vm.DisplayRoots);
+        var displayedLeaf = Assert.Single(displayedParent.DisplayChildren);
+        Assert.Same(leaf, displayedLeaf);
+
+        dialog.EditConnectionResult = MakeConnectionDraft(
+            "prod-web-renamed", ProtocolType.Ssh, "renamed.example.com", 2222, "alice");
+        dialog.ResetEditRecording();
+
+        await vm.EditCommand.ExecuteAsync(displayedLeaf);
+
+        Assert.Equal(1, dialog.EditConnectionCount);
+        Assert.Same(originalNode, dialog.LastConnectionInitial);
+        var persisted = Assert.Single(await _repo.GetAllAsync(), n => n.Id == leaf.Node.Id);
+        Assert.Equal("prod-web-renamed", persisted.Name);
+        Assert.Equal("renamed.example.com", persisted.Host);
+    }
+
+    [Fact]
     public async Task SearchText_MatchesNestedConnection_AutoExpandsAncestorFolder()
     {
         var dialog = new FakeDialogService();
@@ -2713,6 +2748,25 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     {
         public override Task<ConnectionNode?> EditConnectionAsync(ConnectionNode initial, bool isNew) =>
             Task.FromResult<ConnectionNode?>(initial.Clone());
+    }
+
+    private sealed class RecordingEditDialogService : FakeDialogService
+    {
+        public int EditConnectionCount { get; private set; }
+        public ConnectionNode? LastConnectionInitial { get; private set; }
+
+        public void ResetEditRecording()
+        {
+            EditConnectionCount = 0;
+            LastConnectionInitial = null;
+        }
+
+        public override Task<ConnectionNode?> EditConnectionAsync(ConnectionNode initial, bool isNew)
+        {
+            EditConnectionCount++;
+            LastConnectionInitial = initial;
+            return base.EditConnectionAsync(initial, isNew);
+        }
     }
 
     private sealed class StaticCredentialCatalog : IBitwardenCredentialCatalogService
