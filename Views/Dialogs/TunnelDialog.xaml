@@ -431,8 +431,8 @@
                     <CheckBox x:Name="StormshieldTrustCertCheck"
                               Content="Trust server certificate (skip ALL TLS checks — pre-auth credentials and OTP travel unverified)" />
                     <CheckBox x:Name="StormshieldBypassNativeVpnRouteCheck"
-                              Content="Bypass active native VPN route for gateway (requires administrator)"
-                              ToolTipService.ToolTip="Temporarily adds IPv4 host routes for the Stormshield portal and OpenVPN remotes when Windows would otherwise send them through an already-connected VPN." />
+                              Content="Bypass active native VPN route for gateway (required with native VPN, admin)"
+                              ToolTipService.ToolTip="Required when an already-connected native VPN would route the Stormshield portal or OpenVPN remotes through itself. Start Wormhole as Administrator so it can add temporary IPv4 host routes." />
                     <ComboBox x:Name="StormshieldTransportOverrideBox"
                               Header="OpenVPN transport override"
                               HorizontalAlignment="Stretch"

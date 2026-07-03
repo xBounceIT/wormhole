@@ -103,12 +103,14 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         {
             if (settings.Mode == StormshieldConnectionMode.Automatic && !string.IsNullOrWhiteSpace(settings.Server))
             {
-                routeLeases.Add(await PrepareGatewayRoutesAsync(
+                var portalRouteLease = await PrepareGatewayRoutesAsync(
                     config.Name,
                     new[] { settings.Server },
                     settings.BypassNativeVpnGatewayRoute,
                     "portal",
-                    cancellationToken).ConfigureAwait(false));
+                    cancellationToken).ConfigureAwait(false);
+                routeLeases.Add(portalRouteLease);
+                ThrowIfUnresolvedNativeVpnConflict(config.Name, settings, routeLeases);
             }
 
             // Each mode yields BOTH the profile and the password the OpenVPN data plane should authenticate
@@ -134,6 +136,7 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
                 remoteHosts,
                 settings.BypassNativeVpnGatewayRoute,
                 cancellationToken).ConfigureAwait(false));
+            ThrowIfUnresolvedNativeVpnConflict(config.Name, settings, routeLeases);
 
             var sidecar = new OpenVpnSidecarConfig
             {
@@ -332,6 +335,17 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
     internal static bool ShouldEnrichNativeVpnConflict(IReadOnlyList<WindowsHostRouteLease> routeLeases, Exception ex) =>
         GetUnresolvedNativeVpnConflicts(routeLeases).Any() && IsRouteSensitiveFailure(ex);
 
+    internal static void ThrowIfUnresolvedNativeVpnConflict(
+        string configName,
+        StormshieldSettings settings,
+        IReadOnlyList<WindowsHostRouteLease> routeLeases)
+    {
+        if (!GetUnresolvedNativeVpnConflicts(routeLeases).Any())
+            return;
+
+        throw BuildNativeVpnConflictException(configName, settings, routeLeases);
+    }
+
     internal static bool IsRouteSensitiveFailure(Exception ex)
     {
         if (IsTlsAuthenticationFailure(ex)) return false;
@@ -362,7 +376,7 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         string configName,
         StormshieldSettings settings,
         IReadOnlyList<WindowsHostRouteLease> routeLeases,
-        Exception inner)
+        Exception? inner = null)
     {
         var conflicts = GetUnresolvedNativeVpnConflicts(routeLeases)
             .Select(d => d.Message)
@@ -372,10 +386,14 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
         var hint = settings.BypassNativeVpnGatewayRoute
             ? "The advanced route bypass option is enabled; Wormhole installed temporary host routes where Windows allowed it. If the connection still fails, disconnect the native VPN or check for an existing host route owned by it."
             : "Enable the Stormshield advanced option 'Bypass active native VPN route for gateway' and run Wormhole as Administrator, or disconnect the native VPN before connecting this tunnel.";
+        var original = inner is null ? string.Empty : $" Original error: {inner.Message}";
+        var action = inner is null ? "cannot start" : "could not complete";
+        var message =
+            $"Stormshield '{configName}' {action} because Windows appears to be routing the VPN gateway or OpenVPN remote through an already-active native VPN.{conflictSummary} {hint}{original}";
 
-        return new InvalidOperationException(
-            $"Stormshield '{configName}' could not complete because Windows appears to be routing the VPN gateway through an already-active native VPN.{conflictSummary} {hint} Original error: {inner.Message}",
-            inner);
+        return inner is null
+            ? new InvalidOperationException(message)
+            : new InvalidOperationException(message, inner);
     }
 
     private static IEnumerable<WindowsHostRouteDiagnostic> GetUnresolvedNativeVpnConflicts(
