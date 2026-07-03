@@ -117,6 +117,25 @@ public sealed class BitwardenWebDataOriginLeaseRegistryTests
     }
 
     [Fact]
+    public void TrackLiveOrigins_MergesOriginsForHiddenOwnerWhenRequested()
+    {
+        var registry = new BitwardenWebDataOriginLeaseRegistry();
+        var owner = new object();
+        registry.TrackLiveOrigins(owner, @"C:\Wormhole\Profiles\Default", ["https://first.example"]);
+        registry.TrackLiveOrigins(
+            owner,
+            @"C:\Wormhole\Profiles\Default",
+            ["https://second.example"],
+            mergeWithExisting: true);
+
+        var inactive = registry.GetInactiveOrigins(
+            @"C:\Wormhole\Profiles\Default",
+            ["https://first.example", "https://second.example", "https://stale.example"]);
+
+        Assert.Equal(["https://stale.example"], inactive);
+    }
+
+    [Fact]
     public void Release_DoesNotClearOriginUsedByHiddenLiveView()
     {
         var registry = new BitwardenWebDataOriginLeaseRegistry();

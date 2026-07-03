@@ -619,6 +619,7 @@ public sealed partial class WebBrowserView : UserControl
         if (core is null) return;
 
         var liveOrigins = GetWebOrigins(_currentTarget, core.Source);
+        var mergeWithExisting = _bitwardenWebDataLease is null;
         if (_bitwardenWebDataLease is { } lease)
         {
             liveOrigins.UnionWith(lease.Origins);
@@ -627,7 +628,8 @@ public sealed partial class WebBrowserView : UserControl
         s_bitwardenWebDataOrigins.TrackLiveOrigins(
             this,
             _bitwardenWebDataUserDataFolder,
-            liveOrigins);
+            liveOrigins,
+            mergeWithExisting);
     }
 
     private void UntrackHiddenBitwardenWebDataOrigins() =>

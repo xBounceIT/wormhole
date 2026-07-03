@@ -478,7 +478,11 @@ internal sealed class BitwardenWebDataOriginLeaseRegistry
         }
     }
 
-    internal void TrackLiveOrigins(object owner, string userDataFolder, IEnumerable<string> origins)
+    internal void TrackLiveOrigins(
+        object owner,
+        string userDataFolder,
+        IEnumerable<string> origins,
+        bool mergeWithExisting = false)
     {
         ArgumentNullException.ThrowIfNull(owner);
         ArgumentException.ThrowIfNullOrWhiteSpace(userDataFolder);
@@ -488,6 +492,9 @@ internal sealed class BitwardenWebDataOriginLeaseRegistry
         var normalizedOrigins = NormalizeOrigins(origins);
         lock (_gate)
         {
+            PruneDeadLiveOriginsLocked();
+            if (mergeWithExisting && TryMergeLiveOriginsLocked(owner, normalizedUserDataFolder, normalizedOrigins)) return;
+
             RemoveLiveOriginsLocked(owner);
             if (normalizedOrigins.Count == 0) return;
 
@@ -550,6 +557,23 @@ internal sealed class BitwardenWebDataOriginLeaseRegistry
     private void PruneDeadLiveOriginsLocked()
     {
         _liveOrigins.RemoveAll(registration => !registration.Owner.TryGetTarget(out _));
+    }
+
+    private bool TryMergeLiveOriginsLocked(
+        object owner,
+        string normalizedUserDataFolder,
+        HashSet<string> normalizedOrigins)
+    {
+        foreach (var registration in _liveOrigins)
+        {
+            if (!registration.Owner.TryGetTarget(out var target) || !ReferenceEquals(target, owner)) continue;
+            if (!string.Equals(registration.UserDataFolder, normalizedUserDataFolder, StringComparison.Ordinal)) continue;
+
+            registration.Origins.UnionWith(normalizedOrigins);
+            return true;
+        }
+
+        return false;
     }
 
     private bool IsOriginActiveLocked(BitwardenWebDataOriginKey key) =>
