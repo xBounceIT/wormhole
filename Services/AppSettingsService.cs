@@ -101,6 +101,10 @@ public sealed class AppSettingsService : IAppSettingsService
                 {
                     settings.BitwardenCliReleasesUrl = "repos/bitwarden/clients/releases?per_page=20";
                 }
+                if (schemaVersion < AppSettings.BitwardenOnboardingIntroducedSchemaVersion)
+                {
+                    settings.BitwardenOnboardingNoticePendingVersion = 1;
+                }
                 settings.SettingsSchemaVersion = AppSettings.CurrentSchemaVersion;
                 migrated = true;
             }

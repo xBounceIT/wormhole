@@ -29,11 +29,13 @@ public sealed class AppSettingsServiceTests
         var service = new AppSettingsService(temp.FilePath);
 
         Assert.True(service.Current.PromptBeforeTunnelConnect);
+        Assert.Equal(1, service.Current.BitwardenOnboardingNoticePendingVersion);
         Assert.Equal(AppSettings.CurrentSchemaVersion, service.Current.SettingsSchemaVersion);
 
         var saved = JsonSerializer.Deserialize<AppSettings>(File.ReadAllBytes(temp.FilePath));
         Assert.NotNull(saved);
         Assert.True(saved!.PromptBeforeTunnelConnect);
+        Assert.Equal(1, saved.BitwardenOnboardingNoticePendingVersion);
         Assert.Equal(AppSettings.CurrentSchemaVersion, saved.SettingsSchemaVersion);
     }
 
@@ -149,6 +151,61 @@ public sealed class AppSettingsServiceTests
         Assert.Equal("repos/bitwarden/clients/releases?per_page=20", saved!.BitwardenCliReleasesUrl);
         Assert.Equal(AppSettings.CurrentSchemaVersion, saved.SettingsSchemaVersion);
     }
+
+    [Fact]
+    public void LegacySettings_BeforeBitwardenSchema_MarksBitwardenOnboardingPending()
+    {
+        using var temp = TempSettingsFile.Create();
+        File.WriteAllText(temp.FilePath, """
+        {
+          "SettingsSchemaVersion": 5
+        }
+        """);
+
+        var service = new AppSettingsService(temp.FilePath);
+
+        Assert.Equal(1, service.Current.BitwardenOnboardingNoticePendingVersion);
+        Assert.Equal(AppSettings.CurrentSchemaVersion, service.Current.SettingsSchemaVersion);
+
+        var saved = JsonSerializer.Deserialize<AppSettings>(File.ReadAllBytes(temp.FilePath));
+        Assert.NotNull(saved);
+        Assert.Equal(1, saved!.BitwardenOnboardingNoticePendingVersion);
+        Assert.Equal(AppSettings.CurrentSchemaVersion, saved.SettingsSchemaVersion);
+    }
+
+    [Fact]
+    public void BitwardenSchemaSettings_DoesNotMarkBitwardenOnboardingPending()
+    {
+        using var temp = TempSettingsFile.Create();
+        File.WriteAllText(temp.FilePath, """
+        {
+          "SettingsSchemaVersion": 6
+        }
+        """);
+
+        var service = new AppSettingsService(temp.FilePath);
+
+        Assert.Equal(0, service.Current.BitwardenOnboardingNoticePendingVersion);
+        Assert.Equal(AppSettings.CurrentSchemaVersion, service.Current.SettingsSchemaVersion);
+
+        var saved = JsonSerializer.Deserialize<AppSettings>(File.ReadAllBytes(temp.FilePath));
+        Assert.NotNull(saved);
+        Assert.Equal(0, saved!.BitwardenOnboardingNoticePendingVersion);
+        Assert.Equal(AppSettings.CurrentSchemaVersion, saved.SettingsSchemaVersion);
+    }
+
+    [Fact]
+    public void MissingSettings_DoesNotMarkBitwardenOnboardingPending()
+    {
+        using var temp = TempSettingsFile.Create();
+
+        var service = new AppSettingsService(temp.FilePath);
+
+        Assert.Equal(0, service.Current.BitwardenOnboardingNoticePendingVersion);
+        Assert.Equal(AppSettings.CurrentSchemaVersion, service.Current.SettingsSchemaVersion);
+        Assert.False(File.Exists(temp.FilePath));
+    }
+
     private sealed class TempSettingsFile : IDisposable
     {
         private TempSettingsFile(string directory)
