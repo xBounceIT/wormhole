@@ -1,6 +1,7 @@
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Data.Sqlite;
 using Wormhole.Helpers;
 
 namespace Wormhole.Services.BitwardenBrowser;
@@ -9,6 +10,31 @@ internal static class BitwardenBrowserWebViewProfile
 {
     private const string PendingWebDataOriginsFileName = "wormhole-bitwarden-web-origins.txt";
     private static readonly object PendingWebDataOriginsGate = new();
+    private static readonly string[] ExtensionSafeStartupWebDataCleanupRelativePaths =
+    [
+        Path.Combine("Default", "History"),
+        Path.Combine("Default", "History-journal"),
+        Path.Combine("Default", "Visited Links"),
+        Path.Combine("Default", "Cache"),
+        Path.Combine("Default", "Code Cache"),
+        Path.Combine("Default", "GPUCache"),
+        Path.Combine("Default", "Service Worker", "CacheStorage"),
+        Path.Combine("Default", "Service Worker", "ScriptCache"),
+    ];
+    private static readonly string[] LegacyStartupWebDataCleanupRelativePaths =
+    [
+        Path.Combine("Default", "Network", "Cookies"),
+        Path.Combine("Default", "Network", "Cookies-journal"),
+        Path.Combine("Default", "Cookies"),
+        Path.Combine("Default", "Cookies-journal"),
+        Path.Combine("Default", "Local Storage"),
+        Path.Combine("Default", "Session Storage"),
+    ];
+    private static readonly string[] CookieDatabaseRelativePaths =
+    [
+        Path.Combine("Default", "Network", "Cookies"),
+        Path.Combine("Default", "Cookies"),
+    ];
 
     public static bool IsHttpsTarget(Uri navigateUri, Uri? originalUri) =>
         string.Equals((originalUri ?? navigateUri).Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase);
@@ -87,6 +113,46 @@ internal static class BitwardenBrowserWebViewProfile
         }
     }
 
+    public static IReadOnlyList<string> GetStartupWebDataCleanupPaths(string userDataFolder)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(userDataFolder);
+        var paths = ExtensionSafeStartupWebDataCleanupRelativePaths
+            .Select(relativePath => Path.Combine(userDataFolder, relativePath))
+            .ToList();
+
+        if (!HasInstalledExtensionMarker(userDataFolder))
+        {
+            paths.AddRange(LegacyStartupWebDataCleanupRelativePaths
+                .Select(relativePath => Path.Combine(userDataFolder, relativePath)));
+        }
+
+        AddNonExtensionIndexedDbPaths(userDataFolder, paths);
+        return paths;
+    }
+
+    public static IReadOnlyList<string> DiscoverStartupWebDataOrigins(string userDataFolder)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(userDataFolder);
+        var origins = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        AddHistoryOrigins(userDataFolder, origins);
+        AddIndexedDbOrigins(userDataFolder, origins);
+        return origins.ToList();
+    }
+
+    public static void ClearStartupWebCookies(string userDataFolder, IEnumerable<string> origins)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(userDataFolder);
+        ArgumentNullException.ThrowIfNull(origins);
+
+        var hosts = GetCookieHosts(origins);
+        if (hosts.Count == 0) return;
+
+        foreach (var relativePath in CookieDatabaseRelativePaths)
+        {
+            DeleteCookiesForHosts(Path.Combine(userDataFolder, relativePath), hosts);
+        }
+    }
+
     private static string GetPendingWebDataOriginsPath(string userDataFolder) =>
         Path.Combine(userDataFolder, PendingWebDataOriginsFileName);
 
@@ -114,6 +180,136 @@ internal static class BitwardenBrowserWebViewProfile
         }
 
         return normalized;
+    }
+
+    private static bool HasInstalledExtensionMarker(string userDataFolder) =>
+        BitwardenBrowserExtensionMarker.TryReadInstalledExtensionId(
+            BitwardenBrowserExtensionMarker.GetPath(userDataFolder), out _);
+
+    private static HashSet<string> GetCookieHosts(IEnumerable<string> origins)
+    {
+        var hosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var origin in origins)
+        {
+            if (NormalizeWebOrigin(origin) is not { } normalizedOrigin) continue;
+            if (!Uri.TryCreate(normalizedOrigin, UriKind.Absolute, out var uri)) continue;
+            if (!string.IsNullOrWhiteSpace(uri.Host)) hosts.Add(uri.Host.ToLowerInvariant());
+        }
+
+        return hosts;
+    }
+
+    private static void DeleteCookiesForHosts(string cookieDatabasePath, HashSet<string> hosts)
+    {
+        if (!File.Exists(cookieDatabasePath)) return;
+
+        try
+        {
+            var builder = new SqliteConnectionStringBuilder
+            {
+                DataSource = cookieDatabasePath,
+                Mode = SqliteOpenMode.ReadWrite,
+                Cache = SqliteCacheMode.Private,
+                Pooling = false,
+            };
+            using var connection = new SqliteConnection(builder.ToString());
+            connection.Open();
+            using var transaction = connection.BeginTransaction();
+            using var command = connection.CreateCommand();
+            command.Transaction = transaction;
+            command.CommandText = "DELETE FROM cookies WHERE host_key = $host OR host_key = $domainHost";
+            var hostParameter = command.CreateParameter();
+            hostParameter.ParameterName = "$host";
+            command.Parameters.Add(hostParameter);
+            var domainHostParameter = command.CreateParameter();
+            domainHostParameter.ParameterName = "$domainHost";
+            command.Parameters.Add(domainHostParameter);
+
+            foreach (var host in hosts)
+            {
+                hostParameter.Value = host;
+                domainHostParameter.Value = "." + host;
+                command.ExecuteNonQuery();
+            }
+
+            transaction.Commit();
+        }
+        catch
+        {
+            // Chromium cookie databases are best-effort; they may be absent, locked, or mid-upgrade.
+        }
+    }
+
+    private static void AddNonExtensionIndexedDbPaths(string userDataFolder, List<string> paths)
+    {
+        var indexedDbRoot = Path.Combine(userDataFolder, "Default", "IndexedDB");
+        if (!Directory.Exists(indexedDbRoot)) return;
+
+        foreach (var entry in Directory.EnumerateFileSystemEntries(indexedDbRoot))
+        {
+            var name = Path.GetFileName(entry);
+            if (name.StartsWith("chrome-extension_", StringComparison.OrdinalIgnoreCase)) continue;
+            paths.Add(entry);
+        }
+    }
+
+    private static void AddHistoryOrigins(string userDataFolder, HashSet<string> origins)
+    {
+        var historyPath = Path.Combine(userDataFolder, "Default", "History");
+        if (!File.Exists(historyPath)) return;
+
+        try
+        {
+            var builder = new SqliteConnectionStringBuilder
+            {
+                DataSource = historyPath,
+                Mode = SqliteOpenMode.ReadOnly,
+                Cache = SqliteCacheMode.Private,
+                Pooling = false,
+            };
+            using var connection = new SqliteConnection(builder.ToString());
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "SELECT url FROM urls";
+            using var reader = command.ExecuteReader();
+            while (reader.Read())
+            {
+                if (!reader.IsDBNull(0) && NormalizeWebOrigin(reader.GetString(0)) is { } origin)
+                {
+                    origins.Add(origin);
+                }
+            }
+        }
+        catch
+        {
+            // Legacy Chromium history is best-effort; it may be absent, locked, or mid-upgrade.
+        }
+    }
+
+    private static void AddIndexedDbOrigins(string userDataFolder, HashSet<string> origins)
+    {
+        var indexedDbRoot = Path.Combine(userDataFolder, "Default", "IndexedDB");
+        if (!Directory.Exists(indexedDbRoot)) return;
+
+        foreach (var entry in Directory.EnumerateFileSystemEntries(indexedDbRoot))
+        {
+            var name = Path.GetFileName(entry);
+            if (TryParseIndexedDbOrigin(name) is { } origin) origins.Add(origin);
+        }
+    }
+
+    private static string? TryParseIndexedDbOrigin(string name)
+    {
+        const string suffix = "_0.indexeddb.leveldb";
+        if (!name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)) return null;
+
+        var material = name[..^suffix.Length];
+        var separator = material.IndexOf('_');
+        if (separator <= 0 || separator == material.Length - 1) return null;
+
+        var scheme = material[..separator];
+        var host = material[(separator + 1)..];
+        return NormalizeWebOrigin($"{scheme}://{host}");
     }
 
     internal static string? NormalizeWebOrigin(string? origin)

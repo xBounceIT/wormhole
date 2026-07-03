@@ -41,7 +41,6 @@ public sealed partial class WebBrowserView : UserControl
     private static CoreWebView2Environment? s_sharedEnvironment;
     private static readonly BitwardenWebDataOriginLeaseRegistry s_bitwardenWebDataOrigins = new();
     private static readonly SemaphoreSlim s_bitwardenPersistedCleanupGate = new(1, 1);
-    private static readonly HashSet<string> s_bitwardenPersistedCleanupProfiles = new(StringComparer.OrdinalIgnoreCase);
 
     private HttpSessionViewModel? _viewModel;
     private WinUIWebView2? _webView;
@@ -829,18 +828,11 @@ public sealed partial class WebBrowserView : UserControl
         UpdateBitwardenButtonIcon();
     }
 
-    private static string NormalizeBitwardenProfilePath(string userDataFolder) =>
-        Path.GetFullPath(userDataFolder)
-            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-
     private static async Task ClearPersistedBitwardenWebDataAsync(CoreWebView2 core, string userDataFolder)
     {
         await s_bitwardenPersistedCleanupGate.WaitAsync().ConfigureAwait(true);
         try
         {
-            var normalizedProfilePath = NormalizeBitwardenProfilePath(userDataFolder);
-            if (!s_bitwardenPersistedCleanupProfiles.Add(normalizedProfilePath)) return;
-
             IReadOnlyList<string> origins;
             try
             {
