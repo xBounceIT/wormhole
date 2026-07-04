@@ -5,7 +5,6 @@
     <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
-    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <IsPackable>false</IsPackable>
     <WormholeUsePinnedSqliteNative>true</WormholeUsePinnedSqliteNative>
     <!-- Suppress IDE0005 in the test project because shared <Compile Include="..\main\file.cs">

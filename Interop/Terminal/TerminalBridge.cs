@@ -1,10 +1,10 @@
 using System.Globalization;
-using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 using Microsoft.Web.WebView2.Core;
 using Windows.ApplicationModel.DataTransfer;
+using Windows.Storage.Streams;
 using Wormhole.Services;
 
 namespace Wormhole.Interop.Terminal;
@@ -329,23 +329,17 @@ public sealed class TerminalBridge : IDisposable
         catch { /* best effort */ }
     }
 
-    private static unsafe void CopyToSharedBuffer(CoreWebView2SharedBuffer sharedBuffer, ReadOnlySpan<byte> data)
+    private static void CopyToSharedBuffer(CoreWebView2SharedBuffer sharedBuffer, ReadOnlySpan<byte> data)
     {
-        using var reference = sharedBuffer.Buffer;
-        ((IMemoryBufferByteAccess)reference).GetBuffer(out var destination, out var capacity);
-        if (capacity < data.Length)
+        if ((ulong)data.Length > sharedBuffer.Size)
         {
             throw new InvalidOperationException("WebView2 shared buffer is smaller than the terminal output batch.");
         }
-        data.CopyTo(new Span<byte>(destination, data.Length));
-    }
-
-    [ComImport]
-    [Guid("5B0D3235-4DBA-4D44-865E-8F1D0E4FD04D")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private unsafe interface IMemoryBufferByteAccess
-    {
-        void GetBuffer(out byte* buffer, out uint capacity);
+        using var stream = sharedBuffer.OpenStream();
+        using var writer = new DataWriter(stream.GetOutputStreamAt(0));
+        writer.WriteBytes(data.ToArray());
+        writer.StoreAsync().AsTask().GetAwaiter().GetResult();
+        writer.DetachStream();
     }
 
     private void SchedulePendingSharedBufferDisposal()
