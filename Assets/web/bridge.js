@@ -1,12 +1,13 @@
 // Wormhole terminal bridge.
 //
 // Wire format (must stay in sync with Interop/Terminal/TerminalBridge.cs):
-//   C# -> JS: "d:" + base64(shell-output-bytes)   (arbitrary bytes including ANSI escapes)
+//   C# -> JS: "d:" + base64(shell-output-bytes)   (small/fallback arbitrary bytes including ANSI escapes)
 //   C# -> JS: "f:"                                (focus and repaint the terminal)
 //   C# -> JS: "clear:"                            (full xterm.js reset incl. scrollback)
 //   C# -> JS: "paste:" + base64(utf8(text))       (clipboard text in reply to a "p:" request)
 //   JS -> C#: "b:" + base64(raw-input-bytes)      (user keystrokes / binary terminal input)
-//   JS -> C#: "a:N"                              (flow-control ack: xterm parsed N output bytes)
+//   C# -> JS: sharedbufferreceived              (large shell-output bytes, metadata {kind,id,length})
+//   JS -> C#: "a:N" or "a:N:ID"                 (flow-control ack: xterm parsed N output bytes)
 //   JS -> C#: "r:COLSxROWS"                      (geometry after ready)
 //   JS -> C#: "c:" + base64(utf8(selection))     (selection changed; C# decides whether to copy)
 //   JS -> C#: "p:"                               (right-click paste request)
@@ -41,6 +42,18 @@
     let bin = "";
     for (let i = 0; i < bytes.length; i++) {
       bin += String.fromCharCode(bytes[i]);
+    }
+    return btoa(bin);
+  }
+
+  function inputToBase64(data) {
+    let bin = "";
+    for (let i = 0; i < data.length; i++) {
+      const code = data.charCodeAt(i);
+      if (code > 0x7f) {
+        return utf8ToBase64(data);
+      }
+      bin += String.fromCharCode(code);
     }
     return btoa(bin);
   }
@@ -110,7 +123,7 @@
     // text painted in stale colors. PuTTY-like correctness beats GPU throughput here.
 
     function postInputBytes(data) {
-      post("b:" + utf8ToBase64(data));
+      post("b:" + inputToBase64(data));
     }
 
     function refreshVisibleRows(rebuildAtlas) {
@@ -227,6 +240,82 @@
       }
     }
 
+    function postOutputAck(byteCount, ackId) {
+      post("a:" + byteCount + (ackId ? ":" + ackId : ""));
+    }
+
+    function releaseSharedBuffer(buffer) {
+      try {
+        if (window.chrome && window.chrome.webview && typeof window.chrome.webview.releaseBuffer === "function") {
+          window.chrome.webview.releaseBuffer(buffer);
+        }
+      } catch (err) {
+        console.warn("Failed to release terminal shared buffer:", err);
+      }
+    }
+
+    function writeOutputBytes(outBytes, ackId, releaseOutputBuffer) {
+      const byteCount = outBytes.length;
+      let released = false;
+      const release = function () {
+        if (released || !releaseOutputBuffer) return;
+        released = true;
+        releaseOutputBuffer();
+      };
+      const ack = function () {
+        postOutputAck(byteCount, ackId);
+      };
+
+      try {
+        // Pass a callback so xterm reports how many bytes it has parsed: that drives the C#
+        // flow-control window (the "a:" ack), which pauses the SSH read pump when xterm falls
+        // behind so a torrential producer can't overrun xterm's internal write buffer. Keep in
+        // sync with TerminalBridge's ack handler / TerminalFlowController.
+        term.write(outBytes, function () {
+          release();
+          ack();
+        });
+      } catch (err) {
+        // term.write throws only if xterm's write buffer blew past its hard ~50MB discard
+        // limit — flow control should prevent that, but if it ever happens the chunk is
+        // dropped and the parser may be left mid-sequence. Surface it distinctly (not the
+        // misleading "decode failed"), return the flow-control credit so the read pump can't
+        // deadlock, release any shared buffer view, and force a repaint. We deliberately do
+        // NOT term.reset() here: that wipes scrollback on every hiccup — a worse regression
+        // than a one-off repaint.
+        console.warn("xterm write discarded (buffer overflow); repainting to recover.", err);
+        release();
+        ack();
+        selfHealRenderer(true);
+      }
+      // A large coalesced chunk means a burst is in progress; arm the post-burst self-heal so
+      // the renderer is repainted once it settles (or periodically if it never does).
+      if (byteCount >= SELF_HEAL_MIN_BURST_BYTES) {
+        scheduleSelfHeal();
+      }
+    }
+
+    function handleSharedOutputBuffer(e) {
+      const meta = e.additionalData || {};
+      if (meta.kind !== "terminal-output") return;
+
+      let buffer = null;
+      try {
+        buffer = e.getBuffer();
+        writeOutputBytes(new Uint8Array(buffer), meta.id, function () {
+          releaseSharedBuffer(buffer);
+        });
+      } catch (err) {
+        console.error("Failed to consume terminal shared buffer:", err);
+        if (buffer) {
+          releaseSharedBuffer(buffer);
+        }
+        if (meta.length) {
+          postOutputAck(meta.length, meta.id);
+        }
+      }
+    }
+
     let readySent = false;
     let readyTimer = 0;
     let resizeTimer = 0;
@@ -315,6 +404,9 @@
     }
 
     if (window.chrome && window.chrome.webview) {
+      if (typeof window.chrome.webview.addEventListener === "function") {
+        window.chrome.webview.addEventListener("sharedbufferreceived", handleSharedOutputBuffer);
+      }
       window.chrome.webview.addEventListener("message", function (e) {
         const msg = typeof e.data === "string" ? e.data : "";
         if (msg === "f:" || msg.startsWith("f:")) {
@@ -350,30 +442,7 @@
             console.error("Failed to decode shell output:", err);
             return;
           }
-          try {
-            // Pass a callback so xterm reports how many bytes it has parsed: that drives the C#
-            // flow-control window (the "a:" ack), which pauses the SSH read pump when xterm falls
-            // behind so a torrential producer can't overrun xterm's internal write buffer. Keep in
-            // sync with TerminalBridge's "a:" handler / TerminalFlowController.
-            term.write(outBytes, function () {
-              post("a:" + outBytes.length);
-            });
-          } catch (err) {
-            // term.write throws only if xterm's write buffer blew past its hard ~50MB discard
-            // limit — flow control should prevent that, but if it ever happens the chunk is
-            // dropped and the parser may be left mid-sequence. Surface it distinctly (not the
-            // misleading "decode failed"), return the flow-control credit so the read pump can't
-            // deadlock, and force a repaint. We deliberately do NOT term.reset() here: that wipes
-            // scrollback on every hiccup — a worse regression than a one-off repaint.
-            console.warn("xterm write discarded (buffer overflow); repainting to recover.", err);
-            post("a:" + outBytes.length);
-            selfHealRenderer(true);
-          }
-          // A large coalesced chunk means a burst is in progress; arm the post-burst self-heal so
-          // the renderer is repainted once it settles (or periodically if it never does).
-          if (outBytes.length >= SELF_HEAL_MIN_BURST_BYTES) {
-            scheduleSelfHeal();
-          }
+          writeOutputBytes(outBytes);
           return;
         }
         if (msg.startsWith("paste:")) {

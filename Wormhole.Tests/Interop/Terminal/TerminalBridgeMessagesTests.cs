@@ -38,6 +38,42 @@ public sealed class TerminalBridgeMessagesTests
     }
 
     [Fact]
+    public void TryParseOutputAck_AcceptsBase64AckWithoutSharedBufferId()
+    {
+        var ok = TerminalBridgeMessages.TryParseOutputAck("a:128".AsSpan(), out var bytes, out var sharedBufferId);
+
+        Assert.True(ok);
+        Assert.Equal(128, bytes);
+        Assert.Null(sharedBufferId);
+    }
+
+    [Fact]
+    public void TryParseOutputAck_AcceptsSharedBufferAckWithId()
+    {
+        var ok = TerminalBridgeMessages.TryParseOutputAck("a:4096:42".AsSpan(), out var bytes, out var sharedBufferId);
+
+        Assert.True(ok);
+        Assert.Equal(4096, bytes);
+        Assert.Equal(42, sharedBufferId);
+    }
+
+    [Theory]
+    [InlineData("a:")]
+    [InlineData("a:0")]
+    [InlineData("a:-1")]
+    [InlineData("a:128:0")]
+    [InlineData("a:128:bad")]
+    [InlineData("b:128")]
+    public void TryParseOutputAck_RejectsMalformedFrames(string frame)
+    {
+        var ok = TerminalBridgeMessages.TryParseOutputAck(frame.AsSpan(), out var bytes, out var sharedBufferId);
+
+        Assert.False(ok);
+        Assert.Equal(0, bytes);
+        Assert.Null(sharedBufferId);
+    }
+
+    [Fact]
     public void TryParseGeometry_AcceptsUsableResizeFrame()
     {
         var ok = TerminalBridgeMessages.TryParseGeometry(

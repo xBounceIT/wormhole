@@ -49,6 +49,41 @@ internal static class TerminalBridgeMessages
         return payload;
     }
 
+    public static bool TryParseOutputAck(
+        ReadOnlySpan<char> message,
+        out long byteCount,
+        out long? sharedBufferId)
+    {
+        byteCount = 0;
+        sharedBufferId = null;
+
+        if (!message.StartsWith("a:", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var payload = message[2..];
+        var separator = payload.IndexOf(':');
+        var byteCountText = separator < 0 ? payload : payload[..separator];
+        if (!long.TryParse(byteCountText, out var parsedByteCount) || parsedByteCount <= 0)
+        {
+            return false;
+        }
+
+        if (separator >= 0)
+        {
+            var idText = payload[(separator + 1)..];
+            if (!long.TryParse(idText, out var parsedId) || parsedId <= 0)
+            {
+                return false;
+            }
+            sharedBufferId = parsedId;
+        }
+
+        byteCount = parsedByteCount;
+        return true;
+    }
+
     public static byte[] DecodeBase64Bytes(ReadOnlySpan<char> encoded)
     {
         if (encoded.IsEmpty) return Array.Empty<byte>();
