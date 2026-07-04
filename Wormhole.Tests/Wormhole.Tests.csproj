@@ -255,6 +255,7 @@
     <Compile Include="..\Interop\Terminal\TerminalBridgeMessages.cs" Link="Interop\Terminal\TerminalBridgeMessages.cs" />
     <Compile Include="..\Interop\Terminal\TerminalReplayBuffer.cs" Link="Interop\Terminal\TerminalReplayBuffer.cs" />
     <Compile Include="..\Interop\Terminal\TerminalOutputCoalescer.cs" Link="Interop\Terminal\TerminalOutputCoalescer.cs" />
+    <Compile Include="..\Interop\Terminal\TerminalInputWriter.cs" Link="Interop\Terminal\TerminalInputWriter.cs" />
     <Compile Include="..\Interop\Terminal\TerminalFlowController.cs" Link="Interop\Terminal\TerminalFlowController.cs" />
 
     <Compile Include="..\Models\TransferDirection.cs" Link="Models\TransferDirection.cs" />

@@ -11,8 +11,20 @@ public sealed class TerminalBridgeAssetTests
     {
         var js = ReadBridge();
 
-        Assert.Contains("post(\"b:\" + utf8ToBase64(data));", js);
+        Assert.Contains("post(\"b:\" + inputToBase64(data));", js);
         Assert.DoesNotContain("post(\"d:\" + data);", js);
+    }
+
+    [Fact]
+    public void Bridge_ConsumesSharedBuffersForLargeTerminalOutput()
+    {
+        var js = ReadBridge();
+
+        Assert.Contains("sharedbufferreceived", js);
+        Assert.Contains("handleSharedOutputBuffer", js);
+        Assert.Contains("new Uint8Array(buffer)", js);
+        Assert.Contains("window.chrome.webview.releaseBuffer(buffer);", js);
+        Assert.Contains("post(\"a:\" + byteCount + (ackId ? \":\" + ackId : \"\"));", js);
     }
 
     [Fact]

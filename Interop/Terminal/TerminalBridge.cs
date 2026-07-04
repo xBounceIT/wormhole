@@ -1,8 +1,10 @@
+using System.Globalization;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
 using Microsoft.Web.WebView2.Core;
 using Windows.ApplicationModel.DataTransfer;
+using Windows.Storage.Streams;
 using Wormhole.Services;
 
 namespace Wormhole.Interop.Terminal;
@@ -16,6 +18,9 @@ public sealed class TerminalBridge : IDisposable
     // remote (e.g. cat large_file) collapses many SSH packets per ~frame into one
     // WebView2 PostWebMessageAsString. ~12 ms ≈ 80 fps cap on terminal updates.
     private const int CoalesceWindowMs = 12;
+    private const int SharedBufferThresholdBytes = 2 * 1024;
+    private const int MaxSharedBufferChunkBytes = 128 * 1024;
+    private static readonly TimeSpan PendingSharedBufferDisposeDelay = TimeSpan.FromSeconds(2);
 
     // Flow-control watermarks (bytes posted to xterm.js but not yet acked as parsed). xterm parses
     // at only ~5-35 MB/s and silently DISCARDS writes once its internal buffer passes a hard ~50 MB
@@ -35,8 +40,14 @@ public sealed class TerminalBridge : IDisposable
     private readonly IAppSettingsService _settingsService;
     private readonly DispatcherQueue _dispatcher;
     private readonly TerminalOutputCoalescer _coalescer;
+    private readonly TerminalInputWriter _inputWriter;
     private readonly TerminalFlowController _flowController = new(HighWatermarkBytes, LowWatermarkBytes);
+    private readonly Dictionary<long, CoreWebView2SharedBuffer> _pendingSharedBuffers = new();
     private DispatcherQueueTimer? _coalesceTimer;
+    private long _nextSharedBufferId;
+    private bool _sharedBufferOutputDisabled;
+    private bool _sharedBufferFallbackLogged;
+    private bool _forceBase64Output;
     private bool _disposed;
     private bool _firstOutputLogged;
     private uint _lastColumns;
@@ -60,6 +71,9 @@ public sealed class TerminalBridge : IDisposable
                 "TerminalBridge must be constructed on a thread with a DispatcherQueue (the UI thread).");
 
         _coalescer = new TerminalOutputCoalescer(PostCoalescedBytes, ArmCoalesceTimer, ArmImmediateFlush);
+        _inputWriter = new TerminalInputWriter(
+            payload => _session.WriteAsync(payload),
+            ex => LogSessionOperationAfterClose(ex, "writing terminal input"));
 
         _webView.WebMessageReceived += OnWebMessageReceived;
     }
@@ -201,6 +215,68 @@ public sealed class TerminalBridge : IDisposable
     {
         if (_disposed || data.Length == 0) return;
 
+        if (!_forceBase64Output &&
+            !_sharedBufferOutputDisabled &&
+            data.Length >= SharedBufferThresholdBytes)
+        {
+            var offset = 0;
+            while (offset < data.Length)
+            {
+                var chunkLength = Math.Min(MaxSharedBufferChunkBytes, data.Length - offset);
+                var chunk = data.Slice(offset, chunkLength);
+                if (TryPostSharedBufferToWebView(chunk, operation))
+                {
+                    offset += chunkLength;
+                    continue;
+                }
+
+                PostBase64DataBytesToWebView(data.Slice(offset), operation);
+                return;
+            }
+
+            return;
+        }
+
+        PostBase64DataBytesToWebView(data, operation);
+    }
+
+    private bool TryPostSharedBufferToWebView(ReadOnlyMemory<byte> data, string operation)
+    {
+        CoreWebView2SharedBuffer? sharedBuffer = null;
+        long id = 0;
+        try
+        {
+            sharedBuffer = _webView.Environment.CreateSharedBuffer((ulong)data.Length);
+            CopyToSharedBuffer(sharedBuffer, data.Span);
+
+            id = ++_nextSharedBufferId;
+            _pendingSharedBuffers.Add(id, sharedBuffer);
+            _webView.PostSharedBufferToScript(
+                sharedBuffer,
+                CoreWebView2SharedBufferAccess.ReadOnly,
+                BuildSharedBufferMetadata(id, data.Length));
+            if (_flowController.OnPosted(data.Length))
+            {
+                _session.PauseReading();
+            }
+            return true;
+        }
+        catch (Exception ex)
+        {
+            if (id != 0)
+            {
+                _pendingSharedBuffers.Remove(id);
+            }
+            DisposeSharedBuffer(sharedBuffer);
+            DisableSharedBufferOutput(ex, operation);
+            return false;
+        }
+    }
+
+    private void PostBase64DataBytesToWebView(ReadOnlyMemory<byte> data, string operation)
+    {
+        if (_disposed || data.Length == 0) return;
+
         var encodedLength = ((data.Length + 2) / 3) * 4;
         var message = string.Create(encodedLength + 2, data, static (destination, source) =>
         {
@@ -222,6 +298,66 @@ public sealed class TerminalBridge : IDisposable
         }
     }
 
+    private static string BuildSharedBufferMetadata(long id, int byteCount) =>
+        "{\"kind\":\"terminal-output\",\"id\":" +
+        id.ToString(CultureInfo.InvariantCulture) +
+        ",\"length\":" +
+        byteCount.ToString(CultureInfo.InvariantCulture) +
+        "}";
+
+    private void DisableSharedBufferOutput(Exception ex, string operation)
+    {
+        _sharedBufferOutputDisabled = true;
+        if (_sharedBufferFallbackLogged || _disposed) return;
+        _sharedBufferFallbackLogged = true;
+        _logger.LogWarning(
+            ex,
+            "WebView2 shared-buffer terminal output failed while {Operation}; falling back to base64 messages for this bridge.",
+            operation);
+    }
+
+    private void ReleaseSharedBuffer(long id)
+    {
+        if (!_pendingSharedBuffers.Remove(id, out var sharedBuffer)) return;
+        DisposeSharedBuffer(sharedBuffer);
+    }
+
+    private static void DisposeSharedBuffer(CoreWebView2SharedBuffer? sharedBuffer)
+    {
+        if (sharedBuffer is null) return;
+        try { sharedBuffer.Dispose(); }
+        catch { /* best effort */ }
+    }
+
+    private static void CopyToSharedBuffer(CoreWebView2SharedBuffer sharedBuffer, ReadOnlySpan<byte> data)
+    {
+        if ((ulong)data.Length > sharedBuffer.Size)
+        {
+            throw new InvalidOperationException("WebView2 shared buffer is smaller than the terminal output batch.");
+        }
+        using var stream = sharedBuffer.OpenStream();
+        using var writer = new DataWriter(stream.GetOutputStreamAt(0));
+        writer.WriteBytes(data.ToArray());
+        writer.StoreAsync().AsTask().GetAwaiter().GetResult();
+        writer.DetachStream();
+    }
+
+    private void SchedulePendingSharedBufferDisposal()
+    {
+        if (_pendingSharedBuffers.Count == 0) return;
+        var pending = _pendingSharedBuffers.Values.ToArray();
+        _pendingSharedBuffers.Clear();
+
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(PendingSharedBufferDisposeDelay).ConfigureAwait(false);
+            foreach (var sharedBuffer in pending)
+            {
+                DisposeSharedBuffer(sharedBuffer);
+            }
+        });
+    }
+
     private async void OnWebMessageReceived(CoreWebView2 sender, CoreWebView2WebMessageReceivedEventArgs args)
     {
         // WebView2 raises this through an event, so the handler must be async void.
@@ -231,13 +367,17 @@ public sealed class TerminalBridge : IDisposable
             var msg = args.TryGetWebMessageAsString();
             if (string.IsNullOrEmpty(msg)) return;
 
-            if (msg.StartsWith("a:", StringComparison.Ordinal))
+            if (TerminalBridgeMessages.TryParseOutputAck(msg.AsSpan(), out var acked, out var sharedBufferId))
             {
                 // Flow-control ack: xterm finished parsing N output bytes. Decrement the outstanding
                 // window; if we'd paused the read pump and it has now drained below the low mark,
                 // resume it. Runs on the UI thread (WebView2 is thread-affine) — same thread the
                 // posts increment on — so _flowController needs no locking.
-                if (long.TryParse(msg.AsSpan(2), out var acked) && _flowController.OnAcked(acked))
+                if (sharedBufferId is long id)
+                {
+                    ReleaseSharedBuffer(id);
+                }
+                if (_flowController.OnAcked(acked))
                 {
                     _session.ResumeReading();
                 }
@@ -247,7 +387,7 @@ public sealed class TerminalBridge : IDisposable
             if (msg.StartsWith("d:", StringComparison.Ordinal))
             {
                 var payload = TerminalBridgeMessages.EncodeUtf8(msg.AsSpan(2));
-                await WriteToSessionAsync(payload);
+                _inputWriter.Enqueue(payload);
             }
             else if (msg.StartsWith("b:", StringComparison.Ordinal))
             {
@@ -255,7 +395,7 @@ public sealed class TerminalBridge : IDisposable
                 // in the WebView string. This keeps control keys (Ctrl+O, Enter, Ctrl+L)
                 // and legacy mouse reports out of the message framing layer.
                 var payload = TerminalBridgeMessages.DecodeBase64Bytes(msg.AsSpan(2));
-                await WriteToSessionAsync(payload);
+                _inputWriter.Enqueue(payload);
             }
             else if (msg.StartsWith("r:", StringComparison.Ordinal))
             {
@@ -272,7 +412,7 @@ public sealed class TerminalBridge : IDisposable
                         _lastRows = rows;
                         _logger.LogInformation("Terminal resize requested: {Columns}x{Rows}.", cols, rows);
                     }
-                    await ResizeSessionAsync(cols, rows);
+                    await ResizeSessionAsync(cols, rows).ConfigureAwait(false);
                 }
             }
             else if (msg.StartsWith("z:collapsed-fit:", StringComparison.Ordinal))
@@ -330,23 +470,12 @@ public sealed class TerminalBridge : IDisposable
         }
     }
 
-    private async Task WriteToSessionAsync(ReadOnlyMemory<byte> payload)
-    {
-        try
-        {
-            await _session.WriteAsync(payload);
-        }
-        catch (Exception ex)
-        {
-            LogSessionOperationAfterClose(ex, "writing terminal input");
-        }
-    }
 
     private async Task ResizeSessionAsync(uint columns, uint rows)
     {
         try
         {
-            await _session.ResizeAsync(columns, rows);
+            await _session.ResizeAsync(columns, rows).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -364,6 +493,7 @@ public sealed class TerminalBridge : IDisposable
     {
         if (_disposed) return;
         _webView.WebMessageReceived -= OnWebMessageReceived;
+        _inputWriter.Dispose();
         // Stop pending coalesce ticks first so a late timer doesn't fire concurrently
         // with the final drain below. Already-queued Tick handlers will see
         // _coalescer._disposed==true (set by _coalescer.Dispose() below) and short-circuit.
@@ -378,10 +508,12 @@ public sealed class TerminalBridge : IDisposable
         // before the WebView2 host is torn down by the view-unload path). Catch any
         // post-time exception so a WebView2 already mid-teardown can't propagate out of
         // Dispose.
+        _forceBase64Output = true;
         try { _coalescer.Flush(); }
         catch (Exception ex) { _logger.LogWarning(ex, "Final coalescer flush during Dispose failed."); }
         _disposed = true;
         _coalescer.Dispose();
+        SchedulePendingSharedBufferDisposal();
         // If we'd paused the read pump for flow control, release it now. On a view-only detach
         // (background tab) the SSH session keeps running, so a pump left parked on the pause gate
         // would never resume and the session would look frozen on the next reattach. Harmless when
