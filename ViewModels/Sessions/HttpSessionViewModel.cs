@@ -62,6 +62,7 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
             {
                 OnPropertyChanged(nameof(IsConnecting));
                 OnPropertyChanged(nameof(IsConnected));
+                OnPropertyChanged(nameof(IsDisconnected));
                 OnPropertyChanged(nameof(IsFailed));
                 RetryCommand.NotifyCanExecuteChanged();
             }
@@ -79,6 +80,7 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
 
     public bool IsConnecting => Status == SessionStatus.Connecting;
     public bool IsConnected => Status == SessionStatus.Connected;
+    public bool IsDisconnected => Status == SessionStatus.Disconnected;
     public bool IsFailed => Status == SessionStatus.Failed;
 
     /// <summary>
@@ -102,8 +104,8 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
         base.Initialize(profile);
         // Surface the connecting spinner immediately. A freshly-opened tab whose view hasn't loaded yet
         // (e.g. two connections opened back-to-back, so this one isn't the realized/selected tab) would
-        // otherwise sit in Disconnected behind the opaque base cover — a black pane with no spinner or
-        // Retry — until brought forward. Mirrors SshSessionViewModel.MarkConnecting; safe because a web
+        // otherwise sit in the generic Disconnected fallback until brought forward. Mirrors
+        // SshSessionViewModel.MarkConnecting; safe because a web
         // VM has no live session at Initialize, and AttachAsync's ConnectAsync re-affirms Connecting.
         Status = SessionStatus.Connecting;
     }

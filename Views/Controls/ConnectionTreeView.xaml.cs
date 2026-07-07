@@ -260,6 +260,8 @@ public sealed partial class ConnectionTreeView : UserControl
 
     private void OnOpenAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
+        if (!IsFocusWithinTree()) return;
+
         if (SingleSelectedNode() is { } vm &&
             ViewModel.OpenConnectionCommand.CanExecute(vm))
         {
@@ -268,6 +270,26 @@ public sealed partial class ConnectionTreeView : UserControl
         }
     }
 
+    private bool IsFocusWithinTree()
+    {
+        var root = XamlRoot;
+        if (root is null) return false;
+
+        var focused = FocusManager.GetFocusedElement(root) as DependencyObject;
+        return focused is not null && IsDescendantOf(focused, Tree);
+    }
+
+    private static bool IsDescendantOf(DependencyObject child, DependencyObject ancestor)
+    {
+        var current = child;
+        while (current is not null)
+        {
+            if (ReferenceEquals(current, ancestor)) return true;
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return false;
+    }
 
     private TreeNodeViewModel? SingleSelectedNode()
     {

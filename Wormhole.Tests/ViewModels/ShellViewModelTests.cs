@@ -98,6 +98,87 @@ public class ShellViewModelTests
         Assert.Equal(1, second.CloseCount);
     }
 
+    [Fact]
+    public void RemovingSelectedLastTab_ClearsSelectedTab()
+    {
+        var vm = CreateShell();
+        var tab = new TestSessionTab("only");
+        vm.Tabs.Add(tab);
+        vm.SelectedTab = tab;
+
+        vm.Tabs.Remove(tab);
+
+        Assert.Null(vm.SelectedTab);
+        Assert.True(vm.IsEmpty);
+        Assert.False(vm.HasTabs);
+    }
+
+    [Fact]
+    public void RemovingSelectedTab_SelectsClosestRemainingNeighbour()
+    {
+        var vm = CreateShell();
+        var first = new TestSessionTab("first");
+        var second = new TestSessionTab("second");
+        var third = new TestSessionTab("third");
+        vm.Tabs.Add(first);
+        vm.Tabs.Add(second);
+        vm.Tabs.Add(third);
+        vm.SelectedTab = second;
+
+        vm.Tabs.Remove(second);
+
+        Assert.Same(third, vm.SelectedTab);
+    }
+
+    [Fact]
+    public void SelectedTab_CannotPointAtTabOutsideCollection()
+    {
+        var vm = CreateShell();
+        var open = new TestSessionTab("open");
+        var closed = new TestSessionTab("closed");
+        vm.Tabs.Add(open);
+
+        vm.SelectedTab = closed;
+
+        Assert.Same(open, vm.SelectedTab);
+    }
+
+    [Fact]
+    public void SelectedTab_NullWhileTabsRemain_RestoresLastValidSelection()
+    {
+        var vm = CreateShell();
+        var first = new TestSessionTab("first");
+        var second = new TestSessionTab("second");
+        vm.Tabs.Add(first);
+        vm.Tabs.Add(second);
+        vm.SelectedTab = first;
+
+        vm.SelectedTab = null;
+
+        Assert.Same(first, vm.SelectedTab);
+    }
+
+    [Fact]
+    public void SelectedTab_StaleRemovedTabAfterRemoval_KeepsClosestNeighbour()
+    {
+        var vm = CreateShell();
+        var first = new TestSessionTab("first");
+        var second = new TestSessionTab("second");
+        var third = new TestSessionTab("third");
+        var fourth = new TestSessionTab("fourth");
+        vm.Tabs.Add(first);
+        vm.Tabs.Add(second);
+        vm.Tabs.Add(third);
+        vm.Tabs.Add(fourth);
+        vm.SelectedTab = second;
+        vm.Tabs.Remove(second);
+        Assert.Same(third, vm.SelectedTab);
+
+        vm.SelectedTab = second;
+
+        Assert.Same(third, vm.SelectedTab);
+    }
+
     [Theory]
     [InlineData(SessionStatus.Connected, 1)]
     [InlineData(SessionStatus.Connecting, 1)]

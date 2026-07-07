@@ -54,6 +54,7 @@ public sealed partial class SerialSessionViewModel : SessionTabViewModel, ITermi
             {
                 OnPropertyChanged(nameof(IsConnecting));
                 OnPropertyChanged(nameof(IsConnected));
+                OnPropertyChanged(nameof(IsDisconnected));
                 OnPropertyChanged(nameof(IsFailed));
                 RetryCommand.NotifyCanExecuteChanged();
             }
@@ -81,6 +82,7 @@ public sealed partial class SerialSessionViewModel : SessionTabViewModel, ITermi
 
     public bool IsConnecting => Status == SessionStatus.Connecting;
     public bool IsConnected => Status == SessionStatus.Connected;
+    public bool IsDisconnected => Status == SessionStatus.Disconnected;
     public bool IsFailed => Status == SessionStatus.Failed;
     public string ConnectingMessage =>
         Profile is { Host.Length: > 0 } profile

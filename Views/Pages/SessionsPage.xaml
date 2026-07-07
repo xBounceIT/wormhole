@@ -58,7 +58,8 @@
                                              PlaceholderTemplate="{StaticResource ProtocolPlaceholderTemplate}" />
     </Page.Resources>
 
-    <Grid>
+    <Grid x:Name="SessionsRoot"
+          IsTabStop="True">
         <Grid Background="#0c0c0c"
               Visibility="{x:Bind ViewModel.IsEmpty, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}">
             <StackPanel HorizontalAlignment="Center"

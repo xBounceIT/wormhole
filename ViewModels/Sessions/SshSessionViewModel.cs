@@ -159,6 +159,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             {
                 OnPropertyChanged(nameof(IsConnecting));
                 OnPropertyChanged(nameof(IsConnected));
+                OnPropertyChanged(nameof(IsDisconnected));
                 OnPropertyChanged(nameof(IsFailed));
                 OnPropertyChanged(nameof(CanOpenFileTransfer));
                 RetryCommand.NotifyCanExecuteChanged();
@@ -199,6 +200,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
 
     public bool IsConnecting => Status == SessionStatus.Connecting;
     public bool IsConnected => Status == SessionStatus.Connected;
+    public bool IsDisconnected => Status == SessionStatus.Disconnected;
     public bool IsFailed => Status == SessionStatus.Failed;
 
     /// <summary>
@@ -316,16 +318,14 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         }
 
         // No live session to reattach to. A genuine first show connects below; but an incidental
-        // view reload (Sessions↔Settings nav, a manual tab switch, or the closest-neighbour
+        // view reload (Sessions<->Settings nav, a manual tab switch, or the closest-neighbour
         // selection SessionsPage drives when the active tab is closed) onto a tab that has since
-        // DROPPED must not silently reconnect — the "closed a tab, the neighbour started connecting
-        // again with a tunnel-route prompt over a blank pane" repro. A background SSH drop lands in
-        // Failed (OnSessionClosed → ReportFailure), which renders the in-pane Retry overlay; leave it
-        // standing and let the user choose. Unlike RDP — which also guards Disconnected, backed by
-        // its own Disconnected+Reconnect overlay — SSH guards ONLY Failed: it has no Disconnected
-        // overlay (just a blank pane), and the only realistic way to reach Disconnected post-attempt
-        // is a connect interrupted by a nav-away (WebView lost mid-connect), where auto-reconnecting
-        // on return is the wanted recovery, not a dead blank pane. Explicit Retry uses RetryAsync.
+        // DROPPED must not silently reconnect. A background SSH drop lands in Failed
+        // (OnSessionClosed -> ReportFailure), which renders the in-pane Retry overlay; leave it
+        // standing and let the user choose. Disconnected reattaches still auto-recover because
+        // the usual post-attempt Disconnected path is a connect interrupted by a nav-away
+        // (WebView lost mid-connect); the Disconnected overlay below keeps any non-recovered
+        // edge case legible instead of showing a blank pane.
         if (ShouldDeferAutoConnectOnReattach())
         {
             _logger.LogDebug("SSH attach: tab is Failed and sessionless; leaving the Retry overlay up instead of auto-reconnecting.");
@@ -337,11 +337,10 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
 
     // A sessionless tab reaching AttachAsync's connect tail is normally a genuine first show and
     // should connect. The exception: a tab that already attempted and is now Failed must keep its
-    // in-pane Retry overlay rather than auto-reconnecting on an incidental view reload. Only Failed
-    // is deferred — Disconnected deliberately still auto-connects, so an interrupted-connect tab
-    // recovers instead of stranding in SSH's blank Disconnected pane (it has no Disconnected
-    // overlay). Failed implies a prior attempt (it is only ever set by ReportFailure), so no separate
-    // "have we connected before" latch is needed here.
+    // in-pane Retry overlay rather than auto-reconnecting on an incidental view reload. Disconnected
+    // deliberately still auto-connects, so an interrupted-connect tab recovers. Failed implies a prior
+    // attempt (it is only ever set by ReportFailure), so no separate "have we connected before" latch is
+    // needed here.
     internal bool ShouldDeferAutoConnectOnReattach() => Status is SessionStatus.Failed;
 
     /// <summary>
@@ -555,10 +554,9 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     /// Surface the connecting spinner while the view (re)initializes its WebView2 ahead of the
     /// first connect. A freshly-opened tab whose view is unloaded mid-init — e.g. the user opens a
     /// second connection back-to-back and selection moves to it before this tab's xterm.js "ready"
-    /// handshake fires — sits in <see cref="SessionStatus.Disconnected"/> behind the opaque base
-    /// cover: a featureless black screen with no spinner and no Retry, until the tab is brought
+    /// handshake fires — sits in <see cref="SessionStatus.Disconnected"/> until the tab is brought
     /// forward again and the deferred connect lands. Flipping to Connecting here makes that recovery
-    /// window legible (and removes the illusion that a keystroke is what "reconnects" it).
+    /// window explicit (and removes the illusion that a keystroke is what "reconnects" it).
     /// <para>
     /// Strictly Disconnected → Connecting with no live/in-flight session, so it never disturbs a
     /// connected session's Sessions↔Settings nav-back rebind (Status stays Connected) nor a Failed
@@ -645,8 +643,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             // transient blips usually recover within a couple of attempts) before giving up.
             if (_autoReconnectAttempts >= MaxAutoReconnectAttempts)
             {
-                // Budget spent — surface the Failed overlay (with the Retry button) so the user has a
-                // manual recovery path. Use Failed, not Disconnected: SSH has no Disconnected overlay.
+                // Budget spent — surface the Failed overlay with the explanatory exhaustion message
+                // instead of the generic Disconnected fallback.
                 ReportFailure($"Remote session closed. {ReconnectExhaustedNote}");
                 return;
             }
@@ -886,9 +884,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             if (routed is null)
             {
                 // User dismissed the route prompt. Surface a recoverable Failed state rather than
-                // Disconnected: the SSH terminal view only renders an in-pane Retry button on
-                // Failed (Disconnected leaves a blank pane), and this mirrors SSH's existing
-                // cancelled-prompt convention — a dismissed credential prompt also reports failure.
+                // Disconnected: this mirrors SSH's existing cancelled-prompt convention — a dismissed
+                // credential prompt also reports failure — and keeps the route prompt retry explicit.
                 // Retry re-opens the route prompt. Not auto-retryable: the user just declined.
                 _lastConnectRetryable = false;
                 ReportFailure("Connection cancelled.");

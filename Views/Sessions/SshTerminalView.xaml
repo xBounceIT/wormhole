@@ -122,5 +122,25 @@
                         HorizontalAlignment="Center" />
             </StackPanel>
         </Border>
+        <Border Background="#0c0c0c"
+                Visibility="{Binding IsDisconnected, Converter={StaticResource BoolToVisibilityConverter}}">
+            <StackPanel HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Spacing="12"
+                        MaxWidth="420"
+                        Padding="24">
+                <FontIcon Glyph="&#xE711;"
+                          FontSize="32"
+                          Foreground="#e0e0e0"
+                          HorizontalAlignment="Center" />
+                <TextBlock Text="Disconnected"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           Foreground="#e0e0e0"
+                           HorizontalAlignment="Center" />
+                <Button Content="Reconnect"
+                        Command="{Binding RetryCommand}"
+                        HorizontalAlignment="Center" />
+            </StackPanel>
+        </Border>
     </Grid>
 </UserControl>
