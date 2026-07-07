@@ -1,3 +1,4 @@
+using System.Windows.Input;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -18,6 +19,14 @@ public sealed partial class TunnelConfigsPage : Page
         this.InitializeComponent();
     }
 
+    private static void ExecuteIfCan(ICommand command, object? parameter)
+    {
+        if (command.CanExecute(parameter))
+        {
+            command.Execute(parameter);
+        }
+    }
+
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
         base.OnNavigatedTo(e);
@@ -28,7 +37,7 @@ public sealed partial class TunnelConfigsPage : Page
     {
         if (sender is FrameworkElement { DataContext: TunnelConfig config })
         {
-            ViewModel.EditTunnelCommand.Execute(config);
+            ExecuteIfCan(ViewModel.EditTunnelCommand, config);
         }
     }
 
@@ -36,7 +45,7 @@ public sealed partial class TunnelConfigsPage : Page
     {
         if (sender is FrameworkElement { DataContext: TunnelConfig config })
         {
-            ViewModel.EditTunnelCommand.Execute(config);
+            ExecuteIfCan(ViewModel.EditTunnelCommand, config);
         }
     }
 
@@ -53,7 +62,7 @@ public sealed partial class TunnelConfigsPage : Page
     {
         if (sender is FrameworkElement { DataContext: TunnelConfig config })
         {
-            ViewModel.DeleteTunnelCommand.Execute(config);
+            ExecuteIfCan(ViewModel.DeleteTunnelCommand, config);
         }
     }
 }

@@ -1,4 +1,5 @@
 using System.Collections.Specialized;
+using System.Windows.Input;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -20,6 +21,14 @@ public sealed partial class CredentialsPage : Page
         this.InitializeComponent();
     }
 
+    private static void ExecuteIfCan(ICommand command, object? parameter)
+    {
+        if (command.CanExecute(parameter))
+        {
+            command.Execute(parameter);
+        }
+    }
+
     protected override void OnNavigatedTo(NavigationEventArgs e)
     {
         base.OnNavigatedTo(e);
@@ -39,7 +48,7 @@ public sealed partial class CredentialsPage : Page
     {
         if (sender is FrameworkElement { DataContext: CredentialProfile profile })
         {
-            ViewModel.EditCredentialCommand.Execute(profile);
+            ExecuteIfCan(ViewModel.EditCredentialCommand, profile);
         }
     }
 
@@ -47,7 +56,7 @@ public sealed partial class CredentialsPage : Page
     {
         if (sender is FrameworkElement { DataContext: CredentialProfile profile })
         {
-            ViewModel.EditCredentialCommand.Execute(profile);
+            ExecuteIfCan(ViewModel.EditCredentialCommand, profile);
         }
     }
 
@@ -55,7 +64,7 @@ public sealed partial class CredentialsPage : Page
     {
         if (sender is FrameworkElement { DataContext: CredentialProfile profile })
         {
-            ViewModel.DeleteCredentialCommand.Execute(profile);
+            ExecuteIfCan(ViewModel.DeleteCredentialCommand, profile);
         }
     }
 

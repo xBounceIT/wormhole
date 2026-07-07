@@ -357,7 +357,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task ShowCredentials(TreeNodeViewModel? clicked)
     {
         clicked = ResolveSingleTarget(clicked);
@@ -471,7 +471,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
             _ => false,
         };
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task AddFolder(TreeNodeViewModel? clicked)
     {
         var parentId = ResolveParentId(clicked);
@@ -486,7 +486,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
         await SafeAddAsync(edited);
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task AddConnection(TreeNodeViewModel? clicked)
     {
         var parentId = ResolveParentId(clicked);
@@ -502,7 +502,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
         await SafeAddAsync(edited);
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task Edit(TreeNodeViewModel? clicked)
     {
         clicked = ResolveSingleTarget(clicked);
@@ -522,7 +522,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
         await SafeUpdateAsync(edited);
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task Duplicate(TreeNodeViewModel? clicked)
     {
         clicked = ResolveSingleTarget(clicked);
@@ -558,7 +558,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task ImportFromMRemoteNg()
     {
         try
@@ -578,7 +578,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task Delete(TreeNodeViewModel? clicked)
     {
         var targets = ResolveDeleteTargets(clicked);

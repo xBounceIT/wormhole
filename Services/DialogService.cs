@@ -23,6 +23,7 @@ public sealed class DialogService : IDialogService
     private readonly IBitwardenCredentialCatalogService _credentialCatalog;
     private readonly IBitwardenCredentialSyncService _bitwardenCredentialSync;
     private readonly ICredentialPasswordResolver _passwordResolver;
+    private static int _exclusiveUserDialogInProgress;
 
     public DialogService(
         IBitwardenCredentialCatalogService credentialCatalog,
@@ -32,6 +33,41 @@ public sealed class DialogService : IDialogService
         _credentialCatalog = credentialCatalog;
         _bitwardenCredentialSync = bitwardenCredentialSync;
         _passwordResolver = passwordResolver;
+    }
+
+    private static async Task<T?> RunExclusiveUserDialogAsync<T>(Func<Task<T?>> showAsync)
+        where T : class
+    {
+        if (Interlocked.Exchange(ref _exclusiveUserDialogInProgress, 1) != 0)
+        {
+            return default;
+        }
+
+        try
+        {
+            return await showAsync().ConfigureAwait(true);
+        }
+        finally
+        {
+            Volatile.Write(ref _exclusiveUserDialogInProgress, 0);
+        }
+    }
+
+    private static async Task RunExclusiveUserDialogAsync(Func<Task> showAsync)
+    {
+        if (Interlocked.Exchange(ref _exclusiveUserDialogInProgress, 1) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            await showAsync().ConfigureAwait(true);
+        }
+        finally
+        {
+            Volatile.Write(ref _exclusiveUserDialogInProgress, 0);
+        }
     }
 
     public Task ShowMessageAsync(string title, string message)
@@ -184,7 +220,10 @@ public sealed class DialogService : IDialogService
         return result == ContentDialogResult.Primary ? textBox.Text.Trim() : null;
     }
 
-    public async Task<ConnectionNode?> EditConnectionAsync(ConnectionNode initial, bool isNew)
+    public Task<ConnectionNode?> EditConnectionAsync(ConnectionNode initial, bool isNew) =>
+        RunExclusiveUserDialogAsync(() => EditConnectionCoreAsync(initial, isNew));
+
+    private static async Task<ConnectionNode?> EditConnectionCoreAsync(ConnectionNode initial, bool isNew)
     {
         var form = new NewConnectionDialog();
         await form.LoadAsync(initial);
@@ -226,7 +265,10 @@ public sealed class DialogService : IDialogService
         return output;
     }
 
-    public async Task<ConnectionNode?> EditFolderAsync(ConnectionNode initial, bool isNew)
+    public Task<ConnectionNode?> EditFolderAsync(ConnectionNode initial, bool isNew) =>
+        RunExclusiveUserDialogAsync(() => EditFolderCoreAsync(initial, isNew));
+
+    private static async Task<ConnectionNode?> EditFolderCoreAsync(ConnectionNode initial, bool isNew)
     {
         var form = new FolderEditorDialog();
         await form.LoadAsync(initial);
@@ -259,15 +301,19 @@ public sealed class DialogService : IDialogService
     }
 
     public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null) =>
-        ShowFormDialogAsync(new CredentialDialog(), initial, "credential");
+        RunExclusiveUserDialogAsync(() => ShowFormDialogCoreAsync(new CredentialDialog(), initial, "credential"));
 
     public Task<TunnelDraft?> PromptForTunnelAsync(TunnelDraft? initial = null) =>
-        ShowFormDialogAsync(new TunnelDialog(), initial, "VPN tunnel");
+        RunExclusiveUserDialogAsync(() => ShowFormDialogCoreAsync(new TunnelDialog(), initial, "VPN tunnel"));
 
-    public async Task ShowTunnelTestAsync(TunnelConfig config)
+    public Task ShowTunnelTestAsync(TunnelConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);
+        return RunExclusiveUserDialogAsync(() => ShowTunnelTestCoreAsync(config));
+    }
 
+    private static async Task ShowTunnelTestCoreAsync(TunnelConfig config)
+    {
         // Host the test in the shell's modal-overlay layer, NOT a ContentDialog. The Stormshield /
         // WatchGuard establish path opens its own ContentDialog (the OTP / SAML prompt) on the main
         // window's XamlRoot, and WinUI allows only one ContentDialog per XamlRoot — a ContentDialog
@@ -324,7 +370,7 @@ public sealed class DialogService : IDialogService
         }
     }
 
-    private static async Task<TDraft?> ShowFormDialogAsync<TForm, TDraft>(TForm form, TDraft? initial, string entityName)
+    private static async Task<TDraft?> ShowFormDialogCoreAsync<TForm, TDraft>(TForm form, TDraft? initial, string entityName)
         where TForm : UserControl, IDraftForm<TDraft>
         where TDraft : class
     {
@@ -1081,7 +1127,10 @@ public sealed class DialogService : IDialogService
         return (username, passwordBox.Password);
     }
 
-    public async Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync()
+    public Task<MRemoteNgImportResult?> PromptForMRemoteNgImportAsync() =>
+        RunExclusiveUserDialogAsync(PromptForMRemoteNgImportCoreAsync);
+
+    private static async Task<MRemoteNgImportResult?> PromptForMRemoteNgImportCoreAsync()
     {
         var control = new MRemoteNgImportDialog();
         var vm = control.ViewModel;
@@ -1154,7 +1203,10 @@ public sealed class DialogService : IDialogService
         return vm.Result;
     }
 
-    public async Task<BackupExportResult?> PromptForBackupExportAsync()
+    public Task<BackupExportResult?> PromptForBackupExportAsync() =>
+        RunExclusiveUserDialogAsync(PromptForBackupExportCoreAsync);
+
+    private static async Task<BackupExportResult?> PromptForBackupExportCoreAsync()
     {
         var control = new BackupExportDialog();
         var vm = control.ViewModel;
@@ -1210,7 +1262,10 @@ public sealed class DialogService : IDialogService
         return vm.Result;
     }
 
-    public async Task<BackupImportResult?> PromptForBackupImportAsync()
+    public Task<BackupImportResult?> PromptForBackupImportAsync() =>
+        RunExclusiveUserDialogAsync(PromptForBackupImportCoreAsync);
+
+    private static async Task<BackupImportResult?> PromptForBackupImportCoreAsync()
     {
         var control = new BackupImportDialog();
         var vm = control.ViewModel;
