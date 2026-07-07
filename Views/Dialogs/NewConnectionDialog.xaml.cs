@@ -131,7 +131,7 @@ public sealed partial class NewConnectionDialog : UserControl
     private void OnCredentialGotFocus(object sender, RoutedEventArgs e)
     {
         var box = (AutoSuggestBox)sender;
-        ClearDefaultCredentialText(box, ViewModel.SelectedCredential);
+        ClearDefaultCredentialText(box, ViewModel.SelectedCredential, CredentialBindingSentinelIds.Inherit);
         ShowAllCredentialSuggestions(box);
     }
 
@@ -157,7 +157,7 @@ public sealed partial class NewConnectionDialog : UserControl
     private void OnGatewayCredentialGotFocus(object sender, RoutedEventArgs e)
     {
         var box = (AutoSuggestBox)sender;
-        ClearDefaultCredentialText(box, ViewModel.SelectedGatewayCredential);
+        ClearDefaultCredentialText(box, ViewModel.SelectedGatewayCredential, CredentialBindingSentinelIds.ConnectionNone);
         ShowAllGatewayCredentialSuggestions(box);
     }
 
@@ -216,7 +216,7 @@ public sealed partial class NewConnectionDialog : UserControl
         }
         else if (string.IsNullOrWhiteSpace(box.Text))
         {
-            apply(null); // empty input means "no saved credential — prompt every time"
+            apply(null); // empty input uses the picker-specific null behavior.
         }
         else if (resolve(box.Text) is { } resolved)
         {
@@ -228,9 +228,9 @@ public sealed partial class NewConnectionDialog : UserControl
         box.IsSuggestionListOpen = false;
     }
 
-    private static void ClearDefaultCredentialText(AutoSuggestBox box, CredentialProfile? selection)
+    private static void ClearDefaultCredentialText(AutoSuggestBox box, CredentialProfile? selection, Guid defaultSelectionId)
     {
-        if (selection is null || !CredentialBindingSentinelIds.IsSentinel(selection.Id)) return;
+        if (selection?.Id != defaultSelectionId) return;
         if (box.Text == selection.Name) box.Text = string.Empty;
     }
 
