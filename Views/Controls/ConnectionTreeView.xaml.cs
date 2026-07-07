@@ -1,4 +1,5 @@
 using System.Collections.Specialized;
+using System.Windows.Input;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -39,15 +40,23 @@ public sealed partial class ConnectionTreeView : UserControl
         return HeaderRow.DesiredSize.Width;
     }
 
+    private static void ExecuteIfCan(ICommand command, object? parameter)
+    {
+        if (command.CanExecute(parameter))
+        {
+            command.Execute(parameter);
+        }
+    }
+
     private void OnNewFolderAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        ViewModel.AddFolderCommand.Execute(null);
+        ExecuteIfCan(ViewModel.AddFolderCommand, null);
         args.Handled = true;
     }
 
     private void OnNewConnectionAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        ViewModel.AddConnectionCommand.Execute(null);
+        ExecuteIfCan(ViewModel.AddConnectionCommand, null);
         args.Handled = true;
     }
 
@@ -141,14 +150,14 @@ public sealed partial class ConnectionTreeView : UserControl
     {
         if (SingleSelectedNode() is { } node)
         {
-            ViewModel.EditCommand.Execute(node);
+            ExecuteIfCan(ViewModel.EditCommand, node);
         }
         args.Handled = true;
     }
 
     private void OnDeleteAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        ViewModel.DeleteCommand.Execute(null);
+        ExecuteIfCan(ViewModel.DeleteCommand, null);
         args.Handled = true;
     }
 
@@ -203,7 +212,7 @@ public sealed partial class ConnectionTreeView : UserControl
         if (ResolveNodeMenuTarget(sender) is { } vm)
         {
             ViewModel.SelectedNode = vm;
-            ViewModel.AddFolderCommand.Execute(vm);
+            ExecuteIfCan(ViewModel.AddFolderCommand, vm);
         }
     }
 
@@ -212,7 +221,7 @@ public sealed partial class ConnectionTreeView : UserControl
         if (ResolveNodeMenuTarget(sender) is { } vm)
         {
             ViewModel.SelectedNode = vm;
-            ViewModel.AddConnectionCommand.Execute(vm);
+            ExecuteIfCan(ViewModel.AddConnectionCommand, vm);
         }
     }
 
@@ -221,7 +230,7 @@ public sealed partial class ConnectionTreeView : UserControl
         if (ResolveNodeMenuTarget(sender) is { } vm)
         {
             ViewModel.SelectedNode = vm;
-            ViewModel.ShowCredentialsCommand.Execute(vm);
+            ExecuteIfCan(ViewModel.ShowCredentialsCommand, vm);
         }
     }
 
@@ -230,7 +239,7 @@ public sealed partial class ConnectionTreeView : UserControl
         if (ResolveNodeMenuTarget(sender) is { } vm)
         {
             ViewModel.SelectedNode = vm;
-            ViewModel.DuplicateCommand.Execute(vm);
+            ExecuteIfCan(ViewModel.DuplicateCommand, vm);
         }
     }
 
@@ -239,7 +248,7 @@ public sealed partial class ConnectionTreeView : UserControl
         if (ResolveNodeMenuTarget(sender) is { } vm)
         {
             ViewModel.SelectedNode = vm;
-            ViewModel.EditCommand.Execute(vm);
+            ExecuteIfCan(ViewModel.EditCommand, vm);
         }
     }
 
@@ -248,7 +257,7 @@ public sealed partial class ConnectionTreeView : UserControl
         if (ResolveNodeMenuTarget(sender) is { } vm)
         {
             ViewModel.SelectedNode = vm;
-            ViewModel.DeleteCommand.Execute(vm);
+            ExecuteIfCan(ViewModel.DeleteCommand, vm);
         }
     }
 

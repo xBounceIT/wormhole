@@ -1,3 +1,4 @@
+using System.Threading;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Wormhole.Data.Repositories;
@@ -29,6 +30,7 @@ public sealed class FileTransferDialogService : IFileTransferDialogService
     private readonly IConnectionRepository _connectionRepo;
     private readonly ILoggerFactory _loggerFactory;
     private readonly ILogger<FileTransferDialogService> _logger;
+    private int _showInProgress;
 
     public FileTransferDialogService(
         ISftpService sftp,
@@ -48,6 +50,24 @@ public sealed class FileTransferDialogService : IFileTransferDialogService
     }
 
     public async Task ShowAsync(SessionTabViewModel sourceTab)
+    {
+        if (Interlocked.Exchange(ref _showInProgress, 1) != 0)
+        {
+            _logger.LogInformation("Ignoring file-transfer dialog request because one is already open.");
+            return;
+        }
+
+        try
+        {
+            await ShowCoreAsync(sourceTab).ConfigureAwait(true);
+        }
+        finally
+        {
+            Volatile.Write(ref _showInProgress, 0);
+        }
+    }
+
+    private async Task ShowCoreAsync(SessionTabViewModel sourceTab)
     {
         if (sourceTab.Profile is null)
         {

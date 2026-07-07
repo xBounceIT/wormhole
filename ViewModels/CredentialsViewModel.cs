@@ -247,7 +247,7 @@ public partial class CredentialsViewModel : ObservableObject
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task AddCredentialAsync()
     {
         var draft = await _dialog.PromptForCredentialAsync();
@@ -311,7 +311,7 @@ public partial class CredentialsViewModel : ObservableObject
         return index;
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task EditCredentialAsync(CredentialProfile? profile)
     {
         if (profile is null) return;
@@ -442,7 +442,7 @@ public partial class CredentialsViewModel : ObservableObject
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task DeleteCredentialAsync(CredentialProfile? profile)
     {
         if (profile is null) return;
@@ -483,7 +483,7 @@ public partial class CredentialsViewModel : ObservableObject
 
     private bool CanDeleteSelected() => SelectedCredentials.Any(c => !c.IsReadOnly);
 
-    [RelayCommand(CanExecute = nameof(CanDeleteSelected))]
+    [RelayCommand(AllowConcurrentExecutions = false, CanExecute = nameof(CanDeleteSelected))]
     private async Task DeleteSelectedAsync()
     {
         // Snapshot first: SelectedCredentials is rebuilt by the GridView when the

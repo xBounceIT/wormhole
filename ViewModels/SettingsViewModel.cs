@@ -885,7 +885,7 @@ public partial class SettingsViewModel : ObservableObject
         await RefreshSecurityStatusAsync().ConfigureAwait(true);
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task SetOrChangeAppAuthenticationSecretAsync()
     {
         if (AppAuthenticationModeIndex == 0) return;
@@ -906,7 +906,7 @@ public partial class SettingsViewModel : ObservableObject
         await RefreshSecurityStatusAsync().ConfigureAwait(true);
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task TestAppAuthenticationAsync()
     {
         var mode = _settingsService.Current.AppAuthenticationMode;
@@ -1304,7 +1304,7 @@ public partial class SettingsViewModel : ObservableObject
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task RegenerateMcpTokenAsync()
     {
         var confirmed = await _dialog.ConfirmAsync(
@@ -1325,7 +1325,7 @@ public partial class SettingsViewModel : ObservableObject
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task ExportBackupAsync()
     {
         try
@@ -1339,7 +1339,7 @@ public partial class SettingsViewModel : ObservableObject
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task ImportBackupAsync()
     {
         try

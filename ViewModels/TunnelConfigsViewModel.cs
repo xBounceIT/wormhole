@@ -177,7 +177,7 @@ public partial class TunnelConfigsViewModel : ObservableObject
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task AddTunnelAsync()
     {
         var draft = await _dialog.PromptForTunnelAsync();
@@ -246,7 +246,7 @@ public partial class TunnelConfigsViewModel : ObservableObject
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task EditTunnelAsync(TunnelConfig? config)
     {
         if (config is null) return;
@@ -414,7 +414,7 @@ public partial class TunnelConfigsViewModel : ObservableObject
         }
     }
 
-    [RelayCommand]
+    [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task DeleteTunnelAsync(TunnelConfig? config)
     {
         if (config is null) return;
