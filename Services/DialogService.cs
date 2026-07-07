@@ -517,12 +517,14 @@ public sealed class DialogService : IDialogService
             Style = captionStyle,
         });
 
-        var credentialBox = new ComboBox
+        var selectedChoice = choices[0];
+        var credentialBox = new AutoSuggestBox
         {
             HorizontalAlignment = HorizontalAlignment.Stretch,
-            DisplayMemberPath = nameof(AccountCredentialChoice.DisplayName),
+            QueryIcon = new SymbolIcon(Symbol.Find),
+            TextMemberPath = nameof(AccountCredentialChoice.DisplayName),
             ItemsSource = choices,
-            SelectedIndex = 0,
+            Text = selectedChoice.DisplayName,
         };
         savedCredentialSection.Children.Add(credentialBox);
 
@@ -580,8 +582,7 @@ public sealed class DialogService : IDialogService
             XamlRoot = RequireXamlRoot(),
         };
 
-        AccountCredentialChoice CurrentChoice() =>
-            credentialBox.SelectedItem as AccountCredentialChoice ?? choices[0];
+        AccountCredentialChoice CurrentChoice() => selectedChoice;
 
         bool ManualUsernameValid() =>
             !requireUsername || !string.IsNullOrWhiteSpace(userBox?.Text);
@@ -589,7 +590,8 @@ public sealed class DialogService : IDialogService
         void UpdatePrimaryButton()
         {
             var selectedCredential = CurrentChoice().Credential;
-            dialog.IsPrimaryButtonEnabled = selectedCredential is not null || ManualUsernameValid();
+            var typedCredential = ResolveAccountCredentialForCommit(choices, credentialBox.Text)?.Credential;
+            dialog.IsPrimaryButtonEnabled = selectedCredential is not null || typedCredential is not null || ManualUsernameValid();
         }
 
         void UpdateCredentialMode()
@@ -614,6 +616,39 @@ public sealed class DialogService : IDialogService
             UpdatePrimaryButton();
         }
 
+        void SelectCredentialChoice(AccountCredentialChoice choice)
+        {
+            selectedChoice = choice;
+            if (credentialBox.Text != choice.DisplayName)
+            {
+                credentialBox.Text = choice.DisplayName;
+            }
+            UpdateCredentialMode();
+        }
+
+        void CommitCredentialChoice(object? chosenSuggestion)
+        {
+            if (chosenSuggestion is AccountCredentialChoice chosen)
+            {
+                SelectCredentialChoice(chosen);
+            }
+            else if (string.IsNullOrWhiteSpace(credentialBox.Text))
+            {
+                SelectCredentialChoice(choices[0]);
+            }
+            else if (ResolveAccountCredentialForCommit(choices, credentialBox.Text) is { } resolved)
+            {
+                SelectCredentialChoice(resolved);
+            }
+            else
+            {
+                credentialBox.Text = selectedChoice.DisplayName;
+                UpdatePrimaryButton();
+            }
+
+            credentialBox.IsSuggestionListOpen = false;
+        }
+
         Task<string?> PromptBitwardenUnlockFromDialogAsync(CancellationToken _)
         {
             var password = bitwardenUnlockBox.Password;
@@ -634,7 +669,20 @@ public sealed class DialogService : IDialogService
         {
             userBox.TextChanged += (_, _) => UpdatePrimaryButton();
         }
-        credentialBox.SelectionChanged += (_, _) => UpdateCredentialMode();
+        credentialBox.TextChanged += (_, args) =>
+        {
+            if (args.Reason != AutoSuggestionBoxTextChangeReason.UserInput) return;
+            credentialBox.ItemsSource = FilterAccountCredentialChoices(choices, credentialBox.Text);
+            UpdatePrimaryButton();
+        };
+        credentialBox.QuerySubmitted += (_, args) => CommitCredentialChoice(args.ChosenSuggestion);
+        credentialBox.GotFocus += (_, _) =>
+        {
+            ClearDefaultAccountCredentialText(credentialBox, selectedChoice);
+            credentialBox.ItemsSource = FilterAccountCredentialChoices(choices, null);
+            credentialBox.IsSuggestionListOpen = true;
+        };
+        credentialBox.LostFocus += (_, _) => CommitCredentialChoice(null);
 
         if (userBox is not null)
         {
@@ -674,6 +722,7 @@ public sealed class DialogService : IDialogService
 
         dialog.PrimaryButtonClick += async (_, args) =>
         {
+            CommitCredentialChoice(null);
             var selectedCredential = CurrentChoice().Credential;
             if (selectedCredential is null)
             {
@@ -729,6 +778,76 @@ public sealed class DialogService : IDialogService
         return accepted ? promptResult : null;
     }
 
+    private static void ClearDefaultAccountCredentialText(AutoSuggestBox box, AccountCredentialChoice choice)
+    {
+        if (choice.Credential is not null) return;
+        if (box.Text == choice.DisplayName) box.Text = string.Empty;
+    }
+
+    private static List<AccountCredentialChoice> FilterAccountCredentialChoices(
+        IReadOnlyList<AccountCredentialChoice> choices,
+        string? query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return choices.ToList();
+        }
+
+        var q = query.Trim();
+        var matches = new List<AccountCredentialChoice>(choices.Count);
+        foreach (var choice in choices)
+        {
+            if (AccountCredentialChoiceContains(choice, q))
+            {
+                matches.Add(choice);
+            }
+        }
+
+        return matches;
+    }
+
+    private static AccountCredentialChoice? ResolveAccountCredentialForCommit(
+        IReadOnlyList<AccountCredentialChoice> choices,
+        string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return choices[0];
+        }
+
+        var t = text.Trim();
+        foreach (var choice in choices)
+        {
+            if (string.Equals(choice.DisplayName, t, StringComparison.OrdinalIgnoreCase))
+            {
+                return choice;
+            }
+        }
+
+        AccountCredentialChoice? single = null;
+        foreach (var choice in choices)
+        {
+            if (choice.Credential is null) continue;
+            if (!AccountCredentialChoiceContains(choice, t)) continue;
+            if (single is not null) return null;
+            single = choice;
+        }
+
+        return single;
+    }
+
+    private static bool AccountCredentialChoiceContains(AccountCredentialChoice choice, string query)
+    {
+        var credential = choice.Credential;
+        return Contains(choice.DisplayName, query) ||
+               Contains(credential?.Name, query) ||
+               Contains(credential?.Username, query) ||
+               Contains(credential?.Domain, query);
+    }
+
+    private static bool Contains(string? haystack, string needle) =>
+        haystack is not null && haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
+
     private async Task<IReadOnlyList<AccountCredentialChoice>> LoadAccountCredentialChoicesAsync(
         ProtocolType protocol,
         CancellationToken cancellationToken)
@@ -764,6 +883,8 @@ public sealed class DialogService : IDialogService
 
         public CredentialProfile? Credential { get; }
         public string DisplayName { get; }
+
+        public override string ToString() => DisplayName;
 
         private static string BuildDisplayName(CredentialProfile credential)
         {
