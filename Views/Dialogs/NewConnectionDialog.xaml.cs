@@ -128,8 +128,12 @@ public sealed partial class NewConnectionDialog : UserControl
             () => ViewModel.SelectedCredential,
             ViewModel.ResolveCredentialForCommit);
 
-    private void OnCredentialGotFocus(object sender, RoutedEventArgs e) =>
-        ShowAllCredentialSuggestions((AutoSuggestBox)sender);
+    private void OnCredentialGotFocus(object sender, RoutedEventArgs e)
+    {
+        var box = (AutoSuggestBox)sender;
+        ClearDefaultCredentialText(box, ViewModel.SelectedCredential);
+        ShowAllCredentialSuggestions(box);
+    }
 
     private void OnCredentialLostFocus(object sender, RoutedEventArgs e) =>
         CommitCredential(
@@ -150,8 +154,12 @@ public sealed partial class NewConnectionDialog : UserControl
             () => ViewModel.SelectedGatewayCredential,
             ViewModel.ResolveGatewayCredentialForCommit);
 
-    private void OnGatewayCredentialGotFocus(object sender, RoutedEventArgs e) =>
-        ShowAllGatewayCredentialSuggestions((AutoSuggestBox)sender);
+    private void OnGatewayCredentialGotFocus(object sender, RoutedEventArgs e)
+    {
+        var box = (AutoSuggestBox)sender;
+        ClearDefaultCredentialText(box, ViewModel.SelectedGatewayCredential);
+        ShowAllGatewayCredentialSuggestions(box);
+    }
 
     private void OnGatewayCredentialLostFocus(object sender, RoutedEventArgs e) =>
         CommitCredential(
@@ -218,6 +226,12 @@ public sealed partial class NewConnectionDialog : UserControl
 
         SyncCredentialText(box, current());
         box.IsSuggestionListOpen = false;
+    }
+
+    private static void ClearDefaultCredentialText(AutoSuggestBox box, CredentialProfile? selection)
+    {
+        if (selection is null || !CredentialBindingSentinelIds.IsSentinel(selection.Id)) return;
+        if (box.Text == selection.Name) box.Text = string.Empty;
     }
 
     private static void SyncCredentialText(AutoSuggestBox? box, CredentialProfile? selection)
