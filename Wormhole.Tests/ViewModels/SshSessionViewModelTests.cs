@@ -571,8 +571,8 @@ public sealed class SshSessionViewModelTests
     public void MarkConnecting_FlipsDisconnectedToConnecting_WhenIdle()
     {
         // The back-to-back-open repro: a freshly-opened tab whose view was unloaded mid-init sits
-        // in Disconnected behind the opaque black base cover. The view's re-init calls MarkConnecting
-        // so the Connecting spinner shows during the deferred first connect instead of a dead screen.
+        // in Disconnected before the deferred first connect. The view's re-init calls MarkConnecting
+        // so the Connecting spinner replaces the idle disconnected fallback while connect starts.
         var vm = CreateViewModel();
         vm.Initialize(CreateProfile());
         Assert.Equal(SessionStatus.Disconnected, vm.Status);
@@ -612,7 +612,7 @@ public sealed class SshSessionViewModelTests
 
     [Theory]
     [InlineData(SessionStatus.Failed, true)]         // dropped/failed tab keeps its in-pane Retry overlay — no silent reconnect
-    [InlineData(SessionStatus.Disconnected, false)]  // interrupted-connect tab must still recover (SSH has no Disconnected overlay)
+    [InlineData(SessionStatus.Disconnected, false)]  // interrupted-connect tab must still recover
     [InlineData(SessionStatus.Connecting, false)]    // a connect already in flight — let it proceed
     [InlineData(SessionStatus.Connected, false)]     // (defensive: a live tab reattaches before reaching this guard)
     public void ShouldDeferAutoConnectOnReattach_OnlyDefersWhenFailed(SessionStatus status, bool expected)
@@ -620,9 +620,9 @@ public sealed class SshSessionViewModelTests
         // The middle-click-close repro: closing the active tab redirects to a neighbour whose view
         // reloads and re-enters AttachAsync's connect tail. A neighbour that had quietly dropped in
         // the background is Failed — it must NOT silently reconnect (a tunnel-route prompt over a
-        // blank pane); it keeps its in-pane Retry. Disconnected is deliberately NOT deferred: SSH
-        // renders no Disconnected overlay, so deferring there would strand an interrupted-connect tab
-        // in a blank black pane instead of letting it recover.
+        // blank pane); it keeps its in-pane Retry. Disconnected is deliberately NOT deferred so an
+        // interrupted-connect tab can recover through the normal attach path instead of stopping at
+        // the generic disconnected fallback.
         var vm = CreateViewModel();
         vm.Initialize(CreateProfile());
         vm.Status = status;

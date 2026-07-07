@@ -21,6 +21,27 @@ public partial class ShellViewModel : ObservableObject
     [ObservableProperty]
     private SessionTabViewModel? selectedTab;
 
+    private SessionTabViewModel? lastKnownSelectedTab;
+
+    partial void OnSelectedTabChanged(SessionTabViewModel? value)
+    {
+        if (value is not null && Tabs.Contains(value))
+        {
+            lastKnownSelectedTab = value;
+            return;
+        }
+
+        // TabView can briefly report null or an item that has just been removed while its
+        // container is being recycled. Never let the app-level selected tab point at a
+        // closed VM or at nothing while tabs remain; either state can re-realize a torn-down
+        // surface or leave the session host blank.
+        var fallback = lastKnownSelectedTab is { } lastSelected && Tabs.Contains(lastSelected)
+            ? lastSelected
+            : Tabs.Count == 0 ? null : Tabs[Tabs.Count - 1];
+        lastKnownSelectedTab = fallback;
+        SelectedTab = fallback;
+    }
+
     [ObservableProperty]
     private double minSidebarWidth = FallbackMinSidebarWidth;
 
@@ -101,14 +122,41 @@ public partial class ShellViewModel : ObservableObject
         SidebarWidth = settings.Current.SidebarWidth;
 
         bool wasEmpty = Tabs.Count == 0;
-        Tabs.CollectionChanged += (_, _) =>
+        Tabs.CollectionChanged += (_, args) =>
         {
             var isEmpty = Tabs.Count == 0;
-            if (isEmpty == wasEmpty) return;
-            wasEmpty = isEmpty;
-            OnPropertyChanged(nameof(HasTabs));
-            OnPropertyChanged(nameof(IsEmpty));
+            if (isEmpty != wasEmpty)
+            {
+                wasEmpty = isEmpty;
+                OnPropertyChanged(nameof(HasTabs));
+                OnPropertyChanged(nameof(IsEmpty));
+            }
+
+            CoerceSelectedTabAfterTabsChanged(args);
         };
+    }
+
+    private void CoerceSelectedTabAfterTabsChanged(NotifyCollectionChangedEventArgs args)
+    {
+        var selected = SelectedTab;
+        if (selected is null || Tabs.Contains(selected)) return;
+
+        SelectedTab = FindSelectionFallbackAfterRemove(args);
+    }
+
+    private SessionTabViewModel? FindSelectionFallbackAfterRemove(NotifyCollectionChangedEventArgs args)
+    {
+        if (Tabs.Count == 0) return null;
+
+        var fallbackIndex = args.Action is NotifyCollectionChangedAction.Remove or NotifyCollectionChangedAction.Replace
+            ? args.OldStartingIndex
+            : -1;
+        if (fallbackIndex < 0 || fallbackIndex >= Tabs.Count)
+        {
+            fallbackIndex = Tabs.Count - 1;
+        }
+
+        return Tabs[fallbackIndex];
     }
 
     public void ApplyMeasuredMinSidebarWidth(double measuredItemWidth)
@@ -133,7 +181,6 @@ public partial class ShellViewModel : ObservableObject
     {
         var tabs = Tabs.ToArray();
 
-        SelectedTab = null;
         Tabs.Clear();
 
         var closeTasks = tabs.Select(CloseTabForShutdownAsync).ToArray();
