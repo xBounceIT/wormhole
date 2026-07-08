@@ -63,13 +63,19 @@ public interface IDialogService
         string label,
         string primaryText = "OK");
 
-    async Task<(string Email, string MasterPassword, string? AuthenticatorCode)?> PromptBitwardenLoginAsync(CancellationToken cancellationToken = default)
+    async Task<BitwardenLoginPromptResult?> PromptBitwardenLoginAsync(CancellationToken cancellationToken = default)
     {
         var credentials = await PromptCredentialsAsync(
             "Log in to Bitwarden",
             "Enter your Bitwarden email and master password.",
             cancellationToken: cancellationToken).ConfigureAwait(true);
-        return credentials is null ? null : (credentials.Value.Username, credentials.Value.Password, null);
+        return credentials is null
+            ? null
+            : new BitwardenLoginPromptResult(
+                credentials.Value.Username,
+                credentials.Value.Password,
+                null,
+                BitwardenCliServerRegion.Current);
     }
 
     Task<(string Secret, string Confirmation)?> PromptNewSecretAsync(

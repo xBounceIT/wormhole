@@ -475,7 +475,18 @@ public partial class SettingsViewModel : ObservableObject
         BitwardenStatus = "Logging in to Bitwarden...";
         try
         {
-            var sessionKey = await _bitwardenVault.LoginAsync(credentials.Value.Email, credentials.Value.MasterPassword, credentials.Value.AuthenticatorCode).ConfigureAwait(true);
+            _bitwardenSession.ClearSessionKey();
+            if (_settingsService.Current.BitwardenCliServerRegion != credentials.ServerRegion)
+            {
+                _settingsService.Current.BitwardenCliServerRegion = credentials.ServerRegion;
+                _settingsService.Save();
+            }
+
+            var sessionKey = await _bitwardenVault.LoginAsync(
+                credentials.Email,
+                credentials.MasterPassword,
+                credentials.AuthenticatorCode,
+                credentials.ServerRegion).ConfigureAwait(true);
             _bitwardenSession.SetSessionKey(sessionKey);
             await _bitwardenCredentialSync.SyncNowAsync().ConfigureAwait(true);
             await _credentials.LoadCommand.ExecuteAsync(null).ConfigureAwait(true);
@@ -580,9 +591,10 @@ public partial class SettingsViewModel : ObservableObject
             _ => "Unknown",
         };
         var identity = string.IsNullOrWhiteSpace(status.UserEmail) ? string.Empty : $" ({status.UserEmail})";
+        var server = string.IsNullOrWhiteSpace(status.ServerUrl) ? string.Empty : $" Server: {status.ServerUrl}.";
         var session = hasSessionKey ? " Session key is available in memory." : string.Empty;
         var cli = cliInstall is null || cliInstall.Version == "external" ? string.Empty : $" CLI {cliInstall.Version} installed automatically.";
-        return $"{state}{identity}.{session}{cli}";
+        return $"{state}{identity}.{server}{session}{cli}";
     }
 
     // === Bitwarden HTTPS browser extension ==============================

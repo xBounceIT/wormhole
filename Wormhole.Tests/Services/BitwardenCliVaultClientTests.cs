@@ -51,13 +51,19 @@ public sealed class BitwardenCliVaultClientTests
     [Fact]
     public async Task LoginAsync_PassesMasterPasswordThroughEnvironmentOnly()
     {
-        var runner = new FakeRunner(new BitwardenProcessResult(0, "SESSION-KEY\n", string.Empty));
+        var runner = new FakeRunner(
+            new BitwardenProcessResult(0, string.Empty, string.Empty),
+            new BitwardenProcessResult(0, string.Empty, string.Empty),
+            new BitwardenProcessResult(0, "SESSION-KEY\n", string.Empty));
         var client = NewClient(runner);
 
         var session = await client.LoginAsync(" alice@example.com ", "master-secret");
 
         Assert.Equal("SESSION-KEY", session);
-        var request = runner.Requests.Single();
+        Assert.Equal(3, runner.Requests.Count);
+        AssertLogoutRequest(runner.Requests[0]);
+        AssertConfigRequest(runner.Requests[1], "https://vault.bitwarden.com");
+        var request = runner.Requests[2];
         Assert.Collection(
             request.Arguments,
             arg => Assert.Equal("login", arg),
@@ -66,21 +72,27 @@ public sealed class BitwardenCliVaultClientTests
             arg => Assert.Equal("WORMHOLE_BW_PASSWORD", arg),
             arg => Assert.Equal("--raw", arg),
             arg => Assert.Equal("--nointeraction", arg));
-        Assert.DoesNotContain("master-secret", request.Arguments);
+        Assert.DoesNotContain("master-secret", runner.Requests.SelectMany(r => r.Arguments));
         Assert.Equal("master-secret", request.Environment["WORMHOLE_BW_PASSWORD"]);
     }
 
     [Fact]
     public async Task LoginAsync_WithAuthenticatorCode_PassesTotpMethodAndCode()
     {
-        var runner = new FakeRunner(new BitwardenProcessResult(0, "SESSION-KEY\n", string.Empty));
+        var runner = new FakeRunner(
+            new BitwardenProcessResult(0, string.Empty, string.Empty),
+            new BitwardenProcessResult(0, string.Empty, string.Empty),
+            new BitwardenProcessResult(0, "SESSION-KEY\n", string.Empty));
         var client = NewClient(runner);
 
         var session = await client.LoginAsync("alice@example.com", "master-secret", " 123 456 ");
 
         Assert.Equal("SESSION-KEY", session);
+        Assert.Equal(3, runner.Requests.Count);
+        AssertLogoutRequest(runner.Requests[0]);
+        AssertConfigRequest(runner.Requests[1], "https://vault.bitwarden.com");
         Assert.Collection(
-            runner.Requests.Single().Arguments,
+            runner.Requests[2].Arguments,
             arg => Assert.Equal("login", arg),
             arg => Assert.Equal("alice@example.com", arg),
             arg => Assert.Equal("--passwordenv", arg),
@@ -91,6 +103,105 @@ public sealed class BitwardenCliVaultClientTests
             arg => Assert.Equal("0", arg),
             arg => Assert.Equal("--code", arg),
             arg => Assert.Equal("123456", arg));
+    }
+
+    [Fact]
+    public async Task LoginAsync_WithEuropeRegion_LogsOutAndConfiguresEuServerBeforeLogin()
+    {
+        var runner = new FakeRunner(
+            new BitwardenProcessResult(0, string.Empty, string.Empty),
+            new BitwardenProcessResult(0, string.Empty, string.Empty),
+            new BitwardenProcessResult(0, "SESSION-KEY\n", string.Empty));
+        var client = NewClient(runner);
+
+        var session = await client.LoginAsync(
+            "alice@example.com",
+            "master-secret",
+            serverRegion: BitwardenCliServerRegion.Europe);
+
+        Assert.Equal("SESSION-KEY", session);
+        Assert.Equal(3, runner.Requests.Count);
+        AssertLogoutRequest(runner.Requests[0]);
+        AssertConfigRequest(runner.Requests[1], "https://vault.bitwarden.eu");
+        Assert.Collection(
+            runner.Requests[2].Arguments,
+            arg => Assert.Equal("login", arg),
+            arg => Assert.Equal("alice@example.com", arg),
+            arg => Assert.Equal("--passwordenv", arg),
+            arg => Assert.Equal("WORMHOLE_BW_PASSWORD", arg),
+            arg => Assert.Equal("--raw", arg),
+            arg => Assert.Equal("--nointeraction", arg));
+    }
+
+    [Fact]
+    public async Task LoginAsync_WithCurrentRegion_DoesNotLogoutOrConfigureServer()
+    {
+        var runner = new FakeRunner(new BitwardenProcessResult(0, "SESSION-KEY\n", string.Empty));
+        var client = NewClient(runner);
+
+        var session = await client.LoginAsync(
+            "alice@example.com",
+            "master-secret",
+            serverRegion: BitwardenCliServerRegion.Current);
+
+        Assert.Equal("SESSION-KEY", session);
+        var request = Assert.Single(runner.Requests);
+        Assert.Collection(
+            request.Arguments,
+            arg => Assert.Equal("login", arg),
+            arg => Assert.Equal("alice@example.com", arg),
+            arg => Assert.Equal("--passwordenv", arg),
+            arg => Assert.Equal("WORMHOLE_BW_PASSWORD", arg),
+            arg => Assert.Equal("--raw", arg),
+            arg => Assert.Equal("--nointeraction", arg));
+    }
+
+    [Fact]
+    public async Task LoginAsync_WhenAlreadyLoggedOut_StillConfiguresServerAndLogsIn()
+    {
+        var runner = new FakeRunner(
+            new BitwardenProcessResult(1, string.Empty, "You are not logged in."),
+            new BitwardenProcessResult(0, string.Empty, string.Empty),
+            new BitwardenProcessResult(0, "SESSION-KEY\n", string.Empty));
+        var client = NewClient(runner);
+
+        var session = await client.LoginAsync("alice@example.com", "master-secret");
+
+        Assert.Equal("SESSION-KEY", session);
+        Assert.Equal(3, runner.Requests.Count);
+        AssertLogoutRequest(runner.Requests[0]);
+        AssertConfigRequest(runner.Requests[1], "https://vault.bitwarden.com");
+    }
+
+    [Fact]
+    public async Task LoginAsync_WhenLogoutFails_DoesNotConfigureServerOrLogin()
+    {
+        var runner = new FakeRunner(new BitwardenProcessResult(1, string.Empty, "disk full"));
+        var client = NewClient(runner);
+
+        var ex = await Assert.ThrowsAsync<BitwardenVaultException>(() =>
+            client.LoginAsync("alice@example.com", "master-secret", serverRegion: BitwardenCliServerRegion.Europe));
+
+        Assert.Contains("disk full", ex.Message);
+        var request = Assert.Single(runner.Requests);
+        AssertLogoutRequest(request);
+    }
+
+    [Fact]
+    public async Task LoginAsync_WhenServerConfigFails_DoesNotAttemptLogin()
+    {
+        var runner = new FakeRunner(
+            new BitwardenProcessResult(0, string.Empty, string.Empty),
+            new BitwardenProcessResult(1, string.Empty, "network down"));
+        var client = NewClient(runner);
+
+        var ex = await Assert.ThrowsAsync<BitwardenVaultException>(() =>
+            client.LoginAsync("alice@example.com", "master-secret", serverRegion: BitwardenCliServerRegion.Europe));
+
+        Assert.Contains("network down", ex.Message);
+        Assert.Equal(2, runner.Requests.Count);
+        AssertLogoutRequest(runner.Requests[0]);
+        AssertConfigRequest(runner.Requests[1], "https://vault.bitwarden.eu");
     }
 
     [Fact]
@@ -177,6 +288,24 @@ public sealed class BitwardenCliVaultClientTests
         Assert.Contains("BW_SESSION=[redacted]", ex.Message);
         Assert.Contains("--code [redacted]", ex.Message);
         Assert.Contains("WORMHOLE_BW_PASSWORD=[redacted]", ex.Message);
+    }
+
+    private static void AssertLogoutRequest(Request request)
+    {
+        Assert.Collection(request.Arguments, arg => Assert.Equal("logout", arg));
+        Assert.True(request.Environment.ContainsKey("BW_SESSION"));
+        Assert.Null(request.Environment["BW_SESSION"]);
+    }
+
+    private static void AssertConfigRequest(Request request, string serverUrl)
+    {
+        Assert.Collection(
+            request.Arguments,
+            arg => Assert.Equal("config", arg),
+            arg => Assert.Equal("server", arg),
+            arg => Assert.Equal(serverUrl, arg));
+        Assert.True(request.Environment.ContainsKey("BW_SESSION"));
+        Assert.Null(request.Environment["BW_SESSION"]);
     }
 
     private static BitwardenCliVaultClient NewClient(FakeRunner runner) =>

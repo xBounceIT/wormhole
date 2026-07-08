@@ -9,6 +9,8 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
 {
     private const string PasswordEnvVar = "WORMHOLE_BW_PASSWORD";
     private const string SessionEnvVar = "BW_SESSION";
+    private const string UnitedStatesServerUrl = "https://vault.bitwarden.com";
+    private const string EuropeServerUrl = "https://vault.bitwarden.eu";
     private static readonly Regex SessionArgumentRegex = new(@"(?i)(--session(?:\s+|=))\S+", RegexOptions.Compiled);
     private static readonly Regex SessionEnvRegex = new(@"(?i)(BW_SESSION(?:\s*=\s*))\S+", RegexOptions.Compiled);
     private static readonly Regex PasswordEnvRegex = new(@"(?i)(WORMHOLE_BW_PASSWORD(?:\s*=\s*))\S+", RegexOptions.Compiled);
@@ -62,10 +64,17 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
         string email,
         string masterPassword,
         string? authenticatorCode = null,
+        BitwardenCliServerRegion serverRegion = BitwardenCliServerRegion.UnitedStates,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(email);
         ArgumentNullException.ThrowIfNull(masterPassword);
+
+        if (serverRegion != BitwardenCliServerRegion.Current)
+        {
+            await LogoutBeforeServerConfigAsync(cancellationToken).ConfigureAwait(false);
+            await ConfigureServerAsync(serverRegion, cancellationToken).ConfigureAwait(false);
+        }
 
         var args = new List<string>
         {
@@ -156,6 +165,30 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
         await RunAsync(args, BuildSessionEnvironment(sessionKey), cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task LogoutBeforeServerConfigAsync(CancellationToken cancellationToken)
+    {
+        var result = await TryRunAsync(["logout"], BuildSessionEnvironment(sessionKey: null), cancellationToken)
+            .ConfigureAwait(false);
+        if (result.ExitCode == 0 || IsAlreadyLoggedOut(result)) return;
+
+        ThrowProcessFailure(result);
+    }
+
+    private async Task ConfigureServerAsync(
+        BitwardenCliServerRegion serverRegion,
+        CancellationToken cancellationToken)
+    {
+        var serverUrl = ResolveServerUrl(serverRegion);
+        await RunAsync(["config", "server", serverUrl], BuildSessionEnvironment(sessionKey: null), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static string ResolveServerUrl(BitwardenCliServerRegion serverRegion) => serverRegion switch
+    {
+        BitwardenCliServerRegion.Europe => EuropeServerUrl,
+        _ => UnitedStatesServerUrl,
+    };
+
     private async Task<BitwardenProcessResult> RunAsync(
         IReadOnlyList<string> args,
         IReadOnlyDictionary<string, string?>? environment,
@@ -223,6 +256,14 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
                value.Contains("two factor", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("two-factor", StringComparison.OrdinalIgnoreCase);
     }
+
+    private static bool IsAlreadyLoggedOut(BitwardenProcessResult result) =>
+        IsAlreadyLoggedOut(result.StandardError) || IsAlreadyLoggedOut(result.StandardOutput);
+
+    private static bool IsAlreadyLoggedOut(string? value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        (value.Contains("not logged", StringComparison.OrdinalIgnoreCase) ||
+         value.Contains("not authenticated", StringComparison.OrdinalIgnoreCase));
 
     private static bool IsNotFound(string? value) =>
         !string.IsNullOrWhiteSpace(value) &&

@@ -2,7 +2,7 @@ namespace Wormhole.Models;
 
 public sealed class AppSettings
 {
-    public const int CurrentSchemaVersion = 7;
+    public const int CurrentSchemaVersion = 8;
     public const int BitwardenOnboardingIntroducedSchemaVersion = 6;
 
     public int SettingsSchemaVersion { get; set; } = CurrentSchemaVersion;
@@ -42,6 +42,8 @@ public sealed class AppSettings
     // session key in memory.
     public bool EnableBitwardenVault { get; set; }
     public string BitwardenCliPath { get; set; } = "bw";
+    public BitwardenCliServerRegion BitwardenCliServerRegion { get; set; } =
+        BitwardenCliServerRegion.UnitedStates;
     public string BitwardenCliReleasesUrl { get; set; } =
         "repos/bitwarden/clients/releases?per_page=20";
     public string? BitwardenCliVersion { get; set; }
@@ -87,4 +89,11 @@ public enum BitwardenBrowserExtensionSource
     OfficialGitHub,
     ManualZip,
     ManualFolder,
+}
+
+public enum BitwardenCliServerRegion
+{
+    UnitedStates = 0,
+    Europe = 1,
+    Current = 2,
 }

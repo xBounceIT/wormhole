@@ -5,3 +5,9 @@ public sealed record AccountCredentialPromptResult(
     string Password,
     CredentialProfile? SelectedCredential,
     bool SaveCredentialToConnection);
+
+public sealed record BitwardenLoginPromptResult(
+    string Email,
+    string MasterPassword,
+    string? AuthenticatorCode,
+    BitwardenCliServerRegion ServerRegion);

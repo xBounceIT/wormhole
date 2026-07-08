@@ -153,6 +153,27 @@ public sealed class AppSettingsServiceTests
     }
 
     [Fact]
+    public void LegacySettings_MigratesBitwardenCliServerRegionToCurrent()
+    {
+        using var temp = TempSettingsFile.Create();
+        File.WriteAllText(temp.FilePath, """
+        {
+          "SettingsSchemaVersion": 7
+        }
+        """);
+
+        var service = new AppSettingsService(temp.FilePath);
+
+        Assert.Equal(BitwardenCliServerRegion.Current, service.Current.BitwardenCliServerRegion);
+        Assert.Equal(AppSettings.CurrentSchemaVersion, service.Current.SettingsSchemaVersion);
+
+        var saved = JsonSerializer.Deserialize<AppSettings>(File.ReadAllBytes(temp.FilePath));
+        Assert.NotNull(saved);
+        Assert.Equal(BitwardenCliServerRegion.Current, saved!.BitwardenCliServerRegion);
+        Assert.Equal(AppSettings.CurrentSchemaVersion, saved.SettingsSchemaVersion);
+    }
+
+    [Fact]
     public void LegacySettings_BeforeBitwardenSchema_MarksBitwardenOnboardingPending()
     {
         using var temp = TempSettingsFile.Create();
