@@ -75,7 +75,7 @@ public interface IDialogService
                 credentials.Value.Username,
                 credentials.Value.Password,
                 null,
-                BitwardenCliServerRegion.UnitedStates);
+                BitwardenCliServerRegion.Current);
     }
 
     Task<(string Secret, string Confirmation)?> PromptNewSecretAsync(

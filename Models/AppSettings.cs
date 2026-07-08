@@ -93,6 +93,7 @@ public enum BitwardenBrowserExtensionSource
 
 public enum BitwardenCliServerRegion
 {
-    UnitedStates,
-    Europe,
+    UnitedStates = 0,
+    Europe = 1,
+    Current = 2,
 }

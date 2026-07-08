@@ -987,9 +987,15 @@ public sealed class DialogService : IDialogService
             Header = "Server region",
             Width = 320,
         };
+        regionBox.Items.Add(new ComboBoxItem { Content = "Current CLI setting" });
         regionBox.Items.Add(new ComboBoxItem { Content = "United States (vault.bitwarden.com)" });
         regionBox.Items.Add(new ComboBoxItem { Content = "Europe (vault.bitwarden.eu)" });
-        regionBox.SelectedIndex = _settings.Current.BitwardenCliServerRegion == BitwardenCliServerRegion.Europe ? 1 : 0;
+        regionBox.SelectedIndex = _settings.Current.BitwardenCliServerRegion switch
+        {
+            BitwardenCliServerRegion.Europe => 2,
+            BitwardenCliServerRegion.UnitedStates => 1,
+            _ => 0,
+        };
 
         var panel = new StackPanel { Spacing = 8 };
         panel.Children.Add(new TextBlock
@@ -1041,9 +1047,12 @@ public sealed class DialogService : IDialogService
         cancellationToken.ThrowIfCancellationRequested();
         var accepted = result == ContentDialogResult.Primary || submittedViaEnter;
         var authenticatorCode = authenticatorCodeBox.Text.Trim();
-        var serverRegion = regionBox.SelectedIndex == 1
-            ? BitwardenCliServerRegion.Europe
-            : BitwardenCliServerRegion.UnitedStates;
+        var serverRegion = regionBox.SelectedIndex switch
+        {
+            2 => BitwardenCliServerRegion.Europe,
+            1 => BitwardenCliServerRegion.UnitedStates,
+            _ => BitwardenCliServerRegion.Current,
+        };
         return accepted
             ? new BitwardenLoginPromptResult(
                 emailBox.Text.Trim(),

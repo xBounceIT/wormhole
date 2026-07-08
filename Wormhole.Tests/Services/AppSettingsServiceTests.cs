@@ -153,7 +153,7 @@ public sealed class AppSettingsServiceTests
     }
 
     [Fact]
-    public void LegacySettings_MigratesBitwardenCliServerRegionToUnitedStates()
+    public void LegacySettings_MigratesBitwardenCliServerRegionToCurrent()
     {
         using var temp = TempSettingsFile.Create();
         File.WriteAllText(temp.FilePath, """
@@ -164,12 +164,12 @@ public sealed class AppSettingsServiceTests
 
         var service = new AppSettingsService(temp.FilePath);
 
-        Assert.Equal(BitwardenCliServerRegion.UnitedStates, service.Current.BitwardenCliServerRegion);
+        Assert.Equal(BitwardenCliServerRegion.Current, service.Current.BitwardenCliServerRegion);
         Assert.Equal(AppSettings.CurrentSchemaVersion, service.Current.SettingsSchemaVersion);
 
         var saved = JsonSerializer.Deserialize<AppSettings>(File.ReadAllBytes(temp.FilePath));
         Assert.NotNull(saved);
-        Assert.Equal(BitwardenCliServerRegion.UnitedStates, saved!.BitwardenCliServerRegion);
+        Assert.Equal(BitwardenCliServerRegion.Current, saved!.BitwardenCliServerRegion);
         Assert.Equal(AppSettings.CurrentSchemaVersion, saved.SettingsSchemaVersion);
     }
 

@@ -70,8 +70,11 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
         ArgumentException.ThrowIfNullOrWhiteSpace(email);
         ArgumentNullException.ThrowIfNull(masterPassword);
 
-        await LogoutBeforeServerConfigAsync(cancellationToken).ConfigureAwait(false);
-        await ConfigureServerAsync(serverRegion, cancellationToken).ConfigureAwait(false);
+        if (serverRegion != BitwardenCliServerRegion.Current)
+        {
+            await LogoutBeforeServerConfigAsync(cancellationToken).ConfigureAwait(false);
+            await ConfigureServerAsync(serverRegion, cancellationToken).ConfigureAwait(false);
+        }
 
         var args = new List<string>
         {

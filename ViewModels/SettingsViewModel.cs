@@ -475,9 +475,9 @@ public partial class SettingsViewModel : ObservableObject
         BitwardenStatus = "Logging in to Bitwarden...";
         try
         {
+            _bitwardenSession.ClearSessionKey();
             if (_settingsService.Current.BitwardenCliServerRegion != credentials.ServerRegion)
             {
-                _bitwardenSession.ClearSessionKey();
                 _settingsService.Current.BitwardenCliServerRegion = credentials.ServerRegion;
                 _settingsService.Save();
             }

@@ -134,6 +134,29 @@ public sealed class BitwardenCliVaultClientTests
     }
 
     [Fact]
+    public async Task LoginAsync_WithCurrentRegion_DoesNotLogoutOrConfigureServer()
+    {
+        var runner = new FakeRunner(new BitwardenProcessResult(0, "SESSION-KEY\n", string.Empty));
+        var client = NewClient(runner);
+
+        var session = await client.LoginAsync(
+            "alice@example.com",
+            "master-secret",
+            serverRegion: BitwardenCliServerRegion.Current);
+
+        Assert.Equal("SESSION-KEY", session);
+        var request = Assert.Single(runner.Requests);
+        Assert.Collection(
+            request.Arguments,
+            arg => Assert.Equal("login", arg),
+            arg => Assert.Equal("alice@example.com", arg),
+            arg => Assert.Equal("--passwordenv", arg),
+            arg => Assert.Equal("WORMHOLE_BW_PASSWORD", arg),
+            arg => Assert.Equal("--raw", arg),
+            arg => Assert.Equal("--nointeraction", arg));
+    }
+
+    [Fact]
     public async Task LoginAsync_WhenAlreadyLoggedOut_StillConfiguresServerAndLogsIn()
     {
         var runner = new FakeRunner(
