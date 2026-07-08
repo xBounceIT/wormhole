@@ -53,15 +53,17 @@ public sealed class BitwardenCliVaultClientTests
     {
         var runner = new FakeRunner(
             new BitwardenProcessResult(0, string.Empty, string.Empty),
+            new BitwardenProcessResult(0, string.Empty, string.Empty),
             new BitwardenProcessResult(0, "SESSION-KEY\n", string.Empty));
         var client = NewClient(runner);
 
         var session = await client.LoginAsync(" alice@example.com ", "master-secret");
 
         Assert.Equal("SESSION-KEY", session);
-        Assert.Equal(2, runner.Requests.Count);
-        AssertConfigRequest(runner.Requests[0], "https://vault.bitwarden.com");
-        var request = runner.Requests[1];
+        Assert.Equal(3, runner.Requests.Count);
+        AssertLogoutRequest(runner.Requests[0]);
+        AssertConfigRequest(runner.Requests[1], "https://vault.bitwarden.com");
+        var request = runner.Requests[2];
         Assert.Collection(
             request.Arguments,
             arg => Assert.Equal("login", arg),
@@ -79,16 +81,18 @@ public sealed class BitwardenCliVaultClientTests
     {
         var runner = new FakeRunner(
             new BitwardenProcessResult(0, string.Empty, string.Empty),
+            new BitwardenProcessResult(0, string.Empty, string.Empty),
             new BitwardenProcessResult(0, "SESSION-KEY\n", string.Empty));
         var client = NewClient(runner);
 
         var session = await client.LoginAsync("alice@example.com", "master-secret", " 123 456 ");
 
         Assert.Equal("SESSION-KEY", session);
-        Assert.Equal(2, runner.Requests.Count);
-        AssertConfigRequest(runner.Requests[0], "https://vault.bitwarden.com");
+        Assert.Equal(3, runner.Requests.Count);
+        AssertLogoutRequest(runner.Requests[0]);
+        AssertConfigRequest(runner.Requests[1], "https://vault.bitwarden.com");
         Assert.Collection(
-            runner.Requests[1].Arguments,
+            runner.Requests[2].Arguments,
             arg => Assert.Equal("login", arg),
             arg => Assert.Equal("alice@example.com", arg),
             arg => Assert.Equal("--passwordenv", arg),
@@ -102,9 +106,10 @@ public sealed class BitwardenCliVaultClientTests
     }
 
     [Fact]
-    public async Task LoginAsync_WithEuropeRegion_ConfiguresEuServerBeforeLogin()
+    public async Task LoginAsync_WithEuropeRegion_LogsOutAndConfiguresEuServerBeforeLogin()
     {
         var runner = new FakeRunner(
+            new BitwardenProcessResult(0, string.Empty, string.Empty),
             new BitwardenProcessResult(0, string.Empty, string.Empty),
             new BitwardenProcessResult(0, "SESSION-KEY\n", string.Empty));
         var client = NewClient(runner);
@@ -115,10 +120,11 @@ public sealed class BitwardenCliVaultClientTests
             serverRegion: BitwardenCliServerRegion.Europe);
 
         Assert.Equal("SESSION-KEY", session);
-        Assert.Equal(2, runner.Requests.Count);
-        AssertConfigRequest(runner.Requests[0], "https://vault.bitwarden.eu");
+        Assert.Equal(3, runner.Requests.Count);
+        AssertLogoutRequest(runner.Requests[0]);
+        AssertConfigRequest(runner.Requests[1], "https://vault.bitwarden.eu");
         Assert.Collection(
-            runner.Requests[1].Arguments,
+            runner.Requests[2].Arguments,
             arg => Assert.Equal("login", arg),
             arg => Assert.Equal("alice@example.com", arg),
             arg => Assert.Equal("--passwordenv", arg),
@@ -128,17 +134,51 @@ public sealed class BitwardenCliVaultClientTests
     }
 
     [Fact]
+    public async Task LoginAsync_WhenAlreadyLoggedOut_StillConfiguresServerAndLogsIn()
+    {
+        var runner = new FakeRunner(
+            new BitwardenProcessResult(1, string.Empty, "You are not logged in."),
+            new BitwardenProcessResult(0, string.Empty, string.Empty),
+            new BitwardenProcessResult(0, "SESSION-KEY\n", string.Empty));
+        var client = NewClient(runner);
+
+        var session = await client.LoginAsync("alice@example.com", "master-secret");
+
+        Assert.Equal("SESSION-KEY", session);
+        Assert.Equal(3, runner.Requests.Count);
+        AssertLogoutRequest(runner.Requests[0]);
+        AssertConfigRequest(runner.Requests[1], "https://vault.bitwarden.com");
+    }
+
+    [Fact]
+    public async Task LoginAsync_WhenLogoutFails_DoesNotConfigureServerOrLogin()
+    {
+        var runner = new FakeRunner(new BitwardenProcessResult(1, string.Empty, "disk full"));
+        var client = NewClient(runner);
+
+        var ex = await Assert.ThrowsAsync<BitwardenVaultException>(() =>
+            client.LoginAsync("alice@example.com", "master-secret", serverRegion: BitwardenCliServerRegion.Europe));
+
+        Assert.Contains("disk full", ex.Message);
+        var request = Assert.Single(runner.Requests);
+        AssertLogoutRequest(request);
+    }
+
+    [Fact]
     public async Task LoginAsync_WhenServerConfigFails_DoesNotAttemptLogin()
     {
-        var runner = new FakeRunner(new BitwardenProcessResult(1, string.Empty, "network down"));
+        var runner = new FakeRunner(
+            new BitwardenProcessResult(0, string.Empty, string.Empty),
+            new BitwardenProcessResult(1, string.Empty, "network down"));
         var client = NewClient(runner);
 
         var ex = await Assert.ThrowsAsync<BitwardenVaultException>(() =>
             client.LoginAsync("alice@example.com", "master-secret", serverRegion: BitwardenCliServerRegion.Europe));
 
         Assert.Contains("network down", ex.Message);
-        var request = Assert.Single(runner.Requests);
-        AssertConfigRequest(request, "https://vault.bitwarden.eu");
+        Assert.Equal(2, runner.Requests.Count);
+        AssertLogoutRequest(runner.Requests[0]);
+        AssertConfigRequest(runner.Requests[1], "https://vault.bitwarden.eu");
     }
 
     [Fact]
@@ -225,6 +265,13 @@ public sealed class BitwardenCliVaultClientTests
         Assert.Contains("BW_SESSION=[redacted]", ex.Message);
         Assert.Contains("--code [redacted]", ex.Message);
         Assert.Contains("WORMHOLE_BW_PASSWORD=[redacted]", ex.Message);
+    }
+
+    private static void AssertLogoutRequest(Request request)
+    {
+        Assert.Collection(request.Arguments, arg => Assert.Equal("logout", arg));
+        Assert.True(request.Environment.ContainsKey("BW_SESSION"));
+        Assert.Null(request.Environment["BW_SESSION"]);
     }
 
     private static void AssertConfigRequest(Request request, string serverUrl)

@@ -70,6 +70,7 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
         ArgumentException.ThrowIfNullOrWhiteSpace(email);
         ArgumentNullException.ThrowIfNull(masterPassword);
 
+        await LogoutBeforeServerConfigAsync(cancellationToken).ConfigureAwait(false);
         await ConfigureServerAsync(serverRegion, cancellationToken).ConfigureAwait(false);
 
         var args = new List<string>
@@ -161,6 +162,15 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
         await RunAsync(args, BuildSessionEnvironment(sessionKey), cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task LogoutBeforeServerConfigAsync(CancellationToken cancellationToken)
+    {
+        var result = await TryRunAsync(["logout"], BuildSessionEnvironment(sessionKey: null), cancellationToken)
+            .ConfigureAwait(false);
+        if (result.ExitCode == 0 || IsAlreadyLoggedOut(result)) return;
+
+        ThrowProcessFailure(result);
+    }
+
     private async Task ConfigureServerAsync(
         BitwardenCliServerRegion serverRegion,
         CancellationToken cancellationToken)
@@ -243,6 +253,14 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
                value.Contains("two factor", StringComparison.OrdinalIgnoreCase) ||
                value.Contains("two-factor", StringComparison.OrdinalIgnoreCase);
     }
+
+    private static bool IsAlreadyLoggedOut(BitwardenProcessResult result) =>
+        IsAlreadyLoggedOut(result.StandardError) || IsAlreadyLoggedOut(result.StandardOutput);
+
+    private static bool IsAlreadyLoggedOut(string? value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        (value.Contains("not logged", StringComparison.OrdinalIgnoreCase) ||
+         value.Contains("not authenticated", StringComparison.OrdinalIgnoreCase));
 
     private static bool IsNotFound(string? value) =>
         !string.IsNullOrWhiteSpace(value) &&
