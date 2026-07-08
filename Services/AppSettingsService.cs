@@ -105,6 +105,10 @@ public sealed class AppSettingsService : IAppSettingsService
                 {
                     settings.BitwardenOnboardingNoticePendingVersion = 1;
                 }
+                if (schemaVersion < 8)
+                {
+                    settings.BitwardenCliServerRegion = BitwardenCliServerRegion.UnitedStates;
+                }
                 settings.SettingsSchemaVersion = AppSettings.CurrentSchemaVersion;
                 migrated = true;
             }

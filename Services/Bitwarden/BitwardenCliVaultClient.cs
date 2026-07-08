@@ -9,6 +9,8 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
 {
     private const string PasswordEnvVar = "WORMHOLE_BW_PASSWORD";
     private const string SessionEnvVar = "BW_SESSION";
+    private const string UnitedStatesServerUrl = "https://vault.bitwarden.com";
+    private const string EuropeServerUrl = "https://vault.bitwarden.eu";
     private static readonly Regex SessionArgumentRegex = new(@"(?i)(--session(?:\s+|=))\S+", RegexOptions.Compiled);
     private static readonly Regex SessionEnvRegex = new(@"(?i)(BW_SESSION(?:\s*=\s*))\S+", RegexOptions.Compiled);
     private static readonly Regex PasswordEnvRegex = new(@"(?i)(WORMHOLE_BW_PASSWORD(?:\s*=\s*))\S+", RegexOptions.Compiled);
@@ -62,10 +64,13 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
         string email,
         string masterPassword,
         string? authenticatorCode = null,
+        BitwardenCliServerRegion serverRegion = BitwardenCliServerRegion.UnitedStates,
         CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(email);
         ArgumentNullException.ThrowIfNull(masterPassword);
+
+        await ConfigureServerAsync(serverRegion, cancellationToken).ConfigureAwait(false);
 
         var args = new List<string>
         {
@@ -155,6 +160,21 @@ public sealed class BitwardenCliVaultClient : IBitwardenVaultClient
         var args = new List<string> { "sync" };
         await RunAsync(args, BuildSessionEnvironment(sessionKey), cancellationToken).ConfigureAwait(false);
     }
+
+    private async Task ConfigureServerAsync(
+        BitwardenCliServerRegion serverRegion,
+        CancellationToken cancellationToken)
+    {
+        var serverUrl = ResolveServerUrl(serverRegion);
+        await RunAsync(["config", "server", serverUrl], BuildSessionEnvironment(sessionKey: null), cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static string ResolveServerUrl(BitwardenCliServerRegion serverRegion) => serverRegion switch
+    {
+        BitwardenCliServerRegion.Europe => EuropeServerUrl,
+        _ => UnitedStatesServerUrl,
+    };
 
     private async Task<BitwardenProcessResult> RunAsync(
         IReadOnlyList<string> args,

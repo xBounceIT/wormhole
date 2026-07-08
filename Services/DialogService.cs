@@ -23,16 +23,19 @@ public sealed class DialogService : IDialogService
     private readonly IBitwardenCredentialCatalogService _credentialCatalog;
     private readonly IBitwardenCredentialSyncService _bitwardenCredentialSync;
     private readonly ICredentialPasswordResolver _passwordResolver;
+    private readonly IAppSettingsService _settings;
     private static int _exclusiveUserDialogInProgress;
 
     public DialogService(
         IBitwardenCredentialCatalogService credentialCatalog,
         IBitwardenCredentialSyncService bitwardenCredentialSync,
-        ICredentialPasswordResolver passwordResolver)
+        ICredentialPasswordResolver passwordResolver,
+        IAppSettingsService settings)
     {
         _credentialCatalog = credentialCatalog;
         _bitwardenCredentialSync = bitwardenCredentialSync;
         _passwordResolver = passwordResolver;
+        _settings = settings;
     }
 
     private static async Task<T?> RunExclusiveUserDialogAsync<T>(Func<Task<T?>> showAsync)
@@ -948,7 +951,7 @@ public sealed class DialogService : IDialogService
     }
 
     [System.Diagnostics.CodeAnalysis.SuppressMessage("Reliability", "CA2016:Forward the CancellationToken parameter to methods", Justification = "ContentDialog has no cancellation-token overload; this prompt checks cancellation before and after the dialog.")]
-    public async Task<(string Email, string MasterPassword, string? AuthenticatorCode)?> PromptBitwardenLoginAsync(CancellationToken cancellationToken = default)
+    public async Task<BitwardenLoginPromptResult?> PromptBitwardenLoginAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -979,12 +982,22 @@ public sealed class DialogService : IDialogService
                 Names = { new InputScopeName(InputScopeNameValue.Number) }
             }
         };
+        var regionBox = new ComboBox
+        {
+            Header = "Server region",
+            Width = 320,
+        };
+        regionBox.Items.Add(new ComboBoxItem { Content = "United States (vault.bitwarden.com)" });
+        regionBox.Items.Add(new ComboBoxItem { Content = "Europe (vault.bitwarden.eu)" });
+        regionBox.SelectedIndex = _settings.Current.BitwardenCliServerRegion == BitwardenCliServerRegion.Europe ? 1 : 0;
+
         var panel = new StackPanel { Spacing = 8 };
         panel.Children.Add(new TextBlock
         {
             Text = "Wormhole passes the master password to bw through an environment variable and never stores it.",
             TextWrapping = TextWrapping.Wrap,
         });
+        panel.Children.Add(regionBox);
         panel.Children.Add(emailBox);
         panel.Children.Add(passwordBox);
         panel.Children.Add(authenticatorCodeBox);
@@ -1028,7 +1041,16 @@ public sealed class DialogService : IDialogService
         cancellationToken.ThrowIfCancellationRequested();
         var accepted = result == ContentDialogResult.Primary || submittedViaEnter;
         var authenticatorCode = authenticatorCodeBox.Text.Trim();
-        return accepted ? (emailBox.Text.Trim(), passwordBox.Password, string.IsNullOrWhiteSpace(authenticatorCode) ? null : authenticatorCode) : null;
+        var serverRegion = regionBox.SelectedIndex == 1
+            ? BitwardenCliServerRegion.Europe
+            : BitwardenCliServerRegion.UnitedStates;
+        return accepted
+            ? new BitwardenLoginPromptResult(
+                emailBox.Text.Trim(),
+                passwordBox.Password,
+                string.IsNullOrWhiteSpace(authenticatorCode) ? null : authenticatorCode,
+                serverRegion)
+            : null;
     }
 
     public async Task<(string Secret, string Confirmation)?> PromptNewSecretAsync(

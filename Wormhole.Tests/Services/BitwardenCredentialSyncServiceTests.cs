@@ -171,6 +171,7 @@ public sealed class BitwardenCredentialSyncServiceTests
             string email,
             string masterPassword,
             string? authenticatorCode = null,
+            BitwardenCliServerRegion serverRegion = BitwardenCliServerRegion.UnitedStates,
             CancellationToken cancellationToken = default) =>
             Task.FromResult("SESSION");
 

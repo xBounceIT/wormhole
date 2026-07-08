@@ -23,6 +23,7 @@ public class AppSettingsTests
         Assert.NotNull(settings);
         Assert.False(settings!.EnableBitwardenVault);
         Assert.Equal("bw", settings.BitwardenCliPath);
+        Assert.Equal(BitwardenCliServerRegion.UnitedStates, settings.BitwardenCliServerRegion);
         Assert.Equal("repos/bitwarden/clients/releases?per_page=20", settings.BitwardenCliReleasesUrl);
         Assert.Null(settings.BitwardenCliVersion);
         Assert.Null(settings.BitwardenCliInstallStatus);

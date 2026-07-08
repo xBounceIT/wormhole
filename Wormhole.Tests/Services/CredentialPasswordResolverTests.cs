@@ -180,7 +180,12 @@ public sealed class CredentialPasswordResolverTests
             return Task.FromResult("SESSION");
         }
 
-        public Task<string> LoginAsync(string email, string masterPassword, string? authenticatorCode = null, CancellationToken cancellationToken = default) =>
+        public Task<string> LoginAsync(
+            string email,
+            string masterPassword,
+            string? authenticatorCode = null,
+            BitwardenCliServerRegion serverRegion = BitwardenCliServerRegion.UnitedStates,
+            CancellationToken cancellationToken = default) =>
             Task.FromResult("SESSION");
 
         public Task<IReadOnlyList<BitwardenLoginItem>> ListLoginItemsAsync(string? sessionKey, CancellationToken cancellationToken = default) =>
