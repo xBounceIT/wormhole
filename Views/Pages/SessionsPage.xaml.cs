@@ -1,11 +1,15 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Wormhole.Helpers;
 using Wormhole.Services;
 using Wormhole.ViewModels;
 using Wormhole.ViewModels.Sessions;
+using Wormhole.Views.Controls;
 
 namespace Wormhole.Views.Pages;
 
@@ -38,7 +42,11 @@ public sealed partial class SessionsPage : Page
         if (!ViewModel.Tabs.Contains(tab)) return;
         if (!_closingTabs.Add(tab)) return;
 
-        var wasSelected = ReferenceEquals(ViewModel.SelectedTab, tab);
+        // TabView updates its own SelectedItem as part of the middle-click gesture, while the
+        // TwoWay binding can reach the VM a dispatcher tick later. Treat either side as authoritative
+        // during that window; relying on the VM alone makes this path timing-dependent.
+        var wasSelected = ReferenceEquals(SessionTabs.SelectedItem, tab) ||
+                          ReferenceEquals(ViewModel.SelectedTab, tab);
         try
         {
             // When the *active* tab is closed, move selection to its closest neighbour BEFORE
@@ -53,6 +61,10 @@ public sealed partial class SessionsPage : Page
             // tab leaves removal to clear selection and show the empty state.
             if (wasSelected && FindClosestTab(tab) is { } neighbour)
             {
+                // Drive the control directly as well as the VM. Setting only the bound property can
+                // be overtaken by TabView's own selection coercion when the selected container is
+                // removed later in this same close gesture.
+                SessionTabs.SelectedItem = neighbour;
                 ViewModel.SelectedTab = neighbour;
             }
 
@@ -85,19 +97,87 @@ public sealed partial class SessionsPage : Page
 
     private void FocusSessionsSurface()
     {
-        _ = DispatcherQueue.TryEnqueue(() =>
+        try
         {
-            try
+            // Middle-click does not move keyboard focus to the tab header. Move it away from the
+            // tree immediately, then verify again after TabView has finished its pointer/selection
+            // work. The delayed pass only acts if the original focus became stale or WinUI returned
+            // focus to the connection tree, so it cannot steal focus from the new terminal, a
+            // dialog, or a native RDP surface.
+            var focusAtClose = GetFocusedElement();
+            if (focusAtClose is null) return;
+
+            if (!IsFocusWithinSessionsSurface(focusAtClose))
             {
-                if (ViewModel.HasTabs && SessionTabs.Focus(FocusState.Programmatic)) return;
-                SessionsRoot.Focus(FocusState.Programmatic);
+                FocusSessionsSurfaceCore();
             }
-            catch (Exception ex)
+
+            _ = DispatcherQueue.TryEnqueue(
+                DispatcherQueuePriority.Low,
+                () => RestoreFocusIfStale(focusAtClose));
+        }
+        catch (Exception ex)
+        {
+            LogFocusFailure(ex);
+        }
+    }
+
+    private void RestoreFocusIfStale(DependencyObject focusAtClose)
+    {
+        try
+        {
+            var focused = GetFocusedElement();
+            var returnedToTree = IsFocusWithinConnectionTree(focused);
+            var originalFocusBecameStale =
+                ReferenceEquals(focused, focusAtClose) && !IsFocusWithinSessionsSurface(focused);
+            if (returnedToTree || originalFocusBecameStale)
             {
-                var logger = App.Current?.Services?.GetService<ILogger<SessionsPage>>();
-                logger?.LogDebug(ex, "SessionsPage focus push after tab close was suppressed.");
+                FocusSessionsSurfaceCore();
             }
-        });
+        }
+        catch (Exception ex)
+        {
+            LogFocusFailure(ex);
+        }
+    }
+
+    private void FocusSessionsSurfaceCore()
+    {
+        if (!SessionsRoot.Focus(FocusState.Programmatic) && ViewModel.HasTabs)
+        {
+            SessionTabs.Focus(FocusState.Programmatic);
+        }
+    }
+
+    private DependencyObject? GetFocusedElement() =>
+        XamlRoot is { } root ? FocusManager.GetFocusedElement(root) as DependencyObject : null;
+
+    private bool IsFocusWithinSessionsSurface(DependencyObject? current)
+    {
+        while (current is not null)
+        {
+            if (ReferenceEquals(current, SessionsRoot)) return true;
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return false;
+    }
+
+    private static bool IsFocusWithinConnectionTree(DependencyObject? current)
+    {
+        while (current is not null)
+        {
+            if (current is ConnectionTreeView) return true;
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return false;
+    }
+
+    private static void LogFocusFailure(Exception ex)
+    {
+        var logger = App.Current?.Services?.GetService<ILogger<SessionsPage>>();
+        logger?.LogDebug(ex, "SessionsPage focus push after tab close was suppressed.");
     }
 
     // The still-open tab nearest the one being closed: prefer the right neighbour, then the
