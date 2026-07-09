@@ -75,7 +75,7 @@ public sealed partial class SshTerminalView : UserControl
                 // DataContext recycling can happen while the control remains loaded, so OnUnloaded
                 // has not detached the previous bridge. Do it here before the WebView is cleared and
                 // rebound to the new session.
-                _viewModel.DetachView();
+                _viewModel.DetachView(preserveTerminalContents: false);
             }
             if (TerminalView.CoreWebView2 is not null)
             {

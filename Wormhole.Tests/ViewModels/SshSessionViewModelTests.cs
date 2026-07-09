@@ -1134,6 +1134,30 @@ public sealed class SshSessionViewModelTests
     }
 
     [Fact]
+    public void DetachView_PreservedTerminal_KeepsSameWebViewNotFresh()
+    {
+        var vm = CreateViewModel();
+        var webView = new object();
+        vm.RegisterAttachedWebView(webView);
+
+        vm.DetachView();
+
+        Assert.False(vm.RegisterAttachedWebView(webView));
+    }
+
+    [Fact]
+    public void DetachView_ReplacedTerminal_MakesSameWebViewFresh()
+    {
+        var vm = CreateViewModel();
+        var webView = new object();
+        vm.RegisterAttachedWebView(webView);
+
+        vm.DetachView(preserveTerminalContents: false);
+
+        Assert.True(vm.RegisterAttachedWebView(webView));
+    }
+
+    [Fact]
     public void RegisterAttachedWebView_DifferentInstance_ReportsFresh()
     {
         // Sessions↔Settings nav case: new WebView2 with an empty xterm.js; replay

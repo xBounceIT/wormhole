@@ -230,16 +230,20 @@ public sealed partial class SerialSessionViewModel : SessionTabViewModel, ITermi
         }
     }
 
-    public void DetachView()
+    public void DetachView(bool preserveTerminalContents = true)
     {
         var bridge = _bridge;
         _bridge = null;
         if (bridge is not null)
         {
             try { bridge.Dispose(); }
-            catch (Exception ex) { _logger.LogWarning(ex, "Error disposing serial TerminalBridge on view unload."); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Error disposing serial TerminalBridge while detaching view."); }
         }
         _webView = null;
+        if (!preserveTerminalContents)
+        {
+            _lastAttachedWebView = null;
+        }
     }
 
     private async Task ConnectAsync()

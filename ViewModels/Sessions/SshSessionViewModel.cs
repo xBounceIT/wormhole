@@ -55,7 +55,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     private SshAutoSudoDriver? _autoSudo;
     private CancellationTokenSource? _cts;
     private CoreWebView2? _webView;
-    // Survives DetachView so AttachAsync can tell a same-WebView reattach (tab
+    // Survives DetachView only while terminal contents are preserved, so AttachAsync can
+    // tell a same-WebView reattach (tab
     // switch — xterm.js still owns the same buffer) from a fresh-WebView attach (Sessions ↔
     // Settings nav — new control). Used by ReferenceEquals only.
     private object? _lastAttachedWebView;
@@ -574,11 +575,11 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
 
     /// <summary>
     /// Called by the view on Unloaded — releases the WebView2 binding without tearing
-    /// down the SSH session. Background SSH output still arrives on the read pump but
-    /// the bridge is gone, so it isn't routed to a disposed WebView2 (no more
-    /// repeated InvalidOperationException spam). The next AttachAsync rebinds.
+    /// down the SSH session. DataContext rebinding also calls it before repurposing the page.
+    /// Background SSH output still arrives on the read pump, but the missing bridge prevents
+    /// routing it to a disposed WebView2. The next AttachAsync rebinds.
     /// </summary>
-    public void DetachView()
+    public void DetachView(bool preserveTerminalContents = true)
     {
         TerminalBridge? bridge;
         lock (_terminalReplayLock)
@@ -589,9 +590,13 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         if (bridge is not null)
         {
             try { bridge.Dispose(); }
-            catch (Exception ex) { _logger.LogWarning(ex, "Error disposing TerminalBridge on view unload."); }
+            catch (Exception ex) { _logger.LogWarning(ex, "Error disposing TerminalBridge while detaching view."); }
         }
         _webView = null;
+        if (!preserveTerminalContents)
+        {
+            _lastAttachedWebView = null;
+        }
     }
 
     internal void AttachConnectedSessionForTesting(ISshSession session, ITunnelInstance? tunnel = null)
