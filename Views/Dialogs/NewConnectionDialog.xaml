@@ -426,6 +426,7 @@
                          Visibility="{x:Bind ViewModel.IsRdp, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
                 <ScrollViewer x:Name="AdvancedTabContent"
                               Padding="16"
+                              Loaded="OnAdvancedTabContentLoaded"
                               x:Load="{x:Bind IsAdvancedTabContentLoaded, Mode=OneWay}">
                     <StackPanel Spacing="10">
                         <ComboBox Header="Server authentication"

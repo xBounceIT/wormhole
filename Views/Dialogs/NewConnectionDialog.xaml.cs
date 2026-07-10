@@ -145,6 +145,9 @@ public sealed partial class NewConnectionDialog : UserControl, INotifyPropertyCh
         }
     }
 
+    private void OnAdvancedTabContentLoaded(object sender, RoutedEventArgs e) =>
+        SyncCredentialText(GatewayCredentialBox, ViewModel.SelectedGatewayCredential);
+
     /// <summary>Copy field values back into the supplied node. Caller is responsible for the
     /// Id and parent linkage.</summary>
     public void WriteTo(ConnectionNode node) => ViewModel.WriteTo(node);

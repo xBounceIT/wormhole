@@ -114,7 +114,8 @@ public partial class ConnectionTreeViewModel : ObservableObject
             var projection = await Task.Run(
                 () => BuildSearchProjection(index, newValue.Trim(), cts.Token),
                 cts.Token).ConfigureAwait(true);
-            if (!ReferenceEquals(_filterDebounceCts, cts)) return;
+            if (!ReferenceEquals(_filterDebounceCts, cts) ||
+                !ReferenceEquals(_searchIndex, index)) return;
 
             ClearSelection();
             ApplySearchProjection(projection);
