@@ -1698,6 +1698,41 @@ public class RdpSessionViewModelTests
         Assert.Equal(2, svc.LastProfile?.RdpServerAuthentication);
     }
 
+    [Fact]
+    public async Task AttachAsync_UserCancelsTunnelInteraction_StaysDisconnectedWithoutConnecting()
+    {
+        var configId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        var provider = new FakeTunnelProvider
+        {
+            EstablishFailure = new UserInteractionCancelledException(
+                "Stormshield OTP prompt was cancelled by the user."),
+        };
+        tunnelRepo.Configs[configId] = new TunnelConfig
+        {
+            Id = configId,
+            Name = "corp",
+            Kind = TunnelKind.WireGuard,
+        };
+
+        var (vm, svc, creds, dlg, _) = CreateVm(
+            tunnelRepo: tunnelRepo,
+            tunnelProviders: new ITunnelProvider[] { provider });
+        creds.TunnelConfigs[configId] = new byte[] { 1, 2, 3 };
+        dlg.PasswordPromptResult = "password";
+        vm.Initialize(MakeProfile() with
+        {
+            TunnelEnabled = true,
+            TunnelConfigId = configId,
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.Null(vm.ErrorMessage);
+        Assert.Equal(0, svc.ConnectCount);
+    }
+
     // --- Per-connect tunnel routing prompt (PromptBeforeTunnelConnect) --------------------
 
     [Fact]
@@ -2240,6 +2275,7 @@ public class RdpSessionViewModelTests
     {
         public int EstablishCount { get; private set; }
         public FakeTunnelInstance? LastInstance { get; private set; }
+        public Exception? EstablishFailure { get; init; }
         public TunnelKind Kind => TunnelKind.WireGuard;
         private readonly FakeTunnelInstance? _instance;
 
@@ -2255,6 +2291,8 @@ public class RdpSessionViewModelTests
             IProgress<TunnelProgress>? progress = null)
         {
             EstablishCount++;
+            if (EstablishFailure is not null)
+                return Task.FromException<ITunnelInstance>(EstablishFailure);
             LastInstance = _instance ?? new FakeTunnelInstance();
             return Task.FromResult<ITunnelInstance>(LastInstance);
         }

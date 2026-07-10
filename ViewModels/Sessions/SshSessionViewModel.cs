@@ -874,6 +874,18 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             return IsAttemptCurrent(teardownGeneration);
         }
 
+        async Task HandleCancellationAsync()
+        {
+            if (ReferenceEquals(Interlocked.CompareExchange(ref _cts, null, cts), cts))
+            {
+                try { cts.Cancel(); } catch { /* already disposed */ }
+            }
+            if (!await CleanupPendingConnectArtifactsAndIsCurrentAsync().ConfigureAwait(true)) return;
+            await SafeDisposeSessionAsync().ConfigureAwait(true);
+            Progress.Reset();
+            Status = SessionStatus.Disconnected;
+        }
+
         try
         {
             // Per-connect tunnel routing: when the user has opted in (PromptBeforeTunnelConnect)
@@ -888,12 +900,10 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             if (!IsAttemptCurrent(teardownGeneration)) return;
             if (routed is null)
             {
-                // User dismissed the route prompt. Surface a recoverable Failed state rather than
-                // Disconnected: this mirrors SSH's existing cancelled-prompt convention — a dismissed
-                // credential prompt also reports failure — and keeps the route prompt retry explicit.
-                // Retry re-opens the route prompt. Not auto-retryable: the user just declined.
+                // The user deliberately dismissed the route choice. This is not a failed connection
+                // attempt; use the shared cancellation cleanup without auto-retrying.
                 _lastConnectRetryable = false;
-                ReportFailure("Connection cancelled.");
+                await HandleCancellationAsync().ConfigureAwait(true);
                 return;
             }
             _activeRoutedProfile = routed;
@@ -1055,10 +1065,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         }
         catch (OperationCanceledException)
         {
-            if (!await CleanupPendingConnectArtifactsAndIsCurrentAsync().ConfigureAwait(true)) return;
-            await SafeDisposeSessionAsync().ConfigureAwait(true);
-            Progress.Reset();
-            Status = SessionStatus.Disconnected;
+            await HandleCancellationAsync().ConfigureAwait(true);
         }
         catch (SshHostKeyMismatchException ex)
         {

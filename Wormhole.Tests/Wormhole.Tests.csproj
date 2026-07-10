@@ -158,6 +158,7 @@
     <Compile Include="..\Services\IUpdateService.cs" Link="Services\IUpdateService.cs" />
     <Compile Include="..\Services\UpdateService.cs" Link="Services\UpdateService.cs" />
     <Compile Include="..\Services\UpdateChangelogFormatter.cs" Link="Services\UpdateChangelogFormatter.cs" />
+    <Compile Include="..\Services\UserInteractionCancelledException.cs" Link="Services\UserInteractionCancelledException.cs" />
     <Compile Include="..\Services\ICredentialService.cs" Link="Services\ICredentialService.cs" />
     <Compile Include="..\Services\ICredentialPasswordResolver.cs" Link="Services\ICredentialPasswordResolver.cs" />
     <Compile Include="..\Services\CredentialPasswordResolver.cs" Link="Services\CredentialPasswordResolver.cs" />

@@ -38,7 +38,7 @@ public sealed class BitwardenVaultException : Exception
     public bool IsAuthenticationError { get; }
 }
 
-public sealed class BitwardenUnlockCancelledException : OperationCanceledException
+public sealed class BitwardenUnlockCancelledException : UserInteractionCancelledException
 {
     public BitwardenUnlockCancelledException()
         : base("Bitwarden vault unlock was cancelled.")

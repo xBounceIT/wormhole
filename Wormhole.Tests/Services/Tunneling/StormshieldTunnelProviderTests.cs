@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Models;
+using Wormhole.Services;
 using Wormhole.Services.Tunneling;
 using Wormhole.Services.Tunneling.Stormshield;
 using Wormhole.Tests.Fakes;
@@ -212,6 +213,30 @@ public class StormshieldTunnelProviderTests
         Assert.False(optimistic);                         // hash-CONFIRMED hit → cache kept on a later failure
         Assert.Equal(0, cache.WriteCalls);
         Assert.Equal(1, otp.PromptCount);
+    }
+
+    [Fact]
+    public async Task ResolveAutomatic_Otp_PromptCancelled_ThrowsUserCancellation()
+    {
+        var portal = new ScriptedPortal { ConfigHashResult = "abc123" };
+        var cache = new FakeStormshieldConfigCache();
+        var id = Guid.NewGuid();
+        cache.Seed(
+            id,
+            configHash: "abc123",
+            profileOvpn: "client\ndev tun\nremote fw 443\n<ca>cached</ca>\n");
+        var otp = new ScriptedOtpPrompt();
+
+        await Assert.ThrowsAsync<UserInteractionCancelledException>(() =>
+            StormshieldTunnelProvider.ResolveAutomaticCoreAsync(
+                portal,
+                cache,
+                otp,
+                NullLogger.Instance,
+                id,
+                "cfg",
+                ValidSettings(useOtp: true),
+                CancellationToken.None));
     }
 
     [Fact]
@@ -433,14 +458,14 @@ public class StormshieldTunnelProviderTests
     }
 
     [Fact]
-    public async Task TlsConsent_Declined_ThrowsActionable_NoPersist_NoRetry()
+    public async Task TlsConsent_Declined_ThrowsUserCancellation_NoPersist_NoRetry()
     {
         var created = 0;
         var tlsPrompt = new ScriptedTlsTrustPrompt(accept: false);
         var settings = ValidSettings();
         var persistCalls = 0;
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var ex = await Assert.ThrowsAsync<UserInteractionCancelledException>(() =>
             RunTlsConsentAsync(
                 () =>
                 {

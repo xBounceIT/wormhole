@@ -59,7 +59,7 @@ public sealed class VncSessionClosedEventArgs : EventArgs
     public Exception? Exception { get; }
 }
 
-public sealed class VncAuthenticationCancelledException : OperationCanceledException
+public sealed class VncAuthenticationCancelledException : UserInteractionCancelledException
 {
     public VncAuthenticationCancelledException()
         : base("VNC authentication was cancelled.")

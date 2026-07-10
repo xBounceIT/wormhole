@@ -7,6 +7,10 @@ namespace Wormhole.Services.Ssh;
 
 public interface ISshCredentialResolver
 {
+    /// <summary>
+    /// Resolves saved or interactive SSH credentials. Throws
+    /// <see cref="Wormhole.Services.UserInteractionCancelledException"/> when the user dismisses a required prompt.
+    /// </summary>
     Task<SshCredentials> ResolveAsync(ConnectionProfile profile, CancellationToken cancellationToken = default);
 }
 
@@ -157,10 +161,11 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
                     "Enter the passphrase for the SSH key:",
                     cancellationToken).ConfigureAwait(true);
                 cancellationToken.ThrowIfCancellationRequested();
-                if (string.IsNullOrEmpty(passphrase))
+                if (passphrase is null)
                 {
-                    return SshCredentials.Empty;
+                    throw new UserInteractionCancelledException("SSH key passphrase prompt was cancelled.");
                 }
+                if (passphrase.Length == 0) return SshCredentials.Empty;
             }
             return new SshCredentials(null, passphrase, key, credential.Username);
         }
@@ -212,7 +217,11 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
         // Re-check after the await: the user may have closed the tab (canceling the
         // connect CTS) while the dialog was open. Don't act on a stale password.
         cancellationToken.ThrowIfCancellationRequested();
-        if (result is null || string.IsNullOrEmpty(result.Password))
+        if (result is null)
+        {
+            throw new UserInteractionCancelledException("SSH password prompt was cancelled.");
+        }
+        if (string.IsNullOrEmpty(result.Password))
         {
             return SshCredentials.Empty;
         }

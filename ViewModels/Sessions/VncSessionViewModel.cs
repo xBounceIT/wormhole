@@ -203,13 +203,28 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
         ITunnelInstance? pendingTunnel = null;
         IVncSession? pendingSession = null;
 
+        async Task HandleCancellationAsync()
+        {
+            if (ReferenceEquals(Interlocked.CompareExchange(ref _cts, null, cts), cts))
+            {
+                try { cts.Cancel(); } catch { /* already disposed */ }
+                cts.Dispose();
+            }
+            await DisposeSessionSilentlyAsync(pendingSession).ConfigureAwait(true);
+            await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
+            if (!IsAttemptCurrent(teardownGeneration)) return;
+            Progress.Reset();
+            Status = SessionStatus.Disconnected;
+            ErrorMessage = null;
+        }
+
         try
         {
             var routed = await _tunnelPrompter.ResolveRouteAsync(profile, token).ConfigureAwait(true);
             if (!IsAttemptCurrent(teardownGeneration)) return;
             if (routed is null)
             {
-                ReportFailure("Connection cancelled.");
+                await HandleCancellationAsync().ConfigureAwait(true);
                 return;
             }
             profile = routed;
@@ -266,21 +281,9 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
             ErrorMessage = null;
             Status = SessionStatus.Connected;
         }
-        catch (VncAuthenticationCancelledException)
-        {
-            await DisposeSessionSilentlyAsync(pendingSession).ConfigureAwait(true);
-            await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
-            if (!IsAttemptCurrent(teardownGeneration)) return;
-            ReportFailure("Connection cancelled.");
-        }
         catch (OperationCanceledException)
         {
-            await DisposeSessionSilentlyAsync(pendingSession).ConfigureAwait(true);
-            await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
-            if (!IsAttemptCurrent(teardownGeneration)) return;
-            Progress.Reset();
-            Status = SessionStatus.Disconnected;
-            ErrorMessage = null;
+            await HandleCancellationAsync().ConfigureAwait(true);
         }
         catch (Exception ex)
         {

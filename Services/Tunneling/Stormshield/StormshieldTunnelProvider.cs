@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Wormhole.Helpers;
 using Wormhole.Models;
+using Wormhole.Services;
 using Wormhole.Services.Tunneling.OpenVpn;
 
 namespace Wormhole.Services.Tunneling.Stormshield;
@@ -773,7 +774,7 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             }
             else
             {
-                throw new InvalidOperationException(
+                throw new UserInteractionCancelledException(
                     $"The TLS certificate presented by '{settings.Server}:{settings.Port}' could not be verified, "
                     + "and you chose not to trust it. To connect, paste the firewall's CA certificate (PEM) into this "
                     + $"tunnel's settings — or reconnect and choose \"{ITlsTrustPromptService.AcceptButtonLabel}\" "
@@ -1035,10 +1036,9 @@ public sealed class StormshieldTunnelProvider : ITunnelProvider
             cancellationToken).ConfigureAwait(false);
         if (otp is null)
         {
-            // Convention from IOtpPromptService: null is a deliberate user dismiss, not a token
-            // cancel — surface as a regular InvalidOperation so upstream retry logic doesn't treat
-            // it as a transient cancellation.
-            throw new InvalidOperationException("Stormshield OTP prompt was cancelled by the user.");
+            // A deliberate dismiss is distinct from the caller token firing, but both are benign
+            // cancellation outcomes at session/test boundaries.
+            throw new UserInteractionCancelledException("Stormshield OTP prompt was cancelled by the user.");
         }
         otp = otp.Trim();
         if (otp.Length == 0)

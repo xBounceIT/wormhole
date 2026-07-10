@@ -8,6 +8,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.Web.WebView2.Core;
 using Wormhole.Helpers;
 using Wormhole.Models;
+using Wormhole.Services;
 
 namespace Wormhole.Services.Tunneling.Watchguard;
 
@@ -171,8 +172,8 @@ public sealed class DialogWatchguardSamlAuthService : IWatchguardSamlAuthService
 
         cancellationToken.ThrowIfCancellationRequested();
         if (dialogResult == ContentDialogResult.None)
-            throw new InvalidOperationException("Watchguard SAML login was cancelled by the user.");
-        throw new InvalidOperationException("Watchguard SAML login closed before authentication completed.");
+            throw new UserInteractionCancelledException("Watchguard SAML login was cancelled by the user.");
+        throw new UserInteractionCancelledException("Watchguard SAML login closed before authentication completed.");
     }
 
     private static async Task<IReadOnlyList<Cookie>> ReadCookiesAsync(CoreWebView2 webView, Uri baseUri)

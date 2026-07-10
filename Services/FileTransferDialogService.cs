@@ -152,6 +152,14 @@ public sealed class FileTransferDialogService : IFileTransferDialogService
 
                 profile = await PinHostFingerprintIfNeededAsync(sourceTab, profile, session).ConfigureAwait(true);
             }
+            catch (UserInteractionCancelledException)
+            {
+                // Password/Bitwarden/tunnel prompts may be dismissed while opening the on-demand
+                // SFTP session. Release anything already acquired without logging or showing error UI.
+                if (session is not null) try { await session.DisposeAsync().ConfigureAwait(true); } catch { /* best effort */ }
+                if (tunnel is not null) try { await tunnel.DisposeAsync().ConfigureAwait(true); } catch { /* best effort */ }
+                return;
+            }
             catch (Exception ex)
             {
                 _logger.LogWarning(ex, "Failed to open SFTP for {Host}.", profile.Host);

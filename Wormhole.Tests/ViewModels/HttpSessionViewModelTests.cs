@@ -144,7 +144,7 @@ public class HttpSessionViewModelTests
     }
 
     [Fact]
-    public async Task RoutePromptCancelled_ReportsFailed_WithoutNavigate()
+    public async Task RoutePromptCancelled_ReturnsToDisconnected_WithoutNavigate()
     {
         var raised = false;
         var vm = CreateVm(prompter: new FakeRoutePrompter((ConnectionProfile?)null));
@@ -154,8 +154,8 @@ public class HttpSessionViewModelTests
         await vm.AttachAsync();
 
         Assert.False(raised);
-        Assert.Equal(SessionStatus.Failed, vm.Status);
-        Assert.Equal("Connection cancelled.", vm.ErrorMessage);
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.Null(vm.ErrorMessage);
     }
 
     [Fact]

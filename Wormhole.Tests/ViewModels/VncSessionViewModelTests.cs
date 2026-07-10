@@ -103,7 +103,7 @@ public class VncSessionViewModelTests
     }
 
     [Fact]
-    public async Task PasswordProvider_CancelledPrompt_FailsWithCancelledMessage()
+    public async Task PasswordProvider_CancelledPrompt_ReturnsToDisconnected()
     {
         var service = new FakeVncSessionService { RequestPassword = true };
         var vm = CreateVm(service, dialog: new FakeDialogService { PasswordPromptResult = null });
@@ -111,8 +111,8 @@ public class VncSessionViewModelTests
 
         await vm.AttachAsync(new FakeRenderTarget());
 
-        Assert.Equal(SessionStatus.Failed, vm.Status);
-        Assert.Equal("Connection cancelled.", vm.ErrorMessage);
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.Null(vm.ErrorMessage);
     }
 
     [Fact]
@@ -132,7 +132,7 @@ public class VncSessionViewModelTests
     }
 
     [Fact]
-    public async Task ResolveRouteCancel_FailsWithoutOpeningSession()
+    public async Task ResolveRouteCancel_ReturnsToDisconnectedWithoutOpeningSession()
     {
         var service = new FakeVncSessionService();
         var vm = CreateVm(service, prompter: new FakeRoutePrompter(null));
@@ -140,8 +140,8 @@ public class VncSessionViewModelTests
 
         await vm.AttachAsync(new FakeRenderTarget());
 
-        Assert.Equal(SessionStatus.Failed, vm.Status);
-        Assert.Equal("Connection cancelled.", vm.ErrorMessage);
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.Null(vm.ErrorMessage);
         Assert.Empty(service.Calls);
     }
 

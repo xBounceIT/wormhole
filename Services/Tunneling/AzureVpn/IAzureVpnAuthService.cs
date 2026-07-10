@@ -22,8 +22,9 @@ public interface IAzureVpnAuthService
 {
     /// <summary>
     /// Opens the sign-in popup and runs the full interactive flow. Throws
-    /// <see cref="System.InvalidOperationException"/> when the user closes the window without
-    /// completing sign-in, and <see cref="System.OperationCanceledException"/> on token cancel.
+    /// <see cref="Wormhole.Services.UserInteractionCancelledException"/> when the user closes the
+    /// window without completing sign-in, and <see cref="System.OperationCanceledException"/> when
+    /// the caller's cancellation token fires.
     /// </summary>
     Task<AzureVpnTokenResult> AuthenticateInteractiveAsync(
         AzureVpnSettings settings,

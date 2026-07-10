@@ -36,13 +36,12 @@ public class SshCredentialResolverTests
     }
 
     [Fact]
-    public async Task Resolve_NoCredentialId_PromptCancelled_ReturnsEmpty()
+    public async Task Resolve_NoCredentialId_PromptCancelled_ThrowsUserCancellation()
     {
         var resolver = NewResolver(new FakeDialogService());
 
-        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: null));
-
-        Assert.False(creds.HasAny);
+        await Assert.ThrowsAsync<UserInteractionCancelledException>(
+            () => resolver.ResolveAsync(MakeProfile(credentialId: null)));
     }
 
     [Fact]
@@ -257,7 +256,7 @@ public class SshCredentialResolverTests
     }
 
     [Fact]
-    public async Task Resolve_KeyCredential_EncryptedKey_PassphrasePromptCancelled_ReturnsEmpty()
+    public async Task Resolve_KeyCredential_EncryptedKey_PassphrasePromptCancelled_ThrowsUserCancellation()
     {
         var credId = Guid.NewGuid();
         var dialogs = new FakeDialogService();
@@ -267,9 +266,8 @@ public class SshCredentialResolverTests
             creds: new FakeCredentialService(keys: new() { [credId] = new byte[] { 1, 2, 3 } }),
             inspector: new FakePrivateKeyInspector(isEncrypted: true));
 
-        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: credId));
-
-        Assert.False(creds.HasAny);
+        await Assert.ThrowsAsync<UserInteractionCancelledException>(
+            () => resolver.ResolveAsync(MakeProfile(credentialId: credId)));
     }
 
     [Fact]

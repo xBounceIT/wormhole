@@ -8,6 +8,10 @@ namespace Wormhole.Services.Tunneling.Watchguard;
 
 public interface IWatchguardSamlAuthService
 {
+    /// <summary>
+    /// Runs the interactive SAML flow. Throws <see cref="Wormhole.Services.UserInteractionCancelledException"/>
+    /// when the user dismisses the login dialog before authentication completes.
+    /// </summary>
     Task<WatchguardSamlAuthResult> AuthenticateAsync(
         WatchguardSettings settings,
         string configName,

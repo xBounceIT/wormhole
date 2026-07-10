@@ -153,17 +153,26 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
         var token = cts.Token;
         ITunnelInstance? pendingTunnel = null;
 
+        async Task HandleCancellationAsync()
+        {
+            await DisposeTunnelInstanceSilentlyAsync(pendingTunnel).ConfigureAwait(true);
+            if (!IsAttemptCurrent(teardownGeneration)) return;
+            await TearDownTunnelAsync().ConfigureAwait(true);
+            Progress.Reset();
+            Status = SessionStatus.Disconnected;
+        }
+
         try
         {
             // Per-connect tunnel routing: when the user opted in (PromptBeforeTunnelConnect) and the
             // profile is configured for a tunnel, ask whether to route through it or go direct for THIS
-            // attempt. Null means the user cancelled — surface a recoverable Failed (the view's Retry
-            // re-opens the prompt), mirroring SSH/RDP.
+            // attempt. Null means the user deliberately cancelled, so return to Disconnected without
+            // presenting error chrome; a later Connect/Retry can open the prompt again.
             var routed = await _tunnelPrompter.ResolveRouteAsync(profile, token).ConfigureAwait(true);
             if (!IsAttemptCurrent(teardownGeneration)) return;
             if (routed is null)
             {
-                ReportFailure("Connection cancelled.");
+                await HandleCancellationAsync().ConfigureAwait(true);
                 return;
             }
 
@@ -192,11 +201,7 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
         }
         catch (OperationCanceledException)
         {
-            await DisposeTunnelInstanceSilentlyAsync(pendingTunnel).ConfigureAwait(true);
-            if (!IsAttemptCurrent(teardownGeneration)) return;
-            await TearDownTunnelAsync().ConfigureAwait(true);
-            Progress.Reset();
-            Status = SessionStatus.Disconnected;
+            await HandleCancellationAsync().ConfigureAwait(true);
         }
         catch (Exception ex)
         {
