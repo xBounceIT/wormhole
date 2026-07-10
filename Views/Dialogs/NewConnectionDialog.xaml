@@ -18,8 +18,30 @@
         </DataTemplate>
     </UserControl.Resources>
 
-    <TabView x:Name="EditorTabs"
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <ProgressBar x:Name="OptionsLoadingBar"
+                     Grid.Row="0"
+                     IsIndeterminate="True"
+                     Margin="0,0,0,8" />
+
+        <InfoBar x:Name="OptionsLoadError"
+                 Grid.Row="1"
+                 Severity="Error"
+                 IsClosable="False"
+                 IsOpen="False"
+                 Title="Couldn't load editor options"
+                 Margin="0,0,0,8" />
+
+        <TabView x:Name="EditorTabs"
+             Grid.Row="2"
              IsAddTabButtonVisible="False"
+             SelectionChanged="OnEditorTabSelectionChanged"
              CanDragTabs="False"
              CanReorderTabs="False"
              TabWidthMode="SizeToContent"
@@ -192,7 +214,9 @@
             <!-- Serial -->
             <TabViewItem Header="Serial" IsClosable="False"
                          Visibility="{x:Bind ViewModel.IsSerial, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
-                <ScrollViewer Padding="16">
+                <ScrollViewer x:Name="SerialTabContent"
+                              Padding="16"
+                              x:Load="{x:Bind IsSerialTabContentLoaded, Mode=OneWay}">
                     <StackPanel Spacing="10">
                         <StackPanel Orientation="Horizontal" Spacing="10">
                             <NumberBox Header="Speed (baud)"
@@ -270,7 +294,9 @@
             <!-- Display (RDP) -->
             <TabViewItem Header="Display" IsClosable="False"
                          Visibility="{x:Bind ViewModel.IsRdp, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
-                <ScrollViewer Padding="16">
+                <ScrollViewer x:Name="DisplayTabContent"
+                              Padding="16"
+                              x:Load="{x:Bind IsDisplayTabContentLoaded, Mode=OneWay}">
                     <StackPanel Spacing="10">
                         <ComboBox Header="Display configuration"
                                   HorizontalAlignment="Stretch"
@@ -292,7 +318,9 @@
             <!-- Local Resources (RDP) -->
             <TabViewItem Header="Local Resources" IsClosable="False"
                          Visibility="{x:Bind ViewModel.IsRdp, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
-                <ScrollViewer Padding="16">
+                <ScrollViewer x:Name="LocalResourcesTabContent"
+                              Padding="16"
+                              x:Load="{x:Bind IsLocalResourcesTabContentLoaded, Mode=OneWay}">
                     <StackPanel Spacing="12">
                         <ComboBox Header="Remote audio playback"
                                   HorizontalAlignment="Stretch"
@@ -357,7 +385,9 @@
             <!-- Experience (RDP) -->
             <TabViewItem Header="Experience" IsClosable="False"
                          Visibility="{x:Bind ViewModel.IsRdp, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
-                <ScrollViewer Padding="16">
+                <ScrollViewer x:Name="ExperienceTabContent"
+                              Padding="16"
+                              x:Load="{x:Bind IsExperienceTabContentLoaded, Mode=OneWay}">
                     <StackPanel Spacing="10">
                         <ComboBox Header="Connection speed"
                                   HorizontalAlignment="Stretch"
@@ -394,7 +424,9 @@
             <!-- Advanced (RDP) -->
             <TabViewItem Header="Advanced" IsClosable="False"
                          Visibility="{x:Bind ViewModel.IsRdp, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
-                <ScrollViewer Padding="16">
+                <ScrollViewer x:Name="AdvancedTabContent"
+                              Padding="16"
+                              x:Load="{x:Bind IsAdvancedTabContentLoaded, Mode=OneWay}">
                     <StackPanel Spacing="10">
                         <ComboBox Header="Server authentication"
                                   HorizontalAlignment="Stretch"
@@ -460,5 +492,6 @@
                     </StackPanel>
                 </ScrollViewer>
             </TabViewItem>
-    </TabView>
+        </TabView>
+    </Grid>
 </UserControl>

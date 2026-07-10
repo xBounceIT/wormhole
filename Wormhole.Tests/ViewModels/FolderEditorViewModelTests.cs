@@ -299,10 +299,123 @@ public class FolderEditorViewModelTests
         Assert.Equal(credential.Id, vm.SelectedCredential!.Id);
     }
 
+    [Fact]
+    public async Task LoadCredentialsAsync_RefreshesWhenSyncCompletesDuringInitialCacheRead()
+    {
+        var cached = new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Name = "cached",
+            Protocol = ProtocolType.Ssh,
+        };
+        var refreshed = new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Name = "refreshed",
+            Protocol = ProtocolType.Ssh,
+        };
+        var catalog = new BlockingCredentialCatalog(cached, refreshed);
+        var sync = new PausedCredentialSync();
+        var vm = new FolderEditorViewModel(new EmptyRepo(), catalog, sync);
+
+        var refreshApplied = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        vm.AvailableCredentials.CollectionChanged += (_, _) =>
+        {
+            if (vm.AvailableCredentials.Any(c => c.Id == refreshed.Id))
+            {
+                refreshApplied.TrySetResult();
+            }
+        };
+
+        var loadTask = vm.LoadCredentialsAsync();
+        await catalog.FirstReadStarted.WaitAsync(TimeSpan.FromSeconds(1));
+
+        sync.Complete();
+        catalog.ReleaseFirstRead();
+        await loadTask.WaitAsync(TimeSpan.FromSeconds(1));
+        await refreshApplied.Task.WaitAsync(TimeSpan.FromSeconds(1));
+
+        Assert.DoesNotContain(vm.AvailableCredentials, c => c.Id == cached.Id);
+        Assert.Contains(vm.AvailableCredentials, c => c.Id == refreshed.Id);
+        Assert.Equal(2, catalog.PickerReadCount);
+    }
+
     private static FolderEditorViewModel NewVm(
         ITunnelConfigRepository? tunnels = null,
         IReadOnlyList<CredentialProfile>? credentials = null)
         => new(tunnels ?? new EmptyRepo(), new CredentialRepo(credentials ?? Array.Empty<CredentialProfile>()));
+
+    private sealed class BlockingCredentialCatalog : IBitwardenCredentialCatalogService
+    {
+        private readonly CredentialProfile _cached;
+        private readonly CredentialProfile _refreshed;
+        private readonly TaskCompletionSource _firstReadStarted =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _releaseFirstRead =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _pickerReadCount;
+
+        public BlockingCredentialCatalog(CredentialProfile cached, CredentialProfile refreshed)
+        {
+            _cached = cached;
+            _refreshed = refreshed;
+        }
+
+        public Task FirstReadStarted => _firstReadStarted.Task;
+        public int PickerReadCount => Volatile.Read(ref _pickerReadCount);
+
+        public void ReleaseFirstRead() => _releaseFirstRead.TrySetResult();
+
+        public async Task<IReadOnlyList<CredentialProfile>> GetPickerProfilesAsync(
+            CancellationToken cancellationToken = default)
+        {
+            if (Interlocked.Increment(ref _pickerReadCount) != 1)
+            {
+                return new[] { _refreshed };
+            }
+
+            _firstReadStarted.TrySetResult();
+            await _releaseFirstRead.Task.WaitAsync(cancellationToken);
+            return new[] { _cached };
+        }
+
+        public Task<IReadOnlyList<CredentialProfile>> GetCredentialPageProfilesAsync(
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<CredentialProfile>>(new[] { _refreshed });
+
+        public Task<IReadOnlyList<CredentialProfile>> GetProfilesForProtocolAsync(
+            ProtocolType protocol,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<CredentialProfile>>(
+                _refreshed.Protocol == protocol ? new[] { _refreshed } : Array.Empty<CredentialProfile>());
+
+        public Task<CredentialProfile?> GetByIdAsync(
+            Guid id,
+            CancellationToken cancellationToken = default) =>
+            Task.FromResult<CredentialProfile?>(id == _refreshed.Id ? _refreshed : null);
+    }
+
+    private sealed class PausedCredentialSync : IBitwardenCredentialSyncService
+    {
+        private readonly TaskCompletionSource _completion =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public event EventHandler? SyncCompleted;
+
+        public void Start() { }
+
+        public Task SyncIfStaleAsync(CancellationToken cancellationToken = default) =>
+            _completion.Task.WaitAsync(cancellationToken);
+
+        public Task SyncNowAsync(CancellationToken cancellationToken = default) =>
+            SyncIfStaleAsync(cancellationToken);
+
+        public void Complete()
+        {
+            _completion.TrySetResult();
+            SyncCompleted?.Invoke(this, EventArgs.Empty);
+        }
+    }
 
     private sealed class EmptyRepo : ITunnelConfigRepository
     {

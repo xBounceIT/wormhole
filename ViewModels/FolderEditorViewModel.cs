@@ -134,19 +134,58 @@ public partial class FolderEditorViewModel : ObservableObject
 
     public bool IsValid => !string.IsNullOrWhiteSpace(Name);
 
-    public async Task LoadOptionsAsync()
+    public async Task LoadOptionsAsync(CancellationToken cancellationToken = default)
     {
-        var credentials = LoadCredentialsAsync();
-        var tunnels = TunnelPicker.LoadAsync();
+        var credentials = LoadCredentialsAsync(cancellationToken);
+        var tunnels = TunnelPicker.LoadAsync(cancellationToken);
         await Task.WhenAll(credentials, tunnels).ConfigureAwait(true);
     }
 
-    public Task LoadTunnelConfigsAsync() => TunnelPicker.LoadAsync();
+    public Task LoadTunnelConfigsAsync(CancellationToken cancellationToken = default) =>
+        TunnelPicker.LoadAsync(cancellationToken);
 
-    public async Task LoadCredentialsAsync()
+    public async Task LoadCredentialsAsync(CancellationToken cancellationToken = default)
     {
-        await _bitwardenCredentialSync.SyncIfStaleAsync().ConfigureAwait(true);
-        var credentials = await _credentialCatalog.GetPickerProfilesAsync().ConfigureAwait(true);
+        var syncTask = _bitwardenCredentialSync.SyncIfStaleAsync(cancellationToken);
+        var refreshAfterSync = !syncTask.IsCompleted;
+        var credentials = await _credentialCatalog
+            .GetPickerProfilesAsync(cancellationToken)
+            .ConfigureAwait(true);
+        ApplyCredentialCatalog(credentials);
+
+        if (!refreshAfterSync)
+        {
+            await syncTask.ConfigureAwait(true);
+            return;
+        }
+
+        _ = RefreshCredentialsAfterSyncAsync(syncTask, cancellationToken);
+    }
+
+    private async Task RefreshCredentialsAfterSyncAsync(Task syncTask, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await syncTask.ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
+            var refreshed = await _credentialCatalog
+                .GetPickerProfilesAsync(cancellationToken)
+                .ConfigureAwait(true);
+            ApplyCredentialCatalog(refreshed);
+        }
+        catch (OperationCanceledException)
+        {
+            // The editor was closed while its background refresh was still in flight.
+        }
+        catch (Exception)
+        {
+            // Sync is best-effort and the service logs provider failures; keep the usable
+            // cached snapshot instead of surfacing an unobserved fire-and-forget exception.
+        }
+    }
+
+    private void ApplyCredentialCatalog(IReadOnlyList<CredentialProfile> credentials)
+    {
         var available = new List<CredentialProfile>(credentials.Count + 2)
         {
             InheritCredential,

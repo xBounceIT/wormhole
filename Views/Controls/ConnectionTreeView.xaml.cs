@@ -18,6 +18,7 @@ public sealed partial class ConnectionTreeView : UserControl
     private bool _loaded;
     private readonly Dictionary<TreeViewItem, CheckBox> _selectionCheckBoxes = new();
     private TreeViewItem? _hoveredTreeItem;
+    private TreeNodeViewModel? _contextTarget;
 
     public ConnectionTreeViewModel ViewModel { get; }
 
@@ -205,8 +206,35 @@ public sealed partial class ConnectionTreeView : UserControl
         ViewModel.SetNodeSelection(vm, checkBox.IsChecked == true);
     }
 
-    // Per-node MenuFlyout items dispatch via Click because ElementName bindings
-    // can't reach Root from inside a Popup nested in a DataTemplate.
+    // Capture the row before the shared flyout opens. One MenuFlyout instance now
+    // serves every realized TreeViewItem, avoiding a complete popup subtree per row.
+    private void OnNodeRightTapped(object sender, RightTappedRoutedEventArgs e)
+    {
+        if (sender is TreeViewItem { DataContext: TreeNodeViewModel vm })
+        {
+            SetContextTarget(vm);
+        }
+    }
+
+    private void OnNodeContextRequested(UIElement sender, ContextRequestedEventArgs args)
+    {
+        if (sender is TreeViewItem { DataContext: TreeNodeViewModel vm })
+        {
+            SetContextTarget(vm);
+        }
+    }
+
+    private void SetContextTarget(TreeNodeViewModel vm)
+    {
+        _contextTarget = vm;
+        ViewModel.SelectedNode = vm;
+        var visibility = vm.IsConnection ? Visibility.Visible : Visibility.Collapsed;
+        ShowCredentialsMenuItem.Visibility = visibility;
+        DuplicateConnectionMenuItem.Visibility = visibility;
+    }
+
+    // Shared MenuFlyout items dispatch through the captured row because a popup has
+    // its own namescope and does not inherit the target TreeViewItem's DataContext.
     private void OnAddFolderItemClick(object sender, RoutedEventArgs e)
     {
         if (ResolveNodeMenuTarget(sender) is { } vm)
@@ -261,10 +289,14 @@ public sealed partial class ConnectionTreeView : UserControl
         }
     }
 
-    private static TreeNodeViewModel? ResolveNodeMenuTarget(object sender)
+    private TreeNodeViewModel? ResolveNodeMenuTarget(object sender)
     {
-        if (sender is not FrameworkElement fe) return null;
-        return fe.Tag as TreeNodeViewModel ?? fe.DataContext as TreeNodeViewModel;
+        if (sender is FrameworkElement fe &&
+            (fe.Tag as TreeNodeViewModel ?? fe.DataContext as TreeNodeViewModel) is { } bound)
+        {
+            return bound;
+        }
+        return _contextTarget;
     }
 
     private void OnOpenAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)

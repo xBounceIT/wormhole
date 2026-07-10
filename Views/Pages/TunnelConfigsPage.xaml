@@ -5,6 +5,20 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:models="using:Wormhole.Models">
 
+    <Page.Resources>
+        <MenuFlyout x:Key="TunnelContextFlyout">
+            <MenuFlyoutItem Text="Test" Click="OnTestMenuItemClick">
+                <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE768;" /></MenuFlyoutItem.Icon>
+            </MenuFlyoutItem>
+            <MenuFlyoutItem Text="Edit" Click="OnEditMenuItemClick">
+                <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE70F;" /></MenuFlyoutItem.Icon>
+            </MenuFlyoutItem>
+            <MenuFlyoutItem Text="Delete" Click="OnDeleteMenuItemClick">
+                <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE74D;" /></MenuFlyoutItem.Icon>
+            </MenuFlyoutItem>
+        </MenuFlyout>
+    </Page.Resources>
+
     <Grid Padding="24,16,24,16" RowSpacing="12">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -88,29 +102,10 @@
                             Width="260"
                             Height="140"
                             Margin="0,0,12,12"
+                            RightTapped="OnTunnelRightTapped"
+                            ContextRequested="OnTunnelContextRequested"
+                            ContextFlyout="{StaticResource TunnelContextFlyout}"
                             DoubleTapped="OnCardDoubleTapped">
-                        <Border.ContextFlyout>
-                            <MenuFlyout>
-                                <MenuFlyoutItem Text="Test"
-                                                Click="OnTestMenuItemClick">
-                                    <MenuFlyoutItem.Icon>
-                                        <FontIcon Glyph="&#xE768;" />
-                                    </MenuFlyoutItem.Icon>
-                                </MenuFlyoutItem>
-                                <MenuFlyoutItem Text="Edit"
-                                                Click="OnEditMenuItemClick">
-                                    <MenuFlyoutItem.Icon>
-                                        <FontIcon Glyph="&#xE70F;" />
-                                    </MenuFlyoutItem.Icon>
-                                </MenuFlyoutItem>
-                                <MenuFlyoutItem Text="Delete"
-                                                Click="OnDeleteMenuItemClick">
-                                    <MenuFlyoutItem.Icon>
-                                        <FontIcon Glyph="&#xE74D;" />
-                                    </MenuFlyoutItem.Icon>
-                                </MenuFlyoutItem>
-                            </MenuFlyout>
-                        </Border.ContextFlyout>
 
                         <Grid RowSpacing="6">
                             <Grid.RowDefinitions>

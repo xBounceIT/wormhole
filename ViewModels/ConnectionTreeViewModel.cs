@@ -32,6 +32,8 @@ public partial class ConnectionTreeViewModel : ObservableObject
     private bool _isLoading;
     private readonly BulkObservableCollection<TreeNodeViewModel> _searchDisplayRoots = new();
     private readonly HashSet<Guid> _selectedNodeIds = new();
+    private readonly HashSet<TreeNodeViewModel> _nodesUsingFilteredChildren = new();
+    private SearchIndexEntry[] _searchIndex = Array.Empty<SearchIndexEntry>();
 
     public BulkObservableCollection<TreeNodeViewModel> Roots { get; } = new();
     public BulkObservableCollection<TreeNodeViewModel> DisplayRoots => IsSearchActive ? _searchDisplayRoots : Roots;
@@ -51,9 +53,10 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     partial void OnIsSearchActiveChanged(bool value) => OnPropertyChanged(nameof(DisplayRoots));
 
-    // Captured the moment a filter starts so clearing the search restores the tree
-    // to exactly how the user had it expanded before they typed.
-    private Dictionary<Guid, bool>? _expandStateBeforeFilter;
+    // Search only records folders it actually auto-expands. Snapshotting every folder
+    // on the first keystroke made merely typing into Search an O(n) UI-thread operation
+    // before the debounce had even started.
+    private Dictionary<Guid, SearchExpansionOverride>? _searchExpansionOverrides;
 
     // Coalesces rapid keystrokes — the AutoSuggestBox binds with
     // UpdateSourceTrigger=PropertyChanged, so without this every character would walk
@@ -70,12 +73,9 @@ public partial class ConnectionTreeViewModel : ObservableObject
         var wasFiltering = !string.IsNullOrWhiteSpace(oldValue);
         var isFiltering = !string.IsNullOrWhiteSpace(newValue);
 
-        // Snapshot on the leading edge — even when the filter walk is deferred — so the
-        // restore-on-clear path captures the pre-filter expansion regardless of how the
-        // user's keystrokes get batched.
         if (!wasFiltering && isFiltering)
         {
-            _expandStateBeforeFilter = SnapshotExpandState(Roots);
+            _searchExpansionOverrides = new Dictionary<Guid, SearchExpansionOverride>();
         }
 
         // Cancel any in-flight debounce so the latest keystroke supersedes prior ones.
@@ -84,10 +84,11 @@ public partial class ConnectionTreeViewModel : ObservableObject
         if (prior is not null)
         {
             try { prior.Cancel(); } catch (ObjectDisposedException) { }
-            prior.Dispose();
+            // The worker owns disposal. Disposing here can race its Task.Delay/Task.Run path.
         }
 
-        if (SearchDebounceDelay <= TimeSpan.Zero)
+        // Clearing has no expensive match walk and should restore the tree immediately.
+        if (!isFiltering || SearchDebounceDelay <= TimeSpan.Zero)
         {
             ApplyFilterAndMaybeRestore(newValue, wasFiltering, isFiltering);
             return;
@@ -95,21 +96,28 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
         var cts = new CancellationTokenSource();
         _filterDebounceCts = cts;
-        _ = DebouncedApplyFilterAsync(newValue, wasFiltering, isFiltering, cts);
+        _ = DebouncedApplyFilterAsync(newValue, cts);
     }
 
     private async Task DebouncedApplyFilterAsync(
         string newValue,
-        bool wasFiltering,
-        bool isFiltering,
         CancellationTokenSource cts)
     {
         try
         {
-            // ConfigureAwait(true) keeps the continuation on the captured SyncContext —
-            // the WinUI UI thread in production — so ApplyFilter's property writes don't
-            // race the UI thread's tree-render pass.
+            // Resume on WinUI's captured synchronization context before applying results.
             await Task.Delay(SearchDebounceDelay, cts.Token).ConfigureAwait(true);
+
+            // Match the immutable search index off the UI thread; applying the capped
+            // projection resumes on WinUI's captured synchronization context.
+            var index = _searchIndex;
+            var projection = await Task.Run(
+                () => BuildSearchProjection(index, newValue.Trim(), cts.Token),
+                cts.Token).ConfigureAwait(true);
+            if (!ReferenceEquals(_filterDebounceCts, cts)) return;
+
+            ClearSelection();
+            ApplySearchProjection(projection);
         }
         catch (OperationCanceledException)
         {
@@ -126,16 +134,6 @@ public partial class ConnectionTreeViewModel : ObservableObject
             cts.Dispose();
         }
 
-        // Freshness guard: if Task.Delay completed *normally* (cancel-race lost) but a
-        // newer keystroke already replaced _filterDebounceCts between our delay and this
-        // point, our newValue is stale. The finally above nulls _filterDebounceCts only
-        // when we still own the slot — a non-null read here means a fresher task is
-        // pending and will run its own ApplyFilterAndMaybeRestore at its own deadline.
-        // Without this guard, the user briefly sees an older filter over their current
-        // input during fast typing.
-        if (_filterDebounceCts is not null) return;
-
-        ApplyFilterAndMaybeRestore(newValue, wasFiltering, isFiltering);
     }
 
     private void ApplyFilterAndMaybeRestore(string newValue, bool wasFiltering, bool isFiltering)
@@ -143,10 +141,13 @@ public partial class ConnectionTreeViewModel : ObservableObject
         ClearSelection();
         ApplyFilter(newValue);
 
-        if (wasFiltering && !isFiltering && _expandStateBeforeFilter is not null)
+        if (wasFiltering && !isFiltering && _searchExpansionOverrides is not null)
         {
-            RestoreExpandState(Roots, _expandStateBeforeFilter);
-            _expandStateBeforeFilter = null;
+            foreach (var state in _searchExpansionOverrides.Values)
+            {
+                state.Node.IsExpanded = state.WasExpanded;
+            }
+            _searchExpansionOverrides = null;
         }
     }
 
@@ -998,6 +999,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
         Reconcile(Roots, topLevel, byParent);
 
         PruneSelectionToSnapshot();
+        RebuildSearchIndex();
         ApplyFilter(SearchText);
     }
 
@@ -1010,29 +1012,40 @@ public partial class ConnectionTreeViewModel : ObservableObject
             return;
         }
 
-        ApplySearchProjection(trimmed);
+        ApplySearchProjection(BuildSearchProjection(_searchIndex, trimmed, CancellationToken.None));
     }
 
     private void ApplyFullProjection()
     {
-        foreach (var node in EnumerateSubtree(Roots))
+        foreach (var node in _nodesUsingFilteredChildren)
         {
             node.UseFullDisplayChildren();
         }
+        _nodesUsingFilteredChildren.Clear();
 
         SearchStatusText = string.Empty;
         IsSearchActive = false;
     }
 
-    private void ApplySearchProjection(string query)
+    private void ApplySearchProjection(SearchProjection projection)
     {
-        var projection = BuildSearchProjection(Roots, query);
         foreach (var node in projection.IncludedNodes)
         {
             var children = projection.ChildrenByParent.TryGetValue(node.Node.Id, out var projectedChildren)
                 ? projectedChildren
                 : (IReadOnlyList<TreeNodeViewModel>)Array.Empty<TreeNodeViewModel>();
             node.UseFilteredDisplayChildren(children);
+            _nodesUsingFilteredChildren.Add(node);
+        }
+
+        _searchExpansionOverrides ??= new Dictionary<Guid, SearchExpansionOverride>();
+        foreach (var node in projection.AncestorsToExpand)
+        {
+            if (!_searchExpansionOverrides.ContainsKey(node.Node.Id))
+            {
+                _searchExpansionOverrides[node.Node.Id] = new SearchExpansionOverride(node, node.IsExpanded);
+            }
+            node.IsExpanded = true;
         }
 
         _searchDisplayRoots.ReplaceAllIfChanged(projection.Roots);
@@ -1040,64 +1053,55 @@ public partial class ConnectionTreeViewModel : ObservableObject
         IsSearchActive = true;
     }
 
-    private static SearchProjection BuildSearchProjection(BulkObservableCollection<TreeNodeViewModel> roots, string query)
+    private static SearchProjection BuildSearchProjection(
+        IReadOnlyList<SearchIndexEntry> index,
+        string query,
+        CancellationToken cancellationToken)
     {
         var projection = new SearchProjection();
-        var path = new List<TreeNodeViewModel>();
-        var seen = new HashSet<Guid>();
-        var stack = new Stack<SearchWalkFrame>();
-
-        for (var i = roots.Count - 1; i >= 0; i--)
+        var path = new List<int>();
+        for (var i = 0; i < index.Count; i++)
         {
-            stack.Push(new SearchWalkFrame(roots[i], Depth: 0));
-        }
+            if ((i & 0xff) == 0) cancellationToken.ThrowIfCancellationRequested();
+            if (!index[i].Name.Contains(query, StringComparison.OrdinalIgnoreCase)) continue;
 
-        while (stack.Count > 0)
-        {
-            var frame = stack.Pop();
-            var node = frame.Node;
-            if (!seen.Add(node.Node.Id)) continue;
+            projection.TotalMatches++;
+            if (projection.DisplayedMatches >= MaxDisplayedSearchMatches) continue;
 
-            while (path.Count > frame.Depth)
-            {
-                path.RemoveAt(path.Count - 1);
-            }
-            path.Add(node);
-
-            if (node.Name.Contains(query, StringComparison.OrdinalIgnoreCase))
-            {
-                projection.TotalMatches++;
-                if (projection.DisplayedMatches < MaxDisplayedSearchMatches)
-                {
-                    projection.DisplayedMatches++;
-                    IncludeSearchPath(projection, path);
-                }
-            }
-
-            for (var i = node.Children.Count - 1; i >= 0; i--)
-            {
-                stack.Push(new SearchWalkFrame(node.Children[i], frame.Depth + 1));
-            }
+            projection.DisplayedMatches++;
+            IncludeSearchPath(projection, index, i, path);
         }
 
         return projection;
     }
 
-    private static void IncludeSearchPath(SearchProjection projection, List<TreeNodeViewModel> path)
+    private static void IncludeSearchPath(
+        SearchProjection projection,
+        IReadOnlyList<SearchIndexEntry> index,
+        int matchIndex,
+        List<int> path)
     {
-        for (var i = 0; i < path.Count; i++)
+        path.Clear();
+        for (var current = matchIndex; current >= 0; current = index[current].ParentIndex)
         {
-            var node = path[i];
+            path.Add(current);
+        }
+
+        for (var pathIndex = path.Count - 1; pathIndex >= 0; pathIndex--)
+        {
+            var entry = index[path[pathIndex]];
+            var node = entry.Node;
+            var isRoot = pathIndex == path.Count - 1;
             if (projection.IncludedIds.Add(node.Node.Id))
             {
                 projection.IncludedNodes.Add(node);
-                if (i == 0)
+                if (isRoot)
                 {
                     projection.Roots.Add(node);
                 }
                 else
                 {
-                    var parent = path[i - 1];
+                    var parent = index[path[pathIndex + 1]].Node;
                     if (!projection.ChildrenByParent.TryGetValue(parent.Node.Id, out var siblings))
                     {
                         siblings = new List<TreeNodeViewModel>();
@@ -1107,9 +1111,11 @@ public partial class ConnectionTreeViewModel : ObservableObject
                 }
             }
 
-            if (i < path.Count - 1 && node.Kind == NodeKind.Folder)
+            if (pathIndex > 0 &&
+                entry.Kind == NodeKind.Folder &&
+                projection.AncestorIds.Add(node.Node.Id))
             {
-                node.IsExpanded = true;
+                projection.AncestorsToExpand.Add(node);
             }
         }
     }
@@ -1122,28 +1128,31 @@ public partial class ConnectionTreeViewModel : ObservableObject
             : string.Empty;
     }
 
-    private static Dictionary<Guid, bool> SnapshotExpandState(IEnumerable<TreeNodeViewModel> level)
+    private void RebuildSearchIndex()
     {
-        var snapshot = new Dictionary<Guid, bool>();
-        foreach (var node in EnumerateSubtree(level))
+        var entries = new List<SearchIndexEntry>(_lastSnapshot.Count);
+        var stack = new Stack<SearchIndexBuildFrame>();
+        for (var i = Roots.Count - 1; i >= 0; i--)
         {
-            if (node.Kind == NodeKind.Folder)
-            {
-                snapshot[node.Node.Id] = node.IsExpanded;
-            }
+            stack.Push(new SearchIndexBuildFrame(Roots[i], ParentIndex: -1));
         }
-        return snapshot;
-    }
 
-    private static void RestoreExpandState(IEnumerable<TreeNodeViewModel> level, Dictionary<Guid, bool> snapshot)
-    {
-        foreach (var node in EnumerateSubtree(level))
+        var seen = new HashSet<Guid>();
+        while (stack.Count > 0)
         {
-            if (node.Kind == NodeKind.Folder && snapshot.TryGetValue(node.Node.Id, out var wasExpanded))
+            var frame = stack.Pop();
+            var node = frame.Node;
+            if (!seen.Add(node.Node.Id)) continue;
+
+            var entryIndex = entries.Count;
+            entries.Add(new SearchIndexEntry(node, node.Name, node.Kind, frame.ParentIndex));
+            for (var i = node.Children.Count - 1; i >= 0; i--)
             {
-                node.IsExpanded = wasExpanded;
+                stack.Push(new SearchIndexBuildFrame(node.Children[i], entryIndex));
             }
         }
+
+        _searchIndex = entries.ToArray();
     }
 
     private void PruneSelectionToSnapshot()
@@ -1348,7 +1357,15 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     private readonly record struct ReorderFrame(TreeNodeViewModel Node, Guid? ParentId, int SortOrder);
 
-    private readonly record struct SearchWalkFrame(TreeNodeViewModel Node, int Depth);
+    private readonly record struct SearchIndexBuildFrame(TreeNodeViewModel Node, int ParentIndex);
+
+    private readonly record struct SearchIndexEntry(
+        TreeNodeViewModel Node,
+        string Name,
+        NodeKind Kind,
+        int ParentIndex);
+
+    private readonly record struct SearchExpansionOverride(TreeNodeViewModel Node, bool WasExpanded);
 
     private sealed class SearchProjection
     {
@@ -1356,6 +1373,8 @@ public partial class ConnectionTreeViewModel : ObservableObject
         public Dictionary<Guid, List<TreeNodeViewModel>> ChildrenByParent { get; } = new();
         public HashSet<Guid> IncludedIds { get; } = new();
         public List<TreeNodeViewModel> IncludedNodes { get; } = new();
+        public HashSet<Guid> AncestorIds { get; } = new();
+        public List<TreeNodeViewModel> AncestorsToExpand { get; } = new();
         public int TotalMatches { get; set; }
         public int DisplayedMatches { get; set; }
     }
@@ -1420,6 +1439,12 @@ public partial class ConnectionTreeViewModel : ObservableObject
             if (node.Node.Id != replacement.Id) continue;
             node.Node = replacement;
             break;
+        }
+
+        RebuildSearchIndex();
+        if (IsSearchActive)
+        {
+            ApplyFilter(SearchText);
         }
     }
 

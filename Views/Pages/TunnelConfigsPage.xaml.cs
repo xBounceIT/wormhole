@@ -11,6 +11,8 @@ namespace Wormhole.Views.Pages;
 
 public sealed partial class TunnelConfigsPage : Page
 {
+    private TunnelConfig? _contextTarget;
+
     public TunnelConfigsViewModel ViewModel { get; }
 
     public TunnelConfigsPage()
@@ -41,9 +43,30 @@ public sealed partial class TunnelConfigsPage : Page
         }
     }
 
-    private void OnEditMenuItemClick(object sender, RoutedEventArgs e)
+    private void OnTunnelRightTapped(object sender, RightTappedRoutedEventArgs e)
     {
         if (sender is FrameworkElement { DataContext: TunnelConfig config })
+        {
+            _contextTarget = config;
+        }
+    }
+
+    private void OnTunnelContextRequested(UIElement sender, ContextRequestedEventArgs args)
+    {
+        if (sender is FrameworkElement { DataContext: TunnelConfig config })
+        {
+            _contextTarget = config;
+        }
+    }
+
+    private TunnelConfig? ResolveActionTarget(object sender) =>
+        sender is FrameworkElement { DataContext: TunnelConfig config }
+            ? config
+            : _contextTarget;
+
+    private void OnEditMenuItemClick(object sender, RoutedEventArgs e)
+    {
+        if (ResolveActionTarget(sender) is { } config)
         {
             ExecuteIfCan(ViewModel.EditTunnelCommand, config);
         }
@@ -51,7 +74,7 @@ public sealed partial class TunnelConfigsPage : Page
 
     private async void OnTestMenuItemClick(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement { DataContext: TunnelConfig config } &&
+        if (ResolveActionTarget(sender) is { } config &&
             ViewModel.TestTunnelCommand.CanExecute(config))
         {
             await ViewModel.TestTunnelCommand.ExecuteAsync(config);
@@ -60,7 +83,7 @@ public sealed partial class TunnelConfigsPage : Page
 
     private void OnDeleteMenuItemClick(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement { DataContext: TunnelConfig config })
+        if (ResolveActionTarget(sender) is { } config)
         {
             ExecuteIfCan(ViewModel.DeleteTunnelCommand, config);
         }

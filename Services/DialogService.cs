@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Threading;
+using Microsoft.Extensions.Logging;
 using Microsoft.UI;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Text;
@@ -24,18 +25,21 @@ public sealed class DialogService : IDialogService
     private readonly IBitwardenCredentialSyncService _bitwardenCredentialSync;
     private readonly ICredentialPasswordResolver _passwordResolver;
     private readonly IAppSettingsService _settings;
+    private readonly ILogger<DialogService> _logger;
     private static int _exclusiveUserDialogInProgress;
 
     public DialogService(
         IBitwardenCredentialCatalogService credentialCatalog,
         IBitwardenCredentialSyncService bitwardenCredentialSync,
         ICredentialPasswordResolver passwordResolver,
-        IAppSettingsService settings)
+        IAppSettingsService settings,
+        ILogger<DialogService> logger)
     {
         _credentialCatalog = credentialCatalog;
         _bitwardenCredentialSync = bitwardenCredentialSync;
         _passwordResolver = passwordResolver;
         _settings = settings;
+        _logger = logger;
     }
 
     private static async Task<T?> RunExclusiveUserDialogAsync<T>(Func<Task<T?>> showAsync)
@@ -226,10 +230,10 @@ public sealed class DialogService : IDialogService
     public Task<ConnectionNode?> EditConnectionAsync(ConnectionNode initial, bool isNew) =>
         RunExclusiveUserDialogAsync(() => EditConnectionCoreAsync(initial, isNew));
 
-    private static async Task<ConnectionNode?> EditConnectionCoreAsync(ConnectionNode initial, bool isNew)
+    private async Task<ConnectionNode?> EditConnectionCoreAsync(ConnectionNode initial, bool isNew)
     {
         var form = new NewConnectionDialog();
-        await form.LoadAsync(initial);
+        form.Prepare(initial);
 
         var xamlRoot = RequireXamlRoot();
         var dialog = new ContentDialog
@@ -240,29 +244,51 @@ public sealed class DialogService : IDialogService
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Primary,
             XamlRoot = xamlRoot,
-            IsPrimaryButtonEnabled = form.IsValid,
+            IsPrimaryButtonEnabled = form.CanSubmit,
         };
 
         // ContentDialog's default ContentDialogMaxWidth theme resource (~548 px) clips the
-        // editor's wider fields (the single Protocol+Host+Port row and the help captions) with
-        // no horizontal scrollbar. Lock Min == Max to a wider value so the layout has room and
-        // doesn't oscillate as the user types. This path doesn't use ShowFormDialogAsync, so the
-        // width is set here directly (mirroring that helper). Clamp to the host so the dialog
-        // stays inside a narrow window.
+        // editor's wider fields. Clamp a stable preferred width to the current host.
         const double preferredWidth = 640;
         var hostWidth = xamlRoot.Size.Width;
         var targetWidth = hostWidth > 0 ? Math.Min(preferredWidth, hostWidth) : preferredWidth;
         dialog.Resources["ContentDialogMinWidth"] = targetWidth;
         dialog.Resources["ContentDialogMaxWidth"] = targetWidth;
 
-        form.ValidityChanged += (_, _) => dialog.IsPrimaryButtonEnabled = form.IsValid;
-        dialog.Opened += (_, _) => form.FocusNameField();
+        using var loadCancellation = new CancellationTokenSource();
+        var loadTask = Task.CompletedTask;
 
-        var result = await ShowDialogAsync(dialog);
+        void OnValidityChanged(object? _, EventArgs __) =>
+            dialog.IsPrimaryButtonEnabled = form.CanSubmit;
+
+        void OnOpened(ContentDialog _, ContentDialogOpenedEventArgs __)
+        {
+            form.FocusNameField();
+            loadTask = LoadEditorOptionsAsync(
+                form.LoadOptionsAsync,
+                form.ShowLoadError,
+                "connection",
+                loadCancellation.Token);
+        }
+
+        form.ValidityChanged += OnValidityChanged;
+        dialog.Opened += OnOpened;
+
+        ContentDialogResult result;
+        try
+        {
+            result = await ShowDialogAsync(dialog);
+        }
+        finally
+        {
+            loadCancellation.Cancel();
+            await loadTask.ConfigureAwait(true);
+            form.ValidityChanged -= OnValidityChanged;
+            dialog.Opened -= OnOpened;
+        }
+
         if (result != ContentDialogResult.Primary) return null;
 
-        // Produce a fresh node mirroring `initial`'s identity/parent so the caller can update
-        // storage without mutating the input. WriteTo only touches editable fields.
         var output = ConnectionNode.CloneIdentityFrom(initial);
         form.WriteTo(output);
         return output;
@@ -271,10 +297,10 @@ public sealed class DialogService : IDialogService
     public Task<ConnectionNode?> EditFolderAsync(ConnectionNode initial, bool isNew) =>
         RunExclusiveUserDialogAsync(() => EditFolderCoreAsync(initial, isNew));
 
-    private static async Task<ConnectionNode?> EditFolderCoreAsync(ConnectionNode initial, bool isNew)
+    private async Task<ConnectionNode?> EditFolderCoreAsync(ConnectionNode initial, bool isNew)
     {
         var form = new FolderEditorDialog();
-        await form.LoadAsync(initial);
+        form.Prepare(initial);
 
         var dialog = new ContentDialog
         {
@@ -284,23 +310,68 @@ public sealed class DialogService : IDialogService
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Primary,
             XamlRoot = RequireXamlRoot(),
-            IsPrimaryButtonEnabled = form.IsValid,
+            IsPrimaryButtonEnabled = form.CanSubmit,
         };
 
-        form.ValidityChanged += (_, _) => dialog.IsPrimaryButtonEnabled = form.IsValid;
-        dialog.Opened += (_, _) => form.FocusNameField();
+        using var loadCancellation = new CancellationTokenSource();
+        var loadTask = Task.CompletedTask;
 
-        var result = await ShowDialogAsync(dialog);
+        void OnValidityChanged(object? _, EventArgs __) =>
+            dialog.IsPrimaryButtonEnabled = form.CanSubmit;
+
+        void OnOpened(ContentDialog _, ContentDialogOpenedEventArgs __)
+        {
+            form.FocusNameField();
+            loadTask = LoadEditorOptionsAsync(
+                form.LoadOptionsAsync,
+                form.ShowLoadError,
+                "folder",
+                loadCancellation.Token);
+        }
+
+        form.ValidityChanged += OnValidityChanged;
+        dialog.Opened += OnOpened;
+
+        ContentDialogResult result;
+        try
+        {
+            result = await ShowDialogAsync(dialog);
+        }
+        finally
+        {
+            loadCancellation.Cancel();
+            await loadTask.ConfigureAwait(true);
+            form.ValidityChanged -= OnValidityChanged;
+            dialog.Opened -= OnOpened;
+        }
+
         if (result != ContentDialogResult.Primary) return null;
 
-        // Full Clone — not CloneIdentityFrom. Folders can carry Protocol / Host / Username /
-        // RdpDomain etc. as inheritance defaults (mRemoteNG import populates them on container
-        // nodes; see MRemoteNgImportService.Walk). The folder editor writes only the fields it
-        // exposes, so anything else MUST round-trip untouched or descendants that resolve through
-        // this folder lose their defaults.
+        // Full Clone preserves inheritable fields the folder editor does not expose.
         var output = initial.Clone();
         form.WriteTo(output);
         return output;
+    }
+
+    private async Task LoadEditorOptionsAsync(
+        Func<CancellationToken, Task> loadAsync,
+        Action<string> showError,
+        string editorName,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await loadAsync(cancellationToken).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // Dialog closed while optional picker data was still loading.
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load {EditorName} editor options.", editorName);
+            showError(ex.Message);
+        }
     }
 
     public Task<CredentialDraft?> PromptForCredentialAsync(CredentialDraft? initial = null) =>
