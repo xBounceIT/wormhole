@@ -561,15 +561,19 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     /// forward again and the deferred connect lands. Flipping to Connecting here makes that recovery
     /// window explicit (and removes the illusion that a keystroke is what "reconnects" it).
     /// <para>
-    /// Strictly Disconnected → Connecting with no live/in-flight session, so it never disturbs a
-    /// connected session's Sessions↔Settings nav-back rebind (Status stays Connected) nor a Failed
-    /// tab's Retry overlay. Called from <c>SshTerminalView.InitializeWebViewAsync</c> on the UI
-    /// thread once that path has committed to navigating.
+    /// Strictly Disconnected → Connecting with no live/in-flight session and no explicit user
+    /// cancellation to preserve. This never disturbs a connected session's Sessions↔Settings
+    /// nav-back rebind, a Failed tab's Retry overlay, or a Disconnected tab waiting for Reconnect.
+    /// Called from <c>SshTerminalView.InitializeWebViewAsync</c> on the UI thread once that path has
+    /// committed to navigating.
     /// </para>
     /// </summary>
     public void MarkConnecting()
     {
-        if (Status == SessionStatus.Disconnected && _session is null && Volatile.Read(ref _connectInFlight) == 0)
+        if (!_suppressAutoConnectOnReattach &&
+            Status == SessionStatus.Disconnected &&
+            _session is null &&
+            Volatile.Read(ref _connectInFlight) == 0)
         {
             Status = SessionStatus.Connecting;
         }

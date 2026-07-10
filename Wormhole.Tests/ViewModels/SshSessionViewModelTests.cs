@@ -610,6 +610,19 @@ public sealed class SshSessionViewModelTests
         Assert.Equal(SessionStatus.Failed, vm.Status);
     }
 
+    [Fact]
+    public async Task MarkConnecting_NoOps_WhenUserDisconnected()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+        await vm.DisconnectAsync();
+
+        vm.MarkConnecting();
+
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.True(vm.ShouldDeferAutoConnectOnReattach());
+    }
+
     [Theory]
     [InlineData(SessionStatus.Failed, true)]         // dropped/failed tab keeps its in-pane Retry overlay — no silent reconnect
     [InlineData(SessionStatus.Disconnected, false)]  // interrupted-connect tab must still recover
