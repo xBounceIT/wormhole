@@ -615,7 +615,7 @@ public sealed class SshSessionViewModelTests
     [InlineData(SessionStatus.Disconnected, false)]  // interrupted-connect tab must still recover
     [InlineData(SessionStatus.Connecting, false)]    // a connect already in flight — let it proceed
     [InlineData(SessionStatus.Connected, false)]     // (defensive: a live tab reattaches before reaching this guard)
-    public void ShouldDeferAutoConnectOnReattach_OnlyDefersWhenFailed(SessionStatus status, bool expected)
+    public void ShouldDeferAutoConnectOnReattach_WithoutUserCancellation_OnlyDefersFailed(SessionStatus status, bool expected)
     {
         // The middle-click-close repro: closing the active tab redirects to a neighbour whose view
         // reloads and re-enters AttachAsync's connect tail. A neighbour that had quietly dropped in
@@ -628,6 +628,21 @@ public sealed class SshSessionViewModelTests
         vm.Status = status;
 
         Assert.Equal(expected, vm.ShouldDeferAutoConnectOnReattach());
+    }
+
+    [Fact]
+    public async Task ShouldDeferAutoConnectOnReattach_UserDisconnects_DefersUntilRetry()
+    {
+        var vm = CreateViewModel();
+        vm.Initialize(CreateProfile());
+
+        await vm.DisconnectAsync();
+
+        Assert.True(vm.ShouldDeferAutoConnectOnReattach());
+
+        await vm.RetryAsync();
+
+        Assert.False(vm.ShouldDeferAutoConnectOnReattach());
     }
 
     [Fact]
