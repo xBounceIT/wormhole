@@ -19,6 +19,15 @@
                            VerticalAlignment="Stretch"
                            MinHeight="240" />
 
+        <!-- Keep WebView2 visible and measurable while xterm.js initializes. Collapsing the
+             control gives Chromium a 0x0 viewport, so the page can never produce its ready
+             handshake. This cover masks stale contents during initial binding / recycled-view
+             navigation and also blocks input until the current session has attached. -->
+        <Border x:Name="TerminalContentMask"
+                Background="#0c0c0c"
+                IsHitTestVisible="True"
+                Visibility="Visible" />
+
         <!-- Base cover: opaque whenever NOT Connected. Closes the per-overlay
              binding-update window — the Connecting/Failed bindings can update
              as separate compositor frames, briefly exposing the WebView2 (and

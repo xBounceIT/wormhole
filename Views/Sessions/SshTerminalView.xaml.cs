@@ -60,12 +60,14 @@ public sealed partial class SshTerminalView : UserControl
         var newVm = DataContext as ITerminalSessionViewModel;
         var bindingChanged = !ReferenceEquals(newVm, _viewModel);
 
-        // A recycled container still holds the previous session's xterm page. Keep that surface
-        // hidden until the new binding's ready handshake; status overlays remain visible above it.
-        // A same-VM reload can safely restore the existing page immediately.
-        TerminalView.Visibility = !bindingChanged && newVm is not null
-            ? Visibility.Visible
-            : Visibility.Collapsed;
+        // WebView2 must remain in layout while xterm.js waits for a usable viewport. Mask a
+        // recycled page instead of collapsing it; the status overlays remain visible above the
+        // mask, and a same-VM reload can reveal its existing page after reattachment.
+        TerminalView.Visibility = Visibility.Visible;
+        if (bindingChanged || newVm is null)
+        {
+            TerminalContentMask.Visibility = Visibility.Visible;
+        }
 
         if (bindingChanged)
         {
@@ -105,8 +107,23 @@ public sealed partial class SshTerminalView : UserControl
         {
             if (TerminalView.CoreWebView2 is not null)
             {
-                try { await newVm.AttachAsync(TerminalView.CoreWebView2, _lastSize).ConfigureAwait(true); }
-                catch (Exception ex) { newVm.ReportFailure(ex.Message); }
+                var bindingGeneration = _viewBindingGeneration;
+                try
+                {
+                    await newVm.AttachAsync(TerminalView.CoreWebView2, _lastSize).ConfigureAwait(true);
+                    if (IsCurrentBinding(newVm, bindingGeneration))
+                    {
+                        TerminalContentMask.Visibility = Visibility.Collapsed;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (IsCurrentBinding(newVm, bindingGeneration))
+                    {
+                        TerminalContentMask.Visibility = Visibility.Visible;
+                    }
+                    newVm.ReportFailure(ex.Message);
+                }
                 return;
             }
 
@@ -124,6 +141,12 @@ public sealed partial class SshTerminalView : UserControl
         var vm = _viewModel;
         if (vm is null) { _initInProgress = 0; return; }
         var bindingGeneration = _viewBindingGeneration;
+        if (!IsCurrentBinding(vm, bindingGeneration)) { _initInProgress = 0; return; }
+
+        // Retry and recycled-view initialization both navigate the page while it is masked, but
+        // WebView2 itself stays visible so Chromium receives real bounds and xterm.js can fit.
+        TerminalView.Visibility = Visibility.Visible;
+        TerminalContentMask.Visibility = Visibility.Visible;
 
         // Make the (re)init window legible. A tab that was unloaded mid-init (the user opened
         // a second connection back-to-back before this tab's "ready" handshake fired) sits in
@@ -245,7 +268,8 @@ public sealed partial class SshTerminalView : UserControl
 
     private async void OnTerminalInitializationMessage(CoreWebView2 sender, CoreWebView2WebMessageReceivedEventArgs args)
     {
-        if (_activeHandshakeBindingGeneration != _viewBindingGeneration) return;
+        var bindingGeneration = _activeHandshakeBindingGeneration;
+        if (bindingGeneration != _viewBindingGeneration) return;
 
         var msg = args.TryGetWebMessageAsString();
         if (msg is null) return;
@@ -268,7 +292,6 @@ public sealed partial class SshTerminalView : UserControl
         // double-attach.
         sender.WebMessageReceived -= OnTerminalInitializationMessage;
         _handshakeReceived = true;
-        TerminalView.Visibility = Visibility.Visible;
 
         // The handshake carries the initial xterm.js geometry as "ready:COLSxROWS" so the
         // SSH shell can be allocated at the correct size. If parsing fails, fall back to
@@ -291,7 +314,7 @@ public sealed partial class SshTerminalView : UserControl
         LogTerminalReady(size);
 
         var vm = _viewModel;
-        if (vm is null) return;
+        if (vm is null || !IsCurrentBinding(vm, bindingGeneration)) return;
         // Push WinUI keyboard focus into the WebView2 before AttachAsync fires
         // its JS-side term.focus(). Without this, a freshly-opened tab leaves
         // focus on the connection tree and the first keystrokes are dropped
@@ -320,9 +343,19 @@ public sealed partial class SshTerminalView : UserControl
         try
         {
             await vm.AttachAsync(TerminalView.CoreWebView2, size);
+            // AttachAsync may prompt or reconnect and can therefore outlive this binding. Never
+            // reveal a page that has since been recycled for another terminal session.
+            if (IsCurrentBinding(vm, bindingGeneration))
+            {
+                TerminalContentMask.Visibility = Visibility.Collapsed;
+            }
         }
         catch (Exception ex)
         {
+            if (IsCurrentBinding(vm, bindingGeneration))
+            {
+                TerminalContentMask.Visibility = Visibility.Visible;
+            }
             vm.ReportFailure(ex.Message);
         }
     }
@@ -365,6 +398,9 @@ public sealed partial class SshTerminalView : UserControl
     // posting to a disposed WebView2 until reconnect or tab close.
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
+        // Prime the cover for a possible same-control reload before removing WebView2 from layout.
+        TerminalContentMask.Visibility = Visibility.Visible;
+
         // Collapse the WebView2 BEFORE detaching: WinUI 3's TabView leaving parent visibility
         // to its child doesn't reliably suspend WebView2's composition surface, so a
         // background tab still painting (heavy SSH output, or an xterm.js re-render fired
