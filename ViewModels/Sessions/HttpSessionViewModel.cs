@@ -40,6 +40,7 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
     private int _connectInFlight;
     private int _teardownGeneration;
     private int _diagnoseInFlight;
+    private bool _suppressAutoConnectOnReattach;
 
     // Upper bound on the post-failure reachability probe. The sidecar's own in-tunnel dial
     // timeout is 15 s; a target that hasn't answered the probe within this window is reported
@@ -102,6 +103,7 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
     public override void Initialize(ConnectionProfile profile)
     {
         base.Initialize(profile);
+        _suppressAutoConnectOnReattach = false;
         // Surface the connecting spinner immediately. A freshly-opened tab whose view hasn't loaded yet
         // (e.g. two connections opened back-to-back, so this one isn't the realized/selected tab) would
         // otherwise sit in the generic Disconnected fallback until brought forward. Mirrors
@@ -121,11 +123,11 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
             throw new InvalidOperationException("Initialize must be called before AttachAsync.");
         EnsureDispatcher();
 
-        // A Failed tab's overlay (and its Retry button) owns the next action. Don't auto-reconnect or
-        // re-navigate when the view is rebuilt (a Sessions↔Settings round-trip): falling through to
-        // ConnectAsync here would silently re-run the connect — and re-prompt for the VPN route — on
-        // every visit to a failed tab.
-        if (Status == SessionStatus.Failed) return;
+        // A terminal overlay (and its Reconnect button) owns the next action. A user-cancelled or
+        // explicitly disconnected tab is Disconnected rather than Failed, but must likewise survive
+        // an incidental view rebuild without silently reopening its prompts.
+        if (Status == SessionStatus.Failed ||
+            (Status == SessionStatus.Disconnected && _suppressAutoConnectOnReattach)) return;
 
         if (CurrentTarget is { } target)
         {
@@ -153,17 +155,27 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
         var token = cts.Token;
         ITunnelInstance? pendingTunnel = null;
 
+        async Task HandleCancellationAsync()
+        {
+            await DisposeTunnelInstanceSilentlyAsync(pendingTunnel).ConfigureAwait(true);
+            if (!IsAttemptCurrent(teardownGeneration)) return;
+            _suppressAutoConnectOnReattach = true;
+            await TearDownTunnelAsync().ConfigureAwait(true);
+            Progress.Reset();
+            Status = SessionStatus.Disconnected;
+        }
+
         try
         {
             // Per-connect tunnel routing: when the user opted in (PromptBeforeTunnelConnect) and the
             // profile is configured for a tunnel, ask whether to route through it or go direct for THIS
-            // attempt. Null means the user cancelled — surface a recoverable Failed (the view's Retry
-            // re-opens the prompt), mirroring SSH/RDP.
+            // attempt. Null means the user deliberately cancelled, so return to Disconnected without
+            // presenting error chrome; a later Connect/Retry can open the prompt again.
             var routed = await _tunnelPrompter.ResolveRouteAsync(profile, token).ConfigureAwait(true);
             if (!IsAttemptCurrent(teardownGeneration)) return;
             if (routed is null)
             {
-                ReportFailure("Connection cancelled.");
+                await HandleCancellationAsync().ConfigureAwait(true);
                 return;
             }
 
@@ -192,11 +204,7 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
         }
         catch (OperationCanceledException)
         {
-            await DisposeTunnelInstanceSilentlyAsync(pendingTunnel).ConfigureAwait(true);
-            if (!IsAttemptCurrent(teardownGeneration)) return;
-            await TearDownTunnelAsync().ConfigureAwait(true);
-            Progress.Reset();
-            Status = SessionStatus.Disconnected;
+            await HandleCancellationAsync().ConfigureAwait(true);
         }
         catch (Exception ex)
         {
@@ -383,6 +391,7 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
         // Re-read the saved settings (through folder inheritance) so a tunnel/host/ignore-cert edit made
         // after the tab opened is honored on Retry — mirrors SSH/RDP.
         await RefreshProfileFromRepositoryAsync().ConfigureAwait(true);
+        _suppressAutoConnectOnReattach = false;
         Status = SessionStatus.Connecting;
         Progress.Reset();
         Interlocked.Increment(ref _teardownGeneration);
@@ -424,6 +433,7 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
 
     private async Task TearDownToDisconnectedAsync()
     {
+        _suppressAutoConnectOnReattach = true;
         Interlocked.Increment(ref _teardownGeneration);
         await TearDownTunnelAsync().ConfigureAwait(true);
         CurrentTarget = null;

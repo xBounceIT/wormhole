@@ -407,7 +407,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
                 : await _passwordResolver.ReadPasswordAsync(credential, PromptForBitwardenUnlockAsync);
             await ShowResolvedCredentialSecretAsync(clicked.Name, username, secretLabel, secret);
         }
-        catch (BitwardenUnlockCancelledException)
+        catch (UserInteractionCancelledException)
         {
             // User cancelled the unlock prompt; leave the reveal command as a no-op.
         }

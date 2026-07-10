@@ -9,6 +9,7 @@ using Microsoft.Web.WebView2.Core;
 using Windows.Graphics;
 using Wormhole.Helpers;
 using Wormhole.Models;
+using Wormhole.Services;
 
 namespace Wormhole.Services.Tunneling.AzureVpn;
 
@@ -120,7 +121,7 @@ public sealed class DialogAzureVpnAuthService : IAzureVpnAuthService, IDisposabl
         {
             closed = true;
             codeCompletion.TrySetException(
-                new InvalidOperationException("Microsoft sign-in was cancelled before authentication completed."));
+                new UserInteractionCancelledException("Microsoft sign-in was cancelled before authentication completed."));
         };
 
         using var ctReg = cancellationToken.Register(() =>

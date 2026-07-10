@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Models;
+using Wormhole.Services;
 using Wormhole.Services.Tunneling;
 using Wormhole.Services.Tunneling.Stormshield;
 using Wormhole.Tests.Fakes;
@@ -104,6 +105,27 @@ public class TunnelTestDialogViewModelTests
         Assert.Contains("simulated auth failure", vm.ResultMessage);
         Assert.Contains("Last step: starting tunnel.", vm.ResultMessage);
         Assert.Contains(vm.Log, l => l.Contains("simulated auth failure", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Run_UserInteractionCancelled_ReportsCancellationNotFailure()
+    {
+        var provider = new FakeTunnelProvider(TunnelKind.Stormshield)
+        {
+            EstablishFailure = new UserInteractionCancelledException(
+                "Stormshield OTP prompt was cancelled by the user."),
+        };
+        var (vm, config) = CreateVm(provider, new byte[] { 1, 2, 3 });
+
+        await vm.RunAsync(config);
+
+        Assert.False(vm.IsBusy);
+        Assert.True(vm.HasResult);
+        Assert.False(vm.IsSuccess);
+        Assert.True(vm.WasCancelled);
+        Assert.False(vm.WasInformational);
+        Assert.Equal("Tunnel test cancelled", vm.ResultTitle);
+        Assert.DoesNotContain(vm.Log, l => l.StartsWith("Failed:", StringComparison.Ordinal));
     }
 
     [Fact]

@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Models;
+using Wormhole.Services;
 using Wormhole.Services.Tunneling.AzureVpn;
 using Wormhole.Tests.Fakes;
 using Xunit;
@@ -195,10 +196,10 @@ public class AzureVpnTunnelProviderTests
     {
         var auth = new FakeAuthService
         {
-            Throws = new InvalidOperationException("Microsoft sign-in was cancelled before authentication completed."),
+            Throws = new UserInteractionCancelledException("Microsoft sign-in was cancelled before authentication completed."),
         };
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var ex = await Assert.ThrowsAsync<UserInteractionCancelledException>(() =>
             AzureVpnTunnelProvider.ResolveAccessTokenCoreAsync(
                 new FakeOAuthClient(), new FakeAzureVpnTokenCache(), auth, NullLogger.Instance,
                 Guid.NewGuid(), "vpn", Settings(), CancellationToken.None));

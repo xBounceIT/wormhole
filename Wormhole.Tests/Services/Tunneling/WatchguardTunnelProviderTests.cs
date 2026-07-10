@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Models;
+using Wormhole.Services;
 using Wormhole.Services.Tunneling;
 using Wormhole.Services.Tunneling.Watchguard;
 using Xunit;
@@ -341,16 +342,15 @@ public class WatchguardTunnelProviderTests
     }
 
     [Fact]
-    public async Task RunPreAuthLoop_UserCancelsOtp_ThrowsInvalidOperation()
+    public async Task RunPreAuthLoop_UserCancelsOtp_ThrowsUserCancellation()
     {
         // IOtpPromptService contract: returning null means user dismissed. The provider
-        // surfaces this as InvalidOperationException, NOT OperationCanceledException, so
-        // upstream retry logic doesn't confuse a deliberate dismiss with token cancellation.
+        // preserves that deliberate user action as a typed cancellation outcome.
         var pre = new ScriptedPreAuth();
         pre.Queue(new PreAuthOutcome.Challenge("session-1", "enter code"));
         var otp = new ScriptedOtpPrompt(/* null returned */);
 
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+        var ex = await Assert.ThrowsAsync<UserInteractionCancelledException>(() =>
             WatchguardTunnelProvider.RunPreAuthLoopAsync(
                 pre, otp, NullLogger<WatchguardTunnelProvider>.Instance, "cfg", ValidSettings(), CancellationToken.None));
 

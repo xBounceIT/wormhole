@@ -144,18 +144,21 @@ public class HttpSessionViewModelTests
     }
 
     [Fact]
-    public async Task RoutePromptCancelled_ReportsFailed_WithoutNavigate()
+    public async Task RoutePromptCancelled_ReturnsToDisconnected_WithoutNavigate()
     {
         var raised = false;
-        var vm = CreateVm(prompter: new FakeRoutePrompter((ConnectionProfile?)null));
+        var prompter = new FakeRoutePrompter((ConnectionProfile?)null);
+        var vm = CreateVm(prompter: prompter);
         vm.Initialize(Profile(ProtocolType.Https, "fw.local", 443, tunnelEnabled: true));
         vm.NavigateRequested += _ => raised = true;
 
         await vm.AttachAsync();
+        await vm.AttachAsync();
 
         Assert.False(raised);
-        Assert.Equal(SessionStatus.Failed, vm.Status);
-        Assert.Equal("Connection cancelled.", vm.ErrorMessage);
+        Assert.Equal(1, prompter.CallCount);
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.Null(vm.ErrorMessage);
     }
 
     [Fact]
@@ -518,10 +521,14 @@ public class HttpSessionViewModelTests
     {
         private readonly bool _passthrough;
         private readonly ConnectionProfile? _result;
+        public int CallCount { get; private set; }
         public FakeRoutePrompter() => _passthrough = true;
         public FakeRoutePrompter(ConnectionProfile? result) => _result = result;
-        public Task<ConnectionProfile?> ResolveRouteAsync(ConnectionProfile profile, CancellationToken cancellationToken) =>
-            Task.FromResult(_passthrough ? profile : _result);
+        public Task<ConnectionProfile?> ResolveRouteAsync(ConnectionProfile profile, CancellationToken cancellationToken)
+        {
+            CallCount++;
+            return Task.FromResult(_passthrough ? profile : _result);
+        }
     }
 
     private sealed class BlockingRoutePrompter : ITunnelRoutePrompter

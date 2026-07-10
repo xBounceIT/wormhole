@@ -74,6 +74,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     // file transfer. Null until a connect resolves a route; cleared on teardown.
     private ConnectionProfile? _activeRoutedProfile;
     private bool _reconnectRequestedWhileDetached;
+    private bool _suppressAutoConnectOnReattach;
     // Set when a connect reaches Connected while no view is attached (tab backgrounded mid-connect):
     // the session's banner/prompt lands only in _replayBuffer, so the live xterm.js — cleared at
     // connect start and never fed since — is empty. The next AttachAsync must replay even on a
@@ -227,6 +228,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     {
         base.Initialize(profile);
         _initialKnownFingerprint = profile.SshKnownHostFingerprint;
+        _suppressAutoConnectOnReattach = false;
     }
 
     public async Task AttachAsync(CoreWebView2 webView, TerminalSize initialSize)
@@ -324,25 +326,23 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         // DROPPED must not silently reconnect. A background SSH drop lands in Failed
         // (OnSessionClosed -> ReportFailure), which renders the in-pane Retry overlay; leave it
         // standing and let the user choose. Disconnected reattaches still auto-recover because
-        // the usual post-attempt Disconnected path is a connect interrupted by a nav-away
-        // (WebView lost mid-connect); the Disconnected overlay below keeps any non-recovered
-        // edge case legible instead of showing a blank pane.
+        // the usual post-attempt Disconnected path is a connect interrupted by a nav-away, unless
+        // an explicit cancellation/disconnect set the suppression flag handled below.
         if (ShouldDeferAutoConnectOnReattach())
         {
-            _logger.LogDebug("SSH attach: tab is Failed and sessionless; leaving the Retry overlay up instead of auto-reconnecting.");
+            _logger.LogDebug("SSH attach: sessionless tab is waiting for explicit reconnect; leaving its overlay up.");
             return;
         }
 
         await ConnectAsync().ConfigureAwait(true);
     }
 
-    // A sessionless tab reaching AttachAsync's connect tail is normally a genuine first show and
-    // should connect. The exception: a tab that already attempted and is now Failed must keep its
-    // in-pane Retry overlay rather than auto-reconnecting on an incidental view reload. Disconnected
-    // deliberately still auto-connects, so an interrupted-connect tab recovers. Failed implies a prior
-    // attempt (it is only ever set by ReportFailure), so no separate "have we connected before" latch is
-    // needed here.
-    internal bool ShouldDeferAutoConnectOnReattach() => Status is SessionStatus.Failed;
+    // Failed tabs and user-cancelled/disconnected tabs keep their in-pane recovery affordance on an
+    // incidental view rebuild. Other Disconnected tabs still auto-connect so an interrupted connect
+    // can recover through the normal attach path.
+    internal bool ShouldDeferAutoConnectOnReattach() =>
+        Status == SessionStatus.Failed ||
+        (Status == SessionStatus.Disconnected && _suppressAutoConnectOnReattach);
 
     /// <summary>
     /// Raised when <see cref="RetryAsync"/> is invoked but the view's WebView2 never
@@ -370,6 +370,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         // would be ignored on Retry. Done before the detached-view branch below so the deferred
         // background-tab reconnect path (AttachAsync) also uses the refreshed profile.
         await RefreshProfileFromRepositoryAsync().ConfigureAwait(true);
+        _suppressAutoConnectOnReattach = false;
 
         if (_webView is null)
         {
@@ -472,6 +473,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     {
         // Explicit user teardown (Disconnect / tab close) — stop any pending auto-reconnect and clear
         // the budget so a loop or deferred intent can't resurrect a connection the user just dropped.
+        _suppressAutoConnectOnReattach = true;
         CancelAutoReconnect();
         SetAutoReconnectAttempts(0);
         await TearDownSessionAsync().ConfigureAwait(true);
@@ -559,15 +561,19 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     /// forward again and the deferred connect lands. Flipping to Connecting here makes that recovery
     /// window explicit (and removes the illusion that a keystroke is what "reconnects" it).
     /// <para>
-    /// Strictly Disconnected → Connecting with no live/in-flight session, so it never disturbs a
-    /// connected session's Sessions↔Settings nav-back rebind (Status stays Connected) nor a Failed
-    /// tab's Retry overlay. Called from <c>SshTerminalView.InitializeWebViewAsync</c> on the UI
-    /// thread once that path has committed to navigating.
+    /// Strictly Disconnected → Connecting with no live/in-flight session and no explicit user
+    /// cancellation to preserve. This never disturbs a connected session's Sessions↔Settings
+    /// nav-back rebind, a Failed tab's Retry overlay, or a Disconnected tab waiting for Reconnect.
+    /// Called from <c>SshTerminalView.InitializeWebViewAsync</c> on the UI thread once that path has
+    /// committed to navigating.
     /// </para>
     /// </summary>
     public void MarkConnecting()
     {
-        if (Status == SessionStatus.Disconnected && _session is null && Volatile.Read(ref _connectInFlight) == 0)
+        if (!_suppressAutoConnectOnReattach &&
+            Status == SessionStatus.Disconnected &&
+            _session is null &&
+            Volatile.Read(ref _connectInFlight) == 0)
         {
             Status = SessionStatus.Connecting;
         }
@@ -874,6 +880,19 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             return IsAttemptCurrent(teardownGeneration);
         }
 
+        async Task HandleCancellationAsync()
+        {
+            if (ReferenceEquals(Interlocked.CompareExchange(ref _cts, null, cts), cts))
+            {
+                try { cts.Cancel(); } catch { /* already disposed */ }
+            }
+            if (!await CleanupPendingConnectArtifactsAndIsCurrentAsync().ConfigureAwait(true)) return;
+            _suppressAutoConnectOnReattach = true;
+            await SafeDisposeSessionAsync().ConfigureAwait(true);
+            Progress.Reset();
+            Status = SessionStatus.Disconnected;
+        }
+
         try
         {
             // Per-connect tunnel routing: when the user has opted in (PromptBeforeTunnelConnect)
@@ -888,12 +907,10 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             if (!IsAttemptCurrent(teardownGeneration)) return;
             if (routed is null)
             {
-                // User dismissed the route prompt. Surface a recoverable Failed state rather than
-                // Disconnected: this mirrors SSH's existing cancelled-prompt convention — a dismissed
-                // credential prompt also reports failure — and keeps the route prompt retry explicit.
-                // Retry re-opens the route prompt. Not auto-retryable: the user just declined.
+                // The user deliberately dismissed the route choice. This is not a failed connection
+                // attempt; use the shared cancellation cleanup without auto-retrying.
                 _lastConnectRetryable = false;
-                ReportFailure("Connection cancelled.");
+                await HandleCancellationAsync().ConfigureAwait(true);
                 return;
             }
             _activeRoutedProfile = routed;
@@ -1055,10 +1072,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         }
         catch (OperationCanceledException)
         {
-            if (!await CleanupPendingConnectArtifactsAndIsCurrentAsync().ConfigureAwait(true)) return;
-            await SafeDisposeSessionAsync().ConfigureAwait(true);
-            Progress.Reset();
-            Status = SessionStatus.Disconnected;
+            await HandleCancellationAsync().ConfigureAwait(true);
         }
         catch (SshHostKeyMismatchException ex)
         {

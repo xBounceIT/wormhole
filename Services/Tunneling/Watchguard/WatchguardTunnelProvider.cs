@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using Microsoft.Extensions.Logging;
 using Wormhole.Helpers;
 using Wormhole.Models;
+using Wormhole.Services;
 using Wormhole.Services.Tunneling.OpenVpn;
 
 namespace Wormhole.Services.Tunneling.Watchguard;
@@ -376,7 +377,7 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
             "Enter your one-time passcode, or type 'p' to approve with a push notification.",
             cancellationToken).ConfigureAwait(false);
         if (entered is null)
-            throw new InvalidOperationException("Watchguard 2FA prompt was cancelled by the user.");
+            throw new UserInteractionCancelledException("Watchguard 2FA prompt was cancelled by the user.");
         entered = entered.Trim();
         if (entered.Length == 0)
             throw new InvalidOperationException("Watchguard 2FA prompt returned an empty code.");
@@ -712,10 +713,9 @@ public sealed class WatchguardTunnelProvider : ITunnelProvider
                 $"Watchguard 2FA — {configName}", promptText, cancellationToken).ConfigureAwait(false);
             if (entered is null)
             {
-                // User clicked Cancel. Convention from IOtpPromptService: returning null is a user
-                // action, not a token-cancel — surface as a regular InvalidOperation so upstream
-                // cancellation-aware retry logic doesn't confuse this for a transient cancellation.
-                throw new InvalidOperationException("Watchguard 2FA prompt was cancelled by the user.");
+                // User clicked Cancel. Keep this distinct from the caller token firing while still
+                // routing it through the benign cancellation path at session/test boundaries.
+                throw new UserInteractionCancelledException("Watchguard 2FA prompt was cancelled by the user.");
             }
             // Trim defensively. Most prompt impls already do this, but a clipboard paste that
             // includes a trailing newline would survive into the request and the credential the
