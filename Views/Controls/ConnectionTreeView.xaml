@@ -7,6 +7,36 @@
     xmlns:vm="using:Wormhole.ViewModels"
     xmlns:models="using:Wormhole.Models">
 
+    <UserControl.Resources>
+        <!-- One shared flyout for all realized rows. Per-item flyouts multiply the
+             popup visual tree, icons, bindings, and handlers by the viewport size. -->
+        <MenuFlyout x:Key="NodeContextFlyout">
+            <MenuFlyoutItem Text="New folder" Click="OnAddFolderItemClick">
+                <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8F4;" /></MenuFlyoutItem.Icon>
+            </MenuFlyoutItem>
+            <MenuFlyoutItem Text="New connection" Click="OnAddConnectionItemClick">
+                <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE710;" /></MenuFlyoutItem.Icon>
+            </MenuFlyoutItem>
+            <MenuFlyoutSeparator />
+            <MenuFlyoutItem x:Name="ShowCredentialsMenuItem"
+                            Text="Show credentials"
+                            Click="OnShowCredentialsItemClick">
+                <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE7B3;" /></MenuFlyoutItem.Icon>
+            </MenuFlyoutItem>
+            <MenuFlyoutItem x:Name="DuplicateConnectionMenuItem"
+                            Text="Duplicate connection"
+                            Click="OnDuplicateItemClick">
+                <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE8C8;" /></MenuFlyoutItem.Icon>
+            </MenuFlyoutItem>
+            <MenuFlyoutItem Text="Edit" Click="OnEditItemClick">
+                <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE70F;" /></MenuFlyoutItem.Icon>
+            </MenuFlyoutItem>
+            <MenuFlyoutItem Text="Delete" Click="OnDeleteItemClick">
+                <MenuFlyoutItem.Icon><FontIcon Glyph="&#xE74D;" /></MenuFlyoutItem.Icon>
+            </MenuFlyoutItem>
+        </MenuFlyout>
+    </UserControl.Resources>
+
     <UserControl.KeyboardAccelerators>
         <KeyboardAccelerator Modifiers="Control,Shift" Key="N" Invoked="OnNewFolderAccelerator" />
         <KeyboardAccelerator Modifiers="Control" Key="N" Invoked="OnNewConnectionAccelerator" />
@@ -129,58 +159,10 @@
                                   KeyDown="OnTreeItemKeyDown"
                                   PointerEntered="OnTreeItemPointerEntered"
                                   PointerExited="OnTreeItemPointerExited"
+                                  RightTapped="OnNodeRightTapped"
+                                  ContextRequested="OnNodeContextRequested"
+                                  ContextFlyout="{StaticResource NodeContextFlyout}"
                                   DoubleTapped="OnNodeDoubleTapped">
-                        <TreeViewItem.ContextFlyout>
-                            <!-- Click handlers (not Command bindings) because ElementName binding
-                                 can't escape the DataTemplate's namescope into the MenuFlyout popup. -->
-                            <MenuFlyout>
-                                <MenuFlyoutItem Text="New folder"
-                                                Tag="{x:Bind}"
-                                                Click="OnAddFolderItemClick">
-                                    <MenuFlyoutItem.Icon>
-                                        <FontIcon Glyph="&#xE8F4;" />
-                                    </MenuFlyoutItem.Icon>
-                                </MenuFlyoutItem>
-                                <MenuFlyoutItem Text="New connection"
-                                                Tag="{x:Bind}"
-                                                Click="OnAddConnectionItemClick">
-                                    <MenuFlyoutItem.Icon>
-                                        <FontIcon Glyph="&#xE710;" />
-                                    </MenuFlyoutItem.Icon>
-                                </MenuFlyoutItem>
-                                <MenuFlyoutSeparator />
-                                <MenuFlyoutItem Text="Show credentials"
-                                                Tag="{x:Bind}"
-                                                Click="OnShowCredentialsItemClick"
-                                                Visibility="{x:Bind IsConnection, Converter={StaticResource BoolToVisibilityConverter}}">
-                                    <MenuFlyoutItem.Icon>
-                                        <FontIcon Glyph="&#xE7B3;" />
-                                    </MenuFlyoutItem.Icon>
-                                </MenuFlyoutItem>
-                                <MenuFlyoutItem Text="Duplicate connection"
-                                                Tag="{x:Bind}"
-                                                Click="OnDuplicateItemClick"
-                                                Visibility="{x:Bind IsConnection, Converter={StaticResource BoolToVisibilityConverter}}">
-                                    <MenuFlyoutItem.Icon>
-                                        <FontIcon Glyph="&#xE8C8;" />
-                                    </MenuFlyoutItem.Icon>
-                                </MenuFlyoutItem>
-                                <MenuFlyoutItem Text="Edit"
-                                                Tag="{x:Bind}"
-                                                Click="OnEditItemClick">
-                                    <MenuFlyoutItem.Icon>
-                                        <FontIcon Glyph="&#xE70F;" />
-                                    </MenuFlyoutItem.Icon>
-                                </MenuFlyoutItem>
-                                <MenuFlyoutItem Text="Delete"
-                                                Tag="{x:Bind}"
-                                                Click="OnDeleteItemClick">
-                                    <MenuFlyoutItem.Icon>
-                                        <FontIcon Glyph="&#xE74D;" />
-                                    </MenuFlyoutItem.Icon>
-                                </MenuFlyoutItem>
-                            </MenuFlyout>
-                        </TreeViewItem.ContextFlyout>
 
                         <StackPanel Orientation="Horizontal" Spacing="6" Margin="-10,0,0,0">
                             <CheckBox x:Name="SelectCheckBox"

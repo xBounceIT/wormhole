@@ -16,6 +16,8 @@ namespace Wormhole.Views.Dialogs;
 /// </summary>
 public sealed partial class FolderEditorDialog : UserControl
 {
+    private bool _optionsLoaded;
+
     public event EventHandler? ValidityChanged;
 
     public FolderEditorDialog()
@@ -28,14 +30,41 @@ public sealed partial class FolderEditorDialog : UserControl
     public FolderEditorViewModel ViewModel { get; }
 
     public bool IsValid => ViewModel.IsValid;
+    public bool CanSubmit => _optionsLoaded && IsValid;
 
-    /// <summary>Load pick-list options, then copy field values from <paramref name="initial"/>
-    /// into the VM. Options must populate before LoadFrom so saved ids can resolve to
-    /// selected items.</summary>
+    public void Prepare(ConnectionNode initial)
+    {
+        _optionsLoaded = false;
+        OptionsLoadingBar.Visibility = Microsoft.UI.Xaml.Visibility.Visible;
+        OptionsLoadError.IsOpen = false;
+        ViewModel.LoadFrom(initial);
+        ValidityChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    public async Task LoadOptionsAsync(CancellationToken cancellationToken = default)
+    {
+        await ViewModel.LoadOptionsAsync(cancellationToken).ConfigureAwait(true);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        _optionsLoaded = true;
+        OptionsLoadingBar.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
+        OptionsLoadError.IsOpen = false;
+        ValidityChanged?.Invoke(this, EventArgs.Empty);
+    }
+
     public async Task LoadAsync(ConnectionNode initial)
     {
-        await ViewModel.LoadOptionsAsync();
-        ViewModel.LoadFrom(initial);
+        Prepare(initial);
+        await LoadOptionsAsync().ConfigureAwait(true);
+    }
+
+    public void ShowLoadError(string message)
+    {
+        _optionsLoaded = false;
+        OptionsLoadingBar.Visibility = Microsoft.UI.Xaml.Visibility.Collapsed;
+        OptionsLoadError.Message = message;
+        OptionsLoadError.IsOpen = true;
+        ValidityChanged?.Invoke(this, EventArgs.Empty);
     }
 
     /// <summary>Copy field values back into the supplied node. Caller is responsible for the

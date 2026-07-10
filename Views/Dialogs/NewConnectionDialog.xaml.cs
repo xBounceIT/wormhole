@@ -13,9 +13,15 @@ namespace Wormhole.Views.Dialogs;
 /// settings (Display / Local Resources / Experience / Advanced) self-collapse when Protocol
 /// is not RDP via x:Bind to <c>ViewModel.IsRdp</c>.
 /// </summary>
-public sealed partial class NewConnectionDialog : UserControl
+public sealed partial class NewConnectionDialog : UserControl, INotifyPropertyChanged
 {
+    private readonly HashSet<int> _loadedTabIndexes = new() { 0 };
+    private bool _optionsLoaded;
+    private bool _isHydratingInlinePassword;
+    private bool _inlinePasswordChangedByUser;
+
     public event EventHandler? ValidityChanged;
+    public event PropertyChangedEventHandler? PropertyChanged;
 
     public NewConnectionDialog()
     {
@@ -56,24 +62,91 @@ public sealed partial class NewConnectionDialog : UserControl
     }
 
     public bool IsValid => ViewModel.IsValid;
+    public bool CanSubmit => _optionsLoaded && IsValid;
 
-    /// <summary>Load credentials and tunnel configs, then copy field values from
-    /// <paramref name="initial"/> into the VM. Tunnel configs must populate before LoadFrom
-    /// so the SelectedTunnel binding can resolve a saved TunnelConfigId.</summary>
+    public bool IsSerialTabContentLoaded => _loadedTabIndexes.Contains(1);
+    public bool IsDisplayTabContentLoaded => _loadedTabIndexes.Contains(2);
+    public bool IsLocalResourcesTabContentLoaded => _loadedTabIndexes.Contains(3);
+    public bool IsExperienceTabContentLoaded => _loadedTabIndexes.Contains(4);
+    public bool IsAdvancedTabContentLoaded => _loadedTabIndexes.Contains(5);
+
+    /// <summary>
+    /// Applies the saved fields synchronously so the editor can be presented immediately.
+    /// Picker data and secrets are hydrated after ContentDialog.Opened.
+    /// </summary>
+    public void Prepare(ConnectionNode initial)
+    {
+        _optionsLoaded = false;
+        OptionsLoadingBar.Visibility = Visibility.Visible;
+        OptionsLoadError.IsOpen = false;
+        ViewModel.LoadFrom(initial);
+        Bindings.Update();
+        _inlinePasswordChangedByUser = false;
+        SetInlinePassword(string.Empty);
+        ValidityChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    public async Task LoadOptionsAsync(CancellationToken cancellationToken = default)
+    {
+        var credentials = ViewModel.LoadCredentialsAsync(cancellationToken);
+        var tunnels = ViewModel.TunnelPicker.LoadAsync(cancellationToken);
+        var inlineSecret = ViewModel.LoadInlineSecretAsync();
+        await Task.WhenAll(credentials, tunnels, inlineSecret).ConfigureAwait(true);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (_inlinePasswordChangedByUser)
+        {
+            // The editor is already interactive while Credential Manager is read. Preserve
+            // text entered during that window instead of overwriting it with the late result.
+            ViewModel.InlinePassword = InlinePasswordBox.Password;
+        }
+        else
+        {
+            SetInlinePassword(ViewModel.InlinePassword);
+        }
+        _optionsLoaded = true;
+        OptionsLoadingBar.Visibility = Visibility.Collapsed;
+        OptionsLoadError.IsOpen = false;
+        ValidityChanged?.Invoke(this, EventArgs.Empty);
+    }
+
     public async Task LoadAsync(ConnectionNode initial)
     {
-        var credentials = ViewModel.LoadCredentialsAsync();
-        var tunnels = ViewModel.TunnelPicker.LoadAsync();
-        await Task.WhenAll(credentials, tunnels);
-        ViewModel.LoadFrom(initial);
-        // Refresh x:Bind bridges such as PortBindable and SerialBaudRateBindable after
-        // the async load mutates the VM behind the already-initialized control.
-        Bindings.Update();
-        // Pull the existing inline password (if any) from Credential Manager so an edit shows it.
-        // Done after LoadFrom because reading the secret is async and LoadFrom is synchronous.
-        await ViewModel.LoadInlineSecretAsync();
-        InlinePasswordBox.Password = ViewModel.InlinePassword;
+        Prepare(initial);
+        await LoadOptionsAsync().ConfigureAwait(true);
     }
+
+    public void ShowLoadError(string message)
+    {
+        _optionsLoaded = false;
+        OptionsLoadingBar.Visibility = Visibility.Collapsed;
+        OptionsLoadError.Message = message;
+        OptionsLoadError.IsOpen = true;
+        ValidityChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void OnEditorTabSelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        var index = EditorTabs.SelectedIndex;
+        if (index <= 0 || !_loadedTabIndexes.Add(index)) return;
+
+        var propertyName = index switch
+        {
+            1 => nameof(IsSerialTabContentLoaded),
+            2 => nameof(IsDisplayTabContentLoaded),
+            3 => nameof(IsLocalResourcesTabContentLoaded),
+            4 => nameof(IsExperienceTabContentLoaded),
+            5 => nameof(IsAdvancedTabContentLoaded),
+            _ => null,
+        };
+        if (propertyName is not null)
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
+    }
+
+    private void OnAdvancedTabContentLoaded(object sender, RoutedEventArgs e) =>
+        SyncCredentialText(GatewayCredentialBox, ViewModel.SelectedGatewayCredential);
 
     /// <summary>Copy field values back into the supplied node. Caller is responsible for the
     /// Id and parent linkage.</summary>
@@ -86,11 +159,27 @@ public sealed partial class NewConnectionDialog : UserControl
     }
 
     // PasswordBox.Password has no x:Bind-able dependency property, so mirror it into the VM here.
-    // This is a content-change handler (safe), not the literal-IsChecked-plus-handler pattern that
-    // can NRE during InitializeComponent. ViewModel is assigned before InitializeComponent, and
-    // this only touches a simple VM property — never a later-declared x:Name element.
-    private void OnInlinePasswordChanged(object sender, RoutedEventArgs e) =>
+    private void OnInlinePasswordChanged(object sender, RoutedEventArgs e)
+    {
+        if (!_isHydratingInlinePassword)
+        {
+            _inlinePasswordChangedByUser = true;
+        }
         ViewModel.InlinePassword = ((PasswordBox)sender).Password;
+    }
+
+    private void SetInlinePassword(string password)
+    {
+        _isHydratingInlinePassword = true;
+        try
+        {
+            InlinePasswordBox.Password = password;
+        }
+        finally
+        {
+            _isHydratingInlinePassword = false;
+        }
+    }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {

@@ -14,7 +14,27 @@
         </DataTemplate>
     </UserControl.Resources>
 
-    <ScrollViewer Padding="16" MinWidth="420">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <ProgressBar x:Name="OptionsLoadingBar"
+                     Grid.Row="0"
+                     IsIndeterminate="True"
+                     Margin="0,0,0,8" />
+
+        <InfoBar x:Name="OptionsLoadError"
+                 Grid.Row="1"
+                 Severity="Error"
+                 IsClosable="False"
+                 IsOpen="False"
+                 Title="Couldn't load editor options"
+                 Margin="0,0,0,8" />
+
+        <ScrollViewer Grid.Row="2" Padding="16" MinWidth="420">
         <StackPanel Spacing="12">
             <TextBox x:Name="NameBox"
                      Header="Name"
@@ -61,5 +81,6 @@
                            Text="Default for SSH descendants that choose &quot;Inherit from folder&quot;: when on, they run &quot;sudo su&quot; on connect and send the saved password. &quot;Inherit from parent&quot; defers to this folder's own parent." />
             </StackPanel>
         </StackPanel>
-    </ScrollViewer>
+        </ScrollViewer>
+    </Grid>
 </UserControl>

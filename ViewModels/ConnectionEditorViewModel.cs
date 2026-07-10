@@ -694,13 +694,54 @@ public partial class ConnectionEditorViewModel : ObservableObject
         }
     }
 
-    public async Task LoadCredentialsAsync()
+    public async Task LoadCredentialsAsync(CancellationToken cancellationToken = default)
     {
-        await _bitwardenCredentialSync.SyncIfStaleAsync().ConfigureAwait(true);
-        var creds = await _credentialCatalog.GetPickerProfilesAsync().ConfigureAwait(true);
+        // Populate from the local SQLite/cache snapshot first. A stale Bitwarden refresh can
+        // involve a CLI process and network I/O; awaiting it used to hold the editor closed
+        // for seconds even though usable cached choices were already available.
+        var syncTask = _bitwardenCredentialSync.SyncIfStaleAsync(cancellationToken);
+        var refreshAfterSync = !syncTask.IsCompleted;
+        var credentials = await _credentialCatalog
+            .GetPickerProfilesAsync(cancellationToken)
+            .ConfigureAwait(true);
+        ApplyCredentialCatalog(credentials);
+
+        if (!refreshAfterSync)
+        {
+            await syncTask.ConfigureAwait(true);
+            return;
+        }
+
+        _ = RefreshCredentialsAfterSyncAsync(syncTask, cancellationToken);
+    }
+
+    private async Task RefreshCredentialsAfterSyncAsync(Task syncTask, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await syncTask.ConfigureAwait(true);
+            cancellationToken.ThrowIfCancellationRequested();
+            var refreshed = await _credentialCatalog
+                .GetPickerProfilesAsync(cancellationToken)
+                .ConfigureAwait(true);
+            ApplyCredentialCatalog(refreshed);
+        }
+        catch (OperationCanceledException)
+        {
+            // The editor was closed while its background refresh was still in flight.
+        }
+        catch (Exception)
+        {
+            // Sync is best-effort and the service logs provider failures; keep the usable
+            // cached snapshot instead of surfacing an unobserved fire-and-forget exception.
+        }
+    }
+
+    private void ApplyCredentialCatalog(IReadOnlyList<CredentialProfile> credentials)
+    {
         _allCredentials.Clear();
         _allCredentialsById.Clear();
-        foreach (var credential in creds)
+        foreach (var credential in credentials)
         {
             _allCredentials.Add(credential);
             _allCredentialsById[credential.Id] = credential;

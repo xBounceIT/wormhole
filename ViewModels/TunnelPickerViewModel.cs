@@ -136,9 +136,9 @@ public partial class TunnelPickerViewModel : ObservableObject
     /// Rebuild <see cref="AvailableTunnelConfigs"/> from the repository, leading with the
     /// two sentinels so the picker always offers inherit/off.
     /// </summary>
-    public async Task LoadAsync()
+    public async Task LoadAsync(CancellationToken cancellationToken = default)
     {
-        var configs = await _repository.GetAllAsync().ConfigureAwait(true);
+        var configs = await _repository.GetAllAsync(cancellationToken).ConfigureAwait(true);
         var available = new List<TunnelConfig>(configs.Count + 2)
         {
             InheritTunnel,

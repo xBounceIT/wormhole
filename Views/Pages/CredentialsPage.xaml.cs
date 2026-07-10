@@ -13,6 +13,8 @@ namespace Wormhole.Views.Pages;
 
 public sealed partial class CredentialsPage : Page
 {
+    private CredentialProfile? _contextTarget;
+
     public CredentialsViewModel ViewModel { get; }
 
     public CredentialsPage()
@@ -52,9 +54,38 @@ public sealed partial class CredentialsPage : Page
         }
     }
 
-    private void OnEditMenuItemClick(object sender, RoutedEventArgs e)
+    private void OnCredentialRightTapped(object sender, RightTappedRoutedEventArgs e)
     {
         if (sender is FrameworkElement { DataContext: CredentialProfile profile })
+        {
+            SetContextTarget(profile);
+        }
+    }
+
+    private void OnCredentialContextRequested(UIElement sender, ContextRequestedEventArgs args)
+    {
+        if (sender is FrameworkElement { DataContext: CredentialProfile profile })
+        {
+            SetContextTarget(profile);
+        }
+    }
+
+    private void SetContextTarget(CredentialProfile profile)
+    {
+        _contextTarget = profile;
+        var canMutate = !profile.IsReadOnly;
+        ContextEditCredentialItem.IsEnabled = canMutate;
+        ContextDeleteCredentialItem.IsEnabled = canMutate;
+    }
+
+    private CredentialProfile? ResolveActionTarget(object sender) =>
+        sender is FrameworkElement { DataContext: CredentialProfile profile }
+            ? profile
+            : _contextTarget;
+
+    private void OnEditMenuItemClick(object sender, RoutedEventArgs e)
+    {
+        if (ResolveActionTarget(sender) is { } profile)
         {
             ExecuteIfCan(ViewModel.EditCredentialCommand, profile);
         }
@@ -62,7 +93,7 @@ public sealed partial class CredentialsPage : Page
 
     private void OnDeleteMenuItemClick(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement { DataContext: CredentialProfile profile })
+        if (ResolveActionTarget(sender) is { } profile)
         {
             ExecuteIfCan(ViewModel.DeleteCredentialCommand, profile);
         }
