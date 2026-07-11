@@ -126,6 +126,7 @@
     <Compile Include="..\Services\Tunneling\AzureVpn\AzureVpnTunnelProvider.cs" Link="Services\Tunneling\AzureVpn\AzureVpnTunnelProvider.cs" />
     <Compile Include="..\Data\Repositories\ITunnelConfigRepository.cs" Link="Data\Repositories\ITunnelConfigRepository.cs" />
     <Compile Include="..\Helpers\AppPaths.cs" Link="Helpers\AppPaths.cs" />
+    <Compile Include="..\Helpers\NonThrowingLogger.cs" Link="Helpers\NonThrowingLogger.cs" />
     <Compile Include="..\Helpers\LogFiles.cs" Link="Helpers\LogFiles.cs" />
     <Compile Include="..\Helpers\AzureAdCredentialDetector.cs" Link="Helpers\AzureAdCredentialDetector.cs" />
     <Compile Include="..\Helpers\Converters\CredentialProfileDisplayConverter.cs" Link="Helpers\Converters\CredentialProfileDisplayConverter.cs" />
@@ -253,11 +254,13 @@
     <Compile Include="..\Interop\Rdp\MsTscAxEventsSink.cs" Link="Interop\Rdp\MsTscAxEventsSink.cs" />
     <Compile Include="..\Interop\Rdp\RdpHostBoundsWindowPos.cs" Link="Interop\Rdp\RdpHostBoundsWindowPos.cs" />
     <Compile Include="..\Interop\Terminal\TerminalBridge.cs" Link="Interop\Terminal\TerminalBridge.cs" />
+    <Compile Include="..\Interop\Terminal\ITerminalOutputSink.cs" Link="Interop\Terminal\ITerminalOutputSink.cs" />
+    <Compile Include="..\Interop\Terminal\TerminalFocusBarrier.cs" Link="Interop\Terminal\TerminalFocusBarrier.cs" />
     <Compile Include="..\Interop\Terminal\TerminalBridgeMessages.cs" Link="Interop\Terminal\TerminalBridgeMessages.cs" />
     <Compile Include="..\Interop\Terminal\TerminalReplayBuffer.cs" Link="Interop\Terminal\TerminalReplayBuffer.cs" />
-    <Compile Include="..\Interop\Terminal\TerminalOutputCoalescer.cs" Link="Interop\Terminal\TerminalOutputCoalescer.cs" />
+    <Compile Include="..\Interop\Terminal\TerminalOutputPump.cs" Link="Interop\Terminal\TerminalOutputPump.cs" />
+    <Compile Include="..\Interop\Terminal\TerminalInitializationRecoveryGate.cs" Link="Interop\Terminal\TerminalInitializationRecoveryGate.cs" />
     <Compile Include="..\Interop\Terminal\TerminalInputWriter.cs" Link="Interop\Terminal\TerminalInputWriter.cs" />
-    <Compile Include="..\Interop\Terminal\TerminalFlowController.cs" Link="Interop\Terminal\TerminalFlowController.cs" />
 
     <Compile Include="..\Models\TransferDirection.cs" Link="Models\TransferDirection.cs" />
     <Compile Include="..\Models\TransferRequest.cs" Link="Models\TransferRequest.cs" />
@@ -275,9 +278,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Include="..\Interop\Terminal\TerminalBridge.cs" Link="Interop\Terminal\TerminalBridge.cs.txt" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Assets\web\bridge.js" Link="Assets\web\bridge.js" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Assets\web\terminal.html" Link="Assets\web\terminal.html" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\scripts\Fetch-WebAssets.ps1" Link="scripts\Fetch-WebAssets.ps1" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\ViewModels\Sessions\SshSessionViewModel.cs" Link="ViewModels\Sessions\SshSessionViewModel.cs.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\ViewModels\Sessions\SerialSessionViewModel.cs" Link="ViewModels\Sessions\SerialSessionViewModel.cs.txt" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Views\Sessions\SshTerminalView.xaml" Link="Views\Sessions\SshTerminalView.xaml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Views\Sessions\SshTerminalView.xaml.cs" Link="Views\Sessions\SshTerminalView.xaml.cs.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

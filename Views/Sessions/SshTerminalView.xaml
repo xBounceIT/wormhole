@@ -6,7 +6,8 @@
     xmlns:controls="using:Microsoft.UI.Xaml.Controls"
     xmlns:views="using:Wormhole.Views.Sessions">
 
-    <Grid Background="#0c0c0c"
+    <Grid x:Name="TerminalRoot"
+          Background="#0c0c0c"
           HorizontalAlignment="Stretch"
           VerticalAlignment="Stretch"
           MinHeight="240">
@@ -148,6 +149,36 @@
                            HorizontalAlignment="Center" />
                 <Button Content="Reconnect"
                         Command="{Binding RetryCommand}"
+                        HorizontalAlignment="Center" />
+            </StackPanel>
+        </Border>
+
+        <!-- View-local recovery: a replacement WebView2 that also crashes must not tear down a
+             session rendered by another page or restart browser processes without a retry bound. -->
+        <Border x:Name="TerminalRendererRetryOverlay"
+                Background="#0c0c0c"
+                IsHitTestVisible="True"
+                Visibility="Collapsed">
+            <StackPanel HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Spacing="12"
+                        MaxWidth="480"
+                        Padding="24">
+                <FontIcon Glyph="&#xE783;"
+                          FontSize="32"
+                          Foreground="#FF6B6B"
+                          HorizontalAlignment="Center" />
+                <TextBlock Text="Terminal renderer stopped"
+                           Style="{StaticResource SubtitleTextBlockStyle}"
+                           Foreground="#e0e0e0"
+                           HorizontalAlignment="Center" />
+                <TextBlock Text="The browser renderer stopped again while recovering. Retry to create one fresh renderer."
+                           TextWrapping="Wrap"
+                           TextAlignment="Center"
+                           Foreground="#e0e0e0"
+                           Opacity="0.85" />
+                <Button Content="Retry renderer"
+                        Click="OnRetryTerminalRendererClick"
                         HorizontalAlignment="Center" />
             </StackPanel>
         </Border>

@@ -312,8 +312,7 @@
                         </TextBlock>
                         <ToggleSwitch Header="Enable MCP server"
                                       IsOn="{x:Bind ViewModel.EnableMcpServer, Mode=TwoWay}" />
-                        <ToggleSwitch Header="Stream command typing in terminal"
-                                      IsOn="{x:Bind ViewModel.StreamMcpCommandTyping, Mode=TwoWay}" />
+
                         <NumberBox Header="Port"
                                    Value="{x:Bind ViewModel.McpServerPort, Mode=TwoWay}"
                                    SpinButtonPlacementMode="Inline"
