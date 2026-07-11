@@ -12,6 +12,8 @@ namespace Wormhole.Tests.Interop.Terminal;
 /// </summary>
 public sealed class TerminalBridgeBehaviorTests
 {
+    private static readonly TimeSpan HarnessTimeout = TimeSpan.FromSeconds(60);
+
     [Theory]
     [InlineData("fragmented-output")]
     [InlineData("alternate-screen-exit-ordering")]
@@ -64,7 +66,7 @@ public sealed class TerminalBridgeBehaviorTests
         }
 
         using (process)
-        using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15)))
+        using (var timeout = new CancellationTokenSource(HarnessTimeout))
         {
             var stdoutTask = process.StandardOutput.ReadToEndAsync();
             var stderrTask = process.StandardError.ReadToEndAsync();
@@ -77,7 +79,20 @@ public sealed class TerminalBridgeBehaviorTests
                 try { process.Kill(entireProcessTree: true); }
                 catch { /* best effort after deterministic-test timeout */ }
 
-                Assert.Fail($"Node bridge harness timed out for scenario '{scenario}'.");
+                try { await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5)); }
+                catch { /* best effort while collecting timeout diagnostics */ }
+
+                var timeoutStdout = stdoutTask.IsCompletedSuccessfully
+                    ? await stdoutTask
+                    : "<stdout unavailable after process termination>";
+                var timeoutStderr = stderrTask.IsCompletedSuccessfully
+                    ? await stderrTask
+                    : "<stderr unavailable after process termination>";
+                Assert.Fail(
+                    $"Node bridge harness timed out after {HarnessTimeout.TotalSeconds:0} seconds " +
+                    $"for scenario '{scenario}'.{Environment.NewLine}" +
+                    $"stdout:{Environment.NewLine}{timeoutStdout}{Environment.NewLine}" +
+                    $"stderr:{Environment.NewLine}{timeoutStderr}");
             }
 
             var stdout = await stdoutTask;

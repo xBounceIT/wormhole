@@ -198,6 +198,7 @@ public sealed class SshSessionTests
         session.SignalClientErrorForTesting(new IOException("client failed"));
         stream.ReleaseWriteFailure.TrySetResult();
         await Assert.ThrowsAsync<IOException>(() => write);
+        stream.AllowRemoteEof.TrySetResult();
         Assert.Equal(tail, await received.Task.WaitAsync(TimeSpan.FromSeconds(1)));
         await closed.Task.WaitAsync(TimeSpan.FromSeconds(1));
         Assert.Equal(1, stream.CloseCalls);
@@ -591,11 +592,28 @@ public sealed class SshSessionTests
 
     private sealed class DelayedFailingWriteSshSessionStream : TestSshSessionStream
     {
+        private int _readCalls;
+
         public TaskCompletionSource WriteStarted { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public TaskCompletionSource ReleaseWriteFailure { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource AllowRemoteEof { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public override ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken)
+        {
+            if (Interlocked.Increment(ref _readCalls) == 1)
+            {
+                return base.ReadAsync(buffer, cancellationToken);
+            }
+
+            return new(ReadRemoteEofAfterWriteFailureAsync(buffer, cancellationToken));
+        }
 
         public override async ValueTask WriteAsync(
             ReadOnlyMemory<byte> data,
@@ -604,6 +622,14 @@ public sealed class SshSessionTests
             WriteStarted.TrySetResult();
             await ReleaseWriteFailure.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
             throw new IOException("delayed write failure");
+        }
+
+        private async Task<int> ReadRemoteEofAfterWriteFailureAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken)
+        {
+            await AllowRemoteEof.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            return await base.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
         }
     }
 
