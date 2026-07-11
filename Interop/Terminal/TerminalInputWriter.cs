@@ -6,11 +6,13 @@ namespace Wormhole.Interop.Terminal;
 /// Serializes terminal input writes off the WebView2 UI thread. A single keystroke
 /// starts writing immediately; bytes that arrive while that write is still in
 /// flight are coalesced into the next write so rapid typing or paste bursts don't
-/// create one SSH.NET write task per browser message.
+/// create one SSH.NET write task per browser message. Pending input is bounded; a
+/// stalled transport fails closed instead of consuming memory or dropping later keys silently.
 /// </summary>
 internal sealed class TerminalInputWriter : IDisposable
 {
     private const int InitialCapacityBytes = 256;
+    internal const int MaximumPendingBytes = 4 * 1024 * 1024;
     private const int ShrinkThresholdBytes = 16 * 1024;
 
     private readonly Func<ReadOnlyMemory<byte>, Task> _writeAsync;
@@ -42,17 +44,39 @@ internal sealed class TerminalInputWriter : IDisposable
         if (data.IsEmpty) return;
 
         var startWorker = false;
+        Exception? overflow = null;
         lock (_lock)
         {
             if (_disposed) return;
-            EnsureCapacityForAppend(data.Length);
-            data.CopyTo(_buffer.AsSpan(_length));
-            _length += data.Length;
-            if (!_workerRunning)
+            if (data.Length > MaximumPendingBytes - _length)
             {
-                _workerRunning = true;
-                startWorker = true;
+                _disposed = true;
+                _length = 0;
+                if (_buffer.Length > ShrinkThresholdBytes)
+                {
+                    _buffer = new byte[InitialCapacityBytes];
+                }
+                overflow = new IOException(
+                    $"Terminal input backlog exceeded the {MaximumPendingBytes} byte safety limit.");
             }
+            else
+            {
+                EnsureCapacityForAppend(data.Length);
+                data.CopyTo(_buffer.AsSpan(_length));
+                _length += data.Length;
+                if (!_workerRunning)
+                {
+                    _workerRunning = true;
+                    startWorker = true;
+                }
+            }
+        }
+
+        if (overflow is not null)
+        {
+            try { _onWriteFailed(overflow); }
+            catch { }
+            return;
         }
 
         if (startWorker)
@@ -60,7 +84,6 @@ internal sealed class TerminalInputWriter : IDisposable
             _ = Task.Run(FlushLoopAsync);
         }
     }
-
     private async Task FlushLoopAsync()
     {
         while (true)
@@ -69,7 +92,7 @@ internal sealed class TerminalInputWriter : IDisposable
             int length;
             lock (_lock)
             {
-                if (_length == 0)
+                if (_disposed || _length == 0)
                 {
                     _workerRunning = false;
                     return;
@@ -91,8 +114,12 @@ internal sealed class TerminalInputWriter : IDisposable
             }
             catch (Exception ex)
             {
-                _onWriteFailed(ex);
-                Abort();
+                // Owner notification is diagnostic/recovery code and must not strand this worker
+                // if it has its own bug. Abort first-class writer state regardless, then swallow a
+                // callback exception because this fire-and-forget worker has no safe observer.
+                try { _onWriteFailed(ex); }
+                catch { }
+                finally { Abort(); }
                 return;
             }
             finally
@@ -107,9 +134,13 @@ internal sealed class TerminalInputWriter : IDisposable
         lock (_lock)
         {
             _disposed = true;
+            _length = 0;
+            if (_buffer.Length > ShrinkThresholdBytes)
+            {
+                _buffer = new byte[InitialCapacityBytes];
+            }
         }
     }
-
     private void Abort()
     {
         lock (_lock)

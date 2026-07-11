@@ -32,6 +32,13 @@ public interface ITerminalSession : IAsyncDisposable
     /// background thread; subscribers must marshal to the UI thread if they touch UI.
     /// </summary>
     event EventHandler? Closed;
+
+    /// <summary>
+    /// Gets whether transport failure or disposal has begun. Once true, no new writes are
+    /// accepted; a pending <see cref="Closed"/> notification may still be draining final output.
+    /// </summary>
+    bool IsClosing { get; }
+
     /// <summary>
     /// Starts the background read pump. The session does NOT auto-start so consumers
     /// have a chance to subscribe to <see cref="DataReceived"/> and <see cref="Closed"/>
@@ -44,11 +51,11 @@ public interface ITerminalSession : IAsyncDisposable
     Task ResizeAsync(uint columns, uint rows);
 
     /// <summary>
-    /// Pauses the background read pump: it holds before the next read until <see cref="ResumeReading"/>
-    /// is called. Used for terminal flow control so a torrential remote producer (e.g. a flooding
-    /// <c>tcpdump</c>) can't outrun xterm.js and overflow its write buffer — not reading lets the SSH
-    /// channel window fill, which back-pressures the remote. Writes (keystrokes) are unaffected, so the
-    /// user can still send Ctrl+C to stop the flood. Idempotent and safe to call from any thread.
+    /// Requests producer backpressure while xterm.js catches up. Transports with a usable flow
+    /// control mechanism may park their managed read pump. A transport that cannot safely stop its
+    /// peer may continue draining into the terminal pipeline's bounded queue, whose safety cap fails
+    /// closed instead of allowing silent transport-buffer loss. Writes remain active so the user can
+    /// still send Ctrl+C to stop a flooding command.
     /// </summary>
     void PauseReading();
 

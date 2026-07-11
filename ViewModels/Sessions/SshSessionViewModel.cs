@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Web.WebView2.Core;
 using Renci.SshNet.Common;
 using Wormhole.Data.Repositories;
+using Wormhole.Helpers;
 using Wormhole.Interop.Terminal;
 using Wormhole.Models;
 using Wormhole.Services;
@@ -17,7 +18,8 @@ namespace Wormhole.ViewModels.Sessions;
 // the VM is registered as transient in DI ([App.xaml.cs] AddTransient<SshSessionViewModel>),
 // and Microsoft.Extensions.DependencyInjection captures every transient IDisposable in the
 // root scope's _disposables list for the entire app lifetime — implementing IDisposable
-// here would pin every closed-tab VM (~256 KiB replay buffer each) until process exit.
+// here would pin every closed-tab VM and up to ~2 MiB of lazily allocated replay storage
+// after terminal use until process exit.
 // The bridge / session / tunnel / CTS pair are torn down explicitly via DetachAsync /
 // SafeDisposeSessionAsync / CancelRemoteOutputWaitTimer on the documented teardown path.
 #pragma warning disable CA1001
@@ -25,13 +27,15 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
 #pragma warning restore CA1001
 {
     private static readonly TimeSpan RemoteOutputWaitDelay = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan RemoteCloseOutputFlushTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan TerminalBridgeRetirementTimeout = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan AuthenticationFailureEndpointProbeTimeout = TimeSpan.FromSeconds(2);
-    private static readonly TimeSpan McpCommandTypingDelay = TimeSpan.FromMilliseconds(18);
-    private static readonly TimeSpan McpCommandTypingMaxDuration = TimeSpan.FromMilliseconds(2500);
+
     // Wait between automatic reconnect attempts after an unexpected drop. Fixed (not escalating) so a
     // brief blip recovers quickly; a host reboot typically returns within a couple of these.
     private static readonly TimeSpan AutoReconnectDelay = TimeSpan.FromSeconds(10);
     private const int MaxAutoReconnectAttempts = 3;
+    internal const int TerminalReplayCapacityBytes = 1024 * 1024;
     // A reconnect earns its retry budget back only by staying Connected this long. Resetting the
     // budget on first output instead would let a server that emits a banner then immediately closes
     // the shell (forced-command accounts, a crashing MOTD/login script) reset the budget every cycle
@@ -51,7 +55,10 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     private readonly ILogger<SshSessionViewModel> _logger;
 
     private ISshSession? _session;
-    private TerminalBridge? _bridge;
+    private ITerminalOutputSink? _bridge;
+    private object? _bridgeRendererIdentity;
+    private long _terminalFocusGeneration;
+    private TerminalInputWriter? _terminalInputWriter;
     private SshAutoSudoDriver? _autoSudo;
     private CancellationTokenSource? _cts;
     private CoreWebView2? _webView;
@@ -66,6 +73,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     private TerminalSize _initialSize = TerminalSize.Default;
     private CancellationTokenSource? _outputWaitCts;
     private int _connectInFlight;
+    private readonly object _connectCompletionLock = new();
+    private Task? _activeConnectCompletion;
     private int _teardownGeneration;
     private ITunnelInstance? _tunnel;
     // The profile actually used for the live connection's tunnel routing. TunnelEnabled reflects
@@ -99,6 +108,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     // flapping/banner-then-close server. Overridable in tests via _autoReconnectStabilityWindow.
     private CancellationTokenSource? _stabilityResetCts;
     private TimeSpan _autoReconnectStabilityWindow = AutoReconnectStabilityWindow;
+    private TimeSpan _autoReconnectDelay = AutoReconnectDelay;
+    private Func<Task>? _autoReconnectConnectOverrideForTesting;
     // Set by ConnectAsync to categorize its terminal outcome for the auto-reconnect loop: false after a
     // non-retryable failure (auth, host-key, cancelled prompt, missing creds, recoverable tunnel
     // notice), true otherwise. Read only by the loop, immediately after its ConnectAsync call.
@@ -106,6 +117,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
 
     private readonly object _mcpPresentationLock = new();
     private ShellCommandPresentationFilter? _mcpPresentationFilter;
+    private ISshSession? _mcpPresentationSession;
+    private int _mcpPresentationGeneration = -1;
 
     // SFTP pre-warm: as soon as the shell session reaches Connected we open an SFTP
     // session in the background using the *same* creds the shell successfully used. The
@@ -127,12 +140,25 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     // created (Sessions ↔ Settings navigation), the new xterm.js has no scrollback,
     // and an idle prompt sends nothing new. AttachAsync's rebind path replays this
     // buffer so the user doesn't see a black void.
-    private readonly TerminalReplayBuffer _replayBuffer = new(256 * 1024);
+    private readonly TerminalReplayBuffer _replayBuffer = new(TerminalReplayCapacityBytes);
     // Bytes that arrived while no TerminalBridge was attached. Same-WebView tab reattach keeps
     // xterm.js alive, so only this delta should be replayed; full _replayBuffer replay would
     // duplicate already-visible output.
-    private readonly TerminalReplayBuffer _detachedReplayBuffer = new(256 * 1024);
+    private readonly TerminalReplayBuffer _detachedReplayBuffer = new(TerminalReplayCapacityBytes);
     private readonly object _terminalReplayLock = new();
+    private object? _pendingRendererRecoveryIdentity;
+    private string? _pendingRendererRecoveryMessage;
+    private ITerminalOutputSink? _pendingRendererRecoverySourceSink;
+    private int _pendingRendererRecoveryGeneration = -1;
+    private TerminalSize _replayGeometry = TerminalSize.Default;
+    private bool _replayHasOutput;
+    private bool _replayGeometryChanged;
+    private bool _detachedReplayGeometryChanged;
+    private bool _replayHasUnacknowledgedOutput;
+    private bool _replayRetirementFailed;
+    private bool _sessionlessRendererRecoveryAttempted;
+    private Task _terminalSinkRetirement = Task.CompletedTask;
+    private object? _terminalSinkRetirementIdentity;
 
     public SshSessionViewModel(
         ISshSessionService sshService,
@@ -153,8 +179,10 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         _tunnelPrompter = tunnelPrompter;
         _profileResolver = profileResolver;
         _sftpService = sftpService;
-        _loggerFactory = loggerFactory;
-        _logger = loggerFactory.CreateLogger<SshSessionViewModel>();
+        _loggerFactory = loggerFactory is NonThrowingLoggerFactory
+            ? loggerFactory
+            : new NonThrowingLoggerFactory(loggerFactory);
+        _logger = _loggerFactory.CreateLogger<SshSessionViewModel>();
         PropertyChanged += (_, args) =>
         {
             if (args.PropertyName == nameof(Status))
@@ -231,6 +259,118 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         _suppressAutoConnectOnReattach = false;
     }
 
+    public void UpdateTerminalSize(TerminalSize size) =>
+        UpdateTerminalSizeCore(size, sourceSession: null, sourceGeneration: null, geometryIsUncertain: false);
+
+    private void UpdateTerminalSizeFromBridge(
+        ISshSession sourceSession,
+        int sourceGeneration,
+        TerminalSize size,
+        bool geometryIsUncertain) =>
+        UpdateTerminalSizeCore(size, sourceSession, sourceGeneration, geometryIsUncertain);
+
+    private void UpdateTerminalSizeCore(
+        TerminalSize size,
+        ISshSession? sourceSession,
+        int? sourceGeneration,
+        bool geometryIsUncertain)
+    {
+        if (size.Columns == 0 || size.Rows == 0) return;
+        lock (_terminalReplayLock)
+        {
+            if (sourceSession is not null &&
+                (!sourceGeneration.HasValue ||
+                 !IsAttemptCurrent(sourceGeneration.Value) ||
+                 (!ReferenceEquals(sourceSession, _session) && _session is not null)))
+            {
+                return;
+            }
+
+            var changed = size != _initialSize;
+            var belongsToReplayEpoch =
+                sourceSession is not null ||
+                _session is not null ||
+                _replayHasOutput ||
+                _replayBuffer.Count > 0;
+            if (belongsToReplayEpoch &&
+                (geometryIsUncertain ||
+                 (changed &&
+                  (_bridge is null || sourceSession?.IsClosing == true || _session?.IsClosing == true))))
+            {
+                // The renderer and PTY may have crossed this boundary at different instants. Even
+                // if the final dimensions later match again, raw TUI bytes are no longer exact.
+                _detachedReplayGeometryChanged = true;
+            }
+
+            _initialSize = size;
+            if (_session is null || size == _replayGeometry) return;
+
+            if (_replayHasOutput)
+            {
+                _replayGeometryChanged = true;
+            }
+            else
+            {
+                _replayGeometry = size;
+            }
+        }
+    }
+
+    public TerminalRendererRecoveryLease CaptureTerminalRendererRecoveryLease() =>
+        new(Volatile.Read(ref _teardownGeneration));
+
+    public async Task<TerminalRendererRecoveryLease> HandleTerminalRendererFailureAsync(string message)
+    {
+        var preserveExplicitDisconnect =
+            _suppressAutoConnectOnReattach &&
+            Status == SessionStatus.Disconnected;
+        CancelAutoReconnect();
+        SetAutoReconnectAttempts(0);
+        bool preserveSessionlessOutput;
+        lock (_terminalReplayLock)
+        {
+            preserveSessionlessOutput =
+                _session is null &&
+                (_replayHasOutput || _replayBuffer.Count > 0);
+        }
+        var teardownGeneration = await TearDownSessionAsync(
+            preserveSessionlessOutput).ConfigureAwait(true);
+        if (IsAttemptCurrent(teardownGeneration) &&
+            !preserveExplicitDisconnect &&
+            !(_suppressAutoConnectOnReattach && Status == SessionStatus.Disconnected))
+        {
+            ReportFailure(message);
+        }
+        return new TerminalRendererRecoveryLease(teardownGeneration);
+    }
+
+    public async Task<TerminalRendererRecoveryLease?> TryHandleTerminalRendererFailureAsync(
+        object? rendererIdentity,
+        string message)
+    {
+        Task<TerminalRendererRecoveryLease> recoveryTask;
+        lock (_terminalReplayLock)
+        {
+            // A view with no registered renderer may own first-start failure reporting. Once a
+            // renderer is registered, only that exact page may tear down the protocol session.
+            if (_lastAttachedWebView is not null &&
+                !ReferenceEquals(rendererIdentity, _lastAttachedWebView))
+            {
+                return null;
+            }
+
+            // HandleTerminalRendererFailureAsync advances the lifecycle synchronously before its
+            // first await. Starting it under the renderer lock makes authorization + teardown
+            // reservation atomic with RegisterAttachedWebView and scoped DetachView.
+            recoveryTask = HandleTerminalRendererFailureAsync(message);
+        }
+
+        return await recoveryTask.ConfigureAwait(true);
+    }
+
+    public bool IsTerminalRendererRecoveryCurrent(TerminalRendererRecoveryLease lease) =>
+        IsAttemptCurrent(lease.LifecycleGeneration);
+
     public async Task AttachAsync(CoreWebView2 webView, TerminalSize initialSize)
     {
         if (Profile is null)
@@ -242,10 +382,31 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         // replaying onto it would duplicate bytes, so the focus request repaints it instead.
         var xtermIsFresh = RegisterAttachedWebView(webView);
         _webView = webView;
-        _initialSize = initialSize;
+        if (xtermIsFresh)
+        {
+            UpdateTerminalSize(initialSize);
+        }
         // AttachAsync is called from the UI thread (SshTerminalView's ready handler);
         // capture the dispatcher now so background callbacks (Closed) can marshal back.
         EnsureDispatcher();
+
+        // Detach seals the old bridge but deliberately keeps its WebView listener alive until
+        // xterm has parsed every accepted frame and emitted any DA/DSR/CPR reply. Do not replay
+        // or publish a replacement bridge until that exact retirement result is committed.
+        await AwaitPendingTerminalSinkRetirementAsync().ConfigureAwait(true);
+        if (!IsRendererBindingCurrent(webView)) return;
+
+        if (_session is null)
+        {
+            // A remote close may have happened while this page was absent. Reconstruct the final
+            // transcript before either a deferred reconnect clears it or a Failed tab returns.
+            if (!await RestoreSessionlessTerminalAsync(
+                    webView,
+                    xtermIsFresh).ConfigureAwait(true))
+            {
+                return;
+            }
+        }
 
         // Reconnect was requested from the tab context menu while the view was unloaded
         // (background tab) — RetryAsync couldn't fan out to the now-unsubscribed init
@@ -257,23 +418,16 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             // Same reasoning as RetryAsync: skip the Disconnected interlude that
             // DetachAsync would introduce, so the connecting overlay is up for
             // the entire teardown→reconnect window and no phantom text flashes
-            // through. Clear xterm.js now so it's empty by the time Connected
-            // hides the overlay.
+            // through. ConnectAsync clears xterm only after teardown, keeping the
+            // reset ordered behind every frame already posted by the old bridge.
             Status = SessionStatus.Connecting;
             // Blank the stepper now (synchronously, before the teardown await below) so the prior
             // attempt's stale steps — a red Failed step, or an all-completed run — don't render in
             // the connecting overlay during the (100s-of-ms) session/tunnel teardown. ConnectAsync's
             // InitializeProgress rebuilds it fresh. Mirrors RDP's FullTeardownAsync, which resets first.
             Progress.Reset();
-            try
-            {
-                webView.PostWebMessageAsString("clear:");
-            }
-            catch (Exception ex)
-            {
-                _logger.LogDebug(ex, "Suppressed exception while clearing xterm.js before background-tab reconnect.");
-            }
-            await TearDownSessionAsync().ConfigureAwait(true);
+            var reconnectGeneration = await TearDownSessionAsync().ConfigureAwait(true);
+            if (!IsAttemptCurrent(reconnectGeneration)) return;
             await ConnectAsync().ConfigureAwait(true);
 
             // This single connect realized the attempt that the background drop deferred while the view
@@ -294,8 +448,41 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         // prompt + connect — rebind the bridge to the (possibly new) WebView and
         // resync geometry. Replay only when xterm.js is fresh; same-WebView reattach
         // keeps the prior buffer and lets the focus request repaint its existing canvas.
-        if (_session is not null)
+        if (_session is { } attachedSession)
         {
+            var attachGeneration = Volatile.Read(ref _teardownGeneration);
+            if (_connectedWhileDetached)
+            {
+                try
+                {
+                    await TerminalBridge.ResetSessionlessAsync(webView).ConfigureAwait(true);
+                }
+                catch (Exception) when (!IsRendererBindingCurrent(
+                    attachGeneration,
+                    attachedSession,
+                    webView))
+                {
+                    return;
+                }
+                if (!IsRendererBindingCurrent(
+                        attachGeneration,
+                        attachedSession,
+                        webView))
+                {
+                    return;
+                }
+            }
+
+            await RetireCurrentTerminalOutputSinkAsync(
+                preserveSessionOutput: true).ConfigureAwait(true);
+            if (!IsRendererBindingCurrent(
+                    attachGeneration,
+                    attachedSession,
+                    webView))
+            {
+                return;
+            }
+
             // Snapshot and enqueue replay before publishing the new bridge: bytes before
             // the lock are replayed first, while bytes after the lock render live through
             // the new bridge and cannot overtake the older replay batch.
@@ -305,27 +492,93 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             // bytes captured while no bridge existed; replaying the full buffer would duplicate
             // output that xterm.js already rendered before the tab was hidden.
             var newBridge = CreateTerminalBridge(webView);
-            TerminalBridge? oldBridge;
+            var replayIsExact = false;
             lock (_terminalReplayLock)
             {
-                var snapshot = TakeReattachReplaySnapshotUnderLock(xtermIsFresh);
-                oldBridge = _bridge;
-                if (snapshot is not null) newBridge.Replay(snapshot);
-                _bridge = newBridge;
+                replayIsExact = TryTakeReattachReplaySnapshotUnderLock(
+                    xtermIsFresh,
+                    out var historicalReplay,
+                    out var liveDetachedReplay);
+                if (replayIsExact)
+                {
+                    ReplayAndPublishTerminalOutputSinkUnderLock(
+                        newBridge,
+                        webView,
+                        historicalReplay,
+                        liveDetachedReplay);
+                }
             }
-            oldBridge?.Dispose();
-            await _session.ResizeAsync(initialSize.Columns, initialSize.Rows).ConfigureAwait(true);
-            newBridge.RequestFocus();
+            if (!replayIsExact)
+            {
+                newBridge.Dispose();
+                // Rejection means a replacement renderer owns recovery; it is an intentional no-op.
+                await TryHandleTerminalRendererFailureAsync(
+                    webView,
+                    "The terminal view was recreated after its exact replay history expired. " +
+                    "The connection was closed to avoid corrupting terminal state; retry to reconnect.")
+                    .ConfigureAwait(true);
+                return;
+            }
+
+            try
+            {
+                if (!IsTerminalAttachmentCurrent(
+                        attachGeneration,
+                        attachedSession,
+                        newBridge,
+                        webView))
+                {
+                    return;
+                }
+                if (xtermIsFresh)
+                {
+                    await attachedSession.ResizeAsync(_initialSize.Columns, _initialSize.Rows)
+                        .ConfigureAwait(true);
+                    if (!IsTerminalAttachmentCurrent(
+                            attachGeneration,
+                            attachedSession,
+                            newBridge,
+                            webView))
+                    {
+                        return;
+                    }
+                }
+                await newBridge.RequestFocusAsync().ConfigureAwait(true);
+                if (!IsTerminalAttachmentCurrent(
+                        attachGeneration,
+                        attachedSession,
+                        newBridge,
+                        webView))
+                {
+                    return;
+                }
+                ConfirmRetiredTerminalOutputParsed(newBridge);
+                TryPublishConnectedAfterTerminalFocus(
+                    attachGeneration,
+                    attachedSession,
+                    newBridge,
+                    webView);
+            }
+            catch (Exception) when (!IsTerminalAttachmentCurrent(
+                attachGeneration,
+                attachedSession,
+                newBridge,
+                webView))
+            {
+                // The session, page, or bridge was retired while resize/focus awaited.
+                return;
+            }
+
             EnsureRemoteOutputWaitTimer();
             return;
         }
 
         // No live session to reattach to. A genuine first show connects below; but an incidental
         // view reload (Sessions<->Settings nav, a manual tab switch, or the closest-neighbour
-        // selection SessionsPage drives when the active tab is closed) onto a tab that has since
-        // DROPPED must not silently reconnect. A background SSH drop lands in Failed
-        // (OnSessionClosed -> ReportFailure), which renders the in-pane Retry overlay; leave it
-        // standing and let the user choose. Disconnected reattaches still auto-recover because
+        // selection SessionsPage drives when the active tab is closed) must not silently restart a
+        // tab whose bounded auto-reconnect budget ended in Failed. Leave its Retry overlay standing
+        // and let the user choose. Transient drops remain Connecting and recover automatically.
+        // Disconnected reattaches still auto-recover because
         // the usual post-attempt Disconnected path is a connect interrupted by a nav-away, unless
         // an explicit cancellation/disconnect set the suppression flag handled below.
         if (ShouldDeferAutoConnectOnReattach())
@@ -342,7 +595,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     // can recover through the normal attach path.
     internal bool ShouldDeferAutoConnectOnReattach() =>
         Status == SessionStatus.Failed ||
-        (Status == SessionStatus.Disconnected && _suppressAutoConnectOnReattach);
+        _suppressAutoConnectOnReattach;
 
     /// <summary>
     /// Raised when <see cref="RetryAsync"/> is invoked but the view's WebView2 never
@@ -350,11 +603,53 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     /// Retry button isn't dead in WebView2-failure scenarios.
     /// </summary>
     public event Action? InitializationRetryRequested;
+    public event Action? TerminalRendererRecoveryRequested;
+
+    public bool OwnsTerminalRenderer(object? rendererIdentity)
+    {
+        if (rendererIdentity is null) return false;
+        lock (_terminalReplayLock)
+        {
+            return ReferenceEquals(rendererIdentity, _lastAttachedWebView);
+        }
+    }
+
+    public bool TryTakeTerminalRendererRecoveryRequest(object? rendererIdentity, out string message)
+    {
+        lock (_terminalReplayLock)
+        {
+            if (_pendingRendererRecoveryIdentity is null)
+            {
+                message = string.Empty;
+                return false;
+            }
+
+            if (_pendingRendererRecoveryGeneration != Volatile.Read(ref _teardownGeneration) ||
+                (_pendingRendererRecoverySourceSink is { } sourceSink &&
+                 !IsTerminalOutputFailureCurrentUnderLock(
+                     sourceSink,
+                     _pendingRendererRecoveryIdentity,
+                     _pendingRendererRecoveryGeneration)) ||
+                !ReferenceEquals(_pendingRendererRecoveryIdentity, rendererIdentity))
+            {
+                // A retired bridge, lifecycle, or WebView page cannot poison its replacement.
+                ClearPendingRendererRecoveryUnderLock();
+                message = string.Empty;
+                return false;
+            }
+
+            message = _pendingRendererRecoveryMessage ??
+                "The terminal renderer stopped responding. Reconnect to restore a clean terminal state.";
+            ClearPendingRendererRecoveryUnderLock();
+            return true;
+        }
+    }
 
     [RelayCommand(AllowConcurrentExecutions = false, CanExecute = nameof(CanRetry))]
     public async Task RetryAsync()
     {
         if (Volatile.Read(ref _connectInFlight) != 0) return;
+        var retryGeneration = Interlocked.Increment(ref _teardownGeneration);
 
         // A manual Retry supersedes any pending automatic reconnect and starts a fresh budget — the
         // user is explicitly driving now, so cancel the loop/deferred intent so they can't race.
@@ -369,7 +664,11 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         // it — so without this, disabling the tunnel (or any other edit) after the tab was opened
         // would be ignored on Retry. Done before the detached-view branch below so the deferred
         // background-tab reconnect path (AttachAsync) also uses the refreshed profile.
-        await RefreshProfileFromRepositoryAsync().ConfigureAwait(true);
+        if (!await RefreshProfileFromRepositoryAsync(retryGeneration).ConfigureAwait(true) ||
+            !IsAttemptCurrent(retryGeneration))
+        {
+            return;
+        }
         _suppressAutoConnectOnReattach = false;
 
         if (_webView is null)
@@ -402,23 +701,15 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         // hands off directly to the opaque connecting overlay — going through
         // DetachAsync's Status=Disconnected interlude would otherwise leave a
         // sub-frame window with no overlay, exposing the prior session's text as
-        // a brief phantom flash. Post the clear in the same sync chunk so xterm.js
-        // is wiped while the overlay covers it, ready for the Connected handoff.
+        // a brief phantom flash. ConnectAsync clears xterm after the old bridge is
+        // disposed, so the reset cannot be overtaken by pending old-session output.
         Status = SessionStatus.Connecting;
         // See the reconnect-while-detached branch in AttachAsync: reset the stepper before the
         // teardown await so the failed/completed steps from the previous attempt don't linger in
         // the connecting overlay while the old session + tunnel are torn down.
         Progress.Reset();
-        try
-        {
-            _webView.PostWebMessageAsString("clear:");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Suppressed exception while clearing xterm.js before retry.");
-        }
-
-        await TearDownSessionAsync().ConfigureAwait(true);
+        var reconnectGeneration = await TearDownSessionAsync().ConfigureAwait(true);
+        if (!IsAttemptCurrent(reconnectGeneration)) return;
         ErrorMessage = null;
         await ConnectAsync().ConfigureAwait(true);
     }
@@ -434,18 +725,19 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     /// profile when the node was deleted or can't be resolved. Runs on the UI thread (RetryAsync
     /// is a UI-invoked command), so <see cref="SessionTabViewModel.UpdateProfile"/> is safe here.
     /// </summary>
-    private async Task RefreshProfileFromRepositoryAsync()
+    private async Task<bool> RefreshProfileFromRepositoryAsync(int lifecycleGeneration)
     {
         var current = Profile;
-        if (current is null) return;
+        if (current is null) return IsAttemptCurrent(lifecycleGeneration);
 
         var refreshed = await _profileResolver.ResolveAsync(current.NodeId).ConfigureAwait(true);
-        if (refreshed is null) return;
+        if (!IsAttemptCurrent(lifecycleGeneration)) return false;
+        if (refreshed is null) return true;
 
         // This tab's view is fixed to its protocol at open time. If the saved connection's
         // protocol was switched (e.g. SSH→RDP) while the tab is open, the resolved profile is
         // unusable here — keep the cached one rather than SSH-connecting to an RDP profile.
-        if (refreshed.Protocol != Protocol) return;
+        if (refreshed.Protocol != Protocol) return true;
 
         // Never silently drop a host key we already pinned this session. The resolver reads the
         // DB, where a pin written by this tab's connect normally lives — but if that best-effort
@@ -459,6 +751,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
 
         UpdateProfile(refreshed);
         _initialKnownFingerprint = refreshed.SshKnownHostFingerprint;
+        return true;
     }
 
     [RelayCommand]
@@ -476,7 +769,16 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         _suppressAutoConnectOnReattach = true;
         CancelAutoReconnect();
         SetAutoReconnectAttempts(0);
-        await TearDownSessionAsync().ConfigureAwait(true);
+        bool preserveSessionlessOutput;
+        lock (_terminalReplayLock)
+        {
+            preserveSessionlessOutput =
+                _session is null &&
+                (_replayHasOutput || _replayBuffer.Count > 0);
+        }
+        var teardownGeneration = await TearDownSessionAsync(
+            preserveSessionlessOutput).ConfigureAwait(true);
+        if (!IsAttemptCurrent(teardownGeneration)) return;
         Progress.Reset();
         Status = SessionStatus.Disconnected;
     }
@@ -488,16 +790,17 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     // showing, and the user sees the prior session's text flash through. Public
     // DetachAsync is the explicit "user hit Disconnect" path — it still ends in
     // Disconnected and is the only place that should.
-    private async Task TearDownSessionAsync()
+    private async Task<int> TearDownSessionAsync(bool preserveTerminalOutput = false)
     {
-        Interlocked.Increment(ref _teardownGeneration);
+        var teardownGeneration = Interlocked.Increment(ref _teardownGeneration);
         // Signal cancel to any in-flight ConnectAsync; do NOT Dispose() — the awaiter still
         // holds the token. The CTS is GC-eligible once both sides drop their references.
         var cts = _cts;
         _cts = null;
         try { cts?.Cancel(); } catch { /* already disposed */ }
 
-        await SafeDisposeSessionAsync().ConfigureAwait(true);
+        await SafeDisposeSessionAsync(preserveTerminalOutput).ConfigureAwait(true);
+        return teardownGeneration;
     }
 
     public void ReportFailure(string message)
@@ -587,17 +890,50 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     /// </summary>
     public void DetachView(bool preserveTerminalContents = true)
     {
-        TerminalBridge? bridge;
         lock (_terminalReplayLock)
         {
-            bridge = _bridge;
-            _bridge = null;
+            DetachViewUnderLock(preserveTerminalContents);
         }
-        if (bridge is not null)
+    }
+
+    public void DetachView(object? rendererIdentity, bool preserveTerminalContents = true)
+    {
+        if (rendererIdentity is null) return;
+        lock (_terminalReplayLock)
         {
-            try { bridge.Dispose(); }
-            catch (Exception ex) { _logger.LogWarning(ex, "Error disposing TerminalBridge while detaching view."); }
+            if (!ReferenceEquals(rendererIdentity, _lastAttachedWebView)) return;
+            DetachViewUnderLock(preserveTerminalContents);
         }
+    }
+
+    public async Task DetachViewAsync(
+        object? rendererIdentity,
+        bool preserveTerminalContents = true)
+    {
+        if (rendererIdentity is null) return;
+
+        Task retirement;
+        lock (_terminalReplayLock)
+        {
+            if (ReferenceEquals(rendererIdentity, _lastAttachedWebView))
+            {
+                DetachViewUnderLock(preserveTerminalContents);
+            }
+            else if (!ReferenceEquals(
+                         rendererIdentity,
+                         _terminalSinkRetirementIdentity))
+            {
+                return;
+            }
+            retirement = _terminalSinkRetirement;
+        }
+
+        await retirement.ConfigureAwait(true);
+    }
+
+    private void DetachViewUnderLock(bool preserveTerminalContents)
+    {
+        RetireTerminalOutputSinkUnderLock(preserveSessionOutput: true);
         _webView = null;
         if (!preserveTerminalContents)
         {
@@ -607,6 +943,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
 
     internal void AttachConnectedSessionForTesting(ISshSession session, ITunnelInstance? tunnel = null)
     {
+        Interlocked.Increment(ref _teardownGeneration);
         ResetOutputState();
         ClearTerminalReplayBuffers();
         if (_session is not null)
@@ -618,13 +955,181 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         // Lets a test exercise the SFTP-borrows-the-session-tunnel path (BorrowTunnelForSftp), which the
         // real ConnectAsync would normally populate.
         _tunnel = tunnel;
-        _session = session;
+        _terminalInputWriter?.Dispose();
+        lock (_terminalReplayLock)
+        {
+            _session = session;
+            ResetReplayCheckpointUnderLock();
+        }
+        _terminalInputWriter = CreateTerminalInputWriter(session);
         _session.DataReceived += OnSessionDataReceived;
         _session.Closed += OnSessionClosed;
         Status = SessionStatus.Connected;
         StartRemoteOutputWaitTimer();
         // Mirror ConnectAsync's success path so tests can exercise the stability-based budget reset.
         StartAutoReconnectStabilityTimer();
+    }
+
+    private bool TryCreateSessionlessReplaySnapshotUnderLock(
+        bool xtermIsFresh,
+        out byte[]? replay)
+    {
+        replay = null;
+        var hasOutput = _replayHasOutput || _replayBuffer.Count > 0;
+        if (!hasOutput) return true;
+
+        var needsReconstruction =
+            xtermIsFresh ||
+            _connectedWhileDetached ||
+            _detachedReplayBuffer.Count > 0 ||
+            _detachedReplayGeometryChanged ||
+            _replayHasUnacknowledgedOutput ||
+            _replayRetirementFailed;
+        if (!needsReconstruction) return true;
+
+        if (_replayBuffer.HasTruncated ||
+            _replayGeometryChanged ||
+            _detachedReplayGeometryChanged ||
+            _initialSize != _replayGeometry)
+        {
+            return false;
+        }
+
+        replay = _replayBuffer.Snapshot();
+        return true;
+    }
+
+    private async Task<bool> RestoreSessionlessTerminalAsync(
+        CoreWebView2 webView,
+        bool xtermIsFresh,
+        TimeSpan? timeout = null)
+    {
+        var restoreGeneration = Volatile.Read(ref _teardownGeneration);
+        byte[]? replay;
+        bool isExact;
+        lock (_terminalReplayLock)
+        {
+            if (_session is not null || !ReferenceEquals(webView, _webView)) return false;
+            isExact = TryCreateSessionlessReplaySnapshotUnderLock(xtermIsFresh, out replay);
+        }
+
+        if (!isExact)
+        {
+            _logger.LogWarning(
+                "Could not reconstruct preserved SSH output because its exact history or geometry expired.");
+            if (Status != SessionStatus.Disconnected)
+            {
+                ReportFailure(
+                    "The final terminal output could not be restored exactly. Reconnect to start a clean session.");
+            }
+            return false;
+        }
+        if (replay is null) return true;
+
+        try
+        {
+            await TerminalBridge.ReplaySessionlessAsync(
+                webView,
+                replay,
+                timeout).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not render preserved output from the closed SSH session.");
+            if (IsAttemptCurrent(restoreGeneration) &&
+                _session is null &&
+                ReferenceEquals(webView, _webView))
+            {
+                // Keep every replay buffer intact and recreate this exact renderer. Returning false
+                // prevents Attach/auto-reconnect from installing a new session on the broken page.
+                RequestSessionlessRendererRecovery(
+                    webView,
+                    restoreGeneration,
+                    "The terminal renderer could not restore the final SSH output.");
+            }
+            return false;
+        }
+
+        lock (_terminalReplayLock)
+        {
+            if (!IsAttemptCurrent(restoreGeneration) ||
+                _session is not null ||
+                !ReferenceEquals(webView, _webView))
+            {
+                return false;
+            }
+
+            _detachedReplayBuffer.Clear();
+            _connectedWhileDetached = false;
+            _replayHasUnacknowledgedOutput = false;
+            _replayRetirementFailed = false;
+            _sessionlessRendererRecoveryAttempted = false;
+        }
+        return true;
+    }
+
+    private async Task FlushTerminalOutputBeforeRemoteCloseAsync(
+        ISshSession? closedSession,
+        int closeGeneration,
+        long outputDeadline)
+    {
+        while (true)
+        {
+            ITerminalOutputSink? sink;
+            lock (_terminalReplayLock)
+            {
+                if (!IsAttemptCurrent(closeGeneration) ||
+                    !ReferenceEquals(closedSession, _session))
+                {
+                    return;
+                }
+                sink = _bridge;
+            }
+            if (sink is null) return;
+
+            var remaining = TimeSpan.FromMilliseconds(outputDeadline - Environment.TickCount64);
+            if (remaining <= TimeSpan.Zero)
+            {
+                _logger.LogWarning(
+                    "Timed out preserving terminal output before the remote SSH session closed.");
+                return;
+            }
+
+            var flushed = false;
+            try
+            {
+                flushed = await sink.FlushOutputAsync(remaining).ConfigureAwait(true);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Could not confirm terminal output delivery before the remote SSH session closed.");
+            }
+
+            lock (_terminalReplayLock)
+            {
+                if (!IsAttemptCurrent(closeGeneration) ||
+                    !ReferenceEquals(closedSession, _session))
+                {
+                    return;
+                }
+                if (!ReferenceEquals(sink, _bridge))
+                {
+                    // Renderer recovery replaced the sink while the close was being drained. Flush
+                    // the replacement within the same overall deadline before retiring it.
+                    continue;
+                }
+            }
+
+            if (!flushed)
+            {
+                _logger.LogWarning(
+                    "Terminal output could not be acknowledged before the remote SSH session closed; " +
+                    "unposted bytes will be retained in the replay checkpoint.");
+            }
+            return;
+        }
     }
 
     private void OnSessionClosed(object? sender, EventArgs e)
@@ -641,7 +1146,45 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             // server immediately closes the shell after auth (e.g. forced-command accounts).
             if (!ReferenceEquals(closedSession, _session)) return;
             if (Status == SessionStatus.Failed || Status == SessionStatus.Disconnected) return;
-            await SafeDisposeSessionAsync().ConfigureAwait(true);
+            var closeGeneration = Volatile.Read(ref _teardownGeneration);
+            var outputDeadline = Environment.TickCount64 +
+                (long)RemoteCloseOutputFlushTimeout.TotalMilliseconds;
+            // The remote endpoint is already closing. Hide the interactive surface immediately so
+            // keystrokes cannot appear accepted while the protocol writer is discarding them.
+            Status = SessionStatus.Connecting;
+            await FlushTerminalOutputBeforeRemoteCloseAsync(
+                closedSession,
+                closeGeneration,
+                outputDeadline).ConfigureAwait(true);
+            if (!IsAttemptCurrent(closeGeneration) || !ReferenceEquals(closedSession, _session)) return;
+
+            // Preserve the replay checkpoint while the dead connection is visible. A foreground
+            // reconnect deliberately clears it when the next lifecycle begins; until then, any
+            // unposted fallback bytes remain recoverable if the view is recreated.
+            await SafeDisposeSessionAsync(preserveTerminalOutput: true).ConfigureAwait(true);
+
+            if (!IsAttemptCurrent(closeGeneration) || _session is not null) return;
+            // SafeDisposeSessionAsync seals the bridge synchronously, but ordered retirement remains
+            // asynchronous while xterm parses its accepted prefix and returns any parser replies. Do
+            // not clear/replay the page from a sessionless snapshot until the latest published sink
+            // retirement has completed; otherwise late d: frames can land after the q: reconstruction.
+            await AwaitPendingTerminalSinkRetirementAsync().ConfigureAwait(true);
+            if (!IsAttemptCurrent(closeGeneration) || _session is not null) return;
+            var remainingOutputBudget = TimeSpan.FromMilliseconds(
+                outputDeadline - Environment.TickCount64);
+            if (_webView is { } closedSessionWebView)
+            {
+                // A timed-out/failed live flush leaves an exact full checkpoint. Reconstruct it on
+                // the still-current page now, but never extend the close's one shared output deadline.
+                if (!await RestoreSessionlessTerminalAsync(
+                        closedSessionWebView,
+                        xtermIsFresh: false,
+                        remainingOutputBudget).ConfigureAwait(true))
+                {
+                    return;
+                }
+                if (!IsAttemptCurrent(closeGeneration) || _session is not null) return;
+            }
 
             // Re-check after the await: SafeDisposeSessionAsync yields on the real socket close, and a
             // user teardown (Disconnect / tab close → DetachAsync) can land during that window and move
@@ -655,7 +1198,9 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             if (_autoReconnectAttempts >= MaxAutoReconnectAttempts)
             {
                 // Budget spent — surface the Failed overlay with the explanatory exhaustion message
-                // instead of the generic Disconnected fallback.
+                // instead of the generic Disconnected fallback. Mark this outcome terminal so an
+                // active loop cannot classify it as transient and prefix the exhaustion note again.
+                _lastConnectRetryable = false;
                 ReportFailure($"Remote session closed. {ReconnectExhaustedNote}");
                 return;
             }
@@ -677,13 +1222,198 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         });
     }
 
+    private void OnTerminalOutputTransportFailed(
+        ITerminalOutputSink? sourceSink,
+        object rendererIdentity,
+        string message)
+    {
+        if (sourceSink is null) return;
+        var failureGeneration = Volatile.Read(ref _teardownGeneration);
+        lock (_terminalReplayLock)
+        {
+            if (!IsTerminalOutputFailureCurrentUnderLock(
+                    sourceSink,
+                    rendererIdentity,
+                    failureGeneration))
+            {
+                return;
+            }
+
+            _pendingRendererRecoveryIdentity = rendererIdentity;
+            _pendingRendererRecoveryMessage = message;
+            _pendingRendererRecoverySourceSink = sourceSink;
+            _pendingRendererRecoveryGeneration = failureGeneration;
+        }
+
+        MarshalToUi(async () =>
+        {
+            lock (_terminalReplayLock)
+            {
+                if (!IsTerminalOutputFailureCurrentUnderLock(
+                        sourceSink,
+                        rendererIdentity,
+                        failureGeneration) ||
+                    !ReferenceEquals(_pendingRendererRecoverySourceSink, sourceSink) ||
+                    _pendingRendererRecoveryGeneration != failureGeneration)
+                {
+                    if (ReferenceEquals(_pendingRendererRecoverySourceSink, sourceSink) &&
+                        _pendingRendererRecoveryGeneration == failureGeneration)
+                    {
+                        ClearPendingRendererRecoveryUnderLock();
+                    }
+                    return;
+                }
+            }
+
+            var handler = TerminalRendererRecoveryRequested;
+            if (handler is not null)
+            {
+                handler();
+                return;
+            }
+
+            var teardownGeneration = await TearDownSessionAsync().ConfigureAwait(true);
+            if (IsAttemptCurrent(teardownGeneration) && Status != SessionStatus.Disconnected)
+            {
+                ReportFailure(message);
+            }
+        });
+    }
+
+    private bool IsTerminalOutputFailureCurrentUnderLock(
+        ITerminalOutputSink sourceSink,
+        object rendererIdentity,
+        int lifecycleGeneration) =>
+        ReferenceEquals(sourceSink, _bridge) &&
+        IsAttemptCurrent(lifecycleGeneration) &&
+        (ReferenceEquals(rendererIdentity, _webView) ||
+         ReferenceEquals(rendererIdentity, _lastAttachedWebView));
+
+    private void RequestSessionlessRendererRecovery(
+        object rendererIdentity,
+        int lifecycleGeneration,
+        string message)
+    {
+        Action? recoveryHandler = null;
+        var recoveryBudgetExhausted = false;
+        lock (_terminalReplayLock)
+        {
+            if (!IsAttemptCurrent(lifecycleGeneration) ||
+                _session is not null ||
+                !ReferenceEquals(rendererIdentity, _lastAttachedWebView))
+            {
+                return;
+            }
+
+            if (_sessionlessRendererRecoveryAttempted)
+            {
+                recoveryBudgetExhausted = true;
+            }
+            else
+            {
+                _sessionlessRendererRecoveryAttempted = true;
+                _pendingRendererRecoveryIdentity = rendererIdentity;
+                _pendingRendererRecoveryMessage = message;
+                _pendingRendererRecoverySourceSink = null;
+                _pendingRendererRecoveryGeneration = lifecycleGeneration;
+                recoveryHandler = TerminalRendererRecoveryRequested;
+            }
+        }
+
+        if (recoveryBudgetExhausted || recoveryHandler is null)
+        {
+            if (Status != SessionStatus.Disconnected)
+            {
+                ReportFailure(message + " Use Retry to start a clean session.");
+            }
+            return;
+        }
+
+        try { recoveryHandler(); }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not request terminal renderer recreation.");
+            if (Status != SessionStatus.Disconnected) ReportFailure(message);
+        }
+    }
+    private void ClearPendingRendererRecoveryUnderLock()
+    {
+        _pendingRendererRecoveryIdentity = null;
+        _pendingRendererRecoveryMessage = null;
+        _pendingRendererRecoverySourceSink = null;
+        _pendingRendererRecoveryGeneration = -1;
+    }
+
     // Both bridge sites — the initial connect below and the AttachAsync rebind after a view
     // reload — wire the same logger category and settings around the live session, so centralize
     // the construction here. Callers reach this only with a live _session (just connected, or
     // guarded by `_session is not null`); the surrounding snapshot/replay/resize/focus differs
     // per site and stays at the call site.
-    private TerminalBridge CreateTerminalBridge(CoreWebView2 view) =>
-        new(view, _session!, _loggerFactory.CreateLogger<TerminalBridge>(), _settingsService);
+    private TerminalBridge CreateTerminalBridge(CoreWebView2 view)
+    {
+        var sourceSession = _session ??
+            throw new InvalidOperationException("A live SSH session is required for the terminal bridge.");
+        var sourceGeneration = Volatile.Read(ref _teardownGeneration);
+        TerminalBridge? bridge = null;
+        bridge = new TerminalBridge(
+            view,
+            sourceSession,
+            _loggerFactory.CreateLogger<TerminalBridge>(),
+            _settingsService,
+            _initialSize,
+            _terminalInputWriter ?? throw new InvalidOperationException("Terminal input writer is unavailable."),
+            (size, geometryIsUncertain) =>
+                UpdateTerminalSizeFromBridge(sourceSession, sourceGeneration, size, geometryIsUncertain),
+            message => OnTerminalOutputTransportFailed(bridge, view, message));
+        return bridge;
+    }
+
+    private TerminalInputWriter CreateTerminalInputWriter(ISshSession session)
+    {
+        TerminalInputWriter? writer = null;
+        writer = new TerminalInputWriter(
+            payload => session.WriteAsync(payload),
+            exception => OnTerminalInputWriteFailed(writer, session, exception));
+        return writer;
+    }
+
+    private void OnTerminalInputWriteFailed(
+        TerminalInputWriter? source,
+        ISshSession session,
+        Exception exception)
+    {
+        if (source is null) return;
+        lock (_terminalReplayLock)
+        {
+            if (!ReferenceEquals(_terminalInputWriter, source) ||
+                !ReferenceEquals(_session, session))
+            {
+                return;
+            }
+        }
+
+        if (session.IsClosing) return;
+
+        _logger.LogError(exception, "Terminal input writer failed.");
+        MarshalToUi(async () =>
+        {
+            lock (_terminalReplayLock)
+            {
+                if (!ReferenceEquals(_terminalInputWriter, source) ||
+                    !ReferenceEquals(_session, session))
+                {
+                    return;
+                }
+            }
+            if (session.IsClosing || Status is SessionStatus.Failed or SessionStatus.Disconnected) return;
+
+            var teardownGeneration = await TearDownSessionAsync().ConfigureAwait(true);
+            if (IsAttemptCurrent(teardownGeneration) && Status != SessionStatus.Disconnected)
+            {
+                ReportFailure("Terminal input failed: " + exception.Message);
+            }
+        });
+    }
 
     /// <summary>
     /// Start the foreground auto-reconnect loop after an unexpected drop, unless one is already
@@ -705,6 +1435,12 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         {
             while (_autoReconnectAttempts < MaxAutoReconnectAttempts)
             {
+                // A remote close can arrive after session.Start() but before the original ConnectAsync
+                // has unwound (for example while a first-seen host fingerprint is being persisted).
+                // Do not let this reconnect attempt hit the connect gate and silently no-op: wait for
+                // the owner to finish, without consuming an attempt or its delay budget.
+                if (!await WaitForConnectOwnerAndShouldContinueAsync(token).ConfigureAwait(true)) return;
+
                 SetAutoReconnectAttempts(_autoReconnectAttempts + 1);
                 var attempt = _autoReconnectAttempts;
 
@@ -715,17 +1451,31 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
                 IsRecoverableNotice = false;
                 Progress.Reset();
 
-                try { await Task.Delay(AutoReconnectDelay, token).ConfigureAwait(true); }
+                // AttachAsync can realize this already-counted attempt while the loop is sleeping.
+                // Snapshot before the delay so the second owner barrier can distinguish that connect
+                // from a synthetic/no-op owner which never opened a lifecycle.
+                var lifecycleBeforeRetryDelay = Volatile.Read(ref _teardownGeneration);
+                try { await Task.Delay(_autoReconnectDelay, token).ConfigureAwait(true); }
                 catch (OperationCanceledException) { return; }
-                // A user action (Disconnect / manual Retry) cancelled us or moved us out of Connecting
-                // while we waited — stand down and let that path own the state.
-                if (token.IsCancellationRequested || Status != SessionStatus.Connecting) return;
+
+                // AttachAsync can start its own connect while this loop is sleeping (for example after
+                // an unload/reload). Await that exact owner too. Once this returns on the UI thread,
+                // there is no yielding point before ConnectAsync acquires the gate below.
+                if (!await WaitForConnectOwnerAndShouldContinueAsync(token).ConfigureAwait(true)) return;
+
+                if (Volatile.Read(ref _teardownGeneration) != lifecycleBeforeRetryDelay)
+                {
+                    // The owner started during this attempt's delay/barrier and already produced the
+                    // current retryable outcome. It consumes this attempt; start the next bounded wait
+                    // instead of issuing a duplicate connect with the same counter and no delay.
+                    continue;
+                }
 
                 // The view unloaded during the wait (Sessions↔Settings nav / tab backgrounded), so
                 // there's no WebView2 to connect through. Defer to the next AttachAsync (same as a
                 // background-tab drop) instead of calling ConnectAsync, which would just no-op on the
                 // null _webView and silently burn this attempt. The overlay stays on Connecting.
-                if (_webView is null)
+                if (_webView is null && _autoReconnectConnectOverrideForTesting is null)
                 {
                     _reconnectRequestedWhileDetached = true;
                     return;
@@ -734,10 +1484,31 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
                 _logger.LogInformation(
                     "SSH auto-reconnect attempt {Attempt}/{Max} for {Host}.",
                     attempt, MaxAutoReconnectAttempts, Profile?.Host);
-                await ConnectAsync().ConfigureAwait(true);
+                var lifecycleBeforeAttempt = Volatile.Read(ref _teardownGeneration);
+                if (_autoReconnectConnectOverrideForTesting is { } connectOverride)
+                {
+                    await connectOverride().ConfigureAwait(true);
+                }
+                else
+                {
+                    await ConnectAsync().ConfigureAwait(true);
+                }
 
-                // ConnectAsync swallows its outcome into Status (+ _lastConnectRetryable). Decide whether
-                // to keep retrying from that, rather than threading a result back through every caller.
+                // If this exact attempt opened a lifecycle which then closed before ConnectAsync returned,
+                // OnSessionClosed has already disposed it and left Connecting for the next bounded retry.
+                // Its BeginAutoReconnectLoop call intentionally coalesces into this still-owned loop.
+                var attemptStartedLifecycle =
+                    Volatile.Read(ref _teardownGeneration) != lifecycleBeforeAttempt;
+                if (!token.IsCancellationRequested &&
+                    attemptStartedLifecycle &&
+                    Status == SessionStatus.Connecting &&
+                    _session is null)
+                {
+                    continue;
+                }
+
+                // ConnectAsync swallows every other outcome into Status (+ _lastConnectRetryable). Decide
+                // whether to keep retrying from that, rather than threading a result through every caller.
                 // Connected (success), Disconnected (cancelled mid-connect), or a non-retryable Failed
                 // (auth / host-key / notice) all stop the loop; only a transient Failed loops again.
                 if (!ShouldContinueAutoReconnect(Status, _lastConnectRetryable)) return;
@@ -755,6 +1526,32 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             if (ReferenceEquals(_autoReconnectCts, cts)) _autoReconnectCts = null;
             cts.Dispose();
         }
+    }
+
+    private async Task<bool> WaitForConnectOwnerAndShouldContinueAsync(CancellationToken token)
+    {
+        try
+        {
+            while (true)
+            {
+                Task? activeConnect;
+                lock (_connectCompletionLock)
+                {
+                    activeConnect = _activeConnectCompletion;
+                }
+
+                if (activeConnect is null || activeConnect.IsCompleted) break;
+                await activeConnect.WaitAsync(token).ConfigureAwait(true);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+
+        return !token.IsCancellationRequested &&
+            (Status == SessionStatus.Connecting ||
+             ShouldContinueAutoReconnect(Status, _lastConnectRetryable));
     }
 
     /// <summary>
@@ -834,30 +1631,19 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     private async Task ConnectAsync()
     {
         var profile = Profile;
-        if (profile is null || _webView is null) return;
-        if (Interlocked.CompareExchange(ref _connectInFlight, 1, 0) != 0) return;
-        var teardownGeneration = Volatile.Read(ref _teardownGeneration);
+        var connectingWebView = _webView;
+        if (_suppressAutoConnectOnReattach || profile is null || connectingWebView is null) return;
+        var connectCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_connectCompletionLock)
+        {
+            if (_connectInFlight != 0) return;
+            _connectInFlight = 1;
+            _activeConnectCompletion = connectCompletion.Task;
+        }
+        // Starting a new connection defines a new lifecycle episode. This invalidates any
+        // delayed teardown continuation from the previous transport before it can report or clear state.
+        var teardownGeneration = Interlocked.Increment(ref _teardownGeneration);
 
-        // Reset xterm.js before flipping to Connecting so the prior session's text
-        // doesn't bleed through the (now opaque) overlay nor reappear above the new
-        // shell's banner the moment the overlay hides. Harmless on first-time connect
-        // (xterm.js is already empty). The same-VM rebind path in AttachAsync does
-        // NOT reach here — it replays the buffer instead, which is the correct
-        // behavior for a tab switch.
-        //
-        // Swallow ALL exceptions: this runs BEFORE the main try/finally that resets
-        // _connectInFlight, so an uncaught throw here would leak past ConnectAsync
-        // and leave the flag stuck at 1, permanently jamming every future Retry on
-        // this VM (the CompareExchange guard above would silently no-op forever).
-        // The clear is purely cosmetic — never let it block the connect path.
-        try
-        {
-            _webView.PostWebMessageAsString("clear:");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogDebug(ex, "Suppressed exception while clearing xterm.js before connect.");
-        }
 
         Status = SessionStatus.Connecting;
         ErrorMessage = null;
@@ -895,6 +1681,22 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
 
         try
         {
+            await AwaitPendingTerminalSinkRetirementAsync().ConfigureAwait(true);
+            if (!IsAttemptCurrent(teardownGeneration)) return;
+
+            var initialRendererReset = await TryResetCurrentTerminalRendererForNewSessionAsync(
+                teardownGeneration,
+                token).ConfigureAwait(true);
+            if (!initialRendererReset.Succeeded ||
+                !IsAttemptCurrent(teardownGeneration))
+            {
+                return;
+            }
+
+            // The currently owned page (if any) acknowledged the ordered lifecycle boundary.
+            // Only now may a checkpoint retained from an unexpected remote close be discarded.
+            ClearTerminalReplayBuffers();
+
             // Per-connect tunnel routing: when the user has opted in (PromptBeforeTunnelConnect)
             // and this profile is configured for a tunnel, ask whether to route through it or
             // connect directly for THIS attempt. Done before credential resolution so a "Cancel"
@@ -974,43 +1776,64 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
                 await DisposeSessionInstanceSilentlyAsync(pendingSession).ConfigureAwait(true);
                 return;
             }
-            _session = pendingSession;
+            // The browser can resize while credentials, VPN, or SSH negotiation is awaiting. Apply
+            // the latest observed geometry before the read pump starts so banners and full-screen
+            // programs never render at the stale size originally passed to ConnectAsync.
+            await pendingSession.ResizeAsync(_initialSize.Columns, _initialSize.Rows).ConfigureAwait(true);
+            if (!IsAttemptCurrent(teardownGeneration))
+            {
+                await DisposeSessionInstanceSilentlyAsync(pendingSession).ConfigureAwait(true);
+                return;
+            }
+
+            // Reset the page that is owned now, not the one captured when ConnectAsync began.
+            // A recycled WebView may already belong to another VM; a detached connection instead
+            // buffers output and resets whichever page eventually reattaches.
+            var terminalReset = await TryResetCurrentTerminalRendererForNewSessionAsync(
+                teardownGeneration,
+                token).ConfigureAwait(true);
+            if (!terminalReset.Succeeded ||
+                !IsAttemptCurrent(teardownGeneration))
+            {
+                await DisposeSessionInstanceSilentlyAsync(pendingSession).ConfigureAwait(true);
+                pendingSession = null;
+                if (IsAttemptCurrent(teardownGeneration))
+                {
+                    await SafeDisposeSessionAsync().ConfigureAwait(true);
+                }
+                return;
+            }
+            var liveWebView = terminalReset.Renderer;
+
+            lock (_terminalReplayLock)
+            {
+                _session = pendingSession;
+                ResetReplayCheckpointUnderLock();
+            }
             pendingSession = null;
+            _terminalInputWriter = CreateTerminalInputWriter(_session);
 
             // Only a real teardown (tab close, Disconnect, Retry) cancels the token — a plain tab
             // switch does not. Honor a cancellation here so a tab closed mid-connect unwinds through
-            // the OperationCanceledException handler (which disposes the just-built session + tunnel)
-            // rather than being marked Connected with no owner left to dispose it.
+            // the OperationCanceledException handler.
             token.ThrowIfCancellationRequested();
 
-            // Subscribe BEFORE Start() so we don't miss a Closed that fires immediately
-            // (forced-command accounts, EOF-on-connect, etc.).
             _session.DataReceived += OnSessionDataReceived;
             _session.Closed += OnSessionClosed;
 
-            // Re-read _webView (a navigate-away-and-back swaps in a fresh control) and bind the bridge
-            // only if a view is attached. A null _webView means the tab was backgrounded mid-connect:
-            // DetachView nulled it without cancelling the connect, so the session and its (possibly
-            // OTP-gated) tunnel are fully established. Keep them alive with no bridge — output buffers
-            // into _replayBuffer and the next AttachAsync's "_session is not null" path rebuilds the
-            // bridge and replays. Disposing them here instead would force a full reconnect on return,
-            // re-prompting for the tunnel route and re-establishing the VPN from scratch.
-            var liveWebView = _webView;
             if (liveWebView is not null)
             {
                 var bridge = CreateTerminalBridge(liveWebView);
-                TerminalBridge? oldBridge;
                 lock (_terminalReplayLock)
                 {
-                    oldBridge = _bridge;
+                    RetireTerminalOutputSinkUnderLock(preserveSessionOutput: false);
                     _bridge = bridge;
+                    _bridgeRendererIdentity = liveWebView;
+                    _terminalFocusGeneration++;
                 }
-                oldBridge?.Dispose();
             }
             else
             {
-                // No view to bind: the banner/prompt below lands only in _replayBuffer, so flag that the
-                // next AttachAsync must replay it even on a same-WebView reattach (which normally skips).
                 lock (_terminalReplayLock)
                 {
                     _connectedWhileDetached = true;
@@ -1055,19 +1878,18 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             }
 
             if (!IsAttemptCurrent(teardownGeneration)) return;
-            // Guard against an immediate remote close (forced-command / EOF) that
-            // already ran OnSessionClosed while we were awaiting fingerprint
-            // persistence — that handler will have set Status to Failed. Don't flip
-            // it back to Connected and lie about a dead tab being active.
-            if (_session is not null && Status == SessionStatus.Connecting)
+            // Guard against an immediate remote close (forced-command / EOF) while fingerprint
+            // persistence was pending. OnSessionClosed keeps the tab Connecting while it drains
+            // the final output; the focus helper rechecks session identity and IsClosing before
+            // it can publish Connected.
+            if (_session is { } connectedSession && Status == SessionStatus.Connecting)
             {
-                Progress.CompleteAll();
-                Status = SessionStatus.Connected;
-                _bridge?.RequestFocus();
-                StartRemoteOutputWaitTimer();
-                // If this connect was an auto-reconnect, start the clock that restores the retry
-                // budget once the session proves stable (no-op when the budget is already 0).
-                StartAutoReconnectStabilityTimer();
+                if (!await CompleteConnectedAfterCurrentTerminalFocusAsync(
+                        teardownGeneration,
+                        connectedSession).ConfigureAwait(true))
+                {
+                    return;
+                }
             }
         }
         catch (OperationCanceledException)
@@ -1115,13 +1937,221 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         }
         finally
         {
-            Interlocked.Exchange(ref _connectInFlight, 0);
-            RetryCommand.NotifyCanExecuteChanged();
+            lock (_connectCompletionLock)
+            {
+                _connectInFlight = 0;
+                if (ReferenceEquals(_activeConnectCompletion, connectCompletion.Task))
+                {
+                    _activeConnectCompletion = null;
+                }
+            }
+            try
+            {
+                RetryCommand.NotifyCanExecuteChanged();
+            }
+            finally
+            {
+                connectCompletion.TrySetResult();
+            }
         }
     }
 
     private bool IsAttemptCurrent(int teardownGeneration) =>
         Volatile.Read(ref _teardownGeneration) == teardownGeneration;
+
+    private async Task<bool> CompleteConnectedAfterCurrentTerminalFocusAsync(
+        int teardownGeneration,
+        ISshSession connectedSession)
+    {
+        while (true)
+        {
+            ITerminalOutputSink? focusSink;
+            long focusGeneration;
+            object? focusRendererIdentity;
+            lock (_terminalReplayLock)
+            {
+                if (!IsConnectionAwaitingTerminalFocusUnderLock(
+                        teardownGeneration,
+                        connectedSession))
+                {
+                    return false;
+                }
+
+                focusSink = _bridge;
+                focusRendererIdentity = _bridgeRendererIdentity;
+                focusGeneration = _terminalFocusGeneration;
+            }
+
+            try
+            {
+                var focused = await TerminalFocusBarrier.WaitAsync(
+                    focusSink,
+                    () => IsTerminalFocusSnapshotCurrent(
+                        teardownGeneration,
+                        connectedSession,
+                        focusSink,
+                        focusRendererIdentity,
+                        focusGeneration)).ConfigureAwait(true);
+                if (!focused)
+                {
+                    if (!IsConnectionAwaitingTerminalFocus(
+                            teardownGeneration,
+                            connectedSession))
+                    {
+                        return false;
+                    }
+                    continue;
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!IsTerminalFocusSnapshotCurrent(
+                        teardownGeneration,
+                        connectedSession,
+                        focusSink,
+                        focusRendererIdentity,
+                        focusGeneration))
+                {
+                    if (!IsConnectionAwaitingTerminalFocus(
+                            teardownGeneration,
+                            connectedSession))
+                    {
+                        return false;
+                    }
+                    continue;
+                }
+
+                // Rejection means a replacement renderer owns recovery; it is an intentional no-op.
+                await TryHandleTerminalRendererFailureAsync(
+                    focusRendererIdentity,
+                    "Failed to attach the terminal renderer: " + ex.Message)
+                    .ConfigureAwait(true);
+                return false;
+            }
+
+            if (TryPublishConnectedAfterTerminalFocus(
+                    teardownGeneration,
+                    connectedSession,
+                    focusSink,
+                    focusRendererIdentity))
+            {
+                return true;
+            }
+            if (!IsConnectionAwaitingTerminalFocus(
+                    teardownGeneration,
+                    connectedSession))
+            {
+                return false;
+            }
+        }
+    }
+
+    private bool IsConnectionAwaitingTerminalFocus(
+        int teardownGeneration,
+        ISshSession connectedSession)
+    {
+        lock (_terminalReplayLock)
+        {
+            return IsConnectionAwaitingTerminalFocusUnderLock(
+                teardownGeneration,
+                connectedSession);
+        }
+    }
+
+    private bool IsConnectionAwaitingTerminalFocusUnderLock(
+        int teardownGeneration,
+        ISshSession connectedSession) =>
+        IsAttemptCurrent(teardownGeneration) &&
+        ReferenceEquals(connectedSession, _session) &&
+        !connectedSession.IsClosing &&
+        (_bridge is null ||
+         ReferenceEquals(_bridgeRendererIdentity, _lastAttachedWebView)) &&
+        Status == SessionStatus.Connecting;
+
+    private bool IsTerminalFocusSnapshotCurrent(
+        int teardownGeneration,
+        ISshSession connectedSession,
+        ITerminalOutputSink? focusSink,
+        object? focusRendererIdentity,
+        long focusGeneration)
+    {
+        lock (_terminalReplayLock)
+        {
+            return IsConnectionAwaitingTerminalFocusUnderLock(
+                    teardownGeneration,
+                    connectedSession) &&
+                focusGeneration == _terminalFocusGeneration &&
+                ReferenceEquals(focusSink, _bridge) &&
+                ReferenceEquals(focusRendererIdentity, _bridgeRendererIdentity);
+        }
+    }
+
+    private bool TryPublishConnectedAfterTerminalFocus(
+        int teardownGeneration,
+        ISshSession connectedSession,
+        ITerminalOutputSink? focusSink,
+        object? focusRendererIdentity)
+    {
+        lock (_terminalReplayLock)
+        {
+            if (!IsConnectionAwaitingTerminalFocusUnderLock(
+                    teardownGeneration,
+                    connectedSession) ||
+                !ReferenceEquals(focusSink, _bridge) ||
+                !ReferenceEquals(focusRendererIdentity, _bridgeRendererIdentity) ||
+                (focusSink is not null &&
+                 !ReferenceEquals(focusRendererIdentity, _lastAttachedWebView)))
+            {
+                return false;
+            }
+        }
+
+        Progress.CompleteAll();
+        Status = SessionStatus.Connected;
+        StartRemoteOutputWaitTimer();
+        // A reconnect earns its retry budget back only after this focused session remains stable.
+        StartAutoReconnectStabilityTimer();
+        return true;
+    }
+
+    private bool IsRendererBindingCurrent(CoreWebView2 renderer)
+    {
+        lock (_terminalReplayLock)
+        {
+            return ReferenceEquals(_webView, renderer) &&
+                   ReferenceEquals(_lastAttachedWebView, renderer);
+        }
+    }
+
+    private bool IsRendererBindingCurrent(
+        int teardownGeneration,
+        ISshSession session,
+        CoreWebView2 renderer)
+    {
+        if (!IsAttemptCurrent(teardownGeneration)) return false;
+        lock (_terminalReplayLock)
+        {
+            return ReferenceEquals(_session, session) &&
+                   ReferenceEquals(_webView, renderer) &&
+                   ReferenceEquals(_lastAttachedWebView, renderer);
+        }
+    }
+
+    private bool IsTerminalAttachmentCurrent(
+        int teardownGeneration,
+        ISshSession session,
+        ITerminalOutputSink sink,
+        CoreWebView2 renderer)
+    {
+        if (!IsAttemptCurrent(teardownGeneration)) return false;
+        lock (_terminalReplayLock)
+        {
+            return ReferenceEquals(_session, session) &&
+                   ReferenceEquals(_bridge, sink) &&
+                   ReferenceEquals(_webView, renderer) &&
+                   ReferenceEquals(_lastAttachedWebView, renderer);
+        }
+    }
 
     private async Task<bool> ProbeSshEndpointAsync(
         ConnectionProfile profile,
@@ -1203,21 +2233,28 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     {
         if (data.Length == 0) return;
         var sourceSession = sender as ISshSession;
-        // Drop callbacks from a session we've already swapped out. The read of _session
-        // is unbarriered on the SSH pump thread, so a stale-true result can still slip
-        // through; the Append lands in a buffer about to be cleared by teardown, and
-        // MarkOutputReceived re-checks identity under the UI dispatcher.
-        if (!ReferenceEquals(sourceSession, _session)) return;
+        var appended = false;
+        lock (_terminalReplayLock)
+        {
+            // Session retirement and replacement use this same lock. Keeping identity validation,
+            // MCP filtering, replay append, and sink delivery in one critical section prevents a
+            // delayed old read callback from crossing teardown and contaminating the new terminal.
+            if (!ReferenceEquals(sourceSession, _session)) return;
 
-        var filtered = FilterMcpPresentation(data.Span);
-        if (filtered is null)
-        {
-            AppendVisibleTerminalData(data, sourceSession);
+            var filtered = FilterMcpPresentation(data.Span);
+            if (filtered is null)
+            {
+                AppendVisibleTerminalDataUnderLock(data);
+                appended = true;
+            }
+            else if (filtered.Length > 0)
+            {
+                AppendVisibleTerminalDataUnderLock(filtered);
+                appended = true;
+            }
         }
-        else if (filtered.Length > 0)
-        {
-            AppendVisibleTerminalData(filtered, sourceSession);
-        }
+
+        if (appended) NotifyVisibleOutputReceived(sourceSession);
     }
 
     private byte[]? FilterMcpPresentation(ReadOnlySpan<byte> data)
@@ -1226,39 +2263,109 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         {
             var filter = _mcpPresentationFilter;
             if (filter is null) return null;
+            if (!ReferenceEquals(_mcpPresentationSession, _session) ||
+                _mcpPresentationGeneration != Volatile.Read(ref _teardownGeneration))
+            {
+                ClearMcpCommandPresentationUnderLock();
+                return null;
+            }
 
             var visible = filter.Filter(data);
             if (filter.IsComplete)
             {
-                _mcpPresentationFilter = null;
+                ClearMcpCommandPresentationUnderLock();
             }
             return visible;
         }
     }
 
-    private void AppendVisibleTerminalText(string text, ISshSession? sourceSession = null)
+    private async Task<(bool Succeeded, CoreWebView2? Renderer)>
+        TryResetCurrentTerminalRendererForNewSessionAsync(
+            int teardownGeneration,
+            CancellationToken cancellationToken)
     {
-        if (string.IsNullOrEmpty(text)) return;
-        AppendVisibleTerminalData(System.Text.Encoding.UTF8.GetBytes(text), sourceSession);
+        var renderer = GetCurrentRenderer();
+        while (renderer is not null)
+        {
+            try
+            {
+                await TerminalBridge.ResetSessionlessAsync(
+                    renderer,
+                    cancellationToken: cancellationToken).ConfigureAwait(true);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                if (!IsAttemptCurrent(teardownGeneration))
+                {
+                    return (false, null);
+                }
+
+                var latestRenderer = GetCurrentRenderer();
+                if (!ReferenceEquals(renderer, latestRenderer))
+                {
+                    // The page changed while its reset was pending. It may now belong to another
+                    // tab/VM, so never post another message to it; retry only the current owner.
+                    renderer = latestRenderer;
+                    continue;
+                }
+
+                _logger.LogWarning(ex, "Could not reset the owned SSH terminal renderer.");
+                RequestSessionlessRendererRecovery(
+                    renderer,
+                    teardownGeneration,
+                    "The terminal renderer could not be reset for a clean SSH session.");
+                return (false, null);
+            }
+
+            if (!IsAttemptCurrent(teardownGeneration))
+            {
+                return (false, null);
+            }
+
+            var currentRenderer = GetCurrentRenderer();
+            if (ReferenceEquals(renderer, currentRenderer))
+            {
+                return (true, renderer);
+            }
+            renderer = currentRenderer;
+        }
+
+        // Connecting while the view is detached is supported. The eventual reattach performs
+        // the reset before replaying this new session's complete buffered output.
+        return (true, null);
     }
 
-    private void AppendVisibleTerminalData(ReadOnlyMemory<byte> data, ISshSession? sourceSession = null)
+    private CoreWebView2? GetCurrentRenderer()
     {
-        if (data.Length == 0) return;
-        TerminalBridge? bridge;
         lock (_terminalReplayLock)
         {
-            _replayBuffer.Append(data.Span);
-            bridge = _bridge;
-            if (bridge is null)
-            {
-                _detachedReplayBuffer.Append(data.Span);
-            }
+            return _webView is { } renderer &&
+                ReferenceEquals(renderer, _lastAttachedWebView)
+                ? renderer
+                : null;
         }
-        bridge?.AppendOutput(data);
+    }
 
+
+    private void AppendVisibleTerminalDataUnderLock(ReadOnlyMemory<byte> data)
+    {
+        _replayHasOutput = true;
+        _replayBuffer.Append(data.Span);
+        // DetachView removes and disposes the sink under this same lock. A live sink either
+        // accepts the complete chunk here, or the chunk becomes detached replay data.
+        if (_bridge is null || !_bridge.TryAppendOutput(data))
+        {
+            _detachedReplayBuffer.Append(data.Span);
+        }
+    }
+
+    private void NotifyVisibleOutputReceived(ISshSession? sourceSession)
+    {
         if (HasReceivedOutput) return;
-
         // MarshalToUi (base class) handles dispatcher null and enqueue-failure logging.
         MarshalToUi(() => MarkOutputReceived(sourceSession));
     }
@@ -1322,7 +2429,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
 
     private void CancelRemoteOutputWaitTimer() => CancelTimer(ref _outputWaitCts);
 
-    private async Task SafeDisposeSessionAsync()
+    private async Task SafeDisposeSessionAsync(bool preserveTerminalOutput = false)
     {
         CancelRemoteOutputWaitTimer();
         // The session is going away, so stop any pending "stayed stable long enough" timer — a session
@@ -1330,7 +2437,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         // flapping/banner-then-close server).
         CancelAutoReconnectStabilityTimer();
         IsWaitingForRemoteOutput = false;
-        ClearMcpCommandPresentation();
+        CancelAndDisposePrewarm();
 
         // Tear the Auto sudo driver down first so it unsubscribes from DataReceived before the
         // session is disposed (and drops its in-memory copy of the password).
@@ -1338,20 +2445,41 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         _autoSudo = null;
         autoSudo?.Dispose();
 
-        TerminalBridge? bridge;
+        ISshSession? session;
+        TerminalInputWriter? inputWriter;
+        ITunnelInstance? tunnel;
         lock (_terminalReplayLock)
         {
-            bridge = _bridge;
-            _bridge = null;
-        }
-        if (bridge is not null)
-        {
-            try { bridge.Dispose(); }
-            catch (Exception ex) { _logger.LogWarning(ex, "Error disposing TerminalBridge."); }
-        }
+            // Keep MCP filter retirement atomic with session retirement. Both this path and filter
+            // installation take replay -> presentation locks, so a stale continuation can neither
+            // reinstall after this clear nor invert the lock order used by DataReceived. Flush any
+            // speculative prefix first so timeout/teardown never erases real terminal bytes.
+            FlushAndClearMcpCommandPresentationUnderLock();
 
-        var session = _session;
-        _session = null;
+            // Move every session-owned artifact out of global state before the first await. A slow
+            // socket disposal can overlap a user Retry; its continuation must never clear or dispose
+            // artifacts that already belong to the replacement session.
+            RetireTerminalOutputSinkUnderLock(preserveSessionOutput: preserveTerminalOutput);
+            inputWriter = _terminalInputWriter;
+            _terminalInputWriter = null;
+            session = _session;
+            _session = null;
+            tunnel = _tunnel;
+            _tunnel = null;
+            _capturedCredentials = null;
+            _activeRoutedProfile = null;
+
+            if (!preserveTerminalOutput)
+            {
+                _replayBuffer.Clear();
+                _detachedReplayBuffer.Clear();
+                _connectedWhileDetached = false;
+                _sessionlessRendererRecoveryAttempted = false;
+                ResetReplayCheckpointUnderLock();
+            }
+        }
+        inputWriter?.Dispose();
+
         if (session is not null)
         {
             session.DataReceived -= OnSessionDataReceived;
@@ -1360,28 +2488,11 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             catch (Exception ex) { _logger.LogWarning(ex, "Error disposing SSH session."); }
         }
 
-        var tunnel = _tunnel;
-        _tunnel = null;
         if (tunnel is not null)
         {
             try { await tunnel.DisposeAsync().ConfigureAwait(true); }
             catch (Exception ex) { _logger.LogWarning(ex, "Error tearing down session tunnel."); }
         }
-
-        // DetachView (view-only teardown) deliberately keeps the buffer — replaying
-        // across the detach window is the whole point. Session teardown clears it so
-        // a same-VM reconnect doesn't bleed the old session's output into the new one.
-        ClearTerminalReplayBuffers();
-
-        // Drop the cached creds: a future reconnect will re-resolve via ConnectAsync so
-        // a rotated password / removed key / revoked credential doesn't get silently
-        // reused by a prewarm kicked off after the next Connected transition.
-        _capturedCredentials = null;
-
-        // Forget this connection's routing choice; the next connect re-resolves it (and a
-        // file transfer attempted between teardown and reconnect falls back to the saved
-        // profile, which keeps a VPN-required transfer on the VPN).
-        _activeRoutedProfile = null;
     }
 
     // === MCP (AI agent) control ============================================
@@ -1441,21 +2552,29 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     /// </summary>
     internal async Task<ShellCommandResult> RunCommandAsync(string command, TimeSpan timeout, CancellationToken cancellationToken)
     {
-        var session = _session;
-        if (session is null || Status != SessionStatus.Connected)
+        if (_session is null || Status != SessionStatus.Connected)
             throw new InvalidOperationException("SSH session is not connected.");
 
         await _commandGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var runner = new ShellCommandRunner(session, _loggerFactory.CreateLogger<ShellCommandRunner>());
+            var session = _session;
+            var lifecycleGeneration = Volatile.Read(ref _teardownGeneration);
+            if (session is null || Status != SessionStatus.Connected)
+                throw new InvalidOperationException("SSH session is not connected.");
+
+            var runner = new ShellCommandRunner(session);
             try
             {
                 return await runner.RunAsync(
                     command,
                     timeout,
                     1_000_000,
-                    BeginMcpCommandPresentationAsync,
+                    (invocation, token) => BeginMcpCommandPresentationAsync(
+                        session,
+                        lifecycleGeneration,
+                        invocation,
+                        token),
                     cancellationToken).ConfigureAwait(false);
             }
             finally
@@ -1469,50 +2588,83 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         }
     }
 
-    private async Task BeginMcpCommandPresentationAsync(
+    private Task BeginMcpCommandPresentationAsync(
+        ISshSession session,
+        int lifecycleGeneration,
         ShellCommandInvocation invocation,
         CancellationToken cancellationToken)
     {
-        await RenderMcpCommandAsync(invocation.Command, cancellationToken).ConfigureAwait(false);
-
-        lock (_mcpPresentationLock)
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_terminalReplayLock)
         {
-            _mcpPresentationFilter = new ShellCommandPresentationFilter(
-                invocation.StartMarker,
-                invocation.EndMarkerPrefix);
+            EnsureMcpPresentationCurrentUnderLock(session, lifecycleGeneration);
+            lock (_mcpPresentationLock)
+            {
+                _mcpPresentationFilter = new ShellCommandPresentationFilter(
+                    invocation.Command,
+                    invocation.Payload,
+                    invocation.StartMarker,
+                    invocation.EndMarkerPrefix);
+                _mcpPresentationSession = session;
+                _mcpPresentationGeneration = lifecycleGeneration;
+            }
         }
+        return Task.CompletedTask;
     }
 
     private void ClearMcpCommandPresentation()
     {
+        ISshSession? sourceSession;
+        bool appended;
+        lock (_terminalReplayLock)
+        {
+            sourceSession = _mcpPresentationSession;
+            appended = FlushAndClearMcpCommandPresentationUnderLock();
+        }
+
+        if (appended) NotifyVisibleOutputReceived(sourceSession);
+    }
+
+    private bool FlushAndClearMcpCommandPresentationUnderLock()
+    {
         lock (_mcpPresentationLock)
         {
-            _mcpPresentationFilter = null;
+            var appended = false;
+            var filter = _mcpPresentationFilter;
+            if (filter is not null &&
+                ReferenceEquals(_mcpPresentationSession, _session) &&
+                _mcpPresentationGeneration == Volatile.Read(ref _teardownGeneration))
+            {
+                var pending = filter.DrainPending();
+                if (pending.Length > 0)
+                {
+                    AppendVisibleTerminalDataUnderLock(pending);
+                    appended = true;
+                }
+            }
+
+            ClearMcpCommandPresentationUnderLock();
+            return appended;
         }
     }
 
-    private async Task RenderMcpCommandAsync(string command, CancellationToken cancellationToken)
+    private void ClearMcpCommandPresentationUnderLock()
     {
-        var lineEnding = "\r\n";
-        if (_bridge is null || !_settingsService.Current.StreamMcpCommandTyping || command.Length == 0)
-        {
-            AppendVisibleTerminalText(command + lineEnding, _session);
-            return;
-        }
-
-        var maxSteps = Math.Max(1, (int)(McpCommandTypingMaxDuration.TotalMilliseconds / McpCommandTypingDelay.TotalMilliseconds));
-        var chunkSize = Math.Max(1, (command.Length + maxSteps - 1) / maxSteps);
-        for (var offset = 0; offset < command.Length; offset += chunkSize)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var length = Math.Min(chunkSize, command.Length - offset);
-            AppendVisibleTerminalText(command.Substring(offset, length), _session);
-            await Task.Delay(McpCommandTypingDelay, cancellationToken).ConfigureAwait(false);
-        }
-
-        AppendVisibleTerminalText(lineEnding, _session);
+        _mcpPresentationFilter = null;
+        _mcpPresentationSession = null;
+        _mcpPresentationGeneration = -1;
     }
 
+    private void EnsureMcpPresentationCurrentUnderLock(
+        ISshSession session,
+        int lifecycleGeneration)
+    {
+        if (!ReferenceEquals(_session, session) || !IsAttemptCurrent(lifecycleGeneration))
+        {
+            throw new InvalidOperationException(
+                "SSH session changed while presenting the MCP command.");
+        }
+    }
     /// <summary>Writes raw text to the live shell exactly as if the user had typed it.</summary>
     internal async Task SendTextAsync(string text, CancellationToken cancellationToken)
     {
@@ -1769,13 +2921,129 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         lock (_prewarmLock) return _prewarmCts is not null;
     }
 
+    internal void UpdateTerminalSizeFromBridgeForTesting(
+        ISshSession sourceSession,
+        int sourceGeneration,
+        TerminalSize size,
+        bool geometryIsUncertain = false) =>
+        UpdateTerminalSizeFromBridge(
+            sourceSession, sourceGeneration, size, geometryIsUncertain);
+
+    internal byte[]? CreateSessionlessReplaySnapshotForTesting(bool xtermIsFresh)
+    {
+        lock (_terminalReplayLock)
+        {
+            if (!TryCreateSessionlessReplaySnapshotUnderLock(xtermIsFresh, out var replay))
+            {
+                throw new InvalidOperationException(
+                    "The exact sessionless terminal replay history is unavailable.");
+            }
+            return replay;
+        }
+    }
     internal byte[] PeekReplayBufferForTesting() => _replayBuffer.Snapshot();
     internal byte[] PeekDetachedReplayBufferForTesting() => _detachedReplayBuffer.Snapshot();
+    internal Task AwaitPendingTerminalSinkRetirementForTestingAsync() =>
+        AwaitPendingTerminalSinkRetirementAsync();
+
+    internal void AttachTerminalOutputSinkForTesting(
+        ITerminalOutputSink sink,
+        object? rendererIdentity = null)
+    {
+        ArgumentNullException.ThrowIfNull(sink);
+        lock (_terminalReplayLock)
+        {
+            RetireTerminalOutputSinkUnderLock(preserveSessionOutput: false);
+            _bridge = sink;
+            if (rendererIdentity is not null)
+            {
+                _lastAttachedWebView = rendererIdentity;
+            }
+            _bridgeRendererIdentity = rendererIdentity ?? _lastAttachedWebView;
+            _terminalFocusGeneration++;
+        }
+    }
+
+    internal void ReplayAndPublishTerminalOutputSinkForTesting(
+        ITerminalOutputSink sink,
+        byte[]? historicalReplay,
+        byte[]? liveDetachedReplay)
+    {
+        ArgumentNullException.ThrowIfNull(sink);
+        lock (_terminalReplayLock)
+        {
+            ReplayAndPublishTerminalOutputSinkUnderLock(
+                sink,
+                _lastAttachedWebView,
+                historicalReplay,
+                liveDetachedReplay);
+        }
+    }
+
+    internal void ReportTerminalOutputTransportFailureForTesting(
+        ITerminalOutputSink sourceSink,
+        object rendererIdentity,
+        string message) =>
+        OnTerminalOutputTransportFailed(sourceSink, rendererIdentity, message);
+
+    internal void ReportTerminalInputWriteFailureForTesting(Exception exception)
+    {
+        TerminalInputWriter? source;
+        ISshSession? session;
+        lock (_terminalReplayLock)
+        {
+            source = _terminalInputWriter;
+            session = _session;
+        }
+
+        if (source is null || session is null)
+        {
+            throw new InvalidOperationException("A connected terminal input writer is required.");
+        }
+
+        OnTerminalInputWriteFailed(source, session, exception);
+    }
+
+    internal Task<bool> CompleteConnectedAfterCurrentTerminalFocusForTestingAsync()
+    {
+        var session = _session ??
+            throw new InvalidOperationException("A connected SSH session is required.");
+        return CompleteConnectedAfterCurrentTerminalFocusAsync(
+            Volatile.Read(ref _teardownGeneration),
+            session);
+    }
+
+    /// <summary>
+    /// Lets a fake sink verify that TryAppendOutput runs inside the terminal replay critical
+    /// section shared with DetachView. Monitor ownership is thread-specific, so another thread
+    /// cannot cause a false positive.
+    /// </summary>
+    internal bool IsTerminalReplayLockHeldForTesting => Monitor.IsEntered(_terminalReplayLock);
+
+    internal void RequestSessionlessRendererRecoveryForTesting(
+        object rendererIdentity,
+        string message) =>
+        RequestSessionlessRendererRecovery(
+            rendererIdentity,
+            Volatile.Read(ref _teardownGeneration),
+            message);
+    internal void SetPendingRendererRecoveryForTesting(object rendererIdentity, string message)
+    {
+        lock (_terminalReplayLock)
+        {
+            _lastAttachedWebView = rendererIdentity;
+            _pendingRendererRecoveryIdentity = rendererIdentity;
+            _pendingRendererRecoveryMessage = message;
+            _pendingRendererRecoverySourceSink = _bridge;
+            _pendingRendererRecoveryGeneration = Volatile.Read(ref _teardownGeneration);
+        }
+    }
 
     internal void AppendReplayBufferForTesting(params byte[] data)
     {
         lock (_terminalReplayLock)
         {
+            _replayHasOutput = true;
             _replayBuffer.Append(data);
         }
     }
@@ -1788,17 +3056,60 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         }
     }
 
-    internal byte[]? TakeReattachReplaySnapshotForTesting(bool xtermIsFresh)
+    internal (byte[]? HistoricalReplay, byte[]? LiveDetachedReplay)
+        TakeReattachReplayPlanForTesting(bool xtermIsFresh)
     {
         lock (_terminalReplayLock)
         {
-            return TakeReattachReplaySnapshotUnderLock(xtermIsFresh);
+            if (!TryTakeReattachReplaySnapshotUnderLock(
+                    xtermIsFresh,
+                    out var historicalReplay,
+                    out var liveDetachedReplay))
+            {
+                throw new InvalidOperationException("Terminal replay history is not an exact terminal-state checkpoint.");
+            }
+            return (historicalReplay, liveDetachedReplay);
         }
     }
 
+    internal byte[]? TakeReattachReplaySnapshotForTesting(bool xtermIsFresh)
+    {
+        var (historicalReplay, liveDetachedReplay) =
+            TakeReattachReplayPlanForTesting(xtermIsFresh);
+        if (historicalReplay is null) return liveDetachedReplay;
+        if (liveDetachedReplay is null) return historicalReplay;
+
+        var combined = new byte[historicalReplay.Length + liveDetachedReplay.Length];
+        historicalReplay.CopyTo(combined, 0);
+        liveDetachedReplay.CopyTo(combined, historicalReplay.Length);
+        return combined;
+    }
+
     internal int AutoReconnectAttemptsForTesting => _autoReconnectAttempts;
+    internal bool AutoReconnectInProgressForTesting => _autoReconnectCts is not null;
     internal bool ReconnectRequestedWhileDetachedForTesting => _reconnectRequestedWhileDetached;
-    internal void SetConnectInFlightForTesting(int value) => _connectInFlight = value;
+    internal void SetConnectInFlightForTesting(int value)
+    {
+        lock (_connectCompletionLock)
+        {
+            _connectInFlight = value;
+        }
+    }
+
+    internal void SetActiveConnectCompletionForTesting(Task? completion)
+    {
+        lock (_connectCompletionLock)
+        {
+            _activeConnectCompletion = completion;
+        }
+    }
+
+    internal void SetAutoReconnectDelayForTesting(TimeSpan delay) => _autoReconnectDelay = delay;
+    internal void SetAutoReconnectConnectOverrideForTesting(Func<Task>? connect) =>
+        _autoReconnectConnectOverrideForTesting = connect;
+    internal void StartConnectLifecycleForTesting() =>
+        Interlocked.Increment(ref _teardownGeneration);
+    internal void BeginAutoReconnectLoopForTesting() => BeginAutoReconnectLoop();
 
     // Shrink the stability window so a test can observe the budget reset without a 30s wait. Set this
     // BEFORE AttachConnectedSessionForTesting, which arms the timer.
@@ -1809,23 +3120,206 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     // to decide whether to replay scrollback.
     internal bool RegisterAttachedWebView(object webView)
     {
-        var isFresh = !ReferenceEquals(webView, _lastAttachedWebView);
-        _lastAttachedWebView = webView;
-        return isFresh;
+        lock (_terminalReplayLock)
+        {
+            var isFresh = !ReferenceEquals(webView, _lastAttachedWebView);
+            _lastAttachedWebView = webView;
+            return isFresh;
+        }
     }
 
-    private byte[]? TakeReattachReplaySnapshotUnderLock(bool xtermIsFresh)
+    private void ReplayAndPublishTerminalOutputSinkUnderLock(
+        ITerminalOutputSink newSink,
+        object? rendererIdentity,
+        byte[]? historicalReplay,
+        byte[]? liveDetachedReplay)
+    {
+        var published = false;
+        try
+        {
+            if (historicalReplay is { Length: > 0 })
+            {
+                // Side-effect-free q: replay bypasses the live-output pump. Keep this checkpoint
+                // conservative until a focus ACK or exact x/flush/k retirement proves xterm parsed it.
+                _replayHasUnacknowledgedOutput = true;
+                newSink.Replay(historicalReplay, suppressTerminalResponses: true);
+            }
+            if (liveDetachedReplay is not null)
+                newSink.Replay(liveDetachedReplay, suppressTerminalResponses: false);
+            _bridge = newSink;
+            _bridgeRendererIdentity = rendererIdentity;
+            _terminalFocusGeneration++;
+            published = true;
+        }
+        finally
+        {
+            if (!published)
+            {
+                try { newSink.Dispose(); }
+                catch (Exception ex) { _logger.LogWarning(ex, "Error disposing an uncommitted terminal output sink."); }
+            }
+        }
+    }
+
+    private void RetireTerminalOutputSinkUnderLock(bool preserveSessionOutput)
+    {
+        _terminalFocusGeneration++;
+        var sink = _bridge;
+        var retiringRendererIdentity = _bridgeRendererIdentity;
+        _bridge = null;
+        _bridgeRendererIdentity = null;
+        if (sink is null) return;
+
+        if (ReferenceEquals(_pendingRendererRecoverySourceSink, sink))
+        {
+            ClearPendingRendererRecoveryUnderLock();
+        }
+
+        // RetireAsync seals output immediately but keeps the stream-scoped input/ACK listener
+        // subscribed until xterm parses the complete accepted prefix. New session bytes are routed
+        // to the detached buffer while this task runs.
+        _terminalSinkRetirementIdentity = retiringRendererIdentity;
+        _terminalSinkRetirement = CompleteTerminalSinkRetirementAsync(
+            sink,
+            preserveSessionOutput,
+            Volatile.Read(ref _teardownGeneration));
+    }
+
+    private async Task CompleteTerminalSinkRetirementAsync(
+        ITerminalOutputSink sink,
+        bool preserveSessionOutput,
+        int retirementGeneration)
+    {
+        TerminalOutputRetirement retirement;
+        try
+        {
+            retirement = await sink.RetireAsync(
+                TerminalBridgeRetirementTimeout).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            lock (_terminalReplayLock)
+            {
+                if (preserveSessionOutput && IsAttemptCurrent(retirementGeneration))
+                {
+                    _replayRetirementFailed = true;
+                    _detachedReplayGeometryChanged = true;
+                }
+            }
+            _logger.LogWarning(ex, "Error completing ordered terminal output retirement.");
+            try { sink.DisposeAndTakePendingOutput(); }
+            catch (Exception disposeException)
+            {
+                _logger.LogWarning(disposeException, "Error disposing failed terminal output retirement.");
+            }
+            return;
+        }
+
+        if (!preserveSessionOutput) return;
+        lock (_terminalReplayLock)
+        {
+            // A Retry/Disconnect that started while retirement was waiting owns the replay state now.
+            // Its teardown clears the old checkpoint, so a late result from this sink must be discarded.
+            if (!IsAttemptCurrent(retirementGeneration)) return;
+            // Sink publication waits for the preceding retirement, so this result is the exact
+            // acknowledgement boundary for the current renderer. An exact x/flush/k retirement
+            // clears the conservative historical q: marker; an inexact one requires reconstruction.
+            _replayHasUnacknowledgedOutput = retirement.HadUnacknowledgedOutput;
+            _detachedReplayGeometryChanged |= retirement.HadUncertainGeometry;
+            if (retirement.UnpostedOutput.Length > 0)
+            {
+                // These bytes precede every chunk captured after _bridge became null.
+                _detachedReplayBuffer.Prepend(retirement.UnpostedOutput);
+            }
+        }
+    }
+
+    private async Task AwaitPendingTerminalSinkRetirementAsync()
+    {
+        while (true)
+        {
+            Task pending;
+            lock (_terminalReplayLock)
+            {
+                pending = _terminalSinkRetirement;
+            }
+
+            await pending.ConfigureAwait(true);
+            lock (_terminalReplayLock)
+            {
+                if (ReferenceEquals(pending, _terminalSinkRetirement)) return;
+            }
+        }
+    }
+
+    private async Task RetireCurrentTerminalOutputSinkAsync(bool preserveSessionOutput)
+    {
+        lock (_terminalReplayLock)
+        {
+            RetireTerminalOutputSinkUnderLock(preserveSessionOutput);
+        }
+        await AwaitPendingTerminalSinkRetirementAsync().ConfigureAwait(true);
+    }
+
+    private void ConfirmRetiredTerminalOutputParsed(ITerminalOutputSink sink)
+    {
+        lock (_terminalReplayLock)
+        {
+            // A focus acknowledgement is queued behind every older host-to-page message. For a
+            // same-page rebind it proves the retired bridge's in-flight frames were parsed.
+            if (ReferenceEquals(_bridge, sink))
+            {
+                _replayHasUnacknowledgedOutput = false;
+            }
+        }
+    }
+
+    private bool TryTakeReattachReplaySnapshotUnderLock(
+        bool xtermIsFresh,
+        out byte[]? historicalReplay,
+        out byte[]? liveDetachedReplay)
     {
         var replayFull = xtermIsFresh || _connectedWhileDetached;
         _connectedWhileDetached = false;
+        historicalReplay = null;
+        liveDetachedReplay = null;
 
-        if (replayFull)
+        if (_replayRetirementFailed ||
+            _replayHasUnacknowledgedOutput ||
+            (_detachedReplayGeometryChanged && _replayHasOutput) ||
+            _detachedReplayBuffer.HasTruncated ||
+            (replayFull &&
+             (_replayBuffer.HasTruncated ||
+              (_replayHasOutput &&
+               (_replayGeometryChanged || _initialSize != _replayGeometry)))))
         {
-            _detachedReplayBuffer.Clear();
-            return EmptyToNull(_replayBuffer.Snapshot());
+            return false;
         }
 
-        return EmptyToNull(_detachedReplayBuffer.Drain());
+        if (!replayFull)
+        {
+            liveDetachedReplay = EmptyToNull(_detachedReplayBuffer.Drain());
+            _detachedReplayGeometryChanged = false;
+            return true;
+        }
+
+        var fullReplay = _replayBuffer.Snapshot();
+        var detachedReplay = _detachedReplayBuffer.Snapshot();
+        if (detachedReplay.Length > fullReplay.Length ||
+            !fullReplay.AsSpan(fullReplay.Length - detachedReplay.Length)
+                .SequenceEqual(detachedReplay))
+        {
+            return false;
+        }
+
+        var historicalLength = fullReplay.Length - detachedReplay.Length;
+        historicalReplay = historicalLength == 0
+            ? null
+            : fullReplay.AsSpan(0, historicalLength).ToArray();
+        liveDetachedReplay = EmptyToNull(detachedReplay);
+        _detachedReplayBuffer.Clear();
+        _detachedReplayGeometryChanged = false;
+        return true;
     }
 
     private void ClearTerminalReplayBuffers()
@@ -1836,7 +3330,19 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             _detachedReplayBuffer.Clear();
             // Buffers are empty now — nothing pending to replay on the next attach.
             _connectedWhileDetached = false;
+            _sessionlessRendererRecoveryAttempted = false;
+            ResetReplayCheckpointUnderLock();
         }
+    }
+
+    private void ResetReplayCheckpointUnderLock()
+    {
+        _replayGeometry = _initialSize;
+        _replayHasOutput = false;
+        _replayGeometryChanged = false;
+        _detachedReplayGeometryChanged = false;
+        _replayHasUnacknowledgedOutput = false;
+        _replayRetirementFailed = false;
     }
 
     private static byte[]? EmptyToNull(byte[] data) => data.Length == 0 ? null : data;

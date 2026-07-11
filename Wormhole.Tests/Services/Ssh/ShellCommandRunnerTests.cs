@@ -3,7 +3,6 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Extensions.Logging.Abstractions;
 using Wormhole.Services;
 using Wormhole.Services.Ssh;
 using Xunit;
@@ -16,7 +15,7 @@ public sealed class ShellCommandRunnerTests
     public async Task RunAsync_CapturesOutputAndZeroExitCode()
     {
         var session = new ScriptedSshSession { Output = "hello\r\n", ExitCode = 0 };
-        var runner = new ShellCommandRunner(session, NullLogger.Instance);
+        var runner = new ShellCommandRunner(session);
 
         var result = await runner.RunAsync("echo hello", TimeSpan.FromSeconds(5), 1_000_000, CancellationToken.None);
 
@@ -26,11 +25,33 @@ public sealed class ShellCommandRunnerTests
         Assert.False(result.Truncated);
     }
 
+    [Theory]
+    [InlineData("€")]
+    [InlineData("😀")]
+    public async Task RunAsync_PreservesUtf8CharactersSplitAtEveryByte(string expected)
+    {
+        var session = new ScriptedSshSession
+        {
+            Output = expected + "\r\n",
+            EmitOutputOneByteAtATime = true,
+        };
+        var runner = new ShellCommandRunner(session);
+
+        var result = await runner.RunAsync(
+            "printf unicode",
+            TimeSpan.FromSeconds(5),
+            1_000_000,
+            CancellationToken.None);
+
+        Assert.Equal(expected, result.Output);
+        Assert.Equal(0, result.ExitCode);
+    }
+
     [Fact]
     public async Task RunAsync_CapturesNonZeroExitCode()
     {
         var session = new ScriptedSshSession { Output = "nope\r\n", ExitCode = 3 };
-        var runner = new ShellCommandRunner(session, NullLogger.Instance);
+        var runner = new ShellCommandRunner(session);
 
         var result = await runner.RunAsync("false", TimeSpan.FromSeconds(5), 1_000_000, CancellationToken.None);
 
@@ -45,7 +66,7 @@ public sealed class ShellCommandRunnerTests
         // strings — this asserts they are NOT mistaken for the assembled markers (so the
         // echoed command is dropped) and that ANSI color codes are stripped.
         var session = new ScriptedSshSession { Output = "\x1b[32mgreen\x1b[0m\r\n", ExitCode = 0 };
-        var runner = new ShellCommandRunner(session, NullLogger.Instance);
+        var runner = new ShellCommandRunner(session);
 
         var result = await runner.RunAsync("ls --color", TimeSpan.FromSeconds(5), 1_000_000, CancellationToken.None);
 
@@ -57,7 +78,7 @@ public sealed class ShellCommandRunnerTests
     public async Task RunAsync_TimesOut_WhenEndMarkerNeverArrives()
     {
         var session = new ScriptedSshSession { Output = "partial\r\n", EmitEnd = false };
-        var runner = new ShellCommandRunner(session, NullLogger.Instance);
+        var runner = new ShellCommandRunner(session);
 
         var result = await runner.RunAsync("sleep 999", TimeSpan.FromMilliseconds(200), 1_000_000, CancellationToken.None);
 
@@ -72,7 +93,7 @@ public sealed class ShellCommandRunnerTests
         // An inline '#' must not comment out the end-marker bookkeeping: the command is wrapped
         // in eval '...' so the '#' lives inside single quotes.
         var session = new ScriptedSshSession { Output = "ok\r\n", ExitCode = 0 };
-        var runner = new ShellCommandRunner(session, NullLogger.Instance);
+        var runner = new ShellCommandRunner(session);
 
         var result = await runner.RunAsync("echo ok # note", TimeSpan.FromSeconds(5), 1_000_000, CancellationToken.None);
 
@@ -85,7 +106,7 @@ public sealed class ShellCommandRunnerTests
     public async Task RunAsync_EscapesSingleQuotesInCommand()
     {
         var session = new ScriptedSshSession { Output = "hi\r\n", ExitCode = 0 };
-        var runner = new ShellCommandRunner(session, NullLogger.Instance);
+        var runner = new ShellCommandRunner(session);
 
         await runner.RunAsync("echo 'hi'", TimeSpan.FromSeconds(5), 1_000_000, CancellationToken.None);
 
@@ -98,7 +119,7 @@ public sealed class ShellCommandRunnerTests
     {
         var big = new string('x', 5000) + "\r\n";
         var session = new ScriptedSshSession { Output = big, ExitCode = 0 };
-        var runner = new ShellCommandRunner(session, NullLogger.Instance);
+        var runner = new ShellCommandRunner(session);
 
         var result = await runner.RunAsync("yes", TimeSpan.FromSeconds(5), 100, CancellationToken.None);
 
@@ -108,10 +129,32 @@ public sealed class ShellCommandRunnerTests
     }
 
     [Fact]
+    public async Task RunAsync_DetectsEndMarkerBeforeLongSuffixInSameFrame()
+    {
+        var session = new ScriptedSshSession
+        {
+            Output = "done\r\n",
+            ExitCode = 0,
+            OutputAfterEndMarker = new string('x', 300),
+        };
+        var runner = new ShellCommandRunner(session);
+
+        var result = await runner.RunAsync(
+            "echo done",
+            TimeSpan.FromMilliseconds(200),
+            1_000_000,
+            CancellationToken.None);
+
+        Assert.False(result.TimedOut);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal("done", result.Output);
+    }
+
+    [Fact]
     public async Task RunAsync_InvokesPresentationCallbackBeforeWritingPayload()
     {
         var session = new ScriptedSshSession { Output = "hi\r\n", ExitCode = 0 };
-        var runner = new ShellCommandRunner(session, NullLogger.Instance);
+        var runner = new ShellCommandRunner(session);
         ShellCommandInvocation? seen = null;
         Task BeforeWriteAsync(ShellCommandInvocation invocation, CancellationToken _)
         {
@@ -147,8 +190,11 @@ public sealed class ShellCommandRunnerTests
         public string Output { get; init; } = string.Empty;
         public int ExitCode { get; init; }
         public bool EmitEnd { get; init; } = true;
+        public bool EmitOutputOneByteAtATime { get; init; }
+        public string OutputAfterEndMarker { get; init; } = string.Empty;
 
         public string? HostFingerprint => "SHA256:test";
+        public bool IsClosing => false;
 
         public string? LastPayload { get; private set; }
 
@@ -178,9 +224,29 @@ public sealed class ShellCommandRunnerTests
             // assembled markers).
             Emit(payload.Replace("\r", string.Empty) + "\r\n");
             Emit($"@@WHS_{token}@@\r\n");
-            if (Output.Length > 0) Emit(Output);
-            if (EmitEnd) Emit($"@@WHE_{token}_{ExitCode}@@\r\n");
+            if (Output.Length > 0) EmitOutput();
+            if (EmitEnd)
+            {
+                // Keep the marker and suffix in one callback so the runner must inspect the
+                // complete read before reducing its rolling detection window.
+                Emit($"@@WHE_{token}_{ExitCode}@@\r\n{OutputAfterEndMarker}");
+            }
             return Task.CompletedTask;
+        }
+
+        private void EmitOutput()
+        {
+            var bytes = Encoding.UTF8.GetBytes(Output);
+            if (!EmitOutputOneByteAtATime)
+            {
+                DataReceived?.Invoke(this, bytes);
+                return;
+            }
+
+            foreach (var value in bytes)
+            {
+                DataReceived?.Invoke(this, new byte[] { value });
+            }
         }
 
         private void Emit(string text) => DataReceived?.Invoke(this, Encoding.UTF8.GetBytes(text));

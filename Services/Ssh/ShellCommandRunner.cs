@@ -1,7 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
-using Microsoft.Extensions.Logging;
 
 namespace Wormhole.Services.Ssh;
 
@@ -42,8 +41,6 @@ internal sealed class ShellCommandRunner
     private const int DefaultMaxCaptureChars = 1_000_000;
 
     private readonly ISshSession _session;
-    private readonly ILogger _logger;
-
     private readonly object _gate = new();
     private readonly StringBuilder _all = new();        // captured stream, capped at _maxCapture
     private readonly StringBuilder _tail = new();       // rolling tail for marker detection past the cap
@@ -56,10 +53,9 @@ internal sealed class ShellCommandRunner
     private bool _truncated;
     private bool _completed;
 
-    public ShellCommandRunner(ISshSession session, ILogger logger)
+    public ShellCommandRunner(ISshSession session)
     {
         _session = session;
-        _logger = logger;
     }
 
     public Task<ShellCommandResult> RunAsync(
@@ -138,10 +134,13 @@ internal sealed class ShellCommandRunner
 
         var span = data.Span;
         var charCount = _decoder.GetCharCount(span, flush: false);
-        if (charCount == 0) return;
         var chars = new char[charCount];
-        _decoder.GetChars(span, chars, flush: false);
-        var text = new string(chars);
+        // GetCharCount only probes the decoder and does not commit incomplete UTF-8 bytes to its
+        // state. Always call GetChars, including with an empty destination, so a leading byte split
+        // at a ShellStream read boundary is retained for the next chunk.
+        var charsWritten = _decoder.GetChars(span, chars, flush: false);
+        if (charsWritten == 0) return;
+        var text = new string(chars, 0, charsWritten);
 
         lock (_gate)
         {
@@ -150,10 +149,12 @@ internal sealed class ShellCommandRunner
             // Always feed the rolling tail so the end marker is detectable even after the
             // capture cap stops us appending to _all.
             _tail.Append(text);
-            if (_tail.Length > TailWindow)
-            {
+            // Search before trimming: one ShellStream read can contain the end marker followed
+            // by more than TailWindow characters (for example a long prompt or background
+            // output). Trimming first would discard the marker and falsely wait until timeout.
+            var match = _endRegex.Match(_tail.ToString());
+            if (!match.Success && _tail.Length > TailWindow)
                 _tail.Remove(0, _tail.Length - TailWindow);
-            }
 
             if (_all.Length < _maxCapture)
             {
@@ -173,7 +174,6 @@ internal sealed class ShellCommandRunner
                 _truncated = true;
             }
 
-            var match = _endRegex.Match(_tail.ToString());
             if (match.Success)
             {
                 _exitCode = int.TryParse(match.Groups[1].Value, out var rc) ? rc : null;

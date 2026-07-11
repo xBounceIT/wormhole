@@ -79,9 +79,6 @@ public partial class SettingsViewModel : ObservableObject
     private bool enableMcpServer;
 
     [ObservableProperty]
-    private bool streamMcpCommandTyping;
-
-    [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(IsAppAuthenticationEnabled))]
     [NotifyPropertyChangedFor(nameof(ShowWindowsHelloFallback))]
     [NotifyPropertyChangedFor(nameof(CanTestAppAuthentication))]
@@ -195,7 +192,6 @@ public partial class SettingsViewModel : ObservableObject
         enableBitwardenBrowserExtension = _settingsService.Current.EnableBitwardenBrowserExtension;
         RefreshBitwardenBrowserExtensionStatus();
         enableMcpServer = _settingsService.Current.EnableMcpServer;
-        streamMcpCommandTyping = _settingsService.Current.StreamMcpCommandTyping;
         mcpServerPort = _settingsService.Current.McpServerPort;
         appAuthenticationModeIndex = (int)_settingsService.Current.AppAuthenticationMode;
         appAuthenticationHelloFallbackIndex = (int)_settingsService.Current.AppAuthenticationHelloFallback;
@@ -287,12 +283,6 @@ public partial class SettingsViewModel : ObservableObject
         }
 
         _settingsService.Current.BitwardenCliPath = normalized;
-        _settingsService.Save();
-    }
-
-    partial void OnStreamMcpCommandTypingChanged(bool value)
-    {
-        _settingsService.Current.StreamMcpCommandTyping = value;
         _settingsService.Save();
     }
 

@@ -142,6 +142,86 @@ public sealed class TerminalReplayBufferTests
     }
 
     [Fact]
+    public void TruncationFlag_DistinguishesExactReplayFromOverwrittenTailAndResets()
+    {
+        var buffer = new TerminalReplayBuffer(4);
+        buffer.Append(new byte[] { 1, 2, 3, 4 });
+        Assert.False(buffer.HasTruncated);
+
+        buffer.Append(new byte[] { 5 });
+        Assert.True(buffer.HasTruncated);
+        Assert.Equal(new byte[] { 2, 3, 4, 5 }, buffer.Drain());
+        Assert.False(buffer.HasTruncated);
+
+        buffer.Append(new byte[] { 1, 2, 3, 4, 5 });
+        Assert.True(buffer.HasTruncated);
+        buffer.Clear();
+        Assert.False(buffer.HasTruncated);
+    }
+
+    [Fact]
+    public void Prepend_UnderCapacity_PlacesOlderBytesBeforeDetachedSuffix()
+    {
+        var buffer = new TerminalReplayBuffer(8);
+        buffer.Append(new byte[] { 4, 5 });
+
+        buffer.Prepend(new byte[] { 1, 2, 3 });
+
+        Assert.Equal(new byte[] { 1, 2, 3, 4, 5 }, buffer.Snapshot());
+        Assert.False(buffer.HasTruncated);
+    }
+
+    [Fact]
+    public void Prepend_Overflow_KeepsCombinedNewestTailAndMarksReplayInexact()
+    {
+        var buffer = new TerminalReplayBuffer(5);
+        buffer.Append(new byte[] { 5, 6, 7 });
+
+        buffer.Prepend(new byte[] { 1, 2, 3, 4 });
+
+        Assert.Equal(new byte[] { 3, 4, 5, 6, 7 }, buffer.Snapshot());
+        Assert.True(buffer.HasTruncated);
+    }
+
+    [Fact]
+    public void Prepend_ToFullNewerSuffix_DropsOlderBytesAndPreservesSuffix()
+    {
+        var buffer = new TerminalReplayBuffer(4);
+        buffer.Append(new byte[] { 5, 6, 7, 8 });
+
+        buffer.Prepend(new byte[] { 1, 2 });
+
+        Assert.Equal(new byte[] { 5, 6, 7, 8 }, buffer.Snapshot());
+        Assert.True(buffer.HasTruncated);
+    }
+
+    [Fact]
+    public void Append_AfterPrepend_PreservesFifoAndNormalRingTailSemantics()
+    {
+        var buffer = new TerminalReplayBuffer(6);
+        buffer.Append(new byte[] { 4, 5 });
+        buffer.Prepend(new byte[] { 1, 2, 3 });
+
+        buffer.Append(new byte[] { 6, 7 });
+
+        Assert.Equal(new byte[] { 2, 3, 4, 5, 6, 7 }, buffer.Snapshot());
+        Assert.True(buffer.HasTruncated);
+    }
+
+    [Fact]
+    public void EmptyPrepend_PreservesPriorTruncationState()
+    {
+        var buffer = new TerminalReplayBuffer(2);
+        buffer.Append(new byte[] { 1, 2, 3 });
+        Assert.True(buffer.HasTruncated);
+
+        buffer.Prepend(ReadOnlySpan<byte>.Empty);
+
+        Assert.True(buffer.HasTruncated);
+        Assert.Equal(new byte[] { 2, 3 }, buffer.Snapshot());
+    }
+
+    [Fact]
     public void Constructor_RejectsNonPositiveCapacity()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => new TerminalReplayBuffer(0));
