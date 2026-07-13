@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Wormhole.Models;
@@ -299,6 +300,7 @@ public sealed partial class NewConnectionDialog : UserControl, INotifyPropertyCh
         Func<CredentialProfile?> current,
         Func<string?, CredentialProfile?> resolve)
     {
+        var committedSuggestion = chosenSuggestion is CredentialProfile;
         if (chosenSuggestion is CredentialProfile chosen)
         {
             apply(chosen);
@@ -315,6 +317,16 @@ public sealed partial class NewConnectionDialog : UserControl, INotifyPropertyCh
 
         SyncCredentialText(box, current());
         box.IsSuggestionListOpen = false;
+
+        if (committedSuggestion)
+        {
+            // Selecting a flyout item returns focus to the text box after QuerySubmitted.
+            // Our GotFocus handler opens the complete catalog, so close once more after WinUI
+            // has finished that focus transition instead of leaving the picker expanded.
+            _ = box.DispatcherQueue.TryEnqueue(
+                DispatcherQueuePriority.Low,
+                () => box.IsSuggestionListOpen = false);
+        }
     }
 
     private static void ClearDefaultCredentialText(AutoSuggestBox box, CredentialProfile? selection, Guid defaultSelectionId)
