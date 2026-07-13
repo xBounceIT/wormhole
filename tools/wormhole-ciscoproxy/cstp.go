@@ -274,6 +274,11 @@ func cstpConnect(ctx context.Context, cfg config, tlsCfg *tls.Config, cookie str
 // after a valid aggregate-auth login, leaving the tunnel unusable.
 const cstpTunnelPath = "/CSCOSSLC/tunnel"
 
+const (
+	requestedCSTPBaseMTU = 1500
+	defaultCSTPMTU       = 1406
+)
+
 func writeCstpConnect(c *tls.Conn, cfg config, cookie string) error {
 	_, err := c.Write([]byte(buildCstpConnectRequest(cfg, cookie)))
 	return err
@@ -291,8 +296,10 @@ func buildCstpConnectRequest(cfg config, cookie string) string {
 	fmt.Fprintf(&b, "X-CSTP-Version: 1\r\n")
 	fmt.Fprintf(&b, "X-CSTP-Hostname: wormhole\r\n")
 	fmt.Fprintf(&b, "X-CSTP-Address-Type: IPv4\r\n")
-	fmt.Fprintf(&b, "X-CSTP-Base-MTU: 1280\r\n")
-	fmt.Fprintf(&b, "X-CSTP-MTU: 1406\r\n")
+	// Base-MTU describes the outer link; it must not be smaller than the requested inner MTU.
+	// The previous 1280/1406 pair made the affected gateway negotiate an inner MTU of 1187.
+	fmt.Fprintf(&b, "X-CSTP-Base-MTU: %d\r\n", requestedCSTPBaseMTU)
+	fmt.Fprintf(&b, "X-CSTP-MTU: %d\r\n", defaultCSTPMTU)
 	fmt.Fprintf(&b, "X-CSTP-Full-IPv6: false\r\n")
 	// Deliberately advertise neither DTLS (no X-DTLS-Master-Secret) nor compression (no
 	// X-CSTP-Accept-Encoding): this sidecar only carries CSTP-over-TLS and never decodes a
@@ -337,7 +344,7 @@ func readCstpConnectResponse(br *bufio.Reader) (*session, error) {
 		headers[key] = append(headers[key], strings.TrimSpace(v))
 	}
 
-	sess := &session{MTU: 1406}
+	sess := &session{MTU: defaultCSTPMTU}
 	if addrs := headers["x-cstp-address"]; len(addrs) > 0 {
 		a, err := netip.ParseAddr(strings.TrimSpace(addrs[0]))
 		if err != nil {
