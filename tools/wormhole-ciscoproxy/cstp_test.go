@@ -368,6 +368,16 @@ func TestBuildCstpConnectRequest_UsesStandardPath(t *testing.T) {
 	}
 }
 
+func TestBuildCstpConnectRequest_AdvertisesCoherentMTU(t *testing.T) {
+	req := buildCstpConnectRequest(config{Host: "vpn.example.com", Port: 443}, "COOKIEVAL")
+	if !strings.Contains(req, "X-CSTP-Base-MTU: 1500\r\n") {
+		t.Fatalf("outer base MTU missing or incorrect:\n%q", req)
+	}
+	if !strings.Contains(req, "X-CSTP-MTU: 1406\r\n") {
+		t.Fatalf("inner tunnel MTU missing or incorrect:\n%q", req)
+	}
+}
+
 func TestReadCstpConnectResponse_ParsesHeaders(t *testing.T) {
 	raw := "HTTP/1.1 200 CONNECTED\r\n" +
 		"X-CSTP-Version: 1\r\n" +
@@ -401,6 +411,19 @@ func TestReadCstpConnectResponse_ParsesHeaders(t *testing.T) {
 	rest, _ := br.ReadString('\n')
 	if !strings.HasPrefix(rest, "STF") {
 		t.Fatalf("tunnel bytes lost; got %q", rest)
+	}
+}
+
+func TestReadCstpConnectResponse_DefaultsMTUWhenHeaderMissing(t *testing.T) {
+	raw := "HTTP/1.1 200 CONNECTED\r\n" +
+		"X-CSTP-Address: 10.20.30.40\r\n" +
+		"\r\n"
+	sess, err := readCstpConnectResponse(bufio.NewReader(strings.NewReader(raw)))
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if sess.MTU != 1406 {
+		t.Fatalf("mtu: got %d want 1406", sess.MTU)
 	}
 }
 
