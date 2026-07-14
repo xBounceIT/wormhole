@@ -9,10 +9,10 @@ namespace Wormhole.ViewModels;
 
 /// <summary>
 /// Reusable tri-state VPN-tunnel picker. The connection editor and folder editor each
-/// compose one of these and bind their tunnel ComboBox at <see cref="SelectedTunnel"/>.
+/// compose one of these and use <see cref="SelectedTunnel"/> as the picker selection.
 /// The two sentinels (<see cref="InheritTunnel"/>, <see cref="NoTunnel"/>) encode the
-/// tri-state (null = inherit, false = explicitly off, true = explicitly on) inside a
-/// single SelectedItem binding. The "inherit" sentinel's display label is per-instance so
+/// tri-state (null = inherit, false = explicitly off, true = explicitly on) through a
+/// single selection property. The "inherit" sentinel's display label is per-instance so
 /// the host VM can read "(Inherit from folder)" in the connection editor and "(Inherit
 /// from parent)" in the folder editor.
 /// </summary>
@@ -66,8 +66,8 @@ public partial class TunnelPickerViewModel : ObservableObject
     public BulkObservableCollection<TunnelConfig> AvailableTunnelConfigs { get; } = new();
 
     /// <summary>
-    /// Single combobox binding that encodes the tri-state via two sentinels and the
-    /// available tunnel list.
+    /// Single picker selection that encodes the tri-state via two sentinels and the available
+    /// tunnel list.
     /// </summary>
     public TunnelConfig? SelectedTunnel
     {
@@ -89,7 +89,7 @@ public partial class TunnelPickerViewModel : ObservableObject
             }
             // No bound ConfigId: pure inherit (null enable) or pure force-on (true enable).
             // The latter ("force on, inherit ConfigId from ancestor") has no sentinel in
-            // this single-combobox UI; surface it as "no selection" rather than masking it.
+            // this single-picker UI; surface it as "no selection" rather than masking it.
             if (TunnelEnabled is null) return InheritTunnel;
             return null;
         }
@@ -181,6 +181,65 @@ public partial class TunnelPickerViewModel : ObservableObject
         node.TunnelEnabled = TunnelEnabled;
         node.TunnelConfigId = SelectedTunnelConfigId;
     }
+
+    /// <summary>
+    /// Return a snapshot for a type-to-search tunnel picker. Tunnels match the name shown in the
+    /// picker; an empty query also includes the inheritance and no-tunnel sentinels.
+    /// </summary>
+    public IReadOnlyList<TunnelConfig> FilterTunnelConfigs(string? query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return AvailableTunnelConfigs.ToList();
+        }
+
+        var q = query.Trim();
+        var matches = new List<TunnelConfig>(AvailableTunnelConfigs.Count);
+        foreach (var config in AvailableTunnelConfigs)
+        {
+            if (Contains(config.Name, q))
+            {
+                matches.Add(config);
+            }
+        }
+
+        return matches;
+    }
+
+    /// <summary>
+    /// Resolve an exact tunnel name or a single non-sentinel search match. Ambiguous and
+    /// unmatched text returns null so the view can preserve the existing selection.
+    /// </summary>
+    public TunnelConfig? ResolveTunnelForCommit(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return null;
+
+        var q = text.Trim();
+        foreach (var config in AvailableTunnelConfigs)
+        {
+            if (string.Equals(config.Name, q, StringComparison.OrdinalIgnoreCase))
+            {
+                return config;
+            }
+        }
+
+        TunnelConfig? single = null;
+        foreach (var config in AvailableTunnelConfigs)
+        {
+            if (IsSentinel(config)) continue;
+            if (!Contains(config.Name, q)) continue;
+            if (single is not null) return null;
+            single = config;
+        }
+
+        return single;
+    }
+
+    private bool IsSentinel(TunnelConfig config) =>
+        ReferenceEquals(config, InheritTunnel) || ReferenceEquals(config, NoTunnel);
+
+    private static bool Contains(string? value, string query) =>
+        value is not null && value.Contains(query, StringComparison.OrdinalIgnoreCase);
 
     private void AppendStaleTunnelSelection(Guid? id)
     {

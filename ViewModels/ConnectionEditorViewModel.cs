@@ -852,34 +852,10 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// bind it straight to AutoSuggestBox.ItemsSource without observing later source mutations.
     /// </summary>
     public IReadOnlyList<CredentialProfile> FilterCredentials(string? query)
-        => FilterCredentialList(AvailableCredentials, query);
+        => CredentialPickerSearch.Filter(AvailableCredentials, query);
 
     public IReadOnlyList<CredentialProfile> FilterGatewayCredentials(string? query)
-        => FilterCredentialList(AvailableGatewayCredentials, query);
-
-    private static List<CredentialProfile> FilterCredentialList(
-        BulkObservableCollection<CredentialProfile> credentials,
-        string? query)
-    {
-        if (string.IsNullOrWhiteSpace(query))
-        {
-            return credentials.ToList();
-        }
-
-        var q = query.Trim();
-        var matches = new List<CredentialProfile>(credentials.Count);
-        foreach (var credential in credentials)
-        {
-            if (CredentialContains(credential.Name, q) ||
-                CredentialContains(credential.Username, q) ||
-                CredentialContains(credential.Domain, q))
-            {
-                matches.Add(credential);
-            }
-        }
-
-        return matches;
-    }
+        => CredentialPickerSearch.Filter(AvailableGatewayCredentials, query);
 
     /// <summary>
     /// Resolve an exact (case-insensitive) credential Name from <see cref="AvailableCredentials"/>,
@@ -887,28 +863,10 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// that doesn't name a real credential leaves the current selection untouched.
     /// </summary>
     public CredentialProfile? ResolveCredentialByText(string? text)
-        => ResolveCredentialByText(AvailableCredentials, text);
+        => CredentialPickerSearch.ResolveExact(AvailableCredentials, text);
 
     public CredentialProfile? ResolveGatewayCredentialByText(string? text)
-        => ResolveCredentialByText(AvailableGatewayCredentials, text);
-
-    private static CredentialProfile? ResolveCredentialByText(
-        IReadOnlyList<CredentialProfile> credentials,
-        string? text)
-    {
-        if (string.IsNullOrWhiteSpace(text)) return null;
-
-        var t = text.Trim();
-        foreach (var credential in credentials)
-        {
-            if (string.Equals(credential.Name, t, StringComparison.OrdinalIgnoreCase))
-            {
-                return credential;
-            }
-        }
-
-        return null;
-    }
+        => CredentialPickerSearch.ResolveExact(AvailableGatewayCredentials, text);
 
     /// <summary>
     /// Resolve typed picker text to a single credential to commit when the box is submitted or
@@ -920,40 +878,10 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// caller treating empty text as "select none".
     /// </summary>
     public CredentialProfile? ResolveCredentialForCommit(string? text)
-        => ResolveCredentialForCommit(AvailableCredentials, text);
+        => CredentialPickerSearch.ResolveForCommit(AvailableCredentials, text);
 
     public CredentialProfile? ResolveGatewayCredentialForCommit(string? text)
-        => ResolveCredentialForCommit(AvailableGatewayCredentials, text);
-
-    private static CredentialProfile? ResolveCredentialForCommit(
-        IReadOnlyList<CredentialProfile> credentials,
-        string? text)
-    {
-        if (ResolveCredentialByText(credentials, text) is { } exact) return exact;
-        if (string.IsNullOrWhiteSpace(text)) return null;
-
-        var q = text.Trim();
-        CredentialProfile? single = null;
-        foreach (var credential in credentials)
-        {
-            if (IsCredentialSentinel(credential)) continue;
-            if (CredentialContains(credential.Name, q) ||
-                CredentialContains(credential.Username, q) ||
-                CredentialContains(credential.Domain, q))
-            {
-                if (single is not null) return null; // ambiguous — don't guess
-                single = credential;
-            }
-        }
-
-        return single;
-    }
-
-    private static bool IsCredentialSentinel(CredentialProfile credential) =>
-        CredentialBindingSentinelIds.IsSentinel(credential.Id);
-
-    private static bool CredentialContains(string? haystack, string needle) =>
-        haystack is not null && haystack.Contains(needle, StringComparison.OrdinalIgnoreCase);
+        => CredentialPickerSearch.ResolveForCommit(AvailableGatewayCredentials, text);
 
     partial void OnProtocolChanged(ProtocolType value)
     {

@@ -275,6 +275,22 @@ public partial class FolderEditorViewModel : ObservableObject
         AvailableCredentials.ReplaceAll(available);
     }
 
+    /// <summary>
+    /// Return a snapshot for the folder editor's type-to-search credential picker. Saved
+    /// credentials match by name, username, or domain; an empty query includes both special
+    /// choices and every available credential.
+    /// </summary>
+    public IReadOnlyList<CredentialProfile> FilterCredentials(string? query) =>
+        CredentialPickerSearch.Filter(AvailableCredentials, query);
+
+    /// <summary>
+    /// Resolve typed picker text without guessing: an exact name wins, otherwise a single
+    /// non-sentinel search match is accepted. Ambiguous or unmatched text leaves the selection
+    /// unchanged in the view.
+    /// </summary>
+    public CredentialProfile? ResolveCredentialForCommit(string? text) =>
+        CredentialPickerSearch.ResolveForCommit(AvailableCredentials, text);
+
     partial void OnCredentialIdChanged(Guid? value)
     {
         AppendStaleCredentialSelection(value);

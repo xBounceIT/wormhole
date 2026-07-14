@@ -44,10 +44,16 @@
             <StackPanel Spacing="4">
                 <TextBlock Text="Credentials"
                            Style="{StaticResource CaptionTextBlockStyle}" />
-                <ComboBox HorizontalAlignment="Stretch"
-                          ItemsSource="{x:Bind ViewModel.AvailableCredentials}"
-                          ItemTemplate="{StaticResource CredentialItemTemplate}"
-                          SelectedItem="{x:Bind ViewModel.SelectedCredential, Mode=TwoWay}" />
+                <AutoSuggestBox x:Name="CredentialBox"
+                                HorizontalAlignment="Stretch"
+                                PlaceholderText="Inherit from parent"
+                                QueryIcon="Find"
+                                TextMemberPath="Name"
+                                ItemTemplate="{StaticResource CredentialItemTemplate}"
+                                TextChanged="OnCredentialTextChanged"
+                                QuerySubmitted="OnCredentialQuerySubmitted"
+                                GotFocus="OnCredentialGotFocus"
+                                LostFocus="OnCredentialLostFocus" />
                 <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                            Opacity="0.7"
                            TextWrapping="Wrap"
@@ -57,10 +63,16 @@
             <StackPanel Spacing="4">
                 <TextBlock Text="VPN tunnel"
                            Style="{StaticResource CaptionTextBlockStyle}" />
-                <ComboBox HorizontalAlignment="Stretch"
-                          ItemsSource="{x:Bind ViewModel.TunnelPicker.AvailableTunnelConfigs}"
-                          ItemTemplate="{StaticResource TunnelItemTemplate}"
-                          SelectedItem="{x:Bind ViewModel.TunnelPicker.SelectedTunnel, Mode=TwoWay}" />
+                <AutoSuggestBox x:Name="TunnelBox"
+                                HorizontalAlignment="Stretch"
+                                PlaceholderText="Inherit from parent"
+                                QueryIcon="Find"
+                                TextMemberPath="Name"
+                                ItemTemplate="{StaticResource TunnelItemTemplate}"
+                                TextChanged="OnTunnelTextChanged"
+                                QuerySubmitted="OnTunnelQuerySubmitted"
+                                GotFocus="OnTunnelGotFocus"
+                                LostFocus="OnTunnelLostFocus" />
                 <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
                            Opacity="0.7"
                            TextWrapping="Wrap"
