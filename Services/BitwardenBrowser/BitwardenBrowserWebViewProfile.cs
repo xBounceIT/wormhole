@@ -12,7 +12,7 @@ internal static class BitwardenBrowserWebViewProfile
     // deliberately absent: Bitwarden-enabled HTTPS profiles are persistent, so authentication
     // cookies must survive tab teardown, application restarts, and application updates.
     public const string ClearableWebStorageTypes =
-        "appcache,file_systems,indexeddb,local_storage,shader_cache,websql,service_workers,cache_storage";
+        "file_systems,indexeddb,local_storage,shader_cache,websql,service_workers,cache_storage";
 
     private const string PendingWebDataOriginsFileName = "wormhole-bitwarden-web-origins.txt";
     internal const string PersistentRouteKeyFileName = "wormhole-bitwarden-route-key.txt";
@@ -116,21 +116,31 @@ internal static class BitwardenBrowserWebViewProfile
         TrySeedProfileStateFromExistingProfile(
             userDataFolder,
             AppPaths.GetBitwardenBrowserExtensionWebView2UserDataRoot(),
-            persistentRouteKey: null);
+            persistentRouteKey: null,
+            legacyTargetUri: null);
 
     internal static bool TrySeedExtensionStateFromExistingProfile(string userDataFolder, string profileRoot)
-        => TrySeedProfileStateFromExistingProfile(userDataFolder, profileRoot, persistentRouteKey: null);
+        => TrySeedProfileStateFromExistingProfile(
+            userDataFolder,
+            profileRoot,
+            persistentRouteKey: null,
+            legacyTargetUri: null);
 
-    public static bool TrySeedProfileStateFromExistingProfile(string userDataFolder, string? persistentRouteKey) =>
+    public static bool TrySeedProfileStateFromExistingProfile(
+        string userDataFolder,
+        string? persistentRouteKey,
+        Uri? legacyTargetUri = null) =>
         TrySeedProfileStateFromExistingProfile(
             userDataFolder,
             AppPaths.GetBitwardenBrowserExtensionWebView2UserDataRoot(),
-            persistentRouteKey);
+            persistentRouteKey,
+            legacyTargetUri);
 
     internal static bool TrySeedProfileStateFromExistingProfile(
         string userDataFolder,
         string profileRoot,
-        string? persistentRouteKey)
+        string? persistentRouteKey,
+        Uri? legacyTargetUri = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(userDataFolder);
         ArgumentException.ThrowIfNullOrWhiteSpace(profileRoot);
@@ -173,12 +183,25 @@ internal static class BitwardenBrowserWebViewProfile
 
             if (!HasCookieDatabase(userDataFolder))
             {
-                foreach (var cookieSource in matchingRouteSources.Where(source =>
-                             HasMigratableCookieState(source.FullName))
+                var cookieSources = matchingRouteSources
+                    .Where(source => HasMigratableCookieState(source.FullName))
+                    .ToList();
+                IReadOnlySet<string>? legacyCookieHosts = null;
+                if (cookieSources.Count == 0 && persistentRouteKey is not null && legacyTargetUri is not null)
+                {
+                    legacyCookieHosts = GetCookieHosts(legacyTargetUri);
+                    cookieSources = candidates.Where(source =>
+                            ReadPersistentRouteKey(source.FullName) is null
+                            && HasMigratableCookieState(source.FullName)
+                            && CookieDatabaseContainsAnyHost(source.FullName, legacyCookieHosts))
+                        .ToList();
+                }
+
+                foreach (var cookieSource in cookieSources
                          .OrderByDescending(source => GetCookieStateLastWriteTimeUtcSafe(source.FullName))
                          .ThenByDescending(source => GetLastWriteTimeUtcSafe(source.FullName)))
                 {
-                    if (!CopyCookieState(cookieSource.FullName, userDataFolder)) continue;
+                    if (!CopyCookieState(cookieSource.FullName, userDataFolder, legacyCookieHosts)) continue;
                     copiedState = true;
                     break;
                 }
@@ -387,7 +410,82 @@ internal static class BitwardenBrowserWebViewProfile
         return newest;
     }
 
-    private static bool CopyCookieState(string sourceUserDataFolder, string destinationUserDataFolder)
+    private static HashSet<string> GetCookieHosts(Uri targetUri)
+    {
+        var hosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var normalizedHost = targetUri.IdnHost.TrimEnd('.').ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(normalizedHost)) return hosts;
+
+        hosts.Add(normalizedHost);
+        if (IPAddress.TryParse(normalizedHost, out _)) return hosts;
+
+        var dotIndex = normalizedHost.IndexOf('.');
+        while (dotIndex > 0 && dotIndex < normalizedHost.Length - 1)
+        {
+            var parentDomain = normalizedHost[(dotIndex + 1)..];
+            if (!parentDomain.Contains('.', StringComparison.Ordinal)) break;
+            hosts.Add(parentDomain);
+            dotIndex = normalizedHost.IndexOf('.', dotIndex + 1);
+        }
+
+        return hosts;
+    }
+
+    private static bool CookieDatabaseContainsAnyHost(
+        string userDataFolder,
+        IReadOnlySet<string> cookieHosts)
+    {
+        foreach (var relativePath in CookieDatabaseRelativePaths)
+        {
+            var databasePath = Path.Combine(userDataFolder, relativePath);
+            if (!File.Exists(databasePath)) continue;
+
+            try
+            {
+                var builder = new SqliteConnectionStringBuilder
+                {
+                    DataSource = databasePath,
+                    Mode = SqliteOpenMode.ReadOnly,
+                    Cache = SqliteCacheMode.Private,
+                    Pooling = false,
+                };
+                using var connection = new SqliteConnection(builder.ToString());
+                connection.Open();
+                using var command = connection.CreateCommand();
+                var parameterNames = AddCookieHostParameters(command, cookieHosts);
+                command.CommandText = $"SELECT 1 FROM cookies WHERE host_key IN ({parameterNames}) LIMIT 1";
+                if (command.ExecuteScalar() is not null) return true;
+            }
+            catch
+            {
+                // A legacy database may be locked or use an unexpected schema; skip it safely.
+            }
+        }
+
+        return false;
+    }
+
+    private static string AddCookieHostParameters(SqliteCommand command, IReadOnlySet<string> cookieHosts)
+    {
+        var values = cookieHosts
+            .SelectMany(host => new[] { host, "." + host })
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var parameterNames = new string[values.Count];
+        for (var index = 0; index < values.Count; index++)
+        {
+            var parameterName = "$host" + index;
+            parameterNames[index] = parameterName;
+            command.Parameters.AddWithValue(parameterName, values[index]);
+        }
+
+        return string.Join(',', parameterNames);
+    }
+
+    private static bool CopyCookieState(
+        string sourceUserDataFolder,
+        string destinationUserDataFolder,
+        IReadOnlySet<string>? retainedCookieHosts)
     {
         // Chromium encrypts cookie values with the key stored in Local State. Copy it before taking a
         // consistent SQLite backup; without the matching key, the destination cannot decrypt cookies.
@@ -403,13 +501,17 @@ internal static class BitwardenBrowserWebViewProfile
         {
             copied |= TryBackupSqliteDatabase(
                 Path.Combine(sourceUserDataFolder, relativePath),
-                Path.Combine(destinationUserDataFolder, relativePath));
+                Path.Combine(destinationUserDataFolder, relativePath),
+                retainedCookieHosts);
         }
 
         return copied;
     }
 
-    private static bool TryBackupSqliteDatabase(string sourcePath, string destinationPath)
+    private static bool TryBackupSqliteDatabase(
+        string sourcePath,
+        string destinationPath,
+        IReadOnlySet<string>? retainedCookieHosts)
     {
         if (!File.Exists(sourcePath)) return false;
 
@@ -436,6 +538,13 @@ internal static class BitwardenBrowserWebViewProfile
             source.Open();
             destination.Open();
             source.BackupDatabase(destination);
+            if (retainedCookieHosts is not null)
+            {
+                using var command = destination.CreateCommand();
+                var parameterNames = AddCookieHostParameters(command, retainedCookieHosts);
+                command.CommandText = $"DELETE FROM cookies WHERE host_key NOT IN ({parameterNames})";
+                command.ExecuteNonQuery();
+            }
             destination.Close();
             File.Move(stagingPath, destinationPath, overwrite: true);
             return true;

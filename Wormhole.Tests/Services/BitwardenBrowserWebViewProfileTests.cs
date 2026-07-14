@@ -274,10 +274,41 @@ public sealed class BitwardenBrowserWebViewProfileTests
             Assert.True(BitwardenBrowserWebViewProfile.TrySeedProfileStateFromExistingProfile(
                 destination,
                 root,
-                destinationRouteKey));
+                destinationRouteKey,
+                new Uri("https://router.example.com/login")));
 
             Assert.True(File.Exists(BitwardenBrowserExtensionMarker.GetPath(destination)));
             Assert.False(File.Exists(Path.Combine(destination, "Default", "Network", "Cookies")));
+            Assert.Equal(
+                destinationRouteKey,
+                File.ReadAllText(Path.Combine(destination, BitwardenBrowserWebViewProfile.PersistentRouteKeyFileName)));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TrySeedProfileStateFromExistingProfile_MigratesOnlyTargetCookiesFromLegacyProfile()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
+        var source = Path.Combine(root, "profile-legacy");
+        var destination = Path.Combine(root, "profile-destination");
+        const string destinationRouteKey = "destination-route";
+        try
+        {
+            await CreateSeedSourceAsync(source, routeKey: null, "legacy");
+
+            Assert.True(BitwardenBrowserWebViewProfile.TrySeedProfileStateFromExistingProfile(
+                destination,
+                root,
+                destinationRouteKey,
+                new Uri("https://router.example.com/login")));
+
+            var destinationCookies = Path.Combine(destination, "Default", "Network", "Cookies");
+            Assert.Equal("legacy", ReadCookieDatabaseValue(destinationCookies));
+            Assert.Equal(0, CountCookiesForHost(destinationCookies, "unrelated.example.com"));
             Assert.Equal(
                 destinationRouteKey,
                 File.ReadAllText(Path.Combine(destination, BitwardenBrowserWebViewProfile.PersistentRouteKeyFileName)));
@@ -437,6 +468,7 @@ public sealed class BitwardenBrowserWebViewProfileTests
 
         Assert.DoesNotContain("cookies", storageTypes, StringComparer.OrdinalIgnoreCase);
         Assert.DoesNotContain("all", storageTypes, StringComparer.OrdinalIgnoreCase);
+        Assert.DoesNotContain("appcache", storageTypes, StringComparer.OrdinalIgnoreCase);
         Assert.Contains("local_storage", storageTypes, StringComparer.Ordinal);
     }
 
@@ -476,7 +508,7 @@ public sealed class BitwardenBrowserWebViewProfileTests
 
     private static async Task CreateSeedSourceAsync(
         string profile,
-        string routeKey,
+        string? routeKey,
         string value,
         bool includeCookies = true)
     {
@@ -488,9 +520,12 @@ public sealed class BitwardenBrowserWebViewProfileTests
         Directory.CreateDirectory(extensionSettings);
         await File.WriteAllTextAsync(Path.Combine(extensionSettings, "state.log"), value);
         await File.WriteAllTextAsync(Path.Combine(profile, "Local State"), "local-" + value);
-        await File.WriteAllTextAsync(
-            Path.Combine(profile, BitwardenBrowserWebViewProfile.PersistentRouteKeyFileName),
-            routeKey);
+        if (routeKey is not null)
+        {
+            await File.WriteAllTextAsync(
+                Path.Combine(profile, BitwardenBrowserWebViewProfile.PersistentRouteKeyFileName),
+                routeKey);
+        }
         await BitwardenBrowserExtensionMarker.WriteAsync(
             BitwardenBrowserExtensionMarker.GetPath(profile),
             Path.Combine(profile, "extension"),
@@ -508,7 +543,8 @@ public sealed class BitwardenBrowserWebViewProfileTests
         using var connection = new SqliteConnection(builder.ToString());
         connection.Open();
         using var command = connection.CreateCommand();
-        command.CommandText = "CREATE TABLE cookie_test(value TEXT NOT NULL); INSERT INTO cookie_test VALUES ($value);";
+        command.CommandText = "CREATE TABLE cookies(host_key TEXT NOT NULL, value TEXT NOT NULL);"
+            + "INSERT INTO cookies VALUES ('router.example.com', $value), ('unrelated.example.com', 'unrelated');";
         command.Parameters.AddWithValue("$value", value);
         command.ExecuteNonQuery();
     }
@@ -524,8 +560,24 @@ public sealed class BitwardenBrowserWebViewProfileTests
         using var connection = new SqliteConnection(builder.ToString());
         connection.Open();
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT value FROM cookie_test";
+        command.CommandText = "SELECT value FROM cookies WHERE host_key = 'router.example.com'";
         return Assert.IsType<string>(command.ExecuteScalar());
+    }
+
+    private static long CountCookiesForHost(string path, string host)
+    {
+        var builder = new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+        };
+        using var connection = new SqliteConnection(builder.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM cookies WHERE host_key = $host";
+        command.Parameters.AddWithValue("$host", host);
+        return Assert.IsType<long>(command.ExecuteScalar());
     }
 
 }
