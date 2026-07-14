@@ -32,7 +32,7 @@ public sealed class BitwardenBrowserWebViewProfileTests
     }
 
     [Fact]
-    public void UserDataFolder_IncludesSocksPortInRuntimeProfileKey()
+    public void UserDataFolder_WithoutRouteIdentityIncludesSocksPort()
     {
         var firstProxy = new IPEndPoint(IPAddress.Loopback, 12000);
         var secondProxy = new IPEndPoint(IPAddress.Loopback, 23000);
@@ -54,34 +54,94 @@ public sealed class BitwardenBrowserWebViewProfileTests
     }
 
     [Fact]
+    public void UserDataFolder_UsesStableSocksTargetAndTunnelIdentity()
+    {
+        var tunnelConfigId = Guid.NewGuid();
+        var otherTunnelConfigId = Guid.NewGuid();
+        var target = new Uri("https://router.example/login");
+        var firstArgs = BitwardenBrowserWebViewProfile.BuildBrowserArguments(
+            new IPEndPoint(IPAddress.Loopback, 12000));
+        var reboundArgs = BitwardenBrowserWebViewProfile.BuildBrowserArguments(
+            new IPEndPoint(IPAddress.Loopback, 23000));
+
+        var first = BitwardenBrowserWebViewProfile.GetUserDataFolder(
+            firstArgs,
+            ignoreCertificateErrors: false,
+            target,
+            originalUri: null,
+            tunnelConfigId);
+        var rebound = BitwardenBrowserWebViewProfile.GetUserDataFolder(
+            reboundArgs,
+            ignoreCertificateErrors: false,
+            target,
+            originalUri: null,
+            tunnelConfigId);
+        var otherTarget = BitwardenBrowserWebViewProfile.GetUserDataFolder(
+            firstArgs,
+            ignoreCertificateErrors: false,
+            new Uri("https://firewall.example/login"),
+            originalUri: null,
+            tunnelConfigId);
+        var otherTunnel = BitwardenBrowserWebViewProfile.GetUserDataFolder(
+            firstArgs,
+            ignoreCertificateErrors: false,
+            target,
+            originalUri: null,
+            otherTunnelConfigId);
+        var forwarder = BitwardenBrowserWebViewProfile.GetUserDataFolder(
+            BitwardenBrowserWebViewProfile.BuildBrowserArguments(null),
+            ignoreCertificateErrors: false,
+            new Uri("https://127.0.0.1:12000"),
+            target,
+            tunnelConfigId);
+
+        Assert.Equal(first, rebound);
+        Assert.NotEqual(first, otherTarget);
+        Assert.NotEqual(first, otherTunnel);
+        Assert.NotEqual(first, forwarder);
+    }
+
+    [Fact]
     public void UserDataFolder_IsolatesLoopbackForwardersByStableOriginalOrigin()
     {
         var browserArguments = BitwardenBrowserWebViewProfile.BuildBrowserArguments(null);
         var original = new Uri("https://router.example/login");
+        var tunnelConfigId = Guid.NewGuid();
 
         var first = BitwardenBrowserWebViewProfile.GetUserDataFolder(
             browserArguments,
             ignoreCertificateErrors: true,
             new Uri("http://127.0.0.1:12000"),
-            original);
+            original,
+            tunnelConfigId);
         var rebound = BitwardenBrowserWebViewProfile.GetUserDataFolder(
             browserArguments,
             ignoreCertificateErrors: true,
             new Uri("http://127.0.0.1:23000"),
-            original);
+            original,
+            tunnelConfigId);
         var otherTarget = BitwardenBrowserWebViewProfile.GetUserDataFolder(
             browserArguments,
             ignoreCertificateErrors: true,
             new Uri("http://127.0.0.1:12000"),
-            new Uri("https://firewall.example/login"));
+            new Uri("https://firewall.example/login"),
+            tunnelConfigId);
+        var otherTunnel = BitwardenBrowserWebViewProfile.GetUserDataFolder(
+            browserArguments,
+            ignoreCertificateErrors: true,
+            new Uri("http://127.0.0.1:12000"),
+            original,
+            Guid.NewGuid());
         var direct = BitwardenBrowserWebViewProfile.GetUserDataFolder(
             browserArguments,
             ignoreCertificateErrors: true,
             original,
-            originalUri: null);
+            originalUri: null,
+            tunnelConfigId: null);
 
         Assert.Equal(first, rebound);
         Assert.NotEqual(first, otherTarget);
+        Assert.NotEqual(first, otherTunnel);
         Assert.NotEqual(first, direct);
     }
 

@@ -62,16 +62,36 @@ internal static class BitwardenBrowserWebViewProfile
         string browserArguments,
         bool ignoreCertificateErrors,
         Uri navigateUri,
-        Uri? originalUri)
+        Uri? originalUri,
+        Guid? tunnelConfigId)
     {
         ArgumentNullException.ThrowIfNull(navigateUri);
 
-        // Loopback-forwarded targets all navigate to 127.0.0.1/::1, and cookies are not scoped by
-        // port. Give each real target a stable profile so one appliance never receives another
-        // appliance's cookies when the local forwarder is rebound to a different ephemeral port.
-        var contextMaterial = navigateUri.IsLoopback && originalUri is not null
-            ? browserArguments + "\0forwarded-target=" + originalUri.GetLeftPart(UriPartial.Authority).ToLowerInvariant()
-            : browserArguments;
+        var targetOrigin = (originalUri ?? navigateUri)
+            .GetLeftPart(UriPartial.Authority)
+            .ToLowerInvariant();
+        string contextMaterial;
+        if (tunnelConfigId is { } configId)
+        {
+            // Sidecars bind SOCKS listeners on ephemeral ports, while loopback forwarders also rebind
+            // between sessions. Key tunneled profiles by stable routing identity so cookies survive a
+            // reconnect without crossing target, tunnel-config, or routing-mode boundaries. Retain the
+            // hardening baseline in the key so browser-argument changes still create a fresh profile.
+            var routeKind = originalUri is null ? "socks5" : "forwarder";
+            contextMaterial = BuildBrowserArguments(socks5Proxy: null)
+                + "\0tunnel=" + configId.ToString("N")
+                + "\0route=" + routeKind
+                + "\0target=" + targetOrigin;
+        }
+        else
+        {
+            // Loopback-forwarded targets all navigate to 127.0.0.1/::1, and cookies are not scoped by
+            // port. Give each real target a stable profile when no tunnel identity is available.
+            contextMaterial = navigateUri.IsLoopback && originalUri is not null
+                ? browserArguments + "\0forwarded-target=" + targetOrigin
+                : browserArguments;
+        }
+
         return GetUserDataFolder(contextMaterial, ignoreCertificateErrors);
     }
 

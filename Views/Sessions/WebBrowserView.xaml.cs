@@ -349,7 +349,8 @@ public sealed partial class WebBrowserView : UserControl
                 browserArguments,
                 target.IgnoreCertErrors,
                 target.NavigateUri,
-                target.OriginalUri);
+                target.OriginalUri,
+                target.TunnelConfigId);
             BitwardenBrowserWebViewProfile.TrySeedExtensionStateFromExistingProfile(folder);
             Directory.CreateDirectory(folder);
             var options = new CoreWebView2EnvironmentOptions
