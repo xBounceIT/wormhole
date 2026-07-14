@@ -210,7 +210,8 @@ public sealed class BitwardenBrowserWebViewProfileTests
     public async Task TrySeedProfileStateFromExistingProfile_CopiesCookiesOnlyFromMatchingRoute()
     {
         var root = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
-        var matching = Path.Combine(root, "profile-matching");
+        var matching = Path.Combine(root, "profile-matching-fresh-cookies");
+        var matchingWithStaleCookies = Path.Combine(root, "profile-matching-stale-cookies");
         var matchingWithoutCookies = Path.Combine(root, "profile-matching-without-cookies");
         var unrelated = Path.Combine(root, "profile-unrelated");
         var destination = Path.Combine(root, "profile-destination");
@@ -218,11 +219,20 @@ public sealed class BitwardenBrowserWebViewProfileTests
         try
         {
             await CreateSeedSourceAsync(matching, routeKey, "matching");
+            await CreateSeedSourceAsync(matchingWithStaleCookies, routeKey, "stale-matching");
             await CreateSeedSourceAsync(matchingWithoutCookies, routeKey, "newer-matching", includeCookies: false);
             await CreateSeedSourceAsync(unrelated, "other-route", "unrelated");
-            Directory.SetLastWriteTimeUtc(matching, DateTime.UtcNow.AddMinutes(-2));
-            Directory.SetLastWriteTimeUtc(unrelated, DateTime.UtcNow.AddMinutes(-1));
-            Directory.SetLastWriteTimeUtc(matchingWithoutCookies, DateTime.UtcNow);
+            var now = DateTime.UtcNow;
+            File.SetLastWriteTimeUtc(
+                Path.Combine(matching, "Default", "Network", "Cookies"),
+                now);
+            File.SetLastWriteTimeUtc(
+                Path.Combine(matchingWithStaleCookies, "Default", "Network", "Cookies"),
+                now.AddMinutes(-10));
+            Directory.SetLastWriteTimeUtc(matching, now.AddMinutes(-3));
+            Directory.SetLastWriteTimeUtc(unrelated, now.AddMinutes(-2));
+            Directory.SetLastWriteTimeUtc(matchingWithStaleCookies, now.AddMinutes(-1));
+            Directory.SetLastWriteTimeUtc(matchingWithoutCookies, now);
 
             Assert.True(BitwardenBrowserWebViewProfile.TrySeedProfileStateFromExistingProfile(
                 destination,

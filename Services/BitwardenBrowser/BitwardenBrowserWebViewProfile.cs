@@ -46,6 +46,7 @@ internal static class BitwardenBrowserWebViewProfile
         Path.Combine("Default", "Network", "Cookies"),
         Path.Combine("Default", "Cookies"),
     ];
+    private static readonly string[] CookieDatabaseStateSuffixes = ["", "-wal", "-journal"];
 
     public static bool IsHttpsTarget(Uri navigateUri, Uri? originalUri) =>
         string.Equals((originalUri ?? navigateUri).Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase);
@@ -173,7 +174,9 @@ internal static class BitwardenBrowserWebViewProfile
             if (!HasCookieDatabase(userDataFolder))
             {
                 foreach (var cookieSource in matchingRouteSources.Where(source =>
-                             HasMigratableCookieState(source.FullName)))
+                             HasMigratableCookieState(source.FullName))
+                         .OrderByDescending(source => GetCookieStateLastWriteTimeUtcSafe(source.FullName))
+                         .ThenByDescending(source => GetLastWriteTimeUtcSafe(source.FullName)))
                 {
                     if (!CopyCookieState(cookieSource.FullName, userDataFolder)) continue;
                     copiedState = true;
@@ -359,6 +362,30 @@ internal static class BitwardenBrowserWebViewProfile
 
     private static bool HasMigratableCookieState(string userDataFolder) =>
         File.Exists(Path.Combine(userDataFolder, "Local State")) && HasCookieDatabase(userDataFolder);
+
+    private static DateTime GetCookieStateLastWriteTimeUtcSafe(string userDataFolder)
+    {
+        var newest = DateTime.MinValue;
+        foreach (var relativePath in CookieDatabaseRelativePaths)
+        {
+            var databasePath = Path.Combine(userDataFolder, relativePath);
+            foreach (var suffix in CookieDatabaseStateSuffixes)
+            {
+                try
+                {
+                    var path = databasePath + suffix;
+                    var lastWriteTimeUtc = File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue;
+                    if (lastWriteTimeUtc > newest) newest = lastWriteTimeUtc;
+                }
+                catch
+                {
+                    // An unreadable timestamp sorts last; the backup itself remains best-effort.
+                }
+            }
+        }
+
+        return newest;
+    }
 
     private static bool CopyCookieState(string sourceUserDataFolder, string destinationUserDataFolder)
     {
