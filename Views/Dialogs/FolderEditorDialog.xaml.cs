@@ -96,7 +96,11 @@ public sealed partial class FolderEditorDialog : UserControl
     {
         if (e.PropertyName == nameof(TunnelPickerViewModel.SelectedTunnel))
         {
-            SyncPickerText(TunnelBox, ViewModel.TunnelPicker.SelectedTunnel?.Name);
+            var picker = ViewModel.TunnelPicker;
+            TunnelBox.PlaceholderText = picker.TunnelEnabled == true && picker.SelectedTunnelConfigId is null
+                ? "VPN on — configuration inherited from parent"
+                : "Inherit from parent";
+            SyncPickerText(TunnelBox, picker.SelectedTunnel?.Name);
         }
     }
 
