@@ -42,6 +42,46 @@ public class TunnelPickerViewModelTests
     }
 
     [Fact]
+    public async Task FilterTunnelConfigs_MatchesNameCaseInsensitively()
+    {
+        var office = new TunnelConfig { Id = Guid.NewGuid(), Name = "Office", Kind = TunnelKind.WireGuard };
+        var remote = new TunnelConfig { Id = Guid.NewGuid(), Name = "Remote", Kind = TunnelKind.OpenVpn };
+        var vm = new TunnelPickerViewModel(new MultiRepo(office, remote));
+        await vm.LoadAsync();
+
+        Assert.Contains(office, vm.FilterTunnelConfigs("off"));
+        Assert.Contains(remote, vm.FilterTunnelConfigs("REMOTE"));
+        Assert.Empty(vm.FilterTunnelConfigs("missing"));
+        Assert.Equal(vm.AvailableTunnelConfigs.Count, vm.FilterTunnelConfigs(null).Count);
+    }
+
+    [Fact]
+    public async Task ResolveTunnelForCommit_PrefersExactName_ThenUniqueMatch()
+    {
+        var prod = new TunnelConfig { Id = Guid.NewGuid(), Name = "prod", Kind = TunnelKind.WireGuard };
+        var prodBackup = new TunnelConfig { Id = Guid.NewGuid(), Name = "prod-backup", Kind = TunnelKind.OpenVpn };
+        var vm = new TunnelPickerViewModel(new MultiRepo(prod, prodBackup));
+        await vm.LoadAsync();
+
+        Assert.Same(prod, vm.ResolveTunnelForCommit("PROD"));
+        Assert.Same(prodBackup, vm.ResolveTunnelForCommit("backup"));
+        Assert.Null(vm.ResolveTunnelForCommit("pro"));
+        Assert.Null(vm.ResolveTunnelForCommit("missing"));
+        Assert.Null(vm.ResolveTunnelForCommit(""));
+    }
+
+    [Fact]
+    public async Task Search_DoesNotTreatMissingTunnelAsItsDefaultKind()
+    {
+        var vm = NewPicker();
+        await vm.LoadAsync();
+        vm.LoadFrom(new ConnectionNode { TunnelEnabled = true, TunnelConfigId = Guid.NewGuid() });
+
+        Assert.Empty(vm.FilterTunnelConfigs("wireguard"));
+        Assert.Null(vm.ResolveTunnelForCommit("wireguard"));
+    }
+
+    [Fact]
     public void SelectedTunnel_InheritSentinel_NullsBothBackingFields()
     {
         var vm = NewPicker();

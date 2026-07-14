@@ -248,6 +248,37 @@ public class FolderEditorViewModelTests
     }
 
     [Fact]
+    public async Task FilterCredentials_MatchesNameUsernameAndDomain_CaseInsensitively()
+    {
+        var byName = new CredentialProfile { Id = Guid.NewGuid(), Name = "Prod-Web", Protocol = ProtocolType.Ssh };
+        var byUser = new CredentialProfile { Id = Guid.NewGuid(), Name = "service", Username = "deployer", Protocol = ProtocolType.Rdp };
+        var byDomain = new CredentialProfile { Id = Guid.NewGuid(), Name = "desktop", Domain = "EXAMPLE", Protocol = ProtocolType.Rdp };
+        var vm = NewVm(credentials: new[] { byName, byUser, byDomain });
+        await vm.LoadCredentialsAsync();
+
+        Assert.Contains(byName, vm.FilterCredentials("prod"));
+        Assert.Contains(byUser, vm.FilterCredentials("DEPLOY"));
+        Assert.Contains(byDomain, vm.FilterCredentials("example"));
+        Assert.Empty(vm.FilterCredentials("no-match"));
+        Assert.Equal(vm.AvailableCredentials.Count, vm.FilterCredentials(null).Count);
+    }
+
+    [Fact]
+    public async Task ResolveCredentialForCommit_PrefersExactName_ThenUniqueMatch()
+    {
+        var prod = new CredentialProfile { Id = Guid.NewGuid(), Name = "prod", Username = "root", Protocol = ProtocolType.Ssh };
+        var prodWeb = new CredentialProfile { Id = Guid.NewGuid(), Name = "prod-web", Username = "deployer", Protocol = ProtocolType.Ssh };
+        var vm = NewVm(credentials: new[] { prod, prodWeb });
+        await vm.LoadCredentialsAsync();
+
+        Assert.Same(prod, vm.ResolveCredentialForCommit("PROD"));
+        Assert.Same(prodWeb, vm.ResolveCredentialForCommit("deploy"));
+        Assert.Null(vm.ResolveCredentialForCommit("pro"));
+        Assert.Null(vm.ResolveCredentialForCommit("missing"));
+        Assert.Null(vm.ResolveCredentialForCommit(""));
+    }
+
+    [Fact]
     public async Task LoadFrom_MissingSavedCredential_AppendsStaleSelectionAndPreservesUsername()
     {
         var missingCredentialId = Guid.NewGuid();
