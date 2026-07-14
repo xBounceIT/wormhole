@@ -520,17 +520,28 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
             return _password;
         }
 
-        private Task<string?> PromptBitwardenUnlockOnUiAsync(CancellationToken cancellationToken) =>
-            PromptPasswordOnUiAsync("Unlock Bitwarden vault", "Enter your Bitwarden master password.", cancellationToken);
+        private Task<string?> PromptBitwardenUnlockOnUiAsync(
+            Func<string, CancellationToken, Task<string>> unlockAsync,
+            CancellationToken cancellationToken) =>
+            PromptOnUiAsync(
+                () => _dialog.PromptBitwardenUnlockAsync(unlockAsync, cancellationToken),
+                cancellationToken);
 
         private Task<string?> PromptPasswordOnUiAsync(CancellationToken cancellationToken) =>
             PromptPasswordOnUiAsync("VNC password", $"Enter the password for {_profile.Host}:{_profile.Port}.", cancellationToken);
 
-        private async Task<string?> PromptPasswordOnUiAsync(string title, string message, CancellationToken cancellationToken)
+        private Task<string?> PromptPasswordOnUiAsync(string title, string message, CancellationToken cancellationToken) =>
+            PromptOnUiAsync(
+                () => _dialog.PromptPasswordAsync(title, message, cancellationToken),
+                cancellationToken);
+
+        private async Task<string?> PromptOnUiAsync(
+            Func<Task<string?>> promptAsync,
+            CancellationToken cancellationToken)
         {
             if (_dispatcher is null || _dispatcher.HasThreadAccess)
             {
-                return await _dialog.PromptPasswordAsync(title, message, cancellationToken).ConfigureAwait(true);
+                return await promptAsync().ConfigureAwait(true);
             }
 
             var tcs = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -541,7 +552,7 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
             {
                 try
                 {
-                    var result = await _dialog.PromptPasswordAsync(title, message, cancellationToken).ConfigureAwait(true);
+                    var result = await promptAsync().ConfigureAwait(true);
                     tcs.TrySetResult(result);
                 }
                 catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)

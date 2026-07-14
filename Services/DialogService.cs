@@ -527,6 +527,112 @@ public sealed class DialogService : IDialogService
         return accepted ? passwordBox.Password : null;
     }
 
+    public async Task<string?> PromptBitwardenUnlockAsync(
+        Func<string, CancellationToken, Task<string>> unlockAsync,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(unlockAsync);
+
+        var passwordBox = new PasswordBox
+        {
+            Header = "Bitwarden master password",
+            PlaceholderText = "Master password",
+            Width = 320,
+        };
+        var progressRing = new ProgressRing
+        {
+            Width = 20,
+            Height = 20,
+            IsActive = false,
+        };
+        var progressText = new TextBlock
+        {
+            Text = "Unlocking Bitwarden vault…",
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap,
+        };
+        var progressPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            Visibility = Visibility.Collapsed,
+        };
+        progressPanel.Children.Add(progressRing);
+        progressPanel.Children.Add(progressText);
+
+        var errorInfo = new InfoBar
+        {
+            Severity = InfoBarSeverity.Error,
+            IsClosable = false,
+            IsOpen = false,
+            Title = "Couldn't unlock Bitwarden",
+        };
+
+        var panel = new StackPanel { Spacing = 10, MinWidth = 320 };
+        panel.Children.Add(new TextBlock
+        {
+            Text = "Enter your Bitwarden master password. Wormhole never stores it.",
+            TextWrapping = TextWrapping.Wrap,
+        });
+        panel.Children.Add(passwordBox);
+        panel.Children.Add(progressPanel);
+        panel.Children.Add(errorInfo);
+
+        var dialog = new ContentDialog
+        {
+            Title = "Unlock Bitwarden vault",
+            Content = panel,
+            PrimaryButtonText = "Unlock",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = RequireXamlRoot(),
+            IsPrimaryButtonEnabled = false,
+        };
+
+        string? sessionKey = null;
+        passwordBox.PasswordChanged += (_, _) =>
+            dialog.IsPrimaryButtonEnabled = !string.IsNullOrEmpty(passwordBox.Password);
+        dialog.Opened += (_, _) => passwordBox.Focus(FocusState.Programmatic);
+        dialog.PrimaryButtonClick += async (_, args) =>
+        {
+            var deferral = args.GetDeferral();
+            try
+            {
+                dialog.IsPrimaryButtonEnabled = false;
+                passwordBox.IsEnabled = false;
+                errorInfo.IsOpen = false;
+                progressRing.IsActive = true;
+                progressPanel.Visibility = Visibility.Visible;
+
+                var password = passwordBox.Password;
+                passwordBox.Password = string.Empty;
+                sessionKey = await unlockAsync(password, cancellationToken).ConfigureAwait(true);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                args.Cancel = true;
+            }
+            catch (Exception ex)
+            {
+                args.Cancel = true;
+                errorInfo.Message = ex.Message;
+                errorInfo.IsOpen = true;
+            }
+            finally
+            {
+                progressRing.IsActive = false;
+                progressPanel.Visibility = Visibility.Collapsed;
+                passwordBox.IsEnabled = true;
+                dialog.IsPrimaryButtonEnabled = !string.IsNullOrEmpty(passwordBox.Password);
+                deferral.Complete();
+            }
+        };
+
+        var result = await ShowDialogAsync(dialog, cancellationToken).ConfigureAwait(true);
+        cancellationToken.ThrowIfCancellationRequested();
+        return result == ContentDialogResult.Primary ? sessionKey : null;
+    }
+
     public async Task<AccountCredentialPromptResult?> PromptAccountCredentialsAsync(
         string title,
         string message,
@@ -611,6 +717,27 @@ public sealed class DialogService : IDialogService
         };
         savedCredentialSection.Children.Add(bitwardenUnlockBox);
 
+        var credentialProgressRing = new ProgressRing
+        {
+            Width = 20,
+            Height = 20,
+            IsActive = false,
+        };
+        var credentialProgressText = new TextBlock
+        {
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.Wrap,
+        };
+        var credentialProgressPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Spacing = 8,
+            Visibility = Visibility.Collapsed,
+        };
+        credentialProgressPanel.Children.Add(credentialProgressRing);
+        credentialProgressPanel.Children.Add(credentialProgressText);
+        savedCredentialSection.Children.Add(credentialProgressPanel);
+
         if (choices.Count == 1)
         {
             savedCredentialSection.Children.Add(new TextBlock
@@ -645,6 +772,7 @@ public sealed class DialogService : IDialogService
 
         AccountCredentialPromptResult? promptResult = null;
         var submittedViaEnter = false;
+        var credentialReadInProgress = false;
 
         var dialog = new ContentDialog
         {
@@ -665,7 +793,22 @@ public sealed class DialogService : IDialogService
         {
             var selectedCredential = CurrentChoice().Credential;
             var typedCredential = ResolveAccountCredentialForCommit(choices, credentialBox.Text)?.Credential;
-            dialog.IsPrimaryButtonEnabled = selectedCredential is not null || typedCredential is not null || ManualUsernameValid();
+            dialog.IsPrimaryButtonEnabled = !credentialReadInProgress &&
+                (selectedCredential is not null || typedCredential is not null || ManualUsernameValid());
+        }
+
+        void SetCredentialReadProgress(bool isActive, string? message = null)
+        {
+            credentialReadInProgress = isActive;
+            credentialBox.IsEnabled = !isActive;
+            if (userBox is not null) userBox.IsEnabled = !isActive && CurrentChoice().Credential is null;
+            passwordBox.IsEnabled = !isActive && CurrentChoice().Credential is null;
+            bitwardenUnlockBox.IsEnabled = !isActive && CurrentChoice().Credential?.IsBitwarden == true;
+            saveBindingBox.IsEnabled = !isActive && CurrentChoice().Credential is not null;
+            credentialProgressText.Text = message ?? string.Empty;
+            credentialProgressRing.IsActive = isActive;
+            credentialProgressPanel.Visibility = isActive ? Visibility.Visible : Visibility.Collapsed;
+            UpdatePrimaryButton();
         }
 
         void UpdateCredentialMode()
@@ -723,10 +866,18 @@ public sealed class DialogService : IDialogService
             credentialBox.IsSuggestionListOpen = false;
         }
 
-        Task<string?> PromptBitwardenUnlockFromDialogAsync(CancellationToken _)
+        async Task<string?> PromptBitwardenUnlockFromDialogAsync(
+            Func<string, CancellationToken, Task<string>> unlockAsync,
+            CancellationToken token)
         {
             var password = bitwardenUnlockBox.Password;
-            return Task.FromResult(string.IsNullOrEmpty(password) ? null : password);
+            if (string.IsNullOrEmpty(password)) return null;
+
+            credentialProgressText.Text = "Unlocking Bitwarden vault…";
+            bitwardenUnlockBox.Password = string.Empty;
+            var sessionKey = await unlockAsync(password, token).ConfigureAwait(true);
+            credentialProgressText.Text = "Vault unlocked. Loading credential…";
+            return sessionKey;
         }
 
         AccountCredentialPromptResult? BuildManualResult()
@@ -808,6 +959,11 @@ public sealed class DialogService : IDialogService
             var deferral = args.GetDeferral();
             try
             {
+                SetCredentialReadProgress(
+                    true,
+                    selectedCredential.IsBitwarden
+                        ? "Loading credential from Bitwarden…"
+                        : "Loading saved credential…");
                 string? password;
                 try
                 {
@@ -815,6 +971,11 @@ public sealed class DialogService : IDialogService
                         selectedCredential,
                         selectedCredential.IsBitwarden ? PromptBitwardenUnlockFromDialogAsync : null,
                         cancellationToken).ConfigureAwait(true);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    args.Cancel = true;
+                    return;
                 }
                 catch
                 {
@@ -842,6 +1003,7 @@ public sealed class DialogService : IDialogService
             }
             finally
             {
+                SetCredentialReadProgress(false);
                 deferral.Complete();
             }
         };

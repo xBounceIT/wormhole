@@ -406,7 +406,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
             string? secret = credential.Kind == CredentialKind.SshKey
                 ? await _credentialService.ReadPasswordAsync(credId)
-                : await _passwordResolver.ReadPasswordAsync(credential, PromptForBitwardenUnlockAsync);
+                : await _passwordResolver.ReadPasswordAsync(credential, _dialog.PromptBitwardenUnlockAsync);
             await ShowResolvedCredentialSecretAsync(clicked.Name, username, secretLabel, secret);
         }
         catch (UserInteractionCancelledException)
@@ -423,12 +423,6 @@ public partial class ConnectionTreeViewModel : ObservableObject
         }
     }
 
-
-    private Task<string?> PromptForBitwardenUnlockAsync(CancellationToken cancellationToken) =>
-        _dialog.PromptPasswordAsync(
-            "Unlock Bitwarden vault",
-            "Enter your Bitwarden master password.",
-            cancellationToken);
 
     private async Task ShowResolvedCredentialSecretAsync(
         string connectionName,
@@ -1477,7 +1471,7 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
         public Task<string?> ReadPasswordAsync(
             CredentialProfile credential,
-            Func<CancellationToken, Task<string?>>? unlockPrompt = null,
+            BitwardenUnlockPrompt? unlockPrompt = null,
             CancellationToken cancellationToken = default) =>
             _credentials.ReadPasswordAsync(credential.Id);
     }

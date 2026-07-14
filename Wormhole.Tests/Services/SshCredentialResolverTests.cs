@@ -403,7 +403,7 @@ public class SshCredentialResolverTests
     {
         public Task<string?> ReadPasswordAsync(
             CredentialProfile credential,
-            Func<CancellationToken, Task<string?>>? unlockPrompt = null,
+            BitwardenUnlockPrompt? unlockPrompt = null,
             CancellationToken cancellationToken = default) =>
             throw new BitwardenVaultException("missing item");
     }

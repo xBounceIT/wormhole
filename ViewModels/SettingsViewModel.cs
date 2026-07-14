@@ -511,6 +511,7 @@ public partial class SettingsViewModel : ObservableObject
         if (password is null) return;
 
         IsBitwardenBusy = true;
+        BitwardenStatus = "Unlocking Bitwarden vault…";
         try
         {
             var sessionKey = await _bitwardenVault.UnlockAsync(password).ConfigureAwait(true);

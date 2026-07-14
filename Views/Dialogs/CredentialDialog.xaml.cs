@@ -10,6 +10,8 @@ namespace Wormhole.Views.Dialogs;
 
 public sealed partial class CredentialDialog : UserControl, IDraftForm<CredentialDraft>
 {
+    private bool _bitwardenSearchInProgress;
+
     public event EventHandler? ValidityChanged;
 
     public CredentialDialog()
@@ -134,6 +136,8 @@ public sealed partial class CredentialDialog : UserControl, IDraftForm<Credentia
 
     private async Task SearchBitwardenAsync()
     {
+        if (_bitwardenSearchInProgress) return;
+
         var settings = App.Current.Services.GetService<IAppSettingsService>();
         var client = App.Current.Services.GetService<IBitwardenVaultClient>();
         var session = App.Current.Services.GetService<IBitwardenSessionService>();
@@ -148,8 +152,7 @@ public sealed partial class CredentialDialog : UserControl, IDraftForm<Credentia
             return;
         }
 
-        BitwardenSearchButton.IsEnabled = false;
-        ShowBitwardenStatus("Searching Bitwarden...");
+        SetBitwardenSearchProgress(true, "Searching Bitwarden…");
         try
         {
             var items = await SearchWithUnlockRetryAsync(client, session).ConfigureAwait(true);
@@ -168,7 +171,7 @@ public sealed partial class CredentialDialog : UserControl, IDraftForm<Credentia
         }
         finally
         {
-            BitwardenSearchButton.IsEnabled = true;
+            SetBitwardenSearchProgress(false);
         }
     }
 
@@ -191,9 +194,11 @@ public sealed partial class CredentialDialog : UserControl, IDraftForm<Credentia
 
             var masterPassword = BitwardenUnlockField.Password;
             BitwardenUnlockField.Password = string.Empty;
+            ShowBitwardenStatus("Unlocking Bitwarden vault…");
             var sessionKey = await client.UnlockAsync(masterPassword).ConfigureAwait(true);
             session.SetSessionKey(sessionKey);
             BitwardenUnlockField.Visibility = Visibility.Collapsed;
+            ShowBitwardenStatus("Vault unlocked. Searching Bitwarden…");
             return await client.SearchLoginItemsAsync(BitwardenSearchBox.Text, session.SessionKey).ConfigureAwait(true);
         }
     }
@@ -218,6 +223,18 @@ public sealed partial class CredentialDialog : UserControl, IDraftForm<Credentia
     {
         BitwardenStatusBlock.Text = message;
         BitwardenStatusBlock.Visibility = string.IsNullOrWhiteSpace(message) ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private void SetBitwardenSearchProgress(bool isActive, string? message = null)
+    {
+        _bitwardenSearchInProgress = isActive;
+        BitwardenSearchBox.IsEnabled = !isActive;
+        BitwardenSearchButton.IsEnabled = !isActive;
+        BitwardenUnlockField.IsEnabled = !isActive;
+        BitwardenItemsBox.IsEnabled = !isActive;
+        BitwardenProgressRing.IsActive = isActive;
+        BitwardenProgressRing.Visibility = isActive ? Visibility.Visible : Visibility.Collapsed;
+        if (message is not null) ShowBitwardenStatus(message);
     }
 
     private static string? NullIfWhiteSpace(string? value) =>
