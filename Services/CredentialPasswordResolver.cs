@@ -29,7 +29,7 @@ public sealed class CredentialPasswordResolver : ICredentialPasswordResolver, ID
 
     public async Task<string?> ReadPasswordAsync(
         CredentialProfile credential,
-        Func<CancellationToken, Task<string?>>? unlockPrompt = null,
+        BitwardenUnlockPrompt? unlockPrompt = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(credential);
@@ -73,7 +73,7 @@ public sealed class CredentialPasswordResolver : ICredentialPasswordResolver, ID
     private async Task<BitwardenLoginItem?> GetItemWithRetryAsync(
         string itemId,
         string? sessionKey,
-        Func<CancellationToken, Task<string?>>? unlockPrompt,
+        BitwardenUnlockPrompt? unlockPrompt,
         CancellationToken cancellationToken)
     {
         try
@@ -92,7 +92,7 @@ public sealed class CredentialPasswordResolver : ICredentialPasswordResolver, ID
     public void Dispose() => _unlockGate.Dispose();
 
     private async Task<string?> EnsureSessionKeyAsync(
-        Func<CancellationToken, Task<string?>>? unlockPrompt,
+        BitwardenUnlockPrompt? unlockPrompt,
         CancellationToken cancellationToken)
     {
         if (_bitwardenSession.SessionKey is { Length: > 0 } existing) return existing;
@@ -117,14 +117,13 @@ public sealed class CredentialPasswordResolver : ICredentialPasswordResolver, ID
                 throw new BitwardenVaultException("Bitwarden vault is locked.", isAuthenticationError: true);
             }
 
-            var masterPassword = await unlockPrompt(cancellationToken).ConfigureAwait(true);
+            var sessionKey = await unlockPrompt(_bitwarden.UnlockAsync, cancellationToken).ConfigureAwait(true);
             cancellationToken.ThrowIfCancellationRequested();
-            if (masterPassword is null)
+            if (sessionKey is null)
             {
                 throw new BitwardenUnlockCancelledException();
             }
 
-            var sessionKey = await _bitwarden.UnlockAsync(masterPassword, cancellationToken).ConfigureAwait(false);
             _bitwardenSession.SetSessionKey(sessionKey);
             return sessionKey;
         }

@@ -173,7 +173,10 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
         string? stored;
         try
         {
-            stored = await _passwordResolver.ReadPasswordAsync(credential, PromptForBitwardenUnlockAsync, cancellationToken).ConfigureAwait(true);
+            stored = await _passwordResolver.ReadPasswordAsync(
+                credential,
+                _dialogs.PromptBitwardenUnlockAsync,
+                cancellationToken).ConfigureAwait(true);
         }
         catch (BitwardenVaultException)
         {
@@ -186,12 +189,6 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
         }
         return await PromptForPasswordAsync(profile, cancellationToken, credential.Username).ConfigureAwait(true);
     }
-
-    private Task<string?> PromptForBitwardenUnlockAsync(CancellationToken cancellationToken) =>
-        _dialogs.PromptPasswordAsync(
-            "Unlock Bitwarden vault",
-            "Enter your Bitwarden master password.",
-            cancellationToken);
 
     private static async Task ObserveCredentialReadAsync(Task<string?> task)
     {

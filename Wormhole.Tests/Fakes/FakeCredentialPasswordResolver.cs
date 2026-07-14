@@ -17,7 +17,7 @@ public sealed class FakeCredentialPasswordResolver : ICredentialPasswordResolver
 
     public Task<string?> ReadPasswordAsync(
         CredentialProfile credential,
-        Func<CancellationToken, Task<string?>>? unlockPrompt = null,
+        BitwardenUnlockPrompt? unlockPrompt = null,
         CancellationToken cancellationToken = default) =>
         _credentials.ReadPasswordAsync(credential.Id);
 }

@@ -44,6 +44,24 @@ public interface IDialogService
     Task<string?> PromptPasswordAsync(string title, string message, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Prompts for the Bitwarden master password and keeps an on-screen progress indicator active
+    /// while <paramref name="unlockAsync"/> unlocks the vault. Returns the session key, or null when
+    /// the user cancels.
+    /// </summary>
+    async Task<string?> PromptBitwardenUnlockAsync(
+        Func<string, CancellationToken, Task<string>> unlockAsync,
+        CancellationToken cancellationToken = default)
+    {
+        var password = await PromptPasswordAsync(
+            "Unlock Bitwarden vault",
+            "Enter your Bitwarden master password.",
+            cancellationToken).ConfigureAwait(true);
+        if (password is null) return null;
+
+        return await unlockAsync(password, cancellationToken).ConfigureAwait(true);
+    }
+
+    /// <summary>
     /// Prompt for an account password, optionally letting the user select an existing saved
     /// credential instead of typing a password manually. Returns null on cancel. When
     /// <paramref name="requireUsername"/> is true, manual entry requires a username; selected

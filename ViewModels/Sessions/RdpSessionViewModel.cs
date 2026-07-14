@@ -972,7 +972,10 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         {
             try
             {
-                var stored = await _passwordResolver.ReadPasswordAsync(credential, PromptForBitwardenUnlockAsync, token).ConfigureAwait(true);
+                var stored = await _passwordResolver.ReadPasswordAsync(
+                    credential,
+                    _dialog.PromptBitwardenUnlockAsync,
+                    token).ConfigureAwait(true);
                 if (stored is not null && username is not null)
                 {
                     return new ResolvedRdpCredentials(
@@ -1148,12 +1151,6 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     /// callers pass the nulls through, and the OCX falls back to its own prompt if the
     /// gateway requires interactive auth.
     /// </summary>
-    private Task<string?> PromptForBitwardenUnlockAsync(CancellationToken cancellationToken) =>
-        _dialog.PromptPasswordAsync(
-            "Unlock Bitwarden vault",
-            "Enter your Bitwarden master password.",
-            cancellationToken);
-
     private async Task<(string? Username, string? Password)> ResolveGatewayCredentialsAsync(ConnectionProfile profile, CancellationToken token)
     {
         if (profile.RdpGatewayUsageMethod == 0) return (null, null);
@@ -1175,7 +1172,13 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             : $"{gwProfile.Domain}\\{gwProfile.Username}";
 
         string? password = null;
-        try { password = await _passwordResolver.ReadPasswordAsync(gwProfile, PromptForBitwardenUnlockAsync, token).ConfigureAwait(true); }
+        try
+        {
+            password = await _passwordResolver.ReadPasswordAsync(
+                gwProfile,
+                _dialog.PromptBitwardenUnlockAsync,
+                token).ConfigureAwait(true);
+        }
         catch (Exception ex) when (ex is not OperationCanceledException) { _logger.LogWarning(ex, "Failed to read gateway credential password."); }
 
         return (username, password);

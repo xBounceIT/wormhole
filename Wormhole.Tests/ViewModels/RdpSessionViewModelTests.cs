@@ -2228,7 +2228,7 @@ public class RdpSessionViewModelTests
 
         public Task<string?> ReadPasswordAsync(
             CredentialProfile credential,
-            Func<CancellationToken, Task<string?>>? unlockPrompt = null,
+            BitwardenUnlockPrompt? unlockPrompt = null,
             CancellationToken cancellationToken = default) =>
             Task.FromException<string?>(_exception);
     }

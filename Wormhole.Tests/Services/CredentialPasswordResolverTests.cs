@@ -30,6 +30,7 @@ public sealed class CredentialPasswordResolverTests
             Item = new BitwardenLoginItem("item-1", "Server", "root", "vault-pw"),
         };
         var resolver = NewResolver(new FakeCredentialService(), bitwarden);
+        var unlockCompletedInsidePrompt = false;
 
         var password = await resolver.ReadPasswordAsync(
             new CredentialProfile
@@ -37,9 +38,15 @@ public sealed class CredentialPasswordResolverTests
                 SecretProvider = CredentialSecretProvider.Bitwarden,
                 BitwardenItemId = "item-1",
             },
-            _ => Task.FromResult<string?>("master"));
+            async (unlockAsync, cancellationToken) =>
+            {
+                var sessionKey = await unlockAsync("master", cancellationToken);
+                unlockCompletedInsidePrompt = bitwarden.UnlockPassword == "master";
+                return sessionKey;
+            });
 
         Assert.Equal("vault-pw", password);
+        Assert.True(unlockCompletedInsidePrompt);
         Assert.Equal("master", bitwarden.UnlockPassword);
         Assert.Equal("SESSION", bitwarden.SessionSeenByGet);
     }
@@ -67,10 +74,10 @@ public sealed class CredentialPasswordResolverTests
                     SecretProvider = CredentialSecretProvider.Bitwarden,
                     BitwardenItemId = "item-1",
                 },
-                _ =>
+                async (unlockAsync, cancellationToken) =>
                 {
                     promptSawCapturedContext = ReferenceEquals(context, SynchronizationContext.Current);
-                    return Task.FromResult<string?>("master");
+                    return await unlockAsync("master", cancellationToken);
                 });
 
             Assert.Equal("vault-pw", password);
@@ -99,7 +106,7 @@ public sealed class CredentialPasswordResolverTests
                 SecretProvider = CredentialSecretProvider.Bitwarden,
                 BitwardenItemId = "item-1",
             },
-            _ => throw new InvalidOperationException("Prompt should not be shown for an already unlocked vault."));
+            (_, _) => throw new InvalidOperationException("Prompt should not be shown for an already unlocked vault."));
 
         Assert.Equal("vault-pw", password);
         Assert.Null(bitwarden.UnlockPassword);
@@ -120,7 +127,7 @@ public sealed class CredentialPasswordResolverTests
                 SecretProvider = CredentialSecretProvider.Bitwarden,
                 BitwardenItemId = "item-1",
             },
-            _ => Task.FromResult<string?>(null)));
+            (_, _) => Task.FromResult<string?>(null)));
     }
 
     private static CredentialPasswordResolver NewResolver(FakeCredentialService local, FakeBitwardenClient bitwarden)
