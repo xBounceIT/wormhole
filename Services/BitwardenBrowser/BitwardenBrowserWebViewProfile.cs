@@ -519,25 +519,73 @@ internal static class BitwardenBrowserWebViewProfile
         string destinationUserDataFolder,
         IReadOnlySet<string>? retainedCookieHosts)
     {
-        // Chromium encrypts cookie values with the key stored in Local State. Copy it before taking a
-        // consistent SQLite backup; without the matching key, the destination cannot decrypt cookies.
-        if (!CopyFileIfExists(
-                Path.Combine(sourceUserDataFolder, "Local State"),
-                Path.Combine(destinationUserDataFolder, "Local State")))
+        // Chromium encrypts cookie values with the key stored in Local State. Back up the destination
+        // key before replacing it so a failed SQLite backup cannot leave existing cookies undecryptable.
+        var sourceLocalStatePath = Path.Combine(sourceUserDataFolder, "Local State");
+        if (!File.Exists(sourceLocalStatePath)) return false;
+
+        var destinationLocalStatePath = Path.Combine(destinationUserDataFolder, "Local State");
+        var destinationHadLocalState = File.Exists(destinationLocalStatePath);
+        var rollbackPath = destinationLocalStatePath + ".seed-rollback-" + Guid.NewGuid().ToString("N");
+        var copied = false;
+        try
+        {
+            if (destinationHadLocalState)
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(destinationLocalStatePath)!);
+                File.Copy(destinationLocalStatePath, rollbackPath);
+            }
+
+            if (!CopyFileIfExists(sourceLocalStatePath, destinationLocalStatePath)) return false;
+
+            foreach (var relativePath in CookieDatabaseRelativePaths)
+            {
+                copied |= TryBackupSqliteDatabase(
+                    Path.Combine(sourceUserDataFolder, relativePath),
+                    Path.Combine(destinationUserDataFolder, relativePath),
+                    retainedCookieHosts);
+            }
+
+            return copied;
+        }
+        catch
         {
             return false;
         }
-
-        var copied = false;
-        foreach (var relativePath in CookieDatabaseRelativePaths)
+        finally
         {
-            copied |= TryBackupSqliteDatabase(
-                Path.Combine(sourceUserDataFolder, relativePath),
-                Path.Combine(destinationUserDataFolder, relativePath),
-                retainedCookieHosts);
+            if (!copied)
+            {
+                RestoreLocalStateAfterFailedCookieCopy(
+                    destinationLocalStatePath,
+                    rollbackPath,
+                    destinationHadLocalState);
+            }
+            try { if (File.Exists(rollbackPath)) File.Delete(rollbackPath); }
+            catch { /* best-effort cleanup; a uniquely named orphan is harmless */ }
         }
+    }
 
-        return copied;
+    private static void RestoreLocalStateAfterFailedCookieCopy(
+        string destinationPath,
+        string rollbackPath,
+        bool destinationExisted)
+    {
+        try
+        {
+            if (destinationExisted)
+            {
+                if (File.Exists(rollbackPath)) File.Move(rollbackPath, destinationPath, overwrite: true);
+            }
+            else if (File.Exists(destinationPath))
+            {
+                File.Delete(destinationPath);
+            }
+        }
+        catch
+        {
+            // Best-effort migration must not prevent WebView2 startup.
+        }
     }
 
     private static bool TryBackupSqliteDatabase(

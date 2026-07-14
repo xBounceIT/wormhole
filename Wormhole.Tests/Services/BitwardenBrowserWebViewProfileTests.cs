@@ -337,6 +337,40 @@ public sealed class BitwardenBrowserWebViewProfileTests
     }
 
     [Fact]
+    public async Task TrySeedProfileStateFromExistingProfile_FailedRefreshPreservesDestinationLocalStateAndCookies()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
+        var corruptSource = Path.Combine(root, "profile-corrupt-source");
+        var destination = Path.Combine(root, "profile-reused-destination");
+        const string routeKey = "matching-route";
+        try
+        {
+            await CreateSeedSourceAsync(corruptSource, routeKey, "corrupt", includeCookies: false);
+            await CreateSeedSourceAsync(destination, routeKey, "valid");
+            var sourceCookies = Path.Combine(corruptSource, "Default", "Network", "Cookies");
+            Directory.CreateDirectory(Path.GetDirectoryName(sourceCookies)!);
+            await File.WriteAllTextAsync(sourceCookies, "not a sqlite database");
+            var destinationCookies = Path.Combine(destination, "Default", "Network", "Cookies");
+            var now = DateTime.UtcNow;
+            File.SetLastWriteTimeUtc(sourceCookies, now);
+            File.SetLastWriteTimeUtc(destinationCookies, now.AddMinutes(-10));
+
+            Assert.False(BitwardenBrowserWebViewProfile.TrySeedProfileStateFromExistingProfile(
+                destination,
+                root,
+                routeKey));
+
+            Assert.Equal("local-valid", File.ReadAllText(Path.Combine(destination, "Local State")));
+            Assert.Equal("valid", ReadCookieDatabaseValue(destinationCookies));
+            Assert.Empty(Directory.EnumerateFiles(destination, "Local State.seed-rollback-*"));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task TrySeedProfileStateFromExistingProfile_DoesNotCopyCookiesFromAnotherRoute()
     {
         var root = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
@@ -443,6 +477,7 @@ public sealed class BitwardenBrowserWebViewProfileTests
 
             var destinationCookies = Path.Combine(destination, "Default", "Network", "Cookies");
             Assert.False(File.Exists(destinationCookies));
+            Assert.False(File.Exists(Path.Combine(destination, "Local State")));
             Assert.Empty(Directory.EnumerateFiles(
                 Path.GetDirectoryName(destinationCookies)!,
                 "Cookies.seed-*"));
