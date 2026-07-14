@@ -54,7 +54,7 @@ public sealed class BitwardenBrowserWebViewProfileTests
     }
 
     [Fact]
-    public void UserDataFolder_UsesStableSocksTargetAndTunnelIdentity()
+    public void UserDataFolder_SocksProfilesKeepRuntimeArgumentsAndStableRouteIdentity()
     {
         var tunnelConfigId = Guid.NewGuid();
         var otherTunnelConfigId = Guid.NewGuid();
@@ -63,6 +63,27 @@ public sealed class BitwardenBrowserWebViewProfileTests
             new IPEndPoint(IPAddress.Loopback, 12000));
         var reboundArgs = BitwardenBrowserWebViewProfile.BuildBrowserArguments(
             new IPEndPoint(IPAddress.Loopback, 23000));
+
+        var routeKey = BitwardenBrowserWebViewProfile.BuildPersistentRouteKey(
+            target,
+            originalUri: null,
+            tunnelConfigId);
+        var reboundRouteKey = BitwardenBrowserWebViewProfile.BuildPersistentRouteKey(
+            target,
+            originalUri: null,
+            tunnelConfigId);
+        var otherTargetRouteKey = BitwardenBrowserWebViewProfile.BuildPersistentRouteKey(
+            new Uri("https://firewall.example/login"),
+            originalUri: null,
+            tunnelConfigId);
+        var otherTunnelRouteKey = BitwardenBrowserWebViewProfile.BuildPersistentRouteKey(
+            target,
+            originalUri: null,
+            otherTunnelConfigId);
+        var forwarderRouteKey = BitwardenBrowserWebViewProfile.BuildPersistentRouteKey(
+            new Uri("https://127.0.0.1:12000"),
+            target,
+            tunnelConfigId);
 
         var first = BitwardenBrowserWebViewProfile.GetUserDataFolder(
             firstArgs,
@@ -95,7 +116,11 @@ public sealed class BitwardenBrowserWebViewProfileTests
             target,
             tunnelConfigId);
 
-        Assert.Equal(first, rebound);
+        Assert.Equal(routeKey, reboundRouteKey);
+        Assert.NotEqual(routeKey, otherTargetRouteKey);
+        Assert.NotEqual(routeKey, otherTunnelRouteKey);
+        Assert.NotEqual(routeKey, forwarderRouteKey);
+        Assert.NotEqual(first, rebound);
         Assert.NotEqual(first, otherTarget);
         Assert.NotEqual(first, otherTunnel);
         Assert.NotEqual(first, forwarder);
@@ -174,6 +199,109 @@ public sealed class BitwardenBrowserWebViewProfileTests
             Assert.Equal("state", File.ReadAllText(Path.Combine(destination, "Default", "Local Extension Settings", "extension-id", "state.log")));
             Assert.Equal("db", File.ReadAllText(Path.Combine(destination, "Default", "IndexedDB", "chrome-extension_extension-id_0.indexeddb.leveldb", "CURRENT")));
             Assert.False(Directory.Exists(Path.Combine(destination, "Default", "IndexedDB", "https_router.example_0.indexeddb.leveldb")));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TrySeedProfileStateFromExistingProfile_CopiesCookiesOnlyFromMatchingRoute()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
+        var matching = Path.Combine(root, "profile-matching");
+        var matchingWithoutCookies = Path.Combine(root, "profile-matching-without-cookies");
+        var unrelated = Path.Combine(root, "profile-unrelated");
+        var destination = Path.Combine(root, "profile-destination");
+        const string routeKey = "matching-route";
+        try
+        {
+            await CreateSeedSourceAsync(matching, routeKey, "matching");
+            await CreateSeedSourceAsync(matchingWithoutCookies, routeKey, "newer-matching", includeCookies: false);
+            await CreateSeedSourceAsync(unrelated, "other-route", "unrelated");
+            Directory.SetLastWriteTimeUtc(matching, DateTime.UtcNow.AddMinutes(-2));
+            Directory.SetLastWriteTimeUtc(unrelated, DateTime.UtcNow.AddMinutes(-1));
+            Directory.SetLastWriteTimeUtc(matchingWithoutCookies, DateTime.UtcNow);
+
+            Assert.True(BitwardenBrowserWebViewProfile.TrySeedProfileStateFromExistingProfile(
+                destination,
+                root,
+                routeKey));
+
+            Assert.Equal(
+                routeKey,
+                File.ReadAllText(Path.Combine(destination, BitwardenBrowserWebViewProfile.PersistentRouteKeyFileName)));
+            Assert.Equal("local-matching", File.ReadAllText(Path.Combine(destination, "Local State")));
+            Assert.Equal("matching", ReadCookieDatabaseValue(
+                Path.Combine(destination, "Default", "Network", "Cookies")));
+            Assert.Equal(
+                "newer-matching",
+                File.ReadAllText(Path.Combine(
+                    destination,
+                    "Default",
+                    "Local Extension Settings",
+                    "extension-id",
+                    "state.log")));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TrySeedProfileStateFromExistingProfile_DoesNotCopyCookiesFromAnotherRoute()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
+        var source = Path.Combine(root, "profile-source");
+        var destination = Path.Combine(root, "profile-destination");
+        const string destinationRouteKey = "destination-route";
+        try
+        {
+            await CreateSeedSourceAsync(source, "other-route", "source");
+
+            Assert.True(BitwardenBrowserWebViewProfile.TrySeedProfileStateFromExistingProfile(
+                destination,
+                root,
+                destinationRouteKey));
+
+            Assert.True(File.Exists(BitwardenBrowserExtensionMarker.GetPath(destination)));
+            Assert.False(File.Exists(Path.Combine(destination, "Default", "Network", "Cookies")));
+            Assert.Equal(
+                destinationRouteKey,
+                File.ReadAllText(Path.Combine(destination, BitwardenBrowserWebViewProfile.PersistentRouteKeyFileName)));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TrySeedProfileStateFromExistingProfile_FailedBackupLeavesNoPartialCookieDatabase()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
+        var source = Path.Combine(root, "profile-source");
+        var destination = Path.Combine(root, "profile-destination");
+        const string routeKey = "matching-route";
+        try
+        {
+            await CreateSeedSourceAsync(source, routeKey, "source", includeCookies: false);
+            var sourceCookies = Path.Combine(source, "Default", "Network", "Cookies");
+            Directory.CreateDirectory(Path.GetDirectoryName(sourceCookies)!);
+            await File.WriteAllTextAsync(sourceCookies, "not a sqlite database");
+
+            Assert.True(BitwardenBrowserWebViewProfile.TrySeedProfileStateFromExistingProfile(
+                destination,
+                root,
+                routeKey));
+
+            var destinationCookies = Path.Combine(destination, "Default", "Network", "Cookies");
+            Assert.False(File.Exists(destinationCookies));
+            Assert.Empty(Directory.EnumerateFiles(
+                Path.GetDirectoryName(destinationCookies)!,
+                "Cookies.seed-*"));
         }
         finally
         {
@@ -334,6 +462,60 @@ public sealed class BitwardenBrowserWebViewProfileTests
         {
             if (Directory.Exists(profile)) Directory.Delete(profile, recursive: true);
         }
+    }
+
+    private static async Task CreateSeedSourceAsync(
+        string profile,
+        string routeKey,
+        string value,
+        bool includeCookies = true)
+    {
+        var extensionSettings = Path.Combine(
+            profile,
+            "Default",
+            "Local Extension Settings",
+            "extension-id");
+        Directory.CreateDirectory(extensionSettings);
+        await File.WriteAllTextAsync(Path.Combine(extensionSettings, "state.log"), value);
+        await File.WriteAllTextAsync(Path.Combine(profile, "Local State"), "local-" + value);
+        await File.WriteAllTextAsync(
+            Path.Combine(profile, BitwardenBrowserWebViewProfile.PersistentRouteKeyFileName),
+            routeKey);
+        await BitwardenBrowserExtensionMarker.WriteAsync(
+            BitwardenBrowserExtensionMarker.GetPath(profile),
+            Path.Combine(profile, "extension"),
+            "extension-id");
+        if (includeCookies)
+        {
+            CreateCookieDatabase(Path.Combine(profile, "Default", "Network", "Cookies"), value);
+        }
+    }
+
+    private static void CreateCookieDatabase(string path, string value)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var builder = new SqliteConnectionStringBuilder { DataSource = path, Pooling = false };
+        using var connection = new SqliteConnection(builder.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "CREATE TABLE cookie_test(value TEXT NOT NULL); INSERT INTO cookie_test VALUES ($value);";
+        command.Parameters.AddWithValue("$value", value);
+        command.ExecuteNonQuery();
+    }
+
+    private static string ReadCookieDatabaseValue(string path)
+    {
+        var builder = new SqliteConnectionStringBuilder
+        {
+            DataSource = path,
+            Mode = SqliteOpenMode.ReadOnly,
+            Pooling = false,
+        };
+        using var connection = new SqliteConnection(builder.ToString());
+        connection.Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT value FROM cookie_test";
+        return Assert.IsType<string>(command.ExecuteScalar());
     }
 
 }
