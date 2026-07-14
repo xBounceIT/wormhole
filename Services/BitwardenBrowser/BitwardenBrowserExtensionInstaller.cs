@@ -186,14 +186,14 @@ public sealed class BitwardenBrowserExtensionInstaller : IBitwardenBrowserExtens
         try
         {
             var sha256 = await ComputeFileSha256Async(zipPath, cancellationToken).ConfigureAwait(false);
-            return await InstallZipFileAsync(
+            return InstallZipFile(
                 zipPath,
                 forcedVersion: null,
                 sha256,
                 Path.GetFileName(zipPath),
                 downloadUrl: null,
                 BitwardenBrowserExtensionSource.ManualZip,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken);
         }
         finally
         {
@@ -213,12 +213,27 @@ public sealed class BitwardenBrowserExtensionInstaller : IBitwardenBrowserExtens
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            var manifest = BitwardenBrowserExtensionManifest.Read(extensionFolderPath);
-            var version = SanitizeVersion(manifest.Version ?? "manual");
-            var finalPath = GetUniqueInstallPath(version);
-            CopyDirectory(extensionFolderPath, finalPath, cancellationToken);
-            var sha256 = await ComputeDirectorySha256Async(finalPath, cancellationToken).ConfigureAwait(false);
-            return PersistInstall(version, finalPath, sha256, assetName: null, downloadUrl: null, BitwardenBrowserExtensionSource.ManualFolder);
+            Directory.CreateDirectory(_installRoot);
+            var staging = Path.Combine(_installRoot, ".staging-" + Guid.NewGuid().ToString("N"));
+            var stagedExtension = Path.Combine(staging, "extension");
+            try
+            {
+                CopyDirectory(extensionFolderPath, stagedExtension, cancellationToken);
+                var manifest = BitwardenBrowserExtensionManifest.Read(stagedExtension);
+                var version = SanitizeVersion(manifest.Version ?? "manual");
+                var sha256 = await ComputeDirectorySha256Async(stagedExtension, cancellationToken).ConfigureAwait(false);
+                return ActivateStagedInstall(
+                    stagedExtension,
+                    version,
+                    sha256,
+                    assetName: null,
+                    downloadUrl: null,
+                    BitwardenBrowserExtensionSource.ManualFolder);
+            }
+            finally
+            {
+                TryDeleteDirectory(staging);
+            }
         }
         finally
         {
@@ -341,14 +356,14 @@ public sealed class BitwardenBrowserExtensionInstaller : IBitwardenBrowserExtens
             }
 
             progress?.Report("Installing Bitwarden browser extension...");
-            return await InstallZipFileAsync(
+            return InstallZipFile(
                 zipPath,
                 version,
                 actualSha256,
                 assetName,
                 downloadUrl,
                 BitwardenBrowserExtensionSource.OfficialGitHub,
-                cancellationToken).ConfigureAwait(false);
+                cancellationToken);
         }
         finally
         {
@@ -356,7 +371,7 @@ public sealed class BitwardenBrowserExtensionInstaller : IBitwardenBrowserExtens
         }
     }
 
-    private async Task<BitwardenBrowserExtensionInstall> InstallZipFileAsync(
+    private BitwardenBrowserExtensionInstall InstallZipFile(
         string zipPath,
         string? forcedVersion,
         string? sha256,
@@ -377,14 +392,79 @@ public sealed class BitwardenBrowserExtensionInstaller : IBitwardenBrowserExtens
             var extensionRoot = FindExtensionRoot(staging);
             var manifest = BitwardenBrowserExtensionManifest.Read(extensionRoot);
             var version = SanitizeVersion(forcedVersion ?? manifest.Version ?? "manual");
-            var finalPath = GetUniqueInstallPath(version);
-            Directory.Move(extensionRoot, finalPath);
-            if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
+            return ActivateStagedInstall(extensionRoot, version, sha256, assetName, downloadUrl, source);
+        }
+        finally
+        {
+            TryDeleteDirectory(staging);
+        }
+    }
+
+    private BitwardenBrowserExtensionInstall ActivateStagedInstall(
+        string extensionRoot,
+        string version,
+        string? sha256,
+        string? assetName,
+        string? downloadUrl,
+        BitwardenBrowserExtensionSource source)
+    {
+        var finalPath = GetReplacementPath(_settings.Current.BitwardenBrowserExtensionPath)
+            ?? GetUniqueInstallPath(version);
+        var backupPath = ReplaceOrMoveInstall(extensionRoot, finalPath);
+        try
+        {
             return PersistInstall(version, finalPath, sha256, assetName, downloadUrl, source);
+        }
+        finally
+        {
+            // PersistInstall mutates the in-memory settings before writing them. If that write fails,
+            // keeping the new files at the same stable path leaves memory and disk content consistent;
+            // a later startup can retry persistence using the old on-disk version metadata.
+            if (backupPath is not null) TryDeleteDirectory(backupPath);
+        }
+    }
+
+    private string? GetReplacementPath(string? configuredPath)
+    {
+        if (string.IsNullOrWhiteSpace(configuredPath) || !Directory.Exists(configuredPath)) return null;
+
+        var installRoot = Path.GetFullPath(_installRoot)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var candidate = Path.GetFullPath(configuredPath)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var relative = Path.GetRelativePath(installRoot, candidate);
+        if (Path.IsPathRooted(relative)
+            || relative.Equals(".", StringComparison.Ordinal)
+            || relative.Equals("..", StringComparison.Ordinal)
+            || relative.StartsWith(".." + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return candidate;
+    }
+
+    private string? ReplaceOrMoveInstall(string extensionRoot, string finalPath)
+    {
+        if (!Directory.Exists(finalPath))
+        {
+            Directory.Move(extensionRoot, finalPath);
+            return null;
+        }
+
+        // An unpacked extension without a manifest key derives its WebView2 extension ID from the
+        // absolute folder path. Keep that path stable across installs and updates so the existing ID
+        // and its Local Extension Settings/IndexedDB login state remain attached to the new files.
+        var backupPath = Path.Combine(_installRoot, ".backup-" + Guid.NewGuid().ToString("N"));
+        Directory.Move(finalPath, backupPath);
+        try
+        {
+            Directory.Move(extensionRoot, finalPath);
+            return backupPath;
         }
         catch
         {
-            TryDeleteDirectory(staging);
+            Directory.Move(backupPath, finalPath);
             throw;
         }
     }

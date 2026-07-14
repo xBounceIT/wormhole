@@ -29,6 +29,7 @@ public class HttpSessionViewModelTests
         Assert.Null(target.Socks5Proxy);
         Assert.False(target.IgnoreCertErrors);
         Assert.Null(target.OriginalUri);
+        Assert.Null(target.TunnelConfigId);
     }
 
     [Fact]
@@ -75,12 +76,16 @@ public class HttpSessionViewModelTests
         var vm = CreateVm();
         var socks = new IPEndPoint(IPAddress.Loopback, 1080);
         var tunnel = new FakeWebTunnel(socks);
+        var tunnelConfigId = Guid.NewGuid();
 
-        var target = vm.BuildTargetForTesting(Profile(ProtocolType.Https, "fw.local", 443), tunnel);
+        var target = vm.BuildTargetForTesting(
+            Profile(ProtocolType.Https, "fw.local", 443, tunnelConfigId: tunnelConfigId),
+            tunnel);
 
         Assert.Equal(new Uri("https://fw.local:443/"), target!.NavigateUri);
         Assert.Equal(socks, target.Socks5Proxy);
         Assert.Null(target.OriginalUri);
+        Assert.Equal(tunnelConfigId, target.TunnelConfigId);
         Assert.Equal(0, tunnel.BindCount); // SOCKS path must not bind a loopback forwarder
     }
 
@@ -89,12 +94,16 @@ public class HttpSessionViewModelTests
     {
         var vm = CreateVm();
         var tunnel = new FakeWebTunnel(socks: null) { BoundPort = 51515 };
+        var tunnelConfigId = Guid.NewGuid();
 
-        var target = vm.BuildTargetForTesting(Profile(ProtocolType.Https, "fw.local", 443), tunnel);
+        var target = vm.BuildTargetForTesting(
+            Profile(ProtocolType.Https, "fw.local", 443, tunnelConfigId: tunnelConfigId),
+            tunnel);
 
         Assert.Equal(new Uri("https://127.0.0.1:51515/"), target!.NavigateUri);
         Assert.Null(target.Socks5Proxy);
         Assert.Equal(new Uri("https://fw.local:443/"), target.OriginalUri);
+        Assert.Equal(tunnelConfigId, target.TunnelConfigId);
         Assert.Equal(1, tunnel.BindCount);
         Assert.Equal("fw.local", tunnel.LastForwardHost);
         Assert.Equal(443, tunnel.LastForwardPort);

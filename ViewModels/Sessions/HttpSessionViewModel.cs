@@ -242,7 +242,11 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
         {
             // SOCKS path: navigate to the REAL host (correct SNI / Host header / redirects); the view
             // configures the WebView2 environment to proxy through 127.0.0.1:<socksPort>.
-            return new HttpConnectionTarget(BuildUri(scheme, profile.Host, profile.Port), socks, ignoreCert);
+            return new HttpConnectionTarget(
+                BuildUri(scheme, profile.Host, profile.Port),
+                socks,
+                ignoreCert,
+                TunnelConfigId: profile.TunnelConfigId);
         }
 
         // Forwarder path: bind a loopback listener that bridges to host:port through the tunnel and
@@ -252,7 +256,7 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
         var localPort = await tunnel.BindLocalForwarderAsync(profile.Host, profile.Port, token).ConfigureAwait(true);
         var originalUri = BuildUri(scheme, profile.Host, profile.Port);
         var forwarderUri = BuildUri(scheme, IPAddress.Loopback.ToString(), localPort);
-        return new HttpConnectionTarget(forwarderUri, null, ignoreCert, originalUri);
+        return new HttpConnectionTarget(forwarderUri, null, ignoreCert, originalUri, profile.TunnelConfigId);
     }
 
     // UriBuilder brackets a bare IPv6 literal and normalizes the default port on Build (same convention
@@ -499,10 +503,12 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
 /// the view must create a WebView2 environment proxied through it. <see cref="IgnoreCertErrors"/> tells
 /// the view to accept certificate errors for this navigation (HTTPS + the user's opt-in).
 /// <see cref="OriginalUri"/> is non-null only when <see cref="NavigateUri"/> is a loopback forwarder for
-/// the real appliance origin.
+/// the real appliance origin. <see cref="TunnelConfigId"/> gives persistent browser profiles a stable
+/// routing identity that does not depend on an ephemeral SOCKS or forwarder port.
 /// </summary>
 public sealed record HttpConnectionTarget(
     Uri NavigateUri,
     IPEndPoint? Socks5Proxy,
     bool IgnoreCertErrors,
-    Uri? OriginalUri = null);
+    Uri? OriginalUri = null,
+    Guid? TunnelConfigId = null);
