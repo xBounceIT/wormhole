@@ -358,7 +358,7 @@ public sealed partial class WebBrowserView : UserControl
             BitwardenBrowserWebViewProfile.TrySeedProfileStateFromExistingProfile(
                 folder,
                 persistentRouteKey,
-                target.OriginalUri ?? target.NavigateUri);
+                target.NavigateUri);
             Directory.CreateDirectory(folder);
             var options = new CoreWebView2EnvironmentOptions
             {

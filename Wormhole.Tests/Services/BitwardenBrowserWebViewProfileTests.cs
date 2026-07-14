@@ -396,6 +396,33 @@ public sealed class BitwardenBrowserWebViewProfileTests
     }
 
     [Fact]
+    public async Task TrySeedProfileStateFromExistingProfile_MigratesLoopbackCookiesFromLegacyForwarderProfile()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
+        var source = Path.Combine(root, "profile-legacy-forwarder");
+        var destination = Path.Combine(root, "profile-destination");
+        const string destinationRouteKey = "destination-route";
+        try
+        {
+            await CreateSeedSourceAsync(source, routeKey: null, "legacy", cookieHost: "127.0.0.1");
+
+            Assert.True(BitwardenBrowserWebViewProfile.TrySeedProfileStateFromExistingProfile(
+                destination,
+                root,
+                destinationRouteKey,
+                new Uri("http://127.0.0.1:54321")));
+
+            var destinationCookies = Path.Combine(destination, "Default", "Network", "Cookies");
+            Assert.Equal("legacy", ReadCookieDatabaseValue(destinationCookies, "127.0.0.1"));
+            Assert.Equal(0, CountCookiesForHost(destinationCookies, "unrelated.example.com"));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task TrySeedProfileStateFromExistingProfile_FailedBackupLeavesNoPartialCookieDatabase()
     {
         var root = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
@@ -586,7 +613,8 @@ public sealed class BitwardenBrowserWebViewProfileTests
         string profile,
         string? routeKey,
         string value,
-        bool includeCookies = true)
+        bool includeCookies = true,
+        string cookieHost = "router.example.com")
     {
         var extensionSettings = Path.Combine(
             profile,
@@ -608,11 +636,11 @@ public sealed class BitwardenBrowserWebViewProfileTests
             "extension-id");
         if (includeCookies)
         {
-            CreateCookieDatabase(Path.Combine(profile, "Default", "Network", "Cookies"), value);
+            CreateCookieDatabase(Path.Combine(profile, "Default", "Network", "Cookies"), value, cookieHost);
         }
     }
 
-    private static void CreateCookieDatabase(string path, string value)
+    private static void CreateCookieDatabase(string path, string value, string cookieHost = "router.example.com")
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var builder = new SqliteConnectionStringBuilder { DataSource = path, Pooling = false };
@@ -620,12 +648,13 @@ public sealed class BitwardenBrowserWebViewProfileTests
         connection.Open();
         using var command = connection.CreateCommand();
         command.CommandText = "CREATE TABLE cookies(host_key TEXT NOT NULL, value TEXT NOT NULL);"
-            + "INSERT INTO cookies VALUES ('router.example.com', $value), ('unrelated.example.com', 'unrelated');";
+            + "INSERT INTO cookies VALUES ($cookieHost, $value), ('unrelated.example.com', 'unrelated');";
+        command.Parameters.AddWithValue("$cookieHost", cookieHost);
         command.Parameters.AddWithValue("$value", value);
         command.ExecuteNonQuery();
     }
 
-    private static string ReadCookieDatabaseValue(string path)
+    private static string ReadCookieDatabaseValue(string path, string cookieHost = "router.example.com")
     {
         var builder = new SqliteConnectionStringBuilder
         {
@@ -636,7 +665,8 @@ public sealed class BitwardenBrowserWebViewProfileTests
         using var connection = new SqliteConnection(builder.ToString());
         connection.Open();
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT value FROM cookies WHERE host_key = 'router.example.com'";
+        command.CommandText = "SELECT value FROM cookies WHERE host_key = $cookieHost";
+        command.Parameters.AddWithValue("$cookieHost", cookieHost);
         return Assert.IsType<string>(command.ExecuteScalar());
     }
 

@@ -117,30 +117,30 @@ internal static class BitwardenBrowserWebViewProfile
             userDataFolder,
             AppPaths.GetBitwardenBrowserExtensionWebView2UserDataRoot(),
             persistentRouteKey: null,
-            legacyTargetUri: null);
+            legacyCookieUri: null);
 
     internal static bool TrySeedExtensionStateFromExistingProfile(string userDataFolder, string profileRoot)
         => TrySeedProfileStateFromExistingProfile(
             userDataFolder,
             profileRoot,
             persistentRouteKey: null,
-            legacyTargetUri: null);
+            legacyCookieUri: null);
 
     public static bool TrySeedProfileStateFromExistingProfile(
         string userDataFolder,
         string? persistentRouteKey,
-        Uri? legacyTargetUri = null) =>
+        Uri? legacyCookieUri = null) =>
         TrySeedProfileStateFromExistingProfile(
             userDataFolder,
             AppPaths.GetBitwardenBrowserExtensionWebView2UserDataRoot(),
             persistentRouteKey,
-            legacyTargetUri);
+            legacyCookieUri);
 
     internal static bool TrySeedProfileStateFromExistingProfile(
         string userDataFolder,
         string profileRoot,
         string? persistentRouteKey,
-        Uri? legacyTargetUri = null)
+        Uri? legacyCookieUri = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(userDataFolder);
         ArgumentException.ThrowIfNullOrWhiteSpace(profileRoot);
@@ -196,9 +196,9 @@ internal static class BitwardenBrowserWebViewProfile
                     .Where(source => HasMigratableCookieState(source.FullName))
                     .ToList();
                 IReadOnlySet<string>? legacyCookieHosts = null;
-                if (cookieSources.Count == 0 && persistentRouteKey is not null && legacyTargetUri is not null)
+                if (cookieSources.Count == 0 && persistentRouteKey is not null && legacyCookieUri is not null)
                 {
-                    legacyCookieHosts = GetCookieHosts(legacyTargetUri);
+                    legacyCookieHosts = GetCookieHosts(legacyCookieUri);
                     cookieSources = candidates.Where(source =>
                             ReadPersistentRouteKey(source.FullName) is null
                             && HasMigratableCookieState(source.FullName)
