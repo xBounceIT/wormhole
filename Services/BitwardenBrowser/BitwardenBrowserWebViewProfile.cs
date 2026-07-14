@@ -146,9 +146,9 @@ internal static class BitwardenBrowserWebViewProfile
         ArgumentException.ThrowIfNullOrWhiteSpace(profileRoot);
         if (persistentRouteKey is not null) ArgumentException.ThrowIfNullOrWhiteSpace(persistentRouteKey);
 
-        if (HasInstalledExtensionMarker(userDataFolder))
+        var hasInstalledExtension = HasInstalledExtensionMarker(userDataFolder);
+        if (hasInstalledExtension && persistentRouteKey is null)
         {
-            TryWritePersistentRouteKey(userDataFolder, persistentRouteKey);
             return false;
         }
 
@@ -173,6 +173,15 @@ internal static class BitwardenBrowserWebViewProfile
                     ReadPersistentRouteKey(candidate.FullName),
                     persistentRouteKey,
                     StringComparison.Ordinal)).ToList();
+            if (hasInstalledExtension)
+            {
+                var refreshedCookies = TryRefreshCookieStateFromMatchingRoute(
+                    userDataFolder,
+                    matchingRouteSources);
+                TryWritePersistentRouteKey(userDataFolder, persistentRouteKey);
+                return refreshedCookies;
+            }
+
             var extensionSource = matchingRouteSources.FirstOrDefault() ?? candidates.FirstOrDefault();
             var copiedState = false;
             if (extensionSource is not null)
@@ -197,9 +206,7 @@ internal static class BitwardenBrowserWebViewProfile
                         .ToList();
                 }
 
-                foreach (var cookieSource in cookieSources
-                         .OrderByDescending(source => GetCookieStateLastWriteTimeUtcSafe(source.FullName))
-                         .ThenByDescending(source => GetLastWriteTimeUtcSafe(source.FullName)))
+                foreach (var cookieSource in OrderCookieSourcesByFreshness(cookieSources))
                 {
                     if (!CopyCookieState(cookieSource.FullName, userDataFolder, legacyCookieHosts)) continue;
                     copiedState = true;
@@ -409,6 +416,31 @@ internal static class BitwardenBrowserWebViewProfile
 
         return newest;
     }
+
+    private static bool TryRefreshCookieStateFromMatchingRoute(
+        string destinationUserDataFolder,
+        IEnumerable<DirectoryInfo> matchingRouteSources)
+    {
+        var destinationFreshness = GetCookieStateLastWriteTimeUtcSafe(destinationUserDataFolder);
+        var cookieSources = matchingRouteSources
+            .Where(source => HasMigratableCookieState(source.FullName));
+        foreach (var source in OrderCookieSourcesByFreshness(cookieSources))
+        {
+            if (GetCookieStateLastWriteTimeUtcSafe(source.FullName) <= destinationFreshness) break;
+            if (CopyCookieState(source.FullName, destinationUserDataFolder, retainedCookieHosts: null))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static IOrderedEnumerable<DirectoryInfo> OrderCookieSourcesByFreshness(
+        IEnumerable<DirectoryInfo> sources) =>
+        sources
+            .OrderByDescending(source => GetCookieStateLastWriteTimeUtcSafe(source.FullName))
+            .ThenByDescending(source => GetLastWriteTimeUtcSafe(source.FullName));
 
     private static HashSet<string> GetCookieHosts(Uri targetUri)
     {

@@ -261,6 +261,82 @@ public sealed class BitwardenBrowserWebViewProfileTests
     }
 
     [Fact]
+    public async Task TrySeedProfileStateFromExistingProfile_RefreshesReusedRouteProfileFromFresherCookies()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
+        var fresherSource = Path.Combine(root, "profile-fresher-source");
+        var destination = Path.Combine(root, "profile-reused-destination");
+        const string routeKey = "matching-route";
+        try
+        {
+            await CreateSeedSourceAsync(fresherSource, routeKey, "fresh");
+            await CreateSeedSourceAsync(destination, routeKey, "stale");
+            var now = DateTime.UtcNow;
+            File.SetLastWriteTimeUtc(
+                Path.Combine(fresherSource, "Default", "Network", "Cookies"),
+                now);
+            File.SetLastWriteTimeUtc(
+                Path.Combine(destination, "Default", "Network", "Cookies"),
+                now.AddMinutes(-10));
+
+            Assert.True(BitwardenBrowserWebViewProfile.TrySeedProfileStateFromExistingProfile(
+                destination,
+                root,
+                routeKey));
+
+            Assert.Equal("fresh", ReadCookieDatabaseValue(
+                Path.Combine(destination, "Default", "Network", "Cookies")));
+            Assert.Equal("local-fresh", File.ReadAllText(Path.Combine(destination, "Local State")));
+            Assert.Equal(
+                "stale",
+                File.ReadAllText(Path.Combine(
+                    destination,
+                    "Default",
+                    "Local Extension Settings",
+                    "extension-id",
+                    "state.log")));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task TrySeedProfileStateFromExistingProfile_KeepsReusedRouteProfileWhenItsCookiesAreFreshest()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
+        var staleSource = Path.Combine(root, "profile-stale-source");
+        var destination = Path.Combine(root, "profile-fresh-destination");
+        const string routeKey = "matching-route";
+        try
+        {
+            await CreateSeedSourceAsync(staleSource, routeKey, "stale");
+            await CreateSeedSourceAsync(destination, routeKey, "fresh");
+            var now = DateTime.UtcNow;
+            File.SetLastWriteTimeUtc(
+                Path.Combine(staleSource, "Default", "Network", "Cookies"),
+                now.AddMinutes(-10));
+            File.SetLastWriteTimeUtc(
+                Path.Combine(destination, "Default", "Network", "Cookies"),
+                now);
+
+            Assert.False(BitwardenBrowserWebViewProfile.TrySeedProfileStateFromExistingProfile(
+                destination,
+                root,
+                routeKey));
+
+            Assert.Equal("fresh", ReadCookieDatabaseValue(
+                Path.Combine(destination, "Default", "Network", "Cookies")));
+            Assert.Equal("local-fresh", File.ReadAllText(Path.Combine(destination, "Local State")));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task TrySeedProfileStateFromExistingProfile_DoesNotCopyCookiesFromAnotherRoute()
     {
         var root = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
