@@ -182,7 +182,8 @@ public sealed partial class FolderEditorDialog : UserControl
         {
             apply(chosen);
         }
-        else if (string.IsNullOrWhiteSpace(box.Text))
+        // A null getter can encode a valid backing state that has no picker sentinel.
+        else if (string.IsNullOrWhiteSpace(box.Text) && current() is not null)
         {
             apply(null);
         }

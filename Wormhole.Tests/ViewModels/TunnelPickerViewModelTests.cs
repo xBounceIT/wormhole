@@ -125,7 +125,8 @@ public class TunnelPickerViewModelTests
     [Theory]
     [InlineData(null)]
     [InlineData(false)]
-    public async Task LoadFrom_WriteTo_RoundTrip_NullAndOffStates(bool? enabled)
+    [InlineData(true)]
+    public async Task LoadFrom_WriteTo_RoundTrip_StatesWithoutConfigId(bool? enabled)
     {
         var vm = NewPicker();
         await vm.LoadAsync();
