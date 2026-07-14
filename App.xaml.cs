@@ -256,10 +256,10 @@ public partial class App : Application
     /// <summary>
     /// Wipe the non-extension web-browser WebView2 user-data root: no regular web session is live at
     /// launch, and regular web sessions deliberately don't persist across restarts. Bitwarden-enabled
-    /// HTTPS tabs use a separate persistent profile so the extension can keep its login state; startup
-    /// trims safe site-data folders, clears cookies for discovered web origins, and queues those origins
-    /// for selective cleanup by <c>WebBrowserView</c>. Best-effort — a locked folder or any IO error
-    /// is swallowed.
+    /// HTTPS tabs use a separate persistent profile so the extension login and site cookies survive
+    /// restarts and application updates; startup trims non-cookie site-data folders and queues discovered
+    /// origins for selective cleanup by <c>WebBrowserView</c>. Best-effort — a locked folder or any IO
+    /// error is swallowed.
     /// </summary>
     private void ClearWebBrowserUserData()
     {
@@ -287,7 +287,6 @@ public partial class App : Application
             foreach (var profileDir in Directory.EnumerateDirectories(root))
             {
                 var startupOrigins = BitwardenBrowserWebViewProfile.DiscoverStartupWebDataOrigins(profileDir);
-                BitwardenBrowserWebViewProfile.ClearStartupWebCookies(profileDir, startupOrigins);
                 BitwardenBrowserWebViewProfile.AddPendingWebDataOrigins(profileDir, startupOrigins);
 
                 foreach (var path in BitwardenBrowserWebViewProfile.GetStartupWebDataCleanupPaths(profileDir))

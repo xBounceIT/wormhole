@@ -8,6 +8,12 @@ namespace Wormhole.Services.BitwardenBrowser;
 
 internal static class BitwardenBrowserWebViewProfile
 {
+    // Storage.clearDataForOrigin accepts a comma-separated CDP StorageType set. Cookies are
+    // deliberately absent: Bitwarden-enabled HTTPS profiles are persistent, so authentication
+    // cookies must survive tab teardown, application restarts, and application updates.
+    public const string ClearableWebStorageTypes =
+        "appcache,file_systems,indexeddb,local_storage,shader_cache,websql,service_workers,cache_storage";
+
     private const string PendingWebDataOriginsFileName = "wormhole-bitwarden-web-origins.txt";
     private static readonly object PendingWebDataOriginsGate = new();
     private static readonly string[] ExtensionSafeStartupWebDataCleanupRelativePaths =
@@ -23,18 +29,6 @@ internal static class BitwardenBrowserWebViewProfile
         Path.Combine("Default", "Session Storage"),
         Path.Combine("Default", "Service Worker", "CacheStorage"),
         Path.Combine("Default", "Service Worker", "ScriptCache"),
-    ];
-    private static readonly string[] LegacyStartupWebDataCleanupRelativePaths =
-    [
-        Path.Combine("Default", "Network", "Cookies"),
-        Path.Combine("Default", "Network", "Cookies-journal"),
-        Path.Combine("Default", "Cookies"),
-        Path.Combine("Default", "Cookies-journal"),
-    ];
-    private static readonly string[] CookieDatabaseRelativePaths =
-    [
-        Path.Combine("Default", "Network", "Cookies"),
-        Path.Combine("Default", "Cookies"),
     ];
     private static readonly string[] ExtensionStateRelativePaths =
     [
@@ -63,6 +57,23 @@ internal static class BitwardenBrowserWebViewProfile
     public static string GetUserDataFolder(string browserArguments, bool ignoreCertificateErrors) =>
         AppPaths.GetBitwardenBrowserExtensionWebView2UserDataDirectory(
             BuildContextFolderName(browserArguments, ignoreCertificateErrors));
+
+    public static string GetUserDataFolder(
+        string browserArguments,
+        bool ignoreCertificateErrors,
+        Uri navigateUri,
+        Uri? originalUri)
+    {
+        ArgumentNullException.ThrowIfNull(navigateUri);
+
+        // Loopback-forwarded targets all navigate to 127.0.0.1/::1, and cookies are not scoped by
+        // port. Give each real target a stable profile so one appliance never receives another
+        // appliance's cookies when the local forwarder is rebound to a different ephemeral port.
+        var contextMaterial = navigateUri.IsLoopback && originalUri is not null
+            ? browserArguments + "\0forwarded-target=" + originalUri.GetLeftPart(UriPartial.Authority).ToLowerInvariant()
+            : browserArguments;
+        return GetUserDataFolder(contextMaterial, ignoreCertificateErrors);
+    }
 
     public static bool TrySeedExtensionStateFromExistingProfile(string userDataFolder) =>
         TrySeedExtensionStateFromExistingProfile(
@@ -168,12 +179,6 @@ internal static class BitwardenBrowserWebViewProfile
             .Select(relativePath => Path.Combine(userDataFolder, relativePath))
             .ToList();
 
-        if (!HasInstalledExtensionMarker(userDataFolder))
-        {
-            paths.AddRange(LegacyStartupWebDataCleanupRelativePaths
-                .Select(relativePath => Path.Combine(userDataFolder, relativePath)));
-        }
-
         AddNonExtensionIndexedDbPaths(userDataFolder, paths);
         return paths;
     }
@@ -185,20 +190,6 @@ internal static class BitwardenBrowserWebViewProfile
         AddHistoryOrigins(userDataFolder, origins);
         AddIndexedDbOrigins(userDataFolder, origins);
         return origins.ToList();
-    }
-
-    public static void ClearStartupWebCookies(string userDataFolder, IEnumerable<string> origins)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(userDataFolder);
-        ArgumentNullException.ThrowIfNull(origins);
-
-        var hosts = GetCookieHosts(origins);
-        if (hosts.Count == 0) return;
-
-        foreach (var relativePath in CookieDatabaseRelativePaths)
-        {
-            DeleteCookiesForHosts(Path.Combine(userDataFolder, relativePath), hosts);
-        }
     }
 
     private static string GetPendingWebDataOriginsPath(string userDataFolder) =>
@@ -290,78 +281,6 @@ internal static class BitwardenBrowserWebViewProfile
         catch
         {
             // Extension profile seeding is best-effort; locked files are skipped and rebuilt by WebView2.
-        }
-    }
-
-    private static HashSet<string> GetCookieHosts(IEnumerable<string> origins)
-    {
-        var hosts = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var origin in origins)
-        {
-            if (NormalizeWebOrigin(origin) is not { } normalizedOrigin) continue;
-            if (!Uri.TryCreate(normalizedOrigin, UriKind.Absolute, out var uri)) continue;
-            AddCookieHostAndParentDomains(hosts, uri.Host);
-        }
-
-        return hosts;
-    }
-
-    private static void AddCookieHostAndParentDomains(HashSet<string> hosts, string host)
-    {
-        var normalizedHost = host.TrimEnd('.').ToLowerInvariant();
-        if (string.IsNullOrWhiteSpace(normalizedHost)) return;
-
-        hosts.Add(normalizedHost);
-        if (IPAddress.TryParse(normalizedHost, out _)) return;
-
-        var dotIndex = normalizedHost.IndexOf('.');
-        while (dotIndex > 0 && dotIndex < normalizedHost.Length - 1)
-        {
-            var parentDomain = normalizedHost[(dotIndex + 1)..];
-            if (!parentDomain.Contains('.', StringComparison.Ordinal)) return;
-            hosts.Add(parentDomain);
-            dotIndex = normalizedHost.IndexOf('.', dotIndex + 1);
-        }
-    }
-
-    private static void DeleteCookiesForHosts(string cookieDatabasePath, HashSet<string> hosts)
-    {
-        if (!File.Exists(cookieDatabasePath)) return;
-
-        try
-        {
-            var builder = new SqliteConnectionStringBuilder
-            {
-                DataSource = cookieDatabasePath,
-                Mode = SqliteOpenMode.ReadWrite,
-                Cache = SqliteCacheMode.Private,
-                Pooling = false,
-            };
-            using var connection = new SqliteConnection(builder.ToString());
-            connection.Open();
-            using var transaction = connection.BeginTransaction();
-            using var command = connection.CreateCommand();
-            command.Transaction = transaction;
-            command.CommandText = "DELETE FROM cookies WHERE host_key = $host OR host_key = $domainHost";
-            var hostParameter = command.CreateParameter();
-            hostParameter.ParameterName = "$host";
-            command.Parameters.Add(hostParameter);
-            var domainHostParameter = command.CreateParameter();
-            domainHostParameter.ParameterName = "$domainHost";
-            command.Parameters.Add(domainHostParameter);
-
-            foreach (var host in hosts)
-            {
-                hostParameter.Value = host;
-                domainHostParameter.Value = "." + host;
-                command.ExecuteNonQuery();
-            }
-
-            transaction.Commit();
-        }
-        catch
-        {
-            // Chromium cookie databases are best-effort; they may be absent, locked, or mid-upgrade.
         }
     }
 

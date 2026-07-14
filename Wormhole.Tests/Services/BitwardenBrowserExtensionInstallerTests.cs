@@ -69,6 +69,89 @@ public sealed class BitwardenBrowserExtensionInstallerTests
     }
 
     [Fact]
+    public async Task InstallLatestAsync_ReinstallPreservesConfiguredPath()
+    {
+        using var temp = TempInstall.Create();
+        var currentPath = CreateInstalledExtension(temp, "2026.5.1");
+        var oldOnlyFile = Path.Combine(currentPath, "old-only.txt");
+        await File.WriteAllTextAsync(oldOnlyFile, "old");
+        var zipBytes = CreateExtensionZip();
+        var sha256 = ComputeSha256(zipBytes);
+        var settings = new FakeAppSettingsService();
+        settings.Current.BitwardenBrowserExtensionSource = BitwardenBrowserExtensionSource.OfficialGitHub;
+        settings.Current.BitwardenBrowserExtensionVersion = "2026.5.1";
+        settings.Current.BitwardenBrowserExtensionPath = currentPath;
+        var handler = new DelegateHandler(request =>
+        {
+            if (request.RequestUri?.Host == "api.github.com")
+            {
+                return ReleaseResponse(
+                    "browser-v2026.6.1",
+                    "dist-edge-2026.6.1.zip",
+                    "https://downloads.example/edge.zip",
+                    sha256);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(zipBytes)
+            };
+        });
+        var installer = CreateInstaller(temp, settings, handler);
+
+        var install = await installer.InstallLatestAsync();
+
+        Assert.Equal(currentPath, install.ExtensionPath);
+        Assert.Equal(currentPath, settings.Current.BitwardenBrowserExtensionPath);
+        Assert.True(File.Exists(Path.Combine(currentPath, "popup.html")));
+        Assert.False(File.Exists(oldOnlyFile));
+        Assert.Empty(Directory.EnumerateDirectories(temp.InstallRoot, ".backup-*"));
+    }
+
+    [Fact]
+    public async Task InstallLatestAsync_SaveFailureKeepsReplacementAtStablePath()
+    {
+        using var temp = TempInstall.Create();
+        var currentPath = CreateInstalledExtension(temp, "2026.5.1");
+        var oldOnlyFile = Path.Combine(currentPath, "old-only.txt");
+        await File.WriteAllTextAsync(oldOnlyFile, "old");
+        var zipBytes = CreateExtensionZip();
+        var sha256 = ComputeSha256(zipBytes);
+        var settings = new FakeAppSettingsService { SaveException = new IOException("settings unavailable") };
+        settings.Current.BitwardenBrowserExtensionSource = BitwardenBrowserExtensionSource.OfficialGitHub;
+        settings.Current.BitwardenBrowserExtensionVersion = "2026.5.1";
+        settings.Current.BitwardenBrowserExtensionPath = currentPath;
+        var handler = new DelegateHandler(request =>
+        {
+            if (request.RequestUri?.Host == "api.github.com")
+            {
+                return ReleaseResponse(
+                    "browser-v2026.6.1",
+                    "dist-edge-2026.6.1.zip",
+                    "https://downloads.example/edge.zip",
+                    sha256);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new ByteArrayContent(zipBytes)
+            };
+        });
+        var installer = CreateInstaller(temp, settings, handler);
+
+        var exception = await Assert.ThrowsAsync<BitwardenBrowserExtensionException>(
+            () => installer.InstallLatestAsync());
+
+        Assert.IsType<IOException>(exception.InnerException);
+        Assert.Equal(currentPath, settings.Current.BitwardenBrowserExtensionPath);
+        Assert.Equal("2026.6.1", settings.Current.BitwardenBrowserExtensionVersion);
+        Assert.True(File.Exists(Path.Combine(currentPath, "popup.html")));
+        Assert.False(File.Exists(oldOnlyFile));
+        Assert.Empty(Directory.EnumerateDirectories(temp.InstallRoot, ".backup-*"));
+        Assert.Equal(1, settings.SaveCount);
+    }
+
+    [Fact]
     public async Task InstallLatestAsync_RejectsDigestMismatch()
     {
         using var temp = TempInstall.Create();
@@ -161,6 +244,32 @@ public sealed class BitwardenBrowserExtensionInstallerTests
     }
 
     [Fact]
+    public async Task ImportUnpackedAsync_ReimportPreservesConfiguredPath()
+    {
+        using var temp = TempInstall.Create();
+        var currentPath = CreateInstalledExtension(temp, "2026.5.1");
+        var oldOnlyFile = Path.Combine(currentPath, "old-only.txt");
+        await File.WriteAllTextAsync(oldOnlyFile, "old");
+        var source = Path.Combine(temp.DirectoryPath, "source-extension");
+        Directory.CreateDirectory(source);
+        await File.WriteAllTextAsync(Path.Combine(source, "manifest.json"), ValidManifest);
+        await File.WriteAllTextAsync(Path.Combine(source, "popup.html"), "<html></html>");
+        var settings = new FakeAppSettingsService();
+        settings.Current.BitwardenBrowserExtensionSource = BitwardenBrowserExtensionSource.ManualFolder;
+        settings.Current.BitwardenBrowserExtensionVersion = "2026.5.1";
+        settings.Current.BitwardenBrowserExtensionPath = currentPath;
+        var installer = CreateInstaller(temp, settings, new DelegateHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound)));
+
+        var install = await installer.ImportUnpackedAsync(source);
+
+        Assert.Equal(currentPath, install.ExtensionPath);
+        Assert.Equal(currentPath, settings.Current.BitwardenBrowserExtensionPath);
+        Assert.True(File.Exists(Path.Combine(currentPath, "popup.html")));
+        Assert.False(File.Exists(oldOnlyFile));
+        Assert.Empty(Directory.EnumerateDirectories(temp.InstallRoot, ".backup-*"));
+    }
+
+    [Fact]
     public void ReleaseHelpers_FilterBrowserRelease_AndPreferEdgeZip()
     {
         var release = new GitHubRelease
@@ -213,6 +322,8 @@ public sealed class BitwardenBrowserExtensionInstallerTests
     {
         using var temp = TempInstall.Create();
         var currentPath = CreateInstalledExtension(temp, "2026.6.1");
+        var oldOnlyFile = Path.Combine(currentPath, "old-only.txt");
+        await File.WriteAllTextAsync(oldOnlyFile, "old");
         var zipBytes = CreateExtensionZip();
         var sha256 = ComputeSha256(zipBytes);
         var settings = new FakeAppSettingsService();
@@ -241,7 +352,11 @@ public sealed class BitwardenBrowserExtensionInstallerTests
         Assert.Equal("2026.6.2", result.Install?.Version);
         Assert.Equal(BitwardenBrowserExtensionSource.OfficialGitHub, settings.Current.BitwardenBrowserExtensionSource);
         Assert.Equal("2026.6.2", settings.Current.BitwardenBrowserExtensionVersion);
-        Assert.NotEqual(currentPath, settings.Current.BitwardenBrowserExtensionPath);
+        Assert.Equal(currentPath, settings.Current.BitwardenBrowserExtensionPath);
+        Assert.Equal(currentPath, result.Install?.ExtensionPath);
+        Assert.True(File.Exists(Path.Combine(currentPath, "popup.html")));
+        Assert.False(File.Exists(oldOnlyFile));
+        Assert.Empty(Directory.EnumerateDirectories(temp.InstallRoot, ".backup-*"));
         Assert.Equal(1, settings.SaveCount);
     }
 
@@ -418,11 +533,13 @@ public sealed class BitwardenBrowserExtensionInstallerTests
     {
         public AppSettings Current { get; } = new();
         public int SaveCount { get; private set; }
+        public Exception? SaveException { get; init; }
         public event EventHandler? SettingsChanged;
 
         public void Save()
         {
             SaveCount++;
+            if (SaveException is not null) throw SaveException;
             SettingsChanged?.Invoke(this, EventArgs.Empty);
         }
     }

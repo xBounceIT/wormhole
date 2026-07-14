@@ -87,7 +87,8 @@ contains two independent integrations:
   Bitwarden browser extension into dedicated persistent WebView2 profiles for
   HTTPS sessions. The extension owns login, unlock, sync, and autofill exactly
   like it does in a browser; Wormhole only provides the toolbar button and the
-  WebView2 extension host.
+  WebView2 extension host. Authentication cookies in these HTTPS profiles persist
+  across Wormhole restarts and updates.
 
 Bitwarden login items appear as read-only virtual credentials in the Credentials
 page and in SSH / RDP / VNC credential pickers after sync. Selecting one stores

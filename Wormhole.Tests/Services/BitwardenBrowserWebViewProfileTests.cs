@@ -54,6 +54,38 @@ public sealed class BitwardenBrowserWebViewProfileTests
     }
 
     [Fact]
+    public void UserDataFolder_IsolatesLoopbackForwardersByStableOriginalOrigin()
+    {
+        var browserArguments = BitwardenBrowserWebViewProfile.BuildBrowserArguments(null);
+        var original = new Uri("https://router.example/login");
+
+        var first = BitwardenBrowserWebViewProfile.GetUserDataFolder(
+            browserArguments,
+            ignoreCertificateErrors: true,
+            new Uri("http://127.0.0.1:12000"),
+            original);
+        var rebound = BitwardenBrowserWebViewProfile.GetUserDataFolder(
+            browserArguments,
+            ignoreCertificateErrors: true,
+            new Uri("http://127.0.0.1:23000"),
+            original);
+        var otherTarget = BitwardenBrowserWebViewProfile.GetUserDataFolder(
+            browserArguments,
+            ignoreCertificateErrors: true,
+            new Uri("http://127.0.0.1:12000"),
+            new Uri("https://firewall.example/login"));
+        var direct = BitwardenBrowserWebViewProfile.GetUserDataFolder(
+            browserArguments,
+            ignoreCertificateErrors: true,
+            original,
+            originalUri: null);
+
+        Assert.Equal(first, rebound);
+        Assert.NotEqual(first, otherTarget);
+        Assert.NotEqual(first, direct);
+    }
+
+    [Fact]
     public async Task TrySeedExtensionStateFromExistingProfile_CopiesExtensionStateOnly()
     {
         var root = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
@@ -175,7 +207,7 @@ public sealed class BitwardenBrowserWebViewProfileTests
     }
 
     [Fact]
-    public void StartupCleanupPaths_ClearsGlobalWebStateForLegacyProfiles()
+    public void StartupCleanupPaths_PreservesCookiesForLegacyProfiles()
     {
         var profile = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
         var siteIndexedDb = Path.Combine(profile, "Default", "IndexedDB", "https_example.test_0.indexeddb.leveldb");
@@ -187,7 +219,8 @@ public sealed class BitwardenBrowserWebViewProfileTests
 
             var paths = BitwardenBrowserWebViewProfile.GetStartupWebDataCleanupPaths(profile);
 
-            Assert.Contains(Path.Combine(profile, "Default", "Network", "Cookies"), paths);
+            Assert.DoesNotContain(Path.Combine(profile, "Default", "Network", "Cookies"), paths);
+            Assert.DoesNotContain(Path.Combine(profile, "Default", "Cookies"), paths);
             Assert.Contains(Path.Combine(profile, "Default", "Local Storage"), paths);
             Assert.Contains(Path.Combine(profile, "Default", "Session Storage"), paths);
             Assert.Contains(siteIndexedDb, paths);
@@ -200,35 +233,13 @@ public sealed class BitwardenBrowserWebViewProfileTests
     }
 
     [Fact]
-    public void ClearStartupWebCookies_RemovesOnlyDiscoveredOriginCookies()
+    public void ClearableWebStorageTypes_ExcludeCookiesAndAll()
     {
-        var profile = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
-        var cookiesPath = Path.Combine(profile, "Default", "Network", "Cookies");
-        try
-        {
-            Directory.CreateDirectory(Path.GetDirectoryName(cookiesPath)!);
-            var builder = new SqliteConnectionStringBuilder { DataSource = cookiesPath, Pooling = false };
-            using (var connection = new SqliteConnection(builder.ToString()))
-            {
-                connection.Open();
-                using var command = connection.CreateCommand();
-                command.CommandText = "CREATE TABLE cookies(host_key TEXT, name TEXT);"
-                    + "INSERT INTO cookies(host_key, name) VALUES "
-                    + "('router.example.com', 'session'), "
-                    + "('.router.example.com', 'domain-session'), "
-                    + "('.example.com', 'parent-domain-session'), "
-                    + "('vault.bitwarden.example', 'vault-session');";
-                command.ExecuteNonQuery();
-            }
+        var storageTypes = BitwardenBrowserWebViewProfile.ClearableWebStorageTypes.Split(',');
 
-            BitwardenBrowserWebViewProfile.ClearStartupWebCookies(profile, ["https://router.example.com/login"]);
-
-            Assert.Equal(["vault.bitwarden.example"], ReadCookieHosts(cookiesPath));
-        }
-        finally
-        {
-            if (Directory.Exists(profile)) Directory.Delete(profile, recursive: true);
-        }
+        Assert.DoesNotContain("cookies", storageTypes, StringComparer.OrdinalIgnoreCase);
+        Assert.DoesNotContain("all", storageTypes, StringComparer.OrdinalIgnoreCase);
+        Assert.Contains("local_storage", storageTypes, StringComparer.Ordinal);
     }
 
     [Fact]
@@ -265,20 +276,4 @@ public sealed class BitwardenBrowserWebViewProfileTests
         }
     }
 
-    private static string[] ReadCookieHosts(string cookiesPath)
-    {
-        var builder = new SqliteConnectionStringBuilder { DataSource = cookiesPath, Pooling = false };
-        using var connection = new SqliteConnection(builder.ToString());
-        connection.Open();
-        using var command = connection.CreateCommand();
-        command.CommandText = "SELECT host_key FROM cookies ORDER BY host_key";
-        using var reader = command.ExecuteReader();
-        var hosts = new List<string>();
-        while (reader.Read())
-        {
-            hosts.Add(reader.GetString(0));
-        }
-
-        return hosts.ToArray();
-    }
 }

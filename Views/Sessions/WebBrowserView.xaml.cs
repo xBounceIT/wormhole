@@ -345,7 +345,11 @@ public sealed partial class WebBrowserView : UserControl
         var browserArguments = BitwardenBrowserWebViewProfile.BuildBrowserArguments(target.Socks5Proxy);
         if (TryGetBitwardenExtensionInstall(target) is { } bitwardenInstall)
         {
-            var folder = BitwardenBrowserWebViewProfile.GetUserDataFolder(browserArguments, target.IgnoreCertErrors);
+            var folder = BitwardenBrowserWebViewProfile.GetUserDataFolder(
+                browserArguments,
+                target.IgnoreCertErrors,
+                target.NavigateUri,
+                target.OriginalUri);
             BitwardenBrowserWebViewProfile.TrySeedExtensionStateFromExistingProfile(folder);
             Directory.CreateDirectory(folder);
             var options = new CoreWebView2EnvironmentOptions
@@ -917,7 +921,7 @@ public sealed partial class WebBrowserView : UserControl
                 var payload = JsonSerializer.Serialize(new
                 {
                     origin,
-                    storageTypes = "all",
+                    storageTypes = BitwardenBrowserWebViewProfile.ClearableWebStorageTypes,
                 });
                 await core.CallDevToolsProtocolMethodAsync("Storage.clearDataForOrigin", payload);
                 clearedOrigins.Add(origin);
