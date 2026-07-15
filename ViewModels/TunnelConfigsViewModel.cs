@@ -681,6 +681,12 @@ public partial class TunnelConfigsViewModel : ObservableObject
                 AppendValidationError(ref sb, "SAML callback port must be between 1 and 65535.");
             if (fg.UseExternalBrowser && !string.IsNullOrWhiteSpace(fg.Realm))
                 AppendValidationError(ref sb, "External-browser Fortinet SSO does not support realms.");
+            if (!fg.UseExternalBrowser && !string.IsNullOrWhiteSpace(fg.ServerCertSha256Pin))
+            {
+                AppendValidationError(
+                    ref sb,
+                    "Embedded-browser Fortinet SSO cannot enforce a server certificate pin; use the external browser or clear the pin.");
+            }
         }
         else
         {

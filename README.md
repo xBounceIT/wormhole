@@ -139,7 +139,9 @@ The Fortinet SAML `auth_id` or `SVPNCOOKIE` is ephemeral: Wormhole passes exactl
 one of them to the sidecar over stdin and never persists it. The embedded
 certificate-bypass option applies only to the configured gateway origin; the
 system browser keeps its own TLS policy. The configured SHA-256 certificate pin
-still protects the sidecar and tunnel-data connection in either mode.
+still protects the sidecar and tunnel-data connection. Because WebView2 cannot
+enforce a leaf-certificate pin for every valid TLS connection, embedded SSO
+rejects configurations with a pin; use the system browser for pinned tunnels.
 
 Cisco Secure Client remains non-interactive: it generates a code from a saved
 TOTP secret (or falls back to a static secondary password). WatchGuard (pre-auth

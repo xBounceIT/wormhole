@@ -335,7 +335,8 @@
                               Content="Trust server certificate (skip verification)" />
                     <TextBox x:Name="FortinetCertPinBox"
                              Header="Server certificate SHA-256 pin (hex, optional)"
-                             FontFamily="Consolas" />
+                             FontFamily="Consolas"
+                             TextChanged="OnFieldChanged" />
                 </StackPanel>
             </Expander>
         </StackPanel>

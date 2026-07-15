@@ -48,6 +48,11 @@ public sealed class FortinetSamlAuthService : IFortinetSamlAuthService, IDisposa
         ArgumentNullException.ThrowIfNull(settings);
         if (!settings.UseSingleSignOn)
             throw new InvalidOperationException("Fortinet SAML authentication was requested for a non-SSO tunnel.");
+        if (!settings.UseExternalBrowser && !string.IsNullOrWhiteSpace(settings.ServerCertSha256Pin))
+        {
+            throw new InvalidOperationException(
+                "Embedded-browser Fortinet SSO cannot enforce a server certificate pin; use the external browser or clear the pin.");
+        }
         if (Volatile.Read(ref _disposed) != 0)
             throw new OperationCanceledException("Fortinet SAML authentication service is shutting down.");
 

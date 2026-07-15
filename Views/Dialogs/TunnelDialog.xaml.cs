@@ -96,6 +96,10 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
                         if (!IsValidPort(FortinetSamlRedirectPortBox.Text)) missing.Add("SAML callback port (1-65535)");
                         if (!string.IsNullOrWhiteSpace(FortinetRealmBox.Text)) missing.Add("an empty realm for external-browser SSO");
                     }
+                    else if (!string.IsNullOrWhiteSpace(FortinetCertPinBox.Text))
+                    {
+                        missing.Add("external-browser SSO or an empty server certificate pin");
+                    }
                 }
                 else
                 {

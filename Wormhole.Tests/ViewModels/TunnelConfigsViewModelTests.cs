@@ -659,6 +659,29 @@ public class TunnelConfigsViewModelTests
     }
 
     [Fact]
+    public async Task AddTunnel_FortinetEmbeddedSsoWithCertificatePin_RejectsBeforePersist()
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        dialog.TunnelPromptResult = new TunnelDraft(
+            "corp-forti-sso", TunnelKind.Fortinet, WireGuard: null, OpenVpn: null,
+            new FortinetSettings
+            {
+                Host = "vpn.example.com",
+                Port = 443,
+                UseSingleSignOn = true,
+                UseExternalBrowser = false,
+                ServerCertSha256Pin = new string('A', 64),
+            });
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        Assert.Empty(repo.Configs);
+        Assert.Empty(creds.TunnelConfigs);
+        Assert.Contains(dialog.Messages, m =>
+            m.message.Contains("cannot enforce a server certificate pin", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task AddTunnel_OpenVpn_NullSettings_RejectsViaValidation()
     {
         var (vm, repo, _, creds, dialog) = CreateVm();

@@ -55,6 +55,11 @@ public sealed class FortinetTunnelProvider : ITunnelProvider
                 throw new InvalidOperationException("Fortinet SAML callback port must be between 1 and 65535.");
             if (settings.UseExternalBrowser && !string.IsNullOrWhiteSpace(settings.Realm))
                 throw new InvalidOperationException("External-browser Fortinet SSO does not support realms.");
+            if (!settings.UseExternalBrowser && !string.IsNullOrWhiteSpace(settings.ServerCertSha256Pin))
+            {
+                throw new InvalidOperationException(
+                    "Embedded-browser Fortinet SSO cannot enforce a server certificate pin; use the external browser or clear the pin.");
+            }
 
             settings = settings.SanitizedForAuthenticationMode();
             progress?.Report(new TunnelProgress(TunnelPhase.Authenticating));

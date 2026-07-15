@@ -54,6 +54,26 @@ public class FortinetTunnelProviderTests
             StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task EstablishAsync_RejectsEmbeddedSsoWithCertificatePinBeforeAuthentication()
+    {
+        var provider = CreateProvider();
+        var cfg = new TunnelConfig { Id = Guid.NewGuid(), Name = "x", Kind = TunnelKind.Fortinet };
+        var settings = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new FortinetSettings
+        {
+            Host = "vpn.example.com",
+            Port = 443,
+            UseSingleSignOn = true,
+            UseExternalBrowser = false,
+            ServerCertSha256Pin = new string('A', 64),
+        });
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            provider.EstablishAsync(cfg, settings, CancellationToken.None));
+
+        Assert.Contains("cannot enforce a server certificate pin", error.Message, StringComparison.Ordinal);
+    }
+
     private static FortinetTunnelProvider CreateProvider() =>
         new(
             NullLogger<FortinetTunnelProvider>.Instance,
