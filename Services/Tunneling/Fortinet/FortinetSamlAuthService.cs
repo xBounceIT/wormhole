@@ -17,13 +17,11 @@ public sealed class SystemFortinetExternalBrowserLauncher : IFortinetExternalBro
     public void Open(Uri uri)
     {
         ArgumentNullException.ThrowIfNull(uri);
-        using var process = Process.Start(new ProcessStartInfo
+        Process.Start(new ProcessStartInfo
         {
             FileName = uri.AbsoluteUri,
             UseShellExecute = true,
         });
-        if (process is null)
-            throw new InvalidOperationException("Windows did not open the default browser for Fortinet SAML authentication.");
     }
 }
 
