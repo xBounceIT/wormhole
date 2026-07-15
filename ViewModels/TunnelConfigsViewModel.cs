@@ -598,7 +598,8 @@ public partial class TunnelConfigsViewModel : ObservableObject
         TunnelKind.OpenVpn => JsonSerializer.SerializeToUtf8Bytes(
             draft.OpenVpn ?? throw new InvalidOperationException("OpenVPN settings are missing for an OpenVPN draft.")),
         TunnelKind.Fortinet => JsonSerializer.SerializeToUtf8Bytes(
-            draft.Fortinet ?? throw new InvalidOperationException("Fortinet settings are missing for a Fortinet draft.")),
+            (draft.Fortinet ?? throw new InvalidOperationException("Fortinet settings are missing for a Fortinet draft."))
+                .SanitizedForAuthenticationMode()),
         TunnelKind.Watchguard => JsonSerializer.SerializeToUtf8Bytes(
             draft.Watchguard ?? throw new InvalidOperationException("Watchguard settings are missing for a Watchguard draft.")),
         TunnelKind.Stormshield => JsonSerializer.SerializeToUtf8Bytes(
@@ -674,11 +675,24 @@ public partial class TunnelConfigsViewModel : ObservableObject
         StringBuilder? sb = null;
         if (string.IsNullOrWhiteSpace(fg.Host)) AppendValidationError(ref sb, "Gateway host is required.");
         if (fg.Port is < 1 or > 65535) AppendValidationError(ref sb, "Port must be between 1 and 65535.");
-        if (string.IsNullOrWhiteSpace(fg.Username)) AppendValidationError(ref sb, "Username is required.");
-        // IsNullOrWhiteSpace mirrors every other required field (and ValidateWireGuard) — a
-        // single space passed as a password would otherwise reach the gateway as %20 and bounce
-        // back as a cryptic 'invalid credentials' instead of a clean client-side rejection.
-        if (string.IsNullOrWhiteSpace(fg.Password)) AppendValidationError(ref sb, "Password is required.");
+        if (fg.UseSingleSignOn)
+        {
+            if (fg.UseExternalBrowser && fg.SamlRedirectPort is < 1 or > 65535)
+                AppendValidationError(ref sb, "SAML callback port must be between 1 and 65535.");
+            if (fg.UseExternalBrowser && !string.IsNullOrWhiteSpace(fg.Realm))
+                AppendValidationError(ref sb, "External-browser Fortinet SSO does not support realms.");
+            if (!fg.UseExternalBrowser && !string.IsNullOrWhiteSpace(fg.ServerCertSha256Pin))
+            {
+                AppendValidationError(
+                    ref sb,
+                    "Embedded-browser Fortinet SSO cannot enforce a server certificate pin; use the external browser or clear the pin.");
+            }
+        }
+        else
+        {
+            if (string.IsNullOrWhiteSpace(fg.Username)) AppendValidationError(ref sb, "Username is required.");
+            if (string.IsNullOrWhiteSpace(fg.Password)) AppendValidationError(ref sb, "Password is required.");
+        }
         ThrowValidationErrors(sb);
     }
 

@@ -374,6 +374,8 @@ public partial class App : Application
 
         services.AddSingleton<ITunnelProvider, WireGuardTunnelProvider>();
         services.AddSingleton<ITunnelProvider, OpenVpnTunnelProvider>();
+        services.AddSingleton<IFortinetExternalBrowserLauncher, SystemFortinetExternalBrowserLauncher>();
+        services.AddSingleton<IFortinetSamlAuthService, FortinetSamlAuthService>();
         services.AddSingleton<ITunnelProvider, FortinetTunnelProvider>();
         services.AddSingleton<IWatchguardSamlAuthService, DialogWatchguardSamlAuthService>();
         services.AddSingleton<IWatchguardProfileCache, WatchguardProfileCache>();

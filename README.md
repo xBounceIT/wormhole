@@ -126,13 +126,27 @@ sidecar rather than shipping their own binary:
 | Fortinet | `wormhole-fortiproxy.exe` |
 | Cisco Secure Client (AnyConnect) | `wormhole-ciscoproxy.exe` |
 
-2FA / OTP is supported where the provider needs it, but the mechanism differs.
-Fortinet and Cisco Secure Client are **not** interactive: they generate codes
-from a TOTP secret (or, for Cisco, fall back to a static secondary password) you
-store on the tunnel up front, and a gateway that prompts for a one-time code
-fails unless one of those is configured. WatchGuard (pre-auth challenge loop) and
-Stormshield (portal config download) instead prompt for the code at connect time
-through a single in-app OTP dialog.
+Fortinet supports either the existing username/password flow (including a saved
+TOTP secret) or SAML SSO. SAML can run in a dedicated persistent WebView2 profile,
+which preserves the IdP session, or in the system browser. The external-browser
+flow reserves a loopback callback before opening the gateway and uses port
+`8020` by default; configure the same value as FortiGate's
+`saml-redirect-port` when a different port is required. A Fortinet realm can be
+used with embedded WebView2, but Fortinet does not support combining a realm with
+the external-browser redirect flow.
+
+The Fortinet SAML `auth_id` or `SVPNCOOKIE` is ephemeral: Wormhole passes exactly
+one of them to the sidecar over stdin and never persists it. The embedded
+certificate-bypass option applies only to the configured gateway origin; the
+system browser keeps its own TLS policy. The configured SHA-256 certificate pin
+still protects the sidecar and tunnel-data connection. Because WebView2 cannot
+enforce a leaf-certificate pin for every valid TLS connection, embedded SSO
+rejects configurations with a pin; use the system browser for pinned tunnels.
+
+Cisco Secure Client remains non-interactive: it generates a code from a saved
+TOTP secret (or falls back to a static secondary password). WatchGuard (pre-auth
+challenge loop) and Stormshield (portal config download) instead prompt for the
+code at connect time through a single in-app OTP dialog.
 
 Cisco Secure Client speaks the AnyConnect protocol directly (aggregate-auth XML
 login + CSTP tunnel) rather than driving the locally-installed Cisco client, so

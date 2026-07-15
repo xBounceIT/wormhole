@@ -604,6 +604,84 @@ public class TunnelConfigsViewModelTests
     }
 
     [Fact]
+    public async Task AddTunnel_FortinetEmbeddedSso_DoesNotRequirePassword()
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        dialog.TunnelPromptResult = new TunnelDraft(
+            "corp-forti-sso", TunnelKind.Fortinet, WireGuard: null, OpenVpn: null,
+            new FortinetSettings
+            {
+                Host = "vpn.example.com",
+                Port = 443,
+                UseSingleSignOn = true,
+                UseExternalBrowser = false,
+                SamlRedirectPort = 18443,
+                Realm = "ExampleRealm",
+                Username = "must-not-persist",
+                Password = "must-not-persist",
+                TotpSecret = "must-not-persist",
+            });
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        var stored = Assert.Single(repo.Configs.Values);
+        var settings = JsonSerializer.Deserialize<FortinetSettings>(creds.TunnelConfigs[stored.Id])!;
+        Assert.True(settings.UseSingleSignOn);
+        Assert.False(settings.UseExternalBrowser);
+        Assert.Equal(18443, settings.SamlRedirectPort);
+        Assert.Equal("ExampleRealm", settings.Realm);
+        Assert.Empty(settings.Username);
+        Assert.Empty(settings.Password);
+        Assert.Null(settings.TotpSecret);
+    }
+
+    [Fact]
+    public async Task AddTunnel_FortinetExternalSsoWithRealm_RejectsBeforePersist()
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        dialog.TunnelPromptResult = new TunnelDraft(
+            "corp-forti-sso", TunnelKind.Fortinet, WireGuard: null, OpenVpn: null,
+            new FortinetSettings
+            {
+                Host = "vpn.example.com",
+                Port = 443,
+                UseSingleSignOn = true,
+                UseExternalBrowser = true,
+                SamlRedirectPort = 8020,
+                Realm = "UnsupportedRealm",
+            });
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        Assert.Empty(repo.Configs);
+        Assert.Empty(creds.TunnelConfigs);
+        Assert.Contains(dialog.Messages, m => m.message.Contains("does not support realms", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AddTunnel_FortinetEmbeddedSsoWithCertificatePin_RejectsBeforePersist()
+    {
+        var (vm, repo, _, creds, dialog) = CreateVm();
+        dialog.TunnelPromptResult = new TunnelDraft(
+            "corp-forti-sso", TunnelKind.Fortinet, WireGuard: null, OpenVpn: null,
+            new FortinetSettings
+            {
+                Host = "vpn.example.com",
+                Port = 443,
+                UseSingleSignOn = true,
+                UseExternalBrowser = false,
+                ServerCertSha256Pin = new string('A', 64),
+            });
+
+        await vm.AddTunnelCommand.ExecuteAsync(null);
+
+        Assert.Empty(repo.Configs);
+        Assert.Empty(creds.TunnelConfigs);
+        Assert.Contains(dialog.Messages, m =>
+            m.message.Contains("cannot enforce a server certificate pin", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task AddTunnel_OpenVpn_NullSettings_RejectsViaValidation()
     {
         var (vm, repo, _, creds, dialog) = CreateVm();

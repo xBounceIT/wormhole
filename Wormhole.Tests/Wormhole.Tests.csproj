@@ -89,6 +89,9 @@
     <Compile Include="..\Services\Tunneling\Socks5Client.cs" Link="Services\Tunneling\Socks5Client.cs" />
     <Compile Include="..\Services\Tunneling\LocalTcpForwarder.cs" Link="Services\Tunneling\LocalTcpForwarder.cs" />
     <Compile Include="..\Services\Tunneling\Fortinet\FortinetTunnelProvider.cs" Link="Services\Tunneling\Fortinet\FortinetTunnelProvider.cs" />
+    <Compile Include="..\Services\Tunneling\Fortinet\IFortinetSamlAuthService.cs" Link="Services\Tunneling\Fortinet\IFortinetSamlAuthService.cs" />
+    <Compile Include="..\Services\Tunneling\Fortinet\FortinetSamlProtocol.cs" Link="Services\Tunneling\Fortinet\FortinetSamlProtocol.cs" />
+    <Compile Include="..\Services\Tunneling\Fortinet\FortinetExternalSamlAuthClient.cs" Link="Services\Tunneling\Fortinet\FortinetExternalSamlAuthClient.cs" />
     <Compile Include="..\Services\Tunneling\Fortinet\FortinetProcessHost.cs" Link="Services\Tunneling\Fortinet\FortinetProcessHost.cs" />
     <Compile Include="..\Services\Tunneling\Fortinet\FortinetSidecarConfig.cs" Link="Services\Tunneling\Fortinet\FortinetSidecarConfig.cs" />
     <Compile Include="..\Services\Tunneling\CiscoSecureClient\CiscoSecureClientTunnelProvider.cs" Link="Services\Tunneling\CiscoSecureClient\CiscoSecureClientTunnelProvider.cs" />
