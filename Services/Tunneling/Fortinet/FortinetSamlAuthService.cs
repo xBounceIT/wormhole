@@ -51,33 +51,36 @@ public sealed class FortinetSamlAuthService : IFortinetSamlAuthService, IDisposa
         if (Volatile.Read(ref _disposed) != 0)
             throw new OperationCanceledException("Fortinet SAML authentication service is shutting down.");
 
-        using var timeoutCts = new CancellationTokenSource(AuthenticationTimeout);
-        CancellationTokenSource linked;
+        CancellationToken shutdownToken;
+        CancellationTokenSource queued;
         try
         {
-            linked = CancellationTokenSource.CreateLinkedTokenSource(
-                cancellationToken, _shutdownCts.Token, timeoutCts.Token);
+            shutdownToken = _shutdownCts.Token;
+            queued = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, shutdownToken);
         }
         catch (ObjectDisposedException)
         {
             throw new OperationCanceledException("Fortinet SAML authentication service was disposed during setup.");
         }
-        using var linkedCts = linked;
+        using var queuedCts = queued;
+
+        await _authGate.WaitAsync(queuedCts.Token).ConfigureAwait(false);
         try
         {
-            await _authGate.WaitAsync(linked.Token).ConfigureAwait(false);
+            using var timeoutCts = new CancellationTokenSource(AuthenticationTimeout);
+            using var authCts = CancellationTokenSource.CreateLinkedTokenSource(queuedCts.Token, timeoutCts.Token);
             try
             {
                 FortinetSamlAuthResult result;
                 if (settings.UseExternalBrowser)
                 {
                     result = await new FortinetExternalSamlAuthClient(_browserLauncher)
-                        .AuthenticateAsync(settings, linked.Token)
+                        .AuthenticateAsync(settings, authCts.Token)
                         .ConfigureAwait(false);
                 }
                 else
                 {
-                    result = await AuthenticateEmbeddedAsync(settings, configName, linked.Token)
+                    result = await AuthenticateEmbeddedAsync(settings, configName, authCts.Token)
                         .ConfigureAwait(false);
                 }
 
@@ -85,18 +88,18 @@ public sealed class FortinetSamlAuthService : IFortinetSamlAuthService, IDisposa
                     throw new InvalidOperationException("Fortinet SAML authentication returned an invalid result.");
                 return result;
             }
-            finally
+            catch (OperationCanceledException) when (
+                timeoutCts.IsCancellationRequested
+                && !cancellationToken.IsCancellationRequested
+                && !shutdownToken.IsCancellationRequested)
             {
-                _authGate.Release();
+                throw new TimeoutException(
+                    $"Fortinet SAML authentication did not complete within {AuthenticationTimeout.TotalMinutes:F0} minutes.");
             }
         }
-        catch (OperationCanceledException) when (
-            timeoutCts.IsCancellationRequested
-            && !cancellationToken.IsCancellationRequested
-            && !_shutdownCts.IsCancellationRequested)
+        finally
         {
-            throw new TimeoutException(
-                $"Fortinet SAML authentication did not complete within {AuthenticationTimeout.TotalMinutes:F0} minutes.");
+            _authGate.Release();
         }
     }
 
