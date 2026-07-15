@@ -287,10 +287,10 @@ func TestClassifyLoginBody(t *testing.T) {
 }
 
 func TestRedactBody_ScrubsCredentials(t *testing.T) {
-	authID := "opaque-auth-id"
+	authID := "opaque+auth/id="
 	cookie := "opaque-cookie"
 	cfg := config{Username: "alice", Password: "s3cr3t-pw", SamlAuthID: &authID, SvpnCookie: &cookie}
-	body := "Hello alice, password s3cr3t-pw, auth opaque-auth-id, cookie opaque-cookie\n\n   please retry"
+	body := "Hello alice, password s3cr3t-pw, auth opaque+auth/id=, query ?id=" + url.QueryEscape(authID) + ", cookie opaque-cookie\n\n   please retry"
 	got := redactBody([]byte(body), cfg)
 	if strings.Contains(got, "alice") {
 		t.Errorf("username leaked into excerpt: %q", got)
@@ -298,7 +298,7 @@ func TestRedactBody_ScrubsCredentials(t *testing.T) {
 	if strings.Contains(got, "s3cr3t-pw") {
 		t.Errorf("password leaked into excerpt: %q", got)
 	}
-	if strings.Contains(got, authID) || strings.Contains(got, cookie) {
+	if strings.Contains(got, authID) || strings.Contains(got, url.QueryEscape(authID)) || strings.Contains(got, cookie) {
 		t.Errorf("SAML material leaked into excerpt: %q", got)
 	}
 	if strings.Contains(got, "\n") {

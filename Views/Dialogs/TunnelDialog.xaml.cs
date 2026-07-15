@@ -551,6 +551,8 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
 
     private void OnFieldChanged(object sender, TextChangedEventArgs e)
     {
+        if (ReferenceEquals(sender, FortinetRealmBox))
+            UpdateFortinetAuthFields();
         UpdateValidationHint();
         ValidityChanged?.Invoke(this, EventArgs.Empty);
     }
@@ -584,7 +586,7 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         FortinetUsernameBox.IsEnabled = !useSso;
         FortinetPasswordBox.IsEnabled = !useSso;
         FortinetTotpSecretBox.IsEnabled = !useSso;
-        FortinetRealmBox.IsEnabled = !useExternalBrowser;
+        FortinetRealmBox.IsEnabled = !useExternalBrowser || !string.IsNullOrWhiteSpace(FortinetRealmBox.Text);
         FortinetSamlRedirectPortBox.Visibility = useExternalBrowser ? Visibility.Visible : Visibility.Collapsed;
     }
 

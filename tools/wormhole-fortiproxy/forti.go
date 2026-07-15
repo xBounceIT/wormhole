@@ -369,7 +369,7 @@ var wsRE = regexp.MustCompile(`\s+`)
 // sensitiveKVRE matches the VALUES of challenge/session keys in FortiGate's ajax/url-encoded
 // responses (magic, reqid, SAMLResponse, …) so redactBody can strip them. Keys are ordered
 // longest-first where one prefixes another (grpid before grp) for an unambiguous match.
-var sensitiveKVRE = regexp.MustCompile(`(?i)\b(magic|reqid|polid|grpid|grp|portal|peer|tokeninfo|credential|svpncookie|samlrequest|samlresponse)=([^,&\s'"<>]+)`)
+var sensitiveKVRE = regexp.MustCompile(`(?i)\b(magic|reqid|polid|grpid|grp|portal|peer|tokeninfo|credential|svpncookie|samlrequest|samlresponse|id)=([^,&\s'"<>]+)`)
 
 // htmlValueAttrRE matches any HTML value="…" attribute. redactBody masks ALL of them: in a
 // FortiGate challenge/SAML page the value attributes carry the live tokens, and name↔value
