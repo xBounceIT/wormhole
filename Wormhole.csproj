@@ -23,8 +23,8 @@
     <NoWarn>$(NoWarn);MVVMTK0045</NoWarn>
     <DefaultLanguage>en-US</DefaultLanguage>
     <WormholeUsePinnedSqliteNative>true</WormholeUsePinnedSqliteNative>
-    <Version>0.7.11</Version>
-    <AssemblyVersion>0.7.11.0</AssemblyVersion>
+    <Version>0.7.12</Version>
+    <AssemblyVersion>0.7.12.0</AssemblyVersion>
     <InformationalVersion>$(Version)</InformationalVersion>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <RepositoryUrl>https://github.com/xBounceIT/wormhole</RepositoryUrl>
