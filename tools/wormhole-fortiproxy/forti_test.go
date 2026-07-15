@@ -1,10 +1,20 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/cookiejar"
+	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }
 
 // Both FortiGate XML layouts are seen in the wild. A previous parser that bound the
 // assigned IP exclusively to the attribute form silently failed on the nested-element
@@ -277,14 +287,19 @@ func TestClassifyLoginBody(t *testing.T) {
 }
 
 func TestRedactBody_ScrubsCredentials(t *testing.T) {
-	cfg := config{Username: "alice", Password: "s3cr3t-pw"}
-	body := "Hello alice, the password s3cr3t-pw is wrong\n\n   please retry"
+	authID := "opaque-auth-id"
+	cookie := "opaque-cookie"
+	cfg := config{Username: "alice", Password: "s3cr3t-pw", SamlAuthID: &authID, SvpnCookie: &cookie}
+	body := "Hello alice, password s3cr3t-pw, auth opaque-auth-id, cookie opaque-cookie\n\n   please retry"
 	got := redactBody([]byte(body), cfg)
 	if strings.Contains(got, "alice") {
 		t.Errorf("username leaked into excerpt: %q", got)
 	}
 	if strings.Contains(got, "s3cr3t-pw") {
 		t.Errorf("password leaked into excerpt: %q", got)
+	}
+	if strings.Contains(got, authID) || strings.Contains(got, cookie) {
+		t.Errorf("SAML material leaked into excerpt: %q", got)
 	}
 	if strings.Contains(got, "\n") {
 		t.Errorf("whitespace not collapsed: %q", got)
@@ -330,5 +345,119 @@ func TestRedactBody_StructuralRedactionRunsBeforeCredScrub(t *testing.T) {
 	got := redactBody([]byte(body), cfg)
 	if strings.Contains(got, "LIVE_TOKEN") {
 		t.Errorf("token leaked when a credential overlaps markup: %q", got)
+	}
+}
+
+func TestObtainFortinetCookie_SamlAuthIDExchange(t *testing.T) {
+	authID := "alpha+beta/gamma="
+	var gotPath, gotID string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotID = r.URL.Query().Get("id")
+		http.SetCookie(w, &http.Cookie{Name: "SVPNCOOKIE", Value: "session-cookie", Path: "/remote"})
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	baseURL, _ := url.Parse(server.URL)
+	baseURL.Path = "/"
+	tunnelURL := baseURL.JoinPath("remote", "sslvpn-tunnel")
+	jar, _ := cookiejar.New(nil)
+	client := server.Client()
+	client.Jar = jar
+	cfg := config{SamlAuthID: &authID}
+
+	if err := obtainFortinetCookie(context.Background(), client, jar, baseURL, tunnelURL, cfg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/remote/saml/auth_id" {
+		t.Fatalf("path: got %q", gotPath)
+	}
+	if gotID != authID {
+		t.Fatalf("auth ID: got %q want %q", gotID, authID)
+	}
+	if !hasSvpnCookie(jar, tunnelURL) {
+		t.Fatal("SVPNCOOKIE was not stored for the tunnel path")
+	}
+}
+
+func TestObtainFortinetCookie_SamlAuthIDIsAbsentFromErrors(t *testing.T) {
+	authID := "opaque-secret-auth-id"
+	baseURL, _ := url.Parse("https://vpn.example.com/")
+	tunnelURL := baseURL.JoinPath("remote", "sslvpn-tunnel")
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{
+		Jar: jar,
+		Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			return nil, fmt.Errorf("simulated failure for %s", request.URL)
+		}),
+	}
+
+	err := obtainFortinetCookie(
+		context.Background(), client, jar, baseURL, tunnelURL, config{SamlAuthID: &authID})
+	if err == nil {
+		t.Fatal("expected exchange failure")
+	}
+	if strings.Contains(err.Error(), authID) {
+		t.Fatalf("auth ID leaked into error: %v", err)
+	}
+}
+
+func TestObtainFortinetCookie_PreAuthenticatedCookieSkipsNetwork(t *testing.T) {
+	baseURL, _ := url.Parse("https://vpn.example.com/")
+	tunnelURL := baseURL.JoinPath("remote", "sslvpn-tunnel")
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	cookie := "embedded-session"
+
+	if err := obtainFortinetCookie(context.Background(), client, jar, baseURL, tunnelURL, config{SvpnCookie: &cookie}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !hasSvpnCookie(jar, tunnelURL) {
+		t.Fatal("supplied SVPNCOOKIE was not stored for the tunnel path")
+	}
+}
+
+func TestObtainFortinetCookie_TraditionalCredentialsRemainSupported(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/remote/logincheck" {
+			t.Fatalf("path: got %q", r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("parse form: %v", err)
+		}
+		if r.Form.Get("username") != "alice" || r.Form.Get("credential") != "secret" {
+			t.Fatal("traditional credentials were not posted")
+		}
+		http.SetCookie(w, &http.Cookie{Name: "SVPNCOOKIE", Value: "traditional-session", Path: "/remote"})
+		_, _ = w.Write([]byte("ret=1"))
+	}))
+	defer server.Close()
+
+	baseURL, _ := url.Parse(server.URL)
+	baseURL.Path = "/"
+	tunnelURL := baseURL.JoinPath("remote", "sslvpn-tunnel")
+	jar, _ := cookiejar.New(nil)
+	client := server.Client()
+	client.Jar = jar
+	cfg := config{Username: "alice", Password: "secret"}
+
+	if err := obtainFortinetCookie(context.Background(), client, jar, baseURL, tunnelURL, cfg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestStartFortinet_RejectsAmbiguousSamlCredentialsBeforeNetwork(t *testing.T) {
+	authID := "opaque-auth-id"
+	cookie := "opaque-cookie"
+	tests := []config{
+		{Host: "vpn.example.com", Port: 443, SamlAuthID: &authID, SvpnCookie: &cookie},
+		{Host: "vpn.example.com", Port: 443, SamlAuthID: &authID, Username: "alice", Password: "secret"},
+	}
+	for _, cfg := range tests {
+		_, _, _, err := startFortinet(context.Background(), func() {}, cfg)
+		if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+			t.Fatalf("expected mutual-exclusion error, got %v", err)
+		}
 	}
 }

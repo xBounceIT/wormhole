@@ -89,11 +89,19 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
             case TunnelKind.Fortinet:
                 if (string.IsNullOrWhiteSpace(FortinetHostBox.Text)) missing.Add("Host");
                 if (!IsValidPort(FortinetPortBox.Text)) missing.Add("Port (1-65535)");
-                if (string.IsNullOrWhiteSpace(FortinetUsernameBox.Text)) missing.Add("Username");
-                // IsNullOrWhiteSpace mirrors the server-side ValidateFortinet check; an
-                // all-whitespace password would otherwise pass the dialog gate and fail at the
-                // gateway with a generic 'invalid credentials' message.
-                if (string.IsNullOrWhiteSpace(FortinetPasswordBox.Password)) missing.Add("Password");
+                if (FortinetSsoCheck.IsChecked == true)
+                {
+                    if (FortinetExternalBrowserCheck.IsChecked == true)
+                    {
+                        if (!IsValidPort(FortinetSamlRedirectPortBox.Text)) missing.Add("SAML callback port (1-65535)");
+                        if (!string.IsNullOrWhiteSpace(FortinetRealmBox.Text)) missing.Add("an empty realm for external-browser SSO");
+                    }
+                }
+                else
+                {
+                    if (string.IsNullOrWhiteSpace(FortinetUsernameBox.Text)) missing.Add("Username");
+                    if (string.IsNullOrWhiteSpace(FortinetPasswordBox.Password)) missing.Add("Password");
+                }
                 break;
             case TunnelKind.Watchguard:
                 if (string.IsNullOrWhiteSpace(WatchguardServerBox.Text)) missing.Add("Server");
@@ -201,8 +209,14 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         FortinetPasswordBox.Password = fg.Password;
         FortinetRealmBox.Text = fg.Realm ?? string.Empty;
         FortinetTotpSecretBox.Password = fg.TotpSecret ?? string.Empty;
+        FortinetSsoCheck.IsChecked = fg.UseSingleSignOn;
+        FortinetExternalBrowserCheck.IsChecked = fg.UseExternalBrowser;
+        FortinetSamlRedirectPortBox.Text = (fg.SamlRedirectPort is >= 1 and <= 65535
+            ? fg.SamlRedirectPort
+            : FortinetSettings.DefaultSamlRedirectPort).ToString();
         FortinetTrustCertCheck.IsChecked = fg.TrustServerCertificate;
         FortinetCertPinBox.Text = fg.ServerCertSha256Pin ?? string.Empty;
+        UpdateFortinetAuthFields();
 
         var wgg = initial.Watchguard ?? new WatchguardSettings();
         // Coalesce every string field defensively: System.Text.Json happily assigns null to a
@@ -502,21 +516,28 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         // how the user copied it. Same treatment for the cert pin which often arrives with
         // ':' separators that the sidecar already strips, but extra whitespace would still
         // break hex parsing.
-        var totp = StripWhitespace(FortinetTotpSecretBox.Password);
+        var useSso = FortinetSsoCheck.IsChecked == true;
+        var useExternalBrowser = FortinetExternalBrowserCheck.IsChecked == true;
+        var totp = useSso ? string.Empty : StripWhitespace(FortinetTotpSecretBox.Password);
         return new FortinetSettings
         {
             Host = FortinetHostBox.Text.Trim(),
             Port = TryParseInt(FortinetPortBox.Text) ?? 443,
-            Username = FortinetUsernameBox.Text.Trim(),
+            Username = useSso ? string.Empty : FortinetUsernameBox.Text.Trim(),
             // Strip ONLY trailing \r/\n. Passwords can legitimately contain leading,
             // embedded, OR trailing whitespace (spaces and tabs are valid password chars),
             // so a blanket TrimEnd() would silently corrupt those. CR/LF however are paste
             // artifacts — `pass` CLI and many browser password managers append them when
             // copying — that the user can't see in the masked PasswordBox and that
             // FortiGate would otherwise reject as part of an "invalid credentials" message.
-            Password = FortinetPasswordBox.Password?.TrimEnd('\r', '\n') ?? string.Empty,
-            Realm = string.IsNullOrWhiteSpace(FortinetRealmBox.Text) ? null : FortinetRealmBox.Text.Trim(),
+            Password = useSso ? string.Empty : FortinetPasswordBox.Password?.TrimEnd('\r', '\n') ?? string.Empty,
+            Realm = useSso && useExternalBrowser || string.IsNullOrWhiteSpace(FortinetRealmBox.Text)
+                ? null
+                : FortinetRealmBox.Text.Trim(),
             TotpSecret = string.IsNullOrEmpty(totp) ? null : totp,
+            UseSingleSignOn = useSso,
+            UseExternalBrowser = useExternalBrowser,
+            SamlRedirectPort = TryParseInt(FortinetSamlRedirectPortBox.Text) ?? FortinetSettings.DefaultSamlRedirectPort,
             TrustServerCertificate = FortinetTrustCertCheck.IsChecked == true,
             ServerCertSha256Pin = string.IsNullOrWhiteSpace(FortinetCertPinBox.Text) ? null : StripWhitespace(FortinetCertPinBox.Text),
         };
@@ -543,6 +564,28 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
     {
         UpdateValidationHint();
         ValidityChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void OnFortinetSsoChanged(object sender, RoutedEventArgs e)
+    {
+        UpdateFortinetAuthFields();
+        UpdateValidationHint();
+        ValidityChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void UpdateFortinetAuthFields()
+    {
+        // Checked/Unchecked can fire while InitializeComponent is still constructing later fields.
+        if (FortinetSamlRedirectPortBox is null) return;
+
+        var useSso = FortinetSsoCheck.IsChecked == true;
+        var useExternalBrowser = useSso && FortinetExternalBrowserCheck.IsChecked == true;
+        FortinetExternalBrowserCheck.IsEnabled = useSso;
+        FortinetUsernameBox.IsEnabled = !useSso;
+        FortinetPasswordBox.IsEnabled = !useSso;
+        FortinetTotpSecretBox.IsEnabled = !useSso;
+        FortinetRealmBox.IsEnabled = !useExternalBrowser;
+        FortinetSamlRedirectPortBox.Visibility = useExternalBrowser ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private async void OnImportOvpnFile(object sender, RoutedEventArgs e)
@@ -802,6 +845,8 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         FortinetPanel.Visibility = SelectedKind == TunnelKind.Fortinet
             ? Visibility.Visible
             : Visibility.Collapsed;
+        if (SelectedKind == TunnelKind.Fortinet)
+            UpdateFortinetAuthFields();
         WatchguardPanel.Visibility = SelectedKind == TunnelKind.Watchguard
             ? Visibility.Visible
             : Visibility.Collapsed;

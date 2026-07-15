@@ -12,11 +12,16 @@ public sealed class FortinetTunnelProvider : ITunnelProvider
 {
     private readonly ILogger<FortinetTunnelProvider> _logger;
     private readonly ILoggerFactory _loggerFactory;
+    private readonly IFortinetSamlAuthService _samlAuthService;
 
-    public FortinetTunnelProvider(ILogger<FortinetTunnelProvider> logger, ILoggerFactory loggerFactory)
+    public FortinetTunnelProvider(
+        ILogger<FortinetTunnelProvider> logger,
+        ILoggerFactory loggerFactory,
+        IFortinetSamlAuthService samlAuthService)
     {
         _logger = logger;
         _loggerFactory = loggerFactory;
+        _samlAuthService = samlAuthService;
     }
 
     public TunnelKind Kind => TunnelKind.Fortinet;
@@ -43,14 +48,35 @@ public sealed class FortinetTunnelProvider : ITunnelProvider
                 "Open the tunnel editor to re-enter settings.");
         }
 
+        FortinetSamlAuthResult? samlResult = null;
+        if (settings.UseSingleSignOn)
+        {
+            if (settings.UseExternalBrowser && settings.SamlRedirectPort is < 1 or > 65535)
+                throw new InvalidOperationException("Fortinet SAML callback port must be between 1 and 65535.");
+            if (settings.UseExternalBrowser && !string.IsNullOrWhiteSpace(settings.Realm))
+                throw new InvalidOperationException("External-browser Fortinet SSO does not support realms.");
+
+            settings = settings.SanitizedForAuthenticationMode();
+            progress?.Report(new TunnelProgress(TunnelPhase.Authenticating));
+            samlResult = await _samlAuthService.AuthenticateAsync(settings, config.Name, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        else if (string.IsNullOrWhiteSpace(settings.Username) || string.IsNullOrWhiteSpace(settings.Password))
+        {
+            throw new InvalidOperationException(
+                $"Tunnel config '{config.Name}' requires a username and password when SSO is disabled.");
+        }
+
         var sidecar = new FortinetSidecarConfig
         {
             Host = settings.Host,
             Port = settings.Port,
             Username = settings.Username,
             Password = settings.Password,
-            Realm = settings.Realm,
+            Realm = settings.UseSingleSignOn ? null : settings.Realm,
             TotpSecret = settings.TotpSecret,
+            SamlAuthId = samlResult?.AuthId,
+            SvpnCookie = samlResult?.SvpnCookie,
             TrustServerCertificate = settings.TrustServerCertificate,
             ServerCertSha256Pin = settings.ServerCertSha256Pin,
         };

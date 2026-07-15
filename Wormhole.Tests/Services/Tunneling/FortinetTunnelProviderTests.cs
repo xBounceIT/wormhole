@@ -13,9 +13,7 @@ public class FortinetTunnelProviderTests
     [Fact]
     public void Kind_IsFortinet()
     {
-        var provider = new FortinetTunnelProvider(
-            NullLogger<FortinetTunnelProvider>.Instance,
-            NullLoggerFactory.Instance);
+        var provider = CreateProvider();
 
         Assert.Equal(TunnelKind.Fortinet, provider.Kind);
     }
@@ -23,9 +21,7 @@ public class FortinetTunnelProviderTests
     [Fact]
     public async Task EstablishAsync_RejectsEmptySecretBlob()
     {
-        var provider = new FortinetTunnelProvider(
-            NullLogger<FortinetTunnelProvider>.Instance,
-            NullLoggerFactory.Instance);
+        var provider = CreateProvider();
         var cfg = new TunnelConfig { Id = Guid.NewGuid(), Name = "x", Kind = TunnelKind.Fortinet };
 
         await Assert.ThrowsAnyAsync<Exception>(() =>
@@ -40,9 +36,7 @@ public class FortinetTunnelProviderTests
         // parse error or a generic Process-start fault. Real tunnels require the build's
         // FetchFortiProxy target to have produced the binary; this asserts the failure
         // mode when it didn't.
-        var provider = new FortinetTunnelProvider(
-            NullLogger<FortinetTunnelProvider>.Instance,
-            NullLoggerFactory.Instance);
+        var provider = CreateProvider();
         var cfg = new TunnelConfig { Id = Guid.NewGuid(), Name = "x", Kind = TunnelKind.Fortinet };
         var settings = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new FortinetSettings
         {
@@ -58,5 +52,20 @@ public class FortinetTunnelProviderTests
         // depending on platform path quirks — both contain the binary name we want users to see.
         Assert.Contains("fortiproxy", (ex.Message + " " + (ex.InnerException?.Message ?? "")),
             StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static FortinetTunnelProvider CreateProvider() =>
+        new(
+            NullLogger<FortinetTunnelProvider>.Instance,
+            NullLoggerFactory.Instance,
+            new UnexpectedSamlAuthService());
+
+    private sealed class UnexpectedSamlAuthService : IFortinetSamlAuthService
+    {
+        public Task<FortinetSamlAuthResult> AuthenticateAsync(
+            FortinetSettings settings,
+            string configName,
+            CancellationToken cancellationToken) =>
+            throw new InvalidOperationException("SSO should not be invoked by this test.");
     }
 }

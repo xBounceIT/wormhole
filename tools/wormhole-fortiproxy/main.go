@@ -36,6 +36,8 @@ type config struct {
 	Password               string  `json:"password"`
 	Realm                  *string `json:"realm"`
 	TotpSecret             *string `json:"totp_secret"`
+	SamlAuthID             *string `json:"saml_auth_id"`
+	SvpnCookie             *string `json:"svpn_cookie"`
 	TrustServerCertificate bool    `json:"trust_server_certificate"`
 	ServerCertSha256Pin    *string `json:"server_cert_sha256_pin"`
 }
@@ -204,8 +206,17 @@ func startFortinet(ctx context.Context, outerCancel context.CancelFunc, cfg conf
 	if cfg.Host == "" {
 		return nil, nil, nil, errors.New("host is required")
 	}
-	if cfg.Username == "" || cfg.Password == "" {
-		return nil, nil, nil, errors.New("username and password are required")
+	hasSamlAuthID := cfg.SamlAuthID != nil && *cfg.SamlAuthID != ""
+	hasSvpnCookie := cfg.SvpnCookie != nil && *cfg.SvpnCookie != ""
+	if hasSamlAuthID && hasSvpnCookie {
+		return nil, nil, nil, errors.New("saml_auth_id and svpn_cookie are mutually exclusive")
+	}
+	if (hasSamlAuthID || hasSvpnCookie) &&
+		(cfg.Username != "" || cfg.Password != "" || (cfg.TotpSecret != nil && *cfg.TotpSecret != "")) {
+		return nil, nil, nil, errors.New("SAML authentication and username/password credentials are mutually exclusive")
+	}
+	if !hasSamlAuthID && !hasSvpnCookie && (cfg.Username == "" || cfg.Password == "") {
+		return nil, nil, nil, errors.New("username and password are required when SAML authentication is not configured")
 	}
 	if cfg.Port < 1 || cfg.Port > 65535 {
 		return nil, nil, nil, fmt.Errorf("invalid port %d", cfg.Port)

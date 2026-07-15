@@ -26,6 +26,7 @@ internal static class AppPaths
     // state (e.g. the Azure VPN popup's Entra session cookies) start from a fresh profile once.
     private static readonly string WebView2UserDataDirectory = Path.Combine(AppDataDirectory, "webview2");
     private static readonly string WatchguardSamlWebView2UserDataDirectory = Path.Combine(AppDataDirectory, "watchguard-saml-webview2");
+    private static readonly string FortinetSamlWebView2UserDataDirectory = Path.Combine(AppDataDirectory, "fortinet-saml-webview2");
     private static readonly string AzureVpnWebView2UserDataDirectory = Path.Combine(AppDataDirectory, "azurevpn-webview2");
     private static readonly string UpdateChangelogWebView2UserDataDirectory = Path.Combine(AppDataDirectory, "update-changelog-webview2");
     // Separate user-data root for the HTTP/HTTPS browser session surface, so its (possibly
@@ -94,6 +95,12 @@ internal static class AppPaths
 
     public static string GetWatchguardSamlWebView2UserDataDirectory() =>
         Path.Combine(WatchguardSamlWebView2UserDataDirectory, WebViewBrowserArguments.KeyedSharedFolderName);
+
+    // Persistent profile for the embedded Fortinet SAML browser; gateway cookies are cleared per login.
+    public static string GetFortinetSamlWebView2UserDataRoot() => FortinetSamlWebView2UserDataDirectory;
+
+    public static string GetFortinetSamlWebView2UserDataDirectory() =>
+        Path.Combine(FortinetSamlWebView2UserDataDirectory, WebViewBrowserArguments.KeyedSharedFolderName);
 
     // Persistent profile for the Azure VPN Microsoft sign-in popup, so Entra session cookies
     // survive across connects and an interactive re-auth is usually a single account click.

@@ -81,53 +81,9 @@ func fortiLogin(ctx context.Context, cfg config) (*session, error) {
 	// default-path /remote of /remote/logincheck still match.
 	baseURL := &url.URL{Scheme: "https", Host: net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)), Path: "/"}
 
-	// Step 1: POST /remote/logincheck with credentials.
-	form := url.Values{}
-	form.Set("username", cfg.Username)
-	form.Set("credential", cfg.Password)
-	form.Set("ajax", "1")
-	form.Set("just_logged_in", "1")
-	if cfg.Realm != nil && *cfg.Realm != "" {
-		form.Set("realm", *cfg.Realm)
-	}
-	body, err := postForm(authCtx, client, "logincheck", baseURL.JoinPath("remote", "logincheck").String(), form, cfg)
-	if err != nil {
-		return nil, fmt.Errorf("logincheck POST: %w", err)
-	}
-
-	// Step 2: if the body announces a 2FA challenge, complete it.
-	if challenge := parseChallenge(string(body)); challenge != nil {
-		if cfg.TotpSecret == nil || *cfg.TotpSecret == "" {
-			return nil, errors.New("server requested 2FA but no TOTP secret was configured for this tunnel")
-		}
-		code, err := totp.GenerateCode(*cfg.TotpSecret, time.Now())
-		if err != nil {
-			return nil, fmt.Errorf("generate TOTP code: %w", err)
-		}
-		challenge.respond(code, cfg)
-		body, err = postForm(authCtx, client, "logincheck-2fa", baseURL.JoinPath("remote", "logincheck").String(), challenge.form, cfg)
-		if err != nil {
-			return nil, fmt.Errorf("logincheck challenge POST: %w", err)
-		}
-	}
-
-	// Use the tunnel-upgrade URL for the cookie check, not baseURL: FortiGate may set
-	// SVPNCOOKIE without an explicit Path attribute, in which case Go's cookiejar uses the
-	// default-path of the original /remote/logincheck request (= "/remote") — looking up
-	// against the root would miss it. The tunnel-upgrade URL is the one we actually need
-	// the cookie for, so check it there.
 	tunnelURL := baseURL.JoinPath("remote", "sslvpn-tunnel")
-	if !hasSvpnCookie(jar, tunnelURL) {
-		// Surface enough to diagnose WHY the cookie is missing without a packet capture: the
-		// body classification and which cookie NAMES (never values) the jar holds, both at the
-		// tunnel path and the root. Per-response status/body lines were already logged above.
-		tags := strings.Join(classifyLoginBody(body), ",")
-		tunnelCookies := strings.Join(cookieNames(jar, tunnelURL), ",")
-		logf("login failed: SVPNCOOKIE absent. body=[%s] jar(tunnel-path)=[%s] jar(root)=[%s]",
-			tags, tunnelCookies, strings.Join(cookieNames(jar, baseURL), ","))
-		return nil, fmt.Errorf(
-			"login did not yield an SVPNCOOKIE (server returned %d bytes, body=[%s], cookies=[%s] without a recognized challenge)",
-			len(body), tags, tunnelCookies)
+	if err := obtainFortinetCookie(authCtx, client, jar, baseURL, tunnelURL, cfg); err != nil {
+		return nil, err
 	}
 
 	// Step 3: fetch the tunnel config XML (assigned IP, DNS, MTU).
@@ -171,6 +127,76 @@ func fortiLogin(ctx context.Context, cfg config) (*session, error) {
 		MTU:        cfgXML.MTU,
 		DNS:        cfgXML.DNS,
 	}, nil
+}
+
+func obtainFortinetCookie(
+	ctx context.Context,
+	client *http.Client,
+	jar *cookiejar.Jar,
+	baseURL, tunnelURL *url.URL,
+	cfg config,
+) error {
+	var body []byte
+	var err error
+
+	switch {
+	case cfg.SvpnCookie != nil && *cfg.SvpnCookie != "":
+		jar.SetCookies(tunnelURL, []*http.Cookie{{
+			Name:     "SVPNCOOKIE",
+			Value:    *cfg.SvpnCookie,
+			Path:     "/remote",
+			Secure:   true,
+			HttpOnly: true,
+		}})
+	case cfg.SamlAuthID != nil && *cfg.SamlAuthID != "":
+		authURL := baseURL.JoinPath("remote", "saml", "auth_id")
+		query := authURL.Query()
+		query.Set("id", *cfg.SamlAuthID)
+		authURL.RawQuery = query.Encode()
+		body, err = httpGet(ctx, client, "saml-auth-id", authURL.String(), cfg)
+		if err != nil {
+			return errors.New("SAML auth ID exchange failed; verify gateway connectivity and certificate settings")
+		}
+	default:
+		form := url.Values{}
+		form.Set("username", cfg.Username)
+		form.Set("credential", cfg.Password)
+		form.Set("ajax", "1")
+		form.Set("just_logged_in", "1")
+		if cfg.Realm != nil && *cfg.Realm != "" {
+			form.Set("realm", *cfg.Realm)
+		}
+		body, err = postForm(ctx, client, "logincheck", baseURL.JoinPath("remote", "logincheck").String(), form, cfg)
+		if err != nil {
+			return fmt.Errorf("logincheck POST: %w", err)
+		}
+
+		if challenge := parseChallenge(string(body)); challenge != nil {
+			if cfg.TotpSecret == nil || *cfg.TotpSecret == "" {
+				return errors.New("server requested 2FA but no TOTP secret was configured for this tunnel")
+			}
+			code, err := totp.GenerateCode(*cfg.TotpSecret, time.Now())
+			if err != nil {
+				return fmt.Errorf("generate TOTP code: %w", err)
+			}
+			challenge.respond(code, cfg)
+			body, err = postForm(ctx, client, "logincheck-2fa", baseURL.JoinPath("remote", "logincheck").String(), challenge.form, cfg)
+			if err != nil {
+				return fmt.Errorf("logincheck challenge POST: %w", err)
+			}
+		}
+	}
+
+	if !hasSvpnCookie(jar, tunnelURL) {
+		tags := strings.Join(classifyLoginBody(body), ",")
+		tunnelCookies := strings.Join(cookieNames(jar, tunnelURL), ",")
+		logf("login failed: SVPNCOOKIE absent. body=[%s] jar(tunnel-path)=[%s] jar(root)=[%s]",
+			tags, tunnelCookies, strings.Join(cookieNames(jar, baseURL), ","))
+		return fmt.Errorf(
+			"login did not yield an SVPNCOOKIE (server returned %d bytes, body=[%s], cookies=[%s] without a recognized challenge)",
+			len(body), tags, tunnelCookies)
+	}
+	return nil
 }
 
 func buildTLSConfig(cfg config) (*tls.Config, error) {
@@ -406,6 +432,12 @@ func redactBody(body []byte, cfg config) string {
 	}
 	if cfg.Password != "" {
 		s = strings.ReplaceAll(s, cfg.Password, "<redacted>")
+	}
+	if cfg.SamlAuthID != nil && *cfg.SamlAuthID != "" {
+		s = strings.ReplaceAll(s, *cfg.SamlAuthID, "<redacted>")
+	}
+	if cfg.SvpnCookie != nil && *cfg.SvpnCookie != "" {
+		s = strings.ReplaceAll(s, *cfg.SvpnCookie, "<redacted>")
 	}
 	const limit = 256
 	if r := []rune(s); len(r) > limit {
