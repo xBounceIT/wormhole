@@ -274,6 +274,7 @@ public sealed class FortinetSamlAuthService : IFortinetSamlAuthService, IDisposa
         {
             using (RdpOverlayCoordinator.Suppress())
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 dialogResult = await ContentDialogTracker.ShowAsync(dialog, cancellationToken);
             }
         }
