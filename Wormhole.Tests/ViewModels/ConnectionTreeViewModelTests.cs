@@ -2011,6 +2011,65 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task SearchText_ProjectionSwitchExpandsEveryFolderContainingMatches()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "SyncSecurity";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var root = vm.Roots.Single();
+
+        foreach (var folderName in new[] { "CLD", "PRD", "ReeVo" })
+        {
+            dialog.TextPromptResult = folderName;
+            await vm.AddFolderCommand.ExecuteAsync(root);
+            var folder = root.Children.Single(child => child.Name == folderName);
+
+            dialog.EditConnectionResult = MakeConnectionDraft(
+                $"MGR-{folderName}", ProtocolType.Ssh, "host", null, null);
+            await vm.AddConnectionCommand.ExecuteAsync(folder);
+        }
+
+        var matchingFolders = root.Children.ToArray();
+        root.IsExpanded = true;
+        matchingFolders[0].IsExpanded = true;
+
+        void CollapseSearchPaths()
+        {
+            root.IsExpanded = false;
+            foreach (var folder in matchingFolders)
+            {
+                folder.IsExpanded = false;
+            }
+        }
+
+        // Rebinding either TreeView.ItemsSource or a TreeViewItem.ItemsSource can tear down
+        // outgoing containers whose two-way IsExpanded bindings write their old state back.
+        root.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(TreeNodeViewModel.DisplayChildren)) CollapseSearchPaths();
+        };
+        vm.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(ConnectionTreeViewModel.DisplayRoots)) CollapseSearchPaths();
+        };
+
+        vm.SearchText = "mgr";
+
+        Assert.True(root.IsExpanded);
+        Assert.All(matchingFolders, folder => Assert.True(folder.IsExpanded));
+        Assert.Equal(matchingFolders, root.DisplayChildren);
+
+        vm.SearchText = string.Empty;
+
+        Assert.True(root.IsExpanded);
+        Assert.True(matchingFolders[0].IsExpanded);
+        Assert.All(matchingFolders.Skip(1), folder => Assert.False(folder.IsExpanded));
+    }
+
+    [Fact]
     public async Task SearchText_MatchesFolderName_DisplaysFolderWithoutSubtree()
     {
         var dialog = new FakeDialogService();

@@ -1024,6 +1024,14 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     private void ApplySearchProjection(SearchProjection projection)
     {
+        // Capture before changing any ItemsSource because outgoing containers can write
+        // stale collapsed values back through the two-way IsExpanded binding.
+        _searchExpansionOverrides ??= new Dictionary<Guid, SearchExpansionOverride>();
+        foreach (var node in projection.AncestorsToExpand)
+        {
+            _searchExpansionOverrides.TryAdd(node.Node.Id, new SearchExpansionOverride(node, node.IsExpanded));
+        }
+
         foreach (var node in projection.IncludedNodes)
         {
             var children = projection.ChildrenByParent.TryGetValue(node.Node.Id, out var projectedChildren)
@@ -1033,19 +1041,16 @@ public partial class ConnectionTreeViewModel : ObservableObject
             _nodesUsingFilteredChildren.Add(node);
         }
 
-        _searchExpansionOverrides ??= new Dictionary<Guid, SearchExpansionOverride>();
-        foreach (var node in projection.AncestorsToExpand)
-        {
-            if (!_searchExpansionOverrides.ContainsKey(node.Node.Id))
-            {
-                _searchExpansionOverrides[node.Node.Id] = new SearchExpansionOverride(node, node.IsExpanded);
-            }
-            node.IsExpanded = true;
-        }
-
         _searchDisplayRoots.ReplaceAllIfChanged(projection.Roots);
         SearchStatusText = BuildSearchStatusText(projection.DisplayedMatches, projection.TotalMatches);
         IsSearchActive = true;
+
+        // Expand after the projection switch so those teardown writes happen before the
+        // final state is applied to every displayed path.
+        foreach (var node in projection.AncestorsToExpand)
+        {
+            node.IsExpanded = true;
+        }
     }
 
     private static SearchProjection BuildSearchProjection(
