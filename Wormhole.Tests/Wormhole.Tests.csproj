@@ -184,6 +184,7 @@
     <Compile Include="..\Services\BitwardenBrowser\BitwardenBrowserExtensionUpdateService.cs" Link="Services\BitwardenBrowser\BitwardenBrowserExtensionUpdateService.cs" />
     <Compile Include="..\Services\BitwardenBrowser\BitwardenBrowserExtensionManifest.cs" Link="Services\BitwardenBrowser\BitwardenBrowserExtensionManifest.cs" />
     <Compile Include="..\Services\BitwardenBrowser\BitwardenBrowserWebViewProfile.cs" Link="Services\BitwardenBrowser\BitwardenBrowserWebViewProfile.cs" />
+    <Compile Include="..\Services\BitwardenBrowser\BitwardenPopupActiveTabBridge.cs" Link="Services\BitwardenBrowser\BitwardenPopupActiveTabBridge.cs" />
     <Compile Include="..\Services\BitwardenBrowser\BitwardenBrowserExtensionMarker.cs" Link="Services\BitwardenBrowser\BitwardenBrowserExtensionMarker.cs" />
     <Compile Include="..\Services\BitwardenBrowser\BitwardenBrowserExtensionInstaller.cs" Link="Services\BitwardenBrowser\BitwardenBrowserExtensionInstaller.cs" />
     <Compile Include="..\Services\IDialogService.cs" Link="Services\IDialogService.cs" />
