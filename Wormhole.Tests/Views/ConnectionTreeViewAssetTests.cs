@@ -33,11 +33,13 @@ public sealed class ConnectionTreeViewAssetTests
         Assert.Contains("SetNodeExpanded(args.Node, false);", code, StringComparison.Ordinal);
         Assert.Contains("node.Content is TreeNodeViewModel vm", code, StringComparison.Ordinal);
         Assert.Contains("vm.IsExpanded != expanded", code, StringComparison.Ordinal);
-        Assert.Contains("IsUserExpansionGesture(node)", code, StringComparison.Ordinal);
-        Assert.Contains("ReferenceEquals(_hoveredTreeItem, item)", code, StringComparison.Ordinal);
-        Assert.Contains("VirtualKey.LeftButton", code, StringComparison.Ordinal);
-        Assert.Contains("VirtualKey.Left", code, StringComparison.Ordinal);
-        Assert.Contains("VirtualKey.Right", code, StringComparison.Ordinal);
+        Assert.Contains("!ViewModel.IsApplyingTreeProjection", code, StringComparison.Ordinal);
+        Assert.Contains("item.IsLoaded", code, StringComparison.Ordinal);
+        Assert.Contains("_materializingTreeItems.ContainsKey(item)", code, StringComparison.Ordinal);
+        Assert.Contains("_materializingTreeItems[item] = materialization;", code, StringComparison.Ordinal);
+        Assert.Contains("CompleteTreeItemMaterialization(item, materialization)", code, StringComparison.Ordinal);
+        Assert.Contains("_materializingTreeItems.Remove(item);", code, StringComparison.Ordinal);
+        Assert.DoesNotContain("IsUserExpansionGesture", code, StringComparison.Ordinal);
         Assert.Contains("vm.IsExpanded = expanded;", code, StringComparison.Ordinal);
     }
 

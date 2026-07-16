@@ -1,7 +1,6 @@
 using System.Collections.Specialized;
 using System.Windows.Input;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -9,7 +8,6 @@ using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
 using Windows.System;
-using Windows.UI.Core;
 using Wormhole.Models;
 using Wormhole.ViewModels;
 
@@ -19,6 +17,7 @@ public sealed partial class ConnectionTreeView : UserControl
 {
     private bool _loaded;
     private readonly Dictionary<TreeViewItem, CheckBox> _selectionCheckBoxes = new();
+    private readonly Dictionary<TreeViewItem, object> _materializingTreeItems = new();
     private TreeViewItem? _hoveredTreeItem;
     private TreeNodeViewModel? _contextTarget;
 
@@ -89,40 +88,16 @@ public sealed partial class ConnectionTreeView : UserControl
 
     private void SetNodeExpanded(TreeViewNode node, bool expanded)
     {
-        // WinUI raises these events for container lifecycle changes too; only a mismatched
-        // state accompanied by an active pointer or keyboard gesture represents user intent.
+        // WinUI raises these events for projection changes and container recycling too.
+        // Stable containers accept every input path, including touch and UI Automation.
         if (node.Content is TreeNodeViewModel vm &&
             vm.IsExpanded != expanded &&
-            IsUserExpansionGesture(node))
+            !ViewModel.IsApplyingTreeProjection &&
+            Tree.ContainerFromNode(node) is TreeViewItem item &&
+            item.IsLoaded &&
+            !_materializingTreeItems.ContainsKey(item))
         {
             vm.IsExpanded = expanded;
-        }
-    }
-
-    private bool IsUserExpansionGesture(TreeViewNode node)
-    {
-        if (Tree.ContainerFromNode(node) is not TreeViewItem item) return false;
-
-        if (item.FocusState != FocusState.Unfocused &&
-            (IsKeyDown(VirtualKey.Left) || IsKeyDown(VirtualKey.Right)))
-        {
-            return true;
-        }
-
-        return ReferenceEquals(_hoveredTreeItem, item) &&
-               IsKeyDown(VirtualKey.LeftButton);
-    }
-
-    private static bool IsKeyDown(VirtualKey key)
-    {
-        try
-        {
-            return InputKeyboardSource.GetKeyStateForCurrentThread(key)
-                .HasFlag(CoreVirtualKeyStates.Down);
-        }
-        catch
-        {
-            return false;
         }
     }
 
@@ -130,13 +105,31 @@ public sealed partial class ConnectionTreeView : UserControl
     {
         if (sender is not TreeViewItem item) return;
 
-        item.DispatcherQueue.TryEnqueue(() =>
+        var materialization = new object();
+        _materializingTreeItems[item] = materialization;
+
+        if (!item.DispatcherQueue.TryEnqueue(() =>
         {
+            if (!CompleteTreeItemMaterialization(item, materialization)) return;
             if (!item.IsLoaded) return;
 
             SyncSelectionCheckBox(item);
             UpdateSelectionCheckboxChrome();
-        });
+        }))
+        {
+            CompleteTreeItemMaterialization(item, materialization);
+        }
+    }
+
+    private bool CompleteTreeItemMaterialization(TreeViewItem item, object materialization)
+    {
+        if (!_materializingTreeItems.TryGetValue(item, out var current) ||
+            !ReferenceEquals(current, materialization))
+        {
+            return false;
+        }
+
+        return _materializingTreeItems.Remove(item);
     }
 
     private void OnTreeItemUnloaded(object sender, RoutedEventArgs e)
@@ -144,6 +137,7 @@ public sealed partial class ConnectionTreeView : UserControl
         if (sender is not TreeViewItem item) return;
 
         _selectionCheckBoxes.Remove(item);
+        _materializingTreeItems.Remove(item);
         if (ReferenceEquals(_hoveredTreeItem, item))
         {
             _hoveredTreeItem = null;

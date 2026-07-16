@@ -2050,20 +2050,30 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         // if a projection observer mutates expansion during the switch.
         root.PropertyChanged += (_, args) =>
         {
-            if (args.PropertyName == nameof(TreeNodeViewModel.DisplayChildren)) CollapseSearchPaths();
+            if (args.PropertyName == nameof(TreeNodeViewModel.DisplayChildren))
+            {
+                Assert.True(vm.IsApplyingTreeProjection);
+                CollapseSearchPaths();
+            }
         };
         vm.PropertyChanged += (_, args) =>
         {
-            if (args.PropertyName == nameof(ConnectionTreeViewModel.DisplayRoots)) CollapseSearchPaths();
+            if (args.PropertyName == nameof(ConnectionTreeViewModel.DisplayRoots))
+            {
+                Assert.True(vm.IsApplyingTreeProjection);
+                CollapseSearchPaths();
+            }
         };
 
         vm.SearchText = "mgr";
+        Assert.False(vm.IsApplyingTreeProjection);
 
         Assert.True(root.IsExpanded);
         Assert.All(matchingFolders, folder => Assert.True(folder.IsExpanded));
         Assert.Equal(matchingFolders, root.DisplayChildren);
 
         vm.SearchText = string.Empty;
+        Assert.False(vm.IsApplyingTreeProjection);
 
         Assert.True(root.IsExpanded);
         Assert.True(matchingFolders[0].IsExpanded);

@@ -58,6 +58,8 @@ public partial class ConnectionTreeViewModel : ObservableObject
     // before the debounce has even started.
     private Dictionary<Guid, SearchExpansionOverride>? _searchExpansionOverrides;
 
+    internal bool IsApplyingTreeProjection { get; private set; }
+
     // Coalesces rapid keystrokes — the AutoSuggestBox binds with
     // UpdateSourceTrigger=PropertyChanged, so without this every character would walk
     // the entire tree (O(n) with property writes per node). Tests override to zero so
@@ -1012,14 +1014,22 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     private void ApplyFullProjection()
     {
-        foreach (var node in _nodesUsingFilteredChildren)
+        IsApplyingTreeProjection = true;
+        try
         {
-            node.UseFullDisplayChildren();
-        }
-        _nodesUsingFilteredChildren.Clear();
+            foreach (var node in _nodesUsingFilteredChildren)
+            {
+                node.UseFullDisplayChildren();
+            }
+            _nodesUsingFilteredChildren.Clear();
 
-        SearchStatusText = string.Empty;
-        IsSearchActive = false;
+            SearchStatusText = string.Empty;
+            IsSearchActive = false;
+        }
+        finally
+        {
+            IsApplyingTreeProjection = false;
+        }
     }
 
     private void ApplySearchProjection(SearchProjection projection)
@@ -1034,24 +1044,32 @@ public partial class ConnectionTreeViewModel : ObservableObject
             _searchExpansionOverrides.TryAdd(node.Node.Id, new SearchExpansionOverride(node, node.IsExpanded));
         }
 
-        foreach (var node in projection.IncludedNodes)
+        IsApplyingTreeProjection = true;
+        try
         {
-            var children = projection.ChildrenByParent.TryGetValue(node.Node.Id, out var projectedChildren)
-                ? projectedChildren
-                : (IReadOnlyList<TreeNodeViewModel>)Array.Empty<TreeNodeViewModel>();
-            node.UseFilteredDisplayChildren(children);
-            _nodesUsingFilteredChildren.Add(node);
+            foreach (var node in projection.IncludedNodes)
+            {
+                var children = projection.ChildrenByParent.TryGetValue(node.Node.Id, out var projectedChildren)
+                    ? projectedChildren
+                    : (IReadOnlyList<TreeNodeViewModel>)Array.Empty<TreeNodeViewModel>();
+                node.UseFilteredDisplayChildren(children);
+                _nodesUsingFilteredChildren.Add(node);
+            }
+
+            _searchDisplayRoots.ReplaceAllIfChanged(projection.Roots);
+            SearchStatusText = BuildSearchStatusText(projection.DisplayedMatches, projection.TotalMatches);
+            IsSearchActive = true;
+
+            // Expand after the projection switch so those teardown writes happen before the
+            // final state is applied to every displayed path.
+            foreach (var node in projection.AncestorsToExpand)
+            {
+                node.IsExpanded = true;
+            }
         }
-
-        _searchDisplayRoots.ReplaceAllIfChanged(projection.Roots);
-        SearchStatusText = BuildSearchStatusText(projection.DisplayedMatches, projection.TotalMatches);
-        IsSearchActive = true;
-
-        // Expand after the projection switch so those teardown writes happen before the
-        // final state is applied to every displayed path.
-        foreach (var node in projection.AncestorsToExpand)
+        finally
         {
-            node.IsExpanded = true;
+            IsApplyingTreeProjection = false;
         }
     }
 
