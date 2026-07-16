@@ -788,7 +788,13 @@ public sealed partial class WebBrowserView : UserControl
     {
         var environment = _currentEnvironment;
         var popupUri = _bitwardenPopupUri;
+        var pageCore = _webView?.CoreWebView2;
+        var target = _currentTarget;
         if (environment is null || popupUri is null) return;
+
+        var activeTabContext = pageCore is not null && target is not null
+            ? BitwardenPopupActiveTabBridge.CreateContext(target, pageCore.Source)
+            : null;
 
         var popupWebView = new WinUIWebView2
         {
@@ -820,6 +826,21 @@ public sealed partial class WebBrowserView : UserControl
                 {
                     core.Settings.AreDevToolsEnabled = Debugger.IsAttached;
                     core.Settings.AreDefaultContextMenusEnabled = true;
+                    if (activeTabContext is not null)
+                    {
+                        try
+                        {
+                            await core.AddScriptToExecuteOnDocumentCreatedAsync(
+                                BitwardenPopupActiveTabBridge.BuildScript(activeTabContext));
+                        }
+                        catch (Exception ex)
+                        {
+                            // The popup remains usable if an older WebView2 Runtime rejects the
+                            // bridge; it simply falls back to the Runtime's native active-tab result.
+                            LogWarning(
+                                ex, "Could not bridge the active HTTPS tab into the Bitwarden popup.");
+                        }
+                    }
                     core.Navigate(popupUri.ToString());
                 }
             }
