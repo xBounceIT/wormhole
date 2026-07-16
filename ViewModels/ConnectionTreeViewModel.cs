@@ -1024,8 +1024,8 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     private void ApplySearchProjection(SearchProjection projection)
     {
-        // Capture before changing any ItemsSource because outgoing containers can write
-        // stale collapsed values back through the two-way IsExpanded binding.
+        // Capture each displayed ancestor's pre-search state before opening the result paths,
+        // so clearing the query can restore the user's expansion choices.
         _searchExpansionOverrides ??= new Dictionary<Guid, SearchExpansionOverride>();
         foreach (var node in projection.AncestorsToExpand)
         {

@@ -290,6 +290,8 @@
     <None Include="..\ViewModels\Sessions\SerialSessionViewModel.cs" Link="ViewModels\Sessions\SerialSessionViewModel.cs.txt" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Views\Sessions\SshTerminalView.xaml" Link="Views\Sessions\SshTerminalView.xaml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Views\Sessions\SshTerminalView.xaml.cs" Link="Views\Sessions\SshTerminalView.xaml.cs.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Views\Controls\ConnectionTreeView.xaml" Link="Views\Controls\ConnectionTreeView.xaml" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Views\Controls\ConnectionTreeView.xaml.cs" Link="Views\Controls\ConnectionTreeView.xaml.cs.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

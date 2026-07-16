@@ -2045,8 +2045,9 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
             }
         }
 
-        // Rebinding either TreeView.ItemsSource or a TreeViewItem.ItemsSource can tear down
-        // outgoing containers whose two-way IsExpanded bindings write their old state back.
+        // Simulate a projection notification racing with stale container state. The view now
+        // prevents this through a one-way IsExpanded binding; the VM ordering remains defensive
+        // if a projection observer mutates expansion during the switch.
         root.PropertyChanged += (_, args) =>
         {
             if (args.PropertyName == nameof(TreeNodeViewModel.DisplayChildren)) CollapseSearchPaths();

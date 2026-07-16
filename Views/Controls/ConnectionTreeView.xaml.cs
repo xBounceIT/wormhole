@@ -79,6 +79,22 @@ public sealed partial class ConnectionTreeView : UserControl
         }
     }
 
+#pragma warning disable CA1822 // XAML-wired expansion handlers must be instance methods.
+    private void OnTreeExpanding(TreeView sender, TreeViewExpandingEventArgs args) =>
+        SetNodeExpanded(args.Node, true);
+
+    private void OnTreeCollapsed(TreeView sender, TreeViewCollapsedEventArgs args) =>
+        SetNodeExpanded(args.Node, false);
+#pragma warning restore CA1822
+
+    private static void SetNodeExpanded(TreeViewNode node, bool expanded)
+    {
+        if (node.Content is TreeNodeViewModel vm)
+        {
+            vm.IsExpanded = expanded;
+        }
+    }
+
     private void OnTreeItemLoaded(object sender, RoutedEventArgs e)
     {
         if (sender is not TreeViewItem item) return;
