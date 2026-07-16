@@ -2154,6 +2154,33 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task SearchText_LifecycleCollapseOfExcludedFolder_DoesNotOverwriteExpansionState()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Hidden";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var hiddenFolder = vm.Roots.Single();
+        vm.SetExpansionFromView(hiddenFolder, true);
+        Assert.True(hiddenFolder.IsExpanded);
+
+        dialog.EditConnectionResult = MakeConnectionDraft(
+            "needle", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(null);
+
+        vm.SearchText = "needle";
+        Assert.DoesNotContain(hiddenFolder, vm.DisplayRoots);
+
+        vm.SetExpansionFromView(hiddenFolder, false);
+
+        Assert.True(hiddenFolder.IsExpanded);
+        vm.SearchText = string.Empty;
+        Assert.True(hiddenFolder.IsExpanded);
+    }
+
+    [Fact]
     public async Task SearchText_FolderNameMatch_DoesNotExpandDescendantFolders()
     {
         var dialog = new FakeDialogService();

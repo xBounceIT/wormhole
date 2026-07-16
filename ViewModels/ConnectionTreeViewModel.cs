@@ -554,6 +554,15 @@ public partial class ConnectionTreeViewModel : ObservableObject
         }
     }
 
+    internal void SetExpansionFromView(TreeNodeViewModel node, bool expanded)
+    {
+        // TreeView raises lifecycle expansion events while a filtered projection replaces or
+        // recycles containers. Those events are not user intent and must not overwrite the
+        // expansion snapshot that is restored when the search is cleared.
+        if (_searchExpansionOverrides is not null) return;
+        node.IsExpanded = expanded;
+    }
+
     [RelayCommand(AllowConcurrentExecutions = false)]
     private async Task ImportFromMRemoteNg()
     {
