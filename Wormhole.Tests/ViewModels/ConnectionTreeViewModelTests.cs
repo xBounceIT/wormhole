@@ -2123,6 +2123,37 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task SearchText_FolderNameMatchCleared_RestoresExpandedStateAfterProjectionCollapse()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Linux";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var folder = vm.Roots.Single();
+        dialog.EditConnectionResult = MakeConnectionDraft(
+            "alpha", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(folder);
+        folder.IsExpanded = true;
+
+        folder.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(TreeNodeViewModel.DisplayChildren))
+            {
+                folder.IsExpanded = false;
+            }
+        };
+
+        vm.SearchText = "Lin";
+        Assert.False(folder.IsExpanded);
+
+        vm.SearchText = string.Empty;
+        Assert.True(folder.IsExpanded);
+        Assert.Same(folder.Children, folder.DisplayChildren);
+    }
+
+    [Fact]
     public async Task SearchText_FolderNameMatch_DoesNotExpandDescendantFolders()
     {
         var dialog = new FakeDialogService();

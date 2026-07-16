@@ -53,9 +53,9 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     partial void OnIsSearchActiveChanged(bool value) => OnPropertyChanged(nameof(DisplayRoots));
 
-    // Search only records folders it actually auto-expands. Snapshotting every folder
-    // on the first keystroke made merely typing into Search an O(n) UI-thread operation
-    // before the debounce had even started.
+    // Search snapshots only folders in the capped result projection. Snapshotting every folder
+    // on the first keystroke would make merely typing into Search an O(n) UI-thread operation
+    // before the debounce has even started.
     private Dictionary<Guid, SearchExpansionOverride>? _searchExpansionOverrides;
 
     // Coalesces rapid keystrokes — the AutoSuggestBox binds with
@@ -1024,11 +1024,13 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     private void ApplySearchProjection(SearchProjection projection)
     {
-        // Capture each displayed ancestor's pre-search state before opening the result paths,
-        // so clearing the query can restore the user's expansion choices.
+        // Projecting a matching folder to zero children can make WinUI collapse its container.
+        // Capture every included folder before changing any ItemsSource so clearing the query
+        // can restore the user's expansion choices after either lifecycle or auto-expansion writes.
         _searchExpansionOverrides ??= new Dictionary<Guid, SearchExpansionOverride>();
-        foreach (var node in projection.AncestorsToExpand)
+        foreach (var node in projection.IncludedNodes)
         {
+            if (node.Kind != NodeKind.Folder) continue;
             _searchExpansionOverrides.TryAdd(node.Node.Id, new SearchExpansionOverride(node, node.IsExpanded));
         }
 
