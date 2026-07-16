@@ -126,6 +126,8 @@
                   AllowDrop="{x:Bind ViewModel.IsSearchActive, Mode=OneWay, Converter={StaticResource InverseBoolConverter}}"
                   DragItemsStarting="OnDragItemsStarting"
                   DragItemsCompleted="OnDragItemsCompleted"
+                  Expanding="OnTreeExpanding"
+                  Collapsed="OnTreeCollapsed"
                   ItemInvoked="OnTreeItemInvoked">
             <!-- ItemInvoked fires on single-click: it records the active row and toggles
                  folder expansion so the entire row is a hit target. Connection nodes
@@ -151,7 +153,7 @@
             <TreeView.ItemTemplate>
                 <DataTemplate x:DataType="vm:TreeNodeViewModel">
                     <TreeViewItem ItemsSource="{x:Bind DisplayChildren, Mode=OneWay}"
-                                  IsExpanded="{x:Bind IsExpanded, Mode=TwoWay}"
+                                  IsExpanded="{x:Bind IsExpanded, Mode=OneWay}"
                                   ToolTipService.ToolTip="{x:Bind Host, Mode=OneWay}"
                                   Loaded="OnTreeItemLoaded"
                                   Unloaded="OnTreeItemUnloaded"

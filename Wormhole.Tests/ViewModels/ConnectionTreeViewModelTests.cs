@@ -2045,24 +2045,35 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
             }
         }
 
-        // Rebinding either TreeView.ItemsSource or a TreeViewItem.ItemsSource can tear down
-        // outgoing containers whose two-way IsExpanded bindings write their old state back.
+        // Simulate a projection notification racing with stale container state. The view now
+        // prevents this through a one-way IsExpanded binding; the VM ordering remains defensive
+        // if a projection observer mutates expansion during the switch.
         root.PropertyChanged += (_, args) =>
         {
-            if (args.PropertyName == nameof(TreeNodeViewModel.DisplayChildren)) CollapseSearchPaths();
+            if (args.PropertyName == nameof(TreeNodeViewModel.DisplayChildren))
+            {
+                Assert.True(vm.IsApplyingTreeProjection);
+                CollapseSearchPaths();
+            }
         };
         vm.PropertyChanged += (_, args) =>
         {
-            if (args.PropertyName == nameof(ConnectionTreeViewModel.DisplayRoots)) CollapseSearchPaths();
+            if (args.PropertyName == nameof(ConnectionTreeViewModel.DisplayRoots))
+            {
+                Assert.True(vm.IsApplyingTreeProjection);
+                CollapseSearchPaths();
+            }
         };
 
         vm.SearchText = "mgr";
+        Assert.False(vm.IsApplyingTreeProjection);
 
         Assert.True(root.IsExpanded);
         Assert.All(matchingFolders, folder => Assert.True(folder.IsExpanded));
         Assert.Equal(matchingFolders, root.DisplayChildren);
 
         vm.SearchText = string.Empty;
+        Assert.False(vm.IsApplyingTreeProjection);
 
         Assert.True(root.IsExpanded);
         Assert.True(matchingFolders[0].IsExpanded);
@@ -2119,6 +2130,86 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         Assert.False(folder.IsExpanded);
         Assert.Same(vm.Roots, vm.DisplayRoots);
         Assert.Same(folder.Children, folder.DisplayChildren);
+    }
+
+    [Fact]
+    public async Task SearchText_FolderNameMatchCleared_RestoresExpandedStateAfterProjectionCollapse()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Linux";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var folder = vm.Roots.Single();
+        dialog.EditConnectionResult = MakeConnectionDraft(
+            "alpha", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(folder);
+        folder.IsExpanded = true;
+
+        folder.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(TreeNodeViewModel.DisplayChildren))
+            {
+                folder.IsExpanded = false;
+            }
+        };
+
+        vm.SearchText = "Lin";
+        Assert.False(folder.IsExpanded);
+
+        vm.SearchText = string.Empty;
+        Assert.True(folder.IsExpanded);
+        Assert.Same(folder.Children, folder.DisplayChildren);
+    }
+
+    [Fact]
+    public async Task SearchText_ExpansionDuringDebounce_IsPreservedOnClear()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Folder";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var folder = vm.Roots.Single();
+        vm.SearchDebounceDelay = TimeSpan.FromMinutes(1);
+
+        vm.SearchText = "needle";
+        Assert.False(vm.IsSearchActive);
+
+        folder.IsExpanded = true;
+
+        Assert.True(folder.IsExpanded);
+        vm.SearchText = string.Empty;
+        Assert.True(folder.IsExpanded);
+    }
+
+    [Fact]
+    public async Task SearchText_UserCollapse_IsRecordedAndNextProjectionReexpandsMatch()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Folder";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var folder = vm.Roots.Single();
+
+        dialog.EditConnectionResult = MakeConnectionDraft(
+            "needle", ProtocolType.Ssh, "host", null, null);
+        await vm.AddConnectionCommand.ExecuteAsync(folder);
+
+        vm.SearchText = "needle";
+        Assert.True(folder.IsExpanded);
+
+        folder.IsExpanded = false;
+        Assert.False(folder.IsExpanded);
+
+        vm.SearchText = "needl";
+        Assert.True(folder.IsExpanded);
+        vm.SearchText = string.Empty;
+        Assert.False(folder.IsExpanded);
     }
 
     [Fact]

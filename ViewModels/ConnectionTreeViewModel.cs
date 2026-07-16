@@ -53,10 +53,12 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     partial void OnIsSearchActiveChanged(bool value) => OnPropertyChanged(nameof(DisplayRoots));
 
-    // Search only records folders it actually auto-expands. Snapshotting every folder
-    // on the first keystroke made merely typing into Search an O(n) UI-thread operation
-    // before the debounce had even started.
+    // Search snapshots only folders in the capped result projection. Snapshotting every folder
+    // on the first keystroke would make merely typing into Search an O(n) UI-thread operation
+    // before the debounce has even started.
     private Dictionary<Guid, SearchExpansionOverride>? _searchExpansionOverrides;
+
+    internal bool IsApplyingTreeProjection { get; private set; }
 
     // Coalesces rapid keystrokes — the AutoSuggestBox binds with
     // UpdateSourceTrigger=PropertyChanged, so without this every character would walk
@@ -1012,44 +1014,62 @@ public partial class ConnectionTreeViewModel : ObservableObject
 
     private void ApplyFullProjection()
     {
-        foreach (var node in _nodesUsingFilteredChildren)
+        IsApplyingTreeProjection = true;
+        try
         {
-            node.UseFullDisplayChildren();
-        }
-        _nodesUsingFilteredChildren.Clear();
+            foreach (var node in _nodesUsingFilteredChildren)
+            {
+                node.UseFullDisplayChildren();
+            }
+            _nodesUsingFilteredChildren.Clear();
 
-        SearchStatusText = string.Empty;
-        IsSearchActive = false;
+            SearchStatusText = string.Empty;
+            IsSearchActive = false;
+        }
+        finally
+        {
+            IsApplyingTreeProjection = false;
+        }
     }
 
     private void ApplySearchProjection(SearchProjection projection)
     {
-        // Capture before changing any ItemsSource because outgoing containers can write
-        // stale collapsed values back through the two-way IsExpanded binding.
+        // Projecting a matching folder to zero children can make WinUI collapse its container.
+        // Capture every included folder before changing any ItemsSource so clearing the query
+        // can restore the user's expansion choices after either lifecycle or auto-expansion writes.
         _searchExpansionOverrides ??= new Dictionary<Guid, SearchExpansionOverride>();
-        foreach (var node in projection.AncestorsToExpand)
+        foreach (var node in projection.IncludedNodes)
         {
+            if (node.Kind != NodeKind.Folder) continue;
             _searchExpansionOverrides.TryAdd(node.Node.Id, new SearchExpansionOverride(node, node.IsExpanded));
         }
 
-        foreach (var node in projection.IncludedNodes)
+        IsApplyingTreeProjection = true;
+        try
         {
-            var children = projection.ChildrenByParent.TryGetValue(node.Node.Id, out var projectedChildren)
-                ? projectedChildren
-                : (IReadOnlyList<TreeNodeViewModel>)Array.Empty<TreeNodeViewModel>();
-            node.UseFilteredDisplayChildren(children);
-            _nodesUsingFilteredChildren.Add(node);
+            foreach (var node in projection.IncludedNodes)
+            {
+                var children = projection.ChildrenByParent.TryGetValue(node.Node.Id, out var projectedChildren)
+                    ? projectedChildren
+                    : (IReadOnlyList<TreeNodeViewModel>)Array.Empty<TreeNodeViewModel>();
+                node.UseFilteredDisplayChildren(children);
+                _nodesUsingFilteredChildren.Add(node);
+            }
+
+            _searchDisplayRoots.ReplaceAllIfChanged(projection.Roots);
+            SearchStatusText = BuildSearchStatusText(projection.DisplayedMatches, projection.TotalMatches);
+            IsSearchActive = true;
+
+            // Expand after the projection switch so those teardown writes happen before the
+            // final state is applied to every displayed path.
+            foreach (var node in projection.AncestorsToExpand)
+            {
+                node.IsExpanded = true;
+            }
         }
-
-        _searchDisplayRoots.ReplaceAllIfChanged(projection.Roots);
-        SearchStatusText = BuildSearchStatusText(projection.DisplayedMatches, projection.TotalMatches);
-        IsSearchActive = true;
-
-        // Expand after the projection switch so those teardown writes happen before the
-        // final state is applied to every displayed path.
-        foreach (var node in projection.AncestorsToExpand)
+        finally
         {
-            node.IsExpanded = true;
+            IsApplyingTreeProjection = false;
         }
     }
 
