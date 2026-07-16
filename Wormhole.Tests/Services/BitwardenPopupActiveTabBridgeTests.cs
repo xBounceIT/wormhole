@@ -122,6 +122,20 @@ public sealed class BitwardenPopupActiveTabBridgeTests
         Assert.DoesNotContain("</script>", script, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("queryInfo?.active === true", script);
         Assert.Contains("queryInfo?.currentWindow === true", script);
+        Assert.Contains("chrome.scripting.executeScript", script);
+        Assert.Contains("tab.lastAccessed", script);
+    }
+
+    [Fact]
+    public void BuildPageMarkerScript_JsonSerializesMarker()
+    {
+        const string marker = "marker-\"quoted\"</script>\r\n";
+
+        var script = BitwardenPopupActiveTabBridge.BuildPageMarkerScript(marker);
+
+        Assert.Contains(JsonSerializer.Serialize(marker), script);
+        Assert.DoesNotContain("</script>", script, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("data-wormhole-bitwarden-active-tab", script);
     }
 
     [Fact]

@@ -10,6 +10,8 @@ namespace Wormhole.Services.BitwardenBrowser;
 /// </summary>
 internal static class BitwardenPopupActiveTabBridge
 {
+    private const string PageMarkerAttribute = "data-wormhole-bitwarden-active-tab";
+
     internal static BitwardenActiveTabContext? CreateContext(
         HttpConnectionTarget target,
         string? currentSource)
@@ -31,10 +33,22 @@ internal static class BitwardenPopupActiveTabBridge
         return new BitwardenActiveTabContext(physicalUri.AbsoluteUri, logicalUri.AbsoluteUri);
     }
 
+    internal static string BuildPageMarkerScript(string marker)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(marker);
+        var attributePayload = JsonSerializer.Serialize(PageMarkerAttribute);
+        var markerPayload = JsonSerializer.Serialize(marker);
+
+        return $$"""
+            document.documentElement?.setAttribute({{attributePayload}}, {{markerPayload}});
+            """;
+    }
+
     internal static string BuildScript(BitwardenActiveTabContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
         var payload = JsonSerializer.Serialize(context);
+        var pageMarkerAttributePayload = JsonSerializer.Serialize(PageMarkerAttribute);
 
         // Bitwarden asks for { active: true, currentWindow: true } when it pre-fills a new login.
         // The popup lives in a second WebView2, so query all profile tabs to recover the real page,
@@ -55,9 +69,52 @@ internal static class BitwardenPopupActiveTabBridge
                     catch { return value; }
                 };
                 const physicalUrl = normalizeUrl(context.PhysicalUrl);
-                const projectActiveTab = (allTabs) => {
-                    const sourceTab = allTabs.find(
-                        (tab) => tab?.url && normalizeUrl(tab.url) === physicalUrl);
+                const findSourceTab = async (allTabs) => {
+                    const candidates = Array.isArray(allTabs)
+                        ? allTabs.filter(
+                            (tab) => tab?.url && normalizeUrl(tab.url) === physicalUrl)
+                        : [];
+                    if (candidates.length <= 1) {
+                        return candidates[0] ?? null;
+                    }
+
+                    if (context.PageMarker && globalThis.chrome?.scripting?.executeScript) {
+                        for (const tab of candidates) {
+                            if (!Number.isInteger(tab.id)) {
+                                continue;
+                            }
+
+                            try {
+                                const results = await chrome.scripting.executeScript({
+                                    target: { tabId: tab.id },
+                                    func: (attribute, marker) => {
+                                        const root = document.documentElement;
+                                        if (root?.getAttribute(attribute) !== marker) {
+                                            return false;
+                                        }
+
+                                        root.removeAttribute(attribute);
+                                        return true;
+                                    },
+                                    args: [{{pageMarkerAttributePayload}}, context.PageMarker],
+                                });
+                                if (results.some((result) => result?.result === true)) {
+                                    return tab;
+                                }
+                            } catch {
+                                // Fall back to the browser's recency signal below.
+                            }
+                        }
+                    }
+
+                    return candidates.reduce((latest, tab) =>
+                        !latest || (tab.lastAccessed ?? 0) > (latest.lastAccessed ?? 0)
+                            ? tab
+                            : latest,
+                    null);
+                };
+                const projectActiveTab = async (allTabs) => {
+                    const sourceTab = await findSourceTab(allTabs);
                     return sourceTab
                         ? [{ ...sourceTab, active: true, url: context.LogicalUrl }]
                         : null;
@@ -73,8 +130,8 @@ internal static class BitwardenPopupActiveTabBridge
                     }
 
                     if (typeof callback === "function") {
-                        return nativeQuery({}, (allTabs) => {
-                            const projected = projectActiveTab(allTabs);
+                        return nativeQuery({}, async (allTabs) => {
+                            const projected = await projectActiveTab(allTabs);
                             if (projected) {
                                 callback(projected);
                             } else {
@@ -83,8 +140,8 @@ internal static class BitwardenPopupActiveTabBridge
                         });
                     }
 
-                    return nativeQuery({}).then((allTabs) =>
-                        projectActiveTab(allTabs) ?? nativeQuery(queryInfo));
+                    return nativeQuery({}).then(async (allTabs) =>
+                        await projectActiveTab(allTabs) ?? nativeQuery(queryInfo));
                 };
 
                 try {
@@ -124,4 +181,7 @@ internal static class BitwardenPopupActiveTabBridge
     }
 }
 
-internal sealed record BitwardenActiveTabContext(string PhysicalUrl, string LogicalUrl);
+internal sealed record BitwardenActiveTabContext(
+    string PhysicalUrl,
+    string LogicalUrl,
+    string? PageMarker = null);

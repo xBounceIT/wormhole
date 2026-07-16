@@ -795,6 +795,20 @@ public sealed partial class WebBrowserView : UserControl
         var activeTabContext = pageCore is not null && target is not null
             ? BitwardenPopupActiveTabBridge.CreateContext(target, pageCore.Source)
             : null;
+        if (activeTabContext is not null && pageCore is not null)
+        {
+            var pageMarker = Guid.NewGuid().ToString("N");
+            try
+            {
+                await pageCore.ExecuteScriptAsync(
+                    BitwardenPopupActiveTabBridge.BuildPageMarkerScript(pageMarker));
+                activeTabContext = activeTabContext with { PageMarker = pageMarker };
+            }
+            catch (Exception ex)
+            {
+                LogWarning(ex, "Could not mark the active HTTPS tab for the Bitwarden popup.");
+            }
+        }
 
         var popupWebView = new WinUIWebView2
         {
