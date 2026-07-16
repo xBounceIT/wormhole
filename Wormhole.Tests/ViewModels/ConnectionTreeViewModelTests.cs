@@ -2154,6 +2154,28 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
+    public async Task SearchText_ExpansionDuringDebounce_IsSynchronizedFromView()
+    {
+        var dialog = new FakeDialogService();
+        var vm = CreateVm(dialog);
+        await vm.RefreshAsync();
+
+        dialog.TextPromptResult = "Folder";
+        await vm.AddFolderCommand.ExecuteAsync(null);
+        var folder = vm.Roots.Single();
+        vm.SearchDebounceDelay = TimeSpan.FromMinutes(1);
+
+        vm.SearchText = "needle";
+        Assert.False(vm.IsSearchActive);
+
+        vm.SetExpansionFromView(folder, true);
+
+        Assert.True(folder.IsExpanded);
+        vm.SearchText = string.Empty;
+        Assert.True(folder.IsExpanded);
+    }
+
+    [Fact]
     public async Task SearchText_LifecycleCollapseOfExcludedFolder_DoesNotOverwriteExpansionState()
     {
         var dialog = new FakeDialogService();
