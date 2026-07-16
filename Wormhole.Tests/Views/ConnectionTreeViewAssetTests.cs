@@ -32,8 +32,13 @@ public sealed class ConnectionTreeViewAssetTests
         Assert.Contains("SetNodeExpanded(args.Node, true);", code, StringComparison.Ordinal);
         Assert.Contains("SetNodeExpanded(args.Node, false);", code, StringComparison.Ordinal);
         Assert.Contains("node.Content is TreeNodeViewModel vm", code, StringComparison.Ordinal);
-        Assert.Contains("ViewModel.SetExpansionFromView(vm, expanded);", code, StringComparison.Ordinal);
-        Assert.DoesNotContain("vm.IsExpanded = expanded;", code, StringComparison.Ordinal);
+        Assert.Contains("vm.IsExpanded != expanded", code, StringComparison.Ordinal);
+        Assert.Contains("IsUserExpansionGesture(node)", code, StringComparison.Ordinal);
+        Assert.Contains("ReferenceEquals(_hoveredTreeItem, item)", code, StringComparison.Ordinal);
+        Assert.Contains("VirtualKey.LeftButton", code, StringComparison.Ordinal);
+        Assert.Contains("VirtualKey.Left", code, StringComparison.Ordinal);
+        Assert.Contains("VirtualKey.Right", code, StringComparison.Ordinal);
+        Assert.Contains("vm.IsExpanded = expanded;", code, StringComparison.Ordinal);
     }
 
     private static string ReadAsset(string fileName) =>

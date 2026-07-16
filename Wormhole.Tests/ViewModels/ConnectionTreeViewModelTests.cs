@@ -2154,7 +2154,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
-    public async Task SearchText_ExpansionDuringDebounce_IsSynchronizedFromView()
+    public async Task SearchText_ExpansionDuringDebounce_IsPreservedOnClear()
     {
         var dialog = new FakeDialogService();
         var vm = CreateVm(dialog);
@@ -2168,7 +2168,7 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
         vm.SearchText = "needle";
         Assert.False(vm.IsSearchActive);
 
-        vm.SetExpansionFromView(folder, true);
+        folder.IsExpanded = true;
 
         Assert.True(folder.IsExpanded);
         vm.SearchText = string.Empty;
@@ -2176,30 +2176,30 @@ public sealed class ConnectionTreeViewModelTests : IDisposable
     }
 
     [Fact]
-    public async Task SearchText_LifecycleCollapseOfExcludedFolder_DoesNotOverwriteExpansionState()
+    public async Task SearchText_UserCollapse_IsRecordedAndNextProjectionReexpandsMatch()
     {
         var dialog = new FakeDialogService();
         var vm = CreateVm(dialog);
         await vm.RefreshAsync();
 
-        dialog.TextPromptResult = "Hidden";
+        dialog.TextPromptResult = "Folder";
         await vm.AddFolderCommand.ExecuteAsync(null);
-        var hiddenFolder = vm.Roots.Single();
-        vm.SetExpansionFromView(hiddenFolder, true);
-        Assert.True(hiddenFolder.IsExpanded);
+        var folder = vm.Roots.Single();
 
         dialog.EditConnectionResult = MakeConnectionDraft(
             "needle", ProtocolType.Ssh, "host", null, null);
-        await vm.AddConnectionCommand.ExecuteAsync(null);
+        await vm.AddConnectionCommand.ExecuteAsync(folder);
 
         vm.SearchText = "needle";
-        Assert.DoesNotContain(hiddenFolder, vm.DisplayRoots);
+        Assert.True(folder.IsExpanded);
 
-        vm.SetExpansionFromView(hiddenFolder, false);
+        folder.IsExpanded = false;
+        Assert.False(folder.IsExpanded);
 
-        Assert.True(hiddenFolder.IsExpanded);
+        vm.SearchText = "needl";
+        Assert.True(folder.IsExpanded);
         vm.SearchText = string.Empty;
-        Assert.True(hiddenFolder.IsExpanded);
+        Assert.False(folder.IsExpanded);
     }
 
     [Fact]

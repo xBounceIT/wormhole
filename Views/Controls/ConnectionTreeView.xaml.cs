@@ -1,6 +1,7 @@
 using System.Collections.Specialized;
 using System.Windows.Input;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
@@ -8,6 +9,7 @@ using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
 using Windows.System;
+using Windows.UI.Core;
 using Wormhole.Models;
 using Wormhole.ViewModels;
 
@@ -87,9 +89,40 @@ public sealed partial class ConnectionTreeView : UserControl
 
     private void SetNodeExpanded(TreeViewNode node, bool expanded)
     {
-        if (node.Content is TreeNodeViewModel vm)
+        // WinUI raises these events for container lifecycle changes too; only a mismatched
+        // state accompanied by an active pointer or keyboard gesture represents user intent.
+        if (node.Content is TreeNodeViewModel vm &&
+            vm.IsExpanded != expanded &&
+            IsUserExpansionGesture(node))
         {
-            ViewModel.SetExpansionFromView(vm, expanded);
+            vm.IsExpanded = expanded;
+        }
+    }
+
+    private bool IsUserExpansionGesture(TreeViewNode node)
+    {
+        if (Tree.ContainerFromNode(node) is not TreeViewItem item) return false;
+
+        if (item.FocusState != FocusState.Unfocused &&
+            (IsKeyDown(VirtualKey.Left) || IsKeyDown(VirtualKey.Right)))
+        {
+            return true;
+        }
+
+        return ReferenceEquals(_hoveredTreeItem, item) &&
+               IsKeyDown(VirtualKey.LeftButton);
+    }
+
+    private static bool IsKeyDown(VirtualKey key)
+    {
+        try
+        {
+            return InputKeyboardSource.GetKeyStateForCurrentThread(key)
+                .HasFlag(CoreVirtualKeyStates.Down);
+        }
+        catch
+        {
+            return false;
         }
     }
 
