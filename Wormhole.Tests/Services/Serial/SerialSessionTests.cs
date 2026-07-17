@@ -218,14 +218,22 @@ public sealed class SerialSessionTests
         };
         await using var session = CreateSession(port, SerialFlowControlMode.DsrDtr);
 
-        var pauseTask = Task.Run(session.PauseReading);
+        var pauseTask = Task.Factory.StartNew(
+            session.PauseReading,
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
         Assert.True(pauseEntered.Wait(TimeSpan.FromSeconds(1)));
         var resumeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var resumeTask = Task.Run(() =>
-        {
-            resumeStarted.TrySetResult();
-            session.ResumeReading();
-        });
+        var resumeTask = Task.Factory.StartNew(
+            () =>
+            {
+                resumeStarted.TrySetResult();
+                session.ResumeReading();
+            },
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default);
         await resumeStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
         Assert.False(resumeTask.IsCompleted);
 
