@@ -845,6 +845,7 @@ public sealed class DialogService : IDialogService
 
         void CommitCredentialChoice(object? chosenSuggestion)
         {
+            var committedSuggestion = chosenSuggestion is AccountCredentialChoice;
             if (chosenSuggestion is AccountCredentialChoice chosen)
             {
                 SelectCredentialChoice(chosen);
@@ -864,6 +865,16 @@ public sealed class DialogService : IDialogService
             }
 
             credentialBox.IsSuggestionListOpen = false;
+
+            if (committedSuggestion)
+            {
+                // WinUI returns focus to the AutoSuggestBox after an item is clicked. The GotFocus
+                // handler opens the complete credential catalog, so close it again after that focus
+                // transition has finished instead of leaving the suggestion flyout expanded.
+                _ = credentialBox.DispatcherQueue.TryEnqueue(
+                    DispatcherQueuePriority.Low,
+                    () => credentialBox.IsSuggestionListOpen = false);
+            }
         }
 
         async Task<string?> PromptBitwardenUnlockFromDialogAsync(
