@@ -457,6 +457,30 @@ public sealed class BitwardenBrowserWebViewProfileTests
     }
 
     [Fact]
+    public async Task TrySeedProfileStateFromExistingProfile_MigratesCookiesBetweenDirectProfilesAfterArgumentChange()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
+        var source = Path.Combine(root, "profile-old-direct");
+        var destination = Path.Combine(root, "profile-new-direct");
+        try
+        {
+            await CreateSeedSourceAsync(source, routeKey: null, "direct-cookie", cookieHost: "router.example");
+
+            Assert.True(BitwardenBrowserWebViewProfile.TrySeedProfileStateFromExistingProfile(
+                destination,
+                root,
+                persistentRouteKey: null));
+
+            var destinationCookies = Path.Combine(destination, "Default", "Network", "Cookies");
+            Assert.Equal("direct-cookie", ReadCookieDatabaseValue(destinationCookies, "router.example"));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task TrySeedProfileStateFromExistingProfile_FailedBackupLeavesNoPartialCookieDatabase()
     {
         var root = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
@@ -488,161 +512,6 @@ public sealed class BitwardenBrowserWebViewProfileTests
         }
     }
 
-    [Fact]
-    public void PendingWebDataOrigins_RoundTripsNormalizedHttpOrigins()
-    {
-        var profile = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
-        try
-        {
-            BitwardenBrowserWebViewProfile.AddPendingWebDataOrigins(profile,
-            [
-                "https://Example.test/login",
-                "https://example.test/other",
-                "http://127.0.0.1:54321/path",
-                "chrome-extension://abcdef/popup.html",
-                "not a uri",
-            ]);
-
-            var origins = BitwardenBrowserWebViewProfile.ReadPendingWebDataOrigins(profile)
-                .Order(StringComparer.Ordinal)
-                .ToArray();
-
-            Assert.Equal(["http://127.0.0.1:54321", "https://example.test"], origins);
-        }
-        finally
-        {
-            if (Directory.Exists(profile)) Directory.Delete(profile, recursive: true);
-        }
-    }
-
-    [Fact]
-    public void RemovePendingWebDataOrigins_RemovesOnlyClearedOrigins()
-    {
-        var profile = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
-        try
-        {
-            BitwardenBrowserWebViewProfile.AddPendingWebDataOrigins(profile,
-            [
-                "https://first.example",
-                "https://second.example",
-            ]);
-
-            BitwardenBrowserWebViewProfile.RemovePendingWebDataOrigins(profile, ["https://first.example/path"]);
-
-            Assert.Equal(["https://second.example"], BitwardenBrowserWebViewProfile.ReadPendingWebDataOrigins(profile));
-
-            BitwardenBrowserWebViewProfile.RemovePendingWebDataOrigins(profile, ["https://second.example"]);
-
-            Assert.Empty(BitwardenBrowserWebViewProfile.ReadPendingWebDataOrigins(profile));
-        }
-        finally
-        {
-            if (Directory.Exists(profile)) Directory.Delete(profile, recursive: true);
-        }
-    }
-
-    [Fact]
-    public async Task StartupCleanupPaths_PreservesExtensionStateWhenMarkerExists()
-    {
-        var profile = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
-        var siteIndexedDb = Path.Combine(profile, "Default", "IndexedDB", "https_example.test_0.indexeddb.leveldb");
-        var extensionIndexedDb = Path.Combine(profile, "Default", "IndexedDB", "chrome-extension_abc_0.indexeddb.leveldb");
-        try
-        {
-            Directory.CreateDirectory(siteIndexedDb);
-            Directory.CreateDirectory(extensionIndexedDb);
-            await BitwardenBrowserExtensionMarker.WriteAsync(
-                BitwardenBrowserExtensionMarker.GetPath(profile),
-                Path.Combine(profile, "extension"),
-                "extension-id");
-
-            var paths = BitwardenBrowserWebViewProfile.GetStartupWebDataCleanupPaths(profile);
-
-            Assert.Contains(Path.Combine(profile, "Default", "History"), paths);
-            Assert.Contains(Path.Combine(profile, "Default", "Cache"), paths);
-            Assert.Contains(siteIndexedDb, paths);
-            Assert.DoesNotContain(extensionIndexedDb, paths);
-            Assert.DoesNotContain(Path.Combine(profile, "Default", "Network", "Cookies"), paths);
-            Assert.Contains(Path.Combine(profile, "Default", "Local Storage"), paths);
-            Assert.Contains(Path.Combine(profile, "Default", "Session Storage"), paths);
-            Assert.DoesNotContain(paths, path => path.Contains("Extension", StringComparison.OrdinalIgnoreCase));
-        }
-        finally
-        {
-            if (Directory.Exists(profile)) Directory.Delete(profile, recursive: true);
-        }
-    }
-
-    [Fact]
-    public void StartupCleanupPaths_PreservesCookiesForLegacyProfiles()
-    {
-        var profile = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
-        var siteIndexedDb = Path.Combine(profile, "Default", "IndexedDB", "https_example.test_0.indexeddb.leveldb");
-        var extensionIndexedDb = Path.Combine(profile, "Default", "IndexedDB", "chrome-extension_abc_0.indexeddb.leveldb");
-        try
-        {
-            Directory.CreateDirectory(siteIndexedDb);
-            Directory.CreateDirectory(extensionIndexedDb);
-
-            var paths = BitwardenBrowserWebViewProfile.GetStartupWebDataCleanupPaths(profile);
-
-            Assert.DoesNotContain(Path.Combine(profile, "Default", "Network", "Cookies"), paths);
-            Assert.DoesNotContain(Path.Combine(profile, "Default", "Cookies"), paths);
-            Assert.Contains(Path.Combine(profile, "Default", "Local Storage"), paths);
-            Assert.Contains(Path.Combine(profile, "Default", "Session Storage"), paths);
-            Assert.Contains(siteIndexedDb, paths);
-            Assert.DoesNotContain(extensionIndexedDb, paths);
-        }
-        finally
-        {
-            if (Directory.Exists(profile)) Directory.Delete(profile, recursive: true);
-        }
-    }
-
-    [Fact]
-    public void ClearableWebStorageTypes_ExcludeCookiesAndAll()
-    {
-        var storageTypes = BitwardenBrowserWebViewProfile.ClearableWebStorageTypes.Split(',');
-
-        Assert.DoesNotContain("cookies", storageTypes, StringComparer.OrdinalIgnoreCase);
-        Assert.DoesNotContain("all", storageTypes, StringComparer.OrdinalIgnoreCase);
-        Assert.DoesNotContain("appcache", storageTypes, StringComparer.OrdinalIgnoreCase);
-        Assert.Contains("local_storage", storageTypes, StringComparer.Ordinal);
-    }
-
-    [Fact]
-    public void DiscoverStartupWebDataOrigins_RecoversLegacyIndexedDbOrigins()
-    {
-        var profile = Path.Combine(Path.GetTempPath(), "wormhole-bitwarden-webview-" + Guid.NewGuid().ToString("N"));
-        try
-        {
-            Directory.CreateDirectory(Path.Combine(profile, "Default", "IndexedDB", "https_example.test_0.indexeddb.leveldb"));
-            Directory.CreateDirectory(Path.Combine(profile, "Default", "IndexedDB", "http_127.0.0.1_0.indexeddb.leveldb"));
-            Directory.CreateDirectory(Path.Combine(profile, "Default", "IndexedDB", "chrome-extension_abc_0.indexeddb.leveldb"));
-
-            Directory.CreateDirectory(Path.Combine(profile, "Default"));
-            var historyPath = Path.Combine(profile, "Default", "History");
-            var historyBuilder = new SqliteConnectionStringBuilder { DataSource = historyPath, Pooling = false };
-            using (var connection = new SqliteConnection(historyBuilder.ToString()))
-            {
-                connection.Open();
-                using var command = connection.CreateCommand();
-                command.CommandText = "CREATE TABLE urls(url TEXT);"
-                    + "INSERT INTO urls(url) VALUES ('https://history.example/login'), ('ftp://ignored.example/file');";
-                command.ExecuteNonQuery();
-            }
-
-            var origins = BitwardenBrowserWebViewProfile.DiscoverStartupWebDataOrigins(profile)
-                .Order(StringComparer.Ordinal)
-                .ToArray();
-
-            Assert.Equal(["http://127.0.0.1", "https://example.test", "https://history.example"], origins);
-        }
-        finally
-        {
-            if (Directory.Exists(profile)) Directory.Delete(profile, recursive: true);
-        }
-    }
 
     private static async Task CreateSeedSourceAsync(
         string profile,

@@ -37,8 +37,9 @@ internal static class AppPaths
     private static readonly string BitwardenCliDownloadDirectory = Path.Combine(AppDataDirectory, "cache", "bitwarden-cli");
     private static readonly string BitwardenBrowserExtensionDirectory = Path.Combine(AppDataDirectory, "extensions", "bitwarden");
     private static readonly string BitwardenBrowserExtensionDownloadDirectory = Path.Combine(AppDataDirectory, "cache", "bitwarden-browser-extension");
-    // Persistent user-data root for HTTPS tabs that load Bitwarden. The extension login state lives
-    // here; WebBrowserView clears recorded web origins selectively instead of wiping the whole root.
+    private static readonly string BitwardenBrowserSharedStorageFilePath = Path.Combine(AppDataDirectory, "bitwarden-browser-storage.dpapi");
+    // Persistent user-data root for HTTPS tabs that load Bitwarden. Cookies and all site/extension
+    // storage are retained; differing proxy/certificate contexts synchronize through the DPAPI store.
     private static readonly string BitwardenBrowserExtensionWebView2UserDataDirectory = Path.Combine(AppDataDirectory, "bitwarden-browser-webview2");
     private static readonly string BitwardenIconPath = Path.Combine(AppContext.BaseDirectory, "Assets", "Bitwarden", "bitwarden-icon.png");
     private static readonly string WebAssetsDirectory = Path.Combine(AppContext.BaseDirectory, "Assets", "web");
@@ -137,6 +138,8 @@ internal static class AppPaths
     public static string GetBitwardenBrowserExtensionRootDirectory() => BitwardenBrowserExtensionDirectory;
 
     public static string GetBitwardenBrowserExtensionDownloadDirectory() => BitwardenBrowserExtensionDownloadDirectory;
+
+    public static string GetBitwardenBrowserSharedStorageFilePath() => BitwardenBrowserSharedStorageFilePath;
 
     public static string GetBitwardenBrowserExtensionInstallDirectory(string version) =>
         Path.Combine(BitwardenBrowserExtensionDirectory, version);

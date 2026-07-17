@@ -47,6 +47,8 @@ public partial class UpdateViewModel : ObservableObject
     [ObservableProperty] private string? releaseUrl;
 
     public bool ShowChangelog => HasChangelog && IsUpdateAvailable;
+    internal Func<Task>? PrepareForInstallAsync { get; set; }
+
 
     public UpdateViewModel(
         IUpdateService updateService,
@@ -129,7 +131,11 @@ public partial class UpdateViewModel : ObservableObject
         try
         {
             var progress = new Progress<double>(p => Marshal(() => DownloadProgress = p));
-            var path = await _updateService.DownloadInstallerAsync(latest, progress).ConfigureAwait(false);
+            var path = await _updateService.DownloadInstallerAsync(latest, progress).ConfigureAwait(true);
+            if (PrepareForInstallAsync is { } prepareForInstall)
+            {
+                await prepareForInstall().ConfigureAwait(true);
+            }
             Marshal(() => Status = "Launching installer…");
             await _updateService.LaunchInstallerAndExitAsync(path).ConfigureAwait(false);
         }

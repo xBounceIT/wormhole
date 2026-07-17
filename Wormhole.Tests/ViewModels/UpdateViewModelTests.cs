@@ -143,6 +143,25 @@ public class UpdateViewModelTests
         Assert.Equal("Update available: 9.9.9", vm.Status);
     }
 
+    [Fact]
+    public async Task InstallAsync_PreparesOpenSessionsBeforeLaunchingInstaller()
+    {
+        var (vm, updates) = NewHarness();
+        updates.Raise(UpdateWithNotes("update"));
+        var prepared = false;
+        vm.PrepareForInstallAsync = () =>
+        {
+            prepared = true;
+            return Task.CompletedTask;
+        };
+        updates.OnLaunch = () => Assert.True(prepared);
+
+        await vm.InstallCommand.ExecuteAsync(null);
+
+        Assert.True(prepared);
+        Assert.Equal(1, updates.LaunchCount);
+    }
+
     private static (UpdateViewModel ViewModel, FakeUpdateService Updates) NewHarness()
     {
         var updates = new FakeUpdateService();
@@ -169,6 +188,8 @@ public class UpdateViewModelTests
     {
         public UpdateCheckResult? LatestKnown { get; private set; }
         public int CheckCount { get; private set; }
+        public int LaunchCount { get; private set; }
+        public Action? OnLaunch { get; set; }
         public UpdateCheckResult NextResult { get; set; } = UpdateCheckResult.NoUpdate(new Version(0, 4, 0));
         public event EventHandler<UpdateCheckResult>? UpdateAvailable;
         public void Raise(UpdateCheckResult result)
@@ -186,7 +207,12 @@ public class UpdateViewModelTests
         }
         public Task<string> DownloadInstallerAsync(UpdateCheckResult update, IProgress<double>? progress, CancellationToken cancellationToken = default) =>
             Task.FromResult(string.Empty);
-        public Task LaunchInstallerAndExitAsync(string installerPath) => Task.CompletedTask;
+        public Task LaunchInstallerAndExitAsync(string installerPath)
+        {
+            OnLaunch?.Invoke();
+            LaunchCount++;
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class FakeAppSettingsService : IAppSettingsService
