@@ -383,7 +383,9 @@ public sealed partial class WebBrowserView : UserControl
             {
                 _bitwardenUserDataFolder = extensionUserDataFolder;
                 await TryEnsureBitwardenExtensionAsync(core, extensionPath, extensionUserDataFolder).ConfigureAwait(true);
-                await SynchronizeBitwardenStorageAsync(core, extensionUserDataFolder).ConfigureAwait(true);
+                await TrySynchronizeBitwardenStorageBeforeInitialNavigationAsync(
+                    environmentSelection.Environment,
+                    extensionUserDataFolder).ConfigureAwait(true);
             }
 
             if (generation != _createGeneration)
@@ -586,6 +588,34 @@ public sealed partial class WebBrowserView : UserControl
                 await storage.CaptureAsync(userDataFolder, captured).ConfigureAwait(true);
             }
         }).ConfigureAwait(true);
+    }
+
+    private async Task TrySynchronizeBitwardenStorageBeforeInitialNavigationAsync(
+        CoreWebView2Environment environment,
+        string userDataFolder)
+    {
+        var bridgeWebView = new WinUIWebView2 { Visibility = Visibility.Collapsed };
+        WebViewHost.Children.Add(bridgeWebView);
+        try
+        {
+            await bridgeWebView.EnsureCoreWebView2Async(environment);
+            var bridgeCore = bridgeWebView.CoreWebView2
+                ?? throw new InvalidOperationException(
+                    "Bitwarden storage bridge initialized without a CoreWebView2 instance.");
+            await SynchronizeBitwardenStorageAsync(bridgeCore, userDataFolder).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            // Shared Bitwarden state is an enhancement; a transient extension/runtime failure must not
+            // prevent the requested HTTPS appliance from opening.
+            LogWarning(ex, "Could not synchronize Bitwarden browser storage before HTTPS navigation.");
+        }
+        finally
+        {
+            try { bridgeWebView.Close(); }
+            catch (Exception ex) { LogDebug(ex, "Bitwarden storage bridge WebView2 Close threw."); }
+            WebViewHost.Children.Remove(bridgeWebView);
+        }
     }
 
     private async Task CaptureBitwardenStorageAsync(CoreWebView2 core)
