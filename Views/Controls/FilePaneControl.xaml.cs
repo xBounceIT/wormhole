@@ -15,6 +15,7 @@ public sealed partial class FilePaneControl : UserControl
 {
     private const string PaneSentinelKey = "wormhole/pane";
     private const string PaneItemsKey = "wormhole/items";
+    private const string PaneDataFormat = "application/x-wormhole-file-transfer";
 
     /// <summary>The FileEntryViewModel whose row was most recently right-clicked.
     /// Captured in <see cref="OnEntriesContextRequested"/> and consumed by the
@@ -432,7 +433,11 @@ public sealed partial class FilePaneControl : UserControl
 
     private async void OnDragItemsStarting(object sender, DragItemsStartingEventArgs e)
     {
-        if (ViewModel is null) return;
+        if (ViewModel is null)
+        {
+            e.Cancel = true;
+            return;
+        }
         var items = new List<TransferItem>(e.Items.Count);
         var selectedLocalItems = ViewModel.IsLocal ? new List<FileEntryViewModel>(e.Items.Count) : null;
         foreach (var rawItem in e.Items)
@@ -441,12 +446,34 @@ public sealed partial class FilePaneControl : UserControl
             items.Add(new TransferItem(selected.FullPath, selected.Name, selected.IsDirectory));
             selectedLocalItems?.Add(selected);
         }
-        if (items.Count == 0) return;
+        if (items.Count == 0)
+        {
+            e.Cancel = true;
+            return;
+        }
 
-        // In-app sentinel: the matching Drop on the other pane reads this back without
-        // staging temp files. The other pane's Drop also handles the typed item list.
-        e.Data.Properties[PaneSentinelKey] = ViewModel.IsLocal ? "Local" : "Remote";
-        e.Data.Properties[PaneItemsKey] = items;
+        var sourceTag = ViewModel.IsLocal ? "Local" : "Remote";
+
+        try
+        {
+            // Properties are metadata and do not make an otherwise empty DataPackage
+            // valid for a drag. Register real in-app content synchronously before the
+            // first await so remote drags cannot fail-fast WinUI with E_INVALIDARG.
+            e.Data.SetData(PaneDataFormat, sourceTag);
+            e.Data.RequestedOperation = DataPackageOperation.Copy;
+
+            // In-app sentinel: the matching Drop on the other pane reads this back
+            // without staging temp files and also consumes the typed item list.
+            e.Data.Properties[PaneSentinelKey] = sourceTag;
+            e.Data.Properties[PaneItemsKey] = items;
+        }
+        catch (Exception ex)
+        {
+            e.Cancel = true;
+            App.Current.Services.GetService<ILogger<FilePaneControl>>()?.LogWarning(ex, "Could not prepare file drag data.");
+            ViewModel.ErrorMessage = ex.Message;
+            return;
+        }
 
         if (selectedLocalItems is not null)
         {
@@ -464,7 +491,20 @@ public sealed partial class FilePaneControl : UserControl
                 }
                 catch { /* skip non-readable entries */ }
             }
-            if (storage.Count > 0) e.Data.SetStorageItems(storage);
+            if (storage.Count > 0)
+            {
+                try
+                {
+                    e.Data.SetStorageItems(storage);
+                }
+                catch (Exception ex)
+                {
+                    // The in-app payload is already valid. If WinUI has locked the
+                    // package after an asynchronous path lookup, only drag-out to
+                    // Explorer is unavailable; do not let async-void tear down the app.
+                    App.Current.Services.GetService<ILogger<FilePaneControl>>()?.LogWarning(ex, "Could not attach local storage items to file drag data.");
+                }
+            }
         }
         // Remote pane: only the in-app sentinel + items above are attached. Cross-pane
         // drops (remote → local) read those back in OnDrop. OS-level drag-out to Explorer
