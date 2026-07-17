@@ -86,9 +86,12 @@ contains two independent integrations:
 - **Browser extension for HTTPS windows** - Wormhole installs the official
   Bitwarden browser extension into dedicated persistent WebView2 profiles for
   HTTPS sessions. The extension owns login, unlock, sync, and autofill exactly
-  like it does in a browser; Wormhole only provides the toolbar button and the
-  WebView2 extension host. Authentication cookies in these HTTPS profiles persist
-  across Wormhole restarts and updates.
+  like it does in a browser. Profiles with different VPN proxy or certificate
+  policies share the extension's persistent state through an atomic,
+  current-user-DPAPI-protected store; Bitwarden's session-only storage remains
+  memory-only. Wormhole never clears cookies, Local Storage, Session Storage, or
+  IndexedDB in these profiles, and explicitly flushes/closes their WebViews before
+  normal shutdown and updates.
 
 Bitwarden login items appear as read-only virtual credentials in the Credentials
 page and in SSH / RDP / VNC credential pickers after sync. Selecting one stores

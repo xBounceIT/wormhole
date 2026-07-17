@@ -1,7 +1,6 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
@@ -39,8 +38,8 @@ public sealed partial class WebBrowserView : UserControl
     // proxied (SOCKS) tab can't use it — Chromium proxy args are fixed at environment creation — so it
     // builds its own. Cached process-wide; concurrent first callers race via CompareExchange.
     private static CoreWebView2Environment? s_sharedEnvironment;
-    private static readonly BitwardenWebDataOriginLeaseRegistry s_bitwardenWebDataOrigins = new();
-    private static readonly SemaphoreSlim s_bitwardenPersistedCleanupGate = new(1, 1);
+    private static readonly object s_liveViewsGate = new();
+    private static readonly List<WeakReference<WebBrowserView>> s_liveViews = [];
 
     private HttpSessionViewModel? _viewModel;
     private WinUIWebView2? _webView;
@@ -49,8 +48,7 @@ public sealed partial class WebBrowserView : UserControl
     private Uri? _bitwardenPopupUri;
     private string? _bitwardenIconPath;
     private bool _bitwardenExtensionReady;
-    private BitwardenWebDataOriginLease? _bitwardenWebDataLease;
-    private string? _bitwardenWebDataUserDataFolder;
+    private string? _bitwardenUserDataFolder;
     // Temp user-data folder backing this tab's isolated environment (a SOCKS-proxy or ignore-cert tab);
     // deleted (best-effort) when that WebView2 is torn down. Null for shared-environment (plain) tabs.
     private string? _isolatedUserDataFolder;
@@ -63,6 +61,7 @@ public sealed partial class WebBrowserView : UserControl
     // no OS handle unless AvailableWaitHandle is touched, which it isn't), same convention as
     // SshSessionViewModel._commandGate.
     private readonly SemaphoreSlim _createGate = new(1, 1);
+    private readonly HashSet<WinUIWebView2> _popupWebViews = [];
     // True between issuing the initial Navigate and its first NavigationCompleted. Gates the
     // Connected/Failed report so later in-page navigations (link clicks) can't flip the tab's status.
     private bool _awaitingInitialNavigation;
@@ -72,6 +71,110 @@ public sealed partial class WebBrowserView : UserControl
         InitializeComponent();
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
+        lock (s_liveViewsGate)
+        {
+            s_liveViews.Add(new WeakReference<WebBrowserView>(this));
+        }
+    }
+
+    /// <summary>
+    /// Flushes and closes every live HTTP/HTTPS WebView, then waits briefly for WebView2 to release
+    /// its browser processes and user-data folders. Called by both normal shutdown and app updates.
+    /// </summary>
+    public static async Task CloseAllForShutdownAsync()
+    {
+        List<WebBrowserView> views;
+        lock (s_liveViewsGate)
+        {
+            views = [];
+            for (var index = s_liveViews.Count - 1; index >= 0; index--)
+            {
+                if (s_liveViews[index].TryGetTarget(out var view))
+                    views.Add(view);
+                else
+                    s_liveViews.RemoveAt(index);
+            }
+        }
+
+        var environments = views
+            .Select(view => view._currentEnvironment)
+            .OfType<CoreWebView2Environment>()
+            .Distinct()
+            .ToList();
+        var exitWaiters = new List<(
+            CoreWebView2Environment Environment,
+            Windows.Foundation.TypedEventHandler<CoreWebView2Environment, CoreWebView2BrowserProcessExitedEventArgs> Handler,
+            Task Task)>();
+        foreach (var environment in environments)
+        {
+            var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            Windows.Foundation.TypedEventHandler<CoreWebView2Environment, CoreWebView2BrowserProcessExitedEventArgs> handler =
+                (_, _) => completion.TrySetResult();
+            environment.BrowserProcessExited += handler;
+            exitWaiters.Add((environment, handler, completion.Task));
+        }
+
+        try
+        {
+            foreach (var view in views)
+            {
+                await view.CloseForShutdownAsync().ConfigureAwait(true);
+            }
+
+            if (exitWaiters.Count > 0)
+            {
+                try
+                {
+                    await Task.WhenAll(exitWaiters.Select(waiter => waiter.Task))
+                        .WaitAsync(TimeSpan.FromSeconds(5))
+                        .ConfigureAwait(true);
+                }
+                catch (TimeoutException ex)
+                {
+                    LogDebug(ex, "Timed out waiting for WebView2 browser processes to release their user-data folders.");
+                }
+            }
+        }
+        finally
+        {
+            foreach (var waiter in exitWaiters)
+            {
+                waiter.Environment.BrowserProcessExited -= waiter.Handler;
+            }
+        }
+    }
+
+    private async Task CloseForShutdownAsync()
+    {
+        ++_createGeneration;
+        await _createGate.WaitAsync().ConfigureAwait(true);
+        try
+        {
+            if (_webView is null
+                && _popupWebViews.Select(popup => popup.CoreWebView2).FirstOrDefault(core => core is not null) is { } popupCore)
+            {
+                try
+                {
+                    await CaptureBitwardenStorageAsync(popupCore).ConfigureAwait(true);
+                }
+                catch (Exception ex)
+                {
+                    LogWarning(ex, "Could not flush Bitwarden browser storage during application shutdown.");
+                }
+            }
+
+            await DisposeWebViewAsync().ConfigureAwait(true);
+            foreach (var popup in _popupWebViews.ToList())
+            {
+                try { popup.Close(); }
+                catch (Exception ex) { LogDebug(ex, "Bitwarden popup WebView2 Close threw during shutdown."); }
+            }
+            _popupWebViews.Clear();
+        }
+        finally
+        {
+            _createGate.Release();
+        }
     }
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
@@ -137,12 +240,7 @@ public sealed partial class WebBrowserView : UserControl
 
         // A live WebView2 already rendering this session (tab switch on the same view instance): keep it
         // so page state is preserved. Only (re)connect when there is nothing live to rebind to.
-        if (_webView?.CoreWebView2 is not null)
-        {
-            UntrackHiddenBitwardenWebDataOrigins();
-            ReacquireBitwardenWebDataLease();
-            return;
-        }
+        if (_webView?.CoreWebView2 is not null) return;
 
         try
         {
@@ -169,19 +267,7 @@ public sealed partial class WebBrowserView : UserControl
         var generation = ++_createGeneration;
         if (vm is not null) vm.NavigateRequested -= OnNavigateRequested;
 
-        if (vm is null)
-        {
-            UntrackHiddenBitwardenWebDataOrigins();
-            ReleaseBitwardenWebDataLease();
-            return;
-        }
-
-        if (IsTabStillOpen(vm))
-        {
-            TrackHiddenBitwardenWebDataOrigins();
-            ReleaseBitwardenWebDataLease();
-            return;
-        }
+        if (vm is null || IsTabStillOpen(vm)) return;
 
         try
         {
@@ -255,6 +341,7 @@ public sealed partial class WebBrowserView : UserControl
             {
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 VerticalAlignment = VerticalAlignment.Stretch,
+                Visibility = Visibility.Collapsed,
             };
             // Match the dark surface so there's no white flash before the page paints.
             try { webView.DefaultBackgroundColor = Windows.UI.Color.FromArgb(0xFF, 0x0c, 0x0c, 0x0c); }
@@ -294,12 +381,9 @@ public sealed partial class WebBrowserView : UserControl
             if (environmentSelection.BitwardenExtensionPath is { } extensionPath
                 && environmentSelection.UserDataFolder is { } extensionUserDataFolder)
             {
-                await ClearPersistedBitwardenWebDataAsync(core, extensionUserDataFolder).ConfigureAwait(true);
-                var webOrigins = GetWebOrigins(target, core.Source);
-                _bitwardenWebDataUserDataFolder = extensionUserDataFolder;
-                _bitwardenWebDataLease = s_bitwardenWebDataOrigins.Register(extensionUserDataFolder, webOrigins);
-                RememberBitwardenWebDataOrigins(extensionUserDataFolder, webOrigins);
+                _bitwardenUserDataFolder = extensionUserDataFolder;
                 await TryEnsureBitwardenExtensionAsync(core, extensionPath, extensionUserDataFolder).ConfigureAwait(true);
+                await SynchronizeBitwardenStorageAsync(core, extensionUserDataFolder).ConfigureAwait(true);
             }
 
             if (generation != _createGeneration)
@@ -325,6 +409,7 @@ public sealed partial class WebBrowserView : UserControl
             UpdateToolbar();
             _awaitingInitialNavigation = true;
             _currentTarget = target;
+            webView.Visibility = Visibility.Visible;
             core.Navigate(target.NavigateUri.ToString());
         }
         finally
@@ -469,6 +554,125 @@ public sealed partial class WebBrowserView : UserControl
         finally
         {
             UpdateToolbar();
+        }
+    }
+
+    private async Task SynchronizeBitwardenStorageAsync(CoreWebView2 core, string userDataFolder)
+    {
+        var popupUri = _bitwardenPopupUri;
+        var storage = App.Current?.Services?.GetService<BitwardenBrowserSharedStorage>();
+        if (!_bitwardenExtensionReady || popupUri is null || storage is null) return;
+
+        await storage.RunExclusiveAsync(async () =>
+        {
+            await NavigateAndWaitAsync(core, popupUri).ConfigureAwait(true);
+            var restore = await storage.GetRestoreAsync(userDataFolder).ConfigureAwait(true);
+            if (restore is not null)
+            {
+                await ExecuteStorageBridgeAsync(
+                    core,
+                    "restore",
+                    nonce => BitwardenBrowserStorageBridge.BuildRestoreScript(nonce, restore))
+                    .ConfigureAwait(true);
+                await storage.MarkRestoredAsync(userDataFolder, restore).ConfigureAwait(true);
+            }
+
+            var captured = await ExecuteStorageBridgeAsync(
+                core,
+                "capture",
+                BitwardenBrowserStorageBridge.BuildCaptureScript).ConfigureAwait(true);
+            if (captured is not null)
+            {
+                await storage.CaptureAsync(userDataFolder, captured).ConfigureAwait(true);
+            }
+        }).ConfigureAwait(true);
+    }
+
+    private async Task CaptureBitwardenStorageAsync(CoreWebView2 core)
+    {
+        var userDataFolder = _bitwardenUserDataFolder;
+        if (userDataFolder is null) return;
+
+        // A different profile may have published a newer revision since this view last synchronized.
+        // Reusing the full transaction restores that revision before capture, so teardown order cannot
+        // let a stale connection overwrite the newest shared Bitwarden state.
+        await SynchronizeBitwardenStorageAsync(core, userDataFolder).ConfigureAwait(true);
+    }
+
+    private static async Task NavigateAndWaitAsync(CoreWebView2 core, Uri uri)
+    {
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        ulong? navigationId = null;
+        void OnStarting(CoreWebView2 sender, CoreWebView2NavigationStartingEventArgs args)
+        {
+            if (navigationId is null
+                && Uri.TryCreate(args.Uri, UriKind.Absolute, out var startedUri)
+                && startedUri == uri)
+            {
+                navigationId = args.NavigationId;
+            }
+        }
+
+        void OnCompleted(CoreWebView2 sender, CoreWebView2NavigationCompletedEventArgs args)
+        {
+            if (args.NavigationId != navigationId) return;
+            if (args.IsSuccess)
+                completion.TrySetResult();
+            else
+                completion.TrySetException(new InvalidOperationException(
+                    $"Bitwarden storage page navigation failed ({args.WebErrorStatus})."));
+        }
+
+        core.NavigationStarting += OnStarting;
+        core.NavigationCompleted += OnCompleted;
+        try
+        {
+            core.Navigate(uri.ToString());
+            await completion.Task.WaitAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(true);
+        }
+        finally
+        {
+            core.NavigationStarting -= OnStarting;
+            core.NavigationCompleted -= OnCompleted;
+        }
+    }
+
+    private static async Task<BitwardenBrowserStorageSnapshot?> ExecuteStorageBridgeAsync(
+        CoreWebView2 core,
+        string command,
+        Func<string, string> scriptFactory)
+    {
+        var nonce = Guid.NewGuid().ToString("N");
+        var completion = new TaskCompletionSource<BitwardenBrowserStorageSnapshot?>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void OnMessage(CoreWebView2 sender, CoreWebView2WebMessageReceivedEventArgs args)
+        {
+            if (!BitwardenBrowserStorageBridge.TryParseMessage(
+                    args.WebMessageAsJson,
+                    nonce,
+                    command,
+                    out var snapshot,
+                    out var error))
+            {
+                return;
+            }
+
+            if (error is null)
+                completion.TrySetResult(snapshot);
+            else
+                completion.TrySetException(new InvalidOperationException(error));
+        }
+
+        core.WebMessageReceived += OnMessage;
+        try
+        {
+            await core.ExecuteScriptAsync(scriptFactory(nonce));
+            return await completion.Task.WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(true);
+        }
+        finally
+        {
+            core.WebMessageReceived -= OnMessage;
         }
     }
 
@@ -620,79 +824,9 @@ public sealed partial class WebBrowserView : UserControl
 
     private void OnCoreSourceChanged(CoreWebView2 sender, CoreWebView2SourceChangedEventArgs args)
     {
-        TrackBitwardenWebDataOrigin(sender.Source);
         UpdateToolbar();
     }
 
-    private void TrackHiddenBitwardenWebDataOrigins()
-    {
-        if (_bitwardenWebDataUserDataFolder is null || _currentTarget is null) return;
-        var core = _webView?.CoreWebView2;
-        if (core is null) return;
-
-        var liveOrigins = GetWebOrigins(_currentTarget, core.Source);
-        var mergeWithExisting = _bitwardenWebDataLease is null;
-        if (_bitwardenWebDataLease is { } lease)
-        {
-            liveOrigins.UnionWith(lease.Origins);
-        }
-
-        s_bitwardenWebDataOrigins.TrackLiveOrigins(
-            this,
-            _bitwardenWebDataUserDataFolder,
-            liveOrigins,
-            mergeWithExisting);
-    }
-
-    private void UntrackHiddenBitwardenWebDataOrigins() =>
-        s_bitwardenWebDataOrigins.UntrackLiveOrigins(this);
-
-    private void ReacquireBitwardenWebDataLease()
-    {
-        if (_bitwardenWebDataLease is not null) return;
-        if (_bitwardenWebDataUserDataFolder is null || _currentTarget is null) return;
-        var core = _webView?.CoreWebView2;
-        if (core is null) return;
-
-        _bitwardenWebDataLease = s_bitwardenWebDataOrigins.Register(
-            _bitwardenWebDataUserDataFolder,
-            GetWebOrigins(_currentTarget, core.Source));
-    }
-
-    private void ReleaseBitwardenWebDataLease()
-    {
-        var lease = _bitwardenWebDataLease;
-        _bitwardenWebDataLease = null;
-        lease?.Release();
-    }
-
-    private void TrackBitwardenWebDataOrigin(string? source)
-    {
-        if (!TryGetWebOrigin(source, out var origin)) return;
-
-        if (_bitwardenWebDataLease is not null)
-        {
-            _bitwardenWebDataLease.AddOrigins([origin]);
-        }
-        else
-        {
-            TrackHiddenBitwardenWebDataOrigins();
-        }
-
-        if (_bitwardenWebDataUserDataFolder is { } userDataFolder)
-        {
-            RememberBitwardenWebDataOrigins(userDataFolder, [origin]);
-        }
-    }
-
-    private static bool TryGetWebOrigin(string? source, out string origin)
-    {
-        origin = string.Empty;
-        if (!Uri.TryCreate(source, UriKind.Absolute, out var sourceUri)) return false;
-        if (sourceUri.Scheme is not ("http" or "https")) return false;
-        origin = sourceUri.GetLeftPart(UriPartial.Authority);
-        return true;
-    }
 
     private void OnCoreHistoryChanged(CoreWebView2 sender, object args) => UpdateToolbar();
 
@@ -817,6 +951,7 @@ public sealed partial class WebBrowserView : UserControl
             HorizontalAlignment = HorizontalAlignment.Stretch,
             VerticalAlignment = VerticalAlignment.Stretch,
         };
+        _popupWebViews.Add(popupWebView);
         try { popupWebView.DefaultBackgroundColor = Windows.UI.Color.FromArgb(0xFF, 0x1f, 0x1f, 0x1f); }
         catch (Exception ex) { LogDebug(ex, "Setting Bitwarden popup background failed (cosmetic)."); }
 
@@ -826,10 +961,22 @@ public sealed partial class WebBrowserView : UserControl
             Placement = FlyoutPlacementMode.BottomEdgeAlignedRight,
             FlyoutPresenterStyle = CreateBitwardenFlyoutPresenterStyle(),
         };
-        flyout.Closed += (_, _) =>
+        flyout.Closed += async (_, _) =>
         {
+            if (popupWebView.CoreWebView2 is { } core)
+            {
+                try
+                {
+                    await CaptureBitwardenStorageAsync(core).ConfigureAwait(true);
+                }
+                catch (Exception ex)
+                {
+                    LogWarning(ex, "Could not flush Bitwarden browser storage when its popup closed.");
+                }
+            }
             try { popupWebView.Close(); }
             catch (Exception ex) { LogDebug(ex, "Bitwarden popup WebView2 Close threw."); }
+            _popupWebViews.Remove(popupWebView);
         };
         flyout.Opened += async (_, _) =>
         {
@@ -840,6 +987,10 @@ public sealed partial class WebBrowserView : UserControl
                 {
                     core.Settings.AreDevToolsEnabled = Debugger.IsAttached;
                     core.Settings.AreDefaultContextMenusEnabled = true;
+                    if (_bitwardenUserDataFolder is { } popupUserDataFolder)
+                    {
+                        await SynchronizeBitwardenStorageAsync(core, popupUserDataFolder).ConfigureAwait(true);
+                    }
                     if (activeTabContext is not null)
                     {
                         try
@@ -882,17 +1033,7 @@ public sealed partial class WebBrowserView : UserControl
     private async Task DisposeWebViewAsync()
     {
         var webView = _webView;
-        var target = _currentTarget;
-        var bitwardenWebDataLease = _bitwardenWebDataLease;
-        var bitwardenWebDataUserDataFolder = _bitwardenWebDataUserDataFolder;
-        UntrackHiddenBitwardenWebDataOrigins();
         _webView = null;
-        _currentEnvironment = null;
-        _currentTarget = null;
-        _bitwardenPopupUri = null;
-        _bitwardenExtensionReady = false;
-        _bitwardenWebDataLease = null;
-        _bitwardenWebDataUserDataFolder = null;
         if (webView is not null)
         {
             var core = webView.CoreWebView2;
@@ -903,118 +1044,29 @@ public sealed partial class WebBrowserView : UserControl
                 core.SourceChanged -= OnCoreSourceChanged;
                 core.HistoryChanged -= OnCoreHistoryChanged;
                 core.NewWindowRequested -= OnNewWindowRequested;
-
-                if (bitwardenWebDataLease is not null && target is not null)
+                try
                 {
-                    var clearableOrigins = bitwardenWebDataLease.Release(GetWebOrigins(target, core.Source));
-                    bitwardenWebDataLease = null;
-                    var clearedOrigins = await ClearBitwardenWebDataAsync(core, clearableOrigins).ConfigureAwait(true);
-                    if (bitwardenWebDataUserDataFolder is not null)
-                    {
-                        ForgetBitwardenWebDataOrigins(bitwardenWebDataUserDataFolder, clearedOrigins);
-                    }
+                    await CaptureBitwardenStorageAsync(core).ConfigureAwait(true);
+                }
+                catch (Exception ex)
+                {
+                    LogWarning(ex, "Could not flush Bitwarden browser storage during WebView2 teardown.");
                 }
             }
+
             try { webView.Close(); }
             catch (Exception ex) { LogDebug(ex, "WebView2 Close threw during teardown."); }
             WebViewHost.Children.Remove(webView);
         }
-        bitwardenWebDataLease?.Release();
+
+        _currentEnvironment = null;
+        _currentTarget = null;
+        _bitwardenPopupUri = null;
+        _bitwardenExtensionReady = false;
+        _bitwardenUserDataFolder = null;
         CleanupIsolatedUserDataFolder();
         _bitwardenIconPath = null;
         UpdateBitwardenButtonIcon();
-    }
-
-    private static async Task ClearPersistedBitwardenWebDataAsync(CoreWebView2 core, string userDataFolder)
-    {
-        await s_bitwardenPersistedCleanupGate.WaitAsync().ConfigureAwait(true);
-        try
-        {
-            IReadOnlyList<string> origins;
-            try
-            {
-                origins = BitwardenBrowserWebViewProfile.ReadPendingWebDataOrigins(userDataFolder);
-            }
-            catch (Exception ex)
-            {
-                LogDebug(ex, "Could not read pending Bitwarden WebView2 web origins.");
-                return;
-            }
-
-            origins = s_bitwardenWebDataOrigins.GetInactiveOrigins(userDataFolder, origins);
-            if (origins.Count == 0) return;
-
-            var clearedOrigins = await ClearBitwardenWebDataAsync(core, origins).ConfigureAwait(true);
-            var forgettableOrigins = s_bitwardenWebDataOrigins.GetInactiveOrigins(userDataFolder, clearedOrigins);
-            ForgetBitwardenWebDataOrigins(userDataFolder, forgettableOrigins);
-        }
-        finally
-        {
-            s_bitwardenPersistedCleanupGate.Release();
-        }
-    }
-
-    private static async Task<IReadOnlyList<string>> ClearBitwardenWebDataAsync(CoreWebView2 core, IReadOnlyList<string> origins)
-    {
-        var clearedOrigins = new List<string>();
-        foreach (var origin in origins)
-        {
-            try
-            {
-                var payload = JsonSerializer.Serialize(new
-                {
-                    origin,
-                    storageTypes = BitwardenBrowserWebViewProfile.ClearableWebStorageTypes,
-                });
-                await core.CallDevToolsProtocolMethodAsync("Storage.clearDataForOrigin", payload);
-                clearedOrigins.Add(origin);
-            }
-            catch (Exception ex)
-            {
-                LogDebug(ex, "Could not clear origin storage for a Bitwarden-enabled HTTPS tab.");
-            }
-        }
-
-        return clearedOrigins;
-    }
-
-    private static void RememberBitwardenWebDataOrigins(string userDataFolder, IEnumerable<string> origins)
-    {
-        try
-        {
-            BitwardenBrowserWebViewProfile.AddPendingWebDataOrigins(userDataFolder, origins);
-        }
-        catch (Exception ex)
-        {
-            LogDebug(ex, "Could not remember Bitwarden WebView2 web origins for later cleanup.");
-        }
-    }
-
-    private static void ForgetBitwardenWebDataOrigins(string userDataFolder, IEnumerable<string> origins)
-    {
-        try
-        {
-            BitwardenBrowserWebViewProfile.RemovePendingWebDataOrigins(userDataFolder, origins);
-        }
-        catch (Exception ex)
-        {
-            LogDebug(ex, "Could not forget cleared Bitwarden WebView2 web origins.");
-        }
-    }
-
-    private static HashSet<string> GetWebOrigins(HttpConnectionTarget target, string? currentSource)
-    {
-        var origins = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        AddOrigin(target.NavigateUri);
-        if (target.OriginalUri is not null) AddOrigin(target.OriginalUri);
-        if (Uri.TryCreate(currentSource, UriKind.Absolute, out var sourceUri)) AddOrigin(sourceUri);
-        return origins;
-
-        void AddOrigin(Uri uri)
-        {
-            if (uri.Scheme is not ("http" or "https")) return;
-            origins.Add(uri.GetLeftPart(UriPartial.Authority));
-        }
     }
 
     private void CleanupIsolatedUserDataFolder()

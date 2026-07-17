@@ -15,6 +15,7 @@ using Wormhole.Services.Mcp;
 using Wormhole.Services.Security;
 using Wormhole.ViewModels;
 using Wormhole.Views.Pages;
+using Wormhole.Views.Sessions;
 
 namespace Wormhole;
 
@@ -144,6 +145,7 @@ public sealed partial class MainWindow : Window
         }
 
         _ = RunStartupUpdateCheckAsync();
+        ViewModel.Update.PrepareForInstallAsync = PrepareForUpdateAsync;
     }
 
     public async Task RunStartupAuthenticationAsync()
@@ -219,21 +221,7 @@ public sealed partial class MainWindow : Window
 
         try
         {
-            try
-            {
-                // Bound the wait: a long in-flight MCP request (e.g. a slow run_command) must not
-                // hold the window-close path open on Kestrel's graceful drain. The cancellation
-                // token forces shutdown after a short grace period; the process exit reclaims the
-                // rest. Stopping the host first also keeps new tool calls off the sessions that
-                // CloseAllSessionsAsync is about to dispose.
-                using var stopCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                await App.Current.Services.GetRequiredService<IMcpServerHost>().StopAsync(stopCts.Token);
-            }
-            catch (Exception)
-            {
-                // Never let MCP shutdown block (or break) the app from closing.
-            }
-            await ViewModel.CloseAllSessionsAsync();
+            await PrepareForProcessExitAsync().ConfigureAwait(true);
         }
         finally
         {
@@ -243,6 +231,46 @@ public sealed partial class MainWindow : Window
                 Close();
             }
         }
+    }
+
+    private async Task PrepareForUpdateAsync()
+    {
+        if (_sessionCleanupComplete) return;
+        _sessionCleanupInProgress = true;
+        try
+        {
+            await PrepareForProcessExitAsync().ConfigureAwait(true);
+            _sessionCleanupComplete = true;
+        }
+        finally
+        {
+            if (!_sessionCleanupComplete) _sessionCleanupInProgress = false;
+        }
+    }
+
+    private async Task PrepareForProcessExitAsync()
+    {
+        try
+        {
+            // A slow MCP request must not prevent WebView2 from flushing before process exit.
+            using var stopCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+            await App.Current.Services.GetRequiredService<IMcpServerHost>().StopAsync(stopCts.Token);
+        }
+        catch (Exception)
+        {
+            // Never let MCP shutdown block (or break) the app from closing.
+        }
+
+        try
+        {
+            await WebBrowserView.CloseAllForShutdownAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not close every WebView2 cleanly before process exit.");
+        }
+
+        await ViewModel.CloseAllSessionsAsync().ConfigureAwait(true);
     }
 
     private static StackPanel CreateShutdownOverlay(int activeCount)
