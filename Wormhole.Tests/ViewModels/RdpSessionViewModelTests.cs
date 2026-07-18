@@ -1178,6 +1178,39 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public async Task AttachAsync_EphemeralPromptedPassword_IsCachedForReconnect()
+    {
+        var nodeId = Guid.NewGuid();
+        var transientCredentials = new TransientSessionCredentialStore();
+        var dlg = new FakeDialogService { PasswordPromptResult = "prompted-rdp" };
+        var profile = MakeProfile() with
+        {
+            NodeId = nodeId,
+            IsEphemeral = true,
+            CredentialId = null,
+        };
+        var (vm, svc, _, _, _) = CreateVm(dlg: dlg, transientCredentials: transientCredentials);
+        svc.NextSession = new FakeRdpSession();
+        vm.Initialize(profile);
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal("prompted-rdp", transientCredentials.Read(nodeId));
+        Assert.Equal(1, dlg.PasswordPromptCount);
+
+        var (reconnectedVm, reconnectedSvc, _, _, _) = CreateVm(
+            dlg: dlg,
+            transientCredentials: transientCredentials);
+        reconnectedSvc.NextSession = new FakeRdpSession();
+        reconnectedVm.Initialize(profile);
+
+        await reconnectedVm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal("prompted-rdp", reconnectedSvc.LastPassword);
+        Assert.Equal(1, dlg.PasswordPromptCount);
+    }
+
+    [Fact]
     public async Task AttachAsync_InlinePasswordMissingSecret_FallsBackToPasswordPrompt()
     {
         var nodeId = Guid.NewGuid();

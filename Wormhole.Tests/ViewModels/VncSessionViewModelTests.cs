@@ -77,6 +77,35 @@ public class VncSessionViewModelTests
     }
 
     [Fact]
+    public async Task PasswordProvider_EphemeralPromptedPassword_IsCachedForReconnect()
+    {
+        var nodeId = Guid.NewGuid();
+        var transientCredentials = new TransientSessionCredentialStore();
+        var dialog = new FakeDialogService { PasswordPromptResult = "prompted-vnc" };
+        var profile = Profile(nodeId: nodeId) with { IsEphemeral = true };
+        var service = new FakeVncSessionService { RequestPassword = true };
+        var vm = CreateVm(service, dialog: dialog, transientCredentials: transientCredentials);
+        vm.Initialize(profile);
+
+        await vm.AttachAsync(new FakeRenderTarget());
+
+        Assert.Equal("prompted-vnc", transientCredentials.Read(nodeId));
+        Assert.Equal(1, dialog.PasswordPromptCount);
+
+        var reconnectedService = new FakeVncSessionService { RequestPassword = true };
+        var reconnectedVm = CreateVm(
+            reconnectedService,
+            dialog: dialog,
+            transientCredentials: transientCredentials);
+        reconnectedVm.Initialize(profile);
+
+        await reconnectedVm.AttachAsync(new FakeRenderTarget());
+
+        Assert.Equal("prompted-vnc", Assert.Single(reconnectedService.Passwords));
+        Assert.Equal(1, dialog.PasswordPromptCount);
+    }
+
+    [Fact]
     public async Task PasswordProvider_PromptsWhenSavedCredentialHasNoPassword()
     {
         var credentialId = Guid.NewGuid();

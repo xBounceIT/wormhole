@@ -1045,6 +1045,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 promptedUsername,
                 explicitDomain ?? credentialDomain,
                 allowDomainFromUsername: explicitDomain is null && credentialDomain is null);
+            CacheTransientPassword(profile, prompted.Password);
             return new ResolvedRdpCredentials(
                 parsedPrompt.Username,
                 parsedPrompt.Domain,
@@ -1078,15 +1079,16 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             return await ResolveSelectedRdpCredentialAsync(profile, passwordPrompt, token).ConfigureAwait(true);
         }
 
-        return passwordPrompt is null
-            ? null
-            : new ResolvedRdpCredentials(
-                username,
-                domain,
-                passwordPrompt.Password,
-                usernameSource,
-                domainSource,
-                RdpCredentialPasswordSource.Prompt);
+        if (passwordPrompt is null) return null;
+
+        CacheTransientPassword(profile, passwordPrompt.Password);
+        return new ResolvedRdpCredentials(
+            username,
+            domain,
+            passwordPrompt.Password,
+            usernameSource,
+            domainSource,
+            RdpCredentialPasswordSource.Prompt);
     }
 
     private async Task<ResolvedRdpCredentials?> ResolveSelectedRdpCredentialAsync(
@@ -1114,6 +1116,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             selectedDomain,
             allowDomainFromUsername: selectedDomain is null);
 
+        CacheTransientPassword(profile, prompt.Password);
         return new ResolvedRdpCredentials(
             parsed.Username,
             parsed.Domain,
@@ -1123,6 +1126,14 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 ? RdpCredentialValueSource.Credential
                 : RdpCredentialValueSource.None,
             RdpCredentialPasswordSource.SavedCredential);
+    }
+
+    private void CacheTransientPassword(ConnectionProfile profile, string password)
+    {
+        if (profile.IsEphemeral && !string.IsNullOrEmpty(password))
+        {
+            _transientCredentials?.Store(profile.NodeId, password);
+        }
     }
 
     private static string? NullIfWhiteSpace(string? value) =>

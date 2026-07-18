@@ -534,6 +534,10 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
             }
 
             _password = await PromptPasswordOnUiAsync(cancellationToken).ConfigureAwait(false);
+            if (_profile.IsEphemeral && !string.IsNullOrEmpty(_password))
+            {
+                _transientCredentials?.Store(_profile.NodeId, _password);
+            }
             return _password;
         }
 
