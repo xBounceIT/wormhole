@@ -149,6 +149,11 @@ public partial class ShellViewModel : ObservableObject
             return;
         }
 
+        if (args.Action is not (NotifyCollectionChangedAction.Remove or NotifyCollectionChangedAction.Replace))
+        {
+            return;
+        }
+
         if (args.OldItems is null) return;
         foreach (var item in args.OldItems)
         {

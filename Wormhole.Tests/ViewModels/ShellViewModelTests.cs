@@ -221,6 +221,23 @@ public class ShellViewModelTests
     }
 
     [Fact]
+    public void MovingEphemeralTab_PreservesTransientPassword()
+    {
+        var store = new TransientSessionCredentialStore();
+        var vm = CreateShell(store);
+        var nodeId = Guid.NewGuid();
+        store.Store(nodeId, "session-secret");
+        var ephemeralTab = new TestSessionTab("quick");
+        ephemeralTab.Initialize(CreateProfile(nodeId, isEphemeral: true));
+        vm.Tabs.Add(ephemeralTab);
+        vm.Tabs.Add(new TestSessionTab("saved"));
+
+        vm.Tabs.Move(0, 1);
+
+        Assert.Equal("session-secret", store.Read(nodeId));
+    }
+
+    [Fact]
     public async Task CloseAllSessionsAsync_ClearsAllTransientPasswords()
     {
         var store = new TransientSessionCredentialStore();
