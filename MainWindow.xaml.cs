@@ -664,7 +664,7 @@ public sealed partial class MainWindow : Window
     {
         if (args.WindowActivationState == WindowActivationState.Deactivated) return;
         Activated -= OnFirstActivated;
-        // Focus the content Frame so the QuickConnect ComboBox (first focusable
+        // Focus the content Frame so the Quick Connect button (first focusable
         // element in the title-bar row) doesn't keep default launch focus and
         // draw a focus ring. Frame is a Control with IsTabStop=true and a
         // template that draws no focus visual, so this absorbs focus silently.

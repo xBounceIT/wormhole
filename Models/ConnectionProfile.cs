@@ -12,6 +12,12 @@ public sealed record ConnectionProfile
     public Guid? CredentialId { get; init; }
 
     /// <summary>
+    /// True for an ad-hoc Quick Connect profile that has no backing row in the connection tree.
+    /// Ephemeral profiles must never persist credential bindings or SSH host fingerprints.
+    /// </summary>
+    public bool IsEphemeral { get; init; }
+
+    /// <summary>
     /// When true, the SSH/RDP login password is read from Credential Manager keyed by
     /// <see cref="NodeId"/> rather than a saved credential or a prompt. Resolved from the
     /// leaf node only — inline passwords never inherit from a folder.

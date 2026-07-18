@@ -272,6 +272,7 @@ public sealed class FileTransferDialogService : IFileTransferDialogService
 
         var pinned = profile with { SshKnownHostFingerprint = session.HostFingerprint };
         sourceTab.UpdateProfile(pinned);
+        if (pinned.IsEphemeral) return pinned;
         try
         {
             await _connectionRepo.UpdateHostFingerprintAsync(pinned.NodeId, session.HostFingerprint!, CancellationToken.None).ConfigureAwait(true);

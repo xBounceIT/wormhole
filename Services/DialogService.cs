@@ -227,20 +227,70 @@ public sealed class DialogService : IDialogService
         return result == ContentDialogResult.Primary ? textBox.Text.Trim() : null;
     }
 
+    public Task<QuickConnectResult?> PromptQuickConnectAsync() =>
+        RunExclusiveUserDialogAsync(PromptQuickConnectCoreAsync);
+
+    private async Task<QuickConnectResult?> PromptQuickConnectCoreAsync()
+    {
+        var seed = new ConnectionNode
+        {
+            Id = Guid.NewGuid(),
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            CredentialMode = CredentialBindingMode.None,
+            SshAutoSudo = false,
+            SerialBaudRate = SerialDefaults.BaudRate,
+            SerialDataBits = SerialDefaults.DataBits,
+            SerialStopBits = SerialDefaults.StopBits,
+            SerialParity = SerialDefaults.Parity,
+            SerialFlowControl = SerialDefaults.FlowControl,
+            TunnelEnabled = false,
+        };
+
+        var submission = await ShowConnectionEditorCoreAsync(
+            seed,
+            quickConnect: true,
+            title: "Quick Connect",
+            primaryButtonText: "Connect").ConfigureAwait(true);
+        if (submission is null) return null;
+
+        var node = submission.Node;
+        if (string.IsNullOrWhiteSpace(node.Name))
+        {
+            node.Name = node.Host?.Trim() ?? string.Empty;
+        }
+        return new QuickConnectResult(node, submission.Password);
+    }
+
     public Task<ConnectionNode?> EditConnectionAsync(ConnectionNode initial, bool isNew) =>
         RunExclusiveUserDialogAsync(() => EditConnectionCoreAsync(initial, isNew));
 
     private async Task<ConnectionNode?> EditConnectionCoreAsync(ConnectionNode initial, bool isNew)
     {
+        var submission = await ShowConnectionEditorCoreAsync(
+            initial,
+            quickConnect: false,
+            title: isNew ? "New connection" : "Edit connection",
+            primaryButtonText: isNew ? "Create" : "Save").ConfigureAwait(true);
+        return submission?.Node;
+    }
+
+    private async Task<ConnectionEditorSubmission?> ShowConnectionEditorCoreAsync(
+        ConnectionNode initial,
+        bool quickConnect,
+        string title,
+        string primaryButtonText)
+    {
         var form = new NewConnectionDialog();
-        form.Prepare(initial);
+        if (quickConnect) form.PrepareQuickConnect(initial);
+        else form.Prepare(initial);
 
         var xamlRoot = RequireXamlRoot();
         var dialog = new ContentDialog
         {
-            Title = isNew ? "New connection" : "Edit connection",
+            Title = title,
             Content = form,
-            PrimaryButtonText = isNew ? "Create" : "Save",
+            PrimaryButtonText = primaryButtonText,
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Primary,
             XamlRoot = xamlRoot,
@@ -263,7 +313,7 @@ public sealed class DialogService : IDialogService
 
         void OnOpened(ContentDialog _, ContentDialogOpenedEventArgs __)
         {
-            form.FocusNameField();
+            form.FocusPrimaryField();
             loadTask = LoadEditorOptionsAsync(
                 form.LoadOptionsAsync,
                 form.ShowLoadError,
@@ -290,8 +340,24 @@ public sealed class DialogService : IDialogService
         if (result != ContentDialogResult.Primary) return null;
 
         var output = ConnectionNode.CloneIdentityFrom(initial);
-        form.WriteTo(output);
-        return output;
+        if (quickConnect) form.WriteQuickConnectTo(output);
+        else form.WriteTo(output);
+        var password = quickConnect ? form.TakeQuickConnectPassword() : null;
+        return new ConnectionEditorSubmission(output, password);
+    }
+
+    private sealed class ConnectionEditorSubmission
+    {
+        public ConnectionEditorSubmission(ConnectionNode node, string? password)
+        {
+            Node = node;
+            Password = password;
+        }
+
+        public ConnectionNode Node { get; }
+
+        [System.Diagnostics.DebuggerBrowsable(System.Diagnostics.DebuggerBrowsableState.Never)]
+        public string? Password { get; }
     }
 
     public Task<ConnectionNode?> EditFolderAsync(ConnectionNode initial, bool isNew) =>
@@ -633,13 +699,30 @@ public sealed class DialogService : IDialogService
         return result == ContentDialogResult.Primary ? sessionKey : null;
     }
 
-    public async Task<AccountCredentialPromptResult?> PromptAccountCredentialsAsync(
+    public Task<AccountCredentialPromptResult?> PromptAccountCredentialsAsync(
         string title,
         string message,
         ProtocolType protocol,
         bool requireUsername,
         string? initialUsername = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        PromptAccountCredentialsAsync(
+            title,
+            message,
+            protocol,
+            requireUsername,
+            initialUsername,
+            allowSaveCredentialToConnection: true,
+            cancellationToken: cancellationToken);
+
+    public async Task<AccountCredentialPromptResult?> PromptAccountCredentialsAsync(
+        string title,
+        string message,
+        ProtocolType protocol,
+        bool requireUsername,
+        string? initialUsername,
+        bool allowSaveCredentialToConnection,
+        CancellationToken cancellationToken)
     {
         var credentialLoadFailed = false;
         IReadOnlyList<AccountCredentialChoice> choices;
@@ -756,6 +839,7 @@ public sealed class DialogService : IDialogService
             Content = "Save this credential to the connection",
             IsChecked = false,
             IsEnabled = false,
+            Visibility = allowSaveCredentialToConnection ? Visibility.Visible : Visibility.Collapsed,
         };
         savedCredentialSection.Children.Add(saveBindingBox);
 
@@ -804,7 +888,8 @@ public sealed class DialogService : IDialogService
             if (userBox is not null) userBox.IsEnabled = !isActive && CurrentChoice().Credential is null;
             passwordBox.IsEnabled = !isActive && CurrentChoice().Credential is null;
             bitwardenUnlockBox.IsEnabled = !isActive && CurrentChoice().Credential?.IsBitwarden == true;
-            saveBindingBox.IsEnabled = !isActive && CurrentChoice().Credential is not null;
+            saveBindingBox.IsEnabled = allowSaveCredentialToConnection &&
+                !isActive && CurrentChoice().Credential is not null;
             credentialProgressText.Text = message ?? string.Empty;
             credentialProgressRing.IsActive = isActive;
             credentialProgressPanel.Visibility = isActive ? Visibility.Visible : Visibility.Collapsed;
@@ -820,7 +905,7 @@ public sealed class DialogService : IDialogService
             passwordBox.IsEnabled = !usingSavedCredential;
             bitwardenUnlockBox.IsEnabled = usingBitwarden;
             bitwardenUnlockBox.Visibility = usingBitwarden ? Visibility.Visible : Visibility.Collapsed;
-            saveBindingBox.IsEnabled = usingSavedCredential;
+            saveBindingBox.IsEnabled = allowSaveCredentialToConnection && usingSavedCredential;
             if (!usingSavedCredential)
             {
                 saveBindingBox.IsChecked = false;
@@ -1010,7 +1095,7 @@ public sealed class DialogService : IDialogService
                     selectedCredential.Username?.Trim(),
                     password,
                     selectedCredential,
-                    saveBindingBox.IsChecked == true);
+                    allowSaveCredentialToConnection && saveBindingBox.IsChecked == true);
             }
             finally
             {

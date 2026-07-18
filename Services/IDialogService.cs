@@ -14,6 +14,14 @@ public interface IDialogService
     Task<string?> PromptForTextAsync(string title, string label, string defaultValue = "");
 
     /// <summary>
+    /// Opens the full connection editor in ephemeral Quick Connect mode. The returned password,
+    /// when present, is session-only and must be transferred to
+    /// <see cref="ITransientSessionCredentialStore"/> rather than persisted.
+    /// </summary>
+    Task<QuickConnectResult?> PromptQuickConnectAsync() =>
+        Task.FromResult<QuickConnectResult?>(null);
+
+    /// <summary>
     /// Opens the multi-tab connection editor pre-filled from <paramref name="initial"/>. Returns
     /// a new <see cref="ConnectionNode"/> with the edited values on Save (caller writes it back to
     /// storage). Returns null if the user cancels. The input <paramref name="initial"/> is not
@@ -74,6 +82,26 @@ public interface IDialogService
         bool requireUsername,
         string? initialUsername = null,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Variant used by ephemeral sessions to suppress the option that writes a selected saved
+    /// credential back to a connection-tree node.
+    /// </summary>
+    Task<AccountCredentialPromptResult?> PromptAccountCredentialsAsync(
+        string title,
+        string message,
+        ProtocolType protocol,
+        bool requireUsername,
+        string? initialUsername,
+        bool allowSaveCredentialToConnection,
+        CancellationToken cancellationToken) =>
+        PromptAccountCredentialsAsync(
+            title,
+            message,
+            protocol,
+            requireUsername,
+            initialUsername,
+            cancellationToken);
 
     Task<string?> PromptSecretAsync(
         string title,

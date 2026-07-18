@@ -17,6 +17,7 @@ public partial class ShellViewModel : ObservableObject
 
     private readonly IAppSettingsService _settings;
     private readonly ILogger<ShellViewModel> _logger;
+    private readonly ITransientSessionCredentialStore? _transientCredentials;
 
     [ObservableProperty]
     private SessionTabViewModel? selectedTab;
@@ -112,18 +113,21 @@ public partial class ShellViewModel : ObservableObject
         ConnectionTreeViewModel tree,
         UpdateViewModel update,
         IAppSettingsService settings,
-        ILogger<ShellViewModel> logger)
+        ILogger<ShellViewModel> logger,
+        ITransientSessionCredentialStore? transientCredentials = null)
     {
         Tree = tree;
         Update = update;
         _settings = settings;
         _logger = logger;
+        _transientCredentials = transientCredentials;
 
         SidebarWidth = settings.Current.SidebarWidth;
 
         bool wasEmpty = Tabs.Count == 0;
         Tabs.CollectionChanged += (_, args) =>
         {
+            ReleaseTransientCredentials(args);
             var isEmpty = Tabs.Count == 0;
             if (isEmpty != wasEmpty)
             {
@@ -134,6 +138,25 @@ public partial class ShellViewModel : ObservableObject
 
             CoerceSelectedTabAfterTabsChanged(args);
         };
+    }
+
+    private void ReleaseTransientCredentials(NotifyCollectionChangedEventArgs args)
+    {
+        if (_transientCredentials is null) return;
+        if (args.Action == NotifyCollectionChangedAction.Reset)
+        {
+            _transientCredentials.Clear();
+            return;
+        }
+
+        if (args.OldItems is null) return;
+        foreach (var item in args.OldItems)
+        {
+            if (item is SessionTabViewModel { Profile: { IsEphemeral: true } profile })
+            {
+                _transientCredentials.Remove(profile.NodeId);
+            }
+        }
     }
 
     private void CoerceSelectedTabAfterTabsChanged(NotifyCollectionChangedEventArgs args)

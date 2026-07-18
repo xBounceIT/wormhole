@@ -57,6 +57,26 @@ public class VncSessionViewModelTests
     }
 
     [Fact]
+    public async Task PasswordProvider_EphemeralProfile_UsesTransientPasswordBeforePrompting()
+    {
+        var nodeId = Guid.NewGuid();
+        var transientCredentials = new TransientSessionCredentialStore();
+        transientCredentials.Store(nodeId, "session-vnc");
+        var dialog = new FakeDialogService { PasswordPromptResult = "prompted" };
+        var service = new FakeVncSessionService { RequestPassword = true };
+        var vm = CreateVm(
+            service,
+            dialog: dialog,
+            transientCredentials: transientCredentials);
+        vm.Initialize(Profile(nodeId: nodeId) with { IsEphemeral = true });
+
+        await vm.AttachAsync(new FakeRenderTarget());
+
+        Assert.Equal("session-vnc", Assert.Single(service.Passwords));
+        Assert.Equal(0, dialog.PasswordPromptCount);
+    }
+
+    [Fact]
     public async Task PasswordProvider_PromptsWhenSavedCredentialHasNoPassword()
     {
         var credentialId = Guid.NewGuid();
@@ -342,7 +362,8 @@ public class VncSessionViewModelTests
         FakeDialogService? dialog = null,
         ITunnelRoutePrompter? prompter = null,
         TunnelManager? tunnels = null,
-        IConnectionProfileResolver? profileResolver = null)
+        IConnectionProfileResolver? profileResolver = null,
+        ITransientSessionCredentialStore? transientCredentials = null)
     {
         credentials ??= new FakeCredentialService();
         credentialRepository ??= new FakeCredentialRepository();
@@ -355,7 +376,8 @@ public class VncSessionViewModelTests
             tunnels,
             prompter ?? new FakeRoutePrompter(),
             profileResolver ?? new FakeProfileResolver(null),
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            transientCredentials);
     }
 
     private static TunnelManager BuildTunnelManager(

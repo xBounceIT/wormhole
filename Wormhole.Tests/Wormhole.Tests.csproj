@@ -45,6 +45,7 @@
   <ItemGroup>
     <Compile Include="..\Models\ConnectionNode.cs" Link="Models\ConnectionNode.cs" />
     <Compile Include="..\Models\ConnectionProfile.cs" Link="Models\ConnectionProfile.cs" />
+    <Compile Include="..\Models\QuickConnectResult.cs" Link="Models\QuickConnectResult.cs" />
     <Compile Include="..\Models\AccountCredentialPromptResult.cs" Link="Models\AccountCredentialPromptResult.cs" />
     <Compile Include="..\Models\CredentialProfile.cs" Link="Models\CredentialProfile.cs" />
     <Compile Include="..\Models\BitwardenCredentialCacheEntry.cs" Link="Models\BitwardenCredentialCacheEntry.cs" />
@@ -206,6 +207,7 @@
     <Compile Include="..\Services\Ssh\TerminalText.cs" Link="Services\Ssh\TerminalText.cs" />
     <Compile Include="..\Services\Ssh\IPrivateKeyInspector.cs" Link="Services\Ssh\IPrivateKeyInspector.cs" />
     <Compile Include="..\Services\ISessionTabFactory.cs" Link="Services\ISessionTabFactory.cs" />
+    <Compile Include="..\Services\ITransientSessionCredentialStore.cs" Link="Services\ITransientSessionCredentialStore.cs" />
     <Compile Include="..\Services\IConnectionProfileResolver.cs" Link="Services\IConnectionProfileResolver.cs" />
     <Compile Include="..\Services\ConnectionProfileResolver.cs" Link="Services\ConnectionProfileResolver.cs" />
     <Compile Include="..\Services\IConnectionCredentialBindingService.cs" Link="Services\IConnectionCredentialBindingService.cs" />

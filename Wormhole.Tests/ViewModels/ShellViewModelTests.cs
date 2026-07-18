@@ -204,12 +204,58 @@ public class ShellViewModelTests
         Assert.Equal(1, vm.ActiveSessionCount);
     }
 
-    private static ShellViewModel CreateShell() =>
+    [Fact]
+    public void RemovingEphemeralTab_ReleasesTransientPassword()
+    {
+        var store = new TransientSessionCredentialStore();
+        var vm = CreateShell(store);
+        var nodeId = Guid.NewGuid();
+        store.Store(nodeId, "session-secret");
+        var tab = new TestSessionTab("quick");
+        tab.Initialize(CreateProfile(nodeId, isEphemeral: true));
+        vm.Tabs.Add(tab);
+
+        vm.Tabs.Remove(tab);
+
+        Assert.Null(store.Read(nodeId));
+    }
+
+    [Fact]
+    public async Task CloseAllSessionsAsync_ClearsAllTransientPasswords()
+    {
+        var store = new TransientSessionCredentialStore();
+        var vm = CreateShell(store);
+        var firstId = Guid.NewGuid();
+        var secondId = Guid.NewGuid();
+        store.Store(firstId, "first");
+        store.Store(secondId, "second");
+        var tab = new TestSessionTab("quick");
+        tab.Initialize(CreateProfile(firstId, isEphemeral: true));
+        vm.Tabs.Add(tab);
+
+        await vm.CloseAllSessionsAsync();
+
+        Assert.Null(store.Read(firstId));
+        Assert.Null(store.Read(secondId));
+    }
+
+    private static ShellViewModel CreateShell(ITransientSessionCredentialStore? transientCredentials = null) =>
         new(
             tree: null!,
             update: null!,
             settings: new FakeAppSettingsService(),
-            logger: NullLogger<ShellViewModel>.Instance);
+            logger: NullLogger<ShellViewModel>.Instance,
+            transientCredentials: transientCredentials);
+
+    private static ConnectionProfile CreateProfile(Guid nodeId, bool isEphemeral) => new()
+    {
+        NodeId = nodeId,
+        Name = "quick",
+        Protocol = ProtocolType.Ssh,
+        Host = "target.example.com",
+        Port = 22,
+        IsEphemeral = isEphemeral,
+    };
 
     private sealed class TestSessionTab : SessionTabViewModel
     {

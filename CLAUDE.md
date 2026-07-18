@@ -50,5 +50,5 @@ as a philosophical sequel to mRemoteNG. This file orients agents touching the co
 
 ## Current gaps
 
-- SFTP is not a standalone session protocol — `ProtocolType` is `Ssh`/`Rdp`/`Http`/`Https`/`Vnc`/`Serial`. SFTP file transfer is available from connected SSH tabs (see `SftpService` + the File Transfer dialog). Quick Connect is SSH/RDP/VNC/Serial; mRemoteNG import remains SSH/RDP/VNC-only (no HTTP/HTTPS/Serial yet).
+- SFTP is not a standalone session protocol — `ProtocolType` is `Ssh`/`Rdp`/`Http`/`Https`/`Vnc`/`Serial`. SFTP file transfer is available from connected SSH tabs (see `SftpService` + the File Transfer dialog). Quick Connect supports every session protocol through the full ephemeral connection editor; mRemoteNG import remains SSH/RDP/VNC-only (no HTTP/HTTPS/Serial yet).
 - [Views/Pages/ConnectionEditorPage.xaml](Views/Pages/ConnectionEditorPage.xaml) is a legacy placeholder page; the real editor is [Views/Dialogs/NewConnectionDialog.xaml](Views/Dialogs/NewConnectionDialog.xaml).

@@ -28,6 +28,7 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
     private readonly ITunnelRoutePrompter _tunnelPrompter;
     private readonly IConnectionProfileResolver _profileResolver;
     private readonly ILogger<VncSessionViewModel> _logger;
+    private readonly ITransientSessionCredentialStore? _transientCredentials;
 
     private IVncSession? _session;
     private ITunnelInstance? _tunnel;
@@ -47,7 +48,8 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
         TunnelManager tunnels,
         ITunnelRoutePrompter tunnelPrompter,
         IConnectionProfileResolver profileResolver,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        ITransientSessionCredentialStore? transientCredentials = null)
         : this(
             vncService,
             passwordResolver,
@@ -56,7 +58,8 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
             tunnels,
             tunnelPrompter,
             profileResolver,
-            loggerFactory)
+            loggerFactory,
+            transientCredentials)
     {
     }
 
@@ -69,7 +72,8 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
         TunnelManager tunnels,
         ITunnelRoutePrompter tunnelPrompter,
         IConnectionProfileResolver profileResolver,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        ITransientSessionCredentialStore? transientCredentials = null)
     {
         _vncService = vncService;
         _passwordResolver = passwordResolver;
@@ -79,6 +83,7 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
         _tunnelPrompter = tunnelPrompter;
         _profileResolver = profileResolver;
         _logger = loggerFactory.CreateLogger<VncSessionViewModel>();
+        _transientCredentials = transientCredentials;
 
         PropertyChanged += (_, args) =>
         {
@@ -255,6 +260,7 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
                 _passwordResolver,
                 _credentialCatalog,
                 _dialog,
+                _transientCredentials,
                 UiDispatcher,
                 _logger);
             pendingSession = await _vncService.ConnectAsync(
@@ -319,6 +325,7 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
     {
         var current = Profile;
         if (current is null) return;
+        if (current.IsEphemeral) return;
 
         var refreshed = await _profileResolver.ResolveAsync(current.NodeId).ConfigureAwait(true);
         if (refreshed is null || refreshed.Protocol != Protocol) return;
@@ -458,6 +465,7 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
         private readonly ICredentialPasswordResolver _passwordResolver;
         private readonly IBitwardenCredentialCatalogService _credentialCatalog;
         private readonly IDialogService _dialog;
+        private readonly ITransientSessionCredentialStore? _transientCredentials;
         private readonly DispatcherQueue? _dispatcher;
         private readonly ILogger _logger;
         private bool _resolved;
@@ -468,6 +476,7 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
             ICredentialPasswordResolver passwordResolver,
             IBitwardenCredentialCatalogService credentialCatalog,
             IDialogService dialog,
+            ITransientSessionCredentialStore? transientCredentials,
             DispatcherQueue? dispatcher,
             ILogger logger)
         {
@@ -475,6 +484,7 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
             _passwordResolver = passwordResolver;
             _credentialCatalog = credentialCatalog;
             _dialog = dialog;
+            _transientCredentials = transientCredentials;
             _dispatcher = dispatcher;
             _logger = logger;
         }
@@ -483,6 +493,13 @@ public sealed partial class VncSessionViewModel : SessionTabViewModel
         {
             if (_resolved) return _password;
             _resolved = true;
+
+            if (_profile.IsEphemeral &&
+                _transientCredentials?.Read(_profile.NodeId) is { Length: > 0 } transient)
+            {
+                _password = transient;
+                return _password;
+            }
 
             if (_profile.CredentialId is { } credentialId)
             {

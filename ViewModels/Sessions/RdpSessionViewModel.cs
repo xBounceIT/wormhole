@@ -42,6 +42,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     private readonly IDialogService _dialog;
     private readonly IRdpCrashSentinelService _crashSentinel;
     private readonly ILogger<RdpSessionViewModel> _logger;
+    private readonly ITransientSessionCredentialStore? _transientCredentials;
 
     private IRdpSession? _session;
     private ITunnelInstance? _tunnel;
@@ -76,7 +77,8 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         IConnectionProfileResolver profileResolver,
         IDialogService dialog,
         IRdpCrashSentinelService crashSentinel,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        ITransientSessionCredentialStore? transientCredentials = null)
         : this(
             rdpService,
             credentialService,
@@ -88,7 +90,8 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             profileResolver,
             dialog,
             crashSentinel,
-            loggerFactory)
+            loggerFactory,
+            transientCredentials)
     {
     }
 
@@ -104,7 +107,8 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         IConnectionProfileResolver profileResolver,
         IDialogService dialog,
         IRdpCrashSentinelService crashSentinel,
-        ILoggerFactory loggerFactory)
+        ILoggerFactory loggerFactory,
+        ITransientSessionCredentialStore? transientCredentials = null)
     {
         _rdpService = rdpService;
         _credentialService = credentialService;
@@ -117,6 +121,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         _dialog = dialog;
         _crashSentinel = crashSentinel;
         _logger = loggerFactory.CreateLogger<RdpSessionViewModel>();
+        _transientCredentials = transientCredentials;
 
         // Status lives on the base class — re-broadcast its dependents from the derived VM
         // since [NotifyPropertyChangedFor] only sees properties on its own partial class.
@@ -491,6 +496,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     {
         var current = Profile;
         if (current is null) return;
+        if (current.IsEphemeral) return;
 
         var refreshed = await _profileResolver.ResolveAsync(current.NodeId).ConfigureAwait(true);
         if (refreshed is null) return;
@@ -938,7 +944,21 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             }
         }
 
-        if (!forcePrompt && profile.UseInlinePassword && username is not null)
+        if (!forcePrompt &&
+            profile.IsEphemeral &&
+            username is not null &&
+            _transientCredentials?.Read(profile.NodeId) is { Length: > 0 } transient)
+        {
+            return new ResolvedRdpCredentials(
+                username,
+                domain,
+                transient,
+                usernameSource,
+                domainSource,
+                RdpCredentialPasswordSource.InlineConnection);
+        }
+
+        if (!forcePrompt && !profile.IsEphemeral && profile.UseInlinePassword && username is not null)
         {
             try
             {
@@ -1009,6 +1029,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 ProtocolType.Rdp,
                 requireUsername: true,
                 initialUsername: null,
+                allowSaveCredentialToConnection: !profile.IsEphemeral,
                 cancellationToken: token).ConfigureAwait(true);
             token.ThrowIfCancellationRequested();
             if (prompted is null) return null;
@@ -1049,6 +1070,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             ProtocolType.Rdp,
             requireUsername: false,
             initialUsername: prefix,
+            allowSaveCredentialToConnection: !profile.IsEphemeral,
             cancellationToken: token).ConfigureAwait(true);
         token.ThrowIfCancellationRequested();
         if (passwordPrompt?.SelectedCredential is not null)
@@ -1074,7 +1096,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
     {
         if (prompt.SelectedCredential is not { } selectedCredential) return null;
 
-        if (prompt.SaveCredentialToConnection)
+        if (!profile.IsEphemeral && prompt.SaveCredentialToConnection)
         {
             await _credentialBindings.SaveCredentialBindingAsync(
                 profile.NodeId,

@@ -481,6 +481,7 @@ public sealed partial class SerialSessionViewModel : SessionTabViewModel, ITermi
     {
         var current = Profile;
         if (current is null) return IsAttemptCurrent(lifecycleGeneration);
+        if (current.IsEphemeral) return IsAttemptCurrent(lifecycleGeneration);
 
         var refreshed = await _profileResolver.ResolveAsync(current.NodeId).ConfigureAwait(true);
         if (!IsAttemptCurrent(lifecycleGeneration)) return false;

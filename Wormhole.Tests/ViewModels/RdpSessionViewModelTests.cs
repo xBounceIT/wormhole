@@ -1155,6 +1155,29 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public async Task AttachAsync_EphemeralPassword_ConnectsWithoutCredentialManagerOrPrompt()
+    {
+        var nodeId = Guid.NewGuid();
+        var transientCredentials = new TransientSessionCredentialStore();
+        transientCredentials.Store(nodeId, "session-only");
+        var (vm, svc, _, dlg, _) = CreateVm(transientCredentials: transientCredentials);
+        svc.NextSession = new FakeRdpSession();
+        vm.Initialize(MakeProfile() with
+        {
+            NodeId = nodeId,
+            IsEphemeral = true,
+            UseInlinePassword = true,
+            CredentialId = null,
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal("session-only", svc.LastPassword);
+        Assert.Equal(0, dlg.PasswordPromptCount);
+        Assert.Equal(0, dlg.CredentialsPromptCount);
+    }
+
+    [Fact]
     public async Task AttachAsync_InlinePasswordMissingSecret_FallsBackToPasswordPrompt()
     {
         var nodeId = Guid.NewGuid();
@@ -2134,7 +2157,8 @@ public class RdpSessionViewModelTests
         IConnectionRepository? connectionRepository = null,
         IConnectionCredentialBindingService? credentialBindings = null,
         FakeAppSettingsService? settings = null,
-        ICredentialPasswordResolver? passwordResolver = null)
+        ICredentialPasswordResolver? passwordResolver = null,
+        ITransientSessionCredentialStore? transientCredentials = null)
     {
         var svc = new FakeRdpSessionService();
         creds ??= new FakeCredentialService();
@@ -2159,7 +2183,8 @@ public class RdpSessionViewModelTests
             BuildProfileResolver(connectionRepository),
             dlg,
             sentinel,
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            transientCredentials);
         return (vm, svc, creds, dlg, sentinel);
     }
 

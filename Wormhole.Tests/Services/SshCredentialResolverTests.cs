@@ -368,13 +368,57 @@ public class SshCredentialResolverTests
         Assert.Equal("typed-pwd", creds.Password);
         Assert.Equal(1, dialogs.PasswordPromptCount);
     }
+
+    [Fact]
+    public async Task Resolve_EphemeralProfile_UsesTransientPasswordWithoutPromptOrCredentialManager()
+    {
+        var nodeId = Guid.NewGuid();
+        var store = new TransientSessionCredentialStore();
+        store.Store(nodeId, "session-only");
+        var dialogs = new FakeDialogService();
+        var resolver = NewResolver(dialogs, transientCredentials: store);
+
+        var credentials = await resolver.ResolveAsync(
+            MakeProfile(credentialId: null, nodeId: nodeId, isEphemeral: true));
+
+        Assert.Equal("session-only", credentials.Password);
+        Assert.Equal(0, dialogs.AccountCredentialPromptCount);
+    }
+
+    [Fact]
+    public async Task Resolve_EphemeralPrompt_NeverPersistsSelectedCredentialBinding()
+    {
+        var credential = new CredentialProfile
+        {
+            Id = Guid.NewGuid(),
+            Protocol = ProtocolType.Ssh,
+            Kind = CredentialKind.Password,
+            Username = "saved-user",
+        };
+        var dialogs = new FakeDialogService
+        {
+            AccountCredentialPromptResult = new AccountCredentialPromptResult(
+                credential.Username,
+                "prompted",
+                credential,
+                SaveCredentialToConnection: true),
+        };
+        var bindings = new FakeConnectionCredentialBindingService();
+        var resolver = NewResolver(dialogs, credentialBindings: bindings);
+
+        await resolver.ResolveAsync(MakeProfile(credentialId: null, isEphemeral: true));
+
+        Assert.Equal(0, bindings.SaveCount);
+    }
+
     private static SshCredentialResolver NewResolver(
         FakeDialogService dialogs,
         FakeCredentialRepository? repo = null,
         ICredentialService? creds = null,
         FakePrivateKeyInspector? inspector = null,
         IConnectionCredentialBindingService? credentialBindings = null,
-        ICredentialPasswordResolver? passwordResolver = null)
+        ICredentialPasswordResolver? passwordResolver = null,
+        ITransientSessionCredentialStore? transientCredentials = null)
     {
         creds ??= new FakeCredentialService();
         return new SshCredentialResolver(
@@ -383,10 +427,15 @@ public class SshCredentialResolverTests
             passwordResolver ?? new FakeCredentialPasswordResolver(creds),
             credentialBindings ?? new FakeConnectionCredentialBindingService(),
             dialogs,
-            inspector ?? new FakePrivateKeyInspector());
+            inspector ?? new FakePrivateKeyInspector(),
+            transientCredentials);
     }
 
-    private static ConnectionProfile MakeProfile(Guid? credentialId, bool useInlinePassword = false, Guid? nodeId = null)
+    private static ConnectionProfile MakeProfile(
+        Guid? credentialId,
+        bool useInlinePassword = false,
+        Guid? nodeId = null,
+        bool isEphemeral = false)
         => new()
         {
             NodeId = nodeId ?? Guid.NewGuid(),
@@ -397,6 +446,7 @@ public class SshCredentialResolverTests
             Username = "alice",
             CredentialId = credentialId,
             UseInlinePassword = useInlinePassword,
+            IsEphemeral = isEphemeral,
         };
 
     private sealed class ThrowingPasswordResolver : ICredentialPasswordResolver

@@ -12,6 +12,12 @@ using Wormhole.Services.Bitwarden;
 
 namespace Wormhole.ViewModels;
 
+public enum ConnectionEditorMode
+{
+    Persistent,
+    QuickConnect,
+}
+
 /// <summary>
 /// Backs the multi-tab connection editor dialog. Holds every editable field, exposes
 /// LoadFrom/WriteTo for round-tripping with the persistence model, and surfaces validation
@@ -45,6 +51,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     // The node's own UseInlinePassword as loaded, so LoadInlineSecretAsync only reads a secret
     // for a connection that actually has one.
     private bool _loadedUseInlinePassword;
+    private ConnectionEditorMode _mode;
 
     internal ConnectionEditorViewModel(
         ICredentialRepository credentialRepository,
@@ -75,6 +82,15 @@ public partial class ConnectionEditorViewModel : ObservableObject
     /// via the extracted sub-VM; the connection editor uses the default "(Inherit from folder)"
     /// inherit-label.</summary>
     public TunnelPickerViewModel TunnelPicker { get; }
+
+    public bool IsQuickConnect => _mode == ConnectionEditorMode.QuickConnect;
+    public bool SupportsInheritance => !IsQuickConnect;
+    public string NameHeader => IsQuickConnect ? "Session name (optional)" : "Name";
+    public string NamePlaceholder => IsQuickConnect ? "Defaults to target" : "prod-web";
+    public string CredentialPlaceholder => IsQuickConnect ? "Prompt every time" : "Inherit from folder";
+    public string TunnelHelpText => IsQuickConnect
+        ? "Started before the target connection. Select a saved VPN configuration or leave No tunnel."
+        : "Started before the target connection. \"Inherit from folder\" follows the parent folder's tunnel setting; \"No tunnel\" overrides any inherited tunnel.";
 
     /// <summary>
     /// Filtered view over <see cref="_allCredentials"/> for the current <see cref="Protocol"/>:
@@ -141,7 +157,8 @@ public partial class ConnectionEditorViewModel : ObservableObject
 
     /// <summary>The inline Password field is shown for SSH/RDP connections that aren't using a
     /// saved credential. Web protocols do not use credentials.</summary>
-    public bool ShowInlinePassword => (IsSsh || IsRdp) && !UseSavedCredentials;
+    public bool ShowInlinePassword =>
+        (IsSsh || IsRdp || (IsQuickConnect && IsVnc)) && !UseSavedCredentials;
 
     /// <summary>
     /// Connection-level username is meaningful for SSH/RDP prompt mode. VNC v1 uses no-auth or
@@ -189,12 +206,21 @@ public partial class ConnectionEditorViewModel : ObservableObject
     internal const string SshAutoSudoOn = "on";
     internal const string SshAutoSudoOff = "off";
 
-    public IReadOnlyList<KeyValuePair<string, string>> SshAutoSudoChoices { get; } = new[]
+    private static readonly IReadOnlyList<KeyValuePair<string, string>> PersistentSshAutoSudoChoices = new[]
     {
         new KeyValuePair<string, string>(SshAutoSudoInherit, "Inherit from folder"),
         new KeyValuePair<string, string>(SshAutoSudoOn, "On"),
         new KeyValuePair<string, string>(SshAutoSudoOff, "Off"),
     };
+
+    private static readonly IReadOnlyList<KeyValuePair<string, string>> QuickConnectSshAutoSudoChoices = new[]
+    {
+        new KeyValuePair<string, string>(SshAutoSudoOn, "On"),
+        new KeyValuePair<string, string>(SshAutoSudoOff, "Off"),
+    };
+
+    public IReadOnlyList<KeyValuePair<string, string>> SshAutoSudoChoices =>
+        IsQuickConnect ? QuickConnectSshAutoSudoChoices : PersistentSshAutoSudoChoices;
 
     /// <summary>
     /// Short, value-specific help for the Auto sudo control, shown under the picker and updated
@@ -207,7 +233,9 @@ public partial class ConnectionEditorViewModel : ObservableObject
         SshAutoSudoOn => "Runs “sudo su” on connect and sends the saved password at the prompt. " +
                          "If sudo doesn’t prompt (NOPASSWD or cached), nothing is sent.",
         SshAutoSudoOff => "Never runs sudo automatically on connect.",
-        _ => "Follows the parent folder’s Auto sudo setting.",
+        _ => IsQuickConnect
+            ? "Never runs sudo automatically on connect."
+            : "Follows the parent folder’s Auto sudo setting.",
     };
 
     /// <summary>
@@ -265,7 +293,9 @@ public partial class ConnectionEditorViewModel : ObservableObject
             if (value is null || value.Id == InheritCredential.Id)
             {
                 CredentialId = null;
-                CredentialMode = CredentialBindingMode.Inherit;
+                CredentialMode = IsQuickConnect
+                    ? CredentialBindingMode.None
+                    : CredentialBindingMode.Inherit;
             }
             else if (value.Id == NoneCredential.Id)
             {
@@ -280,8 +310,18 @@ public partial class ConnectionEditorViewModel : ObservableObject
         }
     }
 
-    private CredentialBindingMode EffectiveCredentialMode =>
-        CredentialMode ?? (CredentialId is null ? CredentialBindingMode.Inherit : CredentialBindingMode.Saved);
+    private CredentialBindingMode EffectiveCredentialMode
+    {
+        get
+        {
+            var mode = CredentialMode ?? (CredentialId is null
+                ? CredentialBindingMode.Inherit
+                : CredentialBindingMode.Saved);
+            return IsQuickConnect && mode == CredentialBindingMode.Inherit
+                ? CredentialBindingMode.None
+                : mode;
+        }
+    }
 
     /// <summary>
     /// True only when <see cref="CredentialId"/> resolves to a saved credential that actually carries
@@ -675,7 +715,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
     {
         get
         {
-            if (string.IsNullOrWhiteSpace(Name)) return false;
+            if (!IsQuickConnect && string.IsNullOrWhiteSpace(Name)) return false;
             if (string.IsNullOrWhiteSpace(Host)) return false;
             if (HttpAddressError is not null) return false;
             // Port is int?: null means "use the inherited / protocol-default port" (the
@@ -773,11 +813,9 @@ public partial class ConnectionEditorViewModel : ObservableObject
     {
         var connectionNeedsPasswordCredential = Protocol is ProtocolType.Rdp or ProtocolType.Vnc;
 
-        var available = new List<CredentialProfile>(_allCredentials.Count + 3)
-        {
-            InheritCredential,
-            NoneCredential,
-        };
+        var available = new List<CredentialProfile>(_allCredentials.Count + 3);
+        if (SupportsInheritance) available.Add(InheritCredential);
+        available.Add(NoneCredential);
         var gatewayAvailable = new List<CredentialProfile>(_allCredentials.Count + 1)
         {
             NoneCredential,
@@ -893,7 +931,10 @@ public partial class ConnectionEditorViewModel : ObservableObject
             var connectionNeedsPasswordCredential = value is ProtocolType.Rdp or ProtocolType.Vnc;
             var stillCompatible = cred.Protocol == value
                 && (!connectionNeedsPasswordCredential || cred.Kind != CredentialKind.SshKey);
-            if (!stillCompatible) SelectedCredential = InheritCredential;
+            if (!stillCompatible)
+            {
+                SelectedCredential = IsQuickConnect ? NoneCredential : InheritCredential;
+            }
         }
         // Gateway credential is RDP-only — switching away from RDP makes it meaningless.
         if (value != ProtocolType.Rdp) RdpGatewayCredentialId = null;
@@ -965,7 +1006,9 @@ public partial class ConnectionEditorViewModel : ObservableObject
         }
     }
 
-    public void LoadFrom(ConnectionNode node)
+    public void LoadFrom(ConnectionNode node) => LoadFrom(node, ConnectionEditorMode.Persistent);
+
+    public void LoadFrom(ConnectionNode node, ConnectionEditorMode mode)
     {
         // Save-and-restore the suppress flag instead of forcing it to false in finally. The
         // current call-graph never re-enters LoadFrom, but a future protocol-change side
@@ -973,6 +1016,18 @@ public partial class ConnectionEditorViewModel : ObservableObject
         // load if we hard-reset here. Treat any persisted RdpUseExternalClient=true value
         // as user-set (we have no audit field that records "auto-flagged by editor"), so
         // _autoFlagAppliedByAad starts at false — the user can still untick manually.
+        _mode = mode;
+        TunnelPicker.ConfigureInheritance(SupportsInheritance);
+        OnPropertyChanged(nameof(IsQuickConnect));
+        OnPropertyChanged(nameof(SupportsInheritance));
+        OnPropertyChanged(nameof(NameHeader));
+        OnPropertyChanged(nameof(NamePlaceholder));
+        OnPropertyChanged(nameof(CredentialPlaceholder));
+        OnPropertyChanged(nameof(TunnelHelpText));
+        OnPropertyChanged(nameof(SshAutoSudoChoices));
+        OnPropertyChanged(nameof(ShowInlinePassword));
+        OnPropertyChanged(nameof(IsValid));
+
         var previousSuppress = _suppressAadAutoFlag;
         _suppressAadAutoFlag = true;
         _autoFlagAppliedByAad = false;
@@ -1003,7 +1058,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
             RdpDomain = node.RdpDomain ?? string.Empty;
             CredentialId = node.CredentialId;
             CredentialMode = node.CredentialMode ?? (node.CredentialId is null
-                ? CredentialBindingMode.Inherit
+                ? IsQuickConnect ? CredentialBindingMode.None : CredentialBindingMode.Inherit
                 : CredentialBindingMode.Saved);
             _editingNodeId = node.Id;
             _loadedUseInlinePassword = node.UseInlinePassword ?? false;
@@ -1011,12 +1066,12 @@ public partial class ConnectionEditorViewModel : ObservableObject
             // The plaintext is fetched lazily from Credential Manager by LoadInlineSecretAsync
             // (an async call the synchronous LoadFrom can't make); start blank.
             InlinePassword = string.Empty;
-            _loadedSshAutoSudo = node.SshAutoSudo;
+            _loadedSshAutoSudo = IsQuickConnect ? false : node.SshAutoSudo;
             SshAutoSudoMode = node.SshAutoSudo switch
             {
                 true => SshAutoSudoOn,
                 false => SshAutoSudoOff,
-                null => SshAutoSudoInherit,
+                null => IsQuickConnect ? SshAutoSudoOff : SshAutoSudoInherit,
             };
 
             RdpScreenSize = RdpScreenSizes.NormalizeForPicker(node.RdpScreenSize);
@@ -1073,11 +1128,11 @@ public partial class ConnectionEditorViewModel : ObservableObject
             RdpGatewayUseSameCreds = node.RdpGatewayUseSameCreds ?? false;
             RdpUseExternalClient = node.RdpUseExternalClient ?? false;
 
-            SerialBaudRateInherits = node.SerialBaudRate is null;
-            SerialDataBitsInherits = node.SerialDataBits is null;
-            SerialStopBitsInherits = node.SerialStopBits is null;
-            SerialParityInherits = node.SerialParity is null;
-            SerialFlowControlInherits = node.SerialFlowControl is null;
+            SerialBaudRateInherits = SupportsInheritance && node.SerialBaudRate is null;
+            SerialDataBitsInherits = SupportsInheritance && node.SerialDataBits is null;
+            SerialStopBitsInherits = SupportsInheritance && node.SerialStopBits is null;
+            SerialParityInherits = SupportsInheritance && node.SerialParity is null;
+            SerialFlowControlInherits = SupportsInheritance && node.SerialFlowControl is null;
             SerialBaudRate = SerialDefaults.NormalizeBaudRate(node.SerialBaudRate);
             SerialDataBits = SerialDefaults.NormalizeDataBits(node.SerialDataBits);
             SerialStopBits = SerialDefaults.NormalizeStopBits(node.SerialStopBits);
@@ -1098,7 +1153,7 @@ public partial class ConnectionEditorViewModel : ObservableObject
         }
     }
 
-    public void WriteTo(ConnectionNode node)
+    public void WriteTo(ConnectionNode node, bool includePendingInlinePassword = true)
     {
         node.Name = Name.Trim();
         node.Protocol = Protocol;
@@ -1161,7 +1216,9 @@ public partial class ConnectionEditorViewModel : ObservableObject
             node.CredentialId = null;
             node.CredentialMode = CredentialBindingMode.None;
             node.UseInlinePassword = canUseInlinePassword;
-            node.PendingInlinePassword = canUseInlinePassword ? InlinePassword : null; // never logged
+            node.PendingInlinePassword = canUseInlinePassword && includePendingInlinePassword
+                ? InlinePassword
+                : null; // never logged
         }
         else
         {
