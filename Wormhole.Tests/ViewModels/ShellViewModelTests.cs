@@ -238,6 +238,29 @@ public class ShellViewModelTests
     }
 
     [Fact]
+    public void RemovingDuplicatedEphemeralTabs_ReleasesPasswordAfterLastCopyCloses()
+    {
+        var store = new TransientSessionCredentialStore();
+        var vm = CreateShell(store);
+        var nodeId = Guid.NewGuid();
+        store.Store(nodeId, "session-secret");
+        var first = new TestSessionTab("quick-1");
+        first.Initialize(CreateProfile(nodeId, isEphemeral: true));
+        var duplicate = new TestSessionTab("quick-2");
+        duplicate.Initialize(CreateProfile(nodeId, isEphemeral: true));
+        vm.Tabs.Add(first);
+        vm.Tabs.Add(duplicate);
+
+        vm.Tabs.Remove(first);
+
+        Assert.Equal("session-secret", store.Read(nodeId));
+
+        vm.Tabs.Remove(duplicate);
+
+        Assert.Null(store.Read(nodeId));
+    }
+
+    [Fact]
     public async Task CloseAllSessionsAsync_ClearsAllTransientPasswords()
     {
         var store = new TransientSessionCredentialStore();

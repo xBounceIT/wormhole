@@ -159,7 +159,13 @@ public partial class ShellViewModel : ObservableObject
         {
             if (item is SessionTabViewModel { Profile: { IsEphemeral: true } profile })
             {
-                _transientCredentials.Remove(profile.NodeId);
+                var hasOpenDuplicate = Tabs.Any(tab =>
+                    tab.Profile is { IsEphemeral: true } remaining &&
+                    remaining.NodeId == profile.NodeId);
+                if (!hasOpenDuplicate)
+                {
+                    _transientCredentials.Remove(profile.NodeId);
+                }
             }
         }
     }
