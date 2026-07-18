@@ -97,7 +97,9 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
 
     public async Task<SshCredentials> ResolveAsync(ConnectionProfile profile, CancellationToken cancellationToken = default)
     {
-        if (profile.IsEphemeral && _transientCredentials?.Read(profile.NodeId) is { Length: > 0 } transient)
+        if (profile.IsEphemeral &&
+            !string.IsNullOrWhiteSpace(profile.Username) &&
+            _transientCredentials?.Read(profile.NodeId) is { Length: > 0 } transient)
         {
             return new SshCredentials(transient, null, null);
         }

@@ -386,6 +386,34 @@ public class SshCredentialResolverTests
     }
 
     [Fact]
+    public async Task Resolve_EphemeralTransientPasswordWithoutUsername_PromptsForIdentity()
+    {
+        var nodeId = Guid.NewGuid();
+        var store = new TransientSessionCredentialStore();
+        store.Store(nodeId, "session-only");
+        var dialogs = new FakeDialogService
+        {
+            AccountCredentialPromptResult = new AccountCredentialPromptResult(
+                "prompted-user",
+                "prompted-password",
+                SelectedCredential: null,
+                SaveCredentialToConnection: false),
+        };
+        var resolver = NewResolver(dialogs, transientCredentials: store);
+        var profile = MakeProfile(credentialId: null, nodeId: nodeId, isEphemeral: true) with
+        {
+            Username = null,
+        };
+
+        var credentials = await resolver.ResolveAsync(profile);
+
+        Assert.True(dialogs.LastAccountCredentialPromptRequiredUsername);
+        Assert.Equal("prompted-user", credentials.ResolveUsername(profile));
+        Assert.Equal("prompted-password", credentials.Password);
+        Assert.Equal("session-only", store.Read(nodeId));
+    }
+
+    [Fact]
     public async Task Resolve_EphemeralPrompt_NeverPersistsSelectedCredentialBinding()
     {
         var credential = new CredentialProfile
