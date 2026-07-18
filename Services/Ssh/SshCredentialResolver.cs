@@ -213,12 +213,13 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
     {
         cancellationToken.ThrowIfCancellationRequested();
         var username = string.IsNullOrWhiteSpace(profile.Username) ? credentialUsername : profile.Username;
-        var user = string.IsNullOrWhiteSpace(username) ? profile.Host : username + "@" + profile.Host;
+        var requiresUsername = string.IsNullOrWhiteSpace(username);
+        var user = requiresUsername ? profile.Host : username + "@" + profile.Host;
         var result = await _dialogs.PromptAccountCredentialsAsync(
             "SSH password",
             "Enter the password for " + user + ":",
             ProtocolType.Ssh,
-            requireUsername: false,
+            requireUsername: requiresUsername,
             initialUsername: username,
             allowSaveCredentialToConnection: !profile.IsEphemeral,
             cancellationToken: cancellationToken).ConfigureAwait(true);

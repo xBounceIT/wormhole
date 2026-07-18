@@ -411,6 +411,28 @@ public class SshCredentialResolverTests
         Assert.Equal(0, bindings.SaveCount);
     }
 
+    [Fact]
+    public async Task Resolve_MissingUsername_RequiresAndUsesPromptedUsername()
+    {
+        var dialogs = new FakeDialogService
+        {
+            AccountCredentialPromptResult = new AccountCredentialPromptResult(
+                "prompted-user",
+                "prompted-password",
+                SelectedCredential: null,
+                SaveCredentialToConnection: false),
+        };
+        var resolver = NewResolver(dialogs);
+        var profile = MakeProfile(credentialId: null, isEphemeral: true) with { Username = null };
+
+        var credentials = await resolver.ResolveAsync(profile);
+
+        Assert.True(dialogs.LastAccountCredentialPromptRequiredUsername);
+        Assert.Null(dialogs.LastAccountCredentialPromptInitialUsername);
+        Assert.Equal("prompted-user", credentials.ResolveUsername(profile));
+        Assert.Equal("prompted-password", credentials.Password);
+    }
+
     private static SshCredentialResolver NewResolver(
         FakeDialogService dialogs,
         FakeCredentialRepository? repo = null,
