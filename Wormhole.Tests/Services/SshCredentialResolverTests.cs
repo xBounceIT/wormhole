@@ -410,7 +410,12 @@ public class SshCredentialResolverTests
         Assert.True(dialogs.LastAccountCredentialPromptRequiredUsername);
         Assert.Equal("prompted-user", credentials.ResolveUsername(profile));
         Assert.Equal("prompted-password", credentials.Password);
-        Assert.Equal("session-only", store.Read(nodeId));
+        Assert.Equal("prompted-password", store.Read(nodeId));
+
+        var reconnected = await resolver.ResolveAsync(profile with { Username = "prompted-user" });
+
+        Assert.Equal("prompted-password", reconnected.Password);
+        Assert.Equal(1, dialogs.AccountCredentialPromptCount);
     }
 
     [Fact]

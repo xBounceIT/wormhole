@@ -237,6 +237,11 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
             return SshCredentials.Empty;
         }
 
+        if (profile.IsEphemeral)
+        {
+            _transientCredentials?.Store(profile.NodeId, result.Password);
+        }
+
         if (!profile.IsEphemeral &&
             result.SelectedCredential is { } selectedCredential &&
             result.SaveCredentialToConnection)
