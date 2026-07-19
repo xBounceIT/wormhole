@@ -689,6 +689,18 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 {
                     profile = resolvedProfile;
 
+                    // Keep prompted identity in this ephemeral tab so Retry can pair it with
+                    // the session-only password. Start from Profile rather than the routed
+                    // attempt so a one-time tunnel choice does not become sticky.
+                    if (profile.IsEphemeral && Profile is { IsEphemeral: true } ephemeralProfile)
+                    {
+                        UpdateProfile(ephemeralProfile with
+                        {
+                            Username = resolvedProfile.Username,
+                            RdpDomain = resolvedProfile.RdpDomain,
+                        });
+                    }
+
                     // The external-client routing decision at the top of ConnectAsync ran with
                     // the pre-resolution identity, so an AAD-flavored username/domain supplied
                     // by a prompt or linked credential may not have triggered the auto-route to
