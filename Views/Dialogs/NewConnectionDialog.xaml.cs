@@ -76,11 +76,17 @@ public sealed partial class NewConnectionDialog : UserControl, INotifyPropertyCh
     /// Picker data and secrets are hydrated after ContentDialog.Opened.
     /// </summary>
     public void Prepare(ConnectionNode initial)
+        => Prepare(initial, ConnectionEditorMode.Persistent);
+
+    public void PrepareQuickConnect(ConnectionNode initial)
+        => Prepare(initial, ConnectionEditorMode.QuickConnect);
+
+    private void Prepare(ConnectionNode initial, ConnectionEditorMode mode)
     {
         _optionsLoaded = false;
         OptionsLoadingBar.Visibility = Visibility.Visible;
         OptionsLoadError.IsOpen = false;
-        ViewModel.LoadFrom(initial);
+        ViewModel.LoadFrom(initial, mode);
         Bindings.Update();
         _inlinePasswordChangedByUser = false;
         SetInlinePassword(string.Empty);
@@ -153,10 +159,44 @@ public sealed partial class NewConnectionDialog : UserControl, INotifyPropertyCh
     /// Id and parent linkage.</summary>
     public void WriteTo(ConnectionNode node) => ViewModel.WriteTo(node);
 
+    public void WriteQuickConnectTo(ConnectionNode node) =>
+        ViewModel.WriteTo(node, includePendingInlinePassword: false);
+
     public void FocusNameField()
     {
         NameBox.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
         NameBox.SelectAll();
+    }
+
+    public void FocusPrimaryField()
+    {
+        if (!ViewModel.IsQuickConnect)
+        {
+            FocusNameField();
+            return;
+        }
+
+        HostBox.Focus(FocusState.Programmatic);
+        HostBox.SelectAll();
+    }
+
+    /// <summary>
+    /// Move the accepted Quick Connect password out of the editor without ever attaching it to
+    /// the connection node/profile. Saved-credential mode and credential-less protocols return null.
+    /// </summary>
+    public string? TakeQuickConnectPassword()
+    {
+        if (!ViewModel.IsQuickConnect ||
+            ViewModel.UseSavedCredentials ||
+            ViewModel.Protocol is not (ProtocolType.Ssh or ProtocolType.Rdp or ProtocolType.Vnc))
+        {
+            return null;
+        }
+
+        var password = InlinePasswordBox.Password;
+        SetInlinePassword(string.Empty);
+        ViewModel.InlinePassword = string.Empty;
+        return string.IsNullOrEmpty(password) ? null : password;
     }
 
     // PasswordBox.Password has no x:Bind-able dependency property, so mirror it into the VM here.

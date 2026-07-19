@@ -55,6 +55,7 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
     private readonly IConnectionCredentialBindingService _credentialBindings;
     private readonly IDialogService _dialogs;
     private readonly IPrivateKeyInspector _keyInspector;
+    private readonly ITransientSessionCredentialStore? _transientCredentials;
 
     public SshCredentialResolver(
         ICredentialRepository credentialRepo,
@@ -62,14 +63,16 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
         ICredentialPasswordResolver passwordResolver,
         IConnectionCredentialBindingService credentialBindings,
         IDialogService dialogs,
-        IPrivateKeyInspector keyInspector)
+        IPrivateKeyInspector keyInspector,
+        ITransientSessionCredentialStore? transientCredentials = null)
         : this(
             new RepositoryCredentialCatalogAdapter(credentialRepo),
             credentialService,
             passwordResolver,
             credentialBindings,
             dialogs,
-            keyInspector)
+            keyInspector,
+            transientCredentials)
     {
     }
 
@@ -80,7 +83,8 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
         ICredentialPasswordResolver passwordResolver,
         IConnectionCredentialBindingService credentialBindings,
         IDialogService dialogs,
-        IPrivateKeyInspector keyInspector)
+        IPrivateKeyInspector keyInspector,
+        ITransientSessionCredentialStore? transientCredentials = null)
     {
         _credentialCatalog = credentialCatalog;
         _credentialService = credentialService;
@@ -88,17 +92,25 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
         _credentialBindings = credentialBindings;
         _dialogs = dialogs;
         _keyInspector = keyInspector;
+        _transientCredentials = transientCredentials;
     }
 
     public async Task<SshCredentials> ResolveAsync(ConnectionProfile profile, CancellationToken cancellationToken = default)
     {
+        if (profile.IsEphemeral &&
+            !string.IsNullOrWhiteSpace(profile.Username) &&
+            _transientCredentials?.Read(profile.NodeId) is { Length: > 0 } transient)
+        {
+            return new SshCredentials(transient, null, null);
+        }
+
         // Inline per-connection password (the editor forces CredentialId null when this is on,
         // so the two are mutually exclusive). The secret lives in Credential Manager keyed by
         // the node Id. A missing OR empty entry — e.g. a DB restored onto a machine without the
         // secret, or an inline connection saved with a blank password — falls back to a prompt
         // rather than failing the connect opaquely. (An empty Password yields no auth method, so
         // treat it like the no-credential path, matching the saved-credential branch below.)
-        if (profile.UseInlinePassword)
+        if (profile.UseInlinePassword && !profile.IsEphemeral)
         {
             var inline = await _credentialService.ReadPasswordAsync(profile.NodeId).ConfigureAwait(true);
             cancellationToken.ThrowIfCancellationRequested();
@@ -203,14 +215,16 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
     {
         cancellationToken.ThrowIfCancellationRequested();
         var username = string.IsNullOrWhiteSpace(profile.Username) ? credentialUsername : profile.Username;
-        var user = string.IsNullOrWhiteSpace(username) ? profile.Host : username + "@" + profile.Host;
+        var requiresUsername = string.IsNullOrWhiteSpace(username);
+        var user = requiresUsername ? profile.Host : username + "@" + profile.Host;
         var result = await _dialogs.PromptAccountCredentialsAsync(
             "SSH password",
             "Enter the password for " + user + ":",
             ProtocolType.Ssh,
-            requireUsername: false,
+            requireUsername: requiresUsername,
             initialUsername: username,
-            cancellationToken).ConfigureAwait(true);
+            allowSaveCredentialToConnection: !profile.IsEphemeral,
+            cancellationToken: cancellationToken).ConfigureAwait(true);
         // Re-check after the await: the user may have closed the tab (canceling the
         // connect CTS) while the dialog was open. Don't act on a stale password.
         cancellationToken.ThrowIfCancellationRequested();
@@ -223,7 +237,14 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
             return SshCredentials.Empty;
         }
 
-        if (result.SelectedCredential is { } selectedCredential && result.SaveCredentialToConnection)
+        if (profile.IsEphemeral)
+        {
+            _transientCredentials?.Store(profile.NodeId, result.Password);
+        }
+
+        if (!profile.IsEphemeral &&
+            result.SelectedCredential is { } selectedCredential &&
+            result.SaveCredentialToConnection)
         {
             await _credentialBindings.SaveCredentialBindingAsync(
                 profile.NodeId,

@@ -1766,6 +1766,90 @@ public class ConnectionEditorViewModelTests
     }
 
     [Fact]
+    public async Task QuickConnectMode_RemovesInheritanceAndAllowsBlankName()
+    {
+        var vm = new ConnectionEditorViewModel(
+            new EmptyCredentialRepository(),
+            EmptyTunnelRepo(),
+            new FakeCredentialService());
+        var seed = new ConnectionNode
+        {
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            Host = "target.example.com",
+            CredentialMode = CredentialBindingMode.None,
+            TunnelEnabled = false,
+        };
+
+        vm.LoadFrom(seed, ConnectionEditorMode.QuickConnect);
+        await vm.LoadCredentialsAsync();
+
+        Assert.True(vm.IsQuickConnect);
+        Assert.False(vm.SupportsInheritance);
+        Assert.True(vm.IsValid);
+        Assert.Equal(ConnectionEditorViewModel.NoneCredential.Id, vm.SelectedCredential!.Id);
+        Assert.DoesNotContain(
+            vm.AvailableCredentials,
+            credential => credential.Id == ConnectionEditorViewModel.InheritCredential.Id);
+        Assert.Same(TunnelPickerViewModel.NoTunnel, vm.TunnelPicker.SelectedTunnel);
+        Assert.DoesNotContain(vm.TunnelPicker.InheritTunnel, vm.TunnelPicker.AvailableTunnelConfigs);
+        Assert.Collection(
+            vm.SshAutoSudoChoices,
+            choice => Assert.Equal("on", choice.Key),
+            choice => Assert.Equal("off", choice.Key));
+    }
+
+    [Fact]
+    public void QuickConnectMode_VncSupportsInlinePasswordWithoutNodeSecretHandoff()
+    {
+        var vm = new ConnectionEditorViewModel(
+            new EmptyCredentialRepository(),
+            EmptyTunnelRepo(),
+            new FakeCredentialService());
+        vm.LoadFrom(new ConnectionNode
+        {
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Vnc,
+            Host = "vnc.example.com",
+            CredentialMode = CredentialBindingMode.None,
+            TunnelEnabled = false,
+        }, ConnectionEditorMode.QuickConnect);
+        vm.UseSavedCredentials = false;
+        vm.InlinePassword = "vnc-secret";
+
+        var node = new ConnectionNode();
+        vm.WriteTo(node, includePendingInlinePassword: false);
+
+        Assert.True(vm.ShowInlinePassword);
+        Assert.False(node.UseInlinePassword);
+        Assert.Null(node.PendingInlinePassword);
+        Assert.Equal(CredentialBindingMode.None, node.CredentialMode);
+    }
+
+    [Fact]
+    public void QuickConnectMode_SerialUsesExplicitDefaults()
+    {
+        var vm = new ConnectionEditorViewModel(
+            new EmptyCredentialRepository(),
+            EmptyTunnelRepo(),
+            new FakeCredentialService());
+        vm.LoadFrom(new ConnectionNode
+        {
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Serial,
+            Host = "COM3",
+        }, ConnectionEditorMode.QuickConnect);
+
+        Assert.False(vm.SerialBaudRateInherits);
+        Assert.False(vm.SerialDataBitsInherits);
+        Assert.False(vm.SerialStopBitsInherits);
+        Assert.False(vm.SerialParityInherits);
+        Assert.False(vm.SerialFlowControlInherits);
+        Assert.Equal(SerialDefaults.BaudRate, vm.SerialBaudRate);
+        Assert.False(vm.TunnelPicker.TunnelEnabled);
+    }
+
+    [Fact]
     public async Task LoadInlineSecretAsync_PopulatesInlinePasswordFromStore()
     {
         var nodeId = Guid.NewGuid();

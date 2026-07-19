@@ -359,13 +359,15 @@ public partial class App : Application
         services.AddSingleton<IVncSessionService, VncSessionService>();
         services.AddSingleton<ISerialSessionService, SerialSessionService>();
         services.AddSingleton<IPrivateKeyInspector, SshNetPrivateKeyInspector>();
+        services.AddSingleton<ITransientSessionCredentialStore, TransientSessionCredentialStore>();
         services.AddSingleton<ISshCredentialResolver>(sp => new SshCredentialResolver(
             sp.GetRequiredService<IBitwardenCredentialCatalogService>(),
             sp.GetRequiredService<ICredentialService>(),
             sp.GetRequiredService<ICredentialPasswordResolver>(),
             sp.GetRequiredService<IConnectionCredentialBindingService>(),
             sp.GetRequiredService<IDialogService>(),
-            sp.GetRequiredService<IPrivateKeyInspector>()));
+            sp.GetRequiredService<IPrivateKeyInspector>(),
+            sp.GetRequiredService<ITransientSessionCredentialStore>()));
         services.AddSingleton<ISessionTabFactory, SessionTabFactory>();
         services.AddSingleton<IRdpSessionService, RdpSessionService>();
         services.AddSingleton<IRdpCrashSentinelService, RdpCrashSentinelService>();
@@ -454,7 +456,8 @@ public partial class App : Application
             sp.GetRequiredService<IConnectionProfileResolver>(),
             sp.GetRequiredService<IDialogService>(),
             sp.GetRequiredService<IRdpCrashSentinelService>(),
-            sp.GetRequiredService<ILoggerFactory>()));
+            sp.GetRequiredService<ILoggerFactory>(),
+            sp.GetRequiredService<ITransientSessionCredentialStore>()));
         services.AddTransient<HttpSessionViewModel>();
         services.AddTransient<VncSessionViewModel>(sp => new VncSessionViewModel(
             sp.GetRequiredService<IVncSessionService>(),
@@ -464,7 +467,8 @@ public partial class App : Application
             sp.GetRequiredService<TunnelManager>(),
             sp.GetRequiredService<ITunnelRoutePrompter>(),
             sp.GetRequiredService<IConnectionProfileResolver>(),
-            sp.GetRequiredService<ILoggerFactory>()));
+            sp.GetRequiredService<ILoggerFactory>(),
+            sp.GetRequiredService<ITransientSessionCredentialStore>()));
         services.AddTransient<MRemoteNgImportDialogViewModel>();
         services.AddTransient<BackupExportDialogViewModel>();
         services.AddTransient<BackupImportDialogViewModel>();

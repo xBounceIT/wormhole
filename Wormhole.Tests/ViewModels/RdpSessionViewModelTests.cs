@@ -1155,6 +1155,100 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public async Task AttachAsync_EphemeralPassword_ConnectsWithoutCredentialManagerOrPrompt()
+    {
+        var nodeId = Guid.NewGuid();
+        var transientCredentials = new TransientSessionCredentialStore();
+        transientCredentials.Store(nodeId, "session-only");
+        var (vm, svc, _, dlg, _) = CreateVm(transientCredentials: transientCredentials);
+        svc.NextSession = new FakeRdpSession();
+        vm.Initialize(MakeProfile() with
+        {
+            NodeId = nodeId,
+            IsEphemeral = true,
+            UseInlinePassword = true,
+            CredentialId = null,
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal("session-only", svc.LastPassword);
+        Assert.Equal(0, dlg.PasswordPromptCount);
+        Assert.Equal(0, dlg.CredentialsPromptCount);
+    }
+
+    [Fact]
+    public async Task AttachAsync_EphemeralPromptedPassword_IsCachedForReconnect()
+    {
+        var nodeId = Guid.NewGuid();
+        var transientCredentials = new TransientSessionCredentialStore();
+        var dlg = new FakeDialogService { PasswordPromptResult = "prompted-rdp" };
+        var profile = MakeProfile() with
+        {
+            NodeId = nodeId,
+            IsEphemeral = true,
+            CredentialId = null,
+        };
+        var (vm, svc, _, _, _) = CreateVm(dlg: dlg, transientCredentials: transientCredentials);
+        svc.NextSession = new FakeRdpSession();
+        vm.Initialize(profile);
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal("prompted-rdp", transientCredentials.Read(nodeId));
+        Assert.Equal(1, dlg.PasswordPromptCount);
+
+        var (reconnectedVm, reconnectedSvc, _, _, _) = CreateVm(
+            dlg: dlg,
+            transientCredentials: transientCredentials);
+        reconnectedSvc.NextSession = new FakeRdpSession();
+        reconnectedVm.Initialize(profile);
+
+        await reconnectedVm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal("prompted-rdp", reconnectedSvc.LastPassword);
+        Assert.Equal(1, dlg.PasswordPromptCount);
+    }
+
+    [Fact]
+    public async Task RetryAsync_EphemeralPromptedIdentity_ReusesCachedCredentials()
+    {
+        var nodeId = Guid.NewGuid();
+        var transientCredentials = new TransientSessionCredentialStore();
+        var dlg = new FakeDialogService
+        {
+            CredentialsPromptResult = ("CONTOSO\\alice", "session-only"),
+        };
+        var profile = MakeProfile() with
+        {
+            NodeId = nodeId,
+            Username = null,
+            IsEphemeral = true,
+            CredentialId = null,
+        };
+        var (vm, svc, _, _, _) = CreateVm(dlg: dlg, transientCredentials: transientCredentials);
+        svc.NextSession = new FakeRdpSession();
+        vm.Initialize(profile);
+
+        await vm.AttachAsync((IntPtr)0x1234, HostBounds.Seed);
+
+        Assert.Equal("alice", vm.Profile?.Username);
+        Assert.Equal("CONTOSO", vm.Profile?.RdpDomain);
+        Assert.Equal("session-only", transientCredentials.Read(nodeId));
+        Assert.Equal(1, dlg.CredentialsPromptCount);
+
+        svc.NextSession = new FakeRdpSession();
+
+        await vm.RetryAsync();
+
+        Assert.Equal(2, svc.ConnectCount);
+        Assert.Equal("alice", svc.LastProfile?.Username);
+        Assert.Equal("CONTOSO", svc.LastProfile?.RdpDomain);
+        Assert.Equal("session-only", svc.LastPassword);
+        Assert.Equal(1, dlg.CredentialsPromptCount);
+    }
+
+    [Fact]
     public async Task AttachAsync_InlinePasswordMissingSecret_FallsBackToPasswordPrompt()
     {
         var nodeId = Guid.NewGuid();
@@ -2134,7 +2228,8 @@ public class RdpSessionViewModelTests
         IConnectionRepository? connectionRepository = null,
         IConnectionCredentialBindingService? credentialBindings = null,
         FakeAppSettingsService? settings = null,
-        ICredentialPasswordResolver? passwordResolver = null)
+        ICredentialPasswordResolver? passwordResolver = null,
+        ITransientSessionCredentialStore? transientCredentials = null)
     {
         var svc = new FakeRdpSessionService();
         creds ??= new FakeCredentialService();
@@ -2159,7 +2254,8 @@ public class RdpSessionViewModelTests
             BuildProfileResolver(connectionRepository),
             dlg,
             sentinel,
-            NullLoggerFactory.Instance);
+            NullLoggerFactory.Instance,
+            transientCredentials);
         return (vm, svc, creds, dlg, sentinel);
     }
 

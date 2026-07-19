@@ -412,6 +412,7 @@ public sealed partial class HttpSessionViewModel : SessionTabViewModel
     {
         var current = Profile;
         if (current is null) return;
+        if (current.IsEphemeral) return;
 
         var refreshed = await _profileResolver.ResolveAsync(current.NodeId).ConfigureAwait(true);
         if (refreshed is null) return;

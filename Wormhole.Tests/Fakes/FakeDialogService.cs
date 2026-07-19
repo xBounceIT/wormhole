@@ -70,6 +70,9 @@ public class FakeDialogService : IDialogService
         return Task.FromResult(TextPromptResult);
     }
 
+    public virtual Task<QuickConnectResult?> PromptQuickConnectAsync() =>
+        Task.FromResult<QuickConnectResult?>(null);
+
     public virtual Task<ConnectionNode?> EditConnectionAsync(ConnectionNode initial, bool isNew)
     {
         if (EditConnectionResult is null) return Task.FromResult<ConnectionNode?>(null);

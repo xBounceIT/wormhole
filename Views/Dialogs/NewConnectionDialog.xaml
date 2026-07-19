@@ -53,8 +53,8 @@
                 <ScrollViewer Padding="16">
                     <StackPanel Spacing="10">
                         <TextBox x:Name="NameBox"
-                                 Header="Name"
-                                 PlaceholderText="prod-web"
+                                 Header="{x:Bind ViewModel.NameHeader, Mode=OneWay}"
+                                 PlaceholderText="{x:Bind ViewModel.NamePlaceholder, Mode=OneWay}"
                                  Text="{x:Bind ViewModel.Name, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
 
                         <!-- Protocol, Host and Port share one row to keep the form compact. -->
@@ -135,7 +135,7 @@
                                        Style="{StaticResource CaptionTextBlockStyle}" />
                             <AutoSuggestBox x:Name="CredentialBox"
                                             HorizontalAlignment="Stretch"
-                                            PlaceholderText="Inherit from folder"
+                                            PlaceholderText="{x:Bind ViewModel.CredentialPlaceholder, Mode=OneWay}"
                                             QueryIcon="Find"
                                             TextMemberPath="Name"
                                             ItemTemplate="{StaticResource CredentialItemTemplate}"
@@ -197,9 +197,9 @@
                                       ItemTemplate="{StaticResource TunnelItemTemplate}"
                                       SelectedItem="{x:Bind ViewModel.TunnelPicker.SelectedTunnel, Mode=TwoWay}" />
                             <TextBlock Style="{StaticResource CaptionTextBlockStyle}"
-                                       Opacity="0.7"
-                                       TextWrapping="Wrap"
-                                       Text="Started before the target connection. &quot;Inherit from folder&quot; follows the parent folder's tunnel setting; &quot;No tunnel&quot; overrides any inherited tunnel." />
+                                   Opacity="0.7"
+                                   TextWrapping="Wrap"
+                                   Text="{x:Bind ViewModel.TunnelHelpText, Mode=OneWay}" />
                         </StackPanel>
 
                         <InfoBar Severity="Informational"
@@ -231,6 +231,7 @@
                                        Value="{x:Bind SerialBaudRateBindable, Mode=TwoWay, FallbackValue=9600}" />
                             <CheckBox Content="Inherit"
                                       VerticalAlignment="Bottom"
+                                      Visibility="{x:Bind ViewModel.SupportsInheritance, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
                                       IsChecked="{x:Bind ViewModel.SerialBaudRateInherits, Mode=TwoWay}" />
                         </StackPanel>
 
@@ -243,6 +244,7 @@
                                       SelectedItem="{x:Bind ViewModel.SerialDataBits, Mode=TwoWay}" />
                             <CheckBox Content="Inherit"
                                       VerticalAlignment="Bottom"
+                                      Visibility="{x:Bind ViewModel.SupportsInheritance, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
                                       IsChecked="{x:Bind ViewModel.SerialDataBitsInherits, Mode=TwoWay}" />
                         </StackPanel>
 
@@ -257,6 +259,7 @@
                                       SelectedValue="{x:Bind ViewModel.SerialStopBits, Mode=TwoWay}" />
                             <CheckBox Content="Inherit"
                                       VerticalAlignment="Bottom"
+                                      Visibility="{x:Bind ViewModel.SupportsInheritance, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
                                       IsChecked="{x:Bind ViewModel.SerialStopBitsInherits, Mode=TwoWay}" />
                         </StackPanel>
 
@@ -271,6 +274,7 @@
                                       SelectedValue="{x:Bind ViewModel.SerialParity, Mode=TwoWay}" />
                             <CheckBox Content="Inherit"
                                       VerticalAlignment="Bottom"
+                                      Visibility="{x:Bind ViewModel.SupportsInheritance, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
                                       IsChecked="{x:Bind ViewModel.SerialParityInherits, Mode=TwoWay}" />
                         </StackPanel>
 
@@ -285,6 +289,7 @@
                                       SelectedValue="{x:Bind ViewModel.SerialFlowControl, Mode=TwoWay}" />
                             <CheckBox Content="Inherit"
                                       VerticalAlignment="Bottom"
+                                      Visibility="{x:Bind ViewModel.SupportsInheritance, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
                                       IsChecked="{x:Bind ViewModel.SerialFlowControlInherits, Mode=TwoWay}" />
                         </StackPanel>
                     </StackPanel>

@@ -18,10 +18,8 @@
                   Grid.Row="0"
                   Title="Wormhole">
             <TitleBar.Content>
-                <controls:QuickConnectBar HorizontalAlignment="Stretch"
+                <controls:QuickConnectBar HorizontalAlignment="Center"
                                           VerticalAlignment="Center"
-                                          MaxWidth="900"
-                                          MinWidth="320"
                                           Margin="24,6,24,6" />
             </TitleBar.Content>
         </TitleBar>

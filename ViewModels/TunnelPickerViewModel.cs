@@ -27,6 +27,7 @@ public partial class TunnelPickerViewModel : ObservableObject
 
     private readonly ITunnelConfigRepository _repository;
     private readonly Dictionary<Guid, TunnelConfig> _availableTunnelConfigsById = new();
+    private bool _allowInheritance = true;
 
     public TunnelPickerViewModel(ITunnelConfigRepository repository, string inheritLabel = "(Inherit from folder)")
     {
@@ -44,6 +45,8 @@ public partial class TunnelPickerViewModel : ObservableObject
     /// and <see cref="SelectedTunnelConfigId"/> stays null — the resolver walks up.
     /// Per-instance so the host VM can supply a context-appropriate display label.</summary>
     public TunnelConfig InheritTunnel { get; }
+
+    public bool AllowInheritance => _allowInheritance;
 
     /// <summary>Sentinel for "explicitly no tunnel" — overrides any inherited tunnel.
     /// <see cref="TunnelEnabled"/> = false, <see cref="SelectedTunnelConfigId"/> = null.
@@ -106,7 +109,7 @@ public partial class TunnelPickerViewModel : ObservableObject
             Guid? nextConfigId;
             if (value is null || ReferenceEquals(value, InheritTunnel))
             {
-                nextEnabled = null;
+                nextEnabled = AllowInheritance ? null : false;
                 nextConfigId = null;
             }
             else if (ReferenceEquals(value, NoTunnel))
@@ -133,17 +136,46 @@ public partial class TunnelPickerViewModel : ObservableObject
     }
 
     /// <summary>
+    /// Configure whether the host editor has a parent from which tunnel settings can inherit.
+    /// Quick Connect has no parent, so a missing selection is coerced to an explicit "No tunnel".
+    /// </summary>
+    public void ConfigureInheritance(bool allowInheritance)
+    {
+        if (_allowInheritance == allowInheritance) return;
+        _allowInheritance = allowInheritance;
+
+        if (!allowInheritance && TunnelEnabled is null)
+        {
+#pragma warning disable MVVMTK0034 // keep the tunnel pair atomic
+            tunnelEnabled = false;
+            selectedTunnelConfigId = null;
+#pragma warning restore MVVMTK0034
+            OnPropertyChanged(nameof(TunnelEnabled));
+            OnPropertyChanged(nameof(SelectedTunnelConfigId));
+        }
+
+        var available = AvailableTunnelConfigs
+            .Where(config => allowInheritance || !ReferenceEquals(config, InheritTunnel))
+            .ToList();
+        if (allowInheritance && !available.Contains(InheritTunnel))
+        {
+            available.Insert(0, InheritTunnel);
+        }
+        ReplaceAvailableTunnelConfigs(available);
+        OnPropertyChanged(nameof(AllowInheritance));
+        OnPropertyChanged(nameof(SelectedTunnel));
+    }
+
+    /// <summary>
     /// Rebuild <see cref="AvailableTunnelConfigs"/> from the repository, leading with the
     /// two sentinels so the picker always offers inherit/off.
     /// </summary>
     public async Task LoadAsync(CancellationToken cancellationToken = default)
     {
         var configs = await _repository.GetAllAsync(cancellationToken).ConfigureAwait(true);
-        var available = new List<TunnelConfig>(configs.Count + 2)
-        {
-            InheritTunnel,
-            NoTunnel,
-        };
+        var available = new List<TunnelConfig>(configs.Count + 2);
+        if (AllowInheritance) available.Add(InheritTunnel);
+        available.Add(NoTunnel);
         available.AddRange(configs);
         ReplaceAvailableTunnelConfigs(available);
 
@@ -167,8 +199,12 @@ public partial class TunnelPickerViewModel : ObservableObject
         ArgumentNullException.ThrowIfNull(node);
         AppendStaleTunnelSelection(node.TunnelConfigId);
 #pragma warning disable MVVMTK0034 // intentional field-bypass to keep the two-field write atomic
-        tunnelEnabled = node.TunnelEnabled;
-        selectedTunnelConfigId = node.TunnelConfigId;
+        tunnelEnabled = AllowInheritance
+            ? node.TunnelEnabled
+            : node.TunnelEnabled == false
+                ? false
+                : node.TunnelEnabled == true || node.TunnelConfigId is not null;
+        selectedTunnelConfigId = node.TunnelEnabled == false ? null : node.TunnelConfigId;
 #pragma warning restore MVVMTK0034
         OnPropertyChanged(nameof(TunnelEnabled));
         OnPropertyChanged(nameof(SelectedTunnelConfigId));
@@ -178,7 +214,7 @@ public partial class TunnelPickerViewModel : ObservableObject
     public void WriteTo(ConnectionNode node)
     {
         ArgumentNullException.ThrowIfNull(node);
-        node.TunnelEnabled = TunnelEnabled;
+        node.TunnelEnabled = AllowInheritance ? TunnelEnabled : TunnelEnabled ?? false;
         node.TunnelConfigId = SelectedTunnelConfigId;
     }
 

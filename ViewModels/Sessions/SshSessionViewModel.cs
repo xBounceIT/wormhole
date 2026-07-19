@@ -729,6 +729,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     {
         var current = Profile;
         if (current is null) return IsAttemptCurrent(lifecycleGeneration);
+        if (current.IsEphemeral) return IsAttemptCurrent(lifecycleGeneration);
 
         var refreshed = await _profileResolver.ResolveAsync(current.NodeId).ConfigureAwait(true);
         if (!IsAttemptCurrent(lifecycleGeneration)) return false;
@@ -1867,7 +1868,10 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
                 _initialKnownFingerprint = _session.HostFingerprint;
                 try
                 {
-                    await _connectionRepo.UpdateHostFingerprintAsync(profile.NodeId, _session.HostFingerprint, token).ConfigureAwait(true);
+                    if (!profile.IsEphemeral)
+                    {
+                        await _connectionRepo.UpdateHostFingerprintAsync(profile.NodeId, _session.HostFingerprint, token).ConfigureAwait(true);
+                    }
                     if (!IsAttemptCurrent(teardownGeneration)) return;
                 }
                 catch (Exception ex)
