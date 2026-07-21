@@ -687,18 +687,25 @@ public sealed class TerminalOutputPumpTests
         Assert.Equal(4, pump.InFlightBytes);
 
         var enqueueTask = Task.Run(() => pump.Enqueue(new byte[] { 5, 6, 7, 8 }));
-        Assert.True(pauseEntered.Wait(TimeSpan.FromSeconds(2)));
-        var ackTask = Task.Run(() =>
+        Assert.True(pauseEntered.Wait(TimeSpan.FromSeconds(5)));
+        var ackCompleted = new TaskCompletionSource<TerminalDrainRequest>(TaskCreationOptions.RunContinuationsAsynchronously);
+        // Dedicated thread: on CI the thread pool can be saturated for >1s, which made
+        // Task.Run-based ack scheduling flake with WaitAsync(1s) below.
+        var ackThread = new Thread(() =>
         {
             ackStarted.TrySetResult();
-            return pump.Acknowledge(1);
-        });
-        await ackStarted.Task.WaitAsync(TimeSpan.FromSeconds(1));
+            ackCompleted.SetResult(pump.Acknowledge(1));
+        })
+        {
+            IsBackground = true,
+        };
+        ackThread.Start();
+        await ackStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
         try
         {
             await Task.Delay(50);
-            Assert.False(ackTask.IsCompleted);
+            Assert.False(ackCompleted.Task.IsCompleted);
         }
         finally
         {
@@ -706,7 +713,7 @@ public sealed class TerminalOutputPumpTests
         }
 
         Assert.Equal(TerminalDrainRequest.Immediate, await enqueueTask);
-        Assert.Equal(TerminalDrainRequest.None, await ackTask);
+        Assert.Equal(TerminalDrainRequest.None, await ackCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5)));
         Assert.Collection(
             actions,
             action => Assert.Equal("pause", action),
