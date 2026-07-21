@@ -3,6 +3,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.System;
 using Wormhole.Models;
@@ -662,18 +663,33 @@ public sealed partial class FilePaneControl : UserControl
 
     private ListViewItem? ResolveDropTargetListViewItem(DragEventArgs e)
     {
-        // Prefer geometry over OriginalSource: ListViewItem content without a Background
-        // only hit-tests the icon/text band (mid-row), so OriginalSource often misses the
-        // top/bottom of the row. Container bounds cover the full realized height.
-        var point = e.GetPosition(EntriesList);
-        foreach (var raw in EntriesList.Items)
+        // Row templates use a transparent Background so pointer hits span the full
+        // realized height. Walk only the visual tree — realized containers only —
+        // instead of enumerating every bound item on each DragOver.
+        if (e.OriginalSource is DependencyObject source)
         {
-            if (EntriesList.ContainerFromItem(raw) is not ListViewItem container) continue;
-            if (container.ActualWidth <= 0 || container.ActualHeight <= 0) continue;
+            var fromSource = FindOwningListViewItem(source);
+            if (fromSource is not null) return fromSource;
+        }
 
-            var bounds = container.TransformToVisual(EntriesList)
-                .TransformBounds(new Windows.Foundation.Rect(0, 0, container.ActualWidth, container.ActualHeight));
-            if (bounds.Contains(point)) return container;
+        var point = e.GetPosition(EntriesList);
+        foreach (var element in VisualTreeHelper.FindElementsInHostCoordinates(point, EntriesList, includeAllElements: true))
+        {
+            if (element is ListViewItem item) return item;
+            var owner = FindOwningListViewItem(element);
+            if (owner is not null) return owner;
+        }
+
+        return null;
+    }
+
+    private static ListViewItem? FindOwningListViewItem(DependencyObject source)
+    {
+        var current = source;
+        while (current is not null)
+        {
+            if (current is ListViewItem item) return item;
+            current = VisualTreeHelper.GetParent(current);
         }
 
         return null;
