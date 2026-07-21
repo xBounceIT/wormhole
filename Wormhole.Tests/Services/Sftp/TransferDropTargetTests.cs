@@ -69,6 +69,26 @@ public sealed class TransferDropTargetTests : IDisposable
     }
 
     [Fact]
+    public void IsInvalidLocalDropDestination_RejectsFolderDroppedOntoParentRow()
+    {
+        var parent = Directory.CreateDirectory(Path.Combine(_root, "parent")).FullName;
+        var child = Directory.CreateDirectory(Path.Combine(parent, "child")).FullName;
+        var items = new[] { new TransferItem(child, "child", IsDirectory: true) };
+
+        Assert.True(TransferDropTarget.IsInvalidLocalDropDestination(parent, items));
+    }
+
+    [Fact]
+    public void IsInvalidLocalDropDestination_RejectsFileDroppedOntoCurrentDirectory()
+    {
+        var file = Path.Combine(_root, "a.txt");
+        File.WriteAllText(file, "x");
+        var items = new[] { new TransferItem(file, "a.txt", IsDirectory: false) };
+
+        Assert.True(TransferDropTarget.IsInvalidLocalDropDestination(_root, items));
+    }
+
+    [Fact]
     public void IsInvalidLocalDropDestination_IgnoresRemoteSourcePaths()
     {
         var dest = Directory.CreateDirectory(Path.Combine(_root, "dest")).FullName;

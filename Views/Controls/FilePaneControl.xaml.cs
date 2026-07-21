@@ -664,8 +664,8 @@ public sealed partial class FilePaneControl : UserControl
     private ListViewItem? ResolveDropTargetListViewItem(DragEventArgs e)
     {
         // Row templates use a transparent Background so pointer hits span the full
-        // realized height. Walk only the visual tree — realized containers only —
-        // instead of enumerating every bound item on each DragOver.
+        // realized height. Bounds-test only realized ListViewItem containers in the
+        // EntriesList coordinate space — no full Items enumeration, no host-coord API.
         if (e.OriginalSource is DependencyObject source)
         {
             var fromSource = FindOwningListViewItem(source);
@@ -673,14 +673,33 @@ public sealed partial class FilePaneControl : UserControl
         }
 
         var point = e.GetPosition(EntriesList);
-        foreach (var element in VisualTreeHelper.FindElementsInHostCoordinates(point, EntriesList, includeAllElements: true))
+        return FindListViewItemAtPoint(EntriesList, point);
+    }
+
+    private static ListViewItem? FindListViewItemAtPoint(UIElement root, Windows.Foundation.Point pointInRoot)
+    {
+        var queue = new Queue<DependencyObject>();
+        queue.Enqueue(root);
+        ListViewItem? hit = null;
+
+        while (queue.Count > 0)
         {
-            if (element is ListViewItem item) return item;
-            var owner = FindOwningListViewItem(element);
-            if (owner is not null) return owner;
+            var node = queue.Dequeue();
+            if (node is ListViewItem item && item.ActualWidth > 0 && item.ActualHeight > 0)
+            {
+                var origin = item.TransformToVisual(root).TransformPoint(new Windows.Foundation.Point(0, 0));
+                var bounds = new Windows.Foundation.Rect(origin.X, origin.Y, item.ActualWidth, item.ActualHeight);
+                if (bounds.Contains(pointInRoot)) hit = item;
+            }
+
+            var count = VisualTreeHelper.GetChildrenCount(node);
+            for (var i = 0; i < count; i++)
+            {
+                queue.Enqueue(VisualTreeHelper.GetChild(node, i));
+            }
         }
 
-        return null;
+        return hit;
     }
 
     private static ListViewItem? FindOwningListViewItem(DependencyObject source)

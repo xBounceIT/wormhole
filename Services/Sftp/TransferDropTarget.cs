@@ -23,14 +23,23 @@ public static class TransferDropTarget
 
         foreach (var item in items)
         {
-            if (!item.IsDirectory || RemotePath.IsAbsolute(item.SourcePath)) continue;
+            if (RemotePath.IsAbsolute(item.SourcePath)) continue;
 
-            string sourceFull;
-            try { sourceFull = NormalizeLocalDirectory(item.SourcePath); }
+            string targetPath;
+            try { targetPath = Path.GetFullPath(Path.Combine(destFull, item.Name)); }
             catch { continue; }
 
-            if (string.Equals(sourceFull, destFull, StringComparison.OrdinalIgnoreCase)) return true;
-            if (IsDescendantLocalDirectory(sourceFull, destFull)) return true;
+            string sourcePath;
+            try { sourcePath = Path.GetFullPath(item.SourcePath); }
+            catch { continue; }
+
+            if (string.Equals(sourcePath, targetPath, StringComparison.OrdinalIgnoreCase)) return true;
+
+            if (!item.IsDirectory) continue;
+
+            var sourceDir = NormalizeLocalDirectory(item.SourcePath);
+            if (IsDescendantLocalDirectory(sourceDir, targetPath)) return true;
+            if (IsDescendantLocalDirectory(sourceDir, destFull)) return true;
         }
 
         return false;
