@@ -32,6 +32,11 @@ public sealed partial class FileEntryViewModel : ObservableObject
     [ObservableProperty]
     private string editingName;
 
+    /// <summary>Transient drag-over highlight for folder drop targets. Toggled by
+    /// <c>FilePaneControl</c> during cross-pane / Explorer drag-over; never persisted.</summary>
+    [ObservableProperty]
+    private bool isDropTarget;
+
     public FileEntryViewModel(string name, string fullPath, bool isDirectory, bool isSymbolicLink, long size, DateTime lastModifiedUtc)
     {
         this.name = name;

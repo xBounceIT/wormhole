@@ -3,10 +3,10 @@ using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Media;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.System;
 using Wormhole.Models;
+using Wormhole.Services.Sftp;
 using Wormhole.ViewModels.Sessions.Transfer;
 
 namespace Wormhole.Views.Controls;
@@ -22,6 +22,11 @@ public sealed partial class FilePaneControl : UserControl
     /// context-menu Click handlers. Cleared (null) when the right-click lands on
     /// the ListView background rather than a specific row.</summary>
     private FileEntryViewModel? _contextTarget;
+
+    /// <summary>Entry currently highlighted as a folder drop target during drag-over.</summary>
+    private FileEntryViewModel? _dropHoverEntry;
+
+    private int _dropHoverClearGeneration;
 
     public FilePaneViewModel? ViewModel { get; private set; }
 
@@ -515,18 +520,51 @@ public sealed partial class FilePaneControl : UserControl
     private void OnDragOver(object sender, DragEventArgs e)
     {
         if (ViewModel is null) return;
+        _dropHoverClearGeneration++;
         var hasOtherPane = TryGetOtherPaneSource(e.DataView, out _);
         var hasStorage = e.DataView.Contains(StandardDataFormats.StorageItems);
-        if (hasOtherPane || hasStorage)
+        if (!hasOtherPane && !hasStorage)
         {
-            e.AcceptedOperation = DataPackageOperation.Copy;
+            ClearDropHover();
+            return;
         }
+
+        var targetItem = ResolveDropTargetListViewItem(e);
+        var entry = targetItem?.Content as FileEntryViewModel;
+        var destination = ResolveDropDestination(entry);
+        if (hasOtherPane &&
+            e.DataView.Properties.TryGetValue(PaneItemsKey, out var raw) &&
+            raw is IReadOnlyList<TransferItem> paneItems &&
+            IsInvalidDropDestination(destination, paneItems))
+        {
+            e.AcceptedOperation = DataPackageOperation.None;
+            ClearDropHover();
+            return;
+        }
+
+        UpdateDropHover(entry);
+        e.AcceptedOperation = DataPackageOperation.Copy;
+    }
+
+    private void OnDragLeave(object sender, DragEventArgs e)
+    {
+        // ListView DragLeave also fires when moving between rows (parent→child).
+        // Defer the clear so a subsequent DragOver on the next row can cancel it.
+        var generation = ++_dropHoverClearGeneration;
+        _ = DispatcherQueue.TryEnqueue(() =>
+        {
+            if (generation != _dropHoverClearGeneration) return;
+            ClearDropHover();
+        });
     }
 
     private async void OnDrop(object sender, DragEventArgs e)
     {
         if (ViewModel is null || OnTransferRequested is null) return;
+        ClearDropHover();
         var deferral = e.GetDeferral();
+        var dropEntry = ResolveDropTargetListViewItem(e)?.Content as FileEntryViewModel;
+        var destination = ResolveDropDestination(dropEntry);
         try
         {
             // Cross-pane drop has priority — both sentinel and StorageItems may be set
@@ -552,7 +590,8 @@ public sealed partial class FilePaneControl : UserControl
                     // not after a multi-MB SFTP transfer has finished bytes. Errors are
                     // logged inside RunTransferAsync; the destination pane refreshes when
                     // the transfer completes.
-                    FireAndForgetTransfer(new TransferRequest(direction, ViewModel.CurrentPath, items));
+                    if (IsInvalidDropDestination(destination, items)) return;
+                    FireAndForgetTransfer(new TransferRequest(direction, destination, items));
                 }
                 return;
             }
@@ -569,6 +608,7 @@ public sealed partial class FilePaneControl : UserControl
                         item is Windows.Storage.StorageFolder));
                 }
                 if (items.Count == 0) return;
+                if (IsInvalidDropDestination(destination, items)) return;
                 // Explorer drop: source is always local on Windows. Target direction is
                 // determined by THIS pane (the drop receiver).
                 var direction = ViewModel.IsLocal ? TransferDirection.LocalToLocal : TransferDirection.LocalToRemote;
@@ -577,11 +617,11 @@ public sealed partial class FilePaneControl : UserControl
                     // Explorer → local pane: copy files via System.IO. The orchestrator
                     // doesn't run because there's no SFTP work — direct file copy is
                     // faster and avoids spamming the transfer queue for local moves.
-                    await CopyLocalAsync(items, ViewModel.CurrentPath).ConfigureAwait(true);
+                    await CopyLocalAsync(items, destination).ConfigureAwait(true);
                     await ViewModel.RefreshAsync().ConfigureAwait(true);
                     return;
                 }
-                FireAndForgetTransfer(new TransferRequest(direction, ViewModel.CurrentPath, items));
+                FireAndForgetTransfer(new TransferRequest(direction, destination, items));
             }
         }
         catch (Exception ex)
@@ -606,6 +646,57 @@ public sealed partial class FilePaneControl : UserControl
         if (!view.Properties.TryGetValue(PaneSentinelKey, out var raw) || raw is not string tag) return false;
         sourceIsLocal = tag == "Local";
         return true;
+    }
+
+    private string ResolveDropDestination(FileEntryViewModel? entry)
+    {
+        if (ViewModel is null) return string.Empty;
+        return TransferDropTarget.ResolveDestinationDirectory(
+            ViewModel.CurrentPath,
+            entry?.FullPath,
+            entry?.IsDirectory == true);
+    }
+
+    private bool IsInvalidDropDestination(string destination, IReadOnlyList<TransferItem> items) =>
+        ViewModel is { IsLocal: true } && TransferDropTarget.IsInvalidLocalDropDestination(destination, items);
+
+    private ListViewItem? ResolveDropTargetListViewItem(DragEventArgs e)
+    {
+        // Prefer geometry over OriginalSource: ListViewItem content without a Background
+        // only hit-tests the icon/text band (mid-row), so OriginalSource often misses the
+        // top/bottom of the row. Container bounds cover the full realized height.
+        var point = e.GetPosition(EntriesList);
+        foreach (var raw in EntriesList.Items)
+        {
+            if (EntriesList.ContainerFromItem(raw) is not ListViewItem container) continue;
+            if (container.ActualWidth <= 0 || container.ActualHeight <= 0) continue;
+
+            var bounds = container.TransformToVisual(EntriesList)
+                .TransformBounds(new Windows.Foundation.Rect(0, 0, container.ActualWidth, container.ActualHeight));
+            if (bounds.Contains(point)) return container;
+        }
+
+        return null;
+    }
+
+    private void UpdateDropHover(FileEntryViewModel? entry)
+    {
+        var hoverEntry = entry is { IsDirectory: true } ? entry : null;
+        if (ReferenceEquals(_dropHoverEntry, hoverEntry)) return;
+
+        ClearDropHover();
+        if (hoverEntry is null) return;
+
+        _dropHoverEntry = hoverEntry;
+        hoverEntry.IsDropTarget = true;
+    }
+
+    private void ClearDropHover()
+    {
+        _dropHoverClearGeneration++;
+        if (_dropHoverEntry is null) return;
+        _dropHoverEntry.IsDropTarget = false;
+        _dropHoverEntry = null;
     }
 
     /// <summary>

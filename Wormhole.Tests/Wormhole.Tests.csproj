@@ -276,6 +276,7 @@
     <Compile Include="..\Services\ISftpService.cs" Link="Services\ISftpService.cs" />
     <Compile Include="..\Services\Ssh\SshAuthMethodsBuilder.cs" Link="Services\Ssh\SshAuthMethodsBuilder.cs" />
     <Compile Include="..\Services\Sftp\RemotePath.cs" Link="Services\Sftp\RemotePath.cs" />
+    <Compile Include="..\Services\Sftp\TransferDropTarget.cs" Link="Services\Sftp\TransferDropTarget.cs" />
     <Compile Include="..\Services\Sftp\IFileTransferOrchestrator.cs" Link="Services\Sftp\IFileTransferOrchestrator.cs" />
     <Compile Include="..\Services\Sftp\FileTransferOrchestrator.cs" Link="Services\Sftp\FileTransferOrchestrator.cs" />
     <Compile Include="..\ViewModels\Sessions\Transfer\FileEntryViewModel.cs" Link="ViewModels\Sessions\Transfer\FileEntryViewModel.cs" />
