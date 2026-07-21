@@ -29,6 +29,46 @@ public sealed partial class SessionsPage : Page
         this.InitializeComponent();
     }
 
+    private void SessionTabs_Loaded(object sender, RoutedEventArgs e)
+    {
+        EnsureTabViewHeaderOnlyLayout();
+    }
+
+    private void SessionTabs_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        // Template children can appear after the first Loaded, and Visibility toggles can rebuild
+        // the template while the page stays cached — keep the collapse idempotent.
+        EnsureTabViewHeaderOnlyLayout();
+    }
+
+    /// <summary>
+    /// Collapse TabView's internal content presenter so the control is header-strip-only.
+    /// The protocol surface is hosted outside the TabView (SelectedSessionHost) bound to
+    /// SelectedTab — leaving the default star-sized content row would steal the whole pane
+    /// (and Auto-size the strip row incorrectly). Idempotent: safe to re-run after template rebuild.
+    /// </summary>
+    private void EnsureTabViewHeaderOnlyLayout()
+    {
+        // Default TabView template: root Grid row0=TabListView, row1=ContentPresenter (star height).
+        if (VisualTreeHelper.GetChildrenCount(SessionTabs) < 1) return;
+        if (VisualTreeHelper.GetChild(SessionTabs, 0) is not Grid root) return;
+        if (root.RowDefinitions.Count < 2) return;
+
+        // Zero the star content row and collapse its presenter. Height/MaxHeight are left alone —
+        // Visibility.Collapsed + a 0-height row is enough for Auto sizing of the strip.
+        if (root.RowDefinitions[1].Height != new GridLength(0))
+        {
+            root.RowDefinitions[1].Height = new GridLength(0);
+        }
+
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(root); i++)
+        {
+            if (VisualTreeHelper.GetChild(root, i) is not FrameworkElement child) continue;
+            if (Grid.GetRow(child) != 1) continue;
+            if (child.Visibility != Visibility.Collapsed) child.Visibility = Visibility.Collapsed;
+        }
+    }
+
     private async void SessionTabs_TabCloseRequested(TabView sender, TabViewTabCloseRequestedEventArgs args)
     {
         if (args.Item is SessionTabViewModel tab)
@@ -50,13 +90,11 @@ public sealed partial class SessionsPage : Page
         try
         {
             // When the *active* tab is closed, move selection to its closest neighbour BEFORE
-            // removing it. Removing the selected item and letting TabView auto-pick a successor
-            // routes the new tab through a content-realization path that doesn't reliably
-            // re-Load its surface: the SSH session keeps running but the terminal's WebView2
-            // never rebinds, so it stays black until a full reconnect. Selecting the neighbour
-            // first drives the switch through the normal selection-change path (the same one a
-            // manual tab switch uses, which reattaches correctly), after which the closed tab is
-            // just a background tab whose removal no longer disturbs the visible surface.
+            // removing it. The heavy session surface lives outside TabView (SelectedSessionHost
+            // on SelectedTab), so a background-tab close no longer disturbs it — but closing the
+            // selected tab still needs an explicit neighbour hand-off. Selecting the neighbour
+            // first drives the switch through the normal selection-change path; the closed tab is
+            // then just a background header whose removal no longer blanks the host.
             // Only redirect when there's actually a neighbour to move to - closing the last
             // tab leaves removal to clear selection and show the empty state.
             if (wasSelected && FindClosestTab(tab) is { } neighbour)

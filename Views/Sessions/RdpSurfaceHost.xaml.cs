@@ -46,6 +46,9 @@ public sealed partial class RdpSurfaceHost : UserControl
     private int _lastNegotiatedHeightPx;
     private IntPtr _ownerHwnd;
     private bool _attached;
+    // Bumped on every attach start and on Unloaded so an await finishing after a tab switch or
+    // unload cannot re-show a previous session's overlay on the shared SelectedSessionHost slot.
+    private int _attachGeneration;
     private double _lastRasterScale = 1.0;
     private Window? _ownerWindow;
     private XamlRoot? _trackedXamlRoot;
@@ -87,6 +90,9 @@ public sealed partial class RdpSurfaceHost : UserControl
         InitializeComponent();
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
+        // SelectedSessionHost reuses this control when switching between two RDP tabs (same
+        // DataTemplate), so DataContext can change without Unloaded/Loaded. Rebind there.
+        DataContextChanged += OnDataContextChanged;
         SizeChanged += OnSizeChanged;
         // LayoutUpdated is intentionally NOT subscribed: it fires for every visual tree
         // mutation project-wide, not just for this control. SizeChanged + XamlRoot.Changed (DPI)
@@ -178,23 +184,19 @@ public sealed partial class RdpSurfaceHost : UserControl
         // Mark layout active before AttachAsync can show a credentials dialog. SizeChanged
         // events fired while that dialog is open must be allowed to schedule a replay;
         // otherwise the native host can stay at the initial 1x1 seed forever.
+        var attachGeneration = Interlocked.Increment(ref _attachGeneration);
+        var attachingVm = ViewModel;
         _attached = true;
         try
         {
-            await ViewModel.AttachAsync(_ownerHwnd, bounds);
+            await attachingVm.AttachAsync(_ownerHwnd, bounds);
         }
         catch (Exception ex)
         {
             var logger = App.Current.Services.GetService<ILogger<RdpSurfaceHost>>();
             logger?.LogError(ex, "RdpSurfaceHost AttachAsync failed.");
         }
-        // Re-check IsLoaded after the await: if the tab was closed while AttachAsync was in
-        // flight, OnUnloaded already cleared _attached and we must not flip it back on.
-        if (IsLoaded)
-        {
-            ApplyLayout();
-            DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, ApplyLayout);
-        }
+        CompleteAttachIfCurrent(attachGeneration, attachingVm);
 
         // No WinUI focus push on rebind: AttachAsync's rebind branch already issued Win32
         // SetFocus on the OCX HWND, and pushing WinUI Focus(Programmatic) on this
@@ -204,6 +206,9 @@ public sealed partial class RdpSurfaceHost : UserControl
 
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
+        // Invalidate in-flight attach awaits first so they cannot Show() after we Hide.
+        Interlocked.Increment(ref _attachGeneration);
+
         // Hide rather than fully tear down — the VM survives navigation. The owned overlay is
         // just hidden via ShowWindow(SW_HIDE), not destroyed.
         ViewModel?.DetachView();
@@ -260,6 +265,79 @@ public sealed partial class RdpSurfaceHost : UserControl
         }
         _lastNegotiatedWidthPx = 0;
         _lastNegotiatedHeightPx = 0;
+    }
+
+    private async void OnDataContextChanged(FrameworkElement sender, DataContextChangedEventArgs args)
+    {
+        // Same-template tab switches on SelectedSessionHost flip Content without tearing the
+        // visual tree. Detach the outgoing session's overlay and attach the incoming one.
+        if (!IsLoaded) return;
+
+        var vm = DataContext as RdpSessionViewModel;
+        if (ReferenceEquals(vm, _viewModel)) return;
+
+        // Hide the previous session's owned overlay before rebinding the host slot, and bump
+        // generation so any in-flight AttachAsync for the outgoing VM cannot re-Show it.
+        if (_viewModel is not null)
+        {
+            Interlocked.Increment(ref _attachGeneration);
+            _viewModel.DetachView();
+        }
+
+        ViewModel = vm;
+        if (ViewModel is null)
+        {
+            _attached = false;
+            return;
+        }
+
+        if (_ownerHwnd == IntPtr.Zero)
+        {
+            _ownerWindow = App.Current.MainWindow;
+            if (_ownerWindow is null) return;
+            _ownerHwnd = _ownerWindow.GetHwnd();
+        }
+
+        var bounds = ComputeBoundsScreenPx();
+        if (bounds.IsDegenerate(minDim: 1)) bounds = HostBounds.Seed;
+
+        var attachGeneration = Interlocked.Increment(ref _attachGeneration);
+        var attachingVm = ViewModel;
+        _attached = true;
+        _focusPushed = false;
+        try
+        {
+            await attachingVm.AttachAsync(_ownerHwnd, bounds);
+        }
+        catch (Exception ex)
+        {
+            var logger = App.Current.Services.GetService<ILogger<RdpSurfaceHost>>();
+            logger?.LogError(ex, "RdpSurfaceHost DataContextChanged attach failed.");
+        }
+
+        CompleteAttachIfCurrent(attachGeneration, attachingVm);
+    }
+
+    /// <summary>
+    /// Finish a successful attach, or tuck away a session that Apply/Show-ed after it was
+    /// superseded by unload or another DataContext rebind on the shared host slot.
+    /// </summary>
+    private void CompleteAttachIfCurrent(int attachGeneration, RdpSessionViewModel attachingVm)
+    {
+        if (attachGeneration != Volatile.Read(ref _attachGeneration) ||
+            !ReferenceEquals(ViewModel, attachingVm) ||
+            !ReferenceEquals(ViewModel, DataContext as RdpSessionViewModel) ||
+            !IsLoaded)
+        {
+            if (!ReferenceEquals(ViewModel, attachingVm))
+            {
+                attachingVm.DetachView();
+            }
+            return;
+        }
+
+        ApplyLayout();
+        DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, ApplyLayout);
     }
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e)
