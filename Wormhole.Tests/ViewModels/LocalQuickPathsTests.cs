@@ -107,13 +107,17 @@ public sealed class LocalQuickPathsTests
     [Fact]
     public void Build_IgnoresInvalidPaths_WithoutThrowing()
     {
+        // Use rooted invalid paths: relative junk like "not|*a|valid|path" can be
+        // resolved against the test cwd on CI (D:\a\wormhole\...) and slip through
+        // when the drive letter is not probe-safe.
+        const string invalidFolder = @"C:\not|valid|folder";
         var items = LocalQuickPaths.Build(
             getFolderPath: folder => folder == Environment.SpecialFolder.UserProfile
                 ? @"C:\Users\test"
-                : "not|*a|valid|path",
+                : invalidFolder,
             getDrives: () =>
             [
-                new LocalQuickPaths.DriveRoot("also|invalid", IsReady: true),
+                new LocalQuickPaths.DriveRoot(@"C:\also|invalid", IsReady: true),
                 new LocalQuickPaths.DriveRoot(@"C:\", IsReady: true),
             ],
             directoryExists: path => path is @"C:\Users\test" or @"C:\");
