@@ -142,6 +142,35 @@ public sealed class LocalQuickPathsTests
     }
 
     [Fact]
+    public void Build_IncludesMappedDriveFolder_WithoutExistenceProbe()
+    {
+        var mappedDocuments = @"H:\Documents";
+        var probed = new List<string>();
+        var items = LocalQuickPaths.Build(
+            getFolderPath: folder => folder == Environment.SpecialFolder.MyDocuments ? mappedDocuments : string.Empty,
+            getDrives: () => [],
+            directoryExists: path =>
+            {
+                probed.Add(path);
+                return false;
+            });
+
+        Assert.Contains(items, i => i.DisplayName == "Documents" && i.Path == mappedDocuments);
+        Assert.Empty(probed);
+    }
+
+    [Fact]
+    public void ShouldProbeExists_ReturnsFalse_ForUncAndMappedDriveLetters()
+    {
+        var probeSafe = LocalQuickPaths.BuildProbeSafeDriveLetters(
+            [new LocalQuickPaths.DriveRoot(@"C:\", IsReady: true)]);
+
+        Assert.False(LocalQuickPaths.ShouldProbeExists(@"\\server\share\docs", probeSafe));
+        Assert.False(LocalQuickPaths.ShouldProbeExists(@"H:\Documents", probeSafe));
+        Assert.True(LocalQuickPaths.ShouldProbeExists(@"C:\Users\test", probeSafe));
+    }
+
+    [Fact]
     public void EnumerateLocalDriveRoots_DoesNotThrow_OnRealMachine()
     {
         var ex = Record.Exception(() => LocalQuickPaths.EnumerateLocalDriveRoots());

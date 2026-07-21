@@ -19,11 +19,11 @@ public static class LocalQuickPaths
         Func<string, bool>? directoryExists = null)
     {
         getFolderPath ??= Environment.GetFolderPath;
-        // Skip Network/CDRom: DriveInfo.IsReady can stall for seconds on flaky shares
-        // or empty optical drives. For fixed/removable roots we still honour IsReady so
-        // empty card readers / locked volumes never reach the Directory.Exists probe.
         getDrives ??= EnumerateLocalDriveRoots;
         directoryExists ??= Directory.Exists;
+
+        var driveRoots = getDrives();
+        var probeSafeDriveLetters = BuildProbeSafeDriveLetters(driveRoots);
 
         var folders = new List<QuickPathItem>();
         var drives = new List<QuickPathItem>();
@@ -45,17 +45,14 @@ public static class LocalQuickPaths
             }
 
             if (!seen.Add(full)) return false;
-            // Redirected Desktop/Documents/Downloads often resolve to UNC paths. A
-            // synchronous Directory.Exists on an offline share can block the UI thread
+            // Redirected known folders can point at UNC paths or mapped network drives.
+            // A synchronous Directory.Exists on an offline target can block the UI thread
             // for the network timeout while the File Transfer dialog is opening.
-            if (!IsUncPath(full) && !directoryExists(full)) return false;
+            if (ShouldProbeExists(full, probeSafeDriveLetters) && !directoryExists(full)) return false;
             // Empty label → show the resolved path (drive roots: C:\).
             target.Add(new QuickPathItem(string.IsNullOrEmpty(label) ? full : label, full));
             return true;
         }
-
-        static bool IsUncPath(string path) =>
-            path.StartsWith(@"\\", StringComparison.Ordinal);
 
         // WinSCP-ish order: common profile folders first, then Home, then drives.
         TryAdd(folders, "Desktop", getFolderPath(Environment.SpecialFolder.Desktop));
@@ -74,7 +71,7 @@ public static class LocalQuickPaths
         TryAdd(folders, "Videos", getFolderPath(Environment.SpecialFolder.MyVideos));
         TryAdd(folders, "Home", profile);
 
-        foreach (var drive in getDrives())
+        foreach (var drive in driveRoots)
         {
             if (!drive.IsReady) continue;
             // Label as the resolved root (C:\, D:\) — matches WinSCP's drive list.
@@ -89,6 +86,35 @@ public static class LocalQuickPaths
         folders.AddRange(drives);
         return folders;
     }
+
+    internal static bool ShouldProbeExists(string full, HashSet<char> probeSafeDriveLetters)
+    {
+        if (IsUncPath(full)) return false;
+        if (full.Length >= 2 && full[1] == ':' && char.IsLetter(full[0]))
+        {
+            return probeSafeDriveLetters.Contains(char.ToUpperInvariant(full[0]));
+        }
+
+        return true;
+    }
+
+    internal static HashSet<char> BuildProbeSafeDriveLetters(IReadOnlyList<DriveRoot> drives)
+    {
+        var letters = new HashSet<char>();
+        foreach (var drive in drives)
+        {
+            if (!drive.IsReady) continue;
+            if (drive.RootPath.Length >= 2 && drive.RootPath[1] == ':' && char.IsLetter(drive.RootPath[0]))
+            {
+                letters.Add(char.ToUpperInvariant(drive.RootPath[0]));
+            }
+        }
+
+        return letters;
+    }
+
+    private static bool IsUncPath(string path) =>
+        path.StartsWith(@"\\", StringComparison.Ordinal);
 
     /// <summary>
     /// Best-effort fixed/removable drive roots for the quick-path menu. Bad volumes
