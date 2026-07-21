@@ -5,6 +5,12 @@ public class LocalFilePaneViewModel : FilePaneViewModel
     public override bool IsLocal => true;
     public override string Title => "Local";
 
+    /// <summary>
+    /// WinSCP-style preset folders for the path-bar dropdown. Built once per pane
+    /// instance from the current machine's special folders and ready drives.
+    /// </summary>
+    public IReadOnlyList<QuickPathItem> QuickPaths { get; } = LocalQuickPaths.Build();
+
     protected override Task<IReadOnlyList<FileEntryViewModel>> ListAsync(string path, CancellationToken cancellationToken) =>
         Task.Run<IReadOnlyList<FileEntryViewModel>>(() =>
         {

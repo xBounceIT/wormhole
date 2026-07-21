@@ -74,6 +74,7 @@
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
             <!-- VerticalAlignment="Stretch" so the button matches the TextBox row
                  height (~32px). Without this the button uses its content's natural
@@ -91,6 +92,20 @@
                      x:Name="PathBox"
                      Text="{x:Bind ViewModel.CurrentPath, Mode=OneWay}"
                      KeyDown="OnPathBoxKeyDown" />
+            <!-- WinSCP-style preset-folder chevron. Visible only on the local pane;
+                 populated from LocalFilePaneViewModel.QuickPaths in SetViewModel.
+                 Glyph E70D is the Segoe Fluent chevron-down. -->
+            <Button Grid.Column="2"
+                    x:Name="QuickPathsButton"
+                    Style="{StaticResource PaneToolbarButtonStyle}"
+                    ToolTipService.ToolTip="Go to folder"
+                    VerticalAlignment="Stretch"
+                    Visibility="Collapsed">
+                <FontIcon Glyph="&#xE70D;" FontSize="12" />
+                <Button.Flyout>
+                    <MenuFlyout x:Name="QuickPathsFlyout" Placement="Bottom" />
+                </Button.Flyout>
+            </Button>
         </Grid>
 
         <Grid Grid.Row="2" ColumnSpacing="12">
