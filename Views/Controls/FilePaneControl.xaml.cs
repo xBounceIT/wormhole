@@ -43,7 +43,48 @@ public sealed partial class FilePaneControl : UserControl
     public void SetViewModel(FilePaneViewModel vm)
     {
         ViewModel = vm;
+        RebuildQuickPathsFlyout(vm);
         Bindings.Update();
+    }
+
+    /// <summary>
+    /// Local pane only: fill the path-bar chevron MenuFlyout with WinSCP-style
+    /// preset folders. Remote panes hide the button — there is no local SpecialFolder
+    /// equivalent on the SSH side.
+    /// </summary>
+    private void RebuildQuickPathsFlyout(FilePaneViewModel vm)
+    {
+        QuickPathsFlyout.Items.Clear();
+        if (vm is not LocalFilePaneViewModel local || local.QuickPaths.Count == 0)
+        {
+            QuickPathsButton.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        foreach (var item in local.QuickPaths)
+        {
+            if (item.IsSeparator)
+            {
+                QuickPathsFlyout.Items.Add(new MenuFlyoutSeparator());
+                continue;
+            }
+
+            var menuItem = new MenuFlyoutItem
+            {
+                Text = item.DisplayName,
+                Tag = item.Path,
+            };
+            menuItem.Click += OnQuickPathClick;
+            QuickPathsFlyout.Items.Add(menuItem);
+        }
+
+        QuickPathsButton.Visibility = Visibility.Visible;
+    }
+
+    private void OnQuickPathClick(object sender, RoutedEventArgs e)
+    {
+        if (ViewModel is null || sender is not MenuFlyoutItem { Tag: string path }) return;
+        _ = ViewModel.LoadAsync(path);
     }
 
     private void OnSortHeaderClick(object sender, RoutedEventArgs e)
