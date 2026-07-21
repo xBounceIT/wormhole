@@ -226,6 +226,7 @@
                               AllowDrop="True"
                               DragItemsStarting="OnDragItemsStarting"
                               DragOver="OnDragOver"
+                              DragLeave="OnDragLeave"
                               Drop="OnDrop"
                               DoubleTapped="OnEntryDoubleTapped"
                               SelectionChanged="OnSelectionChanged"
@@ -240,13 +241,27 @@
                         </ListView.ItemContainerStyle>
                         <ListView.ItemTemplate>
                             <DataTemplate x:DataType="transfer:FileEntryViewModel">
-                                <Grid ColumnSpacing="10" Padding="22,3,22,3">
+                                <!-- Transparent Background makes the full row hit-testable during
+                                     drag-over (without it only the icon/text band receives hits). -->
+                                <Grid ColumnSpacing="10"
+                                      Padding="22,3,22,3"
+                                      Background="Transparent">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="24" />
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="84" />
                                         <ColumnDefinition Width="124" />
                                     </Grid.ColumnDefinitions>
+                                    <!-- Drop-target chrome: same SubtleFill as PointerOver, thin
+                                         accent outline — not a solid accent fill. -->
+                                    <Border Grid.ColumnSpan="4"
+                                            Margin="-18,-4,-18,-4"
+                                            CornerRadius="4"
+                                            Background="{ThemeResource SubtleFillColorSecondaryBrush}"
+                                            BorderBrush="{ThemeResource AccentFillColorDefaultBrush}"
+                                            BorderThickness="1"
+                                            Visibility="{x:Bind IsDropTarget, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}"
+                                            IsHitTestVisible="False" />
                                     <FontIcon Grid.Column="0"
                                               Glyph="{x:Bind IsDirectory, Converter={StaticResource DirectoryGlyphConverter}, Mode=OneWay}"
                                               FontSize="14" />
