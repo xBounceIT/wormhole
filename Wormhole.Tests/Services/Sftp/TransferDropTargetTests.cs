@@ -89,6 +89,16 @@ public sealed class TransferDropTargetTests : IDisposable
     }
 
     [Fact]
+    public void IsInvalidLocalDropDestination_RejectsFileDroppedOntoDriveRoot()
+    {
+        var root = Path.GetPathRoot(_root)!;
+        var file = Path.Combine(root, "wormhole-self-drop.txt");
+        var items = new[] { new TransferItem(file, "wormhole-self-drop.txt", IsDirectory: false) };
+
+        Assert.True(TransferDropTarget.IsInvalidLocalDropDestination(root, items));
+    }
+
+    [Fact]
     public void IsInvalidLocalDropDestination_IgnoresRemoteSourcePaths()
     {
         var dest = Directory.CreateDirectory(Path.Combine(_root, "dest")).FullName;

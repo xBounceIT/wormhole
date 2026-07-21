@@ -45,8 +45,15 @@ public static class TransferDropTarget
         return false;
     }
 
-    private static string NormalizeLocalDirectory(string path) =>
-        Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    private static string NormalizeLocalDirectory(string path)
+    {
+        var full = Path.GetFullPath(path);
+        var root = Path.GetPathRoot(full);
+        if (!string.IsNullOrEmpty(root) && full.Length <= root.Length)
+            return full;
+
+        return full.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
 
     private static bool IsDescendantLocalDirectory(string ancestor, string candidate)
     {
