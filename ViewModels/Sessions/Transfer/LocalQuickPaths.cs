@@ -48,11 +48,18 @@ public static class LocalQuickPaths
                 return false;
             }
 
-            if (!directoryExists(full) || !seen.Add(full)) return false;
+            if (!seen.Add(full)) return false;
+            // Redirected Desktop/Documents/Downloads often resolve to UNC paths. A
+            // synchronous Directory.Exists on an offline share can block the UI thread
+            // for the network timeout while the File Transfer dialog is opening.
+            if (!IsUncPath(full) && !directoryExists(full)) return false;
             // Empty label → show the resolved path (drive roots: C:\).
             target.Add(new QuickPathItem(string.IsNullOrEmpty(label) ? full : label, full));
             return true;
         }
+
+        static bool IsUncPath(string path) =>
+            path.StartsWith(@"\\", StringComparison.Ordinal);
 
         // WinSCP-ish order: common profile folders first, then Home, then drives.
         TryAdd(folders, "Desktop", getFolderPath(Environment.SpecialFolder.Desktop));

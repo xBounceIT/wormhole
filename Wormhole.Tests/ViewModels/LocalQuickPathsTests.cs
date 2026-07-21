@@ -124,6 +124,24 @@ public sealed class LocalQuickPathsTests
     }
 
     [Fact]
+    public void Build_IncludesUncPaths_WithoutDirectoryExistsProbe()
+    {
+        var uncDocuments = @"\\fileserver\users\test\Documents";
+        var probed = new List<string>();
+        var items = LocalQuickPaths.Build(
+            getFolderPath: folder => folder == Environment.SpecialFolder.MyDocuments ? uncDocuments : string.Empty,
+            getDrives: () => [],
+            directoryExists: path =>
+            {
+                probed.Add(path);
+                return false;
+            });
+
+        Assert.Contains(items, i => i.DisplayName == "Documents" && i.Path == uncDocuments);
+        Assert.Empty(probed);
+    }
+
+    [Fact]
     public void LocalFilePaneViewModel_ExposesQuickPaths()
     {
         var pane = new LocalFilePaneViewModel();
