@@ -71,6 +71,9 @@ public sealed partial class WebBrowserView : UserControl
         InitializeComponent();
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
+        // SelectedSessionHost reuses this control for HTTP→HTTP tab switches (same DataTemplate),
+        // so DataContext can change without Unloaded/Loaded. Re-run attach there.
+        DataContextChanged += OnDataContextChanged;
         lock (s_liveViewsGate)
         {
             s_liveViews.Add(new WeakReference<WebBrowserView>(this));
@@ -179,6 +182,18 @@ public sealed partial class WebBrowserView : UserControl
 
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
+        await AttachCurrentViewModelAsync().ConfigureAwait(true);
+    }
+
+    private async void OnDataContextChanged(FrameworkElement sender, DataContextChangedEventArgs args)
+    {
+        // Same-template HTTP→HTTP switches on SelectedSessionHost flip Content without Unloaded/Loaded.
+        if (!IsLoaded) return;
+        await AttachCurrentViewModelAsync().ConfigureAwait(true);
+    }
+
+    private async Task AttachCurrentViewModelAsync()
+    {
         // Restore the surface that OnUnloaded collapsed to suppress airspace bleed in background tabs.
         // The WebView2 itself is only restored when this view still belongs to the same session: on a
         // VM change the control is stale (about to be torn down below) and re-showing it would flash
@@ -195,15 +210,15 @@ public sealed partial class WebBrowserView : UserControl
             if (_viewModel is not null) _viewModel.NavigateRequested -= OnNavigateRequested;
             _viewModel = newVm;
 
-            // WinUI's TabView recycles item containers, so this same view instance can be rebound from
-            // a closed session's VM to a new one (close a web tab, open the next). Any WebView2 still
-            // attached was built for the PREVIOUS session: if we leave it, the live-WebView guard below
-            // short-circuits and the new session never runs AttachAsync — its "use tunnel" route prompt
-            // never appears and the tab is stuck on the connecting spinner until the app is restarted.
+            // SelectedSessionHost (and older TabView container recycle) can rebind this same view
+            // instance from one HTTP VM to another. Any WebView2 still attached was built for the
+            // PREVIOUS session: if we leave it, the live-WebView guard below short-circuits and the
+            // new session never runs AttachAsync - its "use tunnel" route prompt never appears and
+            // the tab is stuck on the connecting spinner until the app is restarted.
             // Bump the generation so an in-flight create for the old VM bails (and disposes after
             // itself at its own mismatch checks), clear the initial-navigation flag so a stray late
             // NavigationCompleted from the old core can't report against the new VM, hide the stale
-            // surface, then tear the old control down UNDER the create gate — disposing outside the
+            // surface, then tear the old control down UNDER the create gate - disposing outside the
             // gate could Close() a control the old create is still inside EnsureCoreWebView2Async on,
             // or delete an isolated user-data folder its environment creation is using (see the
             // _createGate comment). SshTerminalView guards the same recycle hazard by resetting its
@@ -216,7 +231,7 @@ public sealed partial class WebBrowserView : UserControl
             try
             {
                 // Superseded while waiting (an unload, or a newer rebind queued behind the gate):
-                // teardown belongs to whoever owns the newer generation — the old VM's in-flight
+                // teardown belongs to whoever owns the newer generation - the old VM's in-flight
                 // create disposes after itself when it resumes and sees the mismatch.
                 if (generation == _createGeneration) await DisposeWebViewAsync().ConfigureAwait(true);
             }
@@ -224,22 +239,22 @@ public sealed partial class WebBrowserView : UserControl
             {
                 _createGate.Release();
             }
-            // A newer Loaded/unload took over while we waited on the gate; let it drive the connect
-            // (and the toolbar refresh).
+            // A newer Loaded/DataContext/unload took over while we waited on the gate; let it drive
+            // the connect (and the toolbar refresh).
             if (generation != _createGeneration) return;
             // Clear the previous session's URL and history state out of the toolbar while the new
             // session connects (the create flow refreshes it once navigation starts).
             UpdateToolbar();
         }
-        // Always (re)subscribe — OnUnloaded drops it on every unload so a discarded view instance
+        // Always (re)subscribe - OnUnloaded drops it on every unload so a discarded view instance
         // (Sessions↔Settings round-trip) is left with no VM→view edge and is garbage-collected (its
         // WebView2 released with it, the same way SshTerminalView relies on GC for its terminal control).
         // newVm == _viewModel here on both paths; using it keeps nullable flow analysis satisfied.
         newVm.NavigateRequested -= OnNavigateRequested;
         newVm.NavigateRequested += OnNavigateRequested;
 
-        // A live WebView2 already rendering this session (tab switch on the same view instance): keep it
-        // so page state is preserved. Only (re)connect when there is nothing live to rebind to.
+        // A live WebView2 already rendering this session (same-VM reload): keep it so page state is
+        // preserved. Only (re)connect when there is nothing live to rebind to.
         if (_webView?.CoreWebView2 is not null) return;
 
         try

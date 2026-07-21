@@ -79,109 +79,134 @@
             </StackPanel>
         </Grid>
 
-        <TabView x:Name="SessionTabs"
-                 TabItemsSource="{x:Bind ViewModel.Tabs, Mode=OneWay}"
-                 SelectedItem="{x:Bind ViewModel.SelectedTab, Mode=TwoWay}"
-                 TabWidthMode="SizeToContent"
-                 IsAddTabButtonVisible="False"
-                 CanReorderTabs="True"
-                 CanDragTabs="True"
-                 TabCloseRequested="SessionTabs_TabCloseRequested"
-                 Background="Transparent"
-                 HorizontalAlignment="Stretch"
-                 VerticalAlignment="Stretch"
-                 Visibility="{x:Bind ViewModel.HasTabs, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}">
+        <!--
+            Session chrome (headers) lives in TabView; the heavy protocol surface lives OUTSIDE
+            every TabViewItem. Hosting content inside TabViewItem made sibling-tab removal recycle
+            or Unload the active surface (RDP overlay Hide, SSH TerminalContentMask Visible) without
+            a reliable Loaded recovery — black pane until reconnect. One selected-tab host means
+            closing a background tab never touches the visible surface.
 
-            <TabView.TabItemTemplate>
-                <DataTemplate x:DataType="sessions:SessionTabViewModel">
-                    <TabViewItem HorizontalContentAlignment="Stretch"
-                                 VerticalContentAlignment="Stretch">
-                        <TabViewItem.Header>
-                            <Grid ColumnSpacing="6">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0"
-                                           Text="{x:Bind Title, Mode=OneWay}"
-                                           VerticalAlignment="Center"
-                                           TextTrimming="CharacterEllipsis" />
-                                <Button Grid.Column="1"
-                                        Click="OnTabFileTransferClick"
-                                        Visibility="{x:Bind CanOpenFileTransfer, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
-                                        Style="{StaticResource IconButtonStyle}"
-                                        Padding="4"
-                                        MinWidth="0"
-                                        MinHeight="0"
-                                        ToolTipService.ToolTip="File transfer">
-                                    <FontIcon Glyph="&#xE8AB;" FontSize="14" />
-                                </Button>
-                            </Grid>
-                        </TabViewItem.Header>
-                        <TabViewItem.ContextFlyout>
-                            <!-- Click handlers (not Command bindings) because ElementName binding
-                                 can't escape the DataTemplate's namescope into the MenuFlyout popup.
-                                 Opened/Closed suppress the connected RDP overlay (a top-level window
-                                 above WinUI) for the menu's lifetime, otherwise the menu — which drops
-                                 over the session content area — is occluded by the overlay. -->
-                            <MenuFlyout Opened="OnTabContextFlyoutOpened"
-                                        Closed="OnTabContextFlyoutClosed">
-                                <MenuFlyoutItem Text="Duplicate" Click="OnTabDuplicateClick">
-                                    <MenuFlyoutItem.Icon>
-                                        <FontIcon Glyph="&#xE8C8;" />
-                                    </MenuFlyoutItem.Icon>
-                                </MenuFlyoutItem>
-                                <MenuFlyoutItem Text="Reconnect"
-                                                Click="OnTabReconnectClick"
-                                                Command="{x:Bind ReconnectCommand, Mode=OneTime}"
-                                                Visibility="{x:Bind CanReconnect, Converter={StaticResource BoolToVisibilityConverter}}">
-                                    <MenuFlyoutItem.Icon>
-                                        <FontIcon Glyph="&#xE72C;" />
-                                    </MenuFlyoutItem.Icon>
-                                </MenuFlyoutItem>
-                                <MenuFlyoutItem Text="File transfer"
-                                                Click="OnTabFileTransferClick"
-                                                Visibility="{x:Bind CanOpenFileTransfer, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
-                                    <MenuFlyoutItem.Icon>
-                                        <FontIcon Glyph="&#xE8AB;" />
-                                    </MenuFlyoutItem.Icon>
-                                </MenuFlyoutItem>
-                                <!-- Disconnect / Open-External for RDP: the connected RDP surface is a top-level
-                                     overlay that intercepts right-clicks (they go to the remote desktop), so its
-                                     own ContextFlyout can't open over a live session. Surface these here instead. -->
-                                <MenuFlyoutItem Text="Disconnect"
-                                                Command="{x:Bind TabDisconnectCommand, Mode=OneWay}"
-                                                Visibility="{x:Bind CanTabDisconnect, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
-                                    <MenuFlyoutItem.Icon>
-                                        <FontIcon Glyph="&#xE8BB;" />
-                                    </MenuFlyoutItem.Icon>
-                                </MenuFlyoutItem>
-                                <MenuFlyoutItem Text="Open in System Remote Desktop"
-                                                Command="{x:Bind TabUseExternalClientCommand, Mode=OneWay}"
-                                                Visibility="{x:Bind CanTabUseExternalClient, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
-                                    <MenuFlyoutItem.Icon>
-                                        <FontIcon Glyph="&#xE8A7;" />
-                                    </MenuFlyoutItem.Icon>
-                                </MenuFlyoutItem>
-                                <MenuFlyoutSeparator />
-                                <MenuFlyoutItem Text="Close" Click="OnTabCloseClick">
-                                    <MenuFlyoutItem.Icon>
-                                        <FontIcon Glyph="&#xE894;" />
-                                    </MenuFlyoutItem.Icon>
-                                </MenuFlyoutItem>
-                            </MenuFlyout>
-                        </TabViewItem.ContextFlyout>
-                        <ContentControl Content="{x:Bind}"
-                                        ContentTemplateSelector="{StaticResource SessionContentSelector}"
-                                        HorizontalAlignment="Stretch"
-                                        VerticalAlignment="Stretch"
-                                        HorizontalContentAlignment="Stretch"
-                                        VerticalContentAlignment="Stretch"
-                                        MinHeight="240"
-                                        IsTabStop="False" />
-                    </TabViewItem>
-                </DataTemplate>
-            </TabView.TabItemTemplate>
-        </TabView>
+            Layout: Auto strip row + star content row. Code-behind collapses TabView's internal
+            star-sized content presenter so the Auto row sizes to the header strip only.
+        -->
+        <Grid Visibility="{x:Bind ViewModel.HasTabs, Converter={StaticResource BoolToVisibilityConverter}, Mode=OneWay}">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <!-- Header strip only. Code-behind collapses the default content row so the Auto row
+                 doesn't expand to the TabView's internal star-sized presenter. -->
+            <TabView x:Name="SessionTabs"
+                     Grid.Row="0"
+                     TabItemsSource="{x:Bind ViewModel.Tabs, Mode=OneWay}"
+                     SelectedItem="{x:Bind ViewModel.SelectedTab, Mode=TwoWay}"
+                     TabWidthMode="SizeToContent"
+                     IsAddTabButtonVisible="False"
+                     CanReorderTabs="True"
+                     CanDragTabs="True"
+                     TabCloseRequested="SessionTabs_TabCloseRequested"
+                     Background="Transparent"
+                     HorizontalAlignment="Stretch"
+                     VerticalAlignment="Top"
+                     Loaded="SessionTabs_Loaded"
+                     SizeChanged="SessionTabs_SizeChanged">
+
+                <TabView.TabItemTemplate>
+                    <DataTemplate x:DataType="sessions:SessionTabViewModel">
+                        <!-- Content intentionally empty: the surface hosts outside, bound to SelectedTab. -->
+                        <TabViewItem HorizontalContentAlignment="Stretch"
+                                     VerticalContentAlignment="Stretch">
+                            <TabViewItem.Header>
+                                <Grid ColumnSpacing="6">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0"
+                                               Text="{x:Bind Title, Mode=OneWay}"
+                                               VerticalAlignment="Center"
+                                               TextTrimming="CharacterEllipsis" />
+                                    <Button Grid.Column="1"
+                                            Click="OnTabFileTransferClick"
+                                            Visibility="{x:Bind CanOpenFileTransfer, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}"
+                                            Style="{StaticResource IconButtonStyle}"
+                                            Padding="4"
+                                            MinWidth="0"
+                                            MinHeight="0"
+                                            ToolTipService.ToolTip="File transfer">
+                                        <FontIcon Glyph="&#xE8AB;" FontSize="14" />
+                                    </Button>
+                                </Grid>
+                            </TabViewItem.Header>
+                            <TabViewItem.ContextFlyout>
+                                <!-- Click handlers (not Command bindings) because ElementName binding
+                                     can't escape the DataTemplate's namescope into the MenuFlyout popup.
+                                     Opened/Closed suppress the connected RDP overlay (a top-level window
+                                     above WinUI) for the menu's lifetime, otherwise the menu — which drops
+                                     over the session content area — is occluded by the overlay. -->
+                                <MenuFlyout Opened="OnTabContextFlyoutOpened"
+                                            Closed="OnTabContextFlyoutClosed">
+                                    <MenuFlyoutItem Text="Duplicate" Click="OnTabDuplicateClick">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE8C8;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
+                                    <MenuFlyoutItem Text="Reconnect"
+                                                    Click="OnTabReconnectClick"
+                                                    Command="{x:Bind ReconnectCommand, Mode=OneTime}"
+                                                    Visibility="{x:Bind CanReconnect, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE72C;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
+                                    <MenuFlyoutItem Text="File transfer"
+                                                    Click="OnTabFileTransferClick"
+                                                    Visibility="{x:Bind CanOpenFileTransfer, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE8AB;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
+                                    <!-- Disconnect / Open-External for RDP: the connected RDP surface is a top-level
+                                         overlay that intercepts right-clicks (they go to the remote desktop), so its
+                                         own ContextFlyout can't open over a live session. Surface these here instead. -->
+                                    <MenuFlyoutItem Text="Disconnect"
+                                                    Command="{x:Bind TabDisconnectCommand, Mode=OneWay}"
+                                                    Visibility="{x:Bind CanTabDisconnect, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE8BB;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
+                                    <MenuFlyoutItem Text="Open in System Remote Desktop"
+                                                    Command="{x:Bind TabUseExternalClientCommand, Mode=OneWay}"
+                                                    Visibility="{x:Bind CanTabUseExternalClient, Mode=OneWay, Converter={StaticResource BoolToVisibilityConverter}}">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE8A7;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
+                                    <MenuFlyoutSeparator />
+                                    <MenuFlyoutItem Text="Close" Click="OnTabCloseClick">
+                                        <MenuFlyoutItem.Icon>
+                                            <FontIcon Glyph="&#xE894;" />
+                                        </MenuFlyoutItem.Icon>
+                                    </MenuFlyoutItem>
+                                </MenuFlyout>
+                            </TabViewItem.ContextFlyout>
+                        </TabViewItem>
+                    </DataTemplate>
+                </TabView.TabItemTemplate>
+            </TabView>
+
+            <ContentControl x:Name="SelectedSessionHost"
+                            Grid.Row="1"
+                            Content="{x:Bind ViewModel.SelectedTab, Mode=OneWay}"
+                            ContentTemplateSelector="{StaticResource SessionContentSelector}"
+                            HorizontalAlignment="Stretch"
+                            VerticalAlignment="Stretch"
+                            HorizontalContentAlignment="Stretch"
+                            VerticalContentAlignment="Stretch"
+                            MinHeight="240"
+                            IsTabStop="False" />
+        </Grid>
     </Grid>
 </Page>
