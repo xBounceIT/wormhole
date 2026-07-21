@@ -142,6 +142,13 @@ public sealed class LocalQuickPathsTests
     }
 
     [Fact]
+    public void EnumerateLocalDriveRoots_DoesNotThrow_OnRealMachine()
+    {
+        var ex = Record.Exception(() => LocalQuickPaths.EnumerateLocalDriveRoots());
+        Assert.Null(ex);
+    }
+
+    [Fact]
     public void LocalFilePaneViewModel_ExposesQuickPaths()
     {
         var pane = new LocalFilePaneViewModel();

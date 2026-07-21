@@ -22,10 +22,7 @@ public static class LocalQuickPaths
         // Skip Network/CDRom: DriveInfo.IsReady can stall for seconds on flaky shares
         // or empty optical drives. For fixed/removable roots we still honour IsReady so
         // empty card readers / locked volumes never reach the Directory.Exists probe.
-        getDrives ??= () => DriveInfo.GetDrives()
-            .Where(d => d.DriveType is DriveType.Fixed or DriveType.Removable)
-            .Select(d => new DriveRoot(d.RootDirectory.FullName, d.IsReady))
-            .ToArray();
+        getDrives ??= EnumerateLocalDriveRoots;
         directoryExists ??= Directory.Exists;
 
         var folders = new List<QuickPathItem>();
@@ -91,5 +88,35 @@ public static class LocalQuickPaths
 
         folders.AddRange(drives);
         return folders;
+    }
+
+    /// <summary>
+    /// Best-effort fixed/removable drive roots for the quick-path menu. Bad volumes
+    /// must not prevent the File Transfer dialog from opening.
+    /// </summary>
+    internal static IReadOnlyList<DriveRoot> EnumerateLocalDriveRoots()
+    {
+        try
+        {
+            var roots = new List<DriveRoot>();
+            foreach (var drive in DriveInfo.GetDrives())
+            {
+                try
+                {
+                    if (drive.DriveType is not (DriveType.Fixed or DriveType.Removable)) continue;
+                    roots.Add(new DriveRoot(drive.RootDirectory.FullName, drive.IsReady));
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    // Skip volumes Windows cannot describe (bad USB / card reader).
+                }
+            }
+
+            return roots;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return Array.Empty<DriveRoot>();
+        }
     }
 }
