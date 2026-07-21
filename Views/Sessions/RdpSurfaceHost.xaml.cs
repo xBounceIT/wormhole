@@ -305,6 +305,10 @@ public sealed partial class RdpSurfaceHost : UserControl
         var attachingVm = ViewModel;
         _attached = true;
         _focusPushed = false;
+        // Outgoing tab may have different negotiated resolution; force ApplyResolution to fire for
+        // the incoming session even when its surface size matches the shared host's last values.
+        _lastNegotiatedWidthPx = 0;
+        _lastNegotiatedHeightPx = 0;
         try
         {
             await attachingVm.AttachAsync(_ownerHwnd, bounds);

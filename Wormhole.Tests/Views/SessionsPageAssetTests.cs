@@ -61,6 +61,21 @@ public sealed class SessionsPageAssetTests
         Assert.Contains("private int _attachGeneration;", code, StringComparison.Ordinal);
         Assert.Contains("CompleteAttachIfCurrent(attachGeneration, attachingVm);", code, StringComparison.Ordinal);
         Assert.Contains("attachingVm.DetachView();", code, StringComparison.Ordinal);
+        Assert.Contains("_lastNegotiatedWidthPx = 0;", code, StringComparison.Ordinal);
+        Assert.Contains("_lastNegotiatedHeightPx = 0;", code, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void WebBrowserView_RebindsOnDataContextChangeWhileLoaded()
+    {
+        var code = ReadAsset("Views", "Sessions", "WebBrowserView.xaml.cs.txt");
+        Assert.Contains("DataContextChanged += OnDataContextChanged;", code, StringComparison.Ordinal);
+        Assert.Contains(
+            "private async void OnDataContextChanged(FrameworkElement sender, DataContextChangedEventArgs args)",
+            code,
+            StringComparison.Ordinal);
+        Assert.Contains("AttachCurrentViewModelAsync", code, StringComparison.Ordinal);
+        Assert.Contains("if (!IsLoaded) return;", code, StringComparison.Ordinal);
     }
 
     private static string ReadAsset(params string[] relativeParts) =>
