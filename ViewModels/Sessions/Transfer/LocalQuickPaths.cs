@@ -20,12 +20,11 @@ public static class LocalQuickPaths
     {
         getFolderPath ??= Environment.GetFolderPath;
         // Skip Network/CDRom: DriveInfo.IsReady can stall for seconds on flaky shares
-        // or empty optical drives, and that would hitch File Transfer dialog open.
-        // Fixed + Removable cover the WinSCP-style local roots users jump to; existence
-        // is still gated below via directoryExists.
+        // or empty optical drives. For fixed/removable roots we still honour IsReady so
+        // empty card readers / locked volumes never reach the Directory.Exists probe.
         getDrives ??= () => DriveInfo.GetDrives()
             .Where(d => d.DriveType is DriveType.Fixed or DriveType.Removable)
-            .Select(d => new DriveRoot(d.RootDirectory.FullName, IsReady: true))
+            .Select(d => new DriveRoot(d.RootDirectory.FullName, d.IsReady))
             .ToArray();
         directoryExists ??= Directory.Exists;
 
