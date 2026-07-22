@@ -31,7 +31,7 @@ namespace Wormhole.Views.Sessions;
 // (it isn't). A UserControl has no deterministic dispose hook in WinUI; making it IDisposable buys
 // nothing here.
 #pragma warning disable CA1001
-public sealed partial class WebBrowserView : UserControl
+public sealed partial class WebBrowserView : UserControl, ISessionSurfaceActivation
 #pragma warning restore CA1001
 {
     // Shared environment for non-proxied web tabs (direct connections + loopback port-forwards). A
@@ -65,19 +65,39 @@ public sealed partial class WebBrowserView : UserControl
     // True between issuing the initial Navigate and its first NavigationCompleted. Gates the
     // Connected/Failed report so later in-page navigations (link clicks) can't flip the tab's status.
     private bool _awaitingInitialNavigation;
+    private bool _sessionSurfaceActive = true;
 
     public WebBrowserView()
     {
         InitializeComponent();
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
-        // SelectedSessionHost reuses this control for HTTP→HTTP tab switches (same DataTemplate),
-        // so DataContext can change without Unloaded/Loaded. Re-run attach there.
+        // Multi-surface hosting keeps a dedicated browser per HTTP tab; DataContextChanged remains
+        // as a defensive rebind if the slot is ever recycled.
         DataContextChanged += OnDataContextChanged;
         lock (s_liveViewsGate)
         {
             s_liveViews.Add(new WeakReference<WebBrowserView>(this));
         }
+    }
+
+    /// <summary>
+    /// Collapse the WebView2 composition surface while the tab is backgrounded without tearing
+    /// down the browser session.
+    /// </summary>
+    public void SetSessionSurfaceActive(bool isActive)
+    {
+        if (_sessionSurfaceActive == isActive) return;
+        _sessionSurfaceActive = isActive;
+        if (!isActive)
+        {
+            WebViewHost.Visibility = Visibility.Collapsed;
+            if (_webView is not null) _webView.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        WebViewHost.Visibility = Visibility.Visible;
+        if (_webView is not null) _webView.Visibility = Visibility.Visible;
     }
 
     /// <summary>
@@ -183,11 +203,15 @@ public sealed partial class WebBrowserView : UserControl
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         await AttachCurrentViewModelAsync().ConfigureAwait(true);
+        if (!_sessionSurfaceActive)
+        {
+            SetSessionSurfaceActive(false);
+        }
     }
 
     private async void OnDataContextChanged(FrameworkElement sender, DataContextChangedEventArgs args)
     {
-        // Same-template HTTP→HTTP switches on SelectedSessionHost flip Content without Unloaded/Loaded.
+        // Defensive rebind if a shared host slot ever flips DataContext without Unloaded/Loaded.
         if (!IsLoaded) return;
         await AttachCurrentViewModelAsync().ConfigureAwait(true);
     }
@@ -198,10 +222,16 @@ public sealed partial class WebBrowserView : UserControl
         // The WebView2 itself is only restored when this view still belongs to the same session: on a
         // VM change the control is stale (about to be torn down below) and re-showing it would flash
         // the previous session's page during the gated-teardown await.
-        WebViewHost.Visibility = Visibility.Visible;
+        if (_sessionSurfaceActive)
+        {
+            WebViewHost.Visibility = Visibility.Visible;
+        }
         var newVm = DataContext as HttpSessionViewModel;
         var vmChanged = newVm is not null && !ReferenceEquals(newVm, _viewModel);
-        if (!vmChanged && _webView is not null) _webView.Visibility = Visibility.Visible;
+        if (_sessionSurfaceActive && !vmChanged && _webView is not null)
+        {
+            _webView.Visibility = Visibility.Visible;
+        }
 
         if (newVm is null) return;
 

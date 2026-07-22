@@ -511,65 +511,24 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             if (!replayIsExact)
             {
                 newBridge.Dispose();
-                // Rejection means a replacement renderer owns recovery; it is an intentional no-op.
-                await TryHandleTerminalRendererFailureAsync(
-                    webView,
-                    "The terminal view was recreated after its exact replay history expired. " +
-                    "The connection was closed to avoid corrupting terminal state; retry to reconnect.")
+                // Exact history is unavailable (resize after output, truncated ring, inexact
+                // retirement). Keep the live protocol session and rebind a clean xterm instead of
+                // closing the connection — scrollback is lost, but the shell/serial line stays up.
+                await SoftRebindLiveSessionWithoutExactHistoryAsync(
+                        webView,
+                        attachedSession,
+                        attachGeneration)
                     .ConfigureAwait(true);
                 return;
             }
 
-            try
-            {
-                if (!IsTerminalAttachmentCurrent(
-                        attachGeneration,
-                        attachedSession,
-                        newBridge,
-                        webView))
-                {
-                    return;
-                }
-                if (xtermIsFresh)
-                {
-                    await attachedSession.ResizeAsync(_initialSize.Columns, _initialSize.Rows)
-                        .ConfigureAwait(true);
-                    if (!IsTerminalAttachmentCurrent(
-                            attachGeneration,
-                            attachedSession,
-                            newBridge,
-                            webView))
-                    {
-                        return;
-                    }
-                }
-                await newBridge.RequestFocusAsync().ConfigureAwait(true);
-                if (!IsTerminalAttachmentCurrent(
-                        attachGeneration,
-                        attachedSession,
-                        newBridge,
-                        webView))
-                {
-                    return;
-                }
-                ConfirmRetiredTerminalOutputParsed(newBridge);
-                TryPublishConnectedAfterTerminalFocus(
-                    attachGeneration,
+            await CompleteLiveTerminalAttachmentAsync(
+                    webView,
                     attachedSession,
+                    attachGeneration,
                     newBridge,
-                    webView);
-            }
-            catch (Exception) when (!IsTerminalAttachmentCurrent(
-                attachGeneration,
-                attachedSession,
-                newBridge,
-                webView))
-            {
-                // The session, page, or bridge was retired while resize/focus awaited.
-                return;
-            }
-
-            EnsureRemoteOutputWaitTimer();
+                    resizePty: xtermIsFresh)
+                .ConfigureAwait(true);
             return;
         }
 
@@ -588,6 +547,113 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         }
 
         await ConnectAsync().ConfigureAwait(true);
+    }
+
+    /// <summary>
+    /// Rebinds a live SSH session to a fresh/empty xterm when exact scrollback reconstruction is
+    /// impossible. Clears poisoned replay checkpoints, publishes a new bridge with no historical
+    /// replay, and resizes the PTY — the protocol session stays Connected.
+    /// </summary>
+    private async Task SoftRebindLiveSessionWithoutExactHistoryAsync(
+        CoreWebView2 webView,
+        ISshSession attachedSession,
+        int attachGeneration)
+    {
+        _logger.LogWarning(
+            "Exact terminal replay is unavailable; rebinding the live SSH session without scrollback.");
+
+        try
+        {
+            await TerminalBridge.ResetSessionlessAsync(webView).ConfigureAwait(true);
+        }
+        catch (Exception) when (!IsRendererBindingCurrent(
+            attachGeneration,
+            attachedSession,
+            webView))
+        {
+            return;
+        }
+        if (!IsRendererBindingCurrent(attachGeneration, attachedSession, webView)) return;
+
+        var newBridge = CreateTerminalBridge(webView);
+        // Clear + publish under one lock so bytes that arrive after the clear cannot linger in the
+        // detached buffer while a live bridge is already published.
+        lock (_terminalReplayLock)
+        {
+            ClearTerminalReplayBuffersUnderLock();
+            ReplayAndPublishTerminalOutputSinkUnderLock(
+                newBridge,
+                webView,
+                historicalReplay: null,
+                liveDetachedReplay: null);
+        }
+
+        await CompleteLiveTerminalAttachmentAsync(
+                webView,
+                attachedSession,
+                attachGeneration,
+                newBridge,
+                resizePty: true)
+            .ConfigureAwait(true);
+    }
+
+    private async Task CompleteLiveTerminalAttachmentAsync(
+        CoreWebView2 webView,
+        ISshSession attachedSession,
+        int attachGeneration,
+        ITerminalOutputSink newBridge,
+        bool resizePty)
+    {
+        try
+        {
+            if (!IsTerminalAttachmentCurrent(
+                    attachGeneration,
+                    attachedSession,
+                    newBridge,
+                    webView))
+            {
+                return;
+            }
+            if (resizePty)
+            {
+                await attachedSession.ResizeAsync(_initialSize.Columns, _initialSize.Rows)
+                    .ConfigureAwait(true);
+                if (!IsTerminalAttachmentCurrent(
+                        attachGeneration,
+                        attachedSession,
+                        newBridge,
+                        webView))
+                {
+                    return;
+                }
+            }
+            await newBridge.RequestFocusAsync().ConfigureAwait(true);
+            if (!IsTerminalAttachmentCurrent(
+                    attachGeneration,
+                    attachedSession,
+                    newBridge,
+                    webView))
+            {
+                return;
+            }
+            ConfirmRetiredTerminalOutputParsed(newBridge);
+            TryPublishConnectedAfterTerminalFocus(
+                attachGeneration,
+                attachedSession,
+                newBridge,
+                webView);
+        }
+        catch (Exception) when (!IsTerminalAttachmentCurrent(
+            attachGeneration,
+            attachedSession,
+            newBridge,
+            webView))
+        {
+            // The session, page, or bridge was retired while resize/focus awaited.
+            return;
+        }
+
+        EnsureRemoteOutputWaitTimer();
     }
 
     // Failed tabs and user-cancelled/disconnected tabs keep their in-pane recovery affordance on an
@@ -2950,6 +3016,8 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     internal Task AwaitPendingTerminalSinkRetirementForTestingAsync() =>
         AwaitPendingTerminalSinkRetirementAsync();
 
+    internal void ClearTerminalReplayBuffersForTesting() => ClearTerminalReplayBuffers();
+
     internal void AttachTerminalOutputSinkForTesting(
         ITerminalOutputSink sink,
         object? rendererIdentity = null)
@@ -3330,13 +3398,18 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
     {
         lock (_terminalReplayLock)
         {
-            _replayBuffer.Clear();
-            _detachedReplayBuffer.Clear();
-            // Buffers are empty now — nothing pending to replay on the next attach.
-            _connectedWhileDetached = false;
-            _sessionlessRendererRecoveryAttempted = false;
-            ResetReplayCheckpointUnderLock();
+            ClearTerminalReplayBuffersUnderLock();
         }
+    }
+
+    private void ClearTerminalReplayBuffersUnderLock()
+    {
+        _replayBuffer.Clear();
+        _detachedReplayBuffer.Clear();
+        // Buffers are empty now — nothing pending to replay on the next attach.
+        _connectedWhileDetached = false;
+        _sessionlessRendererRecoveryAttempted = false;
+        ResetReplayCheckpointUnderLock();
     }
 
     private void ResetReplayCheckpointUnderLock()

@@ -27,7 +27,7 @@ namespace Wormhole.Views.Sessions;
 // CA1001 suppressed deliberately: UserControl has no deterministic dispose hook. The render target
 // owns a native framebuffer plus coalesced pooled frame snapshots, both tied to the view instance.
 #pragma warning disable CA1001
-public sealed partial class VncView : UserControl
+public sealed partial class VncView : UserControl, ISessionSurfaceActivation
 #pragma warning restore CA1001
 {
     private VncRenderTarget _renderTarget;
@@ -40,6 +40,7 @@ public sealed partial class VncView : UserControl
     private int _lastPointerY;
     private bool _hasLastPointer;
     private VncPointerButtons _pressedButtons;
+    private bool _sessionSurfaceActive = true;
 
     public VncView()
     {
@@ -50,10 +51,21 @@ public sealed partial class VncView : UserControl
         DataContextChanged += OnDataContextChanged;
     }
 
+    public void SetSessionSurfaceActive(bool isActive)
+    {
+        if (_sessionSurfaceActive == isActive) return;
+        _sessionSurfaceActive = isActive;
+        FramebufferHost.Visibility = isActive ? Visibility.Visible : Visibility.Collapsed;
+    }
+
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         AttachOwnerWindowActivation();
         await AttachCurrentViewModelAsync().ConfigureAwait(true);
+        if (!_sessionSurfaceActive)
+        {
+            SetSessionSurfaceActive(false);
+        }
     }
 
     private async void OnDataContextChanged(FrameworkElement sender, DataContextChangedEventArgs args)
@@ -64,7 +76,10 @@ public sealed partial class VncView : UserControl
 
     private async Task AttachCurrentViewModelAsync()
     {
-        FramebufferHost.Visibility = Visibility.Visible;
+        if (_sessionSurfaceActive)
+        {
+            FramebufferHost.Visibility = Visibility.Visible;
+        }
         var newVm = DataContext as VncSessionViewModel;
         if (newVm is null)
         {

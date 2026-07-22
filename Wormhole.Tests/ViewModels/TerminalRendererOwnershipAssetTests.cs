@@ -15,19 +15,32 @@ public sealed class TerminalRendererOwnershipAssetTests
         var attach = ExtractMethod(
             code,
             "public async Task AttachAsync(",
-            "internal bool ShouldDeferAutoConnectOnReattach()");
+            "private async Task SoftRebindLiveSessionWithoutExactHistoryAsync(");
+        var softRebind = GetSoftRebindBody(code);
         var focus = ExtractMethod(
             code,
             "private async Task<bool> CompleteConnectedAfterCurrentTerminalFocusAsync(",
             "private bool IsConnectionAwaitingTerminalFocus(");
 
         Assert.Contains(
-            "TryHandleTerminalRendererFailureAsync(\n                    webView,",
+            "SoftRebindLiveSessionWithoutExactHistoryAsync(",
+            attach,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "exact replay history expired",
             attach,
             StringComparison.Ordinal);
         Assert.DoesNotContain(
             "await HandleTerminalRendererFailureAsync(",
             attach,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "ClearTerminalReplayBuffersUnderLock();",
+            softRebind,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            "CompleteLiveTerminalAttachmentAsync(",
+            code,
             StringComparison.Ordinal);
 
         Assert.Contains(
@@ -42,6 +55,20 @@ public sealed class TerminalRendererOwnershipAssetTests
             "await HandleTerminalRendererFailureAsync(",
             focus,
             StringComparison.Ordinal);
+    }
+
+    private static string GetSoftRebindBody(string code)
+    {
+        var start = code.IndexOf(
+            "private async Task SoftRebindLiveSessionWithoutExactHistoryAsync(",
+            StringComparison.Ordinal);
+        Assert.True(start >= 0);
+        var end = code.IndexOf(
+            "private async Task CompleteLiveTerminalAttachmentAsync(",
+            start,
+            StringComparison.Ordinal);
+        Assert.True(end > start);
+        return code[start..end];
     }
 
     private static string ExtractMethod(string code, string startMarker, string endMarker)

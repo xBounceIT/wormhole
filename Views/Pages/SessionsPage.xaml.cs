@@ -1,3 +1,5 @@
+using System.Collections.Specialized;
+using System.ComponentModel;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Dispatching;
@@ -10,6 +12,7 @@ using Wormhole.Services;
 using Wormhole.ViewModels;
 using Wormhole.ViewModels.Sessions;
 using Wormhole.Views.Controls;
+using Wormhole.Views.Sessions;
 
 namespace Wormhole.Views.Pages;
 
@@ -18,6 +21,8 @@ public sealed partial class SessionsPage : Page
     private readonly ISessionTabFactory _sessionTabFactory;
     private readonly IFileTransferDialogService _fileTransferDialog;
     private readonly HashSet<SessionTabViewModel> _closingTabs = new();
+    private readonly Dictionary<SessionTabViewModel, FrameworkElement> _sessionSurfaces = new();
+    private bool _sessionSurfaceHostHooked;
 
     public ShellViewModel ViewModel { get; }
 
@@ -27,6 +32,103 @@ public sealed partial class SessionsPage : Page
         _sessionTabFactory = App.Current.Services.GetRequiredService<ISessionTabFactory>();
         _fileTransferDialog = App.Current.Services.GetRequiredService<IFileTransferDialogService>();
         this.InitializeComponent();
+        Loaded += OnSessionsPageLoaded;
+        Unloaded += OnSessionsPageUnloaded;
+    }
+
+    private void OnSessionsPageLoaded(object sender, RoutedEventArgs e)
+    {
+        EnsureSessionSurfaceHostHooked();
+        SyncSessionSurfaces();
+    }
+
+    private void OnSessionsPageUnloaded(object sender, RoutedEventArgs e)
+    {
+        // NavigationCacheMode=Required keeps the page instance; surfaces stay in the dictionary so
+        // a return can re-show them. Unhook collection listeners only while the page is out of the
+        // tree so a cached instance does not double-subscribe after the next Loaded.
+        if (!_sessionSurfaceHostHooked) return;
+        ViewModel.Tabs.CollectionChanged -= OnSessionTabsChanged;
+        ViewModel.PropertyChanged -= OnShellPropertyChanged;
+        _sessionSurfaceHostHooked = false;
+    }
+
+    private void EnsureSessionSurfaceHostHooked()
+    {
+        if (_sessionSurfaceHostHooked) return;
+        ViewModel.Tabs.CollectionChanged += OnSessionTabsChanged;
+        ViewModel.PropertyChanged += OnShellPropertyChanged;
+        _sessionSurfaceHostHooked = true;
+    }
+
+    private void OnShellPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(ShellViewModel.SelectedTab))
+        {
+            SyncSessionSurfaces();
+        }
+    }
+
+    private void OnSessionTabsChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        SyncSessionSurfaces();
+    }
+
+    /// <summary>
+    /// Keep one realized protocol surface per open tab and toggle Visibility on selection.
+    /// Closing a background tab never tears down the visible surface; switching SSH tabs no
+    /// longer destroys WebView2 / exact-replay checkpoints.
+    /// </summary>
+    private void SyncSessionSurfaces()
+    {
+        var selector = (SessionContentSelector)Resources["SessionContentSelector"];
+        var selected = ViewModel.SelectedTab;
+
+        foreach (var tab in ViewModel.Tabs)
+        {
+            if (!_sessionSurfaces.ContainsKey(tab))
+            {
+                var surface = CreateSessionSurface(tab, selector);
+                _sessionSurfaces[tab] = surface;
+                SelectedSessionHost.Children.Add(surface);
+            }
+        }
+
+        foreach (var orphan in _sessionSurfaces.Keys.Where(tab => !ViewModel.Tabs.Contains(tab)).ToList())
+        {
+            if (_sessionSurfaces.Remove(orphan, out var surface))
+            {
+                SelectedSessionHost.Children.Remove(surface);
+            }
+        }
+
+        foreach (var (tab, surface) in _sessionSurfaces)
+        {
+            var isActive = ReferenceEquals(tab, selected);
+            surface.Visibility = isActive ? Visibility.Visible : Visibility.Collapsed;
+            if (surface is ISessionSurfaceActivation activation)
+            {
+                activation.SetSessionSurfaceActive(isActive);
+            }
+        }
+    }
+
+    private static FrameworkElement CreateSessionSurface(
+        SessionTabViewModel tab,
+        SessionContentSelector selector)
+    {
+        var template = selector.ResolveTemplate(tab)
+            ?? throw new InvalidOperationException($"No session template for {tab.GetType().Name}.");
+        if (template.LoadContent() is not FrameworkElement surface)
+        {
+            throw new InvalidOperationException(
+                $"Session template for {tab.GetType().Name} did not produce a FrameworkElement.");
+        }
+
+        surface.DataContext = tab;
+        surface.HorizontalAlignment = HorizontalAlignment.Stretch;
+        surface.VerticalAlignment = VerticalAlignment.Stretch;
+        return surface;
     }
 
     private void SessionTabs_Loaded(object sender, RoutedEventArgs e)
@@ -43,9 +145,9 @@ public sealed partial class SessionsPage : Page
 
     /// <summary>
     /// Collapse TabView's internal content presenter so the control is header-strip-only.
-    /// The protocol surface is hosted outside the TabView (SelectedSessionHost) bound to
-    /// SelectedTab — leaving the default star-sized content row would steal the whole pane
-    /// (and Auto-size the strip row incorrectly). Idempotent: safe to re-run after template rebuild.
+    /// Protocol surfaces are hosted outside the TabView (SelectedSessionHost) — leaving the
+    /// default star-sized content row would steal the whole pane (and Auto-size the strip row
+    /// incorrectly). Idempotent: safe to re-run after template rebuild.
     /// </summary>
     private void EnsureTabViewHeaderOnlyLayout()
     {
@@ -90,11 +192,9 @@ public sealed partial class SessionsPage : Page
         try
         {
             // When the *active* tab is closed, move selection to its closest neighbour BEFORE
-            // removing it. The heavy session surface lives outside TabView (SelectedSessionHost
-            // on SelectedTab), so a background-tab close no longer disturbs it — but closing the
-            // selected tab still needs an explicit neighbour hand-off. Selecting the neighbour
-            // first drives the switch through the normal selection-change path; the closed tab is
-            // then just a background header whose removal no longer blanks the host.
+            // removing it. Multi-surface hosting keeps background surfaces alive, but closing the
+            // selected tab still needs an explicit neighbour hand-off through the normal
+            // selection-change path.
             // Only redirect when there's actually a neighbour to move to - closing the last
             // tab leaves removal to clear selection and show the empty state.
             if (wasSelected && FindClosestTab(tab) is { } neighbour)
@@ -114,6 +214,7 @@ public sealed partial class SessionsPage : Page
             // an orphaned reconnection right before the tab is finally removed. Pulling it from
             // the collection up front makes it unreachable for selection during teardown; the VM
             // stays alive through the captured local, so CloseAsync still runs to completion.
+            // SyncSessionSurfaces removes the matching surface from SelectedSessionHost.
             ViewModel.Tabs.Remove(tab);
             if (wasSelected)
             {
@@ -244,10 +345,8 @@ public sealed partial class SessionsPage : Page
     private void OnTabReconnectClick(object sender, RoutedEventArgs e)
     {
         // Activate the tab before MenuFlyoutItem invokes the Reconnect Command (Click
-        // fires first, Command.Execute second). For background SSH tabs the view is
-        // unloaded and _webView is null, so RetryAsync would otherwise fan out into a
-        // detached InitializationRetryRequested and silently no-op — selecting the tab
-        // schedules its view to re-Load, where AttachAsync consumes the reconnect intent.
+        // fires first, Command.Execute second). Background SSH tabs keep their surface alive
+        // under Collapsed, but selecting still ensures focus and activation run before Retry.
         if (sender is FrameworkElement fe &&
             fe.DataContext is SessionTabViewModel tab &&
             !ReferenceEquals(ViewModel.SelectedTab, tab))

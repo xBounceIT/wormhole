@@ -13,6 +13,9 @@ public sealed class SessionContentSelector : DataTemplateSelector
     public DataTemplate? VncTemplate { get; set; }
     public DataTemplate? PlaceholderTemplate { get; set; }
 
+    /// <summary>Public entry used by the multi-surface SessionsPage host.</summary>
+    public DataTemplate ResolveTemplate(object item) => SelectTemplateCore(item);
+
     protected override DataTemplate SelectTemplateCore(object item) => item switch
     {
         SshSessionViewModel when SshTemplate is not null => SshTemplate,
