@@ -1,10 +1,12 @@
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
+using System.ComponentModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Microsoft.Extensions.Logging;
 using Microsoft.UI.Xaml;
 using Wormhole.Services;
 using Wormhole.ViewModels.Sessions;
+using Wormhole.ViewModels.Sessions.Layout;
 
 namespace Wormhole.ViewModels;
 
@@ -18,17 +20,25 @@ public partial class ShellViewModel : ObservableObject
     private readonly IAppSettingsService _settings;
     private readonly ILogger<ShellViewModel> _logger;
     private readonly ITransientSessionCredentialStore? _transientCredentials;
+    private bool _syncingLayoutSelection;
 
     [ObservableProperty]
     private SessionTabViewModel? selectedTab;
 
     private SessionTabViewModel? lastKnownSelectedTab;
 
+    /// <summary>
+    /// In-memory tiling of visible session panes. Open tabs stay in <see cref="Tabs"/>;
+    /// this only tracks which subset is shown side-by-side.
+    /// </summary>
+    public SessionLayoutController Layout { get; } = new();
+
     partial void OnSelectedTabChanged(SessionTabViewModel? value)
     {
         if (value is not null && Tabs.Contains(value))
         {
             lastKnownSelectedTab = value;
+            SyncLayoutFromSelectedTab(value);
             return;
         }
 
@@ -41,6 +51,47 @@ public partial class ShellViewModel : ObservableObject
             : Tabs.Count == 0 ? null : Tabs[Tabs.Count - 1];
         lastKnownSelectedTab = fallback;
         SelectedTab = fallback;
+    }
+
+    private void SyncLayoutFromSelectedTab(SessionTabViewModel tab)
+    {
+        if (_syncingLayoutSelection) return;
+        _syncingLayoutSelection = true;
+        try
+        {
+            Layout.SelectTab(tab);
+        }
+        finally
+        {
+            _syncingLayoutSelection = false;
+        }
+    }
+
+    private void OnLayoutPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (_syncingLayoutSelection) return;
+        if (e.PropertyName is not (nameof(SessionLayoutController.FocusedLeaf)
+            or nameof(SessionLayoutController.FocusedTab)
+            or nameof(SessionLayoutController.StructureVersion)))
+        {
+            return;
+        }
+
+        var focused = Layout.FocusedTab;
+        if (focused is null || !Tabs.Contains(focused) || ReferenceEquals(SelectedTab, focused))
+        {
+            return;
+        }
+
+        _syncingLayoutSelection = true;
+        try
+        {
+            SelectedTab = focused;
+        }
+        finally
+        {
+            _syncingLayoutSelection = false;
+        }
     }
 
     [ObservableProperty]
@@ -123,11 +174,13 @@ public partial class ShellViewModel : ObservableObject
         _transientCredentials = transientCredentials;
 
         SidebarWidth = settings.Current.SidebarWidth;
+        Layout.PropertyChanged += OnLayoutPropertyChanged;
 
         bool wasEmpty = Tabs.Count == 0;
         Tabs.CollectionChanged += (_, args) =>
         {
             ReleaseTransientCredentials(args);
+            SyncLayoutAfterTabsChanged(args);
             var isEmpty = Tabs.Count == 0;
             if (isEmpty != wasEmpty)
             {
@@ -138,6 +191,27 @@ public partial class ShellViewModel : ObservableObject
 
             CoerceSelectedTabAfterTabsChanged(args);
         };
+    }
+
+    private void SyncLayoutAfterTabsChanged(NotifyCollectionChangedEventArgs args)
+    {
+        if (args.Action == NotifyCollectionChangedAction.Reset)
+        {
+            Layout.Clear();
+            return;
+        }
+
+        if (args.Action is NotifyCollectionChangedAction.Remove or NotifyCollectionChangedAction.Replace)
+        {
+            if (args.OldItems is null) return;
+            foreach (var item in args.OldItems)
+            {
+                if (item is SessionTabViewModel tab)
+                {
+                    Layout.RemoveTab(tab);
+                }
+            }
+        }
     }
 
     private void ReleaseTransientCredentials(NotifyCollectionChangedEventArgs args)

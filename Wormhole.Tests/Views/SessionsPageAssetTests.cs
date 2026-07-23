@@ -12,15 +12,15 @@ public sealed class SessionsPageAssetTests
         var xaml = ReadAsset("Views", "Pages", "SessionsPage.xaml");
         var code = ReadAsset("Views", "Pages", "SessionsPage.xaml.cs.txt");
 
-        var selectedHostIndex = xaml.IndexOf("x:Name=\"SelectedSessionHost\"", StringComparison.Ordinal);
-        Assert.True(selectedHostIndex >= 0, "Selected session surface must be a dedicated host.");
-        Assert.Contains("<Grid x:Name=\"SelectedSessionHost\"", xaml, StringComparison.Ordinal);
-        Assert.DoesNotContain(
-            "Content=\"{x:Bind ViewModel.SelectedTab, Mode=OneWay}\"",
+        var layoutHostIndex = xaml.IndexOf("x:Name=\"SessionLayout\"", StringComparison.Ordinal);
+        Assert.True(layoutHostIndex >= 0, "Session layout host must be a dedicated multi-pane host.");
+        Assert.Contains(
+            "Controller=\"{x:Bind ViewModel.Layout, Mode=OneWay}\"",
             xaml,
             StringComparison.Ordinal);
+        Assert.Contains("sessionViews:SessionLayoutHost", xaml, StringComparison.Ordinal);
         Assert.DoesNotContain(
-            "ContentTemplateSelector=\"{StaticResource SessionContentSelector}\"",
+            "Content=\"{x:Bind ViewModel.SelectedTab, Mode=OneWay}\"",
             xaml,
             StringComparison.Ordinal);
 
@@ -31,20 +31,31 @@ public sealed class SessionsPageAssetTests
 
         var tabItemTemplate = xaml[tabItemTemplateIndex..tabItemTemplateEnd];
         Assert.DoesNotContain(
-            "x:Name=\"SelectedSessionHost\"",
+            "ContentTemplateSelector=\"{StaticResource SessionContentSelector}\"",
+            tabItemTemplate,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "x:Name=\"SessionLayout\"",
+            tabItemTemplate,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "sessionViews:SessionLayoutHost",
             tabItemTemplate,
             StringComparison.Ordinal);
 
         Assert.True(
-            selectedHostIndex > tabItemTemplateEnd,
-            "SelectedSessionHost must sit outside TabViewItem content so sibling tab removal cannot unload it.");
+            layoutHostIndex > tabItemTemplateEnd,
+            "SessionLayout must sit outside TabViewItem content so sibling tab removal cannot unload it.");
 
         Assert.Contains("EnsureTabViewHeaderOnlyLayout", code, StringComparison.Ordinal);
         Assert.Contains("root.RowDefinitions[1].Height = new GridLength(0);", code, StringComparison.Ordinal);
+        Assert.Contains("SessionTabs_TabDragStarting", code, StringComparison.Ordinal);
         Assert.Contains("SyncSessionSurfaces", code, StringComparison.Ordinal);
-        Assert.Contains("_sessionSurfaces", code, StringComparison.Ordinal);
-        Assert.Contains("SetSessionSurfaceActive", code, StringComparison.Ordinal);
-        Assert.Contains("ResolveTemplate", code, StringComparison.Ordinal);
+
+        var layoutHost = ReadAsset("Views", "Sessions", "SessionLayoutHost.xaml.cs.txt");
+        Assert.Contains("SyncSurfaces", layoutHost, StringComparison.Ordinal);
+        Assert.Contains("SetSessionSurfaceActive", layoutHost, StringComparison.Ordinal);
+        Assert.Contains("ResolveTemplate", layoutHost, StringComparison.Ordinal);
     }
 
     [Fact]

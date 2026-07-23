@@ -80,14 +80,13 @@
         </Grid>
 
         <!--
-            Session chrome (headers) lives in TabView; the heavy protocol surfaces live OUTSIDE
-            every TabViewItem. Hosting content inside TabViewItem made sibling-tab removal recycle
-            or Unload the active surface (RDP overlay Hide, SSH TerminalContentMask Visible) without
-            a reliable Loaded recovery — black pane until reconnect.
+            Session chrome (headers) lives in TabView; protocol surfaces live in SessionLayoutHost
+            outside every TabViewItem. Hosting content inside TabViewItem made sibling-tab removal
+            recycle or Unload the active surface without a reliable Loaded recovery.
 
-            SelectedSessionHost keeps one realized surface per open tab and toggles Visibility on
-            selection. Destroying/recreating the SSH WebView on every switch required an exact
-            scrollback replay that fails after resize and closed the live session.
+            SessionLayoutHost keeps one realized surface per open tab (Visibility + activation
+            toggles) and tiles visible leaves on a Canvas so splits/moves do not destroy WebView2
+            / exact-replay checkpoints. Drag a tab onto a leaf edge to split (max 4 panes).
 
             Layout: Auto strip row + star content row. Code-behind collapses TabView's internal
             star-sized content presenter so the Auto row sizes to the header strip only.
@@ -108,6 +107,9 @@
                      IsAddTabButtonVisible="False"
                      CanReorderTabs="True"
                      CanDragTabs="True"
+                     AllowDrop="True"
+                     TabDragStarting="SessionTabs_TabDragStarting"
+                     TabDragCompleted="SessionTabs_TabDragCompleted"
                      TabCloseRequested="SessionTabs_TabCloseRequested"
                      Background="Transparent"
                      HorizontalAlignment="Stretch"
@@ -200,13 +202,15 @@
                 </TabView.TabItemTemplate>
             </TabView>
 
-            <!-- One realized surface per open tab; code-behind toggles Visibility on selection. -->
-            <Grid x:Name="SelectedSessionHost"
-                  Grid.Row="1"
-                  HorizontalAlignment="Stretch"
-                  VerticalAlignment="Stretch"
-                  MinHeight="240"
-                  IsTabStop="False" />
+            <!-- Multi-pane host: persistent surfaces per tab, tiled for visible leaves. -->
+            <sessionViews:SessionLayoutHost x:Name="SessionLayout"
+                                            Grid.Row="1"
+                                            Controller="{x:Bind ViewModel.Layout, Mode=OneWay}"
+                                            ContentTemplateSelector="{StaticResource SessionContentSelector}"
+                                            PaneActivateRequested="SessionLayout_PaneActivateRequested"
+                                            HorizontalAlignment="Stretch"
+                                            VerticalAlignment="Stretch"
+                                            MinHeight="240" />
         </Grid>
     </Grid>
 </Page>

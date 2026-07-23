@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="Wormhole.Views.Sessions.SessionPaneHost"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Wormhole.Views.Sessions">
+
+    <!-- Chrome overlay only: protocol surfaces are siblings on the layout Canvas so they are
+         never Unloaded when retargeting a leaf. -->
+    <Grid x:Name="Root" Background="Transparent">
+        <Border x:Name="FocusChrome"
+                BorderThickness="2"
+                BorderBrush="Transparent"
+                CornerRadius="2"
+                IsHitTestVisible="False" />
+
+        <local:SessionDropOverlay x:Name="DropOverlay"
+                                  Canvas.ZIndex="10" />
+    </Grid>
+</UserControl>
