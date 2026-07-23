@@ -28,18 +28,26 @@ public sealed class SshTerminalViewAssetTests
         const string visibleAssignment = "TerminalView.Visibility = Visibility.Visible;";
         const string collapsedAssignment = "TerminalView.Visibility = Visibility.Collapsed;";
         const string unloadMethod = "OnUnloaded(object sender";
+        const string surfaceActiveMethod = "SetSessionSurfaceActive(bool isActive)";
 
+        var surfaceActiveIndex = code.IndexOf(surfaceActiveMethod, StringComparison.Ordinal);
         var unloadIndex = code.IndexOf(unloadMethod, StringComparison.Ordinal);
-        var collapsedIndex = code.IndexOf(collapsedAssignment, StringComparison.Ordinal);
+        var firstCollapsedIndex = code.IndexOf(collapsedAssignment, StringComparison.Ordinal);
+        var lastCollapsedIndex = code.LastIndexOf(collapsedAssignment, StringComparison.Ordinal);
 
         Assert.Contains(visibleAssignment, code, StringComparison.Ordinal);
+        Assert.True(surfaceActiveIndex >= 0, "Multi-surface activation must keep the bridge while collapsing.");
         Assert.True(unloadIndex >= 0, "The unload lifecycle hook must remain present.");
         Assert.True(
-            collapsedIndex > unloadIndex,
-            "WebView2 may be collapsed only after entering OnUnloaded; initialization needs real bounds.");
-        Assert.Equal(
-            collapsedIndex,
-            code.LastIndexOf(collapsedAssignment, StringComparison.Ordinal));
+            firstCollapsedIndex > surfaceActiveIndex && firstCollapsedIndex < unloadIndex,
+            "Background tab deactivation may collapse WebView2 before unload.");
+        Assert.True(
+            lastCollapsedIndex > unloadIndex,
+            "OnUnloaded must still collapse WebView2 to suppress bleed when the page leaves the tree.");
+        Assert.Contains(
+            "TerminalView.Visibility = _sessionSurfaceActive ? Visibility.Visible : Visibility.Collapsed;",
+            code,
+            StringComparison.Ordinal);
         Assert.Contains(
             "TerminalContentMask.Visibility = Visibility.Visible;",
             code,

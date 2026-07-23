@@ -13,7 +13,7 @@ using Wormhole.ViewModels.Sessions;
 
 namespace Wormhole.Views.Sessions;
 
-public sealed partial class SshTerminalView : UserControl
+public sealed partial class SshTerminalView : UserControl, ISessionSurfaceActivation
 {
     // How long to wait for the JS "ready" handshake after navigation completes before
     // surfacing a failure. Missing/corrupt xterm assets, JS errors in bridge.js, or
@@ -55,6 +55,7 @@ public sealed partial class SshTerminalView : UserControl
     private int _rendererUnresponsiveEvents;
     private long _lastRendererUnresponsiveTick;
     private TerminalSize _lastSize = TerminalSize.Default;
+    private bool _sessionSurfaceActive = true;
 
     public SshTerminalView()
     {
@@ -65,9 +66,39 @@ public sealed partial class SshTerminalView : UserControl
         DataContextChanged += OnDataContextChanged;
     }
 
+    /// <summary>
+    /// Multi-surface tab host toggles Visibility without Unloading this control. Collapse the
+    /// WebView2 to stop pixel bleed, but keep the TerminalBridge attached so switching back does
+    /// not require an exact scrollback replay.
+    /// </summary>
+    public void SetSessionSurfaceActive(bool isActive)
+    {
+        if (_sessionSurfaceActive == isActive) return;
+        _sessionSurfaceActive = isActive;
+        if (!isActive)
+        {
+            TerminalContentMask.Visibility = Visibility.Visible;
+            TerminalView.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        TerminalView.Visibility = Visibility.Visible;
+        if (_handshakeReceived)
+        {
+            TerminalContentMask.Visibility = Visibility.Collapsed;
+            TryFocusTerminalHost();
+        }
+    }
+
     private async void OnLoaded(object sender, RoutedEventArgs e)
     {
         await AttachCurrentViewModelSafelyAsync().ConfigureAwait(true);
+        if (!_sessionSurfaceActive)
+        {
+            // Loaded can fire while the surface is still Collapsed (background tab). Keep the
+            // protocol session attached but hide the WebView composition surface.
+            SetSessionSurfaceActive(false);
+        }
     }
 
     private async void OnDataContextChanged(FrameworkElement sender, DataContextChangedEventArgs args)
@@ -183,8 +214,9 @@ public sealed partial class SshTerminalView : UserControl
         // WebView2 must remain in layout while xterm.js waits for a usable viewport. Mask a
         // recycled page instead of collapsing it; the status overlays remain visible above the
         // mask, and a same-VM reload can reveal its existing page after reattachment.
-        TerminalView.Visibility = Visibility.Visible;
-        if (bindingChanged || newVm is null)
+        // Background multi-surface tabs keep the composition surface collapsed to avoid bleed.
+        TerminalView.Visibility = _sessionSurfaceActive ? Visibility.Visible : Visibility.Collapsed;
+        if (bindingChanged || newVm is null || !_sessionSurfaceActive)
         {
             TerminalContentMask.Visibility = Visibility.Visible;
         }
@@ -280,7 +312,10 @@ public sealed partial class SshTerminalView : UserControl
                         IsCurrentBinding(newVm, bindingGeneration))
                     {
                         CompleteLocalRendererRecovery();
-                        TerminalContentMask.Visibility = Visibility.Collapsed;
+                        if (_sessionSurfaceActive)
+                        {
+                            TerminalContentMask.Visibility = Visibility.Collapsed;
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -864,7 +899,10 @@ public sealed partial class SshTerminalView : UserControl
             TryRemoveInitializationMessageHandler(sender);
             EnsureViewModelSubscriptions(vm);
             CompleteLocalRendererRecovery();
-            TerminalContentMask.Visibility = Visibility.Collapsed;
+            if (_sessionSurfaceActive)
+            {
+                TerminalContentMask.Visibility = Visibility.Collapsed;
+            }
         }
         catch (Exception ex)
         {

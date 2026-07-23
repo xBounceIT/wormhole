@@ -80,11 +80,14 @@
         </Grid>
 
         <!--
-            Session chrome (headers) lives in TabView; the heavy protocol surface lives OUTSIDE
+            Session chrome (headers) lives in TabView; the heavy protocol surfaces live OUTSIDE
             every TabViewItem. Hosting content inside TabViewItem made sibling-tab removal recycle
             or Unload the active surface (RDP overlay Hide, SSH TerminalContentMask Visible) without
-            a reliable Loaded recovery — black pane until reconnect. One selected-tab host means
-            closing a background tab never touches the visible surface.
+            a reliable Loaded recovery — black pane until reconnect.
+
+            SelectedSessionHost keeps one realized surface per open tab and toggles Visibility on
+            selection. Destroying/recreating the SSH WebView on every switch required an exact
+            scrollback replay that fails after resize and closed the live session.
 
             Layout: Auto strip row + star content row. Code-behind collapses TabView's internal
             star-sized content presenter so the Auto row sizes to the header strip only.
@@ -114,7 +117,7 @@
 
                 <TabView.TabItemTemplate>
                     <DataTemplate x:DataType="sessions:SessionTabViewModel">
-                        <!-- Content intentionally empty: the surface hosts outside, bound to SelectedTab. -->
+                        <!-- Content intentionally empty: surfaces host in SelectedSessionHost. -->
                         <TabViewItem HorizontalContentAlignment="Stretch"
                                      VerticalContentAlignment="Stretch">
                             <TabViewItem.Header>
@@ -197,16 +200,13 @@
                 </TabView.TabItemTemplate>
             </TabView>
 
-            <ContentControl x:Name="SelectedSessionHost"
-                            Grid.Row="1"
-                            Content="{x:Bind ViewModel.SelectedTab, Mode=OneWay}"
-                            ContentTemplateSelector="{StaticResource SessionContentSelector}"
-                            HorizontalAlignment="Stretch"
-                            VerticalAlignment="Stretch"
-                            HorizontalContentAlignment="Stretch"
-                            VerticalContentAlignment="Stretch"
-                            MinHeight="240"
-                            IsTabStop="False" />
+            <!-- One realized surface per open tab; code-behind toggles Visibility on selection. -->
+            <Grid x:Name="SelectedSessionHost"
+                  Grid.Row="1"
+                  HorizontalAlignment="Stretch"
+                  VerticalAlignment="Stretch"
+                  MinHeight="240"
+                  IsTabStop="False" />
         </Grid>
     </Grid>
 </Page>

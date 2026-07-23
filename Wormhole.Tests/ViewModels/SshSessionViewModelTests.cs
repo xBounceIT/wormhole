@@ -1991,6 +1991,23 @@ public sealed class SshSessionViewModelTests
     }
 
     [Fact]
+    public void SoftRebindCheckpointClear_AllowsFreshReplayAfterGeometryPoison()
+    {
+        // AttachAsync soft-rebind clears poisoned checkpoints instead of closing the live session.
+        var (vm, session) = CreateConnectedVm();
+        session.RaiseData((byte)'x');
+        vm.UpdateTerminalSize(new TerminalSize(120, 40));
+        Assert.Throws<InvalidOperationException>(
+            () => vm.TakeReattachReplaySnapshotForTesting(xtermIsFresh: true));
+
+        vm.ClearTerminalReplayBuffersForTesting();
+
+        Assert.Null(vm.TakeReattachReplaySnapshotForTesting(xtermIsFresh: true));
+        Assert.Equal(SessionStatus.Connected, vm.Status);
+        Assert.Equal(0, session.DisposeCount);
+    }
+
+    [Fact]
     public void SessionlessRendererRecovery_AutomaticallyRetriesOnlyOnce()
     {
         var vm = CreateViewModel();

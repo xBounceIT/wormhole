@@ -24,7 +24,7 @@ namespace Wormhole.Views.Sessions;
 /// AppWindow.Changed (move/resize/minimize) tick to keep the overlay positioned over our bounds.
 /// The Grid in XAML stays empty — the native surface paints itself over the slot.
 /// </summary>
-public sealed partial class RdpSurfaceHost : UserControl
+public sealed partial class RdpSurfaceHost : UserControl, ISessionSurfaceActivation
 {
     private const double LayoutCoalesceMs = 16;
     // The overlay window tracks the tab on every 16ms layout tick (LayoutCoalesceMs), but the
@@ -64,6 +64,7 @@ public sealed partial class RdpSurfaceHost : UserControl
     // duration; layout/visibility ticks must not re-show it (a window move while the dialog is
     // open would otherwise pop the overlay back over the dialog).
     private bool _overlaySuppressed;
+    private bool _sessionSurfaceActive = true;
 
     // Native subclass on the owner window so window MOVES reposition the overlay synchronously
     // inside the WM_WINDOWPOSCHANGED message — the managed AppWindow.Changed + 16ms timer path
@@ -90,8 +91,9 @@ public sealed partial class RdpSurfaceHost : UserControl
         InitializeComponent();
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
-        // SelectedSessionHost reuses this control when switching between two RDP tabs (same
-        // DataTemplate), so DataContext can change without Unloaded/Loaded. Rebind there.
+        // SelectedSessionHost used to reuse one control across RDP tabs via DataContext flips.
+        // Multi-surface hosting keeps a dedicated host per tab; DataContextChanged remains as a
+        // defensive rebind if the slot is ever recycled.
         DataContextChanged += OnDataContextChanged;
         SizeChanged += OnSizeChanged;
         // LayoutUpdated is intentionally NOT subscribed: it fires for every visual tree
@@ -99,6 +101,55 @@ public sealed partial class RdpSurfaceHost : UserControl
         // + AppWindow.Changed (window move/resize/minimize) catch the geometry shifts we care
         // about. The overlay is a separate top-level window and does NOT auto-track the owner's
         // client area, so those handlers are required to keep it positioned.
+    }
+
+    /// <summary>
+    /// Multi-surface tab host collapses this control without Unloading it. The RDP overlay is a
+    /// top-level HWND, so deselect must Hide it explicitly; select re-Attaches/Shows it.
+    /// </summary>
+    public void SetSessionSurfaceActive(bool isActive)
+    {
+        if (_sessionSurfaceActive == isActive) return;
+        _sessionSurfaceActive = isActive;
+        if (!isActive)
+        {
+            Interlocked.Increment(ref _attachGeneration);
+            ViewModel?.DetachView();
+            return;
+        }
+
+        if (!IsLoaded || ViewModel is null) return;
+        _ = ActivateSessionSurfaceAsync();
+    }
+
+    private async Task ActivateSessionSurfaceAsync()
+    {
+        if (!_sessionSurfaceActive || !IsLoaded || ViewModel is null) return;
+
+        if (_ownerHwnd == IntPtr.Zero)
+        {
+            _ownerWindow = App.Current.MainWindow;
+            if (_ownerWindow is null) return;
+            _ownerHwnd = _ownerWindow.GetHwnd();
+        }
+
+        var bounds = ComputeBoundsScreenPx();
+        if (bounds.IsDegenerate(minDim: 1)) bounds = HostBounds.Seed;
+
+        var attachGeneration = Interlocked.Increment(ref _attachGeneration);
+        var attachingVm = ViewModel;
+        _attached = true;
+        try
+        {
+            await attachingVm.AttachAsync(_ownerHwnd, bounds).ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            var logger = App.Current.Services.GetService<ILogger<RdpSurfaceHost>>();
+            logger?.LogError(ex, "RdpSurfaceHost activate attach failed.");
+        }
+
+        CompleteAttachIfCurrent(attachGeneration, attachingVm);
     }
 
     public RdpSessionViewModel? ViewModel
@@ -197,6 +248,12 @@ public sealed partial class RdpSurfaceHost : UserControl
             logger?.LogError(ex, "RdpSurfaceHost AttachAsync failed.");
         }
         CompleteAttachIfCurrent(attachGeneration, attachingVm);
+
+        // Background tabs can Load while Collapsed; keep the HWND hidden until selected.
+        if (!_sessionSurfaceActive)
+        {
+            attachingVm.DetachView();
+        }
 
         // No WinUI focus push on rebind: AttachAsync's rebind branch already issued Win32
         // SetFocus on the OCX HWND, and pushing WinUI Focus(Programmatic) on this
@@ -331,9 +388,10 @@ public sealed partial class RdpSurfaceHost : UserControl
         if (attachGeneration != Volatile.Read(ref _attachGeneration) ||
             !ReferenceEquals(ViewModel, attachingVm) ||
             !ReferenceEquals(ViewModel, DataContext as RdpSessionViewModel) ||
-            !IsLoaded)
+            !IsLoaded ||
+            !_sessionSurfaceActive)
         {
-            if (!ReferenceEquals(ViewModel, attachingVm))
+            if (!ReferenceEquals(ViewModel, attachingVm) || !_sessionSurfaceActive)
             {
                 attachingVm.DetachView();
             }
