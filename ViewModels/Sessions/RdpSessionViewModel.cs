@@ -1057,6 +1057,17 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 promptedUsername,
                 explicitDomain ?? credentialDomain,
                 allowDomainFromUsername: explicitDomain is null && credentialDomain is null);
+            if (!profile.IsEphemeral && prompted.SaveCredentialToConnection)
+            {
+                await _credentialBindings.SaveInlinePasswordAsync(
+                    profile.NodeId,
+                    prompted.Password,
+                    username: parsedPrompt.Username,
+                    rdpDomain: parsedPrompt.Domain ?? string.Empty,
+                    cancellationToken: token).ConfigureAwait(true);
+                token.ThrowIfCancellationRequested();
+            }
+
             CacheTransientPassword(profile, prompted.Password);
             return new ResolvedRdpCredentials(
                 parsedPrompt.Username,
@@ -1092,6 +1103,17 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
         }
 
         if (passwordPrompt is null) return null;
+
+        if (!profile.IsEphemeral && passwordPrompt.SaveCredentialToConnection)
+        {
+            await _credentialBindings.SaveInlinePasswordAsync(
+                profile.NodeId,
+                passwordPrompt.Password,
+                username: username,
+                rdpDomain: domain ?? string.Empty,
+                cancellationToken: token).ConfigureAwait(true);
+            token.ThrowIfCancellationRequested();
+        }
 
         CacheTransientPassword(profile, passwordPrompt.Password);
         return new ResolvedRdpCredentials(

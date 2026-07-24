@@ -8,4 +8,11 @@ public interface IConnectionCredentialBindingService
         Guid nodeId,
         CredentialProfile credential,
         CancellationToken cancellationToken = default);
+
+    Task SaveInlinePasswordAsync(
+        Guid nodeId,
+        string password,
+        string? username = null,
+        string? rdpDomain = null,
+        CancellationToken cancellationToken = default);
 }
