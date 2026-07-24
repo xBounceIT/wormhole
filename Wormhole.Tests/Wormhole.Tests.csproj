@@ -249,6 +249,9 @@
     <Compile Include="..\ViewModels\TunnelTestDialogViewModel.cs" Link="ViewModels\TunnelTestDialogViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\ConnectionProgress.cs" Link="ViewModels\Sessions\ConnectionProgress.cs" />
     <Compile Include="..\ViewModels\Sessions\SessionTabViewModel.cs" Link="ViewModels\Sessions\SessionTabViewModel.cs" />
+    <Compile Include="..\ViewModels\Sessions\Layout\SessionLayoutEdge.cs" Link="ViewModels\Sessions\Layout\SessionLayoutEdge.cs" />
+    <Compile Include="..\ViewModels\Sessions\Layout\SessionLayoutNode.cs" Link="ViewModels\Sessions\Layout\SessionLayoutNode.cs" />
+    <Compile Include="..\ViewModels\Sessions\Layout\SessionLayoutController.cs" Link="ViewModels\Sessions\Layout\SessionLayoutController.cs" />
     <Compile Include="..\ViewModels\Sessions\ITerminalSessionViewModel.cs" Link="ViewModels\Sessions\ITerminalSessionViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\SshSessionViewModel.cs" Link="ViewModels\Sessions\SshSessionViewModel.cs" />
     <Compile Include="..\ViewModels\Sessions\SerialSessionViewModel.cs" Link="ViewModels\Sessions\SerialSessionViewModel.cs" />
@@ -302,6 +305,9 @@
     <None Include="..\Views\Sessions\RdpSurfaceHost.xaml.cs" Link="Views\Sessions\RdpSurfaceHost.xaml.cs.txt" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Views\Pages\SessionsPage.xaml" Link="Views\Pages\SessionsPage.xaml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Views\Pages\SessionsPage.xaml.cs" Link="Views\Pages\SessionsPage.xaml.cs.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Views\Sessions\SessionLayoutHost.xaml.cs" Link="Views\Sessions\SessionLayoutHost.xaml.cs.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Views\Sessions\SessionPaneHost.xaml" Link="Views\Sessions\SessionPaneHost.xaml.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Views\Sessions\SessionPaneHost.xaml.cs" Link="Views\Sessions\SessionPaneHost.xaml.cs.txt" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Views\Controls\ConnectionTreeView.xaml" Link="Views\Controls\ConnectionTreeView.xaml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Views\Controls\ConnectionTreeView.xaml.cs" Link="Views\Controls\ConnectionTreeView.xaml.cs.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

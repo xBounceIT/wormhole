@@ -9,16 +9,16 @@
     <Grid x:Name="TerminalRoot"
           Background="#0c0c0c"
           HorizontalAlignment="Stretch"
-          VerticalAlignment="Stretch"
-          MinHeight="240">
+          VerticalAlignment="Stretch">
         <!-- DefaultBackgroundColor matches the Grid + terminal.html (#0c0c0c) so the
              WebView2 doesn't flash its default white during the brief window between
-             control creation and xterm.js painting. -->
+             control creation and xterm.js painting.
+             No MinHeight: tiled panes must shrink below 240px or the surface overflows
+             the SessionLayoutHost leaf bounds and overlaps the splitter. -->
         <controls:WebView2 x:Name="TerminalView"
                            DefaultBackgroundColor="#0c0c0c"
                            HorizontalAlignment="Stretch"
-                           VerticalAlignment="Stretch"
-                           MinHeight="240" />
+                           VerticalAlignment="Stretch" />
 
         <!-- Keep WebView2 visible and measurable while xterm.js initializes. Collapsing the
              control gives Chromium a 0x0 viewport, so the page can never produce its ready

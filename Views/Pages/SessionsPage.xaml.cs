@@ -7,10 +7,12 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
+using Windows.ApplicationModel.DataTransfer;
 using Wormhole.Helpers;
 using Wormhole.Services;
 using Wormhole.ViewModels;
 using Wormhole.ViewModels.Sessions;
+using Wormhole.ViewModels.Sessions.Layout;
 using Wormhole.Views.Controls;
 using Wormhole.Views.Sessions;
 
@@ -21,7 +23,6 @@ public sealed partial class SessionsPage : Page
     private readonly ISessionTabFactory _sessionTabFactory;
     private readonly IFileTransferDialogService _fileTransferDialog;
     private readonly HashSet<SessionTabViewModel> _closingTabs = new();
-    private readonly Dictionary<SessionTabViewModel, FrameworkElement> _sessionSurfaces = new();
     private bool _sessionSurfaceHostHooked;
 
     public ShellViewModel ViewModel { get; }
@@ -40,16 +41,22 @@ public sealed partial class SessionsPage : Page
     {
         EnsureSessionSurfaceHostHooked();
         SyncSessionSurfaces();
+        UpdateGlobalTabStripVisibility();
     }
 
     private void OnSessionsPageUnloaded(object sender, RoutedEventArgs e)
     {
-        // NavigationCacheMode=Required keeps the page instance; surfaces stay in the dictionary so
-        // a return can re-show them. Unhook collection listeners only while the page is out of the
-        // tree so a cached instance does not double-subscribe after the next Loaded.
+        // NavigationCacheMode=Required keeps the page instance; surfaces stay in the layout host
+        // so a return can re-show them. Unhook collection listeners only while the page is out of
+        // the tree so a cached instance does not double-subscribe after the next Loaded.
         if (!_sessionSurfaceHostHooked) return;
         ViewModel.Tabs.CollectionChanged -= OnSessionTabsChanged;
         ViewModel.PropertyChanged -= OnShellPropertyChanged;
+        ViewModel.Layout.PropertyChanged -= OnLayoutPropertyChanged;
+        SessionLayout.PaneCloseRequested -= OnPaneCloseRequested;
+        SessionLayout.PaneRestoreFullViewRequested -= OnPaneRestoreFullViewRequested;
+        SessionLayout.PaneDuplicateRequested -= OnPaneDuplicateRequested;
+        SessionLayout.PaneFileTransferRequested -= OnPaneFileTransferRequested;
         _sessionSurfaceHostHooked = false;
     }
 
@@ -58,14 +65,76 @@ public sealed partial class SessionsPage : Page
         if (_sessionSurfaceHostHooked) return;
         ViewModel.Tabs.CollectionChanged += OnSessionTabsChanged;
         ViewModel.PropertyChanged += OnShellPropertyChanged;
+        ViewModel.Layout.PropertyChanged += OnLayoutPropertyChanged;
+        SessionLayout.PaneCloseRequested += OnPaneCloseRequested;
+        SessionLayout.PaneRestoreFullViewRequested += OnPaneRestoreFullViewRequested;
+        SessionLayout.PaneDuplicateRequested += OnPaneDuplicateRequested;
+        SessionLayout.PaneFileTransferRequested += OnPaneFileTransferRequested;
         _sessionSurfaceHostHooked = true;
     }
 
     private void OnShellPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(ShellViewModel.SelectedTab))
+        if (e.PropertyName is nameof(ShellViewModel.SelectedTab) or nameof(ShellViewModel.Tabs))
         {
             SyncSessionSurfaces();
+        }
+    }
+
+    private void OnLayoutPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName is nameof(SessionLayoutController.StructureVersion)
+            or nameof(SessionLayoutController.Root)
+            or nameof(SessionLayoutController.LeafCount))
+        {
+            SyncSessionSurfaces();
+            UpdateGlobalTabStripVisibility();
+        }
+    }
+
+    /// <summary>
+    /// Multi-pane layouts use per-pane connection rows (mRemoteNG-style). Hide the global
+    /// strip so each tiled pane owns its own detached connection header.
+    /// </summary>
+    private void UpdateGlobalTabStripVisibility()
+    {
+        var multiPane = ViewModel.Layout.LeafCount > 1;
+        SessionTabs.Visibility = multiPane ? Visibility.Collapsed : Visibility.Visible;
+        if (!multiPane)
+        {
+            EnsureTabViewHeaderOnlyLayout();
+        }
+    }
+
+    private async void OnPaneCloseRequested(object? sender, SessionTabViewModel tab)
+    {
+        await CloseTabAsync(tab);
+    }
+
+    private void OnPaneRestoreFullViewRequested(object? sender, SessionTabViewModel tab)
+    {
+        ViewModel.RestoreTabToFullView(tab);
+        UpdateGlobalTabStripVisibility();
+    }
+
+    private void OnPaneDuplicateRequested(object? sender, SessionTabViewModel tab)
+    {
+        if (tab.Profile is { } profile)
+        {
+            _sessionTabFactory.Open(profile);
+        }
+    }
+
+    private async void OnPaneFileTransferRequested(object? sender, SessionTabViewModel tab)
+    {
+        try
+        {
+            await _fileTransferDialog.ShowAsync(tab);
+        }
+        catch (Exception ex)
+        {
+            var logger = App.Current.Services.GetService<ILogger<SessionsPage>>();
+            logger?.LogError(ex, "File-transfer dialog failed to open from pane header.");
         }
     }
 
@@ -75,60 +144,76 @@ public sealed partial class SessionsPage : Page
     }
 
     /// <summary>
-    /// Keep one realized protocol surface per open tab and toggle Visibility on selection.
-    /// Closing a background tab never tears down the visible surface; switching SSH tabs no
-    /// longer destroys WebView2 / exact-replay checkpoints.
+    /// Keep one realized protocol surface per open tab inside <see cref="SessionLayout"/>.
+    /// Visible leaves show their surfaces tiled; other tabs stay Collapsed (not Unloaded) so SSH
+    /// WebView2 / exact-replay checkpoints survive tab switches and pane moves.
     /// </summary>
     private void SyncSessionSurfaces()
     {
         var selector = (SessionContentSelector)Resources["SessionContentSelector"];
-        var selected = ViewModel.SelectedTab;
-
-        foreach (var tab in ViewModel.Tabs)
-        {
-            if (!_sessionSurfaces.ContainsKey(tab))
-            {
-                var surface = CreateSessionSurface(tab, selector);
-                _sessionSurfaces[tab] = surface;
-                SelectedSessionHost.Children.Add(surface);
-            }
-        }
-
-        foreach (var orphan in _sessionSurfaces.Keys.Where(tab => !ViewModel.Tabs.Contains(tab)).ToList())
-        {
-            if (_sessionSurfaces.Remove(orphan, out var surface))
-            {
-                SelectedSessionHost.Children.Remove(surface);
-            }
-        }
-
-        foreach (var (tab, surface) in _sessionSurfaces)
-        {
-            var isActive = ReferenceEquals(tab, selected);
-            surface.Visibility = isActive ? Visibility.Visible : Visibility.Collapsed;
-            if (surface is ISessionSurfaceActivation activation)
-            {
-                activation.SetSessionSurfaceActive(isActive);
-            }
-        }
+        SessionLayout.SyncSurfaces(ViewModel.Tabs, selector);
     }
 
-    private static FrameworkElement CreateSessionSurface(
-        SessionTabViewModel tab,
-        SessionContentSelector selector)
+    private void SessionTabs_TabDragStarting(TabView sender, TabViewTabDragStartingEventArgs args)
     {
-        var template = selector.ResolveTemplate(tab)
-            ?? throw new InvalidOperationException($"No session template for {tab.GetType().Name}.");
-        if (template.LoadContent() is not FrameworkElement surface)
+        if (args.Item is not SessionTabViewModel tab)
         {
-            throw new InvalidOperationException(
-                $"Session template for {tab.GetType().Name} did not produce a FrameworkElement.");
+            return;
         }
 
-        surface.DataContext = tab;
-        surface.HorizontalAlignment = HorizontalAlignment.Stretch;
-        surface.VerticalAlignment = VerticalAlignment.Stretch;
-        return surface;
+        SessionLayout.BeginTabDrag(tab);
+        args.Data.Properties[SessionLayoutHost.DragTabFormat] = tab;
+        args.Data.RequestedOperation = DataPackageOperation.Move;
+    }
+
+    private void SessionTabs_TabDragCompleted(TabView sender, TabViewTabDragCompletedEventArgs args)
+    {
+        SessionLayout.NotifyDragSourceCompleted();
+    }
+
+    /// <summary>
+    /// Dropping a tiled tab back onto the strip restores the original single-pane view.
+    /// When only one pane is visible, leave the event alone so TabView can reorder.
+    /// </summary>
+    private void SessionTabs_TabStripDragOver(object sender, DragEventArgs e)
+    {
+        if (!TryGetRestoreDropTab(e, out _))
+        {
+            return;
+        }
+
+        e.AcceptedOperation = DataPackageOperation.Move;
+        if (e.DragUIOverride is not null)
+        {
+            e.DragUIOverride.IsGlyphVisible = false;
+            e.DragUIOverride.Caption = "Restore full view";
+        }
+
+        e.Handled = true;
+    }
+
+    private void SessionTabs_TabStripDrop(object sender, DragEventArgs e)
+    {
+        if (!TryGetRestoreDropTab(e, out var tab) || tab is null)
+        {
+            return;
+        }
+
+        ViewModel.RestoreTabToFullView(tab);
+        e.Handled = true;
+    }
+
+    private bool TryGetRestoreDropTab(DragEventArgs e, out SessionTabViewModel? tab)
+    {
+        tab = SessionLayout.DraggedTab;
+        if (tab is null
+            || ViewModel.Layout.LeafCount <= 1
+            || ViewModel.Layout.FindLeaf(tab) is null)
+        {
+            return false;
+        }
+
+        return true;
     }
 
     private void SessionTabs_Loaded(object sender, RoutedEventArgs e)
@@ -145,7 +230,7 @@ public sealed partial class SessionsPage : Page
 
     /// <summary>
     /// Collapse TabView's internal content presenter so the control is header-strip-only.
-    /// Protocol surfaces are hosted outside the TabView (SelectedSessionHost) — leaving the
+    /// Protocol surfaces are hosted in SessionLayoutHost (outside the TabView) — leaving the
     /// default star-sized content row would steal the whole pane (and Auto-size the strip row
     /// incorrectly). Idempotent: safe to re-run after template rebuild.
     /// </summary>
@@ -214,7 +299,7 @@ public sealed partial class SessionsPage : Page
             // an orphaned reconnection right before the tab is finally removed. Pulling it from
             // the collection up front makes it unreachable for selection during teardown; the VM
             // stays alive through the captured local, so CloseAsync still runs to completion.
-            // SyncSessionSurfaces removes the matching surface from SelectedSessionHost.
+            // SyncSessionSurfaces removes the matching surface from SessionLayoutHost.
             ViewModel.Tabs.Remove(tab);
             if (wasSelected)
             {
