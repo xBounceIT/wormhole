@@ -1,10 +1,10 @@
-using Microsoft.UI;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Windows.Foundation;
+using Windows.UI;
 using Wormhole.ViewModels.Sessions.Layout;
 
 namespace Wormhole.Views.Controls;
@@ -32,9 +32,10 @@ public sealed class PaneSplitter : ContentControl
         IsTabStop = false;
         HorizontalContentAlignment = HorizontalAlignment.Stretch;
         VerticalContentAlignment = VerticalAlignment.Stretch;
+        // Opaque-enough fill so the reserved gap stays visible and hit-testable between WebView2 HWNDs.
         Content = new Border
         {
-            Background = new SolidColorBrush(Colors.Transparent),
+            Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x3A, 0x3A, 0x3A)),
             HorizontalAlignment = HorizontalAlignment.Stretch,
             VerticalAlignment = VerticalAlignment.Stretch,
         };
@@ -70,6 +71,8 @@ public sealed class PaneSplitter : ContentControl
     }
 
     public event EventHandler? RatioChanged;
+    public event EventHandler? DragStarted;
+    public event EventHandler? DragEnded;
 
     private static void OnSplitChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
     {
@@ -91,6 +94,7 @@ public sealed class PaneSplitter : ContentControl
         _origin = e.GetCurrentPoint(Track).Position;
         _originRatio = Split.Ratio;
         CapturePointer(e.Pointer);
+        DragStarted?.Invoke(this, EventArgs.Empty);
         e.Handled = true;
     }
 
@@ -112,7 +116,18 @@ public sealed class PaneSplitter : ContentControl
             delta = pos.Y - _origin.Y;
         }
 
-        SessionLayoutController.SetRatio(Split, _originRatio + (delta / span));
+        var raw = _originRatio + (delta / span);
+        var before = Split.Ratio;
+        SessionLayoutController.SetRatio(Split, raw);
+        // When clamped, rebase the drag origin so reversing direction responds immediately
+        // and the grip does not feel like it keeps "sliding" past the pane minimum.
+        if (Math.Abs(Split.Ratio - before) < 0.0001
+            && (raw < SessionLayoutController.MinRatio || raw > SessionLayoutController.MaxRatio))
+        {
+            _origin = pos;
+            _originRatio = Split.Ratio;
+        }
+
         RatioChanged?.Invoke(this, EventArgs.Empty);
         e.Handled = true;
     }
@@ -120,13 +135,20 @@ public sealed class PaneSplitter : ContentControl
     private void OnPointerReleased(object sender, PointerRoutedEventArgs e)
     {
         if (!_dragging) return;
-        _dragging = false;
+        EndDrag();
         ReleasePointerCapture(e.Pointer);
         e.Handled = true;
     }
 
     private void OnPointerCaptureLost(object sender, PointerRoutedEventArgs e)
     {
+        if (!_dragging) return;
+        EndDrag();
+    }
+
+    private void EndDrag()
+    {
         _dragging = false;
+        DragEnded?.Invoke(this, EventArgs.Empty);
     }
 }

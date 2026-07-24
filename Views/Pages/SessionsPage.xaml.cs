@@ -41,6 +41,7 @@ public sealed partial class SessionsPage : Page
     {
         EnsureSessionSurfaceHostHooked();
         SyncSessionSurfaces();
+        UpdateGlobalTabStripVisibility();
     }
 
     private void OnSessionsPageUnloaded(object sender, RoutedEventArgs e)
@@ -52,6 +53,10 @@ public sealed partial class SessionsPage : Page
         ViewModel.Tabs.CollectionChanged -= OnSessionTabsChanged;
         ViewModel.PropertyChanged -= OnShellPropertyChanged;
         ViewModel.Layout.PropertyChanged -= OnLayoutPropertyChanged;
+        SessionLayout.PaneCloseRequested -= OnPaneCloseRequested;
+        SessionLayout.PaneRestoreFullViewRequested -= OnPaneRestoreFullViewRequested;
+        SessionLayout.PaneDuplicateRequested -= OnPaneDuplicateRequested;
+        SessionLayout.PaneFileTransferRequested -= OnPaneFileTransferRequested;
         _sessionSurfaceHostHooked = false;
     }
 
@@ -61,6 +66,10 @@ public sealed partial class SessionsPage : Page
         ViewModel.Tabs.CollectionChanged += OnSessionTabsChanged;
         ViewModel.PropertyChanged += OnShellPropertyChanged;
         ViewModel.Layout.PropertyChanged += OnLayoutPropertyChanged;
+        SessionLayout.PaneCloseRequested += OnPaneCloseRequested;
+        SessionLayout.PaneRestoreFullViewRequested += OnPaneRestoreFullViewRequested;
+        SessionLayout.PaneDuplicateRequested += OnPaneDuplicateRequested;
+        SessionLayout.PaneFileTransferRequested += OnPaneFileTransferRequested;
         _sessionSurfaceHostHooked = true;
     }
 
@@ -76,9 +85,56 @@ public sealed partial class SessionsPage : Page
     {
         if (e.PropertyName is nameof(SessionLayoutController.StructureVersion)
             or nameof(SessionLayoutController.Root)
-            or nameof(SessionLayoutController.FocusedLeaf))
+            or nameof(SessionLayoutController.LeafCount))
         {
             SyncSessionSurfaces();
+            UpdateGlobalTabStripVisibility();
+        }
+    }
+
+    /// <summary>
+    /// Multi-pane layouts use per-pane connection rows (mRemoteNG-style). Hide the global
+    /// strip so each tiled pane owns its own detached connection header.
+    /// </summary>
+    private void UpdateGlobalTabStripVisibility()
+    {
+        var multiPane = ViewModel.Layout.LeafCount > 1;
+        SessionTabs.Visibility = multiPane ? Visibility.Collapsed : Visibility.Visible;
+        if (!multiPane)
+        {
+            EnsureTabViewHeaderOnlyLayout();
+        }
+    }
+
+    private async void OnPaneCloseRequested(object? sender, SessionTabViewModel tab)
+    {
+        await CloseTabAsync(tab);
+    }
+
+    private void OnPaneRestoreFullViewRequested(object? sender, SessionTabViewModel tab)
+    {
+        ViewModel.RestoreTabToFullView(tab);
+        UpdateGlobalTabStripVisibility();
+    }
+
+    private void OnPaneDuplicateRequested(object? sender, SessionTabViewModel tab)
+    {
+        if (tab.Profile is { } profile)
+        {
+            _sessionTabFactory.Open(profile);
+        }
+    }
+
+    private async void OnPaneFileTransferRequested(object? sender, SessionTabViewModel tab)
+    {
+        try
+        {
+            await _fileTransferDialog.ShowAsync(tab);
+        }
+        catch (Exception ex)
+        {
+            var logger = App.Current.Services.GetService<ILogger<SessionsPage>>();
+            logger?.LogError(ex, "File-transfer dialog failed to open from pane header.");
         }
     }
 
@@ -98,14 +154,6 @@ public sealed partial class SessionsPage : Page
         SessionLayout.SyncSurfaces(ViewModel.Tabs, selector);
     }
 
-    private void SessionLayout_PaneActivateRequested(object sender, SessionLeafNode leaf)
-    {
-        if (leaf.Tab is { } tab && ViewModel.Tabs.Contains(tab))
-        {
-            ViewModel.SelectedTab = tab;
-        }
-    }
-
     private void SessionTabs_TabDragStarting(TabView sender, TabViewTabDragStartingEventArgs args)
     {
         if (args.Item is not SessionTabViewModel tab)
@@ -113,14 +161,59 @@ public sealed partial class SessionsPage : Page
             return;
         }
 
-        SessionLayout.DraggedTab = tab;
+        SessionLayout.BeginTabDrag(tab);
         args.Data.Properties[SessionLayoutHost.DragTabFormat] = tab;
         args.Data.RequestedOperation = DataPackageOperation.Move;
     }
 
     private void SessionTabs_TabDragCompleted(TabView sender, TabViewTabDragCompletedEventArgs args)
     {
-        SessionLayout.DraggedTab = null;
+        SessionLayout.NotifyDragSourceCompleted();
+    }
+
+    /// <summary>
+    /// Dropping a tiled tab back onto the strip restores the original single-pane view.
+    /// When only one pane is visible, leave the event alone so TabView can reorder.
+    /// </summary>
+    private void SessionTabs_TabStripDragOver(object sender, DragEventArgs e)
+    {
+        if (!TryGetRestoreDropTab(e, out _))
+        {
+            return;
+        }
+
+        e.AcceptedOperation = DataPackageOperation.Move;
+        if (e.DragUIOverride is not null)
+        {
+            e.DragUIOverride.IsGlyphVisible = false;
+            e.DragUIOverride.Caption = "Restore full view";
+        }
+
+        e.Handled = true;
+    }
+
+    private void SessionTabs_TabStripDrop(object sender, DragEventArgs e)
+    {
+        if (!TryGetRestoreDropTab(e, out var tab) || tab is null)
+        {
+            return;
+        }
+
+        ViewModel.RestoreTabToFullView(tab);
+        e.Handled = true;
+    }
+
+    private bool TryGetRestoreDropTab(DragEventArgs e, out SessionTabViewModel? tab)
+    {
+        tab = SessionLayout.DraggedTab;
+        if (tab is null
+            || ViewModel.Layout.LeafCount <= 1
+            || ViewModel.Layout.FindLeaf(tab) is null)
+        {
+            return false;
+        }
+
+        return true;
     }
 
     private void SessionTabs_Loaded(object sender, RoutedEventArgs e)

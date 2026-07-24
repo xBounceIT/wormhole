@@ -70,6 +70,13 @@ public partial class ShellViewModel : ObservableObject
     private void OnLayoutPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (_syncingLayoutSelection) return;
+
+        if (e.PropertyName is nameof(SessionLayoutController.StructureVersion)
+            or nameof(SessionLayoutController.Root))
+        {
+            SyncTabsToLayoutOrder();
+        }
+
         if (e.PropertyName is not (nameof(SessionLayoutController.FocusedLeaf)
             or nameof(SessionLayoutController.FocusedTab)
             or nameof(SessionLayoutController.StructureVersion)))
@@ -91,6 +98,46 @@ public partial class ShellViewModel : ObservableObject
         finally
         {
             _syncingLayoutSelection = false;
+        }
+    }
+
+    /// <summary>
+    /// Collapse the layout to a single full-size pane for <paramref name="tab"/>
+    /// (e.g. after dropping that tab back onto the tab strip).
+    /// </summary>
+    public void RestoreTabToFullView(SessionTabViewModel tab)
+    {
+        if (!Tabs.Contains(tab)) return;
+        Layout.EnsureSingle(tab);
+        if (!ReferenceEquals(SelectedTab, tab))
+        {
+            SelectedTab = tab;
+        }
+    }
+
+    /// <summary>
+    /// Keep strip order aligned with pane reading order (left→right, top→bottom) so a
+    /// docked connection's tab sits where the split placed it. Non-visible tabs keep
+    /// their relative order after the visible leaves.
+    /// </summary>
+    public void SyncTabsToLayoutOrder()
+    {
+        var leafTabs = Layout.Leaves.Select(leaf => leaf.Tab).Where(Tabs.Contains).ToList();
+        if (leafTabs.Count == 0) return;
+
+        var hidden = Tabs.Where(tab => !leafTabs.Contains(tab)).ToList();
+        var desired = leafTabs.Concat(hidden).ToList();
+        ApplyTabOrder(desired);
+    }
+
+    private void ApplyTabOrder(List<SessionTabViewModel> desired)
+    {
+        for (var i = 0; i < desired.Count; i++)
+        {
+            var item = desired[i];
+            var from = Tabs.IndexOf(item);
+            if (from < 0 || from == i) continue;
+            Tabs.Move(from, i);
         }
     }
 

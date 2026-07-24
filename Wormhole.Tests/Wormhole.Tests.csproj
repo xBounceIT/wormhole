@@ -306,6 +306,8 @@
     <None Include="..\Views\Pages\SessionsPage.xaml" Link="Views\Pages\SessionsPage.xaml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Views\Pages\SessionsPage.xaml.cs" Link="Views\Pages\SessionsPage.xaml.cs.txt" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Views\Sessions\SessionLayoutHost.xaml.cs" Link="Views\Sessions\SessionLayoutHost.xaml.cs.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Views\Sessions\SessionPaneHost.xaml" Link="Views\Sessions\SessionPaneHost.xaml.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\Views\Sessions\SessionPaneHost.xaml.cs" Link="Views\Sessions\SessionPaneHost.xaml.cs.txt" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Views\Controls\ConnectionTreeView.xaml" Link="Views\Controls\ConnectionTreeView.xaml" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\Views\Controls\ConnectionTreeView.xaml.cs" Link="Views\Controls\ConnectionTreeView.xaml.cs.txt" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

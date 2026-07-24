@@ -199,6 +199,44 @@ public sealed class SessionLayoutControllerTests
     }
 
     [Fact]
+    public void MoveOntoLeaf_MovesTabAndCollapsesSourcePane()
+    {
+        var layout = new SessionLayoutController();
+        var a = new StubSessionTab("a");
+        var b = new StubSessionTab("b");
+        layout.EnsureSingle(a);
+        Assert.True(layout.DropOn(layout.FocusedLeaf!, SessionLayoutEdge.Right, b));
+        var right = layout.FindLeaf(b)!;
+
+        Assert.True(layout.MoveOntoLeaf(right, a));
+
+        Assert.Equal(1, layout.LeafCount);
+        Assert.Same(a, layout.FocusedTab);
+        Assert.NotNull(layout.FindLeaf(a));
+        Assert.Null(layout.FindLeaf(b));
+    }
+
+    [Fact]
+    public void MoveOntoLeaf_PlacesBackgroundTabIntoPane()
+    {
+        var layout = new SessionLayoutController();
+        var a = new StubSessionTab("a");
+        var b = new StubSessionTab("b");
+        var c = new StubSessionTab("c");
+        layout.EnsureSingle(a);
+        Assert.True(layout.DropOn(layout.FocusedLeaf!, SessionLayoutEdge.Right, b));
+        var right = layout.FindLeaf(b)!;
+
+        Assert.True(layout.MoveOntoLeaf(right, c));
+
+        Assert.Same(c, right.Tab);
+        Assert.Null(layout.FindLeaf(b));
+        Assert.NotNull(layout.FindLeaf(a));
+        Assert.Same(c, layout.FocusedTab);
+        Assert.Equal(2, layout.LeafCount);
+    }
+
+    [Fact]
     public void SetRatio_Clamps()
     {
         var layout = new SessionLayoutController();
@@ -223,8 +261,11 @@ public sealed class SessionLayoutControllerTests
     [InlineData(190, 50, 200, 100, SessionLayoutEdge.Right)]
     [InlineData(100, 10, 200, 100, SessionLayoutEdge.Top)]
     [InlineData(100, 90, 200, 100, SessionLayoutEdge.Bottom)]
-    [InlineData(100, 50, 200, 100, null)]
-    public void HitTestEdge_ResolvesBands(double x, double y, double w, double h, SessionLayoutEdge? expected)
+    [InlineData(100, 50, 200, 100, SessionLayoutEdge.Top)] // center → nearest (top/bottom tie → top)
+    [InlineData(30, 50, 200, 100, SessionLayoutEdge.Left)]
+    [InlineData(170, 50, 200, 100, SessionLayoutEdge.Right)]
+    [InlineData(100, 70, 200, 100, SessionLayoutEdge.Bottom)]
+    public void HitTestEdge_ResolvesNearestEdge(double x, double y, double w, double h, SessionLayoutEdge expected)
     {
         Assert.Equal(expected, SessionLayoutController.HitTestEdge(x, y, w, h));
     }

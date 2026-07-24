@@ -1,6 +1,5 @@
-using System.ComponentModel;
 using System.Collections.ObjectModel;
-using System.Text.Json;
+using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Windows.ApplicationModel.DataTransfer;
@@ -18,7 +17,11 @@ namespace Wormhole.Views.Sessions;
 public sealed partial class SessionLayoutHost : UserControl
 {
     public const string DragTabFormat = "Wormhole.SessionTab";
-    private const double GripThickness = 6;
+    /// <summary>
+    /// Reserved gap between pane surfaces. Must stay large enough that WebView2 HWNDs cannot
+    /// swallow the grip (airspace); thinner values made the splitter unrecoverable after drag.
+    /// </summary>
+    private const double GripThickness = 12;
 
     public static readonly DependencyProperty ControllerProperty =
         DependencyProperty.Register(
@@ -42,7 +45,11 @@ public sealed partial class SessionLayoutHost : UserControl
     private SessionPaneHost? _previewPane;
     private SessionLayoutEdge? _previewEdge;
     private SessionTabViewModel? _draggedTab;
+    private bool _dragDropHandled;
+    private SessionPaneHost? _headerDropHighlightPane;
     private readonly Canvas _canvas = new();
+    private bool _isSplitterDragging;
+    private bool _relayoutQueued;
 
     public SessionLayoutHost()
     {
@@ -70,8 +77,6 @@ public sealed partial class SessionLayoutHost : UserControl
         get => _draggedTab;
         set => _draggedTab = value;
     }
-
-    public event EventHandler<SessionLeafNode>? PaneActivateRequested;
 
     /// <summary>
     /// Ensure one realized surface per open tab; show/position those in layout leaves and
@@ -152,9 +157,9 @@ public sealed partial class SessionLayoutHost : UserControl
 
     private void OnControllerPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
+        // FocusedLeaf alone only toggles IsFocused on leaves (pane chrome); topology is unchanged.
         if (e.PropertyName is nameof(SessionLayoutController.StructureVersion)
             or nameof(SessionLayoutController.Root)
-            or nameof(SessionLayoutController.FocusedLeaf)
             or nameof(SessionLayoutController.LeafCount))
         {
             SyncHostsAndRelayout();
@@ -196,13 +201,23 @@ public sealed partial class SessionLayoutHost : UserControl
             {
                 AddPaneHost(leaf);
             }
-            else
+            else if (_paneHosts.TryGetValue(leaf, out var existing))
             {
-                _paneHosts[leaf].RefreshFocusChrome(_controller.LeafCount);
+                existing.Leaf = leaf;
             }
         }
 
+        UpdatePaneHeaders();
         Relayout();
+    }
+
+    private void UpdatePaneHeaders()
+    {
+        var show = (_controller?.LeafCount ?? 0) > 1;
+        foreach (var pane in _paneHosts.Values)
+        {
+            pane.ShowConnectionHeader = show;
+        }
     }
 
     private void AddPaneHost(SessionLeafNode leaf)
@@ -212,10 +227,22 @@ public sealed partial class SessionLayoutHost : UserControl
             Leaf = leaf,
             HorizontalAlignment = HorizontalAlignment.Left,
             VerticalAlignment = VerticalAlignment.Top,
-            IsHitTestVisible = false,
+            IsHitTestVisible = true,
+            ShowConnectionHeader = (_controller?.LeafCount ?? 0) > 1,
         };
-        pane.PaneActivateRequested += OnPaneActivateRequested;
-        pane.RefreshFocusChrome(_controller?.LeafCount ?? 1);
+        pane.ActivateRequested += OnPaneActivateRequested;
+        pane.CloseRequested += OnPaneCloseRequested;
+        pane.RestoreFullViewRequested += OnPaneRestoreFullViewRequested;
+        pane.DuplicateRequested += OnPaneDuplicateRequested;
+        pane.FileTransferRequested += OnPaneFileTransferRequested;
+        pane.HeaderDragStarted += OnPaneHeaderDragStarted;
+        pane.HeaderDragEnded += OnPaneHeaderDragEnded;
+        pane.ConnectionHeaderDragOver += OnConnectionHeaderDragOver;
+        pane.ConnectionHeaderDragLeave += OnConnectionHeaderDragLeave;
+        pane.ConnectionHeaderDrop += OnConnectionHeaderDrop;
+        pane.LayoutDragOver += OnDragOver;
+        pane.LayoutDragLeave += OnDragLeave;
+        pane.LayoutDrop += OnDrop;
         _paneHosts[leaf] = pane;
         _canvas.Children.Add(pane);
     }
@@ -223,12 +250,191 @@ public sealed partial class SessionLayoutHost : UserControl
     private void RemovePaneHost(SessionLeafNode leaf)
     {
         if (!_paneHosts.Remove(leaf, out var pane)) return;
-        pane.PaneActivateRequested -= OnPaneActivateRequested;
+        pane.ActivateRequested -= OnPaneActivateRequested;
+        pane.CloseRequested -= OnPaneCloseRequested;
+        pane.RestoreFullViewRequested -= OnPaneRestoreFullViewRequested;
+        pane.DuplicateRequested -= OnPaneDuplicateRequested;
+        pane.FileTransferRequested -= OnPaneFileTransferRequested;
+        pane.HeaderDragStarted -= OnPaneHeaderDragStarted;
+        pane.HeaderDragEnded -= OnPaneHeaderDragEnded;
+        pane.ConnectionHeaderDragOver -= OnConnectionHeaderDragOver;
+        pane.ConnectionHeaderDragLeave -= OnConnectionHeaderDragLeave;
+        pane.ConnectionHeaderDrop -= OnConnectionHeaderDrop;
+        pane.LayoutDragOver -= OnDragOver;
+        pane.LayoutDragLeave -= OnDragLeave;
+        pane.LayoutDrop -= OnDrop;
         _canvas.Children.Remove(pane);
     }
 
-    private void OnPaneActivateRequested(object? sender, SessionLeafNode leaf) =>
-        PaneActivateRequested?.Invoke(this, leaf);
+    private void OnPaneActivateRequested(object? sender, EventArgs e)
+    {
+        if (sender is not SessionPaneHost { Leaf: { } leaf }) return;
+        _controller?.Focus(leaf);
+    }
+
+    private void OnPaneCloseRequested(object? sender, EventArgs e)
+    {
+        if (sender is not SessionPaneHost { Leaf.Tab: { } tab }) return;
+        PaneCloseRequested?.Invoke(this, tab);
+    }
+
+    private void OnPaneRestoreFullViewRequested(object? sender, EventArgs e)
+    {
+        if (sender is not SessionPaneHost { Leaf.Tab: { } tab }) return;
+        PaneRestoreFullViewRequested?.Invoke(this, tab);
+    }
+
+    private void OnPaneDuplicateRequested(object? sender, EventArgs e)
+    {
+        if (sender is not SessionPaneHost { Leaf.Tab: { } tab }) return;
+        PaneDuplicateRequested?.Invoke(this, tab);
+    }
+
+    private void OnPaneFileTransferRequested(object? sender, EventArgs e)
+    {
+        if (sender is not SessionPaneHost { Leaf.Tab: { } tab }) return;
+        PaneFileTransferRequested?.Invoke(this, tab);
+    }
+
+    private void OnPaneHeaderDragStarted(object? sender, SessionTabViewModel tab)
+    {
+        BeginTabDrag(tab);
+    }
+
+    private void OnPaneHeaderDragEnded(object? sender, EventArgs e) => NotifyDragSourceCompleted();
+
+    /// <summary>
+    /// Marks the in-flight dragged tab for layout drop targeting (global strip or pane chip).
+    /// </summary>
+    public void BeginTabDrag(SessionTabViewModel tab)
+    {
+        _dragDropHandled = false;
+        DraggedTab = tab;
+        // Do NOT disable surface hit-testing here. Pane hosts are transparent over content;
+        // with surfaces IsHitTestVisible=false nothing under the pointer is hit-tested, so
+        // SessionLayoutHost never receives DragOver/Drop (docking dies with DropResult=None).
+    }
+
+    public void EndTabDrag()
+    {
+        DraggedTab = null;
+        ClearHeaderDropHighlight();
+        ClearPreview();
+    }
+
+    /// <summary>
+    /// Source drag finished. Defer clearing <see cref="DraggedTab"/> so Drop handlers that are
+    /// dispatched after StartDragAsync/TabDragCompleted returns still resolve the tab.
+    /// </summary>
+    public void NotifyDragSourceCompleted()
+    {
+        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        {
+            if (!_dragDropHandled)
+            {
+                EndTabDrag();
+            }
+        });
+    }
+
+    private void MarkDropHandledAndEnd()
+    {
+        _dragDropHandled = true;
+        EndTabDrag();
+    }
+
+    private void OnConnectionHeaderDragOver(object sender, DragEventArgs e)
+    {
+        if (sender is not SessionPaneHost { Leaf: { } leaf } pane)
+        {
+            e.AcceptedOperation = DataPackageOperation.None;
+            return;
+        }
+
+        var tab = ResolveDraggedTab(e);
+        if (tab is null || ReferenceEquals(leaf.Tab, tab) || _controller is null)
+        {
+            e.AcceptedOperation = DataPackageOperation.None;
+            ClearHeaderDropHighlight();
+            return;
+        }
+
+        e.AcceptedOperation = DataPackageOperation.Move;
+        if (e.DragUIOverride is not null)
+        {
+            e.DragUIOverride.IsGlyphVisible = false;
+            e.DragUIOverride.IsCaptionVisible = true;
+            e.DragUIOverride.Caption = "Move to this pane";
+        }
+
+        SetHeaderDropHighlight(pane);
+        ClearPreview();
+        e.Handled = true;
+    }
+
+    private void OnConnectionHeaderDragLeave(object sender, DragEventArgs e)
+    {
+        if (sender is SessionPaneHost pane)
+        {
+            pane.SetConnectionHeaderDropHighlight(false);
+            if (ReferenceEquals(_headerDropHighlightPane, pane))
+            {
+                _headerDropHighlightPane = null;
+            }
+        }
+    }
+
+    private void OnConnectionHeaderDrop(object sender, DragEventArgs e)
+    {
+        ClearHeaderDropHighlight();
+        ClearPreview();
+        var tab = ResolveDraggedTab(e);
+        if (sender is not SessionPaneHost { Leaf: { } leaf } || _controller is null)
+        {
+            MarkDropHandledAndEnd();
+            return;
+        }
+
+        if (tab is null || ReferenceEquals(leaf.Tab, tab))
+        {
+            MarkDropHandledAndEnd();
+            return;
+        }
+
+        if (_controller.MoveOntoLeaf(leaf, tab))
+        {
+            e.AcceptedOperation = DataPackageOperation.Move;
+            e.Handled = true;
+        }
+
+        MarkDropHandledAndEnd();
+    }
+
+    private void SetHeaderDropHighlight(SessionPaneHost pane)
+    {
+        if (ReferenceEquals(_headerDropHighlightPane, pane)) return;
+        ClearHeaderDropHighlight();
+        _headerDropHighlightPane = pane;
+        pane.SetConnectionHeaderDropHighlight(true);
+    }
+
+    private void ClearHeaderDropHighlight()
+    {
+        _headerDropHighlightPane?.SetConnectionHeaderDropHighlight(false);
+        _headerDropHighlightPane = null;
+    }
+
+    /// <summary>Raised when the user closes a connection from a per-pane header.</summary>
+    public event EventHandler<SessionTabViewModel>? PaneCloseRequested;
+
+    /// <summary>Raised when the user restores a tiled pane to the single full view.</summary>
+    public event EventHandler<SessionTabViewModel>? PaneRestoreFullViewRequested;
+
+    /// <summary>Raised when the user duplicates a connection from a per-pane header.</summary>
+    public event EventHandler<SessionTabViewModel>? PaneDuplicateRequested;
+
+    /// <summary>Raised when the user opens SFTP from a per-pane header.</summary>
+    public event EventHandler<SessionTabViewModel>? PaneFileTransferRequested;
 
     private void Relayout()
     {
@@ -254,26 +460,56 @@ public sealed partial class SessionLayoutHost : UserControl
         var visibleTabs = new HashSet<SessionTabViewModel>();
         foreach (var (leaf, bounds) in _leafBounds)
         {
-            if (_paneHosts.TryGetValue(leaf, out var pane))
+            _paneHosts.TryGetValue(leaf, out var pane);
+            if (pane is not null)
             {
-                Canvas.SetLeft(pane, bounds.X);
-                Canvas.SetTop(pane, bounds.Y);
-                pane.Width = Math.Max(0, bounds.Width);
-                pane.Height = Math.Max(0, bounds.Height);
-                pane.RefreshFocusChrome(_controller.LeafCount);
+                SetCanvasBounds(pane, bounds);
+                Canvas.SetZIndex(pane, 10);
             }
 
             if (_surfaces.TryGetValue(leaf.Tab, out var surface))
             {
-                Canvas.SetLeft(surface, bounds.X);
-                Canvas.SetTop(surface, bounds.Y);
-                surface.Width = Math.Max(0, bounds.Width);
-                surface.Height = Math.Max(0, bounds.Height);
+                // Clear MinHeight/MinWidth so session templates cannot overflow leaf bounds.
+                if (surface.MinHeight > 0) surface.MinHeight = 0;
+                if (surface.MinWidth > 0) surface.MinWidth = 0;
+
+                // Protocol surface sits under the per-pane connection header (mRemoteNG-style).
+                var headerH = pane?.ReservedHeaderHeight ?? 0;
+                var content = new Rect(
+                    bounds.X,
+                    bounds.Y + headerH,
+                    bounds.Width,
+                    Math.Max(0, bounds.Height - headerH));
+                SetCanvasBounds(surface, content);
+                Canvas.SetZIndex(surface, 0);
                 visibleTabs.Add(leaf.Tab);
             }
         }
 
-        ApplySurfaceVisibility(visibleTabs);
+        // Visibility does not change mid-sash-drag; skip the pass to keep the UI thread free.
+        if (!_isSplitterDragging)
+        {
+            ApplySurfaceVisibility(visibleTabs);
+        }
+    }
+
+    private static void SetCanvasBounds(FrameworkElement element, Rect bounds)
+    {
+        var width = Math.Max(0, bounds.Width);
+        var height = Math.Max(0, bounds.Height);
+        // Canvas children default Width/Height/offsets to NaN. NaN comparisons are never true,
+        // so a naive "changed by 0.5?" check skipped the first assign and left the WebView2 at a
+        // tiny content size (~80x60) — below xterm's usable minimum, so ready never arrived in time.
+        var left = Canvas.GetLeft(element);
+        var top = Canvas.GetTop(element);
+        if (double.IsNaN(left) || Math.Abs(left - bounds.X) > 0.5)
+            Canvas.SetLeft(element, bounds.X);
+        if (double.IsNaN(top) || Math.Abs(top - bounds.Y) > 0.5)
+            Canvas.SetTop(element, bounds.Y);
+        if (double.IsNaN(element.Width) || Math.Abs(element.Width - width) > 0.5)
+            element.Width = width;
+        if (double.IsNaN(element.Height) || Math.Abs(element.Height - height) > 0.5)
+            element.Height = height;
     }
 
     private void ApplySurfaceVisibility(HashSet<SessionTabViewModel>? visibleTabs)
@@ -317,6 +553,7 @@ public sealed partial class SessionLayoutHost : UserControl
             Canvas.SetTop(splitter, bounds.Y);
             splitter.Width = grip;
             splitter.Height = bounds.Height;
+            Canvas.SetZIndex(splitter, 1000);
         }
         else
         {
@@ -332,6 +569,7 @@ public sealed partial class SessionLayoutHost : UserControl
             Canvas.SetTop(splitter, bounds.Y + firstH);
             splitter.Width = bounds.Width;
             splitter.Height = grip;
+            Canvas.SetZIndex(splitter, 1000);
         }
     }
 
@@ -350,17 +588,53 @@ public sealed partial class SessionLayoutHost : UserControl
             Track = this,
         };
         splitter.RatioChanged += OnSplitterRatioChanged;
+        splitter.DragStarted += OnSplitterDragStarted;
+        splitter.DragEnded += OnSplitterDragEnded;
+        Canvas.SetZIndex(splitter, 1000);
         _splitters[split] = splitter;
         _canvas.Children.Add(splitter);
         return splitter;
     }
 
-    private void OnSplitterRatioChanged(object? sender, EventArgs e) => Relayout();
+    private void OnSplitterRatioChanged(object? sender, EventArgs e)
+    {
+        // Coalesce multiple PointerMoved updates into one layout pass per dispatcher tick.
+        if (_relayoutQueued) return;
+        _relayoutQueued = true;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            _relayoutQueued = false;
+            Relayout();
+        });
+    }
+
+    private void OnSplitterDragStarted(object? sender, EventArgs e)
+    {
+        _isSplitterDragging = true;
+        SetSurfacesHitTestVisible(false);
+    }
+
+    private void OnSplitterDragEnded(object? sender, EventArgs e)
+    {
+        _isSplitterDragging = false;
+        SetSurfacesHitTestVisible(true);
+        Relayout();
+    }
+
+    private void SetSurfacesHitTestVisible(bool visible)
+    {
+        foreach (var surface in _surfaces.Values)
+        {
+            surface.IsHitTestVisible = visible;
+        }
+    }
 
     private void RemoveSplitter(SessionSplitNode split)
     {
         if (!_splitters.Remove(split, out var splitter)) return;
         splitter.RatioChanged -= OnSplitterRatioChanged;
+        splitter.DragStarted -= OnSplitterDragStarted;
+        splitter.DragEnded -= OnSplitterDragEnded;
         _canvas.Children.Remove(splitter);
     }
 
@@ -374,7 +648,7 @@ public sealed partial class SessionLayoutHost : UserControl
 
     private void OnDragOver(object sender, DragEventArgs e)
     {
-        if (!TryResolveDropTarget(e, out _, out _, out var pane, out var edge))
+        if (!TryResolveDropTarget(e, out _, out _, out var pane, out var edge, out var onHeader))
         {
             e.AcceptedOperation = DataPackageOperation.None;
             ClearPreview();
@@ -385,10 +659,21 @@ public sealed partial class SessionLayoutHost : UserControl
         if (e.DragUIOverride is not null)
         {
             e.DragUIOverride.IsGlyphVisible = false;
-            e.DragUIOverride.IsCaptionVisible = false;
+            e.DragUIOverride.IsCaptionVisible = true;
+            e.DragUIOverride.Caption = onHeader ? "Move to this pane" : "Dock here";
         }
 
-        ShowPreview(pane, edge);
+        // Header drops move into that pane — no edge highlight needed.
+        if (onHeader)
+        {
+            ClearPreview();
+        }
+        else
+        {
+            ShowPreview(pane, edge);
+        }
+
+        e.Handled = true;
     }
 
     private void OnDragLeave(object sender, DragEventArgs e) => ClearPreview();
@@ -396,15 +681,22 @@ public sealed partial class SessionLayoutHost : UserControl
     private void OnDrop(object sender, DragEventArgs e)
     {
         ClearPreview();
-        if (!TryResolveDropTarget(e, out var tab, out var leaf, out _, out var edge))
+        if (!TryResolveDropTarget(e, out var tab, out var leaf, out _, out var edge, out var onHeader))
         {
+            MarkDropHandledAndEnd();
             return;
         }
 
-        if (_controller!.DropOn(leaf, edge, tab))
+        var ok = onHeader
+            ? _controller!.MoveOntoLeaf(leaf, tab)
+            : _controller!.DropOn(leaf, edge, tab);
+        if (ok)
         {
             e.AcceptedOperation = DataPackageOperation.Move;
+            e.Handled = true;
         }
+
+        MarkDropHandledAndEnd();
     }
 
     private bool TryResolveDropTarget(
@@ -412,36 +704,24 @@ public sealed partial class SessionLayoutHost : UserControl
         out SessionTabViewModel tab,
         out SessionLeafNode leaf,
         out SessionPaneHost pane,
-        out SessionLayoutEdge edge)
+        out SessionLayoutEdge edge,
+        out bool onConnectionHeader)
     {
         tab = null!;
         leaf = null!;
         pane = null!;
         edge = default;
+        onConnectionHeader = false;
 
         var dragged = ResolveDraggedTab(e);
         if (dragged is null || _controller is null)
         {
-            // #region agent log
-            AgentDebugLog("A", "SessionLayoutHost.TryResolveDropTarget", "no-dragged-or-controller", new { hasDragged = dragged is not null });
-            // #endregion
             return false;
         }
 
         var point = e.GetPosition(_canvas);
         if (!TryHitTestLeaf(point, out var hitLeaf, out var local, out var bounds) || hitLeaf is null)
         {
-            // #region agent log
-            AgentDebugLog("F", "SessionLayoutHost.TryResolveDropTarget", "miss-leaf", new { point.X, point.Y, leafCount = _leafBounds.Count });
-            // #endregion
-            return false;
-        }
-
-        if (!_controller.CanDropOn(hitLeaf, dragged))
-        {
-            // #region agent log
-            AgentDebugLog("E", "SessionLayoutHost.TryResolveDropTarget", "can-drop-false", new { });
-            // #endregion
             return false;
         }
 
@@ -450,22 +730,30 @@ public sealed partial class SessionLayoutHost : UserControl
             return false;
         }
 
-        var hitEdge = SessionLayoutController.HitTestEdge(local.X, local.Y, bounds.Width, bounds.Height);
-        // #region agent log
-        AgentDebugLog("E", "SessionLayoutHost.TryResolveDropTarget", "edge-hit", new
+        var headerH = hitPane.ReservedHeaderHeight;
+        onConnectionHeader = headerH > 0 && local.Y < headerH;
+
+        if (onConnectionHeader)
         {
-            local.X,
-            local.Y,
-            bounds.Width,
-            bounds.Height,
-            edge = hitEdge?.ToString(),
-            band = 0.25,
-            paneW = hitPane.Width,
-            paneH = hitPane.Height,
-            actualW = hitPane.ActualWidth,
-            actualH = hitPane.ActualHeight,
-        });
-        // #endregion
+            // Dropping on the connection row moves into that pane.
+            if (ReferenceEquals(hitLeaf.Tab, dragged))
+            {
+                return false;
+            }
+
+            tab = dragged;
+            leaf = hitLeaf;
+            pane = hitPane;
+            edge = SessionLayoutEdge.Left; // unused for header moves
+            return true;
+        }
+
+        if (!_controller.CanDropOn(hitLeaf, dragged))
+        {
+            return false;
+        }
+
+        var hitEdge = SessionLayoutController.HitTestEdge(local.X, local.Y, bounds.Width, bounds.Height);
         if (hitEdge is null)
         {
             return false;
@@ -561,29 +849,4 @@ public sealed partial class SessionLayoutHost : UserControl
 
         ClearSplitters();
     }
-
-    // #region agent log
-    private static void AgentDebugLog(string hypothesisId, string location, string message, object data)
-    {
-        try
-        {
-            var payload = new Dictionary<string, object?>
-            {
-                ["sessionId"] = "e57f3c",
-                ["hypothesisId"] = hypothesisId,
-                ["location"] = location,
-                ["message"] = message,
-                ["data"] = data,
-                ["timestamp"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-            };
-            File.AppendAllText(
-                @"C:\Users\dange\.cursor\worktrees\wormhole\qoqy\debug-e57f3c.log",
-                JsonSerializer.Serialize(payload) + "\n");
-        }
-        catch
-        {
-            // ignore debug log failures
-        }
-    }
-    // #endregion
 }

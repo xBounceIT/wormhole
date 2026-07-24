@@ -136,6 +136,58 @@ public partial class SessionLayoutController : ObservableObject
         return LeafCount < MaxLeaves;
     }
 
+    /// <summary>
+    /// Drop onto another pane's connection row: move <paramref name="dragged"/> into that pane.
+    /// If it was already tiled elsewhere, that source pane is collapsed (displaced tab stays open
+    /// but leaves the layout). A background tab replaces the target's visible tab.
+    /// </summary>
+    public bool MoveOntoLeaf(SessionLeafNode target, SessionTabViewModel dragged)
+    {
+        if (ReferenceEquals(target.Tab, dragged))
+        {
+            return false;
+        }
+
+        var source = FindLeaf(dragged);
+        if (source is null)
+        {
+            // Background tab → this pane (previous occupant leaves the layout).
+            target.Tab = dragged;
+            Focus(target);
+            BumpStructure();
+            return true;
+        }
+
+        if (ReferenceEquals(source, target))
+        {
+            return false;
+        }
+
+        // Move out of source pane first. Detach promotes the sibling (often <paramref name="target"/>)
+        // so the tree stays valid; the displaced tab is no longer in any leaf.
+        if (!DetachLeaf(source))
+        {
+            return false;
+        }
+
+        if (!Contains(Root, target))
+        {
+            // Source detach removed the split that held target — target was promoted to root.
+            var survivor = FirstLeaf(Root);
+            if (survivor is null)
+            {
+                return false;
+            }
+
+            target = survivor;
+        }
+
+        target.Tab = dragged;
+        Focus(target);
+        BumpStructure();
+        return true;
+    }
+
     public bool DropOn(SessionLeafNode target, SessionLayoutEdge edge, SessionTabViewModel dragged)
     {
         if (!CanDropOn(target, dragged))
@@ -225,50 +277,29 @@ public partial class SessionLayoutController : ObservableObject
             return null;
         }
 
-        var leftBand = width * 0.25;
-        var rightBand = width * 0.75;
-        var topBand = height * 0.25;
-        var bottomBand = height * 0.75;
-
-        // Prefer edges when the pointer is clearly in a band; corner ambiguity
-        // resolves to the nearer axis by relative distance into the band.
+        // Resolve to the nearest edge so the entire pane is a valid drop target.
+        // Narrow 25% bands left a large dead center that rejected drops and confused placement.
         var distLeft = x;
         var distRight = width - x;
         var distTop = y;
         var distBottom = height - y;
 
-        var inLeft = x < leftBand;
-        var inRight = x > rightBand;
-        var inTop = y < topBand;
-        var inBottom = y > bottomBand;
+        var best = SessionLayoutEdge.Left;
+        var bestDist = distLeft;
 
-        if (!inLeft && !inRight && !inTop && !inBottom)
-        {
-            return null;
-        }
-
-        SessionLayoutEdge? best = null;
-        var bestDist = double.MaxValue;
-
-        if (inLeft && distLeft < bestDist)
-        {
-            best = SessionLayoutEdge.Left;
-            bestDist = distLeft;
-        }
-
-        if (inRight && distRight < bestDist)
+        if (distRight < bestDist)
         {
             best = SessionLayoutEdge.Right;
             bestDist = distRight;
         }
 
-        if (inTop && distTop < bestDist)
+        if (distTop < bestDist)
         {
             best = SessionLayoutEdge.Top;
             bestDist = distTop;
         }
 
-        if (inBottom && distBottom < bestDist)
+        if (distBottom < bestDist)
         {
             best = SessionLayoutEdge.Bottom;
         }

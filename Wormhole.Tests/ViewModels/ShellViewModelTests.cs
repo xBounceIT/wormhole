@@ -3,6 +3,7 @@ using Wormhole.Models;
 using Wormhole.Services;
 using Wormhole.ViewModels;
 using Wormhole.ViewModels.Sessions;
+using Wormhole.ViewModels.Sessions.Layout;
 using Xunit;
 
 namespace Wormhole.Tests.ViewModels;
@@ -277,6 +278,76 @@ public class ShellViewModelTests
 
         Assert.Null(store.Read(firstId));
         Assert.Null(store.Read(secondId));
+    }
+
+    [Fact]
+    public void SyncTabsToLayoutOrder_PutsLeafTabsInReadingOrder()
+    {
+        var vm = CreateShell();
+        var a = new TestSessionTab("a");
+        var b = new TestSessionTab("b");
+        var hidden = new TestSessionTab("hidden");
+        // Open order: b, a, hidden — after docking b to the right of a, leaves are [a,b].
+        vm.Tabs.Add(b);
+        vm.Tabs.Add(a);
+        vm.Tabs.Add(hidden);
+        vm.Layout.EnsureSingle(a);
+        Assert.True(vm.Layout.DropOn(vm.Layout.FocusedLeaf!, SessionLayoutEdge.Right, b));
+
+        vm.SyncTabsToLayoutOrder();
+
+        Assert.Equal(new[] { a, b, hidden }, vm.Tabs.ToArray());
+    }
+
+    [Fact]
+    public void SyncTabsToLayoutOrder_LeftDockPlacesIncomingBeforeAnchor()
+    {
+        var vm = CreateShell();
+        var a = new TestSessionTab("a");
+        var b = new TestSessionTab("b");
+        vm.Tabs.Add(a);
+        vm.Tabs.Add(b);
+        vm.Layout.EnsureSingle(a);
+        Assert.True(vm.Layout.DropOn(vm.Layout.FocusedLeaf!, SessionLayoutEdge.Left, b));
+
+        vm.SyncTabsToLayoutOrder();
+
+        Assert.Equal(new[] { b, a }, vm.Tabs.ToArray());
+    }
+
+    [Fact]
+    public void RestoreTabToFullView_CollapsesLayoutToSinglePane()
+    {
+        var vm = CreateShell();
+        var a = new TestSessionTab("a");
+        var b = new TestSessionTab("b");
+        vm.Tabs.Add(a);
+        vm.Tabs.Add(b);
+        vm.Layout.EnsureSingle(a);
+        Assert.True(vm.Layout.DropOn(vm.Layout.FocusedLeaf!, SessionLayoutEdge.Right, b));
+        Assert.Equal(2, vm.Layout.LeafCount);
+
+        vm.RestoreTabToFullView(b);
+
+        Assert.Equal(1, vm.Layout.LeafCount);
+        Assert.Same(b, vm.Layout.FocusedTab);
+        Assert.Same(b, vm.SelectedTab);
+        Assert.Same(b, Assert.IsType<SessionLeafNode>(vm.Layout.Root).Tab);
+    }
+
+    [Fact]
+    public void StructureVersionChange_ReordersTabsAutomatically()
+    {
+        var vm = CreateShell();
+        var a = new TestSessionTab("a");
+        var b = new TestSessionTab("b");
+        vm.Tabs.Add(b);
+        vm.Tabs.Add(a);
+        vm.Layout.EnsureSingle(a);
+        Assert.True(vm.Layout.DropOn(vm.Layout.FocusedLeaf!, SessionLayoutEdge.Right, b));
+
+        // DropOn bumps StructureVersion → OnLayoutPropertyChanged → SyncTabsToLayoutOrder.
+        Assert.Equal(new[] { a, b }, vm.Tabs.ToArray());
     }
 
     private static ShellViewModel CreateShell(ITransientSessionCredentialStore? transientCredentials = null) =>

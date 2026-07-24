@@ -1320,7 +1320,6 @@ public sealed partial class SshTerminalView : UserControl, ISessionSurfaceActiva
             replacement.DefaultBackgroundColor = failedView.DefaultBackgroundColor;
             replacement.HorizontalAlignment = HorizontalAlignment.Stretch;
             replacement.VerticalAlignment = VerticalAlignment.Stretch;
-            replacement.MinHeight = 240;
             replacement.Visibility = Visibility.Visible;
             return replacement;
         }

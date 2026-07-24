@@ -11,8 +11,7 @@
 
     <Grid Background="#0c0c0c"
           HorizontalAlignment="Stretch"
-          VerticalAlignment="Stretch"
-          MinHeight="240">
+          VerticalAlignment="Stretch">
         <Grid x:Name="FramebufferHost"
               Background="#0c0c0c"
               HorizontalAlignment="Stretch"

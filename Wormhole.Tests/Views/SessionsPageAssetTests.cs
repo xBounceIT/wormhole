@@ -50,7 +50,19 @@ public sealed class SessionsPageAssetTests
         Assert.Contains("EnsureTabViewHeaderOnlyLayout", code, StringComparison.Ordinal);
         Assert.Contains("root.RowDefinitions[1].Height = new GridLength(0);", code, StringComparison.Ordinal);
         Assert.Contains("SessionTabs_TabDragStarting", code, StringComparison.Ordinal);
+        Assert.Contains("SessionTabs_TabStripDrop", code, StringComparison.Ordinal);
+        Assert.Contains("RestoreTabToFullView", code, StringComparison.Ordinal);
+        Assert.Contains("UpdateGlobalTabStripVisibility", code, StringComparison.Ordinal);
         Assert.Contains("SyncSessionSurfaces", code, StringComparison.Ordinal);
+
+        var paneHost = ReadAsset("Views", "Sessions", "SessionPaneHost.xaml.txt");
+        Assert.Contains("TitleChip", paneHost, StringComparison.Ordinal);
+        Assert.Contains("FileTransferButton", paneHost, StringComparison.Ordinal);
+        Assert.Contains("HeaderContextFlyout", paneHost, StringComparison.Ordinal);
+        Assert.Contains("StartDragAsync", ReadAsset("Views", "Sessions", "SessionPaneHost.xaml.cs.txt"), StringComparison.Ordinal);
+        Assert.Contains("ConnectionHeaderDrop", ReadAsset("Views", "Sessions", "SessionPaneHost.xaml.cs.txt"), StringComparison.Ordinal);
+        Assert.Contains("MoveOntoLeaf", ReadAsset("Views", "Sessions", "SessionLayoutHost.xaml.cs.txt"), StringComparison.Ordinal);
+        Assert.Contains("OnConnectionHeaderDrop", ReadAsset("Views", "Sessions", "SessionLayoutHost.xaml.cs.txt"), StringComparison.Ordinal);
 
         var layoutHost = ReadAsset("Views", "Sessions", "SessionLayoutHost.xaml.cs.txt");
         Assert.Contains("SyncSurfaces", layoutHost, StringComparison.Ordinal);
