@@ -106,6 +106,32 @@ public class SshCredentialResolverTests
     }
 
     [Fact]
+    public async Task Resolve_NoCredentialId_ManualPassword_WithSave_PersistsInlinePassword()
+    {
+        var nodeId = Guid.NewGuid();
+        var bindings = new FakeConnectionCredentialBindingService();
+        var dialogs = new FakeDialogService
+        {
+            AccountCredentialPromptResult = new AccountCredentialPromptResult(
+                "typed-user",
+                "typed-pwd",
+                SelectedCredential: null,
+                SaveCredentialToConnection: true),
+        };
+        var resolver = NewResolver(dialogs, credentialBindings: bindings);
+
+        var creds = await resolver.ResolveAsync(MakeProfile(credentialId: null, nodeId: nodeId) with { Username = null });
+
+        Assert.Equal("typed-pwd", creds.Password);
+        Assert.Equal("typed-user", creds.UsernameOverride);
+        Assert.Equal(0, bindings.SaveCount);
+        Assert.Equal(1, bindings.SaveInlineCount);
+        Assert.Equal(nodeId, bindings.LastNodeId);
+        Assert.Equal("typed-pwd", bindings.LastInlinePassword);
+        Assert.Equal("typed-user", bindings.LastInlineUsername);
+    }
+
+    [Fact]
     public async Task Resolve_PasswordCredential_Stored_NoPrompt()
     {
         var credId = Guid.NewGuid();
@@ -442,6 +468,27 @@ public class SshCredentialResolverTests
         await resolver.ResolveAsync(MakeProfile(credentialId: null, isEphemeral: true));
 
         Assert.Equal(0, bindings.SaveCount);
+        Assert.Equal(0, bindings.SaveInlineCount);
+    }
+
+    [Fact]
+    public async Task Resolve_EphemeralPrompt_NeverPersistsManualInlinePassword()
+    {
+        var dialogs = new FakeDialogService
+        {
+            AccountCredentialPromptResult = new AccountCredentialPromptResult(
+                "typed-user",
+                "prompted",
+                SelectedCredential: null,
+                SaveCredentialToConnection: true),
+        };
+        var bindings = new FakeConnectionCredentialBindingService();
+        var resolver = NewResolver(dialogs, credentialBindings: bindings);
+
+        await resolver.ResolveAsync(MakeProfile(credentialId: null, isEphemeral: true) with { Username = null });
+
+        Assert.Equal(0, bindings.SaveCount);
+        Assert.Equal(0, bindings.SaveInlineCount);
     }
 
     [Fact]

@@ -242,19 +242,29 @@ public sealed class SshCredentialResolver : ISshCredentialResolver
             _transientCredentials?.Store(profile.NodeId, result.Password);
         }
 
-        if (!profile.IsEphemeral &&
-            result.SelectedCredential is { } selectedCredential &&
-            result.SaveCredentialToConnection)
-        {
-            await _credentialBindings.SaveCredentialBindingAsync(
-                profile.NodeId,
-                selectedCredential,
-                cancellationToken).ConfigureAwait(true);
-            cancellationToken.ThrowIfCancellationRequested();
-        }
-
         var selectedUsername = NullIfWhiteSpace(result.Username)
             ?? NullIfWhiteSpace(result.SelectedCredential?.Username);
+
+        if (!profile.IsEphemeral && result.SaveCredentialToConnection)
+        {
+            if (result.SelectedCredential is { } selectedCredential)
+            {
+                await _credentialBindings.SaveCredentialBindingAsync(
+                    profile.NodeId,
+                    selectedCredential,
+                    cancellationToken).ConfigureAwait(true);
+            }
+            else
+            {
+                await _credentialBindings.SaveInlinePasswordAsync(
+                    profile.NodeId,
+                    result.Password,
+                    username: selectedUsername ?? NullIfWhiteSpace(username),
+                    cancellationToken: cancellationToken).ConfigureAwait(true);
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+        }
 
         return new SshCredentials(result.Password, null, null, selectedUsername ?? credentialUsername)
         {

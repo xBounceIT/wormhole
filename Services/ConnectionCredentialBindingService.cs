@@ -78,4 +78,62 @@ public sealed class ConnectionCredentialBindingService : IConnectionCredentialBi
             _logger.LogWarning(ex, "Could not save credential binding for connection node {NodeId}.", nodeId);
         }
     }
+
+    public async Task SaveInlinePasswordAsync(
+        Guid nodeId,
+        string password,
+        string? username = null,
+        string? rdpDomain = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(password);
+
+        try
+        {
+            var node = await _connections.GetByIdAsync(nodeId, cancellationToken).ConfigureAwait(false);
+            if (node is null)
+            {
+                _logger.LogWarning("Could not save inline password for missing connection node {NodeId}.", nodeId);
+                return;
+            }
+
+            if (node.Kind != NodeKind.Connection)
+            {
+                _logger.LogWarning(
+                    "Could not save inline password for node {NodeId} because it is a {Kind}.",
+                    nodeId,
+                    node.Kind);
+                return;
+            }
+
+            node.CredentialId = null;
+            node.CredentialMode = CredentialBindingMode.None;
+            node.UseInlinePassword = true;
+            node.PendingInlinePassword = null;
+
+            if (!string.IsNullOrWhiteSpace(username))
+            {
+                node.Username = username.Trim();
+            }
+
+            if (node.Protocol == ProtocolType.Rdp && rdpDomain is not null)
+            {
+                node.RdpDomain = string.IsNullOrWhiteSpace(rdpDomain)
+                    ? null
+                    : rdpDomain.Trim();
+            }
+
+            await _connections.UpdateAsync(node, cancellationToken).ConfigureAwait(false);
+            _connectionNodeChanges?.PublishConnectionNodeUpdated(node);
+            await _credentials.StorePasswordAsync(nodeId, password).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not save inline password for connection node {NodeId}.", nodeId);
+        }
+    }
 }

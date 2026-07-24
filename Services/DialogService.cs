@@ -836,9 +836,9 @@ public sealed class DialogService : IDialogService
 
         var saveBindingBox = new CheckBox
         {
-            Content = "Save this credential to the connection",
+            Content = "Save to this connection",
             IsChecked = false,
-            IsEnabled = false,
+            IsEnabled = allowSaveCredentialToConnection,
             Visibility = allowSaveCredentialToConnection ? Visibility.Visible : Visibility.Collapsed,
         };
         savedCredentialSection.Children.Add(saveBindingBox);
@@ -888,8 +888,7 @@ public sealed class DialogService : IDialogService
             if (userBox is not null) userBox.IsEnabled = !isActive && CurrentChoice().Credential is null;
             passwordBox.IsEnabled = !isActive && CurrentChoice().Credential is null;
             bitwardenUnlockBox.IsEnabled = !isActive && CurrentChoice().Credential?.IsBitwarden == true;
-            saveBindingBox.IsEnabled = allowSaveCredentialToConnection &&
-                !isActive && CurrentChoice().Credential is not null;
+            saveBindingBox.IsEnabled = allowSaveCredentialToConnection && !isActive;
             credentialProgressText.Text = message ?? string.Empty;
             credentialProgressRing.IsActive = isActive;
             credentialProgressPanel.Visibility = isActive ? Visibility.Visible : Visibility.Collapsed;
@@ -905,11 +904,7 @@ public sealed class DialogService : IDialogService
             passwordBox.IsEnabled = !usingSavedCredential;
             bitwardenUnlockBox.IsEnabled = usingBitwarden;
             bitwardenUnlockBox.Visibility = usingBitwarden ? Visibility.Visible : Visibility.Collapsed;
-            saveBindingBox.IsEnabled = allowSaveCredentialToConnection && usingSavedCredential;
-            if (!usingSavedCredential)
-            {
-                saveBindingBox.IsChecked = false;
-            }
+            saveBindingBox.IsEnabled = allowSaveCredentialToConnection;
             if (!usingBitwarden)
             {
                 bitwardenUnlockBox.Password = string.Empty;
@@ -983,7 +978,7 @@ public sealed class DialogService : IDialogService
                 requireUsername ? userBox!.Text.Trim() : null,
                 passwordBox.Password,
                 null,
-                false);
+                allowSaveCredentialToConnection && saveBindingBox.IsChecked == true);
         }
 
         if (userBox is not null)

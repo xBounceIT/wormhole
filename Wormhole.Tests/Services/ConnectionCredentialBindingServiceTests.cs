@@ -136,6 +136,109 @@ public class ConnectionCredentialBindingServiceTests
         Assert.Equal("inline-secret", secrets.Passwords[nodeId]);
     }
 
+    [Fact]
+    public async Task SaveInlinePasswordAsync_UpdatesLeafNodeStoresSecretAndPublishes()
+    {
+        var nodeId = Guid.NewGuid();
+        var existingCredentialId = Guid.NewGuid();
+        var node = new ConnectionNode
+        {
+            Id = nodeId,
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Rdp,
+            Username = "old-user",
+            RdpDomain = "OLD",
+            CredentialId = existingCredentialId,
+            CredentialMode = CredentialBindingMode.Saved,
+            UseInlinePassword = false,
+        };
+        var repo = new RecordingConnectionRepository(node);
+        var secrets = new FakeCredentialService();
+        var notifier = new ConnectionNodeChangeNotifier();
+        ConnectionNode? published = null;
+        notifier.ConnectionNodeUpdated += (_, args) => published = args.Node;
+        var service = new ConnectionCredentialBindingService(
+            repo,
+            secrets,
+            NullLogger<ConnectionCredentialBindingService>.Instance,
+            notifier);
+
+        await service.SaveInlinePasswordAsync(
+            nodeId,
+            "typed-secret",
+            username: "typed-user",
+            rdpDomain: "CORP");
+
+        Assert.Equal(1, repo.UpdateCount);
+        Assert.Null(node.CredentialId);
+        Assert.Equal(CredentialBindingMode.None, node.CredentialMode);
+        Assert.True(node.UseInlinePassword);
+        Assert.Null(node.PendingInlinePassword);
+        Assert.Equal("typed-user", node.Username);
+        Assert.Equal("CORP", node.RdpDomain);
+        Assert.Equal("typed-secret", secrets.Passwords[nodeId]);
+        Assert.NotNull(published);
+        Assert.True(published!.UseInlinePassword);
+        Assert.Null(published.CredentialId);
+    }
+
+    [Fact]
+    public async Task SaveInlinePasswordAsync_EmptyRdpDomain_ClearsDomain()
+    {
+        var nodeId = Guid.NewGuid();
+        var node = new ConnectionNode
+        {
+            Id = nodeId,
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Rdp,
+            Username = "alice",
+            RdpDomain = "OLD",
+            CredentialMode = CredentialBindingMode.None,
+            UseInlinePassword = false,
+        };
+        var repo = new RecordingConnectionRepository(node);
+        var secrets = new FakeCredentialService();
+        var service = new ConnectionCredentialBindingService(
+            repo,
+            secrets,
+            NullLogger<ConnectionCredentialBindingService>.Instance);
+
+        await service.SaveInlinePasswordAsync(nodeId, "secret", username: "alice", rdpDomain: "");
+
+        Assert.Null(node.RdpDomain);
+        Assert.Equal("secret", secrets.Passwords[nodeId]);
+    }
+
+    [Fact]
+    public async Task SaveInlinePasswordAsync_UpdateFails_DoesNotPublishOrStoreSecret()
+    {
+        var nodeId = Guid.NewGuid();
+        var node = new ConnectionNode
+        {
+            Id = nodeId,
+            Kind = NodeKind.Connection,
+            Protocol = ProtocolType.Ssh,
+            CredentialMode = CredentialBindingMode.Inherit,
+            UseInlinePassword = false,
+        };
+        var repo = new RecordingConnectionRepository(node) { ThrowOnUpdate = true };
+        var secrets = new FakeCredentialService();
+        var notifier = new ConnectionNodeChangeNotifier();
+        var publishCount = 0;
+        notifier.ConnectionNodeUpdated += (_, _) => publishCount++;
+        var service = new ConnectionCredentialBindingService(
+            repo,
+            secrets,
+            NullLogger<ConnectionCredentialBindingService>.Instance,
+            notifier);
+
+        await service.SaveInlinePasswordAsync(nodeId, "typed-secret", username: "typed-user");
+
+        Assert.Equal(1, repo.UpdateCount);
+        Assert.Equal(0, publishCount);
+        Assert.False(secrets.Passwords.ContainsKey(nodeId));
+    }
+
     private sealed class RecordingConnectionRepository : IConnectionRepository
     {
         private readonly ConnectionNode _node;

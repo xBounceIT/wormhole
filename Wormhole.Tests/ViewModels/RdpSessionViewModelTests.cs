@@ -1464,6 +1464,72 @@ public class RdpSessionViewModelTests
     }
 
     [Fact]
+    public async Task AttachAsync_PasswordPrompt_ManualPassword_WithSave_PersistsInlinePassword()
+    {
+        var nodeId = Guid.NewGuid();
+        var bindings = new FakeConnectionCredentialBindingService();
+        var (vm, svc, _, dlg, _) = CreateVm(credentialBindings: bindings);
+        dlg.AccountCredentialPromptResult = new AccountCredentialPromptResult(
+            null,
+            "typed-password",
+            SelectedCredential: null,
+            SaveCredentialToConnection: true);
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with
+        {
+            NodeId = nodeId,
+            Username = "profile-user",
+            RdpDomain = "CORP",
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal("profile-user", svc.LastProfile?.Username);
+        Assert.Equal("CORP", svc.LastProfile?.RdpDomain);
+        Assert.Equal("typed-password", svc.LastPassword);
+        Assert.Equal(0, bindings.SaveCount);
+        Assert.Equal(1, bindings.SaveInlineCount);
+        Assert.Equal(nodeId, bindings.LastNodeId);
+        Assert.Equal("typed-password", bindings.LastInlinePassword);
+        Assert.Equal("profile-user", bindings.LastInlineUsername);
+        Assert.Equal("CORP", bindings.LastInlineRdpDomain);
+    }
+
+    [Fact]
+    public async Task AttachAsync_MissingUsernamePrompt_ManualPassword_WithSave_PersistsInlinePassword()
+    {
+        var nodeId = Guid.NewGuid();
+        var bindings = new FakeConnectionCredentialBindingService();
+        var (vm, svc, _, dlg, _) = CreateVm(credentialBindings: bindings);
+        dlg.AccountCredentialPromptResult = new AccountCredentialPromptResult(
+            "CORP\\alice",
+            "typed-password",
+            SelectedCredential: null,
+            SaveCredentialToConnection: true);
+        svc.NextSession = new FakeRdpSession();
+
+        vm.Initialize(MakeProfile() with
+        {
+            NodeId = nodeId,
+            Username = null,
+            RdpDomain = null,
+        });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal("alice", svc.LastProfile?.Username);
+        Assert.Equal("CORP", svc.LastProfile?.RdpDomain);
+        Assert.Equal("typed-password", svc.LastPassword);
+        Assert.Equal(0, bindings.SaveCount);
+        Assert.Equal(1, bindings.SaveInlineCount);
+        Assert.Equal(nodeId, bindings.LastNodeId);
+        Assert.Equal("typed-password", bindings.LastInlinePassword);
+        Assert.Equal("alice", bindings.LastInlineUsername);
+        Assert.Equal("CORP", bindings.LastInlineRdpDomain);
+    }
+
+    [Fact]
     public async Task RetryAsync_AfterCredentialFailure_SelectedSavedCredential_WithSave_UsesSavedIdentityAndPersistsBinding()
     {
         var badCredentialId = Guid.NewGuid();
