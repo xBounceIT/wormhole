@@ -601,7 +601,7 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
         CoreWebView2 webView,
         ISshSession attachedSession,
         int attachGeneration,
-        ITerminalOutputSink newBridge,
+        TerminalBridge newBridge,
         bool resizePty)
     {
         try

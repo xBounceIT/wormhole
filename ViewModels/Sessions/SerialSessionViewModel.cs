@@ -401,7 +401,7 @@ public sealed partial class SerialSessionViewModel : SessionTabViewModel, ITermi
         CoreWebView2 webView,
         ITerminalSession attachedSession,
         int attachGeneration,
-        ITerminalOutputSink newBridge,
+        TerminalBridge newBridge,
         bool resizePty)
     {
         try
