@@ -1786,17 +1786,34 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
 
             // Build the stepper from the ROUTED decision, not the saved profile: if the user chose
             // "connect directly", routed.TunnelEnabled is false → no tunnel steps (plain spinner);
-            // otherwise the VPN tunnel + Connect steps show. Credential resolution below is a quick
-            // local step and deliberately NOT a phase — a completed "Credentials" step would imply
-            // the target was authenticated before the tunnel was up; target auth happens in Connect.
+            // otherwise the VPN tunnel + Connect steps show.
             InitializeProgress(routed);
 
+            Progress.Begin(ConnectionPhase.Tunnel);
+            // Establish from the routed profile (TunnelEnabled forced off when the user chose
+            // "connect directly"). This must happen before target credential resolution: interactive
+            // tunnel authentication (including OTP/TOTP) belongs first, and target credentials should
+            // only be requested once the route to the target is ready. When routed has no tunnel,
+            // EstablishAsync returns null and the Begin calls are no-ops (the stepper is empty).
+            pendingTunnel = await _tunnels.EstablishAsync(
+                routed, token, CreateUiProgress<TunnelProgress>(OnTunnelProgress)).ConfigureAwait(true);
+            if (!IsAttemptCurrent(teardownGeneration))
+            {
+                await DisposeTunnelInstanceSilentlyAsync(pendingTunnel).ConfigureAwait(true);
+                return;
+            }
+            _tunnel = pendingTunnel;
+            pendingTunnel = null;
+
+            Progress.Begin(ConnectionPhase.Connect);
             var creds = await _credentialResolver.ResolveAsync(profile, token).ConfigureAwait(true);
             if (!IsAttemptCurrent(teardownGeneration)) return;
             if (!creds.HasAny)
             {
                 // Not auto-retryable: no stored/entered credentials won't appear by retrying.
                 _lastConnectRetryable = false;
+                await SafeDisposeSessionAsync().ConfigureAwait(true);
+                if (!IsAttemptCurrent(teardownGeneration)) return;
                 ReportFailure("No credentials provided.");
                 return;
             }
@@ -1821,22 +1838,6 @@ public sealed partial class SshSessionViewModel : SessionTabViewModel, ITerminal
             // passphrase or password and break the "instant click" UX.
             _capturedCredentials = creds;
 
-            Progress.Begin(ConnectionPhase.Tunnel);
-            // Establish from the routed profile (TunnelEnabled forced off when the user chose
-            // "connect directly"); the SSH service routes through the explicit _tunnel handle, so
-            // the rest of the connect keeps using the unmodified profile. When routed has no tunnel,
-            // EstablishAsync returns null and the Begin calls are no-ops (the stepper is empty).
-            pendingTunnel = await _tunnels.EstablishAsync(
-                routed, token, CreateUiProgress<TunnelProgress>(OnTunnelProgress)).ConfigureAwait(true);
-            if (!IsAttemptCurrent(teardownGeneration))
-            {
-                await DisposeTunnelInstanceSilentlyAsync(pendingTunnel).ConfigureAwait(true);
-                return;
-            }
-            _tunnel = pendingTunnel;
-            pendingTunnel = null;
-
-            Progress.Begin(ConnectionPhase.Connect);
             pendingSession = await _sshService.ConnectAsync(profile, creds, _initialSize, _tunnel, token).ConfigureAwait(true);
             if (!IsAttemptCurrent(teardownGeneration))
             {

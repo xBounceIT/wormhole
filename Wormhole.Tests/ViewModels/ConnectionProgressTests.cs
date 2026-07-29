@@ -8,7 +8,7 @@ namespace Wormhole.Tests.ViewModels;
 public sealed class ConnectionProgressTests
 {
     // Mirrors what the session view-models build for a tunneled connection: VPN tunnel -> Connect.
-    // (Credential resolution is a local pre-tunnel step and deliberately not a phase.)
+    // (Target credential resolution occurs after the tunnel and is deliberately part of Connect.)
     private static readonly (ConnectionPhase Phase, string Label)[] TunnelSteps =
     {
         (ConnectionPhase.Tunnel, "VPN tunnel"),
