@@ -204,17 +204,21 @@
     </ItemGroup>
   </Target>
 
-  <!-- OpenVPN userspace sidecar. Mirrors FetchWgProxy above. The script either downloads a
-       pinned release, builds from tools\wormhole-ovpnproxy\ with the full toolchain (Go +
-       CMake + C++ + populated submodules) for a real OpenVPN3-linked binary, or falls back
-       to a mock-only sidecar that still satisfies the wire protocol so the rest of the app
-       keeps working. Missing toolchain warns but does not break the build. -->
+  <!-- OpenVPN userspace sidecar. Mirrors FetchWgProxy above. Development builds may fall
+       back to the mock-only wire-protocol sidecar when the native toolchain is unavailable.
+       Release builds default to RequireRealOvpnProxy=true and fail closed unless the staged
+       binary is a real OpenVPN3 PE for the requested architecture. -->
   <Target Name="FetchOvpnProxy" BeforeTargets="BeforeBuild">
     <PropertyGroup>
       <_OvpnProxyArch Condition="'$(PlatformTarget)' == 'ARM64' Or '$(PlatformTarget)' == 'arm64'">arm64</_OvpnProxyArch>
       <_OvpnProxyArch Condition="'$(_OvpnProxyArch)' == ''">x64</_OvpnProxyArch>
+      <!-- Never let any Release/publish path (including the local installer script) stage
+           the development-only mock sidecar. Callers may still opt in explicitly for
+           diagnostics by setting RequireRealOvpnProxy=false before this default applies. -->
+      <RequireRealOvpnProxy Condition="'$(RequireRealOvpnProxy)' == '' And '$(Configuration)' == 'Release'">true</RequireRealOvpnProxy>
+      <_RequireRealOvpnProxyArg Condition="'$(RequireRealOvpnProxy)' == 'true'">-RequireReal</_RequireRealOvpnProxyArg>
     </PropertyGroup>
-    <Exec Condition="'$(SkipSidecarFetch)' != 'true'" Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\scripts\Fetch-OvpnProxy.ps1&quot; -Arch $(_OvpnProxyArch) -Quiet" />
+    <Exec Condition="'$(SkipSidecarFetch)' != 'true' Or '$(_RequireRealOvpnProxyArg)' != ''" Command="powershell.exe -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildProjectDirectory)\scripts\Fetch-OvpnProxy.ps1&quot; -Arch $(_OvpnProxyArch) -Quiet $(_RequireRealOvpnProxyArg)" />
     <ItemGroup>
       <None Include="$(MSBuildProjectDirectory)\obj\ovpnproxy\$(_OvpnProxyArch)\wormhole-ovpnproxy.exe"
             Condition="Exists('$(MSBuildProjectDirectory)\obj\ovpnproxy\$(_OvpnProxyArch)\wormhole-ovpnproxy.exe')">

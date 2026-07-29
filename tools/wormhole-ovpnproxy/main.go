@@ -28,12 +28,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/xBounceIT/wormhole/tools/internal/sockstun"
@@ -52,7 +54,19 @@ type config struct {
 	// "p"/"push" to request a push notification. The sidecar connects, and if the server
 	// challenges, it reconnects carrying this response. Empty for non-2FA / non-challenge VPNs.
 	ChallengeResponse string `json:"challenge_response"`
-	Mock              bool   `json:"mock"`
+	// Stable Windows adapter IDs and effective profile remotes for the OUTER OpenVPN
+	// transport. The native shim prefers DNS through those adapters, falls back to the
+	// system resolver when physical DNS is blocked, and refreshes the current interface
+	// index before every socket connect.
+	TransportAdapterIDs []string          `json:"transport_adapter_ids"`
+	TransportRemotes    []transportRemote `json:"transport_remotes"`
+	Mock                bool              `json:"mock"`
+}
+
+type transportRemote struct {
+	Host     string `json:"host"`
+	Port     string `json:"port"`
+	Protocol string `json:"protocol"`
 }
 
 func logf(format string, args ...any) {
@@ -77,6 +91,9 @@ func run(cliMock bool) error {
 	cfg, err := readConfig()
 	if err != nil {
 		return fmt.Errorf("reading config: %w", err)
+	}
+	if err := validateTransportIsolation(cfg); err != nil {
+		return fmt.Errorf("invalid physical transport isolation: %w", err)
 	}
 	// CLI flag wins if either is set — handy for ad-hoc invocations where the operator
 	// pipes a real config but wants mock dialing for a quick smoke test.
@@ -141,6 +158,33 @@ func run(cliMock bool) error {
 	}()
 
 	return sockstun.Serve(ctx, ln, dial, stderrLogger{})
+}
+
+func validateTransportIsolation(cfg config) error {
+	hasAdapters := len(cfg.TransportAdapterIDs) > 0
+	hasRemotes := len(cfg.TransportRemotes) > 0
+	if hasAdapters != hasRemotes {
+		return errors.New("transport_adapter_ids and transport_remotes must be supplied together")
+	}
+	if !hasAdapters {
+		return nil
+	}
+	if len(cfg.TransportAdapterIDs) > 8 {
+		return fmt.Errorf("too many transport_adapter_ids: %d (maximum 8)", len(cfg.TransportAdapterIDs))
+	}
+	for _, adapterID := range cfg.TransportAdapterIDs {
+		if strings.TrimSpace(adapterID) == "" {
+			return errors.New("transport_adapter_ids contains an empty stable adapter ID")
+		}
+	}
+	for _, remote := range cfg.TransportRemotes {
+		if strings.TrimSpace(remote.Host) == "" ||
+			strings.TrimSpace(remote.Port) == "" ||
+			strings.TrimSpace(remote.Protocol) == "" {
+			return errors.New("transport_remotes contains an incomplete endpoint")
+		}
+	}
+	return nil
 }
 
 func readConfig() (config, error) {

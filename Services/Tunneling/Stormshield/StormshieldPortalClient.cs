@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
@@ -110,17 +109,31 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
     // already orders the callback's write before that read — no extra synchronization needed.
     public StormshieldTlsFailure? LastTlsFailure { get; private set; }
 
-    public StormshieldPortalClient(string server, int port, bool trustServerCertificate, string? caPem)
+    public StormshieldPortalClient(
+        string server,
+        int port,
+        bool trustServerCertificate,
+        string? caPem,
+        IWindowsPhysicalNetworkPathService networkPathService)
     {
+        ArgumentNullException.ThrowIfNull(networkPathService);
         _baseUri = BuildBaseUri(server, port);
 
-        // CookieContainer so the portal session set by the auth POST is carried into the
-        // config-download requests automatically.
-        var handler = new HttpClientHandler
+        // SocketsHttpHandler exposes ConnectCallback, which lets us bind each HTTPS transport
+        // socket to the selected physical interface. This is per-socket state: it neither
+        // installs routes nor requires elevation, and it remains effective if a native VPN
+        // connects before or after this client.
+        var handler = new SocketsHttpHandler
         {
             CookieContainer = new CookieContainer(),
             UseCookies = true,
             AllowAutoRedirect = true,
+            // Keep the system proxy behavior of HttpClientHandler. ConnectCallback receives
+            // the proxy endpoint when one is configured, so its DNS and transport are still
+            // isolated on the physical uplink by the same connector.
+            UseProxy = true,
+            ConnectCallback = (context, cancellationToken) =>
+                networkPathService.ConnectTcpAsync(context.DnsEndPoint, cancellationToken),
         };
         X509Certificate2Collection? caCerts = null;
         try
@@ -130,7 +143,7 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
                 // Honors the explicit "trust everything" opt-in. Security note: this disables
                 // hostname, chain, and revocation checks for the pre-auth POST, so credentials /
                 // OTP would be visible to a MITM on a hostile network.
-                handler.ServerCertificateCustomValidationCallback = (_, _, _, _) => true;
+                handler.SslOptions.RemoteCertificateValidationCallback = (_, _, _, _) => true;
             }
             else if (!string.IsNullOrWhiteSpace(caPem))
             {
@@ -151,8 +164,10 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
                     throw new InvalidOperationException("Stormshield CA certificate (PEM) contained no certificates.");
                 }
                 var pinned = caCerts;
-                handler.ServerCertificateCustomValidationCallback = (_, serverCert, peerChain, errors) =>
+                handler.SslOptions.RemoteCertificateValidationCallback = (_, serverCert, peerChain, errors) =>
                 {
+                    using var converted = ConvertCertificate(serverCert);
+                    var serverCert2 = serverCert as X509Certificate2 ?? converted;
                     // The pinned CA — not the OS trust store — is the authoritative anchor. Tolerate
                     // a hostname mismatch because SNS factory certs use the appliance serial as the
                     // CN with no matching SAN (the vendor client sets check_hostname=False for the
@@ -161,10 +176,10 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
                         SslPolicyErrors.RemoteCertificateChainErrors | SslPolicyErrors.RemoteCertificateNameMismatch;
                     if ((errors & ~tolerated) != SslPolicyErrors.None)
                     {
-                        RecordTlsFailure(serverCert, errors, peerChain);
+                        RecordTlsFailure(serverCert2, errors, peerChain);
                         return false;
                     }
-                    if (serverCert is null)
+                    if (serverCert2 is null)
                     {
                         RecordTlsFailure(null, errors | SslPolicyErrors.RemoteCertificateNotAvailable, peerChain);
                         return false;
@@ -178,10 +193,10 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
                         for (var i = 1; i < peerChain.ChainElements.Count; i++)
                             customChain.ChainPolicy.ExtraStore.Add(peerChain.ChainElements[i].Certificate);
                     }
-                    var trusted = customChain.Build(serverCert);
+                    var trusted = customChain.Build(serverCert2);
                     // Surface the pin miss as a chain error — that's what it is from the user's
                     // point of view: the certificate does not chain to the CA they pinned.
-                    if (!trusted) RecordTlsFailure(serverCert, errors | SslPolicyErrors.RemoteCertificateChainErrors, customChain);
+                    if (!trusted) RecordTlsFailure(serverCert2, errors | SslPolicyErrors.RemoteCertificateChainErrors, customChain);
                     return trusted;
                 };
             }
@@ -192,10 +207,11 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
                 // The callback re-implements the default policy verbatim (valid ⇔ errors == None);
                 // it exists only to RECORD what failed so the provider can offer an informed
                 // "trust this server?" recovery instead of a bare handshake error.
-                handler.ServerCertificateCustomValidationCallback = (_, serverCert, peerChain, errors) =>
+                handler.SslOptions.RemoteCertificateValidationCallback = (_, serverCert, peerChain, errors) =>
                 {
                     if (errors == SslPolicyErrors.None) return true;
-                    RecordTlsFailure(serverCert, errors, peerChain);
+                    using var converted = ConvertCertificate(serverCert);
+                    RecordTlsFailure(serverCert as X509Certificate2 ?? converted, errors, peerChain);
                     return false;
                 };
             }
@@ -215,6 +231,9 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
             throw;
         }
     }
+
+    private static X509Certificate2? ConvertCertificate(X509Certificate? certificate) =>
+        certificate is null or X509Certificate2 ? null : new X509Certificate2(certificate);
 
     // Test seam: inject a fake HttpClient pointed at a loopback listener + the base URI it serves.
     public StormshieldPortalClient(HttpClient http, Uri baseUri)
@@ -309,9 +328,13 @@ internal sealed class StormshieldPortalClient : IStormshieldPortal
         {
             throw;
         }
-        catch (Exception)
+        catch (Exception ex) when (
+            ex is HttpRequestException
+                or IOException
+                or TaskCanceledException)
         {
-            // HttpRequestException, a non-cancellation TaskCanceledException (timeout), etc. → unavailable.
+            // Expected transport/body failures and non-caller timeouts → unavailable.
+            // Programming/runtime failures still propagate instead of masquerading as a cache hint.
             return null;
         }
     }

@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Text.Json.Serialization;
 
 namespace Wormhole.Services.Tunneling.OpenVpn;
@@ -25,5 +26,29 @@ public sealed class OpenVpnSidecarConfig
     /// </summary>
     [JsonPropertyName("challenge_response")] public string? ChallengeResponse { get; set; }
 
+    /// <summary>
+    /// Stable Windows adapter IDs eligible for the outer OpenVPN transport. The sidecar
+    /// resolves the current interface index immediately before every DNS query and socket
+    /// connect, so network transitions cannot leave a stale index behind.
+    /// </summary>
+    [JsonPropertyName("transport_adapter_ids")]
+    public IReadOnlyList<string>? TransportAdapterIds { get; set; }
+
+    /// <summary>
+    /// Effective OpenVPN remotes in profile order. When supplied with adapter IDs, the
+    /// sidecar prefers physical-adapter DNS, falls back to the system resolver when a
+    /// native VPN blocks it, and feeds the resulting IP to OpenVPN3 while preserving the
+    /// original hostname. The transport socket remains pinned to the physical adapter.
+    /// </summary>
+    [JsonPropertyName("transport_remotes")]
+    public IReadOnlyList<OpenVpnTransportRemote>? TransportRemotes { get; set; }
+
     [JsonPropertyName("mock")] public bool Mock { get; set; }
+}
+
+public sealed class OpenVpnTransportRemote
+{
+    [JsonPropertyName("host")] public string Host { get; set; } = string.Empty;
+    [JsonPropertyName("port")] public string Port { get; set; } = string.Empty;
+    [JsonPropertyName("protocol")] public string Protocol { get; set; } = string.Empty;
 }

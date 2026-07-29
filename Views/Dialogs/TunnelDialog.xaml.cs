@@ -256,7 +256,6 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         StormshieldProfileOvpnBox.Text = ss.ProfileOvpn ?? string.Empty;
         StormshieldCaPemBox.Text = ss.CaPem ?? string.Empty;
         StormshieldTrustCertCheck.IsChecked = ss.TrustServerCertificate;
-        StormshieldBypassNativeVpnRouteCheck.IsChecked = ss.BypassNativeVpnGatewayRoute;
         StormshieldTransportOverrideBox.SelectedIndex = ss.OpenVpnTransportOverride switch
         {
             StormshieldOpenVpnTransportOverride.ForceTcp => 1,
@@ -371,7 +370,6 @@ public sealed partial class TunnelDialog : UserControl, IDraftForm<TunnelDraft>
         ProfileOvpn = StormshieldProfileOvpnBox.Text,
         CaPem = string.IsNullOrWhiteSpace(StormshieldCaPemBox.Text) ? null : StormshieldCaPemBox.Text,
         TrustServerCertificate = StormshieldTrustCertCheck.IsChecked == true,
-        BypassNativeVpnGatewayRoute = StormshieldBypassNativeVpnRouteCheck.IsChecked == true,
         OpenVpnTransportOverride = StormshieldSelectedTransportOverride,
         OpenVpnCompressionFramingOverride = StormshieldSelectedCompressionFramingOverride,
         AppToken = string.IsNullOrWhiteSpace(StormshieldAppTokenBox.Text)

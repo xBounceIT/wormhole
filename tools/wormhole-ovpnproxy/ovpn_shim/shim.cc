@@ -31,18 +31,36 @@
 
 #include "shim.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+
+#if defined(_WIN32)
+  // DnsQueryEx and DNS_QUERY_REQUEST are exposed by the SDK from Windows 8 onward.
+  // Wormhole targets Windows 10; OpenVPN3's generic minimum is older, so raise it
+  // locally before including the Windows DNS headers.
+  #undef _WIN32_WINNT
+  #define _WIN32_WINNT 0x0602
+  #include <winsock2.h>
+  #include <ws2tcpip.h>
+  #include <windows.h>
+  #include <windns.h>
+  #include <iphlpapi.h>
+  #include <rpc.h>
+#endif
 
 // ovpncli.hpp lives at openvpn3/client/ovpncli.hpp (NOT under openvpn3/openvpn/
 // — that's a sibling subtree). The CMakeLists adds `${OPENVPN3_DIR}/client` to
@@ -399,6 +417,10 @@ class WormholeClient final : public OpenVPNClient {
       connected_ = true;
       terminated_ = false;
       last_error_.clear();
+      // A later reconnect must perform fresh interface-scoped DNS instead of
+      // reusing answers captured before a native VPN or network transition.
+      resolved_transport_targets_.clear();
+      next_transport_remote_index_ = 0;
       dump_ovpn3_stats("CONNECTED"); // baseline — error counters expected ~zero here
     } else if (ev.name == "DISCONNECTED" || ev.fatal) {
       terminated_ = true;
@@ -469,6 +491,136 @@ class WormholeClient final : public OpenVPNClient {
 
   // App custom control channel messages are unused by the sidecar — no-op.
   void acc_event(const AppCustomControlMessageEvent&) override {}
+
+  void add_transport_adapter(std::string adapter_id) {
+    if (adapter_id.empty()) return;
+    if (std::find(
+            transport_adapter_ids_.begin(),
+            transport_adapter_ids_.end(),
+            adapter_id) == transport_adapter_ids_.end()) {
+      transport_adapter_ids_.push_back(std::move(adapter_id));
+    }
+  }
+
+  void add_transport_remote(
+      std::string host,
+      std::string port,
+      std::string protocol) {
+    if (host.empty() || port.empty() || protocol.empty()) return;
+    transport_remotes_.push_back(
+        {std::move(host), std::move(port), std::move(protocol)});
+  }
+
+  bool remote_override_enabled() override {
+    return !transport_adapter_ids_.empty() && !transport_remotes_.empty();
+  }
+
+  void remote_override(RemoteOverride& remote) override {
+    if (resolved_transport_targets_.empty()) {
+      resolve_transport_targets();
+    }
+    if (resolved_transport_targets_.empty()) {
+      remote.error =
+          "no OpenVPN remote could be resolved through an active physical adapter";
+      return;
+    }
+
+    auto target = std::move(resolved_transport_targets_.front());
+    resolved_transport_targets_.pop_front();
+    pending_transport_adapter_id_ = target.adapter_id;
+    remote.host = std::move(target.host);
+    remote.ip = std::move(target.ip);
+    remote.port = std::move(target.port);
+    remote.proto = std::move(target.protocol);
+    pending_transport_interface_index_ = target.interface_index;
+    pending_transport_ipv6_ = target.ipv6;
+    pending_transport_remote_index_ = target.remote_index;
+    std::fprintf(
+        stderr,
+        "[ovpn3] remote %s resolved to %s through physical adapter %s\n",
+        remote.host.c_str(),
+        remote.ip.c_str(),
+        pending_transport_adapter_id_.c_str());
+    std::fflush(stderr);
+  }
+
+  // OpenVPN3 invokes socket_protect after creating each TCP/UDP transport socket and
+  // before connect(). Resolve the current family-specific index from the stable adapter
+  // ID selected by remote_override, then constrain this socket without changing routes.
+  bool socket_protect(
+      openvpn_io::detail::socket_type socket,
+      std::string remote,
+      bool ipv6) override {
+    if (transport_adapter_ids_.empty()) return true;
+
+#if defined(_WIN32)
+    if (ipv6 != pending_transport_ipv6_) {
+      resolved_transport_targets_.clear();
+      next_transport_remote_index_ = pending_transport_remote_index_;
+      std::fprintf(
+          stderr,
+          "[ovpn3] refusing outer transport to %s: OpenVPN requested the "
+          "wrong address family for the selected endpoint\n",
+          remote.c_str());
+      std::fflush(stderr);
+      return false;
+    }
+    const auto interface_index =
+        current_interface_index(pending_transport_adapter_id_, ipv6);
+    if (interface_index == 0
+        || interface_index != pending_transport_interface_index_) {
+      resolved_transport_targets_.clear();
+      next_transport_remote_index_ = pending_transport_remote_index_;
+      std::fprintf(
+          stderr,
+          "[ovpn3] refusing outer transport to %s: selected physical adapter %s "
+          "has no active or stable %s index\n",
+          remote.c_str(),
+          pending_transport_adapter_id_.c_str(),
+          ipv6 ? "IPv6" : "IPv4");
+      std::fflush(stderr);
+      return false;
+    }
+
+    const std::uint32_t option_value = ipv6
+        ? static_cast<std::uint32_t>(interface_index)
+        : htonl(static_cast<std::uint32_t>(interface_index));
+    const int level = ipv6 ? IPPROTO_IPV6 : IPPROTO_IP;
+    const int option = ipv6 ? IPV6_UNICAST_IF : IP_UNICAST_IF;
+    if (::setsockopt(
+            socket,
+            level,
+            option,
+            reinterpret_cast<const char*>(&option_value),
+            sizeof(option_value)) == SOCKET_ERROR) {
+      const int error = WSAGetLastError();
+      std::fprintf(
+          stderr,
+          "[ovpn3] failed to bind outer transport to physical %s interface %lu "
+          "for %s (Winsock error %d)\n",
+          ipv6 ? "IPv6" : "IPv4",
+          interface_index,
+          remote.c_str(),
+          error);
+      std::fflush(stderr);
+      return false;
+    }
+    std::fprintf(
+        stderr,
+        "[ovpn3] outer transport to %s pinned to physical %s interface %lu\n",
+        remote.c_str(),
+        ipv6 ? "IPv6" : "IPv4",
+        interface_index);
+    std::fflush(stderr);
+    return true;
+#else
+    std::fprintf(
+        stderr,
+        "[ovpn3] physical-interface transport pinning was requested on a non-Windows build\n");
+    std::fflush(stderr);
+    return false;
+#endif
+  }
 
   // --- Embedder lifecycle -------------------------------------------------
   int load(const std::string& ovpn) {
@@ -668,8 +820,428 @@ class WormholeClient final : public OpenVPNClient {
   void set_log_sink(LogSink sink) { log_sink_ = sink; }
 
  private:
+  struct TransportRemote {
+    std::string host;
+    std::string port;
+    std::string protocol;
+  };
+
+  struct ResolvedTransportTarget {
+    std::string host;
+    std::string ip;
+    std::string port;
+    std::string protocol;
+    std::string adapter_id;
+    std::uint32_t route_metric;
+    std::uint32_t interface_index;
+    bool ipv6;
+    std::size_t remote_index;
+  };
+
+#if defined(_WIN32)
+  struct InterfaceIndexes {
+    ULONG ipv4 = 0;
+    ULONG ipv6 = 0;
+  };
+
+  static bool ensure_winsock_started() {
+    static const int status = [] {
+      WSADATA data{};
+      return WSAStartup(MAKEWORD(2, 2), &data);
+    }();
+    return status == 0;
+  }
+
+  static std::string normalized_adapter_id(std::string value) {
+    value.erase(
+        std::remove_if(value.begin(), value.end(), [](unsigned char c) {
+          return c == '{' || c == '}';
+        }),
+        value.end());
+    std::transform(
+        value.begin(), value.end(), value.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+  }
+
+  static InterfaceIndexes current_interface_indexes(
+      const std::string& adapter_id) {
+    InterfaceIndexes result;
+    if (adapter_id.empty()) return result;
+
+    ULONG buffer_size = 0;
+    if (GetAdaptersAddresses(
+            AF_UNSPEC, 0, nullptr, nullptr, &buffer_size) != ERROR_BUFFER_OVERFLOW
+        || buffer_size == 0) {
+      return result;
+    }
+    std::vector<unsigned char> buffer(buffer_size);
+    auto* first = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+    if (GetAdaptersAddresses(
+            AF_UNSPEC, 0, nullptr, first, &buffer_size) != NO_ERROR) {
+      return result;
+    }
+
+    const auto wanted = normalized_adapter_id(adapter_id);
+    for (auto* adapter = first; adapter; adapter = adapter->Next) {
+      if (!adapter->AdapterName || adapter->OperStatus != IfOperStatusUp) continue;
+      if (normalized_adapter_id(adapter->AdapterName) != wanted) continue;
+      result.ipv4 = adapter->IfIndex;
+      result.ipv6 = adapter->Ipv6IfIndex;
+      return result;
+    }
+    return result;
+  }
+
+  static ULONG current_interface_index(
+      const std::string& adapter_id,
+      bool ipv6) {
+    const auto indexes = current_interface_indexes(adapter_id);
+    return ipv6 ? indexes.ipv6 : indexes.ipv4;
+  }
+
+  static ULONG route_metric(
+      ULONG interface_index,
+      const std::string& address_text,
+      bool ipv6) {
+    if (interface_index == 0) return std::numeric_limits<ULONG>::max();
+
+    NET_LUID interface_luid{};
+    if (ConvertInterfaceIndexToLuid(interface_index, &interface_luid) != NO_ERROR) {
+      return std::numeric_limits<ULONG>::max();
+    }
+
+    SOCKADDR_INET destination{};
+    destination.si_family = ipv6 ? AF_INET6 : AF_INET;
+    void* address = ipv6
+        ? static_cast<void*>(&destination.Ipv6.sin6_addr)
+        : static_cast<void*>(&destination.Ipv4.sin_addr);
+    if (InetPtonA(
+            ipv6 ? AF_INET6 : AF_INET,
+            address_text.c_str(),
+            address) != 1) {
+      return std::numeric_limits<ULONG>::max();
+    }
+
+    MIB_IPFORWARD_ROW2 route{};
+    SOCKADDR_INET source{};
+    if (GetBestRoute2(
+            &interface_luid,
+            0,
+            nullptr,
+            &destination,
+            0,
+            &route,
+            &source) != NO_ERROR) {
+      return std::numeric_limits<ULONG>::max();
+    }
+
+    MIB_IPINTERFACE_ROW interface_row{};
+    InitializeIpInterfaceEntry(&interface_row);
+    interface_row.Family = destination.si_family;
+    interface_row.InterfaceLuid = interface_luid;
+    const ULONG interface_metric =
+        GetIpInterfaceEntry(&interface_row) == NO_ERROR
+            ? interface_row.Metric
+            : 0;
+    const auto total =
+        static_cast<unsigned long long>(route.Metric) + interface_metric;
+    return total > std::numeric_limits<ULONG>::max()
+        ? std::numeric_limits<ULONG>::max()
+        : static_cast<ULONG>(total);
+  }
+
+  static std::wstring utf8_to_wide(const std::string& value) {
+    if (value.empty()) return {};
+    const int size = MultiByteToWideChar(
+        CP_UTF8, MB_ERR_INVALID_CHARS, value.c_str(), -1, nullptr, 0);
+    if (size <= 0) return {};
+    std::wstring result(static_cast<std::size_t>(size), L'\0');
+    if (MultiByteToWideChar(
+            CP_UTF8,
+            MB_ERR_INVALID_CHARS,
+            value.c_str(),
+            -1,
+            result.data(),
+            size) <= 0) {
+      return {};
+    }
+    result.resize(static_cast<std::size_t>(size - 1));
+    return result;
+  }
+
+  static bool is_ip_literal(
+      const std::string& host,
+      bool ipv6) {
+    std::array<unsigned char, 16> bytes{};
+    return InetPtonA(
+        ipv6 ? AF_INET6 : AF_INET,
+        host.c_str(),
+        bytes.data()) == 1;
+  }
+
+  static std::vector<std::string> query_dns(
+      const std::string& host,
+      ULONG interface_index,
+      bool ipv6) {
+    struct DnsQueryRequest {
+      ULONG Version;
+      PCWSTR QueryName;
+      WORD QueryType;
+      ULONG64 QueryOptions;
+      void* DnsServerList;
+      ULONG InterfaceIndex;
+      void* QueryCompletionCallback;
+      void* QueryContext;
+    };
+    using DnsQueryExFunction =
+        DNS_STATUS (WINAPI *)(DnsQueryRequest*, PDNS_QUERY_RESULT, void*);
+    static const auto dns_query_ex = [] {
+      auto module = GetModuleHandleW(L"dnsapi.dll");
+      if (!module) module = LoadLibraryW(L"dnsapi.dll");
+      return module
+          ? reinterpret_cast<DnsQueryExFunction>(
+                GetProcAddress(module, "DnsQueryEx"))
+          : nullptr;
+    }();
+
+    std::vector<std::string> addresses;
+    if (interface_index == 0 || !dns_query_ex) return addresses;
+    const auto query_name = utf8_to_wide(host);
+    if (query_name.empty()) return addresses;
+
+    DnsQueryRequest request{};
+    request.Version = 1;
+    request.QueryName = query_name.c_str();
+    request.QueryType = ipv6 ? DNS_TYPE_AAAA : DNS_TYPE_A;
+    request.QueryOptions = DNS_QUERY_BYPASS_CACHE;
+    request.InterfaceIndex = interface_index;
+
+    DNS_QUERY_RESULT result{};
+    result.Version = DNS_QUERY_RESULTS_VERSION1;
+    const DNS_STATUS status = dns_query_ex(&request, &result, nullptr);
+    if (status == ERROR_SUCCESS && result.QueryStatus == ERROR_SUCCESS) {
+      for (auto* record = result.pQueryRecords; record; record = record->pNext) {
+        if (record->wType != request.QueryType) continue;
+        std::array<char, INET6_ADDRSTRLEN> text{};
+        if (ipv6) {
+          IN6_ADDR address{};
+          std::memcpy(
+              &address,
+              &record->Data.AAAA.Ip6Address,
+              sizeof(address));
+          if (InetNtopA(AF_INET6, &address, text.data(), text.size())) {
+            addresses.emplace_back(text.data());
+          }
+        } else {
+          IN_ADDR address{};
+          address.S_un.S_addr = record->Data.A.IpAddress;
+          if (InetNtopA(AF_INET, &address, text.data(), text.size())) {
+            addresses.emplace_back(text.data());
+          }
+        }
+      }
+    }
+    if (result.pQueryRecords) {
+      DnsRecordListFree(result.pQueryRecords, DnsFreeRecordList);
+    }
+    return addresses;
+  }
+
+  static std::vector<std::string> query_system_dns(
+      const std::string& host,
+      bool ipv6) {
+    std::vector<std::string> addresses;
+    const auto query_name = utf8_to_wide(host);
+    if (query_name.empty()) return addresses;
+
+    PDNS_RECORD first = nullptr;
+    const WORD query_type = ipv6 ? DNS_TYPE_AAAA : DNS_TYPE_A;
+    const auto status = DnsQuery_W(
+        query_name.c_str(),
+        query_type,
+        DNS_QUERY_STANDARD,
+        nullptr,
+        &first,
+        nullptr);
+    if (status != ERROR_SUCCESS) {
+      std::fprintf(
+          stderr,
+          "[ovpn3] system %s DNS for %s failed with status %ld\n",
+          ipv6 ? "IPv6" : "IPv4",
+          host.c_str(),
+          static_cast<long>(status));
+      std::fflush(stderr);
+      return addresses;
+    }
+    for (auto* current = first; current; current = current->pNext) {
+      if (current->wType != query_type) continue;
+      std::array<char, INET6_ADDRSTRLEN> text{};
+      const void* address = ipv6
+          ? static_cast<const void*>(&current->Data.AAAA.Ip6Address)
+          : static_cast<const void*>(&current->Data.A.IpAddress);
+      if (InetNtopA(
+              ipv6 ? AF_INET6 : AF_INET,
+              const_cast<void*>(address),
+              text.data(),
+              text.size())) {
+        addresses.emplace_back(text.data());
+      }
+    }
+    DnsRecordListFree(first, DnsFreeRecordList);
+    return addresses;
+  }
+#endif
+
+  static bool protocol_allows_family(
+      const std::string& protocol,
+      bool ipv6) {
+    std::string normalized = protocol;
+    std::transform(
+        normalized.begin(), normalized.end(), normalized.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const bool explicitly_ipv4 = normalized.find('4') != std::string::npos;
+    const bool explicitly_ipv6 = normalized.find('6') != std::string::npos;
+    return ipv6 ? !explicitly_ipv4 : !explicitly_ipv6;
+  }
+
+#if defined(_WIN32)
+  static void add_resolved_target(
+      std::vector<ResolvedTransportTarget>& targets,
+      const TransportRemote& remote,
+      const std::string& ip,
+      const std::string& adapter_id,
+      ULONG interface_index,
+      std::size_t remote_index) {
+    const bool ipv6 = is_ip_literal(ip, true);
+    const ULONG metric = route_metric(interface_index, ip, ipv6);
+    if (metric == std::numeric_limits<ULONG>::max()) return;
+    const auto duplicate = std::find_if(
+        targets.begin(),
+        targets.end(),
+        [&](const ResolvedTransportTarget& target) {
+          return target.ip == ip
+              && target.port == remote.port
+              && target.protocol == remote.protocol
+              && target.adapter_id == adapter_id;
+        });
+    if (duplicate == targets.end()) {
+      targets.push_back(
+          {
+              remote.host,
+              ip,
+              remote.port,
+              remote.protocol,
+              adapter_id,
+              metric,
+              interface_index,
+              ipv6,
+              remote_index});
+    }
+  }
+#endif
+
+  void resolve_transport_targets() {
+#if defined(_WIN32)
+    if (transport_remotes_.empty()) return;
+    if (!ensure_winsock_started()) {
+      std::fprintf(stderr, "[ovpn3] failed to initialize Winsock for outer DNS\n");
+      std::fflush(stderr);
+      return;
+    }
+    const auto start_remote_index = next_transport_remote_index_;
+    for (std::size_t offset = 0; offset < transport_remotes_.size(); ++offset) {
+      const auto remote_index =
+          (start_remote_index + offset) % transport_remotes_.size();
+      const auto& remote = transport_remotes_[remote_index];
+      std::vector<ResolvedTransportTarget> remote_targets;
+      const bool literal_ipv4 = is_ip_literal(remote.host, false);
+      const bool literal_ipv6 = is_ip_literal(remote.host, true);
+      std::array<std::vector<std::string>, 2> system_addresses;
+      std::array<bool, 2> queried_system_dns{false, false};
+      std::array<bool, 2> logged_system_fallback{false, false};
+      for (const auto& adapter_id : transport_adapter_ids_) {
+        const auto indexes = current_interface_indexes(adapter_id);
+        if (literal_ipv4 || literal_ipv6) {
+          const bool ipv6 = literal_ipv6;
+          const auto interface_index = ipv6 ? indexes.ipv6 : indexes.ipv4;
+          if (protocol_allows_family(remote.protocol, ipv6)
+              && interface_index != 0) {
+            add_resolved_target(
+                remote_targets,
+                remote,
+                remote.host,
+                adapter_id,
+                interface_index,
+                remote_index);
+          }
+          continue;
+        }
+
+        for (const bool ipv6 : {false, true}) {
+          if (!protocol_allows_family(remote.protocol, ipv6)) continue;
+          const auto interface_index = ipv6 ? indexes.ipv6 : indexes.ipv4;
+          if (interface_index == 0) continue;
+          auto addresses = query_dns(remote.host, interface_index, ipv6);
+          const auto family = ipv6 ? 1U : 0U;
+          if (addresses.empty()) {
+            if (!queried_system_dns[family]) {
+              system_addresses[family] = query_system_dns(remote.host, ipv6);
+              queried_system_dns[family] = true;
+            }
+            addresses = system_addresses[family];
+            if (!addresses.empty() && !logged_system_fallback[family]) {
+              std::fprintf(
+                  stderr,
+                  "[ovpn3] physical %s DNS for %s returned no addresses; "
+                  "using the system resolver before physical socket pinning\n",
+                  ipv6 ? "IPv6" : "IPv4",
+                  remote.host.c_str());
+              std::fflush(stderr);
+              logged_system_fallback[family] = true;
+            }
+          }
+          for (const auto& address : addresses) {
+            add_resolved_target(
+                remote_targets,
+                remote,
+                address,
+                adapter_id,
+                interface_index,
+                remote_index);
+          }
+        }
+      }
+      std::stable_sort(
+          remote_targets.begin(),
+          remote_targets.end(),
+          [](const ResolvedTransportTarget& left,
+             const ResolvedTransportTarget& right) {
+            return left.route_metric < right.route_metric;
+          });
+      for (auto& target : remote_targets) {
+        resolved_transport_targets_.push_back(std::move(target));
+      }
+      next_transport_remote_index_ =
+          (remote_index + 1) % transport_remotes_.size();
+      if (!resolved_transport_targets_.empty()) return;
+    }
+#else
+    // Stormshield physical transport isolation is Windows-only. Fail closed if a
+    // constrained config is accidentally supplied on another platform.
+#endif
+  }
+
   Config profile_;
   ProvideCreds creds_;
+  std::vector<std::string> transport_adapter_ids_;
+  std::vector<TransportRemote> transport_remotes_;
+  std::deque<ResolvedTransportTarget> resolved_transport_targets_;
+  std::size_t next_transport_remote_index_ = 0;
+  std::size_t pending_transport_remote_index_ = 0;
+  std::string pending_transport_adapter_id_;
+  std::uint32_t pending_transport_interface_index_ = 0;
+  bool pending_transport_ipv6_ = false;
   std::thread connect_thread_;
   std::atomic<bool> stopped_{false};
 
@@ -891,7 +1463,6 @@ struct ClientWrapper {
 #if HAVE_OPENVPN3
   std::unique_ptr<WormholeClient> client;
 #endif
-  std::atomic<bool> freed{false};
 };
 
 } // namespace
@@ -912,7 +1483,6 @@ void ovpn_free(ovpn_client_t* c) {
 #if HAVE_OPENVPN3
   if (!c) return;
   auto* w = reinterpret_cast<ClientWrapper*>(c);
-  if (w->freed.exchange(true)) return;
   if (w->client) w->client->stop_session();
   delete w;
 #else
@@ -938,6 +1508,35 @@ int ovpn_set_creds(ovpn_client_t* c, const char* username, const char* password)
   return 0;
 #else
   (void)c; (void)username; (void)password;
+  return 100;
+#endif
+}
+
+int ovpn_add_transport_adapter(
+    ovpn_client_t* c,
+    const char* adapter_id) {
+#if HAVE_OPENVPN3
+  if (!c || !adapter_id || !*adapter_id) return 1;
+  reinterpret_cast<ClientWrapper*>(c)->client->add_transport_adapter(adapter_id);
+  return 0;
+#else
+  (void)c; (void)adapter_id;
+  return 100;
+#endif
+}
+
+int ovpn_add_transport_remote(
+    ovpn_client_t* c,
+    const char* host,
+    const char* port,
+    const char* protocol) {
+#if HAVE_OPENVPN3
+  if (!c || !host || !*host || !port || !*port || !protocol || !*protocol) return 1;
+  reinterpret_cast<ClientWrapper*>(c)->client->add_transport_remote(
+      host, port, protocol);
+  return 0;
+#else
+  (void)c; (void)host; (void)port; (void)protocol;
   return 100;
 #endif
 }

@@ -1,5 +1,6 @@
 # libovpn_shim — static library that wraps OpenVPN3-core for CGO consumption by the
-# wormhole-ovpnproxy sidecar. Builds to ovpn_shim/build/libovpn_shim.a.
+# wormhole-ovpnproxy sidecar. The build script uses the architecture-specific
+# ovpn_shim/build/<arch>/libovpn_shim.a to prevent cross-architecture cache reuse.
 #
 # Prerequisites:
 #   - C++17 toolchain on PATH (MinGW-w64 g++ for CGO compatibility; MSVC also works)
