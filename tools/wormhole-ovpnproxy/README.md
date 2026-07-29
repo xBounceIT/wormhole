@@ -72,18 +72,19 @@ Then build:
 # Fetch-OvpnProxy.ps1 detects VCPKG_ROOT + cmake + go automatically and runs the
 # full build with -tags ovpn3. The first run takes ~10-15 min as vcpkg downloads
 # and builds asio, jsoncpp, lz4, xxhash. Subsequent builds are incremental.
-.\scripts\Fetch-OvpnProxy.ps1 -Arch x64 -Force
+.\scripts\Fetch-OvpnProxy.ps1 -Arch x64 -Force -RequireReal
 ```
 
 Or invoke the steps manually:
 
 ```powershell
 # Build the C++ shim
-cmake -B tools\wormhole-ovpnproxy\ovpn_shim\build `
+cmake -B tools\wormhole-ovpnproxy\ovpn_shim\build\x64 `
       -S tools\wormhole-ovpnproxy\ovpn_shim `
+      -G "MinGW Makefiles" `
       -DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake `
-      -DVCPKG_TARGET_TRIPLET=x64-windows-static
-cmake --build tools\wormhole-ovpnproxy\ovpn_shim\build --config Release
+      -DVCPKG_TARGET_TRIPLET=x64-mingw-static
+cmake --build tools\wormhole-ovpnproxy\ovpn_shim\build\x64 --config Release
 
 # Build the Go sidecar with the CGO link
 cd tools\wormhole-ovpnproxy
@@ -91,12 +92,12 @@ $env:CGO_ENABLED = "1"
 go build -trimpath -tags ovpn3 -ldflags "-s -w" -o ..\..\bin\wormhole-ovpnproxy.exe .
 ```
 
-Cross-build for arm64:
+Cross-build for arm64 with an x64-hosted llvm-mingw archive (required because the
+ARM64 sidecar links libc++ explicitly):
 
-```
-GOOS=windows GOARCH=arm64 CGO_ENABLED=1 \
-  CC=clang-cl --target=arm64-pc-windows-msvc \
-  go build -trimpath -tags ovpn3 ...
+```powershell
+$env:PATH = "C:\llvm-mingw\bin;$env:PATH"
+.\scripts\Fetch-OvpnProxy.ps1 -Arch arm64 -Force -RequireReal
 ```
 
 ## Why a Go sidecar?

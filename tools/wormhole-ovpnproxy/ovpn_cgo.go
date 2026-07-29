@@ -25,7 +25,9 @@ package main
 
 /*
 #cgo CXXFLAGS: -std=c++17 -I${SRCDIR}/ovpn_shim
-#cgo LDFLAGS: -L${SRCDIR}/ovpn_shim/build -lovpn_shim -lstdc++
+#cgo !windows LDFLAGS: -L${SRCDIR}/ovpn_shim/build -lovpn_shim -lstdc++
+#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/x64 -lovpn_shim -lstdc++
+#cgo windows,arm64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/arm64 -lovpn_shim -lc++
 // libovpn_shim.a is a thin static archive of just shim.cc + ovpncli.cpp — it does NOT
 // bundle its dependencies. CMake knows the transitive closure (mbedTLS, lz4, and the
 // Win32 system libs that OpenVPN3's add_core_dependencies() attaches to the target), but
@@ -34,28 +36,30 @@ package main
 // undefined references. These libs are Windows-specific — the Linux CI best-effort build
 // supplies its own via $CGO_LDFLAGS. mbedTLS libs come from the submodule build tree (an
 // arch-independent dir); lz4 and jsoncpp from vcpkg, whose lib dir is triplet-specific, so
-// the -L for it is keyed off GOARCH below (x64- vs arm64-mingw-static). Today only x64
-// builds -tags ovpn3 (arm64 ships the mock stub — no submodules/toolchain on that runner),
-// but selecting the vcpkg path by GOARCH avoids silently linking x64 archives into an
-// arm64 sidecar if that ever changes. -ljsoncpp mirrors CMake's add_json_library(ovpn_shim):
+// the -L for it is keyed off GOARCH below (x64- vs arm64-mingw-static). Release builds
+// use the native OpenVPN3 binding on both architectures; selecting by GOARCH prevents
+// silently linking x64 archives into an arm64 sidecar. -ljsoncpp mirrors CMake's
+// add_json_library(ovpn_shim):
 // the openvpn3 code paths compiled here don't currently pull Json:: symbols, but linking it
 // keeps the closure honest against config drift (and ld ignores an unreferenced static
 // archive). Order matters for single-pass ld: dependents (ovpn_shim) before dependencies
 // (mbedTLS, lz4, jsoncpp), before the Win32 import libs they call into.
-// Statically link the MinGW C++/runtime libs so the shipped sidecar is self-contained.
-// Without this the .exe imports libstdc++-6.dll + libwinpthread-1.dll, which don't exist
-// on a clean end-user machine — the sidecar would fail to start (and the release verify
-// gate, which only looks for "binding not linked", would not catch the DLL-load failure).
-// System DLLs (kernel32, ws2_32, bcrypt, UCRT) stay dynamic, as they must.
-#cgo windows LDFLAGS: -static -static-libgcc -static-libstdc++
-#cgo windows LDFLAGS: -L${SRCDIR}/ovpn_shim/build/third_party_mbedtls/library
-#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/vcpkg_installed/x64-mingw-static/lib
-#cgo windows,arm64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/vcpkg_installed/arm64-mingw-static/lib
+// Statically link the compiler runtime so the shipped sidecar is self-contained. x64
+// uses MinGW GCC/libstdc++; ARM64 uses the pinned llvm-mingw toolchain and libc++.
+// Keeping the runtime flags architecture-specific avoids relying on clang's implicit
+// translation of -lstdc++ to -lc++ (and its ignored -static-libstdc++ compatibility
+// flag). System DLLs (kernel32, ws2_32, bcrypt, UCRT) stay dynamic, as they must.
+#cgo windows LDFLAGS: -static
+#cgo windows,amd64 LDFLAGS: -static-libgcc -static-libstdc++
+#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/x64/third_party_mbedtls/library
+#cgo windows,arm64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/arm64/third_party_mbedtls/library
+#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/x64/vcpkg_installed/x64-mingw-static/lib
+#cgo windows,arm64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/arm64/vcpkg_installed/arm64-mingw-static/lib
 #cgo windows LDFLAGS: -lmbedtls -lmbedx509 -lmbedcrypto -llz4 -ljsoncpp
 // -lbcrypt resolves BCryptGenRandom, which mbedTLS 3.6's entropy_poll.c uses for the
 // Windows entropy source (modern mbedTLS prefers CNG/bcrypt over the legacy advapi32
 // CryptGenRandom). advapi32/ole32/shell32 mirror OpenVPN3's add_core_dependencies set.
-#cgo windows LDFLAGS: -lws2_32 -lwsock32 -liphlpapi -lfwpuclnt -lwininet -lsetupapi -lrpcrt4 -lwtsapi32 -ladvapi32 -lbcrypt -lole32 -lshell32
+#cgo windows LDFLAGS: -lws2_32 -lwsock32 -liphlpapi -ldnsapi -lfwpuclnt -lwininet -lsetupapi -lrpcrt4 -lwtsapi32 -ladvapi32 -lbcrypt -lole32 -lshell32
 
 #include "ovpn_shim/shim.h"
 #include <stdlib.h>
@@ -128,6 +132,26 @@ func connectWithChallenge(cfg config) (*C.ovpn_client_t, netip.Prefix, error) {
 
 		if rc := C.ovpn_load_profile(client, cProfile); rc != 0 {
 			return nil, netip.Prefix{}, false, "", fmt.Errorf("ovpn_load_profile failed (code %d) — likely a malformed .ovpn", int(rc))
+		}
+		for _, adapterID := range cfg.TransportAdapterIDs {
+			cAdapterID := C.CString(adapterID)
+			rc := C.ovpn_add_transport_adapter(client, cAdapterID)
+			C.free(unsafe.Pointer(cAdapterID))
+			if rc != 0 {
+				return nil, netip.Prefix{}, false, "", fmt.Errorf("ovpn_add_transport_adapter failed (code %d)", int(rc))
+			}
+		}
+		for _, remote := range cfg.TransportRemotes {
+			cHost := C.CString(remote.Host)
+			cPort := C.CString(remote.Port)
+			cProtocol := C.CString(remote.Protocol)
+			rc := C.ovpn_add_transport_remote(client, cHost, cPort, cProtocol)
+			C.free(unsafe.Pointer(cHost))
+			C.free(unsafe.Pointer(cPort))
+			C.free(unsafe.Pointer(cProtocol))
+			if rc != 0 {
+				return nil, netip.Prefix{}, false, "", fmt.Errorf("ovpn_add_transport_remote failed (code %d)", int(rc))
+			}
 		}
 		if cfg.Username != "" || cfg.Password != "" {
 			cU := C.CString(cfg.Username)

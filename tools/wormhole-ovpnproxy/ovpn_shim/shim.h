@@ -2,9 +2,10 @@
 // openvpn::ClientAPI::OpenVPNClient with a thread-safe TUN packet queue so the parent
 // process can drive a userspace TUN through CGO without touching any OS interface.
 //
-// All functions are thread-safe except where noted. Lifetime: call ovpn_new, then
-// ovpn_load_profile / ovpn_set_creds / ovpn_connect_async / ovpn_wait_connected, then
-// poll ovpn_tun_recv + ovpn_tun_send until ovpn_stop. Free with ovpn_free.
+// Runtime packet/stop functions are thread-safe except where noted. Configuration and
+// destruction are single-owner operations. Lifetime: call ovpn_new, then load the profile,
+// add optional transport adapters/remotes, set credentials, connect/wait, poll the TUN,
+// stop, and finally call ovpn_free exactly once.
 
 #ifndef WORMHOLE_OVPN_SHIM_H
 #define WORMHOLE_OVPN_SHIM_H
@@ -18,8 +19,8 @@ typedef struct ovpn_client_s ovpn_client_t;
 // Create a new client instance. Returns null on allocation failure. Never blocks.
 ovpn_client_t* ovpn_new();
 
-// Free a client created by ovpn_new. Safe to call after ovpn_stop. Idempotent on
-// already-freed clients (returns immediately).
+// Free a client created by ovpn_new. Safe to call after ovpn_stop. The pointer is invalid
+// after this returns and must not be passed to ovpn_free (or any other function) again.
 void ovpn_free(ovpn_client_t* c);
 
 // Load a .ovpn profile blob. Returns 0 on success, non-zero on parse failure. Must be
@@ -28,6 +29,20 @@ int ovpn_load_profile(ovpn_client_t* c, const char* profile_ovpn);
 
 // Set username/password credentials. Either may be empty/null. Returns 0 on success.
 int ovpn_set_creds(ovpn_client_t* c, const char* username, const char* password);
+
+// Add a stable Windows adapter GUID eligible for the outer OpenVPN transport. The
+// shim resolves its current interface index before each DNS query and socket connect,
+// so reconnecting an adapter cannot leave a stale index behind.
+int ovpn_add_transport_adapter(ovpn_client_t* c, const char* adapter_id);
+
+// Add an effective OpenVPN remote in profile order. When transport adapters are set,
+// the shim overrides OpenVPN3's system resolver: it resolves the hostname through each
+// physical adapter and supplies the resulting IP while preserving the original host.
+int ovpn_add_transport_remote(
+    ovpn_client_t* c,
+    const char* host,
+    const char* port,
+    const char* protocol);
 
 // Provide a response to an OpenVPN dynamic challenge (CRV1). `response` is the user's
 // one-time passcode (or "p"/"push" to request an AuthPoint push); `cookie` is the value

@@ -26,10 +26,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref_name }}
-          # The real (-tags ovpn3) OpenVPN sidecar links against the openvpn3 + mbedtls
-          # submodules. Fetch them on x64 (the arch we build the real sidecar for); arm64
-          # intentionally ships the mock-only stub for now, so skip the submodule clone there.
-          submodules: ${{ matrix.platform == 'x64' && 'recursive' || '' }}
+          # Both release architectures ship the real OpenVPN3 sidecar.
+          submodules: recursive
 
       - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
@@ -59,6 +57,34 @@ jobs:
           choco install mingw -y --no-progress
           "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      - name: Set up OpenVPN3 sidecar cross-toolchain (arm64)
+        if: matrix.platform == 'arm64'
+        shell: pwsh
+        run: |
+          # llvm-mingw's x86_64-hosted archive contains cross compilers for every
+          # Windows architecture, including aarch64. Pin the toolchain release so
+          # the release build is reproducible.
+          $version = "20260602"
+          $archive = "$env:RUNNER_TEMP\llvm-mingw.zip"
+          $destination = "$env:RUNNER_TEMP\llvm-mingw"
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$version/llvm-mingw-$version-ucrt-x86_64.zip"
+          $expectedSha256 = "3de3eda9377bbaf35f8c9001f190380f63b8ee981fa55d3ae9d7cce7c6ad7c70"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "llvm-mingw SHA-256 mismatch: expected $expectedSha256, got $actualSha256"
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination
+          $toolchain = Get-ChildItem -LiteralPath $destination -Directory | Select-Object -First 1
+          if (-not $toolchain) { throw "llvm-mingw archive did not contain a toolchain directory" }
+          $bin = Join-Path $toolchain.FullName "bin"
+          if (-not (Test-Path (Join-Path $bin "aarch64-w64-mingw32-clang.exe"))) {
+            throw "llvm-mingw archive is missing the aarch64 cross compiler"
+          }
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append
+          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WORMHOLE_OVPN_CMAKE_GENERATOR=Ninja" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Resolve version
         id: ver
         shell: pwsh
@@ -76,30 +102,38 @@ jobs:
           -c Release
           -r win-${{ matrix.platform }}
           -p:Platform=${{ matrix.platform }}
+          -p:RequireRealOvpnProxy=true
           --self-contained true
           -o artifacts/publish/win-${{ matrix.platform }}
 
-      - name: Verify real OpenVPN sidecar shipped (x64)
+      - name: Verify real OpenVPN sidecar shipped
         # Hard gate so we never silently ship the mock-only stub again (the v0.2.4 bug). The
         # stub fatals with "OpenVPN3 binding not linked" on any real-mode connect; the real
         # ovpn3 build instead fails a bogus profile with an OpenVPN parse error. Drive one
         # real-mode config through stdin and assert the stub's signature string is absent.
-        if: matrix.platform == 'x64'
         shell: pwsh
         run: |
-          $exe = "$PWD\artifacts\publish\win-x64\wormhole-ovpnproxy.exe"
+          $platform = "${{ matrix.platform }}"
+          $exe = "$PWD\artifacts\publish\win-$platform\wormhole-ovpnproxy.exe"
           if (-not (Test-Path $exe)) {
             throw "wormhole-ovpnproxy.exe is missing from the publish output — Fetch-OvpnProxy.ps1 produced nothing. Check the 'Set up OpenVPN3 sidecar toolchain' step."
           }
-          $cfg = '{"profile_ovpn":"remote 203.0.113.1 1194\ndev tun\n","mock":false}'
-          $out = ($cfg | & $exe 2>&1 | Out-String)
-          # The sidecar exits non-zero on the bogus profile; that's expected, so don't let the
-          # runner's pwsh epilogue ("exit $LASTEXITCODE") fail the step on it.
-          $global:LASTEXITCODE = 0
-          if ($out -match 'binding not linked') {
-            throw "Shipped wormhole-ovpnproxy.exe is the MOCK-ONLY stub — the '-tags ovpn3' build did not run. Sidecar stderr: $out"
+          # The mock-only build embeds this fatal string. Byte-scan both architectures
+          # because an x64 GitHub runner cannot execute the arm64 binary.
+          $ascii = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
+          if ($ascii -match 'binding not linked') {
+            throw "Shipped wormhole-ovpnproxy.exe is the MOCK-ONLY stub — the '-tags ovpn3' build did not run."
           }
-          Write-Host "OK: real ovpn3 OpenVPN sidecar verified (no 'binding not linked'). Sidecar stderr: $out"
+          if ($platform -eq "x64") {
+            $cfg = '{"profile_ovpn":"remote 203.0.113.1 1194\ndev tun\n","mock":false}'
+            $out = ($cfg | & $exe 2>&1 | Out-String)
+            # The sidecar exits non-zero on the bogus profile; that is expected.
+            $global:LASTEXITCODE = 0
+            if ($out -match 'binding not linked') {
+              throw "Shipped x64 sidecar is mock-only. Sidecar stderr: $out"
+            }
+          }
+          Write-Host "OK: real ovpn3 OpenVPN sidecar verified for $platform."
 
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress

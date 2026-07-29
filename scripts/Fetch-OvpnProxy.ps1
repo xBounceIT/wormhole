@@ -2,7 +2,8 @@ param(
     [ValidateSet("x64", "arm64")]
     [string]$Arch = "x64",
     [switch]$Force,
-    [switch]$Quiet
+    [switch]$Quiet,
+    [switch]$RequireReal
 )
 
 Set-StrictMode -Version Latest
@@ -65,15 +66,16 @@ $env:PATH = $pathParts -join ';'
 #      submodules are populated, build from source with -tags ovpn3 (full OpenVPN3 link).
 #   3. Else if Go is on PATH (no submodules / no C++ toolchain), build without the
 #      ovpn3 tag -- produces a binary that supports --mock and the SOCKS5 wire protocol
-#      but errors on real-mode connect. Useful for CI / managed-side wire tests.
-#   4. Else emit a non-fatal warning. Wormhole still builds; OpenVPN tunnels surface a
-#      runtime error.
+#      but errors on real-mode connect. Useful for development/managed wire tests.
+#   4. Else emit a non-fatal warning.
+# When -RequireReal is set (the default for Release), paths 3/4 and every failed native
+# configure/compile/link step fail closed and remove any stale staged binary.
 
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot   = Split-Path -Parent $scriptRoot
 $sourceDir  = Join-Path $repoRoot "tools\wormhole-ovpnproxy"
 $shimDir    = Join-Path $sourceDir "ovpn_shim"
-$shimBuild  = Join-Path $shimDir "build"
+$shimBuild  = Join-Path $shimDir "build\$Arch"
 $openvpn3   = Join-Path $sourceDir "third_party\openvpn3\client\ovpncli.hpp"
 $mbedtls    = Join-Path $sourceDir "third_party\mbedtls\include\mbedtls\ssl.h"
 $stagingDir = Join-Path $repoRoot "obj\ovpnproxy\$Arch"
@@ -119,6 +121,41 @@ function Remove-StagedBinary {
     }
 }
 
+function Assert-RequiredRealBinary {
+    if (-not $RequireReal) { return }
+    if (-not (Test-Path -LiteralPath $binaryPath)) {
+        throw "The required real OpenVPN3 sidecar for '$Arch' was not produced."
+    }
+
+    $bytes = [System.IO.File]::ReadAllBytes($binaryPath)
+    try {
+        if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) {
+            throw "The staged OpenVPN3 sidecar for '$Arch' is not a valid PE executable."
+        }
+        $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+        if ($peOffset -lt 0 -or $peOffset + 6 -gt $bytes.Length) {
+            throw "The staged OpenVPN3 sidecar for '$Arch' has an invalid PE header."
+        }
+        if ([BitConverter]::ToUInt32($bytes, $peOffset) -ne 0x00004550) {
+            throw "The staged OpenVPN3 sidecar for '$Arch' has an invalid PE signature."
+        }
+        $machine = [BitConverter]::ToUInt16($bytes, $peOffset + 4)
+        $expectedMachine = if ($Arch -eq "arm64") { 0xaa64 } else { 0x8664 }
+        if ($machine -ne $expectedMachine) {
+            throw ("The staged OpenVPN3 sidecar has machine type 0x{0:x4}; expected 0x{1:x4} for '$Arch'." -f
+                   $machine, $expectedMachine)
+        }
+        $ascii = [Text.Encoding]::ASCII.GetString($bytes)
+        if ($ascii.IndexOf("binding not linked", [StringComparison]::Ordinal) -ge 0) {
+            throw "The staged OpenVPN3 sidecar for '$Arch' is the development-only mock stub."
+        }
+    }
+    catch {
+        Remove-StagedBinary
+        throw
+    }
+}
+
 # Step 1: pinned release.
 $release = $releases[$Arch]
 if ($release) {
@@ -126,6 +163,7 @@ if ($release) {
     if ($haveFile -and -not $Force) {
         $actual = Get-FileSha256 $binaryPath
         if ($actual -eq $release.Sha256) {
+            Assert-RequiredRealBinary
             Write-Info "OK    wormhole-ovpnproxy.exe ($Arch)"
             return
         }
@@ -142,6 +180,7 @@ if ($release) {
         Remove-Item $binaryPath -Force
         throw "SHA256 mismatch for wormhole-ovpnproxy.exe ($Arch). Expected $($release.Sha256), got $hash."
     }
+    Assert-RequiredRealBinary
     Write-Info "OK    wormhole-ovpnproxy.exe ($Arch) (pinned)"
     return
 }
@@ -151,6 +190,9 @@ if ($release) {
 $go = Get-Command go -ErrorAction SilentlyContinue
 if (-not $go) {
     Remove-StagedBinary
+    if ($RequireReal) {
+        throw "A real OpenVPN3 sidecar is required for '$Arch', but 'go' is not on PATH."
+    }
     Write-Warning "wormhole-ovpnproxy.exe not built: no pinned release for arch '$Arch' and 'go' is not on PATH. OpenVPN tunnels will be unavailable at runtime until this sidecar is provided."
     return
 }
@@ -159,14 +201,62 @@ if (-not $go) {
 # strictly better than a build break or a half-linked binary.
 $cmake = Get-Command cmake -ErrorAction SilentlyContinue
 $haveOvpn3Src = (Test-Path $openvpn3) -and (Test-Path $mbedtls)
+$cCompilerNames = if ($Arch -eq "arm64") {
+    # llvm-mingw provides GCC-compatible aliases for clang. Prefer the aliases to
+    # preserve existing CMake caches while ovpn_cgo.go links its libc++ explicitly.
+    @("aarch64-w64-mingw32-gcc", "aarch64-w64-mingw32-clang")
+} else {
+    @("gcc")
+}
+$cppCompilerNames = if ($Arch -eq "arm64") {
+    @("aarch64-w64-mingw32-g++", "aarch64-w64-mingw32-clang++")
+} else {
+    @("g++")
+}
+$cCompiler = $cCompilerNames |
+    ForEach-Object { Get-Command $_ -ErrorAction SilentlyContinue } |
+    Select-Object -First 1
+$cppCompiler = $cppCompilerNames |
+    ForEach-Object { Get-Command $_ -ErrorAction SilentlyContinue } |
+    Select-Object -First 1
+$arm64CompilerIsLlvm = $true
+if ($Arch -eq "arm64" -and $cCompiler -and $cppCompiler) {
+    $cCompilerBanner = (& $cCompiler.Source --version 2>&1 | Out-String)
+    $cCompilerVersionExitCode = $LASTEXITCODE
+    $cppCompilerBanner = (& $cppCompiler.Source --version 2>&1 | Out-String)
+    $cppCompilerVersionExitCode = $LASTEXITCODE
+    $arm64CompilerIsLlvm =
+        $cCompilerVersionExitCode -eq 0 -and
+        $cppCompilerVersionExitCode -eq 0 -and
+        $cCompilerBanner -match "(?i)clang" -and
+        $cppCompilerBanner -match "(?i)clang"
+    if (-not $arm64CompilerIsLlvm) {
+        # A genuine GCC cross-toolchain uses libstdc++, while the pinned ARM64
+        # build links libc++. Prefer explicit clang executables if both toolchains
+        # are on PATH; otherwise reject this incompatible compiler pair early.
+        $cCompiler = Get-Command "aarch64-w64-mingw32-clang" -ErrorAction SilentlyContinue
+        $cppCompiler = Get-Command "aarch64-w64-mingw32-clang++" -ErrorAction SilentlyContinue
+        $arm64CompilerIsLlvm = $null -ne $cCompiler -and $null -ne $cppCompiler
+    }
+}
+$haveCompiler =
+    $null -ne $cCompiler -and
+    $null -ne $cppCompiler -and
+    $arm64CompilerIsLlvm
 $buildTag = ""
-if ($cmake -and $haveOvpn3Src) {
+if ($cmake -and $haveOvpn3Src -and $haveCompiler) {
     $buildTag = "ovpn3"
     Write-Info "BUILD wormhole-ovpnproxy.exe ($Arch) with -tags ovpn3 (full OpenVPN3)"
 } elseif (-not $haveOvpn3Src) {
     Write-Info "BUILD wormhole-ovpnproxy.exe ($Arch) without ovpn3 tag (submodules not populated; mock-only sidecar)"
+} elseif (-not $haveCompiler) {
+    Write-Info "BUILD wormhole-ovpnproxy.exe ($Arch) without ovpn3 tag (target C/C++ compiler missing or incompatible; ARM64 requires llvm-mingw)"
 } else {
     Write-Info "BUILD wormhole-ovpnproxy.exe ($Arch) without ovpn3 tag (cmake not on PATH; mock-only sidecar)"
+}
+if ($RequireReal -and $buildTag -ne "ovpn3") {
+    Remove-StagedBinary
+    throw "A real OpenVPN3 sidecar is required for '$Arch', but its source/toolchain prerequisites are incomplete."
 }
 
 # If we're going to enable ovpn3, build the shim static lib first.
@@ -224,17 +314,29 @@ if ($buildTag -eq "ovpn3") {
     # must install those four libraries through whatever package manager they use and
     # ensure CMake's find_package can locate them.
     #
-    # Triplet choice: Go CGO on Windows uses gcc (MinGW). MSVC-built .lib files won't
-    # link cleanly into Go's CGO output, so we use the mingw-static triplet which makes
-    # vcpkg build all transitive deps with the MinGW toolchain that gcc/g++ also use.
-    # The `MinGW Makefiles` generator drives mingw32-make. Ninja would be faster if
-    # available but isn't a hard requirement.
-    $cmakeArgs = @("-B", $shimBuild, "-S", $shimDir, "-G", "MinGW Makefiles")
+    # Triplet choice: Go CGO on Windows requires a MinGW-ABI compiler. MSVC-built .lib
+    # files won't link cleanly into Go's CGO output, so vcpkg uses mingw-static for all
+    # transitive dependencies. x64 uses GCC/libstdc++; ARM64 uses llvm-mingw/libc++.
+    # The `MinGW Makefiles` generator drives mingw32-make. Ninja is also supported.
+    $generator = if ($env:WORMHOLE_OVPN_CMAKE_GENERATOR) {
+        $env:WORMHOLE_OVPN_CMAKE_GENERATOR
+    } else {
+        "MinGW Makefiles"
+    }
+    $cmakeArgs = @(
+        "-B", $shimBuild,
+        "-S", $shimDir,
+        "-G", $generator
+    )
+    if ($Arch -eq "arm64") {
+        $cmakeArgs += "-DCMAKE_C_COMPILER=$($cCompiler.Source)"
+        $cmakeArgs += "-DCMAKE_CXX_COMPILER=$($cppCompiler.Source)"
+    }
     if ($env:VCPKG_ROOT -and (Test-Path "$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake")) {
         $cmakeArgs += "-DCMAKE_TOOLCHAIN_FILE=$env:VCPKG_ROOT\scripts\buildsystems\vcpkg.cmake"
         $triplet = if ($Arch -eq "arm64") { "arm64-mingw-static" } else { "x64-mingw-static" }
         $cmakeArgs += "-DVCPKG_TARGET_TRIPLET=$triplet"
-        Write-Info "Using vcpkg toolchain at $env:VCPKG_ROOT (triplet $triplet, generator: MinGW Makefiles)"
+        Write-Info "Using vcpkg toolchain at $env:VCPKG_ROOT (triplet $triplet, generator: $generator)"
     }
     else {
         Write-Info "VCPKG_ROOT not set -- relying on system find_package for asio/jsoncpp/lz4/xxhash"
@@ -275,6 +377,13 @@ if ($buildTag -eq "ovpn3") {
         Pop-Location
     }
     if (-not $shimBuilt) {
+        if ($RequireReal) {
+            if ($shimOutput.Count -gt 0) {
+                foreach ($line in ($shimOutput | Select-Object -Last 60)) { Write-Host $line }
+            }
+            Remove-StagedBinary
+            throw "ovpn_shim build failed for '$Arch'; refusing to produce a mock-only release sidecar."
+        }
         Write-Warning "ovpn_shim build failed; falling back to mock-only sidecar (no -tags ovpn3). See tools/wormhole-ovpnproxy/README.md for the full toolchain requirements."
         # Surface the real cmake/compiler/linker error even under -Quiet so the failure is
         # diagnosable straight from CI logs instead of silently shipping the stub.
@@ -292,6 +401,8 @@ $env:GOOS = "windows"
 $env:GOARCH = if ($Arch -eq "arm64") { "arm64" } else { "amd64" }
 if ($shimBuilt) {
     $env:CGO_ENABLED = "1"
+    $env:CC = $cCompiler.Source
+    $env:CXX = $cppCompiler.Source
     $env:CGO_CFLAGS = "-I$shimDir"
     # `go build` keys its cgo link cache on the Go sources + the `#cgo` directive strings, NOT on the
     # *content* of the external static archive (libovpn_shim.a) named via `-lovpn_shim`. So when only
@@ -357,10 +468,14 @@ finally {
 }
 
 if ($buildOk) {
+    Assert-RequiredRealBinary
     $tagSuffix = if ($buildTag) { " (built, -tags $buildTag)" } else { " (built, mock-only)" }
     Write-Info "OK    wormhole-ovpnproxy.exe ($Arch)$tagSuffix"
     return
 }
 
 Remove-StagedBinary
+if ($RequireReal) {
+    throw "wormhole-ovpnproxy.exe build failed for '$Arch' ($failureDetail); refusing to continue without the required real OpenVPN3 sidecar."
+}
 Write-Warning "wormhole-ovpnproxy.exe build failed ($failureDetail). Continuing without the sidecar; OpenVPN tunnels will surface a runtime error if used."

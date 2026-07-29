@@ -126,13 +126,6 @@ public sealed class StormshieldSettings
     /// the official client's "Always trust this server" toggle and the Fortinet/WatchGuard equivalents.
     /// </summary>
     [JsonPropertyName("TrustServerCertificate")] public bool TrustServerCertificate { get; set; }
-    /// <summary>
-    /// When enabled, Wormhole temporarily installs IPv4 host routes for the Stormshield portal and
-    /// OpenVPN remotes through the best physical default gateway if Windows would otherwise route
-    /// them through a VPN-like adapter. This is an opt-in workaround for running Wormhole's
-    /// Stormshield tunnel while the native Stormshield VPN client is already connected.
-    /// </summary>
-    [JsonPropertyName("BypassNativeVpnGatewayRoute")] public bool BypassNativeVpnGatewayRoute { get; set; }
 
     /// <summary>The <c>app</c> form value sent to the portal. See <see cref="DefaultAppToken"/>.</summary>
     [JsonPropertyName("AppToken")] public string AppToken { get; set; } = DefaultAppToken;

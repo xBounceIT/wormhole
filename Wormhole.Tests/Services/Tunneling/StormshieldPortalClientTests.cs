@@ -1,12 +1,14 @@
 using System;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Web;
+using Wormhole.Services.Tunneling;
 using Wormhole.Services.Tunneling.Stormshield;
 using Xunit;
 
@@ -69,14 +71,36 @@ public class StormshieldPortalClientTests
     public void Ctor_ThrowsOnMalformedCaPem()
     {
         Assert.Throws<InvalidOperationException>(() =>
-            new StormshieldPortalClient("fw.example.com", 443, trustServerCertificate: false, caPem: "not a valid PEM"));
+            new StormshieldPortalClient(
+                "fw.example.com",
+                443,
+                trustServerCertificate: false,
+                caPem: "not a valid PEM",
+                new WindowsPhysicalNetworkPathService()));
     }
 
     [Fact]
     public void Ctor_TrustServerCertificateBypassesCaPemValidation()
     {
-        using var client = new StormshieldPortalClient("fw.example.com", 443, trustServerCertificate: true, caPem: "garbage");
+        using var client = new StormshieldPortalClient(
+            "fw.example.com",
+            443,
+            trustServerCertificate: true,
+            caPem: "garbage",
+            new WindowsPhysicalNetworkPathService());
         Assert.NotNull(client);
+    }
+
+    [Fact]
+    public void Ctor_ThrowsOnNullNetworkPathService()
+    {
+        Assert.Throws<ArgumentNullException>(() =>
+            new StormshieldPortalClient(
+                "fw.example.com",
+                443,
+                trustServerCertificate: false,
+                caPem: null,
+                networkPathService: null!));
     }
 
     [Fact]
@@ -337,6 +361,29 @@ public class StormshieldPortalClientTests
         Assert.Null(await client.GetConfigHashAsync(CancellationToken.None));
     }
 
+    [Fact]
+    public async Task GetConfigHashAsync_TransportFailure_ReturnsNull()
+    {
+        using var http = new HttpClient(
+            new ThrowingHandler(new HttpRequestException("offline")));
+        using var client = new StormshieldPortalClient(
+            http, new Uri("https://rpv.example.com/"));
+
+        Assert.Null(await client.GetConfigHashAsync(CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task GetConfigHashAsync_UnexpectedRuntimeFailure_Propagates()
+    {
+        using var http = new HttpClient(
+            new ThrowingHandler(new InvalidOperationException("programming failure")));
+        using var client = new StormshieldPortalClient(
+            http, new Uri("https://rpv.example.com/"));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.GetConfigHashAsync(CancellationToken.None));
+    }
+
     private static byte[] BuildBundleZip(params (string Name, string Content)[] files)
     {
         using var ms = new MemoryStream();
@@ -367,6 +414,14 @@ public class StormshieldPortalClientTests
                 Content = new StringContent(body, Encoding.UTF8, mediaType),
             });
         }
+    }
+
+    private sealed class ThrowingHandler(Exception exception) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken) =>
+            Task.FromException<HttpResponseMessage>(exception);
     }
 
     /// <summary>
