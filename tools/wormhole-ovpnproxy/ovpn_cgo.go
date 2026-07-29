@@ -27,7 +27,7 @@ package main
 #cgo CXXFLAGS: -std=c++17 -I${SRCDIR}/ovpn_shim
 #cgo !windows LDFLAGS: -L${SRCDIR}/ovpn_shim/build -lovpn_shim -lstdc++
 #cgo windows,amd64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/x64 -lovpn_shim -lstdc++
-#cgo windows,arm64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/arm64 -lovpn_shim -lstdc++
+#cgo windows,arm64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/arm64 -lovpn_shim -lc++
 // libovpn_shim.a is a thin static archive of just shim.cc + ovpncli.cpp — it does NOT
 // bundle its dependencies. CMake knows the transitive closure (mbedTLS, lz4, and the
 // Win32 system libs that OpenVPN3's add_core_dependencies() attaches to the target), but
@@ -44,12 +44,13 @@ package main
 // keeps the closure honest against config drift (and ld ignores an unreferenced static
 // archive). Order matters for single-pass ld: dependents (ovpn_shim) before dependencies
 // (mbedTLS, lz4, jsoncpp), before the Win32 import libs they call into.
-// Statically link the MinGW C++/runtime libs so the shipped sidecar is self-contained.
-// Without this the .exe imports libstdc++-6.dll + libwinpthread-1.dll, which don't exist
-// on a clean end-user machine — the sidecar would fail to start (and the release verify
-// gate, which only looks for "binding not linked", would not catch the DLL-load failure).
-// System DLLs (kernel32, ws2_32, bcrypt, UCRT) stay dynamic, as they must.
-#cgo windows LDFLAGS: -static -static-libgcc -static-libstdc++
+// Statically link the compiler runtime so the shipped sidecar is self-contained. x64
+// uses MinGW GCC/libstdc++; ARM64 uses the pinned llvm-mingw toolchain and libc++.
+// Keeping the runtime flags architecture-specific avoids relying on clang's implicit
+// translation of -lstdc++ to -lc++ (and its ignored -static-libstdc++ compatibility
+// flag). System DLLs (kernel32, ws2_32, bcrypt, UCRT) stay dynamic, as they must.
+#cgo windows LDFLAGS: -static
+#cgo windows,amd64 LDFLAGS: -static-libgcc -static-libstdc++
 #cgo windows,amd64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/x64/third_party_mbedtls/library
 #cgo windows,arm64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/arm64/third_party_mbedtls/library
 #cgo windows,amd64 LDFLAGS: -L${SRCDIR}/ovpn_shim/build/x64/vcpkg_installed/x64-mingw-static/lib

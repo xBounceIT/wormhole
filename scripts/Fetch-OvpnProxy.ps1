@@ -202,6 +202,8 @@ if (-not $go) {
 $cmake = Get-Command cmake -ErrorAction SilentlyContinue
 $haveOvpn3Src = (Test-Path $openvpn3) -and (Test-Path $mbedtls)
 $cCompilerNames = if ($Arch -eq "arm64") {
+    # llvm-mingw provides GCC-compatible aliases for clang. Prefer the aliases to
+    # preserve existing CMake caches while ovpn_cgo.go links its libc++ explicitly.
     @("aarch64-w64-mingw32-gcc", "aarch64-w64-mingw32-clang")
 } else {
     @("gcc")
@@ -217,7 +219,30 @@ $cCompiler = $cCompilerNames |
 $cppCompiler = $cppCompilerNames |
     ForEach-Object { Get-Command $_ -ErrorAction SilentlyContinue } |
     Select-Object -First 1
-$haveCompiler = $null -ne $cCompiler -and $null -ne $cppCompiler
+$arm64CompilerIsLlvm = $true
+if ($Arch -eq "arm64" -and $cCompiler -and $cppCompiler) {
+    $cCompilerBanner = (& $cCompiler.Source --version 2>&1 | Out-String)
+    $cCompilerVersionExitCode = $LASTEXITCODE
+    $cppCompilerBanner = (& $cppCompiler.Source --version 2>&1 | Out-String)
+    $cppCompilerVersionExitCode = $LASTEXITCODE
+    $arm64CompilerIsLlvm =
+        $cCompilerVersionExitCode -eq 0 -and
+        $cppCompilerVersionExitCode -eq 0 -and
+        $cCompilerBanner -match "(?i)clang" -and
+        $cppCompilerBanner -match "(?i)clang"
+    if (-not $arm64CompilerIsLlvm) {
+        # A genuine GCC cross-toolchain uses libstdc++, while the pinned ARM64
+        # build links libc++. Prefer explicit clang executables if both toolchains
+        # are on PATH; otherwise reject this incompatible compiler pair early.
+        $cCompiler = Get-Command "aarch64-w64-mingw32-clang" -ErrorAction SilentlyContinue
+        $cppCompiler = Get-Command "aarch64-w64-mingw32-clang++" -ErrorAction SilentlyContinue
+        $arm64CompilerIsLlvm = $null -ne $cCompiler -and $null -ne $cppCompiler
+    }
+}
+$haveCompiler =
+    $null -ne $cCompiler -and
+    $null -ne $cppCompiler -and
+    $arm64CompilerIsLlvm
 $buildTag = ""
 if ($cmake -and $haveOvpn3Src -and $haveCompiler) {
     $buildTag = "ovpn3"
@@ -225,7 +250,7 @@ if ($cmake -and $haveOvpn3Src -and $haveCompiler) {
 } elseif (-not $haveOvpn3Src) {
     Write-Info "BUILD wormhole-ovpnproxy.exe ($Arch) without ovpn3 tag (submodules not populated; mock-only sidecar)"
 } elseif (-not $haveCompiler) {
-    Write-Info "BUILD wormhole-ovpnproxy.exe ($Arch) without ovpn3 tag (target C/C++ compiler not on PATH; mock-only sidecar)"
+    Write-Info "BUILD wormhole-ovpnproxy.exe ($Arch) without ovpn3 tag (target C/C++ compiler missing or incompatible; ARM64 requires llvm-mingw)"
 } else {
     Write-Info "BUILD wormhole-ovpnproxy.exe ($Arch) without ovpn3 tag (cmake not on PATH; mock-only sidecar)"
 }
@@ -289,11 +314,10 @@ if ($buildTag -eq "ovpn3") {
     # must install those four libraries through whatever package manager they use and
     # ensure CMake's find_package can locate them.
     #
-    # Triplet choice: Go CGO on Windows uses gcc (MinGW). MSVC-built .lib files won't
-    # link cleanly into Go's CGO output, so we use the mingw-static triplet which makes
-    # vcpkg build all transitive deps with the MinGW toolchain that gcc/g++ also use.
-    # The `MinGW Makefiles` generator drives mingw32-make. Ninja would be faster if
-    # available but isn't a hard requirement.
+    # Triplet choice: Go CGO on Windows requires a MinGW-ABI compiler. MSVC-built .lib
+    # files won't link cleanly into Go's CGO output, so vcpkg uses mingw-static for all
+    # transitive dependencies. x64 uses GCC/libstdc++; ARM64 uses llvm-mingw/libc++.
+    # The `MinGW Makefiles` generator drives mingw32-make. Ninja is also supported.
     $generator = if ($env:WORMHOLE_OVPN_CMAKE_GENERATOR) {
         $env:WORMHOLE_OVPN_CMAKE_GENERATOR
     } else {

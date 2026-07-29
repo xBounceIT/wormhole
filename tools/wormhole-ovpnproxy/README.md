@@ -92,7 +92,8 @@ $env:CGO_ENABLED = "1"
 go build -trimpath -tags ovpn3 -ldflags "-s -w" -o ..\..\bin\wormhole-ovpnproxy.exe .
 ```
 
-Cross-build for arm64 with an x64-hosted llvm-mingw archive:
+Cross-build for arm64 with an x64-hosted llvm-mingw archive (required because the
+ARM64 sidecar links libc++ explicitly):
 
 ```powershell
 $env:PATH = "C:\llvm-mingw\bin;$env:PATH"
