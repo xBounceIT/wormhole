@@ -555,7 +555,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
             // constraints). A null result means the user cancelled — return silently to
             // Disconnected. Decided per attempt (the Profile is left untouched) so Retry
             // re-asks after a network change. CancellationToken.None: the connect CTS isn't
-            // created until after credential entry, and the IsAttemptCurrent guard below
+            // created until after this routing decision, and the IsAttemptCurrent guard below
             // handles a Disconnect that lands while the prompt is open.
             var routed = await _tunnelPrompter.ResolveRouteAsync(profile, CancellationToken.None).ConfigureAwait(true);
             if (!IsAttemptCurrent(teardownGeneration)) return;
@@ -631,10 +631,10 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 // the hook to clear; subsequent attempts behave normally.
             }
 
-            // The CTS exists from the start so FullTeardown / Disconnect can cancel an in-flight
-            // connect, but the ConnectTimeout itself only kicks in once we've actually started
-            // the network handshake. Counting credential-entry time against the 30s budget would
-            // make a slow typist's correct password expire before the OCX ever sees it.
+            // The CTS exists from the start so FullTeardown / Disconnect can cancel tunnel startup,
+            // credential prompts, and the eventual connect. The ConnectTimeout itself only kicks in
+            // once the RDP network handshake starts. Counting tunnel or credential time against the
+            // 30s budget would expire before the OCX ever sees the target.
             var previousCts = _cts;
             var cts = new CancellationTokenSource();
             _cts = cts;
@@ -644,13 +644,20 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
             try
             {
-                // Credential resolution runs before the tunnel and is deliberately NOT a stepper
-                // phase — target authentication happens later, in the Connect phase, through the
-                // tunnel (see ConnectionPhase). So no Progress.Begin here.
+                // Bring the route up first. VPN authentication (including OTP/TOTP) must complete
+                // before Wormhole requests credentials for the target RDP server.
+                Progress.Begin(ConnectionPhase.Tunnel);
+                var connectProfile = await PrepareConnectProfileAsync(
+                    profile, token, CreateUiProgress<TunnelProgress>(OnTunnelProgress)).ConfigureAwait(true);
+                if (!IsAttemptCurrent(teardownGeneration)) return;
+                token.ThrowIfCancellationRequested();
+
+                Progress.Begin(ConnectionPhase.Connect);
                 var resolved = await ResolveCredentialsAsync(profile, forcePromptForPassword, token).ConfigureAwait(true);
                 if (!IsAttemptCurrent(teardownGeneration)) return;
                 if (token.IsCancellationRequested)
                 {
+                    await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
                     TransitionToDisconnectedIfCurrent(cts);
                     return;
                 }
@@ -661,8 +668,9 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 // Manager entry, fell through to a prompt, user cancelled". Either way, no.
                 if (resolved is not { } creds)
                 {
-                    ClearConnectWatchdog(cts);
-                    Status = SessionStatus.Disconnected;
+                    await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
+                    if (!IsAttemptCurrent(teardownGeneration)) return;
+                    TransitionToDisconnectedIfCurrent(cts);
                     return;
                 }
                 var password = creds.Password;
@@ -680,10 +688,15 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                     creds.PasswordSource,
                     creds.UsernameSource,
                     creds.DomainSource);
+                connectProfile = connectProfile with
+                {
+                    Username = creds.Username,
+                    RdpDomain = creds.Domain,
+                };
 
-                // Thread the resolved identity into the profile so PrepareConnectProfileAsync
-                // and the OCX both see the same username/domain. This covers linked saved
-                // credentials whose username/domain differ from the node's inherited fields.
+                // Thread the resolved identity into both the already-routed connect profile and
+                // the tab profile so the OCX sees the same username/domain. This covers linked
+                // saved credentials whose identity differs from the node's inherited fields.
                 if (!string.Equals(resolvedProfile.Username, profile.Username, StringComparison.Ordinal) ||
                     !string.Equals(resolvedProfile.RdpDomain, profile.RdpDomain, StringComparison.Ordinal))
                 {
@@ -711,6 +724,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                         if (profile.TunnelEnabled)
                         {
                             ReportFailure(TunnelExternalClientUnsupportedMessage, dueToCredentials: false);
+                            await DisposeTunnelSilentlyAsync().ConfigureAwait(true);
                             return;
                         }
                         LaunchExternalProcess(profile);
@@ -720,18 +734,11 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
                 var (gwUser, gwPassword) = await ResolveGatewayCredentialsAsync(profile, token).ConfigureAwait(true);
                 if (!IsAttemptCurrent(teardownGeneration)) return;
-                Progress.Begin(ConnectionPhase.Tunnel);
-                var connectProfile = await PrepareConnectProfileAsync(
-                    profile, token, CreateUiProgress<TunnelProgress>(OnTunnelProgress)).ConfigureAwait(true);
-                if (!IsAttemptCurrent(teardownGeneration)) return;
-                token.ThrowIfCancellationRequested();
 
                 // ConnectAsync returns immediately after kicking off the asynchronous OCX
                 // handshake, so without a real watchdog there's no way to surface a "server
-                // never answered" timeout. Start that watchdog only after gateway credential
-                // lookup and tunnel startup: those have their own failure/cancel behavior, and
-                // counting a slow VPN handshake against the RDP server response budget would
-                // incorrectly report "RDP server didn't respond" before the ActiveX ever tried.
+                // never answered" timeout. Start that watchdog only after credential lookup and
+                // tunnel startup: those have their own failure/cancel behavior.
                 cts.Token.Register(() =>
                 {
                     // User-initiated cancels (FullTeardown) null _cts BEFORE calling Cancel,
@@ -747,7 +754,6 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
                 });
                 cts.CancelAfter(ConnectTimeout);
 
-                Progress.Begin(ConnectionPhase.Connect);
                 // Subscribe via the onSessionReady hook (not after the await) so the VM is ready
                 // to receive an immediate OnLogonError / OnDisconnected that the OCX may fire
                 // synchronously during the Connect() inside form.Start(). Subscribing after the
@@ -1421,7 +1427,7 @@ public sealed partial class RdpSessionViewModel : SessionTabViewModel
 
     /// <summary>
     /// Seed the connecting stepper for this attempt. Tunneled connections get numbered phases
-    /// (credentials → VPN tunnel → connect); direct connections clear the steps so the overlay
+    /// (VPN tunnel → connect, with target credential resolution inside connect); direct connections clear the steps so the overlay
     /// falls back to its plain spinner + reconnect-attempt banner.
     /// </summary>
     private void InitializeProgress(ConnectionProfile profile)

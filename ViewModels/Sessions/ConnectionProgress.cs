@@ -26,10 +26,9 @@ public enum ConnectionStepState
 /// The well-known ordered network phases a tunneled connection passes through. Kept abstract from
 /// any one protocol so both <see cref="SshSessionViewModel"/> and <see cref="RdpSessionViewModel"/>
 /// drive the same stepper.
-/// <para>Note there is deliberately no "Credentials" phase: resolving the stored secret is a quick
-/// local step that happens BEFORE the tunnel, and showing it as a completed phase would wrongly
-/// imply the target was authenticated before the tunnel existed. Authentication to the target
-/// happens through the tunnel, as part of <see cref="Connect"/>.</para>
+/// <para>Note there is deliberately no "Credentials" phase: target credential resolution happens
+/// after the tunnel is established and is part of <see cref="Connect"/>. Keeping it in that phase
+/// also avoids implying that entering a credential means the target has already authenticated it.</para>
 /// </summary>
 public enum ConnectionPhase
 {

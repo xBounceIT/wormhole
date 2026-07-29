@@ -918,19 +918,30 @@ public class RdpSessionViewModelTests
         // The external-client guard at the top of ConnectAsync runs BEFORE the credentials
         // prompt, so a profile with empty Username slips past it even when the user is
         // about to type an AAD identity. The fix re-evaluates the guard after the prompt
-        // returns: combined with a tunnel, it should land on the same
+        // returns: after establishing the configured tunnel first, it should land on the same
         // TunnelExternalClientUnsupportedMessage as a profile that started with the AAD
         // username — proving we'd have refused embedded mstscax routing in the non-tunnel
         // case too (where the late re-check would have redirected to mstsc.exe instead of
         // crashing on WAM broker DLL load).
+        var configId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
         var provider = new FakeTunnelProvider();
-        var (vm, svc, _, dlg, _) = CreateVm(tunnelProviders: new ITunnelProvider[] { provider });
+        tunnelRepo.Configs[configId] = new TunnelConfig
+        {
+            Id = configId,
+            Name = "corp",
+            Kind = TunnelKind.WireGuard,
+        };
+        var (vm, svc, creds, dlg, _) = CreateVm(
+            tunnelRepo: tunnelRepo,
+            tunnelProviders: new ITunnelProvider[] { provider });
+        creds.TunnelConfigs[configId] = new byte[] { 1, 2, 3 };
         dlg.CredentialsPromptResult = ("AzureAD\\alice@tenant.com", "pwd");
         vm.Initialize(MakeProfile() with
         {
             Username = null,
             TunnelEnabled = true,
-            TunnelConfigId = Guid.NewGuid(),
+            TunnelConfigId = configId,
         });
 
         await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
@@ -938,7 +949,8 @@ public class RdpSessionViewModelTests
         Assert.Equal(SessionStatus.Failed, vm.Status);
         Assert.Contains("host network", vm.ErrorMessage);
         Assert.Equal(0, svc.ConnectCount);
-        Assert.Equal(0, provider.EstablishCount);
+        Assert.Equal(1, provider.EstablishCount);
+        Assert.Equal(1, provider.LastInstance?.DisposeCount);
         Assert.Equal(1, dlg.CredentialsPromptCount);
     }
 
@@ -1709,6 +1721,72 @@ public class RdpSessionViewModelTests
 
         await vm.DisconnectAsync();
         Assert.Equal(1, provider.LastInstance.DisposeCount);
+    }
+
+    [Fact]
+    public async Task AttachAsync_TunnelEnabled_EstablishesTunnelBeforePromptingForTargetPassword()
+    {
+        var configId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        var provider = new BlockingTunnelProvider();
+        tunnelRepo.Configs[configId] = new TunnelConfig
+        {
+            Id = configId,
+            Name = "corp",
+            Kind = TunnelKind.WireGuard,
+        };
+
+        var (vm, svc, creds, dlg, _) = CreateVm(
+            tunnelRepo: tunnelRepo,
+            tunnelProviders: new ITunnelProvider[] { provider });
+        creds.TunnelConfigs[configId] = new byte[] { 1, 2, 3 };
+        dlg.PasswordPromptResult = "password";
+        svc.NextSession = new FakeRdpSession();
+        vm.Initialize(MakeProfile() with { TunnelEnabled = true, TunnelConfigId = configId });
+
+        var attachTask = vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+        await provider.EstablishStarted.Task;
+
+        Assert.Equal(0, dlg.PasswordPromptCount);
+        Assert.Equal(0, dlg.AccountCredentialPromptCount);
+
+        provider.ReleaseEstablish.SetResult(null);
+        await attachTask;
+
+        Assert.Equal(1, dlg.PasswordPromptCount);
+        Assert.Equal(1, dlg.AccountCredentialPromptCount);
+        await vm.DisconnectAsync();
+    }
+
+    [Fact]
+    public async Task AttachAsync_TunnelEnabled_UserCancelsTargetPassword_DisposesEstablishedTunnel()
+    {
+        var configId = Guid.NewGuid();
+        var tunnelRepo = new FakeTunnelConfigRepository();
+        var provider = new FakeTunnelProvider();
+        tunnelRepo.Configs[configId] = new TunnelConfig
+        {
+            Id = configId,
+            Name = "corp",
+            Kind = TunnelKind.WireGuard,
+        };
+
+        var (vm, svc, creds, dlg, _) = CreateVm(
+            tunnelRepo: tunnelRepo,
+            tunnelProviders: new ITunnelProvider[] { provider });
+        creds.TunnelConfigs[configId] = new byte[] { 1, 2, 3 };
+        dlg.PasswordPromptResult = null;
+        vm.Initialize(MakeProfile() with { TunnelEnabled = true, TunnelConfigId = configId });
+
+        await vm.AttachAsync(IntPtr.Zero, HostBounds.Seed);
+
+        Assert.Equal(SessionStatus.Disconnected, vm.Status);
+        Assert.False(vm.Progress.IsActive);
+        Assert.Empty(vm.Progress.Steps);
+        Assert.Equal(1, dlg.PasswordPromptCount);
+        Assert.Equal(0, svc.ConnectCount);
+        Assert.Equal(1, provider.EstablishCount);
+        Assert.Equal(1, provider.LastInstance?.DisposeCount);
     }
 
     [Fact]

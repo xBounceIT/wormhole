@@ -119,6 +119,22 @@ public sealed class FileTransferDialogService : IFileTransferDialogService
             // a key passphrase the user already entered at terminal connect time.
             try
             {
+                // Reuse the live shell's tunnel (a non-owning borrow) rather than establishing a second
+                // one: for an OTP-interactive VPN a second establish would re-prompt for / burn another
+                // one-time code, and it is a redundant VPN connection for any tunnel. The SSH session owns
+                // disposal of the real instance. If there is no live shell tunnel to borrow — a non-SSH
+                // source tab, or an SSH session that has since disconnected and torn its tunnel down — fall
+                // back to establishing one. Establish before resolving target credentials so any tunnel
+                // OTP/TOTP challenge is completed before an SFTP password/passphrase prompt is shown.
+                var sshSource = sourceTab as SshSessionViewModel;
+                var borrowed = sshSource?.BorrowTunnelForSftp();
+                // When there's no live tunnel to borrow, establish against the terminal's routed
+                // profile rather than the saved one: if the user chose "connect directly" for the
+                // shell, RoutedProfileForSubsession has TunnelEnabled=false → EstablishAsync
+                // returns null → direct SFTP, instead of silently bringing up the declined VPN.
+                var establishProfile = sshSource?.RoutedProfileForSubsession ?? profile;
+                tunnel = borrowed ?? await _tunnels.EstablishAsync(establishProfile, CancellationToken.None).ConfigureAwait(true);
+
                 SshCredentials? creds = sourceTab is SshSessionViewModel sshTabForCreds
                     ? sshTabForCreds.GetCapturedCredentialsForSftp()
                     : null;
@@ -128,26 +144,15 @@ public sealed class FileTransferDialogService : IFileTransferDialogService
                 }
                 if (!creds.HasAny)
                 {
+                    if (tunnel is not null)
+                    {
+                        try { await tunnel.DisposeAsync().ConfigureAwait(true); } catch { /* best effort */ }
+                        tunnel = null;
+                    }
                     await _dialogs.ShowMessageAsync("File transfer", "No credentials provided.").ConfigureAwait(true);
                     return;
                 }
 
-                // Reuse the live shell's tunnel (a non-owning borrow) rather than establishing a second
-                // one: for an OTP-interactive VPN a second establish would re-prompt for / burn another
-                // one-time code, and it is a redundant VPN connection for any tunnel. The SSH session owns
-                // disposal of the real instance. If there is no live shell tunnel to borrow — a non-SSH
-                // source tab, or an SSH session that has since disconnected and torn its tunnel down — fall
-                // back to establishing one. That keeps a VPN-required transfer ON the VPN (rather than
-                // silently connecting direct) at the cost of re-establishing it; and for a no-VPN profile
-                // EstablishAsync returns null → direct SFTP, unchanged.
-                var sshSource = sourceTab as SshSessionViewModel;
-                var borrowed = sshSource?.BorrowTunnelForSftp();
-                // When there's no live tunnel to borrow, establish against the terminal's routed
-                // profile rather than the saved one: if the user chose "connect directly" for the
-                // shell, RoutedProfileForSubsession has TunnelEnabled=false → EstablishAsync
-                // returns null → direct SFTP, instead of silently bringing up the declined VPN.
-                var establishProfile = sshSource?.RoutedProfileForSubsession ?? profile;
-                tunnel = borrowed ?? await _tunnels.EstablishAsync(establishProfile, CancellationToken.None).ConfigureAwait(true);
                 session = await _sftp.ConnectAsync(profile, creds, tunnel, CancellationToken.None).ConfigureAwait(true);
 
                 profile = await PinHostFingerprintIfNeededAsync(sourceTab, profile, session).ConfigureAwait(true);
