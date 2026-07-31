@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Session orchestrator: dispatch resolved profiles to serial/SSH/HTTP with optional tunnel lease; RDP/VNC typed stubs; SSH Fake reconnect glue."
+description = "Session orchestrator: dispatch resolved profiles to serial/SSH/HTTP with optional tunnel lease; RDP/VNC typed stubs; SSH Fake reconnect glue; connection progress stepper Fake glue."
 publish = false
 
 [lib]

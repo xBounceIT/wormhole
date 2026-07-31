@@ -7,12 +7,14 @@
 //! - Serial → [`wormhole_serial`]
 //! - SSH → [`wormhole_ssh`] password path (+ known_hosts verify-on-connect + host-key prompt gate stub
 //!   + Fake reconnect loop glue over [`wormhole_ssh::reconnect`])
+//! - Per-connect tunnel route prompt Fake glue ([`tunnel_route_prompt`])
 //! - HTTP/HTTPS → [`wormhole_http`] target types (WebView2 hosting stays elsewhere)
 //!
 //! RDP / VNC prepare typed [`RdpConnectRequest`] / [`VncConnectRequest`] stubs, then
 //! fail closed with [`SessionError::UnsupportedProtocol`] (structured reason) **before**
 //! any tunnel establish — no OLE / VNC engine. See `docs/migration/16-session-orchestrator.md`.
 
+mod connection_progress;
 mod connectors;
 mod error;
 mod fake_port;
@@ -23,7 +25,13 @@ mod profile;
 mod rdp_vnc;
 mod ssh_reconnect;
 mod state;
+mod tunnel_route_prompt;
 
+pub use connection_progress::{
+    describe_tunnel_phase, ConnectProgressPlan, ConnectionProgress, ConnectionProgressPhase,
+    ConnectionStep, ConnectionStepState, FakeConnectOutcome, FakeConnectionProgressGlue,
+    FakePhaseOutcome, TunnelProgressReport, TunnelSubPhase,
+};
 pub use connectors::{
     CredentialResolver, EmptyCredentialResolver, FakeCredentialResolver, FakeSerialConnector,
     FakeSshConnector, FakeTunnelBroker, LiveSerialConnector, LiveSshConnector, ManagerTunnelBroker,
@@ -44,6 +52,11 @@ pub use rdp_vnc::{
 };
 pub use ssh_reconnect::{
     apply_fake_reconnect_result, FakeSshReconnectGlue, FakeSshReconnectResult,
+};
+pub use tunnel_route_prompt::{
+    apply_tunnel_route_choice, resolve_tunnel_route, FakeTunnelRoutePromptUi,
+    MemoryTunnelConfigNames, TunnelConfigNameLookup, TunnelRouteChoice, TunnelRoutePrompt,
+    TunnelRoutePromptRequest, FALLBACK_TUNNEL_NAME,
 };
 pub use state::{ConnectedSession, SessionState, SshConnected};
 

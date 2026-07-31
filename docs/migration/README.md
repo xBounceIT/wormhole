@@ -73,6 +73,7 @@
 | [adversarial-ledger-diagnostics-runner.md](adversarial-ledger-diagnostics-runner.md) | SoakRunner / FakeClock glue review closed |
 | [adversarial-ledger-tunnels-mcp.md](adversarial-ledger-tunnels-mcp.md) | Tunnels / MCP / app review closed |
 | [adversarial-ledger-tunnel-lease.md](adversarial-ledger-tunnel-lease.md) | TunnelManager lease glue (coalesce / UpdatedAt / cancel / secret Debug) review closed |
+| [adversarial-ledger-tunnel-route-prompt.md](adversarial-ledger-tunnel-route-prompt.md) | Per-connect tunnel route prompt Fake glue (`resolve_tunnel_route` / `FakeTunnelRoutePromptUi`) review closed |
 | [adversarial-ledger-mcp-http.md](adversarial-ledger-mcp-http.md) | MCP Streamable HTTP loopback review closed |
 | [adversarial-ledger-mcp-bind.md](adversarial-ledger-mcp-bind.md) | MCP loopback bind hardening (`0.0.0.0` / mapped / zone) review closed |
 | [adversarial-ledger-mcp-tools-list.md](adversarial-ledger-mcp-tools-list.md) | MCP tools/list → capability-report glue (`FakeMcpCapabilityServer`) review closed |
@@ -88,6 +89,7 @@
 | [adversarial-ledger-ssh-agent-auth.md](adversarial-ledger-ssh-agent-auth.md) | SSH agent ↔ auth select glue (`select_auth_methods_for_connect` / FakeFallible) review closed |
 | [adversarial-ledger-ssh-reconnect.md](adversarial-ledger-ssh-reconnect.md) | SSH reconnect / backoff policy stub (`SshReconnectPolicy` / Fake schedule) review closed |
 | [adversarial-ledger-session-ssh-reconnect.md](adversarial-ledger-session-ssh-reconnect.md) | Session orch Fake SSH reconnect glue (`FakeSshReconnectGlue`) review closed |
+| [adversarial-ledger-connection-progress.md](adversarial-ledger-connection-progress.md) | Session connecting progress stepper Fake glue (`FakeConnectionProgressGlue` / `ConnectProgressPlan`) review closed |
 | [adversarial-ledger-ssh-socks-route.md](adversarial-ledger-ssh-socks-route.md) | SSH SOCKS5 tunnel route select (`select_ssh_connect_target` / FakeTunnelSocks) review closed |
 | [adversarial-ledger-ssh-kbi.md](adversarial-ledger-ssh-kbi.md) | SSH keyboard-interactive multi-prompt Fake channel (`FakeKbiChannel` / `answer_kbi_round`) review closed |
 | [adversarial-ledger-serial-enumerate.md](adversarial-ledger-serial-enumerate.md) | Serial port enumeration review closed |

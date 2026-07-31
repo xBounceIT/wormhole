@@ -34,6 +34,9 @@ mod theme;
 mod tree;
 mod workspace;
 
+#[cfg(feature = "session")]
+mod tunnel_route_prompt;
+
 #[cfg(feature = "tunnels")]
 mod otp_prompt;
 #[cfg(feature = "tunnels")]
@@ -123,6 +126,14 @@ pub use tree::{
     TreeOpenError,
 };
 // Tree `connect` / `connect_prepared` stay aliased to avoid clashing with QC glue names.
+#[cfg(feature = "session")]
+pub use tunnel_route_prompt::resolve_tunnel_route_from_settings;
+#[cfg(feature = "session")]
+pub use wormhole_session::{
+    apply_tunnel_route_choice, resolve_tunnel_route, FakeTunnelRoutePromptUi,
+    MemoryTunnelConfigNames, TunnelConfigNameLookup, TunnelRouteChoice, TunnelRoutePrompt,
+    TunnelRoutePromptRequest, FALLBACK_TUNNEL_NAME,
+};
 #[cfg(feature = "session")]
 pub use tree::connect as connect_tree;
 #[cfg(feature = "session")]
