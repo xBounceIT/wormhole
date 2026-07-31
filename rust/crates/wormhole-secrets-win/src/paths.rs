@@ -184,6 +184,22 @@ pub fn bitwarden_extension_download_cache_dir() -> PathBuf {
         .join("bitwarden-browser-extension")
 }
 
+/// `%LOCALAPPDATA%\Wormhole\tools\bitwarden-cli` — managed `bw.exe` installs
+/// (`AppPaths.GetBitwardenCliRootDirectory`).
+pub fn bitwarden_cli_install_dir() -> PathBuf {
+    wormhole_app_data_dir()
+        .join("tools")
+        .join("bitwarden-cli")
+}
+
+/// `%LOCALAPPDATA%\Wormhole\cache\bitwarden-cli` — download staging for CLI ZIPs
+/// (`AppPaths.GetBitwardenCliDownloadDirectory`; Fake glue does not download).
+pub fn bitwarden_cli_download_cache_dir() -> PathBuf {
+    wormhole_app_data_dir()
+        .join("cache")
+        .join("bitwarden-cli")
+}
+
 /// `%LOCALAPPDATA%\Wormhole\stormshield-cache`
 pub fn stormshield_cache_dir() -> PathBuf {
     wormhole_app_data_dir().join("stormshield-cache")

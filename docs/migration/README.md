@@ -50,6 +50,8 @@
 | [adversarial-ledger-hello-cutover.md](adversarial-ledger-hello-cutover.md) | Hello / app-auth / Bitwarden browser / cutover review closed |
 | [adversarial-ledger-bitwarden-session.md](adversarial-ledger-bitwarden-session.md) | Bitwarden CLI session stub (`StubBitwardenSession` / Fake) review closed |
 | [adversarial-ledger-bitwarden-catalog.md](adversarial-ledger-bitwarden-catalog.md) | Bitwarden virtual credential catalog Fake glue (`BitwardenCredentialCatalogGlue` / stable virtual ids) review closed |
+| [adversarial-ledger-bitwarden-cli-pin.md](adversarial-ledger-bitwarden-cli-pin.md) | Bitwarden CLI install pin + hash Fake glue (`BitwardenCliInstallGlue` / release catalog) review closed |
+| [adversarial-ledger-bitwarden-zip-pin.md](adversarial-ledger-bitwarden-zip-pin.md) | Bitwarden browser extension manual ZIP/folder install pin Fake glue (`BitwardenExtensionInstallGlue` / Fake FS + Fake zip) review closed |
 | [adversarial-ledger-bitwarden-onboarding.md](adversarial-ledger-bitwarden-onboarding.md) | Bitwarden onboarding notice versioning Fake glue (`BitwardenOnboardingNoticeGlue` / settings store) review closed |
 | [adversarial-ledger-hello-stub.md](adversarial-ledger-hello-stub.md) | Hello AvailabilityProbe / HelloPrompt stub review closed |
 | [adversarial-ledger-app-auth-pin.md](adversarial-ledger-app-auth-pin.md) | App-auth PIN/password Fake verifier (`AppAuthenticationService` / Fake protector) review closed |

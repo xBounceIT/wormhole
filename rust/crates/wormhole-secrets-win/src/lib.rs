@@ -22,6 +22,8 @@
 //!   tracking; Disabled / Never never lock; zero/negative duration fail-closed; no GPUI
 //! - Bitwarden CLI unlock / memory-only session stub (`BitwardenSession` +
 //!   `StubBitwardenSession` / `FakeBitwardenSession`); `bw` process spawn is **not** wired yet
+//! - Bitwarden CLI install pin + hash Fake glue (`BitwardenCliInstallGlue` /
+//!   `FakeBitwardenCliReleaseSource`); no GitHub download / `bw` spawn yet
 //! - Bitwarden virtual credential catalog Fake glue (`BitwardenCredentialCatalogGlue` /
 //!   `FakeBitwardenCredentialCache` / stable virtual ids); locked vault → fail-closed
 //! - Process-local ephemeral session passwords (`TransientSessionCredentialStore` +
@@ -53,6 +55,7 @@ mod app_auth;
 mod app_auth_service;
 mod azure_vpn_token_cache;
 mod bitwarden_credential_catalog;
+mod bitwarden_cli_install_glue;
 mod bitwarden_session;
 mod bitwarden_virtual_credential_ids;
 mod cred_mgr;
@@ -84,6 +87,14 @@ pub use azure_vpn_token_cache::{
     read_azure_vpn_token_cache_under, write_azure_vpn_token_cache,
     write_azure_vpn_token_cache_under, AzureVpnTokenCacheStore, DpapiAzureVpnTokenCacheStore,
     FakeAzureVpnTokenCacheStore,
+};
+pub use bitwarden_cli_install_glue::{
+    configured_install_from_settings, find_windows_asset, is_cli_release, lab_pinned_release,
+    parse_cli_version, parse_github_sha256, resolve_executable_path, sanitize_version,
+    sha256_hex_lower, BitwardenCliInstall, BitwardenCliInstallError, BitwardenCliInstallGlue,
+    BitwardenCliInstallPersist, BitwardenCliInstallSettings, BitwardenCliInstallSettingsStore,
+    BitwardenCliPinnedRelease, BitwardenCliReleaseSource, FakeBitwardenCliInstallSettings,
+    FakeBitwardenCliReleaseSource, BW_EXECUTABLE_NAME, DEFAULT_BITWARDEN_CLI_RELEASES_PATH,
 };
 pub use bitwarden_credential_catalog::{
     demo_bitwarden_cache_entries, BitwardenCatalogError, BitwardenCatalogProfile,
@@ -134,7 +145,8 @@ pub use paths::{
     azure_vpn_token_cache_path_under, bitwarden_browser_shared_storage_path,
     bitwarden_browser_webview2_root, bitwarden_browser_webview2_user_data,
     bitwarden_extension_download_cache_dir, bitwarden_extension_install_dir,
-    bitwarden_extension_root, confined_file_under, ensure_confined_under, key_path,
+    bitwarden_extension_root, bitwarden_cli_download_cache_dir, bitwarden_cli_install_dir,
+    confined_file_under, ensure_confined_under, key_path,
     key_path_under, keys_dir, stormshield_cache_dir, stormshield_ovpn_cache_path, tunnel_path,
     tunnel_path_under, tunnels_dir, watchguard_cache_dir, watchguard_ovpn_cache_path,
     wormhole_app_data_dir,
@@ -319,6 +331,18 @@ mod tests {
             .to_string_lossy()
             .ends_with(&format!(
                 "cache{sep}bitwarden-browser-extension",
+                sep = std::path::MAIN_SEPARATOR
+            )));
+        assert!(bitwarden_cli_install_dir()
+            .to_string_lossy()
+            .ends_with(&format!(
+                "tools{sep}bitwarden-cli",
+                sep = std::path::MAIN_SEPARATOR
+            )));
+        assert!(bitwarden_cli_download_cache_dir()
+            .to_string_lossy()
+            .ends_with(&format!(
+                "cache{sep}bitwarden-cli",
                 sep = std::path::MAIN_SEPARATOR
             )));
     }

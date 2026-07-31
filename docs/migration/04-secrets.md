@@ -166,6 +166,25 @@ Picker search remains `wormhole-ui::credential_picker` — map `BitwardenCatalog
 
 See [adversarial-ledger-bitwarden-catalog.md](adversarial-ledger-bitwarden-catalog.md).
 
+### Bitwarden browser extension manual install pin (Lab Fake glue)
+
+C# `BitwardenBrowserExtensionInstaller` supports official GitHub releases plus **manual ZIP /
+folder** imports. Manual sources (`ManualZip`, `ManualFolder`) stay **pinned** — auto-update is
+rejected (offline / enterprise installs). Rust lab glue:
+
+| Piece | Location |
+|---|---|
+| Pin + import orchestration | `bitwarden_extension_install` — `BitwardenExtensionInstallGlue` + `FakeBitwardenExtensionSettingsStore` |
+| Filesystem (tests) | `FakeExtensionInstallFs` — in-memory tree; **no** live unzip of untrusted archives in unit tests |
+| ZIP (tests) | `FakeZipArchive` + `ZipEntrySpec`; production path uses `confined_zip_destination` before any write |
+| Path confinement | `replacement_install_path` + `paths::ensure_confined_under` / `bitwarden_extension_install_dir` |
+| Auto-update gate | `reject_auto_update_if_pinned` → `BitwardenExtensionInstallError::PinnedSource` when `ManualZip` / `ManualFolder` |
+
+**No** GitHub HTTP download, **no** `zip` crate on disk yet, **no** WebView2 extension host.
+SHA-256 digest parsing reuses `bitwarden_cli_install_glue::parse_github_sha256`.
+
+See [adversarial-ledger-bitwarden-zip-pin.md](adversarial-ledger-bitwarden-zip-pin.md).
+
 ---
 
 ## DPAPI API
@@ -392,6 +411,39 @@ crate owns the unlock/session contract only.
 and keep the session key in memory. That process bridge is **not** wired yet;
 `StubBitwardenSession` always fails closed.
 
+### Bitwarden CLI install pin (Fake glue)
+
+Mirrors C# `BitwardenCliInstaller` **version pin + SHA-256 verify** without GitHub
+HTTP download or `bw` process spawn. Lab hosts inject
+[`FakeBitwardenCliReleaseSource`] + [`FakeBitwardenCliInstallSettings`]; production
+will add ZIP download/extract and `wormhole-storage` `AppSettings` persistence.
+
+| Item | Value |
+|---|---|
+| Orchestrator | `BitwardenCliInstallGlue` — `configured_install` / `ensure_installed` / `install_pinned` |
+| Settings | `BitwardenCliInstallSettingsStore` (Fake or future storage adapter) |
+| Release catalog | `BitwardenCliReleaseSource` — scripted pinned row only (no `reqwest`) |
+| Paths | `bitwarden_cli_install_dir` → `tools\bitwarden-cli`; `bitwarden_cli_download_cache_dir` → `cache\bitwarden-cli` |
+| Fail-closed | Empty version → `EmptyVersion`; empty / malformed SHA-256 pin → `EmptySha256`; digest mismatch → `HashMismatch` (no settings persist) |
+| Helpers | `parse_cli_version`, `parse_github_sha256`, `is_cli_release`, `find_windows_asset`, `resolve_executable_path`, `sanitize_version` (C# parity) |
+
+```rust
+use wormhole_secrets_win::{
+    BitwardenCliInstallGlue, FakeBitwardenCliInstallSettings,
+    FakeBitwardenCliReleaseSource,
+};
+
+let glue = BitwardenCliInstallGlue::new(
+    FakeBitwardenCliInstallSettings::new(),
+    FakeBitwardenCliReleaseSource::lab_default(),
+);
+let install = glue.ensure_installed()?; // verify digest, stage bw.exe under install root
+```
+
+Configured external `bw.exe` paths short-circuit install (version label `external` when
+no download URL). Never log artifact bytes or digests — errors use fixed copy only.
+See [adversarial-ledger-bitwarden-cli-pin.md](adversarial-ledger-bitwarden-cli-pin.md).
+
 ---
 
 ## Transient session credentials (ephemeral / process-local)
@@ -454,5 +506,4 @@ Coverage: target/path/entropy formatting (no OS), DPAPI round-trips (null / name
 - Fortinet cookie persistence (none by design)
 - Domain / InheritanceResolver
 - WinRT `UserConsentVerifier` UI (documented gap)
-- Bitwarden extension download / cookie seeding (profile paths + HTTP arg builders only)
-- Bitwarden `bw` process spawn / install / sync / credential catalog (session trait stub only)
+- Bitwarden extension GitHub download / WebView2 cookie seeding (profile paths + HTTP arg builders in `wormhole-http`; **manual ZIP/folder pin Fake glue** landed — live `zip` extract + update scheduler still Pending)
