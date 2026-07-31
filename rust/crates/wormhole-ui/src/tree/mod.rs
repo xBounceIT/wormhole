@@ -1,12 +1,15 @@
 //! Connection-tree view-model (load / search / expand) — GPUI-independent.
 //!
 //! Open / double-click → session glue lives in [`open`] behind `--features session`
-//! (default). Thin filter query → visible ids lives in [`filter`].
+//! (default). Thin filter query → visible ids lives in [`filter`]. Reparent / drag
+//! validation (+ Fake apply / optional storage connection reparent) lives in
+//! [`reparent`].
 
 mod error;
 mod filter;
 mod model;
 mod node;
+mod reparent;
 mod source;
 
 #[cfg(feature = "session")]
@@ -19,8 +22,15 @@ pub use filter::{
 };
 pub use model::{ConnectionTreeModel, FlattenedRow, MAX_DISPLAYED_SEARCH_MATCHES};
 pub use node::TreeNode;
+pub use reparent::{
+    apply_reparent_memory, reparent_memory, should_reject_drag_selection,
+    should_reject_drag_selection_from, validate_reparent, validate_reparent_from, ReparentError,
+    ReparentOptions, ValidatedReparent,
+};
 pub use source::{ConnectionNodeSource, MemoryConnectionSource};
 
+#[cfg(feature = "storage")]
+pub use reparent::reparent_connection_storage;
 #[cfg(feature = "storage")]
 pub use source::StorageConnectionSource;
 

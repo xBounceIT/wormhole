@@ -133,6 +133,20 @@ fake.store(&id, "secret")?;
 **Never** log password material. Prefer `redact_secret` before logging around auth;
 `SecretsError` / `FakePasswordStore` Debug never embed the password string.
 
+**Storage glue:** `wormhole-storage::credential_glue` creates/renames/deletes
+`CredentialProfiles` **metadata** only. When deleting, callers may pass
+`CredentialSecrets` (tests: `MemoryCredentialSecrets`, or an adapter over
+`FakePasswordStore` + `FakeKeyMaterialStore`) so CredMgr / `keys\` cleanup stays
+out of band after the SQLite row is gone. Password bodies never enter SQLite.
+
+### Credential picker search (UI metadata only)
+
+Saved-credential **picker filtering** (C# `CredentialPickerSearch.Filter`) lives in
+`wormhole-ui::credential_picker` — `CredentialProfileRow` metadata (`id` / `name` /
+`username` / `domain`), `FakeCredentialList`, and case-insensitive substring filter.
+That glue **never** reads CredMgr / DPAPI; empty query returns all rows in stable order.
+See [20-connection-editor.md](20-connection-editor.md).
+
 ---
 
 ## DPAPI API
@@ -200,7 +214,7 @@ Never log passwords, key material, refresh tokens, or session keys.
 | `redact_truncated` | Trim + cap at **500 Unicode scalars** (not raw UTF-8 bytes) |
 | `redact_env_and_cli_secrets` | Case-insensitive Bitwarden CLI sanitize: `--session`/`=` , `BW_SESSION=`, `--code`/`=`, `WORMHOLE_BW_PASSWORD=` (optional spaces around `=`), then truncate |
 
-[`SecretsError`](../../rust/crates/wormhole-secrets-win/src/lib.rs) never carries secret payloads — `Display`/`Debug` only expose ops, Win32 codes, sizes, and I/O messages.
+[`SecretsError`](../../rust/crates/wormhole-secrets-win/src/lib.rs) never carries secret payloads — `Display`/`Debug` only expose ops, Win32 codes, sizes, and I/O messages. `EmptyPassword` is intentionally payload-free (fail-closed transient `store`).
 
 
 ---
@@ -218,8 +232,9 @@ Never log passwords, key material, refresh tokens, or session keys.
 | `app_auth` | `protect_app_authentication`, `unprotect_app_authentication`, read/write/unlock store helpers, `AppAuthUnlock` (Debug redacts plaintext) |
 | `hello` | `AvailabilityProbe` / `HelloPrompt` traits, `StubHelloPrompt` (fail-closed), `FakeHelloPrompt` (tests, no UI), free helpers `is_remote_desktop_session` / `check_hello_availability` / `request_hello_verification`, `WINRT_HELLO_GAP`, `REMOTE_DESKTOP_UNAVAILABLE_MESSAGE` |
 | `bitwarden_session` | `BitwardenSession` trait, `StubBitwardenSession` (fail-closed), `FakeBitwardenSession` (tests, no `bw`), `BitwardenSessionKey` (Debug redacts), `BITWARDEN_CLI_SESSION_GAP`, free helpers `unlock_bitwarden_session` / `bitwarden_session_status` |
+| `transient_session` | `TransientSessionCredentialStore` trait, `MemoryTransientSessionCredentialStore` (production in-process), `FakeTransientSessionCredentialStore` (tests; Debug length-only + call counts); **never** SQLite / CredMgr / DPAPI; empty password → `SecretsError::EmptyPassword` |
 | `redact` | `REDACTED`, `REDACT_TRUNCATE_DEFAULT`, `redact_secret`, `redact_truncated`, `redact_env_and_cli_secrets` |
-| root | `Result`, `SecretsError` (includes `InvalidPathSegment`, `PathNotConfined`) |
+| root | `Result`, `SecretsError` (includes `InvalidPathSegment`, `PathNotConfined`, `EmptyPassword`) |
 
 ---
 
@@ -313,6 +328,47 @@ and keep the session key in memory. That process bridge is **not** wired yet;
 
 ---
 
+## Transient session credentials (ephemeral / process-local)
+
+Mirrors C# `ITransientSessionCredentialStore` — passwords for ephemeral Quick
+Connect / session tabs that must **not** land in SQLite, CredMgr, or DPAPI.
+Keyed by a `Uuid` that is either a session id or a connection **node** id
+(C# names the parameter `sessionId`; Quick Connect stores under `node.Id`,
+shell release uses `profile.NodeId`).
+
+| Item | Value |
+|---|---|
+| Trait | `TransientSessionCredentialStore` — `store` / `read` / `remove` / `clear` |
+| Production | `MemoryTransientSessionCredentialStore` (mutex `HashMap`; process lifetime) |
+| Tests | `FakeTransientSessionCredentialStore` (same contract + call / reject counters) |
+| Persistence | **None** — memory only; cleared when the owning tab leaves the shell |
+| Empty password | Fail closed → `SecretsError::EmptyPassword` (C# `ThrowIfNullOrEmpty`); callers with no password skip `store` |
+| Whitespace | Accepted (parity with C# `ThrowIfNullOrEmpty`, which does not treat `" "` as empty) |
+| Debug | Entry count + UTF-8 lengths (+ Fake call counts) only — never password strings |
+
+```rust
+use wormhole_secrets_win::{
+    FakeTransientSessionCredentialStore, MemoryTransientSessionCredentialStore,
+    TransientSessionCredentialStore,
+};
+
+let store = MemoryTransientSessionCredentialStore::new();
+store.store(&node_id, "session-only")?; // empty "" → EmptyPassword
+let pw = store.read(&node_id);          // Option; never log
+store.remove(&node_id);                 // missing → no-op
+store.clear();                          // shell tab-collection reset
+
+// Unit tests: instrumented fake (Debug length-only).
+let fake = FakeTransientSessionCredentialStore::new();
+fake.store(&node_id, "opaque-test")?;
+```
+
+Distinct from CredMgr [`PasswordStore`] (persisted `Wormhole:<guid>`) and from
+Bitwarden CLI session keys. QC accept path may instead pass the password only
+via `ConnectOptions::password` — see [21-quick-connect.md](21-quick-connect.md).
+
+---
+
 ## Test
 
 ```powershell
@@ -321,7 +377,7 @@ cd rust
 cargo test -p wormhole-secrets-win
 ```
 
-Coverage: target/path/entropy formatting (no OS), DPAPI round-trips (null / named / tunnel-id), protected file I/O + atomic overwrite, CredMgr round-trip (empty / Unicode / embedded NUL / 2560 UTF-16-byte ceiling incl. astral surrogate pins / concurrent — [adversarial-ledger-credmgr-size.md](adversarial-ledger-credmgr-size.md)), **CredMgr password CRUD glue** (`store`/`read`/`delete`; `Wormhole:<guid:D>`; missing delete Ok; `WinCredPasswordStore` ≡ free helpers; `FakePasswordStore` multi-id + concurrent Debug-safe; CredFree Drop guard — [adversarial-ledger-credmgr-crud.md](adversarial-ledger-credmgr-crud.md)), redaction case / `=` forms / UTF-8 truncate safety, app-auth protect/unlock + wrong-entropy / Debug redaction, Hello remote-session + WinRT-gap fail-closed stubs (`AvailabilityProbe` / `HelloPrompt` / `FakeHelloPrompt` without interactive UI; Fake `Debug` omits freeform messages — [adversarial-ledger-hello-stub.md](adversarial-ledger-hello-stub.md)), Bitwarden CLI session stub (`StubBitwardenSession` / `FakeBitwardenSession` + key Debug redaction), Bitwarden path segment rejection, **keys/tunnels/azurevpn-cache path confinement** (`ensure_confined_under` empty-root + `..` / absolute / prefix-escape rejects; `key_path_under` / `tunnel_path_under` / `azure_vpn_token_cache_path_under` + temp-dir payload round-trips; write/read/**delete|clear** hostile roots rejected before I/O with untouched temp dirs; `PathNotConfined` never embeds path or key material — [adversarial-ledger-dpapi-paths.md](adversarial-ledger-dpapi-paths.md)), **private-key DPAPI CRUD stub** (`KeyMaterialStore` + DPAPI + Fake; non-atomic write matching C# CredentialService; Fake defensive copies + concurrent Debug-safe; delete never unprotects — [adversarial-ledger-key-dpapi-crud.md](adversarial-ledger-key-dpapi-crud.md)), **tunnel payload DPAPI CRUD stub** (`TunnelPayloadStore` / `DpapiTunnelPayloadStore` / `FakeTunnelPayloadStore`; confinement before I/O; no sibling `keys\` escape; missing delete Ok; never unprotect on delete; Fake ↔ DPAPI contract; Debug length-only — [adversarial-ledger-tunnel-payload-dpapi.md](adversarial-ledger-tunnel-payload-dpapi.md)), **Azure VPN Entra refresh-token cache store** (`AzureVpnTokenCacheStore` + DPAPI + Fake; atomic write + tunnel-id entropy; clear on logout; never unprotects; never logs tokens; sibling keys/tunnels escape fail-closed — [adversarial-ledger-entra-token-cache.md](adversarial-ledger-entra-token-cache.md)).
+Coverage: target/path/entropy formatting (no OS), DPAPI round-trips (null / named / tunnel-id), protected file I/O + atomic overwrite, CredMgr round-trip (empty / Unicode / embedded NUL / 2560 UTF-16-byte ceiling incl. astral surrogate pins / concurrent — [adversarial-ledger-credmgr-size.md](adversarial-ledger-credmgr-size.md)), **CredMgr password CRUD glue** (`store`/`read`/`delete`; `Wormhole:<guid:D>`; missing delete Ok; `WinCredPasswordStore` ≡ free helpers; `FakePasswordStore` multi-id + concurrent Debug-safe; CredFree Drop guard — [adversarial-ledger-credmgr-crud.md](adversarial-ledger-credmgr-crud.md)), redaction case / `=` forms / UTF-8 truncate safety, app-auth protect/unlock + wrong-entropy / Debug redaction, Hello remote-session + WinRT-gap fail-closed stubs (`AvailabilityProbe` / `HelloPrompt` / `FakeHelloPrompt` without interactive UI; Fake `Debug` omits freeform messages — [adversarial-ledger-hello-stub.md](adversarial-ledger-hello-stub.md)), Bitwarden CLI session stub (`StubBitwardenSession` / `FakeBitwardenSession` + key Debug redaction), Bitwarden path segment rejection, **transient session credential store** (`TransientSessionCredentialStore` / `MemoryTransientSessionCredentialStore` / `FakeTransientSessionCredentialStore`; put/get/clear by session or node key; empty password fail-closed; never SQLite; Debug length-only + concurrent — [adversarial-ledger-transient-credentials.md](adversarial-ledger-transient-credentials.md)), **keys/tunnels/azurevpn-cache path confinement** (`ensure_confined_under` empty-root + `..` / absolute / prefix-escape rejects; `key_path_under` / `tunnel_path_under` / `azure_vpn_token_cache_path_under` + temp-dir payload round-trips; write/read/**delete|clear** hostile roots rejected before I/O with untouched temp dirs; `PathNotConfined` never embeds path or key material — [adversarial-ledger-dpapi-paths.md](adversarial-ledger-dpapi-paths.md)), **private-key DPAPI CRUD stub** (`KeyMaterialStore` + DPAPI + Fake; non-atomic write matching C# CredentialService; Fake defensive copies + concurrent Debug-safe; delete never unprotects — [adversarial-ledger-key-dpapi-crud.md](adversarial-ledger-key-dpapi-crud.md)), **tunnel payload DPAPI CRUD stub** (`TunnelPayloadStore` / `DpapiTunnelPayloadStore` / `FakeTunnelPayloadStore`; confinement before I/O; no sibling `keys\` escape; missing delete Ok; never unprotect on delete; Fake ↔ DPAPI contract; Debug length-only — [adversarial-ledger-tunnel-payload-dpapi.md](adversarial-ledger-tunnel-payload-dpapi.md)), **Azure VPN Entra refresh-token cache store** (`AzureVpnTokenCacheStore` + DPAPI + Fake; atomic write + tunnel-id entropy; clear on logout; never unprotects; never logs tokens; sibling keys/tunnels escape fail-closed — [adversarial-ledger-entra-token-cache.md](adversarial-ledger-entra-token-cache.md)).
 
 ---
 

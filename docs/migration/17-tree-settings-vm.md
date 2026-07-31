@@ -1,6 +1,6 @@
 # Connection-tree + settings view-models — `wormhole-ui`
 
-**Status:** pure Rust view-models green (independent of GPUI chrome); tree Open→session glue stub; tree filter/search id glue stub  
+**Status:** pure Rust view-models green (independent of GPUI chrome); tree Open→session glue stub; tree filter/search id glue stub; tree reparent/drag validation glue stub  
 **Date:** 2026-07-31  
 **Crate:** `rust/crates/wormhole-ui` (`tree` + `settings` modules)  
 **C# mirrors:** `ViewModels/ConnectionTreeViewModel.cs`, `ViewModels/SettingsViewModel.cs`, `Services/AppSettingsService.cs`, `Models/AppSettings.cs`
@@ -18,6 +18,7 @@
 | Storage adapter | `StorageConnectionSource` | `--features storage` → `wormhole-storage` read API |
 | Tree VM | `ConnectionTreeModel` | Load, search/filter projection, folder expand |
 | Filter glue | `visible_connection_ids` / `visible_connection_ids_from` | Thin query → visible ids (name **or** host); ancestor folders kept |
+| Reparent glue | `validate_reparent` / `should_reject_drag_selection` / `reparent_memory` / `reparent_connection_storage` | Drag/reparent validation (search, cycles, connection-as-parent); Fake apply; optional storage connection reparent |
 | Flatten | `flatten_visible()` | Depth-first rows respecting expand + search |
 | Tree Open glue | `prepare_connect_request` / `prepare_tree_connect` / `connect_from_tree` / `connect_from_selection` | Double-click / Open / selection → `InheritanceResolver` → [`ConnectRequest`] / [`TreeConnectRequest`] + out-of-band [`ConnectOptions`] → `SessionOrchestrator::connect` (default feature `session`) |
 | Settings model | `AppSettings` | PascalCase JSON, numeric enums (C# `System.Text.Json`) |
@@ -52,9 +53,24 @@ Thin pure-state helper (no expand / no display cap — hosts that need projectio
 
 `visible_connection_ids_from` loads via [`ConnectionNodeSource`] (tests use [`MemoryConnectionSource`]). No live DB required.
 
-**Out of scope (later):** drag-drop sibling reorder UX, add/edit/delete **commands** on the VM, inheritance host tooltips, debounce (host may debounce `set_search_text`), GPUI TreeView bindings.
+### Tree reparent / drag validation glue (`tree/reparent.rs`)
 
-**Storage write helpers (not on this VM):** `wormhole-storage::ConnectionRepository` now exposes `create_folder` / `rename_folder` / `delete_folder` and a `reparent_connection` move stub (temp-SQLite covered; see [adversarial-ledger-folder-crud.md](adversarial-ledger-folder-crud.md)). Hosts can call those after dialog confirmation; the tree model still reloads via `list_all`. See [03-storage.md](03-storage.md).
+Thin pure-state helper mirroring C# `ShouldRejectDragSelection` + the validation subset of `PersistTreeStructureAsync` (no GPUI TreeView chrome). Distinct from credential-picker fields in `connection_editor`.
+
+| Check | Behaviour |
+|---|---|
+| `ReparentOptions.search_active` | Reject validate / drag selection / Fake apply / storage apply (C# search disables drag-reorder; apply re-checks like `PersistTreeStructureAsync`) |
+| New parent is a connection | `ReparentError::TargetNotFolder` (connections cannot contain children) |
+| New parent is self or a descendant of the moved node | `ReparentError::WouldCreateCycle` (folder→descendant) |
+| Missing node / missing parent | `ReparentError::NotFound` |
+| Folder **or** connection move | Allowed at validate layer (C# `UpdateManyAsync` persists both) |
+| Multi-drag ancestor+descendant | `should_reject_drag_selection` → `true` |
+| Fake apply | `reparent_memory` / `apply_reparent_memory(…, options)` re-validate then mutate [`MemoryConnectionSource`] `ParentId` + append `SortOrder`; return fresh `ValidatedReparent` |
+| Storage apply (`--features storage`) | `reparent_connection_storage` → `ConnectionRepository::reparent_connection` for **connections** only; folders → `FolderPersistUnsupported` after validate |
+
+**Out of scope (later):** full drag-drop sibling reorder UX / `PersistTreeStructureAsync` folder-into-folder persist batch, add/edit/delete **commands** on the VM, inheritance host tooltips, debounce (host may debounce `set_search_text`), GPUI TreeView bindings.
+
+**Storage write helpers:** `wormhole-storage::ConnectionRepository` exposes `create_folder` / `rename_folder` / `delete_folder` and `reparent_connection` (temp-SQLite covered; see [adversarial-ledger-folder-crud.md](adversarial-ledger-folder-crud.md)). Tree glue validates first, then calls `reparent_connection` for connections; the tree model still reloads via `list_all`. See [03-storage.md](03-storage.md). After successful writes, hosts should publish metadata-only events on `wormhole-domain::FakeConnectionNodeChangeNotifier` (create/update/delete/reparent — no secrets) so tree + open-session subscribers can refresh; see [02-domain.md](02-domain.md).
 
 ### Tree Open / double-click → session (`tree/open.rs`)
 
@@ -93,6 +109,9 @@ ConnectionTreeModel::load_from / load_nodes / set_search_text / display_roots
   / display_children / set_expanded / expand_all / collapse_all / flatten_visible
 visible_connection_ids(nodes, query) / visible_connection_ids_from(source, query)
 node_matches_query(node, query) / fields_match_query_lower(name_lower, host_lower, query_lower)
+validate_reparent / validate_reparent_from / should_reject_drag_selection[_from]
+reparent_memory / apply_reparent_memory / ReparentOptions / ValidatedReparent / ReparentError
+reparent_connection_storage (feature = "storage")
 
 # feature = "session" (default):
 prepare_connect_request(id, source) -> ConnectRequest
@@ -114,6 +133,8 @@ AppSettings (+ enums) — CURRENT_SCHEMA_VERSION = 8
 ```powershell
 $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 cd rust
+cargo test -p wormhole-ui reparent
+cargo test -p wormhole-ui --features storage reparent
 cargo test -p wormhole-ui
 cargo test -p wormhole-ui --features storage
 # Optional: tree Open + QC session glue off
@@ -124,7 +145,7 @@ cargo test -p wormhole-ui --features gpui
 
 ## Coordination with storage-writes
 
-- **Tree reads:** `ConnectionNodeSource` + optional `StorageConnectionSource` (`--features storage`) call `ConnectionRepository::list_all`. Node **writes** stay on the storage agent.
+- **Tree reads:** `ConnectionNodeSource` + optional `StorageConnectionSource` (`--features storage`) call `ConnectionRepository::list_all`. Node **writes** stay on the storage agent; tree reparent glue may call `reparent_connection` after validate (`--features storage`).
 - **Settings:** `SettingsStore` trait + `JsonFileSettingsStore` / `MemorySettingsStore` live in `wormhole-ui` so the VM is not blocked on storage. Prefer a single writer: inject `StorageSettingsStore` (`--features storage`) to drive `wormhole-storage::SettingsStore`, or use the UI file/memory backends alone — do not dual-write the same path. See [03-storage.md](03-storage.md).
 
 ## Related docs
@@ -137,4 +158,6 @@ cargo test -p wormhole-ui --features gpui
 - [adversarial-ledger-tree-settings-vm.md](adversarial-ledger-tree-settings-vm.md) — adversarial review ledger  
 - [adversarial-ledger-tree-filter.md](adversarial-ledger-tree-filter.md) — tree filter/search id glue ledger  
 - [adversarial-ledger-tree-open-session.md](adversarial-ledger-tree-open-session.md) — tree Open → session connect glue ledger  
-- [adversarial-ledger-settings-apply.md](adversarial-ledger-settings-apply.md) — SettingsViewModel → StorageSettingsStore apply glue ledger  
+- [adversarial-ledger-tree-reparent.md](adversarial-ledger-tree-reparent.md) — tree reparent / drag validation glue ledger
+- [adversarial-ledger-folder-crud.md](adversarial-ledger-folder-crud.md) — storage folder CRUD + `reparent_connection` stub
+- [adversarial-ledger-settings-apply.md](adversarial-ledger-settings-apply.md) — SettingsViewModel → StorageSettingsStore apply glue ledger 

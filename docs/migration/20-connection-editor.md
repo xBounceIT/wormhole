@@ -20,6 +20,7 @@
 | `VisibleFields` | Protocol-driven chrome: port / creds / tunnel / RDP tabs / serial / HTTPS ignore-cert |
 | `TunnelUiState` / `TunnelUiSelection` | Inherit / No tunnel / Config(id) — mirrors tunnel picker sentinels |
 | `CredentialUiMode` | Saved picker vs inline/prompt (`UseSavedCredentials`) |
+| `credential_picker` / `FakeCredentialList` | Metadata-only name/username(/domain) filter; empty query = all; no secrets in Debug |
 | `ValidationReport` / `ValidationError` | Save-button gate |
 | `save_validated_editor` / `load_inline_secret` / `EditorSaveOp` | Feature `storage`: validate → node → `ConnectionRepository` insert/update → CredMgr/`PasswordStore` (node Id); edit rehydrate |
 
@@ -101,6 +102,31 @@ Quick Connect disables inheritance (no Inherit sentinel; missing selection → N
 - **Inline:** clears `credential_id`, sets `CredentialBindingMode::None`; SSH/RDP set `use_inline_password` and return pending plaintext from `to_connection_node` / `write_to` (never stored on `ConnectionNode`)
 - Credential-less protocols (HTTP/HTTPS/Serial) clear credential fields on write
 
+### Credential picker search glue
+
+[`credential_picker`](../../rust/crates/wormhole-ui/src/credential_picker.rs) (crate root) ports C# `CredentialPickerSearch.Filter` — metadata-only rows + Fake list; **no GPUI**, no CredMgr reads:
+
+| Op | Behavior |
+|---|---|
+| `filter_credential_profiles` / `filter_credential_profiles_from` | Empty / whitespace query → all rows (**stable input order**); else case-insensitive substring on **name** or **username** (plus **domain** for C# parity). `from` propagates source `Err` (no empty success invent) |
+| `CredentialProfileRow` | `id` / `name` / `username` / `domain` only — **no** password / private-key / session fields; `Debug` cannot echo secrets |
+| `FakeCredentialList` | In-memory `CredentialProfileSource` for tests; `Debug` is length + fail flag only; `set_profiles` clears any fail flag |
+| `CredentialPickerSearchVm` | Cached snapshot + `set_query` → `filtered()`; successful `load_from` **replaces** snapshot (query unchanged); `load_from` `Err` keeps **last-good** cache + query (C# `LoadAsync` catch parity); no debounce (host may debounce); `Debug` uses counts / query length only |
+| Secrets | Stay in CredMgr / DPAPI ([04-secrets.md](04-secrets.md)); this glue never loads secret material |
+
+```rust
+use wormhole_ui::{
+    filter_credential_profiles, CredentialPickerSearchVm, CredentialProfileRow, FakeCredentialList,
+};
+let fake = FakeCredentialList::with_profiles([/* rows */]);
+let mut vm = CredentialPickerSearchVm::new();
+vm.load_from(&fake)?;
+vm.set_query("alice");
+let hits = vm.filtered();
+```
+
+Non-goals: SQLite credential-catalog repository, Bitwarden virtual rows, `ResolveExact` / commit helpers, GPUI combo chrome.
+
 ## Persist glue (`--features storage`)
 
 Validated Persistent editor → `ConnectionRepository` insert/update, then CredMgr (or `FakePasswordStore`) keyed by **node Id**:
@@ -160,6 +186,7 @@ select_baud_preset(&mut state, 6); // 9600
 $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 cd rust
 cargo test -p wormhole-ui --no-default-features --features storage
+cargo test -p wormhole-ui --no-default-features --lib credential_picker
 cargo test -p wormhole-ui serial_ports
 cargo test -p wormhole-ui serial_presets
 cargo test -p wormhole-serial
@@ -170,12 +197,14 @@ Focused suites:
 
 - `tests/connection_editor_validation.rs` — per-protocol validation matrix, visibility, tunnel tri-state, credential modes, load/write round-trip, `apply_resolved_profile`, Debug redaction
 - `tests/connection_editor_persist.rs` (+ `persist` unit tests) — temp DB insert/update round-trip, inline CredMgr Fake out-of-band, purge on leave-inline / blank, `load_inline_secret` preserve, Insert CredMgr rollback
+- `credential_picker` unit tests — Fake list filter / empty query / name+username(+domain) match / Debug no secrets / `from` source `Err` / VM last-good on load `Err` / replace-not-append
 - `serial_ports` unit tests — Fake enumerator refresh / empty / fail-closed / select into editor+QC host
 - `serial_presets` unit tests — PuTTY defaults, preset index select, illegal stop/data fail-closed, node round-trip / inherit
 
 Adversarial reviews:
 - State machine: [adversarial-ledger-connection-editor.md](adversarial-ledger-connection-editor.md)
 - Persist glue: [adversarial-ledger-editor-save.md](adversarial-ledger-editor-save.md)
+- Credential picker search glue: [adversarial-ledger-credential-picker.md](adversarial-ledger-credential-picker.md)
 - Serial enumerate library: [adversarial-ledger-serial-enumerate.md](adversarial-ledger-serial-enumerate.md)
 - Serial COM picker glue: [adversarial-ledger-serial-picker.md](adversarial-ledger-serial-picker.md)
 - Serial baud/parity presets: [adversarial-ledger-serial-presets.md](adversarial-ledger-serial-presets.md)

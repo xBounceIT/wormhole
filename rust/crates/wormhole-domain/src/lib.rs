@@ -4,6 +4,7 @@
 //! See `docs/migration/02-domain.md` for the C# → Rust field/enum map.
 
 mod connection_node;
+mod connection_node_change;
 mod connection_profile;
 mod enums;
 mod error;
@@ -12,10 +13,17 @@ mod rdp_screen_sizes;
 mod serial;
 
 pub use connection_node::ConnectionNode;
+pub use connection_node_change::{
+    ConnectionNodeChangeCallback, ConnectionNodeChangeEvent, ConnectionNodeChangeKind,
+    ConnectionNodeChangeNotifier, ConnectionNodeChangePublisher, ConnectionNodeChangeSubscription,
+    FakeConnectionNodeChangeNotifier, NopConnectionNodeChangeNotifier, RecordingRefreshListener,
+    SharedConnectionNodeChangeNotifier,
+};
 pub use connection_profile::ConnectionProfile;
 pub use enums::{
-    CredentialBindingMode, CredentialBindingSentinelIds, NodeKind, ProtocolType,
-    SerialFlowControlMode, SerialParityMode, SerialStopBitsMode, TunnelKind,
+    CredentialBindingMode, CredentialBindingSentinelIds, CredentialKind, CredentialSecretProvider,
+    NodeKind, ProtocolType, SerialFlowControlMode, SerialParityMode, SerialStopBitsMode,
+    TunnelKind, BITWARDEN_PASSWORD_FIELD_PATH,
 };
 pub use error::{InvalidEnumValue, ResolveError};
 pub use inheritance::InheritanceResolver;

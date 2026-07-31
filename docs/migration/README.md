@@ -32,6 +32,7 @@
 | [adversarial-ledger-tree-settings-vm.md](adversarial-ledger-tree-settings-vm.md) | Connection-tree + settings VM review closed |
 | [adversarial-ledger-tree-filter.md](adversarial-ledger-tree-filter.md) | Tree filter/search id glue (`visible_connection_ids` / host match) review closed |
 | [adversarial-ledger-tree-open-session.md](adversarial-ledger-tree-open-session.md) | Tree Open → session connect glue review closed |
+| [adversarial-ledger-tree-reparent.md](adversarial-ledger-tree-reparent.md) | Tree reparent / drag validation glue review closed |
 | [adversarial-ledger-settings-apply.md](adversarial-ledger-settings-apply.md) | SettingsViewModel → StorageSettingsStore stage/apply glue review closed |
 | [16-session-orchestrator.md](16-session-orchestrator.md) | Session orchestrator (`wormhole-session`) Serial/SSH/HTTP + tunnel lease |
 | [18-rust-installer.md](18-rust-installer.md) | Rust `Build-Rust-Artifacts.ps1` + parallel Inno channel spike (WinUI untouched) |
@@ -40,6 +41,7 @@
 | [adversarial-ledger-editor-save.md](adversarial-ledger-editor-save.md) | Connection editor → storage persist glue review closed |
 | [21-quick-connect.md](21-quick-connect.md) | Quick Connect pure state / validation (`wormhole-ui`) |
 | [adversarial-ledger-connection-editor.md](adversarial-ledger-connection-editor.md) | ConnectionEditorState review closed (no GPUI) |
+| [adversarial-ledger-credential-picker.md](adversarial-ledger-credential-picker.md) | Credential picker search glue (`filter_credential_profiles` / Fake / SearchVm) review closed |
 | [gate-checklist.md](gate-checklist.md) | Executable pass/fail for gates 1–8 |
 | [gate-evidence-log.md](gate-evidence-log.md) | LabOnly vs HardwarePass evidence stubs (lab ≠ hardware) |
 | [toolchain.md](toolchain.md) | Existing Rust PATH/versions for agents |
@@ -49,17 +51,20 @@
 | [adversarial-ledger-hello-stub.md](adversarial-ledger-hello-stub.md) | Hello AvailabilityProbe / HelloPrompt stub review closed |
 | [adversarial-ledger-hello-unlock-ui.md](adversarial-ledger-hello-unlock-ui.md) | Hello unlock prompt UI glue (`HelloUnlockGlue` / `FakeHelloUnlockUi`) review closed |
 | [adversarial-ledger-domain.md](adversarial-ledger-domain.md) | Domain review closed (73 tests) |
+| [adversarial-ledger-node-change-notifier.md](adversarial-ledger-node-change-notifier.md) | Connection node change Fake pub/sub (`ConnectionNodeChangeEvent` / Fake) review closed |
 | [adversarial-ledger-secrets.md](adversarial-ledger-secrets.md) | Secrets review closed (25 tests) |
 | [adversarial-ledger-dpapi-paths.md](adversarial-ledger-dpapi-paths.md) | DPAPI keys/tunnels path confinement review closed |
 | [adversarial-ledger-key-dpapi-crud.md](adversarial-ledger-key-dpapi-crud.md) | Private-key / tunnel DPAPI CRUD stubs (`KeyMaterialStore` / `TunnelPayloadStore`) review closed |
 | [adversarial-ledger-tunnel-payload-dpapi.md](adversarial-ledger-tunnel-payload-dpapi.md) | Tunnel payload DPAPI store (`TunnelPayloadStore` / sibling `keys\` isolation) review closed |
 | [adversarial-ledger-credmgr-size.md](adversarial-ledger-credmgr-size.md) | CredMgr 2560 UTF-16-byte password size guard review closed |
 | [adversarial-ledger-credmgr-crud.md](adversarial-ledger-credmgr-crud.md) | CredMgr password CRUD glue (`PasswordStore` / Fake / WinCred) review closed |
+| [adversarial-ledger-transient-credentials.md](adversarial-ledger-transient-credentials.md) | Transient session credential store (`Memory`/`Fake`; never SQLite) review closed |
 | [adversarial-ledger-scaffold.md](adversarial-ledger-scaffold.md) | Scaffold / surface-win review closed |
 | [adversarial-ledger-storage.md](adversarial-ledger-storage.md) | Storage review closed |
 | [adversarial-ledger-storage-writes.md](adversarial-ledger-storage-writes.md) | Storage write path + SettingsStore review closed |
 | [adversarial-ledger-folder-crud.md](adversarial-ledger-folder-crud.md) | Folder/connection tree CRUD (`create_folder` / reparent) review closed |
 | [adversarial-ledger-tunnel-config-crud.md](adversarial-ledger-tunnel-config-crud.md) | TunnelConfigRepository metadata CRUD review closed |
+| [adversarial-ledger-credential-metadata-crud.md](adversarial-ledger-credential-metadata-crud.md) | CredentialProfiles metadata CRUD + glue (`credential.rs` / `credential_glue`) review closed |
 | [adversarial-ledger-rust-installer.md](adversarial-ledger-rust-installer.md) | Rust publish/Inno spike review closed |
 | [adversarial-ledger-diagnostics.md](adversarial-ledger-diagnostics.md) | Diagnostics / soak stubs review closed |
 | [adversarial-ledger-diagnostics-runner.md](adversarial-ledger-diagnostics-runner.md) | SoakRunner / FakeClock glue review closed |
@@ -75,6 +80,7 @@
 | [adversarial-ledger-ssh-auth.md](adversarial-ledger-ssh-auth.md) | SSH SshAuthMethod / authenticator stubs review closed |
 | [adversarial-ledger-ssh-agent.md](adversarial-ledger-ssh-agent.md) | SSH agent availability probe (`FakeAgent` / pipe bounds) review closed |
 | [adversarial-ledger-ssh-agent-auth.md](adversarial-ledger-ssh-agent-auth.md) | SSH agent ↔ auth select glue (`select_auth_methods_for_connect` / FakeFallible) review closed |
+| [adversarial-ledger-ssh-reconnect.md](adversarial-ledger-ssh-reconnect.md) | SSH reconnect / backoff policy stub (`SshReconnectPolicy` / Fake schedule) review closed |
 | [adversarial-ledger-serial-enumerate.md](adversarial-ledger-serial-enumerate.md) | Serial port enumeration review closed |
 | [adversarial-ledger-serial-picker.md](adversarial-ledger-serial-picker.md) | Serial COM host-field picker glue (`wormhole-ui`) review closed |
 | [adversarial-ledger-serial-presets.md](adversarial-ledger-serial-presets.md) | Serial baud/parity preset VM glue (`SerialLineCombo` / DCB / editor↔QC) review closed |
@@ -102,6 +108,7 @@
 | [adversarial-ledger-vnc-forwarder.md](adversarial-ledger-vnc-forwarder.md) | VNC `select_vnc_connect_target` / LocalForwarder stub review closed |
 | [adversarial-ledger-vnc-session-glue.md](adversarial-ledger-vnc-session-glue.md) | VNC session glue (`push_*` / `apply_framebuffer_rect` / Fake dirty notify) review closed |
 | [adversarial-ledger-vnc-clipboard.md](adversarial-ledger-vnc-clipboard.md) | VNC clipboard cut-text glue (`clipboard_glue` ClientCutText / ServerCutText) review closed |
+| [adversarial-ledger-vnc-password-auth.md](adversarial-ledger-vnc-password-auth.md) | VNC password-only auth glue (`auth_glue` / `FakeVncPasswordProvider`) review closed |
 | [adversarial-ledger-gpui-gates.md](adversarial-ledger-gpui-gates.md) | GPUI gates 1–2 review closed |
 | [adversarial-ledger-sftp-vpn.md](adversarial-ledger-sftp-vpn.md) | SFTP + OpenVPN/Fortinet review closed |
 | [adversarial-ledger-sftp-cancel.md](adversarial-ledger-sftp-cancel.md) | SFTP single-flight cancel / gate review closed |

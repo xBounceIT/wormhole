@@ -19,6 +19,9 @@
 //!   `UserConsentVerifier` is **not** wired yet
 //! - Bitwarden CLI unlock / memory-only session stub (`BitwardenSession` +
 //!   `StubBitwardenSession` / `FakeBitwardenSession`); `bw` process spawn is **not** wired yet
+//! - Process-local ephemeral session passwords (`TransientSessionCredentialStore` +
+//!   `MemoryTransientSessionCredentialStore` / `FakeTransientSessionCredentialStore`);
+//!   never SQLite / CredMgr / DPAPI — keyed by session or connection-node id
 //!
 //! See `docs/migration/04-secrets.md` and `docs/migration/15-cutover.md`.
 //!
@@ -50,6 +53,7 @@ mod hello;
 mod key_tunnel;
 mod paths;
 mod redact;
+mod transient_session;
 #[cfg(windows)]
 mod win32;
 
@@ -109,6 +113,10 @@ pub use paths::{
 pub use redact::{
     redact_env_and_cli_secrets, redact_secret, redact_truncated, REDACTED, REDACT_TRUNCATE_DEFAULT,
 };
+pub use transient_session::{
+    FakeTransientSessionCredentialStore, MemoryTransientSessionCredentialStore,
+    TransientSessionCredentialStore,
+};
 
 use std::fmt;
 
@@ -150,6 +158,12 @@ pub enum SecretsError {
         /// API or helper name that rejected the path.
         op: &'static str,
     },
+    /// Transient session credential `store` rejected an empty password (fail closed).
+    ///
+    /// Parity with C# `ArgumentException.ThrowIfNullOrEmpty` on
+    /// `ITransientSessionCredentialStore.Store`. Display/Debug never embed the
+    /// password (there is none to embed).
+    EmptyPassword,
 }
 
 impl fmt::Display for SecretsError {
@@ -172,6 +186,10 @@ impl fmt::Display for SecretsError {
                     "{op} path is not confined under the required secrets root"
                 )
             }
+            Self::EmptyPassword => write!(
+                f,
+                "transient session credential store rejected an empty password"
+            ),
         }
     }
 }
@@ -337,6 +355,11 @@ mod tests {
         let dpapi = SecretsError::DpapiUnprotect;
         assert!(!format!("{dpapi}").contains(secret));
         assert!(!format!("{dpapi:?}").contains(secret));
+
+        let empty = SecretsError::EmptyPassword;
+        assert!(!format!("{empty}").contains(secret));
+        assert!(!format!("{empty:?}").contains(secret));
+        assert!(empty.to_string().contains("empty password"));
     }
 
     #[cfg(windows)]

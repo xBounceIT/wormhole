@@ -39,9 +39,9 @@ pub enum VncAuthInputKind {
 impl VncAuthInputKind {
     /// Map a negotiated security type to the input the client must supply.
     pub fn from_security(security: RfbSecurityType) -> Self {
-        match security {
-            RfbSecurityType::None => Self::None,
-            RfbSecurityType::VncAuth => Self::Password,
+        match VncAuthMethod::from_security(security) {
+            VncAuthMethod::None => Self::None,
+            VncAuthMethod::Password => Self::Password,
         }
     }
 }
@@ -243,12 +243,8 @@ pub fn provide_vnc_auth_input(
         }),
         VncAuthInputKind::Credentials => Err(VncError::UnsupportedCredentialsAuth),
         VncAuthInputKind::Password => {
-            let password = match provider.get_password()? {
-                None => return Err(VncError::AuthCancelled),
-                Some(p) if p.as_str().is_empty() => return Err(VncError::PasswordRequired),
-                Some(p) => p,
-            };
-            // Re-check via resolve_auth so empty / missing stay one contract.
+            let password = provider.get_password()?.ok_or(VncError::AuthCancelled)?;
+            // Empty / missing stay one contract via resolve_auth (PasswordRequired).
             let method = resolve_auth(RfbSecurityType::VncAuth, Some(&password))?;
             Ok(VncAuthSelection {
                 method,
@@ -279,6 +275,15 @@ mod tests {
         assert!(fields.username_ignored());
         assert!(fields.domain_ignored());
 
+        let selected = select_vnc_auth(RfbSecurityType::None, &fields).unwrap();
+        assert_eq!(selected.method, VncAuthMethod::None);
+        assert!(selected.password.is_none());
+    }
+
+    #[test]
+    fn select_no_auth_allows_empty_password_and_strips_it() {
+        // Empty only fails closed when VncAuth is required — None negotiation keeps going.
+        let fields = VncAuthFields::new().with_password(VncPassword::new("").unwrap());
         let selected = select_vnc_auth(RfbSecurityType::None, &fields).unwrap();
         assert_eq!(selected.method, VncAuthMethod::None);
         assert!(selected.password.is_none());
@@ -341,6 +346,45 @@ mod tests {
             provide_vnc_auth_input(VncAuthInputKind::Password, &fake),
             Err(VncError::PasswordRequired)
         );
+        assert_eq!(fake.call_count(), 1);
+    }
+
+    #[test]
+    fn provide_propagates_provider_hard_error() {
+        let fake = FakeVncPasswordProvider::failing(VncError::Message("provider failed".into()));
+        assert_eq!(
+            provide_vnc_auth_input(VncAuthInputKind::Password, &fake),
+            Err(VncError::Message("provider failed".into()))
+        );
+        assert_eq!(fake.call_count(), 1);
+    }
+
+    #[test]
+    fn provide_accepts_exact_eight_byte_password() {
+        let pw = VncPassword::new("12345678").unwrap();
+        let fake = FakeVncPasswordProvider::with_password(pw);
+        let selected = provide_vnc_auth_input(VncAuthInputKind::Password, &fake).unwrap();
+        assert_eq!(selected.method, VncAuthMethod::Password);
+        assert_eq!(selected.password.as_ref().map(VncPassword::as_str), Some("12345678"));
+    }
+
+    #[test]
+    fn auth_errors_display_without_secrets() {
+        let secret = "sekrit!!";
+        for err in [
+            VncError::PasswordRequired,
+            VncError::AuthCancelled,
+            VncError::UnsupportedCredentialsAuth,
+        ] {
+            let display = err.to_string();
+            assert!(!display.is_empty());
+            assert!(!display.contains(secret));
+            assert!(!display.contains("password="));
+        }
+        // Hard Message path must not silently swallow — Display is the message body.
+        let msg = VncError::Message("provider failed".into());
+        assert_eq!(msg.to_string(), "provider failed");
+        assert!(!msg.to_string().contains(secret));
     }
 
     #[test]
@@ -383,21 +427,54 @@ mod tests {
     }
 
     #[test]
+    fn resolve_from_provider_fail_closed_on_cancel_and_empty() {
+        let cancelled = FakeVncPasswordProvider::cancelled();
+        assert_eq!(
+            resolve_vnc_auth_from_provider(RfbSecurityType::VncAuth, &cancelled),
+            Err(VncError::AuthCancelled)
+        );
+        assert_eq!(cancelled.call_count(), 1);
+
+        let empty = FakeVncPasswordProvider::empty_password();
+        assert_eq!(
+            resolve_vnc_auth_from_provider(RfbSecurityType::VncAuth, &empty),
+            Err(VncError::PasswordRequired)
+        );
+        assert_eq!(empty.call_count(), 1);
+
+        // None security never consults the provider even when it would cancel/empty.
+        let unused = FakeVncPasswordProvider::cancelled();
+        assert_eq!(
+            resolve_vnc_auth_from_provider(RfbSecurityType::None, &unused)
+                .unwrap()
+                .method,
+            VncAuthMethod::None
+        );
+        assert_eq!(unused.call_count(), 0);
+    }
+
+    #[test]
     fn debug_redacts_password_on_fields_selection_and_fake() {
         let secret = "sekrit!!";
         let fields = VncAuthFields::new()
             .with_username("alice")
+            .with_domain("CORP\\unique-domain-token")
             .with_password(VncPassword::new(secret).unwrap());
         let fields_dbg = format!("{fields:?}");
         assert!(fields_dbg.contains("VncPassword(***)"));
         assert!(!fields_dbg.contains(secret));
         assert!(!fields_dbg.contains("alice")); // presence only
+        assert!(!fields_dbg.contains("CORP\\unique-domain-token"));
         assert!(fields_dbg.contains("username_present: true"));
+        assert!(fields_dbg.contains("domain_present: true"));
 
         let selected = select_vnc_auth(RfbSecurityType::VncAuth, &fields).unwrap();
         let sel_dbg = format!("{selected:?}");
         assert!(sel_dbg.contains("VncPassword(***)"));
         assert!(!sel_dbg.contains(secret));
+        // Selection carries method + password only — never username/domain.
+        assert!(!sel_dbg.contains("alice"));
+        assert!(!sel_dbg.contains("CORP"));
 
         let fake = FakeVncPasswordProvider::with_password(VncPassword::new(secret).unwrap());
         let fake_dbg = format!("{fake:?}");
@@ -415,5 +492,23 @@ mod tests {
             VncAuthInputKind::from_security(RfbSecurityType::VncAuth),
             VncAuthInputKind::Password
         );
+    }
+
+    #[test]
+    fn input_kind_tracks_auth_method_from_security() {
+        // Glue input kind and core method mapping must stay aligned for every
+        // RfbSecurityType Wormhole v1 accepts.
+        for security in [RfbSecurityType::None, RfbSecurityType::VncAuth] {
+            let kind = VncAuthInputKind::from_security(security);
+            let method = VncAuthMethod::from_security(security);
+            match (kind, method) {
+                (VncAuthInputKind::None, VncAuthMethod::None) => {}
+                (VncAuthInputKind::Password, VncAuthMethod::Password) => {}
+                (VncAuthInputKind::Credentials, _) => {
+                    panic!("from_security must never yield Credentials")
+                }
+                (k, m) => panic!("mismatched kind/method for {security:?}: {k:?} vs {m:?}"),
+            }
+        }
     }
 }

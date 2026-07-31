@@ -2,11 +2,11 @@
 
 
 
-**Status:** implemented (read + write path + settings JSON + TunnelConfig metadata CRUD)  
+**Status:** implemented (read + write path + settings JSON + TunnelConfig metadata CRUD + CredentialProfiles metadata CRUD)  
 
 **Crate:** `rust/crates/wormhole-storage`  
 
-**Source of truth:** C# `Data/MigrationRunner.cs`, `Data/SqliteConnectionFactory.cs`, `Data/SqliteTypeHandlers.cs`, `Data/Repositories/ConnectionRepository.cs`, `Data/Repositories/TunnelConfigRepository.cs`, `Models/AppSettings.cs`, `Services/AppSettingsService.cs`, embedded `Data/Migrations/*.sql`
+**Source of truth:** C# `Data/MigrationRunner.cs`, `Data/SqliteConnectionFactory.cs`, `Data/SqliteTypeHandlers.cs`, `Data/Repositories/ConnectionRepository.cs`, `Data/Repositories/TunnelConfigRepository.cs`, `Data/Repositories/CredentialRepository.cs`, `Models/AppSettings.cs`, `Services/AppSettingsService.cs`, embedded `Data/Migrations/*.sql`
 
 
 
@@ -110,6 +110,8 @@ Context7 MCP was unavailable; pins follow the same crates.io research approach a
 
 | TunnelConfigs | `TunnelConfigRepository` — Id/Name/Kind/CreatedAt/UpdatedAt only; secrets DPAPI under `tunnels/` | `TunnelConfigRepository` — same columns; `insert` stamps both times; `update` persists caller `UpdatedAt` **verbatim** (no auto-stamp — TunnelManager pool invalidation); blank names rejected (`InvalidArgument`); `delete` is **fail-open** on in-use configs (no `Nodes.TunnelConfigId` check — editor owns that, matching C#) |
 
+| CredentialProfiles | `CredentialRepository` — metadata only (Name/Username/Domain/Kind/…); passwords CredMgr; keys DPAPI | `CredentialRepository` + `credential_glue::{create,rename,delete}_credential_profile` — same columns; blank names fail-closed; Bitwarden field path blank/whitespace → `login.password`, non-blank trimmed (C# `NormalizeBitwardenFieldPath`); `delete` metadata fail-open on `Nodes.CredentialId` / `RdpGatewayCredentialId` (C# parity); optional [`CredentialSecrets`] / [`MemoryCredentialSecrets`] / `FakePasswordStore` cleanup **after** row delete (cleanup errors ignored) — **never** password bodies in SQLite |
+
 
 
 ## Settings JSON (`settings.json`)
@@ -184,6 +186,28 @@ TunnelConfigRepository::new(&factory)
 
 TunnelConfig { id, name, kind, created_at, updated_at }  # metadata only; no secret columns
 
+CredentialRepository::new(&factory)
+
+  -> list_all() / get_by_id(Uuid)
+
+  -> insert(CredentialProfile) -> CredentialProfile   # stamps CreatedAt; trims name; rejects blank
+
+  -> update(&CredentialProfile)                       # metadata fields; trims/rejects blank name
+
+  -> delete(Uuid)                                     # metadata only; fail-open if Nodes still reference Id
+
+credential_glue::create_credential_profile / rename_credential_profile / delete_credential_profile
+
+  -> create from CredentialProfileDraft (no password arg)
+
+  -> rename(id, name) fail-closed blank; NotFound if missing
+
+  -> delete(id, Option<&dyn CredentialSecrets>)       # row first, then best-effort CredMgr/key cleanup
+
+CredentialProfile { … metadata … }                    # no password field; Debug safe
+
+MemoryCredentialSecrets                               # Fake/Memory cleanup stub (ids only; no bodies)
+
 SettingsStore::new(path) | default_local()
 
   -> load() / load_and_migrate() / save(&AppSettings)
@@ -202,11 +226,15 @@ format_guid_d / parse_guid_d / format_timestamp_o / parse_timestamp_o
 
 `TunnelConfig` keeps timestamps on the row itself (C# model parity). `insert` stamps both; `update` does **not** auto-stamp — editors must bump `UpdatedAt` only after the DPAPI payload is on disk so `TunnelManager` does not cache a stale secret under a new stamp (see [`07-tunnels-mcp.md`](07-tunnels-mcp.md) edited-config invalidation).
 
+`CredentialProfile` is metadata-only (C# parity). Passwords never enter this crate's write path — store/read/delete via `wormhole-secrets-win::PasswordStore` / `FakePasswordStore` keyed by **credential id**. Glue `delete_credential_profile` deletes the SQLite row first, then best-effort secret cleanup (same order as C# `CredentialsViewModel`).
+
 
 
 ## Out of scope (later)
 
-- `GetByTunnelConfigId` (node reference sample for delete guards) and credential / Bitwarden cache repositories
+- `GetByTunnelConfigId` (node reference sample for delete guards) and Bitwarden credential cache repository
+
+- Credentials page UI / Bitwarden virtual catalog rows (`IsVirtualBitwarden`)
 
 - DPAPI tunnel secret IO (lives in `wormhole-secrets-win`; not written by this repository)
 
@@ -239,4 +267,5 @@ format_guid_d / parse_guid_d / format_timestamp_o / parse_timestamp_o
 
 - [`adversarial-ledger-folder-crud.md`](adversarial-ledger-folder-crud.md) — folder CRUD + connection reparent stub review closed
 
+- [`adversarial-ledger-tunnel-config-crud.md`](adversarial-ledger-tunnel-config-crud.md) — TunnelConfig metadata CRUD review closed
 

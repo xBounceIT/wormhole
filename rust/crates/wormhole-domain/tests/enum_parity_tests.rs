@@ -1,8 +1,9 @@
 //! Discriminant parity with C# / SQLite + TryFrom round-trips.
 
 use wormhole_domain::{
-    CredentialBindingMode, NodeKind, ProtocolType, SerialFlowControlMode, SerialParityMode,
-    SerialStopBitsMode, TunnelKind,
+    CredentialBindingMode, CredentialKind, CredentialSecretProvider, NodeKind, ProtocolType,
+    SerialFlowControlMode, SerialParityMode, SerialStopBitsMode, TunnelKind,
+    BITWARDEN_PASSWORD_FIELD_PATH,
 };
 
 #[test]
@@ -27,8 +28,15 @@ fn node_kind_and_credential_mode_discriminants_match_csharp() {
     assert_eq!(CredentialBindingMode::Inherit.as_i32(), 0);
     assert_eq!(CredentialBindingMode::None.as_i32(), 1);
     assert_eq!(CredentialBindingMode::Saved.as_i32(), 2);
+    assert_eq!(CredentialKind::Password.as_i32(), 0);
+    assert_eq!(CredentialKind::SshKey.as_i32(), 1);
+    assert_eq!(CredentialSecretProvider::Local.as_i32(), 0);
+    assert_eq!(CredentialSecretProvider::Bitwarden.as_i32(), 1);
+    assert_eq!(BITWARDEN_PASSWORD_FIELD_PATH, "login.password");
     assert!(NodeKind::try_from(2).is_err());
     assert!(CredentialBindingMode::try_from(3).is_err());
+    assert!(CredentialKind::try_from(2).is_err());
+    assert!(CredentialSecretProvider::try_from(2).is_err());
 }
 
 #[test]

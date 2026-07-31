@@ -1,6 +1,6 @@
 # SSH library spike — russh
 
-**Status:** crate `wormhole-ssh` scaffold (auth methods + shell behind feature `client`; known_hosts + verify-on-connect + host-key prompt glue + agent availability probe + agent↔auth select glue + auto-sudo detector + session glue stub always on)  
+**Status:** crate `wormhole-ssh` scaffold (auth methods + shell behind feature `client`; known_hosts + verify-on-connect + host-key prompt glue + agent availability probe + agent↔auth select glue + auto-sudo detector + session glue stub + reconnect/backoff policy stub always on)  
 **Date:** 2026-07-31  
 **Context7 MCP:** unavailable in this environment; versions from crates.io / docs.rs.
 
@@ -51,7 +51,7 @@ ConnectionProfile.tunnel_enabled
 | `client` | **on** | Pulls `russh`, `tokio`, `async-trait`, `wormhole-terminal`; exposes connect/shell APIs |
 
 `cargo check -p wormhole-ssh` exercises the default `client` feature.
-`cargo check -p wormhole-ssh --no-default-features` must still compile (transport/client modules gated off; **known_hosts**, **verify-on-connect**, **host-key prompt glue**, **agent probe**, **agent↔auth select glue**, **auto-sudo detector**, and **auto-sudo session glue** always build).
+`cargo check -p wormhole-ssh --no-default-features` must still compile (transport/client modules gated off; **known_hosts**, **verify-on-connect**, **host-key prompt glue**, **agent probe**, **agent↔auth select glue**, **auto-sudo detector**, **auto-sudo session glue**, and **reconnect/backoff policy** always build).
 
 ## Host-key known_hosts
 
@@ -180,6 +180,27 @@ password. Sync write errors never include payload bytes and **fail closed**
 until the 10s prompt timeout. Live SSH shell / WebView2 pump / GPUI wiring
 remains Pending — Fake terminal only.
 
+## SSH reconnect / backoff policy stub (always on)
+
+Pure decision glue mirroring C# `SshSessionViewModel` auto-reconnect (no live
+SSH / no GPUI / no credential fields):
+
+| Item | API |
+|---|---|
+| Cause | `SshDisconnectCause::{UserCancel,UnexpectedDrop,Error{retryable}}` |
+| Decide | `decide_after_disconnect` / `SshReconnectPolicy::on_disconnect` |
+| Continue | `should_continue_auto_reconnect` / `decide_after_connect_attempt` (C# `ShouldContinueAutoReconnect`: only Failed+retryable) |
+| Budget | `SshReconnectBudget` + `MAX_AUTO_RECONNECT_ATTEMPTS` (3); reset on user cancel / stability window |
+| Schedule | `FixedBackoffSchedule` (C# fixed 10s) + `FakeBackoffSchedule` (scripted delays in unit tests) |
+| Hostile | budget/schedule mismatch, lying Fake (`max>0` but no attempt-1 delay), `attempts_consumed > max` → `ReconnectPolicyError` (fail closed, never Retry) |
+
+Defaults: 3 attempts, `AUTO_RECONNECT_DELAY` = 10s, `AUTO_RECONNECT_STABILITY_WINDOW` = 30s
+(timer owned by the caller). User cancel and non-retryable errors never
+auto-reconnect. `SshReconnectPolicy::on_disconnect(UserCancel)` resets the
+budget (C# Disconnect pairing); pure `decide_after_disconnect` does not mutate.
+`begin_retry` validates the next slot **before** recording (atomic fail-closed).
+Orchestrator / UI loop wiring remains Pending.
+
 ## Non-goals (this spike)
 
 - Host-key mismatch **UI dialog** (prompt trait + Fake store glue exist; GPUI/WinUI dialog Pending)
@@ -187,6 +208,7 @@ remains Pending — Fake terminal only.
 - Real SSH agent / keyboard-interactive wire protocols (availability probe + connect-prep select glue only; auth still stubs)
 - Pageant detection (OpenSSH named-pipe probe only on Windows)
 - Live auto-sudo against a real SSH shell / WebView2 pump (glue + Fake terminal only)
+- Live SSH reconnect loop / WebView2 rebind (policy + Fake schedule only)
 - Real SOCKS5 dialer implementation
 - Wiring into GPUI / WebView2 terminal bridge
 - Cross-process merge of concurrent known_hosts writers (last atomic writer wins)
@@ -200,7 +222,7 @@ cargo test -p wormhole-ssh
 cargo test -p wormhole-ssh --no-default-features
 cargo check -p wormhole-ssh
 cargo check -p wormhole-ssh --no-default-features
-# verify-on-connect + prompt glue + auto-sudo + agent probe + agent↔auth select always on (Fake store / FakeAgent offline).
+# verify-on-connect + prompt glue + auto-sudo + reconnect policy + agent probe + agent↔auth select always on (Fake store / FakeAgent / FakeBackoff offline).
 # Optional live server:
 # $env:WORMHOLE_SSH_HOST=...; $env:WORMHOLE_SSH_USER=...; $env:WORMHOLE_SSH_PASSWORD=...
 # cargo test -p wormhole-ssh -- --ignored

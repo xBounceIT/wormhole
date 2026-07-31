@@ -10,11 +10,15 @@ use tempfile::TempDir;
 use uuid::Uuid;
 use wormhole_domain::InheritanceResolver;
 use wormhole_domain::ResolveError;
+use wormhole_secrets_win::{FakeKeyMaterialStore, FakePasswordStore, KeyMaterialStore, PasswordStore};
 use wormhole_storage::{
-    format_guid_d, format_timestamp_o, parse_timestamp_o, AppSettings, ConnectionNode,
-    ConnectionRepository, CredentialBindingMode, Migration, MigrationRunner, NodeKind, ProtocolType,
-    SerialFlowControlMode, SerialParityMode, SerialStopBitsMode, SettingsStore,
-    SqliteConnectionFactory, StorageError, TunnelConfig, TunnelConfigRepository, TunnelKind,
+    create_credential_profile, delete_credential_profile, format_guid_d, format_timestamp_o,
+    parse_timestamp_o, rename_credential_profile, AppSettings, ConnectionNode, ConnectionRepository,
+    CredentialBindingMode, CredentialKind, CredentialProfileDraft, CredentialRepository,
+    CredentialSecretProvider, CredentialSecrets, MemoryCredentialSecrets, Migration,
+    MigrationRunner, NodeKind, ProtocolType, SerialFlowControlMode, SerialParityMode,
+    SerialStopBitsMode, SettingsStore, SqliteConnectionFactory, StorageError, TunnelConfig,
+    TunnelConfigRepository, TunnelKind, BITWARDEN_PASSWORD_FIELD_PATH,
 };
 
 fn temp_db() -> (TempDir, PathBuf, SqliteConnectionFactory) {
@@ -1416,4 +1420,478 @@ fn tunnel_config_delete_succeeds_even_when_node_references_id() {
         )
         .unwrap();
     assert_eq!(leftover, format_guid_d(tunnel_id));
+}
+
+// --- CredentialProfiles metadata CRUD + glue ---------------------------------
+
+/// Adapts CredMgr / key Fake stores into [`CredentialSecrets`] for delete glue tests.
+struct FakeCredentialSecrets<'a> {
+    passwords: &'a FakePasswordStore,
+    keys: &'a FakeKeyMaterialStore,
+}
+
+impl CredentialSecrets for FakeCredentialSecrets<'_> {
+    fn delete_password(&self, credential_id: &Uuid) -> Result<(), String> {
+        self.passwords
+            .delete(credential_id)
+            .map_err(|e| e.to_string())
+    }
+
+    fn delete_private_key(&self, credential_id: &Uuid) -> Result<(), String> {
+        self.keys.delete(credential_id).map_err(|e| e.to_string())
+    }
+}
+
+#[test]
+fn credential_profile_create_rename_delete_round_trip() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = CredentialRepository::new(&factory);
+
+    let id_b = Uuid::parse_str("aa111111-bbbb-1111-1111-111111111111").unwrap();
+    let id_a = Uuid::parse_str("aa222222-aaaa-2222-2222-222222222222").unwrap();
+
+    let mut draft_b = CredentialProfileDraft::local_password(id_b, "bravo-cred");
+    draft_b.username = Some("bob".into());
+    let stored_b = create_credential_profile(&repo, draft_b).unwrap();
+    assert_eq!(stored_b.id, id_b);
+    assert_eq!(stored_b.name, "bravo-cred");
+    assert_eq!(stored_b.username.as_deref(), Some("bob"));
+    assert_eq!(stored_b.kind, CredentialKind::Password);
+    assert_eq!(stored_b.protocol, ProtocolType::Ssh);
+    assert_eq!(stored_b.secret_provider, CredentialSecretProvider::Local);
+    assert_eq!(
+        stored_b.bitwarden_field_path.as_deref(),
+        Some(BITWARDEN_PASSWORD_FIELD_PATH)
+    );
+
+    let draft_a = CredentialProfileDraft::local_password(id_a, "alpha-cred");
+    create_credential_profile(&repo, draft_a).unwrap();
+
+    // list_all ordered by Name.
+    let all = repo.list_all().unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].name, "alpha-cred");
+    assert_eq!(all[1].name, "bravo-cred");
+
+    let renamed = rename_credential_profile(&repo, id_b, "  bravo-renamed  ").unwrap();
+    assert_eq!(renamed.name, "bravo-renamed");
+    assert_eq!(repo.get_by_id(id_b).unwrap().unwrap().name, "bravo-renamed");
+
+    // Case-insensitive GUID lookup.
+    {
+        let conn = factory.open().unwrap();
+        conn.execute(
+            "UPDATE CredentialProfiles SET Id = ?1 WHERE Id = ?2;",
+            rusqlite::params![
+                "AA111111-BBBB-1111-1111-111111111111",
+                format_guid_d(id_b)
+            ],
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        repo.get_by_id(id_b).unwrap().unwrap().name,
+        "bravo-renamed"
+    );
+
+    // Writers emit lowercase format D; no password columns on the table.
+    {
+        let conn = factory.open().unwrap();
+        let id_c = Uuid::parse_str("aa333333-cccc-3333-3333-333333333333").unwrap();
+        create_credential_profile(
+            &repo,
+            CredentialProfileDraft::local_password(id_c, "charlie"),
+        )
+        .unwrap();
+        let (id_text, name, kind, protocol, provider, created): (
+            String,
+            String,
+            i32,
+            i32,
+            i32,
+            String,
+        ) = conn
+            .query_row(
+                "SELECT Id, Name, Kind, Protocol, SecretProvider, CreatedAt
+                 FROM CredentialProfiles WHERE Id = ?1;",
+                rusqlite::params![format_guid_d(id_c)],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            )
+            .unwrap();
+        assert_eq!(id_text, "aa333333-cccc-3333-3333-333333333333");
+        assert_eq!(name, "charlie");
+        assert_eq!(kind, 0);
+        assert_eq!(protocol, 0);
+        assert_eq!(provider, 0);
+        parse_timestamp_o(&created).unwrap();
+
+        let col_names: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM pragma_table_info('CredentialProfiles');")
+                .unwrap();
+            stmt.query_map([], |r| r.get(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect()
+        };
+        assert_eq!(col_names.len(), 12, "CredentialProfiles metadata-only column count");
+        for forbidden in ["Password", "Secret", "CredentialBlob", "PrivateKey"] {
+            assert!(
+                !col_names.iter().any(|c| c.eq_ignore_ascii_case(forbidden)),
+                "forbidden column {forbidden} in {col_names:?}"
+            );
+        }
+        // PrivateKeyFileName is a filename pointer — allowed; PrivateKey body is not.
+        assert!(col_names.iter().any(|c| c == "PrivateKeyFileName"));
+    }
+
+    delete_credential_profile(&repo, id_a, None).unwrap();
+    assert!(repo.get_by_id(id_a).unwrap().is_none());
+}
+
+#[test]
+fn credential_profile_rejects_blank_name_on_create_rename_update() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = CredentialRepository::new(&factory);
+    let id = Uuid::parse_str("bb111111-ffff-1111-1111-111111111111").unwrap();
+
+    for blank in ["", "   ", "\t\n"] {
+        let err = create_credential_profile(
+            &repo,
+            CredentialProfileDraft::local_password(id, blank),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, StorageError::InvalidArgument(_)),
+            "create blank {blank:?}: {err:?}"
+        );
+    }
+    assert!(repo.list_all().unwrap().is_empty());
+
+    let stored = create_credential_profile(
+        &repo,
+        CredentialProfileDraft::local_password(id, "  keep-me  "),
+    )
+    .unwrap();
+    assert_eq!(stored.name, "keep-me");
+
+    for blank in ["", "   "] {
+        let err = rename_credential_profile(&repo, id, blank).unwrap_err();
+        assert!(
+            matches!(err, StorageError::InvalidArgument(_)),
+            "rename blank {blank:?}: {err:?}"
+        );
+    }
+    assert_eq!(repo.get_by_id(id).unwrap().unwrap().name, "keep-me");
+
+    let mut row = repo.get_by_id(id).unwrap().unwrap();
+    row.name = "   ".into();
+    let err = repo.update(&row).unwrap_err();
+    assert!(matches!(err, StorageError::InvalidArgument(_)), "got {err:?}");
+}
+
+#[test]
+fn credential_profile_passwords_stay_out_of_band_via_fake_credmgr() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = CredentialRepository::new(&factory);
+    let passwords = FakePasswordStore::new();
+    let keys = FakeKeyMaterialStore::new();
+    let secrets = FakeCredentialSecrets {
+        passwords: &passwords,
+        keys: &keys,
+    };
+
+    let id = Uuid::parse_str("cc111111-cccc-1111-1111-111111111111").unwrap();
+    create_credential_profile(
+        &repo,
+        CredentialProfileDraft::local_password(id, "with-secret"),
+    )
+    .unwrap();
+
+    // Password lives only in CredMgr Fake — never on the SQLite row / Debug.
+    passwords.store(&id, "s3cret-body").unwrap();
+    keys.store(&id, b"-----BEGIN KEY-----\n").unwrap();
+
+    let row = repo.get_by_id(id).unwrap().unwrap();
+    let debug = format!("{row:?}");
+    assert!(!debug.contains("s3cret-body"));
+    assert!(!debug.contains("BEGIN KEY"));
+    assert_eq!(passwords.read(&id).unwrap().as_deref(), Some("s3cret-body"));
+
+    // Raw SQL scan: no column holds the password body.
+    {
+        let conn = factory.open().unwrap();
+        let blob: String = conn
+            .query_row(
+                "SELECT typeof(Id)||'|'||Id||'|'||Name||'|'||ifnull(Username,'')||'|'||
+                        ifnull(Domain,'')||'|'||Kind||'|'||ifnull(PrivateKeyFileName,'')||'|'||
+                        Protocol||'|'||SecretProvider||'|'||ifnull(BitwardenItemId,'')||'|'||
+                        ifnull(BitwardenItemName,'')||'|'||ifnull(BitwardenFieldPath,'')||'|'||
+                        CreatedAt
+                 FROM CredentialProfiles WHERE Id = ?1;",
+                rusqlite::params![format_guid_d(id)],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !blob.contains("s3cret-body"),
+            "password leaked into SQLite: {blob}"
+        );
+    }
+
+    delete_credential_profile(&repo, id, Some(&secrets)).unwrap();
+    assert!(repo.get_by_id(id).unwrap().is_none());
+    assert!(passwords.read(&id).unwrap().is_none());
+    assert!(keys.read(&id).unwrap().is_none());
+}
+
+#[test]
+fn credential_profile_memory_secrets_cleanup_on_delete() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = CredentialRepository::new(&factory);
+    let memory = MemoryCredentialSecrets::new();
+    let id = Uuid::parse_str("dd111111-dddd-1111-1111-111111111111").unwrap();
+    create_credential_profile(&repo, CredentialProfileDraft::local_password(id, "mem")).unwrap();
+    delete_credential_profile(&repo, id, Some(&memory)).unwrap();
+    assert_eq!(memory.deleted_password_ids(), vec![id]);
+    assert_eq!(memory.deleted_key_ids(), vec![id]);
+    let dbg = format!("{memory:?}");
+    assert!(dbg.contains("cred_mgr_delete_count"));
+    assert!(!dbg.contains("s3cret"));
+}
+
+#[test]
+fn credential_profile_duplicate_name_rejected_by_unique_index() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = CredentialRepository::new(&factory);
+    let a = Uuid::parse_str("ee111111-eeee-1111-1111-111111111111").unwrap();
+    let b = Uuid::parse_str("ee222222-eeee-2222-2222-222222222222").unwrap();
+    create_credential_profile(&repo, CredentialProfileDraft::local_password(a, "dup")).unwrap();
+    let err = create_credential_profile(&repo, CredentialProfileDraft::local_password(b, "dup"))
+        .unwrap_err();
+    assert!(matches!(err, StorageError::Sqlite(_)), "got {err:?}");
+    assert_eq!(repo.list_all().unwrap().len(), 1);
+}
+
+#[test]
+fn credential_profile_binds_hostile_name_without_sql_injection() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = CredentialRepository::new(&factory);
+    let id = Uuid::parse_str("ff111111-ffff-1111-1111-111111111111").unwrap();
+    let hostile = "'; DROP TABLE CredentialProfiles;--";
+    create_credential_profile(&repo, CredentialProfileDraft::local_password(id, hostile)).unwrap();
+    assert_eq!(repo.get_by_id(id).unwrap().unwrap().name, hostile);
+    assert_eq!(repo.list_all().unwrap().len(), 1);
+}
+
+#[test]
+fn credential_profile_rejects_unknown_kind_on_read() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let id = Uuid::parse_str("ff222222-ffff-2222-2222-222222222222").unwrap();
+    {
+        let conn = factory.open().unwrap();
+        conn.execute(
+            "INSERT INTO CredentialProfiles
+                (Id, Name, Username, Domain, Kind, PrivateKeyFileName, Protocol,
+                 SecretProvider, BitwardenItemId, BitwardenItemName, BitwardenFieldPath, CreatedAt)
+             VALUES (?1, 'bad', NULL, NULL, 99, NULL, 0, 0, NULL, NULL, 'login.password', ?2);",
+            rusqlite::params![format_guid_d(id), format_timestamp_o(Utc::now())],
+        )
+        .unwrap();
+    }
+    let repo = CredentialRepository::new(&factory);
+    assert!(matches!(repo.list_all().unwrap_err(), StorageError::Sqlite(_)));
+    assert!(matches!(
+        repo.get_by_id(id).unwrap_err(),
+        StorageError::Sqlite(_)
+    ));
+}
+
+#[test]
+fn credential_profile_normalize_blank_bitwarden_field_path() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = CredentialRepository::new(&factory);
+    let id = Uuid::parse_str("ff333333-ffff-3333-3333-333333333333").unwrap();
+    let mut draft = CredentialProfileDraft::local_password(id, "bw-path");
+    draft.bitwarden_field_path = Some("   ".into());
+    let stored = create_credential_profile(&repo, draft).unwrap();
+    assert_eq!(
+        stored.bitwarden_field_path.as_deref(),
+        Some(BITWARDEN_PASSWORD_FIELD_PATH)
+    );
+
+    // Non-blank paths trim (C# NormalizeBitwardenFieldPath); None → default.
+    let id2 = Uuid::parse_str("ff333333-ffff-3333-3333-333333333334").unwrap();
+    let mut draft2 = CredentialProfileDraft::local_password(id2, "bw-trim");
+    draft2.bitwarden_field_path = Some("  login.custom  ".into());
+    let stored2 = create_credential_profile(&repo, draft2).unwrap();
+    assert_eq!(stored2.bitwarden_field_path.as_deref(), Some("login.custom"));
+
+    let id3 = Uuid::parse_str("ff333333-ffff-3333-3333-333333333335").unwrap();
+    let mut draft3 = CredentialProfileDraft::local_password(id3, "bw-none");
+    draft3.bitwarden_field_path = None;
+    let stored3 = create_credential_profile(&repo, draft3).unwrap();
+    assert_eq!(
+        stored3.bitwarden_field_path.as_deref(),
+        Some(BITWARDEN_PASSWORD_FIELD_PATH)
+    );
+
+    // update path also trims.
+    let mut row = repo.get_by_id(id2).unwrap().unwrap();
+    row.bitwarden_field_path = Some("  fields.api_key  ".into());
+    repo.update(&row).unwrap();
+    assert_eq!(
+        repo.get_by_id(id2)
+            .unwrap()
+            .unwrap()
+            .bitwarden_field_path
+            .as_deref(),
+        Some("fields.api_key")
+    );
+}
+
+#[test]
+fn credential_profile_delete_succeeds_even_when_node_references_id() {
+    // Repo-layer fail-open: C# DeleteAsync does not check Nodes.CredentialId.
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = CredentialRepository::new(&factory);
+    let cred_id = Uuid::parse_str("ff444444-ffff-4444-4444-444444444444").unwrap();
+    let node_id = Uuid::parse_str("ff555555-ffff-5555-5555-555555555555").unwrap();
+    create_credential_profile(
+        &repo,
+        CredentialProfileDraft::local_password(cred_id, "in-use"),
+    )
+    .unwrap();
+    {
+        let conn = factory.open().unwrap();
+        let now = format_timestamp_o(Utc::now());
+        conn.execute(
+            "INSERT INTO Nodes (Id, ParentId, Name, Kind, SortOrder, Protocol, Host, Port,
+                                CredentialId, CreatedAt, UpdatedAt)
+             VALUES (?1, NULL, 'conn', 1, 0, 0, 'h', 22, ?2, ?3, ?3);",
+            rusqlite::params![format_guid_d(node_id), format_guid_d(cred_id), now],
+        )
+        .unwrap();
+    }
+    delete_credential_profile(&repo, cred_id, None).unwrap();
+    assert!(repo.get_by_id(cred_id).unwrap().is_none());
+    let leftover: String = factory
+        .open()
+        .unwrap()
+        .query_row(
+            "SELECT CredentialId FROM Nodes WHERE Id = ?1;",
+            rusqlite::params![format_guid_d(node_id)],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(leftover, format_guid_d(cred_id));
+}
+
+#[test]
+fn credential_profile_rename_missing_id_is_not_found() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = CredentialRepository::new(&factory);
+    let missing = Uuid::parse_str("ff666666-ffff-6666-6666-666666666666").unwrap();
+    let err = rename_credential_profile(&repo, missing, "nope").unwrap_err();
+    assert!(matches!(err, StorageError::NotFound(id) if id == missing));
+}
+
+#[test]
+fn credential_profile_update_duplicate_name_rejected() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = CredentialRepository::new(&factory);
+    let a = Uuid::parse_str("ff777777-ffff-7777-7777-777777777777").unwrap();
+    let b = Uuid::parse_str("ff888888-ffff-8888-8888-888888888888").unwrap();
+    create_credential_profile(&repo, CredentialProfileDraft::local_password(a, "alpha")).unwrap();
+    create_credential_profile(&repo, CredentialProfileDraft::local_password(b, "beta")).unwrap();
+    let err = rename_credential_profile(&repo, b, "alpha").unwrap_err();
+    assert!(matches!(err, StorageError::Sqlite(_)), "got {err:?}");
+    assert_eq!(repo.get_by_id(b).unwrap().unwrap().name, "beta");
+}
+
+#[test]
+fn credential_profile_duplicate_id_insert_rejected() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = CredentialRepository::new(&factory);
+    let id = Uuid::parse_str("ff999999-ffff-9999-9999-999999999999").unwrap();
+    create_credential_profile(&repo, CredentialProfileDraft::local_password(id, "first")).unwrap();
+    let err = create_credential_profile(
+        &repo,
+        CredentialProfileDraft::local_password(id, "second"),
+    )
+    .unwrap_err();
+    assert!(matches!(err, StorageError::Sqlite(_)), "got {err:?}");
+    assert_eq!(repo.list_all().unwrap().len(), 1);
+    assert_eq!(repo.get_by_id(id).unwrap().unwrap().name, "first");
+}
+
+#[test]
+fn credential_profile_rejects_unknown_protocol_and_provider_on_read() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let bad_protocol = Uuid::parse_str("aa000001-ffff-0001-0001-000000000001").unwrap();
+    let bad_provider = Uuid::parse_str("aa000002-ffff-0002-0002-000000000002").unwrap();
+    let now = format_timestamp_o(Utc::now());
+    {
+        let conn = factory.open().unwrap();
+        conn.execute(
+            "INSERT INTO CredentialProfiles
+                (Id, Name, Username, Domain, Kind, PrivateKeyFileName, Protocol,
+                 SecretProvider, BitwardenItemId, BitwardenItemName, BitwardenFieldPath, CreatedAt)
+             VALUES (?1, 'bad-proto', NULL, NULL, 0, NULL, 99, 0, NULL, NULL, 'login.password', ?2);",
+            rusqlite::params![format_guid_d(bad_protocol), now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO CredentialProfiles
+                (Id, Name, Username, Domain, Kind, PrivateKeyFileName, Protocol,
+                 SecretProvider, BitwardenItemId, BitwardenItemName, BitwardenFieldPath, CreatedAt)
+             VALUES (?1, 'bad-prov', NULL, NULL, 0, NULL, 0, 99, NULL, NULL, 'login.password', ?2);",
+            rusqlite::params![format_guid_d(bad_provider), now],
+        )
+        .unwrap();
+    }
+    let repo = CredentialRepository::new(&factory);
+    assert!(matches!(
+        repo.get_by_id(bad_protocol).unwrap_err(),
+        StorageError::Sqlite(_)
+    ));
+    assert!(matches!(
+        repo.get_by_id(bad_provider).unwrap_err(),
+        StorageError::Sqlite(_)
+    ));
+    assert!(matches!(repo.list_all().unwrap_err(), StorageError::Sqlite(_)));
+}
+
+#[test]
+fn credential_profile_secret_cleanup_errors_do_not_resurrect_row() {
+    struct FailingSecrets;
+    impl CredentialSecrets for FailingSecrets {
+        fn delete_password(&self, _: &Uuid) -> Result<(), String> {
+            Err("credmgr boom".into())
+        }
+        fn delete_private_key(&self, _: &Uuid) -> Result<(), String> {
+            Err("key boom".into())
+        }
+    }
+
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = CredentialRepository::new(&factory);
+    let id = Uuid::parse_str("aa000003-ffff-0003-0003-000000000003").unwrap();
+    create_credential_profile(&repo, CredentialProfileDraft::local_password(id, "gone")).unwrap();
+    delete_credential_profile(&repo, id, Some(&FailingSecrets)).unwrap();
+    assert!(repo.get_by_id(id).unwrap().is_none());
 }

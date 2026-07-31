@@ -1,14 +1,15 @@
 //! Wormhole GPUI shell skeleton + connection-tree / settings / connection-editor VMs.
 //!
 //! Pure UI state (sidebar regions, tab strip, session tab bar, ≤4-pane layout tree,
-//! settings, connection editor, Quick Connect + recent-history MRU, serial COM picker
-//! + baud/parity preset glue) compiles without GPUI. Enable `--features gpui` for shell
+//! settings, connection editor, Quick Connect + recent-history MRU, credential picker
+//! search glue, serial COM picker + baud/parity preset glue) compiles without GPUI.
+//! Enable `--features gpui` for shell
 //! chrome (`gpui_platform::application()`). Enable `--features storage` for the SQLite
-//! connection-tree read adapter, `StorageSettingsStore`, and editor save glue. Default
-//! features `session` / `tunnels` / `update` wire tree Open / Quick Connect →
-//! `wormhole-session`, OTP / Fortinet SAML prompt UI glue → `wormhole-tunnels`
-//! (`ChannelOtpPrompt` / `ChannelSamlAuthCallback` + Fake; no dialog / WebView2
-//! chrome), and update notify glue → `wormhole-update` (`check_now` +
+//! connection-tree read adapter, `StorageSettingsStore`, editor save glue, and tree
+//! connection reparent apply. Default features `session` / `tunnels` / `update` wire
+//! tree Open / Quick Connect → `wormhole-session`, OTP / Fortinet SAML prompt UI glue →
+//! `wormhole-tunnels` (`ChannelOtpPrompt` / `ChannelSamlAuthCallback` + Fake; no dialog /
+//! WebView2 chrome), and update notify glue → `wormhole-update` (`check_now` +
 //! Fake / NetworkStub; no live HTTP).
 //!
 //! See `docs/migration/08-ui.md`, `docs/migration/17-tree-settings-vm.md`,
@@ -17,6 +18,7 @@
 //! `docs/migration/13-update-logging.md`.
 
 mod connection_editor;
+mod credential_picker;
 mod error;
 mod layout_sink;
 mod pane_layout;
@@ -46,6 +48,11 @@ pub use connection_editor::{
     ConnectionEditorMode, ConnectionEditorState, CredentialUiMode, RdpDriveRedirectMode,
     SshAutoSudoMode, TunnelUiSelection, TunnelUiState, ValidationError, ValidationReport,
     VisibleFields, WriteOptions,
+};
+pub use credential_picker::{
+    filter_credential_profiles, filter_credential_profiles_from, profile_matches_query,
+    CredentialPickerError, CredentialPickerSearchVm, CredentialProfileRow,
+    CredentialProfileSource, FakeCredentialList,
 };
 #[cfg(feature = "storage")]
 pub use connection_editor::{
@@ -92,9 +99,12 @@ pub use shell::{ShellState, SidebarRegion};
 pub use tabs::{SessionTab, TabStrip};
 pub use theme::{ThemeTokens, THEME};
 pub use tree::{
-    fields_match_query_lower, node_matches_query, visible_connection_ids,
-    visible_connection_ids_from, ConnectionNodeSource, ConnectionTreeModel, FlattenedRow,
-    MemoryConnectionSource, TreeError, TreeNode, MAX_DISPLAYED_SEARCH_MATCHES,
+    apply_reparent_memory, fields_match_query_lower, node_matches_query, reparent_memory,
+    should_reject_drag_selection, should_reject_drag_selection_from, validate_reparent,
+    validate_reparent_from, visible_connection_ids, visible_connection_ids_from,
+    ConnectionNodeSource, ConnectionTreeModel, FlattenedRow, MemoryConnectionSource,
+    ReparentError, ReparentOptions, TreeError, TreeNode, ValidatedReparent,
+    MAX_DISPLAYED_SEARCH_MATCHES,
 };
 #[cfg(feature = "session")]
 pub use tree::{
@@ -116,7 +126,7 @@ pub use workspace::{PaneId, WorkspaceState, MAX_PANES};
 #[cfg(feature = "storage")]
 pub use settings::StorageSettingsStore;
 #[cfg(feature = "storage")]
-pub use tree::StorageConnectionSource;
+pub use tree::{reparent_connection_storage, StorageConnectionSource};
 
 #[cfg(feature = "tunnels")]
 pub use otp_prompt::{

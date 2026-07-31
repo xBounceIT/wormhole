@@ -58,6 +58,23 @@ Internally wraps `ConnectionEditorState` in `ConnectionEditorMode::QuickConnect`
 4. Caller resolves profile (`try_build_ephemeral_profile` / `prepare_connect`) and stores password in a process-local transient store keyed by `node.id` **or** passes it only via `ConnectOptions::password`
 5. Open session tab / call `connect_prepared` / `connect_quick_connect` with `profile.is_ephemeral == true`
 
+### Transient credential store (`wormhole-secrets-win`)
+
+Process-local put/get/clear for the out-of-band QC password (C#
+`ITransientSessionCredentialStore`) lives in
+[`wormhole-secrets-win::transient_session`](04-secrets.md#transient-session-credentials-ephemeral--process-local)
+— **not** in this UI crate and **never** SQLite / CredMgr:
+
+| API | Role |
+|---|---|
+| `TransientSessionCredentialStore` | Trait: `store` / `read` / `remove` / `clear` by session or node `Uuid` |
+| `MemoryTransientSessionCredentialStore` | Production in-process map |
+| `FakeTransientSessionCredentialStore` | Unit-test fake (Debug length-only) |
+| Empty `store("")` | Fail closed (`SecretsError::EmptyPassword`); QC skips store when password absent |
+
+Shell tab-close / collection reset should `remove(node_id)` / `clear()` so
+ephemeral secrets do not outlive their tab.
+
 ### Session orchestrator glue (`session_connect`)
 
 Pure helper (no GPUI) that bridges QC accept → [`wormhole-session`](16-session-orchestrator.md):

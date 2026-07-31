@@ -19,3 +19,4 @@ wormhole-domain = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 wormhole-testkit = { workspace = true }
+wormhole-secrets-win = { workspace = true }

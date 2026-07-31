@@ -58,7 +58,16 @@ Default builds **do not** pull `vnc-rs`. They ship RFB subset types + a decode/i
 
 - `VncPassword` (8-**byte** classic DES limit; redacted `Debug`; no `Display`)
 
-- **Auth glue** (`auth_glue`): no-auth vs classic VNC password select (`select_vnc_auth` / `provide_vnc_auth_input` / `FakeVncPasswordProvider`). Username/domain on `VncAuthFields` are **ignored** (C# editor hides them for VNC; `CredentialsAuthenticationInput` → `UnsupportedCredentialsAuth`). Missing / **empty** password when VncAuth required → `PasswordRequired` (fail-closed); provider cancel → `AuthCancelled`. `Debug` redacts password on fields / selection / Fake. No live RFB challenge.
+- **Auth glue** (`auth_glue`): no-auth vs classic VNC password select (`select_vnc_auth` / `provide_vnc_auth_input` / `resolve_vnc_auth_from_provider` / `FakeVncPasswordProvider`). Username/domain on `VncAuthFields` are **ignored** (C# editor hides them for VNC). `Debug` redacts password on fields / selection / Fake. No live RFB challenge. See [adversarial-ledger-vnc-password-auth.md](adversarial-ledger-vnc-password-auth.md).
+
+  Fail-closed (username/domain never sent; provider not consulted for None / Credentials):
+
+  | Condition | Error |
+  |---|---|
+  | `CredentialsAuthenticationInput` / `VncAuthInputKind::Credentials` | `UnsupportedCredentialsAuth` |
+  | Provider returns `Ok(None)` (user cancel) | `AuthCancelled` |
+  | Missing or empty password when VncAuth required | `PasswordRequired` |
+  | Provider hard `Err` | propagated unchanged |
 
 - `RawPixelBuffer` — contiguous BGRA/RGBA store with **damage-rect merge** (overlapping + edge-adjacent)
 

@@ -116,7 +116,7 @@ All environments should live under `%LOCALAPPDATA%\Wormhole\…` (not beside Pro
 | mRemoteNG AES-GCM | `Services/MRemoteNg/MRemoteNgCrypto.cs` | **16-byte nonce** — BouncyCastle required |
 | Bitwarden CLI session | `BitwardenCliVaultClient` / session service | Memory-only session key; never SQLite/backup |
 | Fortinet SAML cookies / auth_id | `FortinetSamlAuthService` | Ephemeral; stdin to sidecar; not persisted |
-| Transient session passwords | `ITransientSessionCredentialStore` | In-memory for Quick Connect / prompts |
+| Transient session passwords | `ITransientSessionCredentialStore` | In-memory for Quick Connect / prompts; Rust: `wormhole-secrets-win::transient_session` (`Memory`/`Fake`; never SQLite/CredMgr/DPAPI) |
 
 ### 5.4 Explicit non-secrets (safe to copy in fixtures metadata)
 

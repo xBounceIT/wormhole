@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "SSH protocol spike for Wormhole (russh). Auth/shell behind `client`; known_hosts + verify-on-connect + host-key prompt + agent probe + agent↔auth select glue + auto-sudo detector/glue always on."
+description = "SSH protocol spike for Wormhole (russh). Auth/shell behind `client`; known_hosts + verify-on-connect + host-key prompt + agent probe + agent↔auth select glue + auto-sudo detector/glue + reconnect/backoff policy always on."
 publish = false
 
 [lib]

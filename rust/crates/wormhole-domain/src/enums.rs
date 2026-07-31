@@ -153,6 +153,85 @@ impl CredentialBindingSentinelIds {
     }
 }
 
+/// Mirrors `Wormhole.Models.CredentialKind` (Password = 0, SshKey = 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(i32)]
+pub enum CredentialKind {
+    Password = 0,
+    SshKey = 1,
+}
+
+impl CredentialKind {
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+}
+
+impl TryFrom<i32> for CredentialKind {
+    type Error = InvalidEnumValue;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Password),
+            1 => Ok(Self::SshKey),
+            _ => Err(InvalidEnumValue {
+                enum_name: "CredentialKind",
+                value,
+            }),
+        }
+    }
+}
+
+impl fmt::Display for CredentialKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Password => "Password",
+            Self::SshKey => "SshKey",
+        })
+    }
+}
+
+/// Mirrors `Wormhole.Models.CredentialSecretProvider` (Local = 0, Bitwarden = 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(i32)]
+pub enum CredentialSecretProvider {
+    Local = 0,
+    Bitwarden = 1,
+}
+
+impl CredentialSecretProvider {
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+}
+
+impl TryFrom<i32> for CredentialSecretProvider {
+    type Error = InvalidEnumValue;
+
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Local),
+            1 => Ok(Self::Bitwarden),
+            _ => Err(InvalidEnumValue {
+                enum_name: "CredentialSecretProvider",
+                value,
+            }),
+        }
+    }
+}
+
+impl fmt::Display for CredentialSecretProvider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Local => "Local",
+            Self::Bitwarden => "Bitwarden",
+        })
+    }
+}
+
+/// Default Bitwarden field path (`Wormhole.Models.BitwardenDefaults.PasswordFieldPath`).
+pub const BITWARDEN_PASSWORD_FIELD_PATH: &str = "login.password";
+
 /// Mirrors `Wormhole.Models.SerialParityMode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(i32)]

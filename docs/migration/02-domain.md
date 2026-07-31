@@ -34,6 +34,8 @@ Rust: `uuid::Uuid` hyphenated display and `wormhole_domain::format_guid_d(&id)` 
 | `ProtocolType` | `ProtocolType` | Ssh=0, Rdp=1, *(2 retired SFTP)*, Http=3, Https=4, Serial=5, Vnc=6 |
 | `NodeKind` | `NodeKind` | Folder=0, Connection=1 |
 | `CredentialBindingMode` | `CredentialBindingMode` | Inherit=0, None=1, Saved=2 |
+| `CredentialKind` | `CredentialKind` | Password=0, SshKey=1 |
+| `CredentialSecretProvider` | `CredentialSecretProvider` | Local=0, Bitwarden=1 |
 | `SerialParityMode` | `SerialParityMode` | None=0 … Space=4 |
 | `SerialStopBitsMode` | `SerialStopBitsMode` | One=1, Two=2, OnePointFive=3 |
 | `SerialFlowControlMode` | `SerialFlowControlMode` | None=0 … DsrDtr=3 |
@@ -101,10 +103,39 @@ Tree Open and Quick Connect must run `InheritanceResolver` **before** attaching 
 
 See [17-tree-settings-vm.md](17-tree-settings-vm.md) and [21-quick-connect.md](21-quick-connect.md). Domain parity stays in this crate; glue pins live in `wormhole-ui` unit tests (`MemoryConnectionSource` / QC Fake).
 
+## Connection node change notifier (Fake glue)
+
+Pure pub/sub stub mirroring C# `IConnectionNodeChangeNotifier` / `ConnectionNodeChangeNotifier`, extended to **create / update / delete / reparent**. Lives in `wormhole-domain` (no GPUI, no SQLite).
+
+| Type | Role |
+|---|---|
+| `ConnectionNodeChangeEvent` | Metadata-only: `node_id`, `NodeKind`, change kind, `parent_id` / `previous_parent_id` |
+| `ConnectionNodeChangeKind` | `Created` / `Updated` / `Deleted` / `Reparented` |
+| `ConnectionNodeChangeNotifier` | `publish` + `subscribe` / `unsubscribe` |
+| `FakeConnectionNodeChangeNotifier` | Records events; fans out to callbacks **outside** the lock; nested publishes are queued until the current fan-out finishes (delivery order matches the event log) |
+| `NopConnectionNodeChangeNotifier` | Swallow publishes (no listeners) |
+| `RecordingRefreshListener` | Test helper: counts tree-reload vs session-profile-refresh hints |
+| `*_from_node` helpers | Strip a `ConnectionNode` to metadata (C# update publish shape without cloning secret-bearing fields — domain rows never carry password bytes) |
+
+Refresh hints:
+
+- **Tree reload** — create / delete / reparent (`suggests_tree_reload`); update can patch in place (C# `ApplyConnectionNodeUpdated`). Structural parent moves must use **Reparented**, not Updated.
+- **Session profile refresh** — update / delete / reparent (`suggests_session_profile_refresh`); folder mutations may affect descendant sessions (`may_affect_descendant_sessions`). Created is tree-only.
+
+`FakeConnectionNodeChangeNotifier::clear` clears the recorded event log only (subscribers and in-flight nested publishes stay). Subscription ids wrap and skip `0` (reserved for Nop) and never collide with a live subscriber id.
+
+**Never** put passwords, private keys, or tunnel payloads on the event. Storage / editor hosts publish after successful writes; tree + open-session VMs subscribe later (GPUI wiring Pending).
+
+```powershell
+cargo test -p wormhole-domain --test connection_node_change_tests
+```
+
+Adversarial review closed: [adversarial-ledger-node-change-notifier.md](adversarial-ledger-node-change-notifier.md).
+
 ## Deferred (out of scope for this crate)
 
 - SQLite / Credential Manager / DPAPI persistence
 - `ConnectionNode.Clone*` / `PendingInlinePassword` editor helpers
 - Full `TunnelConfig` row + provider settings models
 - `ConnectionProfileResolver` (repository wiring)
-- UI / GPUI / surface-lab integration
+- UI / GPUI / surface-lab integration (tree + session subscribers over this Fake)

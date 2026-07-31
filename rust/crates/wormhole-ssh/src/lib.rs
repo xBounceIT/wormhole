@@ -4,9 +4,10 @@
 //! hook-point design. Password / private-key connect + interactive shell live
 //! behind the `client` feature (on by default). Host-key known_hosts store,
 //! verify-on-connect decision + accept/reject prompt glue, auto-sudo prompt
-//! detector + session glue stub (Fake terminal), SSH agent **availability**
-//! probe, and agent ↔ auth method select glue are always on. Agent and
-//! keyboard-interactive **wire** auth are stubs (`AuthNotImplemented`).
+//! detector + session glue stub (Fake terminal), SSH reconnect / backoff policy
+//! stub (Fake schedule), SSH agent **availability** probe, and agent ↔ auth
+//! method select glue are always on. Agent and keyboard-interactive **wire**
+//! auth are stubs (`AuthNotImplemented`).
 
 mod agent;
 mod agent_auth_select;
@@ -16,6 +17,7 @@ mod error;
 mod host_key_prompt;
 mod host_key_verify;
 mod known_hosts;
+mod reconnect;
 #[cfg(feature = "client")]
 mod auth;
 #[cfg(feature = "client")]
@@ -44,6 +46,14 @@ pub use auto_sudo_glue::{
     AutoSudoWriteError, LINE_TERMINATOR,
 };
 pub use error::SshError;
+pub use reconnect::{
+    decide_after_connect_attempt, decide_after_disconnect, plan_next_attempt,
+    reconnect_exhausted_note, should_continue_auto_reconnect, BackoffSchedule,
+    FakeBackoffSchedule, FixedBackoffSchedule, ReconnectConnectOutcome, ReconnectPolicyError,
+    ReconnectStopReason, ReconnectVerdict, SshDisconnectCause, SshReconnectBudget,
+    SshReconnectPolicy, AUTO_RECONNECT_DELAY, AUTO_RECONNECT_STABILITY_WINDOW,
+    MAX_AUTO_RECONNECT_ATTEMPTS,
+};
 pub use host_key_prompt::{
     resolve_host_key_prompted, FakeHostKeyPrompt, FakeKnownHosts, HostKeyPinStore,
     HostKeyPrompt, HostKeyPromptReason, HostKeyPromptRequest, HostKeyPromptResponse,
