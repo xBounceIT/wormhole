@@ -1,0 +1,48 @@
+[package]
+name = "wormhole-mcp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Loopback MCP Streamable HTTP host (mirrors Services/Mcp)."
+publish = false
+
+[lib]
+name = "wormhole_mcp"
+path = "src/lib.rs"
+
+[features]
+default = ["rmcp"]
+# Official Model Context Protocol Rust SDK + Streamable HTTP tower service.
+rmcp = [
+    "dep:rmcp",
+    "dep:axum",
+    "dep:tokio-util",
+    "dep:http",
+    "dep:bytes",
+    "dep:serde_json",
+]
+# Persist / load MCP bearer token via Windows Credential Manager.
+secrets = ["dep:wormhole-secrets-win"]
+
+[dependencies]
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "net", "time", "io-util"] }
+tracing = { workspace = true }
+base64 = { workspace = true }
+getrandom = { workspace = true }
+rmcp = { workspace = true, optional = true, default-features = false, features = [
+    "server",
+    "transport-streamable-http-server",
+] }
+axum = { workspace = true, optional = true }
+tokio-util = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+wormhole-secrets-win = { workspace = true, optional = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "net", "time", "io-util"] }

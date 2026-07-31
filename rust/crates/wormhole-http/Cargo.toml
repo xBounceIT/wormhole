@@ -1,0 +1,20 @@
+[package]
+name = "wormhole-http"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "HTTP/HTTPS session target types (URL + SOCKS + ignore-cert) ported from HttpSessionViewModel."
+publish = false
+
+[lib]
+name = "wormhole_http"
+path = "src/lib.rs"
+
+[dependencies]
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+uuid = { workspace = true, features = ["std", "v4"] }

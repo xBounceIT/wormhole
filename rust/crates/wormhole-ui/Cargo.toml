@@ -1,0 +1,61 @@
+[package]
+name = "wormhole-ui"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "GPUI shell skeleton + tree / settings / connection-editor / Quick Connect (+ recent-history MRU) + serial COM picker + baud/parity preset glue + tree Open→session + OTP / Fortinet SAML prompt UI glue + update notify glue (GPUI optional)."
+publish = false
+
+[lib]
+name = "wormhole_ui"
+path = "src/lib.rs"
+
+[[example]]
+name = "wormhole-ui-lab"
+path = "examples/wormhole-ui-lab.rs"
+required-features = ["gpui"]
+
+[features]
+default = ["session", "tunnels", "update"]
+# Optional GPUI chrome (same pins as surface-lab). Pure state machine works without it.
+gpui = ["dep:gpui", "dep:gpui_platform"]
+# Optional SQLite tree read + settings.json StorageSettingsStore + editor save (CredMgr).
+storage = ["dep:wormhole-storage", "dep:wormhole-secrets-win"]
+# Session-orchestrator connect glue (tree Open + Quick Connect → wormhole-session).
+session = ["dep:wormhole-session"]
+# Tunnel OTP + Fortinet SAML prompt UI glue (Channel ↔ Fake UI; no GPUI / WebView2 dialog).
+tunnels = ["dep:wormhole-tunnels", "dep:tokio"]
+# UpdateChecker → Settings/UI notify glue (Fake / NetworkStub; no live HTTP).
+update = ["dep:wormhole-update"]
+
+[dependencies]
+thiserror = { workspace = true }
+uuid = { workspace = true, features = ["std", "v4"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+wormhole-domain = { workspace = true }
+wormhole-serial = { workspace = true }
+wormhole-session = { workspace = true, optional = true }
+wormhole-storage = { workspace = true, optional = true }
+wormhole-secrets-win = { workspace = true, optional = true }
+wormhole-tunnels = { workspace = true, optional = true }
+wormhole-update = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["sync"] }
+gpui = { workspace = true, optional = true }
+gpui_platform = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+uuid = { workspace = true, features = ["std", "v4"] }
+tempfile = { workspace = true }
+wormhole-storage = { workspace = true }
+wormhole-secrets-win = { workspace = true }
+wormhole-tunnels = { workspace = true }
+wormhole-update = { workspace = true }
+
+[[test]]
+name = "connection_editor_persist"
+path = "tests/connection_editor_persist.rs"
+required-features = ["storage"]
+

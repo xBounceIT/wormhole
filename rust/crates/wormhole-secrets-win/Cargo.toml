@@ -1,0 +1,26 @@
+[package]
+name = "wormhole-secrets-win"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Windows Credential Manager + DPAPI secrets for Wormhole (CredMgr / keys / tunnels)."
+publish = false
+
+[lib]
+name = "wormhole_secrets_win"
+path = "src/lib.rs"
+
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
+
+[dependencies]
+uuid = { workspace = true, features = ["v4"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }

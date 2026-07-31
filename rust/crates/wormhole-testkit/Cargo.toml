@@ -1,0 +1,10 @@
+[package]
+name = "wormhole-testkit"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared fixtures and helpers for Wormhole Rust crate tests."
+publish = false
+
+[dependencies]

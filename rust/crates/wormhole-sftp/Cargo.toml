@@ -1,0 +1,28 @@
+[package]
+name = "wormhole-sftp"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Serialized SFTP ops + transfer queue + SSH dialog glue + progress callback (mirrors SftpSession / FileTransferOrchestrator / FileTransferDialogService)."
+publish = false
+
+[lib]
+name = "wormhole_sftp"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Optional: compile against russh-sftp (resolves cleanly with workspace russh =0.62.4;
+# live channel wiring lands with SSH session integration — see docs/migration/11-sftp.md).
+russh = ["dep:russh-sftp", "dep:bytes"]
+
+[dependencies]
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+bytes = { workspace = true, optional = true }
+russh-sftp = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }

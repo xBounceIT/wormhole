@@ -50,8 +50,15 @@ tools/wormhole-ovpnproxy/shim_buildinfo.go
 tools/wormhole-*/wormhole-*proxy
 tools/wormhole-*/wormhole-*proxy.exe
 
+# Rust workspace build output (sources + Cargo.toml are checked in)
+rust/target/
+
 # OS noise
 Thumbs.db
 desktop.ini
 .DS_Store
 .claude/
+
+# Local Rust probe binaries
+rust/*.pdb
+

@@ -1,0 +1,151 @@
+# Wormhole Rust/GPUI migration workspace (parallel to the .NET app).
+# Windows-only for now: x86_64-pc-windows-msvc and aarch64-pc-windows-msvc.
+#
+# Default builds stub out GPUI. Enable with: cargo check -p surface-lab --features gpui
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/surface-lab",
+    "crates/wormhole-surface-win",
+    "crates/wormhole-secrets-win",
+    "crates/wormhole-domain",
+    "crates/wormhole-storage",
+    "crates/wormhole-testkit",
+    "crates/wormhole-terminal",
+    "crates/wormhole-serial",
+    "crates/wormhole-ssh",
+    "crates/wormhole-sftp",
+    "crates/wormhole-tunnels",
+    "crates/wormhole-mcp",
+    "crates/wormhole-app",
+    "crates/wormhole-ui",
+    "crates/wormhole-vnc",
+    "crates/wormhole-http",
+    "crates/wormhole-import",
+    "crates/wormhole-update",
+    "crates/wormhole-session",
+    "crates/wormhole-diagnostics",
+]
+default-members = [
+    "crates/surface-lab",
+    "crates/wormhole-surface-win",
+    "crates/wormhole-secrets-win",
+    "crates/wormhole-domain",
+    "crates/wormhole-storage",
+    "crates/wormhole-tunnels",
+    "crates/wormhole-mcp",
+    "crates/wormhole-app",
+    "crates/wormhole-ui",
+    "crates/wormhole-vnc",
+    "crates/wormhole-http",
+    "crates/wormhole-sftp",
+    "crates/wormhole-import",
+    "crates/wormhole-update",
+    "crates/wormhole-session",
+    "crates/wormhole-diagnostics",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+rust-version = "1.85"
+repository = "https://github.com/wormhole-app/wormhole"
+
+[workspace.dependencies]
+wormhole-surface-win = { path = "crates/wormhole-surface-win" }
+wormhole-secrets-win = { path = "crates/wormhole-secrets-win" }
+wormhole-domain = { path = "crates/wormhole-domain" }
+wormhole-storage = { path = "crates/wormhole-storage" }
+wormhole-testkit = { path = "crates/wormhole-testkit" }
+wormhole-terminal = { path = "crates/wormhole-terminal" }
+wormhole-serial = { path = "crates/wormhole-serial" }
+wormhole-ssh = { path = "crates/wormhole-ssh" }
+wormhole-sftp = { path = "crates/wormhole-sftp" }
+wormhole-tunnels = { path = "crates/wormhole-tunnels" }
+wormhole-mcp = { path = "crates/wormhole-mcp" }
+wormhole-app = { path = "crates/wormhole-app" }
+wormhole-ui = { path = "crates/wormhole-ui" }
+wormhole-vnc = { path = "crates/wormhole-vnc" }
+wormhole-http = { path = "crates/wormhole-http" }
+wormhole-import = { path = "crates/wormhole-import" }
+wormhole-update = { path = "crates/wormhole-update" }
+wormhole-diagnostics = { path = "crates/wormhole-diagnostics" }
+wormhole-session = { path = "crates/wormhole-session" }
+
+# Shared pins (crates.io 2026-07-31; Context7 MCP unavailable — same note as deps-pins.md).
+uuid = { version = "=1.24.0", default-features = false, features = ["std"] }
+# 0.7.19 has no `sync` feature (CancellationToken lives under `rt` when needed).
+tokio-util = { version = "=0.7.19", default-features = false, features = ["rt"] }
+# RFB client engine (optional; see docs/migration/09-vnc.md). Package `vnc-rs`, lib `vnc`.
+vnc = { package = "vnc-rs", version = "=0.5.3", default-features = false }
+thiserror = { version = "=2.0.19" }
+tempfile = { version = "=3.20.0" }
+chrono = { version = "=0.4.44", default-features = false, features = ["clock", "std"] }
+rusqlite = { version = "=0.40.1", features = ["bundled"] }
+bytes = { version = "=1.12.1" }
+base64 = { version = "=0.22.1" }
+async-trait = { version = "=0.1.91" }
+futures = { version = "=0.3.33" }
+tokio = { version = "=1.53.1", default-features = false }
+# SOCKS5 DOMAINNAME Punycode (wormhole-tunnels Socks5Client; mirrors C# IdnMapping).
+idna = { version = "=1.1.0" }
+tokio-serial = { version = "=5.5.0" }
+russh = { version = "=0.62.4", default-features = false, features = ["ring", "rsa"] }
+# SFTP codec/client helpers (no hard dep on russh; see docs/migration/11-sftp.md).
+russh-sftp = { version = "=2.3.0", default-features = false }
+tracing = { version = "=0.1.44" }
+tracing-subscriber = { version = "=0.3.23", default-features = false }
+# SHA-256 for update installer verify (mirrors UpdateService IncrementalHash).
+sha2 = { version = "=0.11.0" }
+hex = { version = "=0.4.3", default-features = false, features = ["std"] }
+# Official MCP Rust SDK (rmcp). MSRV 1.88; agents use rustc 1.97+ (see toolchain.md).
+rmcp = { version = "=3.0.1", default-features = false }
+# Streamable HTTP host for wormhole-mcp (Context7 MCP unavailable — crates.io 2026-07-31).
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "json", "tokio", "matched-path"] }
+http = { version = "=1.5.0", default-features = false }
+getrandom = { version = "=0.3.4", default-features = false, features = ["std"] }
+# mRemoteNG XML + backup envelope (see docs/migration/12-import.md).
+# quick-xml 0.41 has no `std` feature flag (std is unconditional when not `nostd`).
+quick-xml = { version = "=0.41.0", default-features = false }
+serde = { version = "=1.0.229", default-features = false, features = ["std", "derive"] }
+serde_json = { version = "=1.0.151", default-features = false, features = ["std"] }
+# mRemoteNG ConfVersion 2.7: AES-256-GCM with **16-byte** nonce (not .NET AesGcm's 12).
+# Instantiated as `AesGcm<Aes256, typenum::U16>`; AAD = salt. See docs/migration/12-import.md.
+aes-gcm = { version = "=0.11.0", default-features = false, features = ["aes", "alloc"] }
+pbkdf2 = { version = "=0.12.2", default-features = false, features = ["hmac"] }
+sha1 = { version = "=0.10.6", default-features = false }
+hmac = { version = "=0.12.1", default-features = false }
+zeroize = { version = "=1.9.0", default-features = false, features = ["std"] }
+
+# Pins: docs/migration/deps-pins.md — bump SHAs only with coordinated cargo check.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "9c7a5c9485669f57a22bc9c07b0f856cf1829a34" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "9c7a5c9485669f57a22bc9c07b0f856cf1829a34", default-features = false }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "88f102d13654fe25aa2fede076274b6b751a3704" }
+wry = { version = "=0.56.0", default-features = false, features = ["os-webview"] }
+webview2-com = { version = "=0.38.2" }
+raw-window-handle = { version = "=0.6.2" }
+# Direct pin for `#[implement]` consumers (windows 0.61 has no `implement` feature).
+windows-core = { version = "=0.61.2" }
+
+[workspace.dependencies.windows]
+version = "=0.61.3"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security_Credentials",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+]

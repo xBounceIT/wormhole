@@ -1,0 +1,35 @@
+[package]
+name = "surface-lab"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Phase-1 Wormhole surface technical gate lab (GPUI + native HWND overlays)."
+publish = false
+
+[[bin]]
+name = "surface-lab"
+path = "src/main.rs"
+
+[features]
+default = []
+gpui = ["dep:gpui", "dep:gpui_platform"]
+# RDP ActiveX owned-overlay spike (gate 6). See docs/migration/05-rdp-spike.md.
+rdp = ["wormhole-surface-win/rdp"]
+# Real WebView2 child host smokes (gates 3–5). Pins: docs/migration/deps-pins.md.
+webview = ["wormhole-surface-win/webview", "dep:wormhole-terminal", "dep:bytes"]
+# PaneLayoutSink → NativeSurfaceBroker wiring smoke (gate 2 layout tick).
+pane-layout = ["wormhole-surface-win/pane-layout", "dep:wormhole-ui"]
+
+[dependencies]
+wormhole-surface-win = { workspace = true }
+wormhole-diagnostics = { workspace = true }
+wormhole-ui = { workspace = true, optional = true }
+wormhole-terminal = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+gpui = { workspace = true, optional = true }
+gpui_platform = { workspace = true, optional = true }
+
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]

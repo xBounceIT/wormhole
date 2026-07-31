@@ -1,0 +1,34 @@
+[package]
+name = "wormhole-session"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Session orchestrator: dispatch resolved profiles to serial/SSH/HTTP with optional tunnel lease; RDP/VNC typed stubs."
+publish = false
+
+[lib]
+name = "wormhole_session"
+path = "src/lib.rs"
+
+[features]
+default = ["ssh-client"]
+# Live russh password connect (disable in constrained builds).
+ssh-client = ["wormhole-ssh/client"]
+
+[dependencies]
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time"] }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["std", "v4"] }
+wormhole-domain = { workspace = true }
+wormhole-http = { workspace = true }
+wormhole-serial = { workspace = true }
+wormhole-ssh = { workspace = true }
+wormhole-tunnels = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+uuid = { workspace = true, features = ["std", "v4"] }

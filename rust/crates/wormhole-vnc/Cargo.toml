@@ -1,0 +1,28 @@
+[package]
+name = "wormhole-vnc"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "RFB/VNC subset: auth types + password-only auth glue (Fake), Raw buffer/damage, input queue, session↔fb/input glue, clipboard cut-text glue stub, BindLocalForwarder target stub; optional vnc-rs engine."
+publish = false
+
+[lib]
+name = "wormhole_vnc"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Optional async engine via crates.io `vnc-rs` (lib name `vnc`). See docs/migration/09-vnc.md.
+engine = ["dep:vnc", "dep:tokio", "dep:async-trait"]
+
+[dependencies]
+thiserror = { workspace = true }
+bytes = { workspace = true }
+async-trait = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt", "sync", "macros", "net"] }
+# Package name on crates.io is `vnc-rs`; library crate is `vnc`.
+vnc = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

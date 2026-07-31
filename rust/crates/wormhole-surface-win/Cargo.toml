@@ -1,0 +1,50 @@
+[package]
+name = "wormhole-surface-win"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Native HWND surface broker skeleton for Wormhole (WebView2 / RDP ActiveX)."
+publish = false
+
+[lib]
+name = "wormhole_surface_win"
+path = "src/lib.rs"
+
+[features]
+default = []
+# RDP ActiveX owned-overlay spike (CoCreate + OLE in-place + GWLP_HWNDPARENT). mstscax is runtime-only.
+# `windows` is always linked for SetFocus/GetFocus (gate 7); this flag enables COM/OLE/overlay.
+rdp = ["dep:zeroize"]
+# Real WebView2 child HWND hosting via wry 0.56 (not gpui-wry).
+# `wormhole-http` is for the pure HttpCertPolicy → Default|AlwaysAllow adapter +
+# leaf/target glue only (no COM). AlwaysAllow maps from IgnoreErrors only;
+# create/lab leave default validation.
+webview = ["dep:wry", "dep:raw-window-handle", "dep:webview2-com", "dep:wormhole-http"]
+# PaneLayoutSink → NativeSurfaceBroker adapter + pane focus + session surface +
+# split/merge notify glue (depends on wormhole-ui state types only; default-features
+# off → no tunnels).
+pane-layout = ["dep:wormhole-ui"]
+
+[dependencies]
+# Always available: focus helpers (SetFocus/GetFocus) must compile without rdp/webview.
+windows = { workspace = true }
+# Direct pin for `#[implement]` (windows 0.61 has no `implement` feature).
+windows-core = { workspace = true }
+wry = { workspace = true, optional = true }
+webview2-com = { workspace = true, optional = true }
+raw-window-handle = { workspace = true, optional = true }
+# Pure HttpCertPolicy → WebView2CertErrorAction mapping (feature `webview`).
+wormhole-http = { workspace = true, optional = true }
+# SecureString-equivalent for ClearTextPassword put (feature `rdp` configure path).
+zeroize = { workspace = true, optional = true }
+# Optional: BrokerPaneLayoutSink + pane_focus + session_surface + pane_split glue
+# (PaneId / SessionId → SurfaceHandle; split/merge → layout ticks). Path dep with
+# default-features off so we do not pull wormhole-ui `session` / tunnels into
+# surface-win.
+wormhole-ui = { path = "../wormhole-ui", optional = true, default-features = false }
+
+[package.metadata.docs.rs]
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
+features = ["webview", "rdp", "pane-layout"]

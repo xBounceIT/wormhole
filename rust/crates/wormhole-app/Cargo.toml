@@ -1,0 +1,56 @@
+[package]
+name = "wormhole-app"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "App composition root: Arc<dyn Trait> wiring for domain/storage/secrets/tunnels/MCP/ui/vnc/http/sftp/update/session + tracing; Hello unlock prompt UI glue (Fake / Stub; no WinRT)."
+publish = false
+
+[lib]
+name = "wormhole_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "wormhole-app"
+path = "src/bin/wormhole_app.rs"
+
+[features]
+default = ["tunnels", "mcp", "domain", "storage", "secrets", "ui", "vnc", "http", "sftp", "update", "session"]
+domain = ["dep:wormhole-domain"]
+tunnels = ["dep:wormhole-tunnels"]
+mcp = ["dep:wormhole-mcp"]
+storage = ["dep:wormhole-storage"]
+secrets = ["dep:wormhole-secrets-win"]
+ui = ["dep:wormhole-ui"]
+vnc = ["dep:wormhole-vnc"]
+http = ["dep:wormhole-http"]
+sftp = ["dep:wormhole-sftp"]
+update = ["dep:wormhole-update"]
+session = ["dep:wormhole-session", "tunnels"]
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt", "registry", "std", "ansi"] }
+uuid = { workspace = true, features = ["std"] }
+
+wormhole-domain = { workspace = true, optional = true }
+wormhole-tunnels = { workspace = true, optional = true }
+wormhole-mcp = { workspace = true, optional = true }
+wormhole-storage = { workspace = true, optional = true }
+wormhole-secrets-win = { workspace = true, optional = true }
+wormhole-ui = { workspace = true, optional = true }
+wormhole-vnc = { workspace = true, optional = true }
+wormhole-http = { workspace = true, optional = true }
+wormhole-sftp = { workspace = true, optional = true }
+wormhole-update = { workspace = true, optional = true }
+wormhole-session = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+uuid = { workspace = true, features = ["std"] }
+tempfile = { workspace = true }

@@ -1,0 +1,38 @@
+[package]
+name = "wormhole-import"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "mRemoteNG XML import spike + Wormhole backup envelope metadata (mirrors Services/MRemoteNg + Models/Backup)."
+publish = false
+
+[lib]
+name = "wormhole_import"
+path = "src/lib.rs"
+
+[features]
+default = ["domain", "storage"]
+domain = ["dep:wormhole-domain"]
+# Plan → SQLite write stub via wormhole-storage (Credential Manager still out of scope).
+storage = ["domain", "dep:wormhole-storage"]
+
+[dependencies]
+aes-gcm = { workspace = true }
+base64 = { workspace = true }
+pbkdf2 = { workspace = true }
+quick-xml = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sha1 = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true, features = ["std", "v4"] }
+wormhole-domain = { workspace = true, optional = true }
+wormhole-storage = { workspace = true, optional = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+wormhole-storage = { workspace = true }
+wormhole-testkit = { workspace = true }
+

@@ -1,0 +1,19 @@
+[package]
+name = "wormhole-domain"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Pure domain models and folder-level inheritance for Wormhole (ported from C#)."
+publish = false
+
+[lib]
+name = "wormhole_domain"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+uuid = { workspace = true, features = ["v4"] }

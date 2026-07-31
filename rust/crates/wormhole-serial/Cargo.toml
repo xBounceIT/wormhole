@@ -1,0 +1,23 @@
+[package]
+name = "wormhole-serial"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Tokio serial (COM) session for Wormhole, mirroring Services/Serial/SerialSession.cs (enumerate + PuTTY line presets)."
+publish = false
+
+[lib]
+name = "wormhole_serial"
+path = "src/lib.rs"
+
+[dependencies]
+bytes = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "macros", "io-util", "time"] }
+tokio-serial = { workspace = true }
+wormhole-domain = { workspace = true }
+wormhole-terminal = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "sync", "time"] }

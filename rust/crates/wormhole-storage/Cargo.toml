@@ -1,0 +1,21 @@
+[package]
+name = "wormhole-storage"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SQLite persistence for Wormhole (rusqlite + embedded Data/Migrations)."
+publish = false
+
+[dependencies]
+chrono = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
+wormhole-domain = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+wormhole-testkit = { workspace = true }

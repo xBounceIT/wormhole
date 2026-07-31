@@ -1,0 +1,81 @@
+; =============================================================================
+; COMMENTS-ONLY TEMPLATE — not compiled by scripts/Build-Installer.ps1
+; =============================================================================
+; Purpose: sketch a PARALLEL Inno channel for Rust preview binaries staged by
+;   scripts/Build-Rust-Artifacts.ps1 -> artifacts\publish\rust-win-{arch}\
+;
+; Rules (see docs/migration/18-rust-installer.md and 15-cutover.md):
+;   - Do NOT replace installer\Wormhole.iss or change its AppId / DefaultDirName.
+;   - Use a DIFFERENT AppId (new GUID) so ARP lists two products.
+;   - Install under a different folder (e.g. Wormhole Lab), never overwrite WinUI.
+;   - Distinct OutputBaseFilename so CI artifacts do not collide.
+;   - Shared user data under %LOCALAPPDATA%\Wormhole\ is intentional; uninstall
+;     of this preview must NOT delete wormhole.db / keys / tunnels / app-auth.
+;   - This fragment does NOT claim cutover or hardware surface-lab gates passed.
+;
+; When promoting to a real .iss: copy this into Wormhole-Rust.iss (or similar),
+; replace PLACEHOLDER_* tokens, drop the leading "; " comment markers on active
+; lines, and drive ISCC from a separate Build-Rust-Installer.ps1 — leave
+; Build-Installer.ps1 pointed at ..\Wormhole.iss only.
+; =============================================================================
+;
+; #define MyAppName       "Wormhole Lab"
+; #define MyAppPublisher  "Wormhole project"
+; #define MyAppExeName    "wormhole-app.exe"
+; ; Preview alternate: "surface-lab.exe"
+;
+; #ifndef MyAppVersion
+;   #error MyAppVersion must be defined by the build script.
+; #endif
+;
+; #ifndef AppArchitecture
+;   #define AppArchitecture "x64"
+; #endif
+;
+; #ifndef PublishDir
+;   #define PublishDir "..\..\artifacts\publish\rust-win-" + AppArchitecture
+; #endif
+;
+; [Setup]
+; ; PLACEHOLDER_APPID — generate a new GUID; never reuse WinUI's
+; ;   {{6E3A0D9E-2A1F-4F4C-9C9F-2F8F8E1A0A11}}
+; AppId={{PLACEHOLDER_NEW_GUID}}
+; AppName={#MyAppName}
+; AppVersion={#MyAppVersion}
+; AppPublisher={#MyAppPublisher}
+; DefaultDirName={autopf}\{#MyAppName}
+; DefaultGroupName={#MyAppName}
+; DisableProgramGroupPage=yes
+; ; UninstallDisplayIcon={app}\{#MyAppExeName}
+; ; SetupIconFile=..\..\Assets\Wormhole.ico
+; OutputBaseFilename=WormholeLab-{#MyAppVersion}-win-{#AppArchitecture}-setup
+; SolidCompression=yes
+; WizardStyle=modern
+; ArchitecturesAllowed={#AppArchitecture}
+; ArchitecturesInstallIn64BitMode={#AppArchitecture}
+;
+; [Languages]
+; Name: "english"; MessagesFile: "compiler:Default.isl"
+;
+; [Files]
+; ; EXPLICIT leaf sources only — do NOT use "{#PublishDir}\*" with recursesubdirs
+; ; (would ship stray files if the stage dir is polluted; sidecars stay optional).
+; Source: "{#PublishDir}\wormhole-app.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Source: "{#PublishDir}\surface-lab.exe"; DestDir: "{app}"; Flags: ignoreversion
+; Source: "{#PublishDir}\wormhole-wgproxy.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; Source: "{#PublishDir}\wormhole-ovpnproxy.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; Source: "{#PublishDir}\wormhole-fortiproxy.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; Source: "{#PublishDir}\wormhole-ciscoproxy.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+;
+; [Icons]
+; Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
+; Name: "{commondesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+;
+; [Tasks]
+; Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
+;
+; [Run]
+; Filename: "{app}\{#MyAppExeName}"; Description: "Launch {#MyAppName}"; Flags: nowait postinstall skipifsilent
+;
+; ; Optional future: #ifdef /DIncludeWinUIChannel — NOT recommended for v1 preview;
+; ; prefer two separate setups (strategy A in 18-rust-installer.md).

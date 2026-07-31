@@ -1,0 +1,17 @@
+[package]
+name = "wormhole-diagnostics"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Support diagnostics report + soak/benchmark harness stubs (no secrets)."
+publish = false
+
+[lib]
+name = "wormhole_diagnostics"
+path = "src/lib.rs"
+
+[dependencies]
+# Sidecar presence reuses tunnels locate helpers (file existence only — never spawn).
+wormhole-tunnels = { workspace = true }
+windows = { workspace = true }

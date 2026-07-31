@@ -1,0 +1,21 @@
+[package]
+name = "wormhole-update"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "GitHub release check / download / SHA-256 verify + UpdateChecker channel + check_now notify status (mirrors Services/UpdateService.cs). No installer UX / no live HTTP."
+publish = false
+
+[lib]
+name = "wormhole_update"
+path = "src/lib.rs"
+
+[dependencies]
+hex = { workspace = true }
+sha2 = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

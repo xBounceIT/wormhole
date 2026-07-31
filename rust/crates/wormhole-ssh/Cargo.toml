@@ -1,0 +1,32 @@
+[package]
+name = "wormhole-ssh"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SSH protocol spike for Wormhole (russh). Auth/shell behind `client`; known_hosts + verify-on-connect + host-key prompt + agent probe + agent↔auth select glue + auto-sudo detector/glue always on."
+publish = false
+
+[lib]
+name = "wormhole_ssh"
+path = "src/lib.rs"
+
+[features]
+default = ["client"]
+# Enables russh-backed connect + interactive shell; auth: password/key live, agent/kbi stubs.
+client = ["dep:russh", "dep:tokio", "dep:async-trait"]
+
+[dependencies]
+thiserror = { workspace = true }
+bytes = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }
+async-trait = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true, features = ["rt", "sync", "macros", "io-util", "time", "net"] }
+russh = { workspace = true, optional = true }
+# Always on: TerminalSize + FakeTerminalSession for auto-sudo glue (no GPUI).
+wormhole-terminal = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "macros", "net", "time"] }

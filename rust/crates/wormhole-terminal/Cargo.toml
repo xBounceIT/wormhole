@@ -1,0 +1,27 @@
+[package]
+name = "wormhole-terminal"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "PTY-like terminal session traits and xterm.js WebView2 bridge message types."
+publish = false
+
+[lib]
+name = "wormhole_terminal"
+path = "src/lib.rs"
+
+[features]
+default = []
+# Win32 CF_UNICODETEXT host clipboard (`Win32Clipboard`). Windows only.
+clipboard-win = ["dep:windows"]
+
+[dependencies]
+bytes = { workspace = true }
+base64 = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+windows = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }

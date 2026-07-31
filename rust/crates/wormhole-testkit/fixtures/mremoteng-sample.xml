@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Synthetic mRemoteNG-shaped export for unit tests. No real hosts or secrets.
+     cipher-ssh Password is a known-vector AES-GCM blob (plaintext "lab-secret",
+     import password "import-pw", KdfIterations=1000). bad-cipher-ssh uses a
+     truncated placeholder that must fail closed. -->
+<mrng:Connections
+    xmlns:mrng="http://mremoteng.org"
+    Name="Connections"
+    ConfVersion="2.7"
+    EncryptionEngine="AES"
+    BlockCipherMode="GCM"
+    Protected=""
+    FullFileEncryption="false"
+    KdfIterations="1000">
+  <Node Name="Lab" Type="Container" Expanded="True" Protocol="SSH2" Hostname="" Port="" Username="" Password="">
+    <Node Name="jump-ssh" Type="Connection" Descr="bastion" Protocol="SSH2"
+          Hostname="192.0.2.10" Port="22" Username="labuser" Domain=""
+          Password="" InheritPassword="False" InheritUsername="False"
+          InheritHostname="False" InheritPort="False" InheritProtocol="False" />
+    <Node Name="dc-rdp" Type="Connection" Protocol="RDP"
+          Hostname="192.0.2.20" Port="3389" Username="Administrator" Domain="LAB"
+          Password="" Resolution="1920x1080"
+          InheritPassword="False" InheritUsername="False" />
+    <Node Name="kvm-vnc" Type="Connection" Protocol="VNC"
+          Hostname="192.0.2.30" Port="5900" Username="" Domain=""
+          Password="" InheritPassword="False" />
+    <Node Name="appliance-https" Type="Connection" Protocol="HTTPS"
+          Hostname="192.0.2.40" Port="443" Username="" Password="" />
+    <Node Name="console-serial" Type="Connection" Protocol="Serial"
+          Hostname="COM3" Port="" Username="" Password="" />
+    <Node Name="cipher-ssh" Type="Connection" Protocol="SSH2"
+          Hostname="192.0.2.50" Port="22" Username="cipheruser"
+          Password="AQIDBAUGBwgJCgsMDQ4PEKChoqOkpaanqKmqq6ytrq+KjLoePtVObXWf/NJg081njZIDGCuP33lsaA=="
+          InheritPassword="False" />
+    <Node Name="bad-cipher-ssh" Type="Connection" Protocol="SSH2"
+          Hostname="192.0.2.51" Port="22" Username="badcipher"
+          Password="AAAAAA=="
+          InheritPassword="False" />
+  </Node>
+</mrng:Connections>
