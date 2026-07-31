@@ -17,7 +17,7 @@ default = []
 # `windows` is always linked for SetFocus/GetFocus (gate 7); this flag enables COM/OLE/overlay.
 # `wormhole-domain` is for ConnectionProfile → Fake display/redirect + performance/bitmap
 # configure glue only (no COM).
-rdp = ["dep:zeroize", "dep:wormhole-domain"]
+rdp = ["dep:zeroize", "dep:wormhole-domain", "dep:uuid"]
 # Real WebView2 child HWND hosting via wry 0.56 (not gpui-wry).
 # `wormhole-http` is for the pure HttpCertPolicy → Default|AlwaysAllow adapter +
 # leaf/target glue only (no COM). AlwaysAllow maps from IgnoreErrors only;
@@ -42,6 +42,7 @@ wormhole-http = { workspace = true, optional = true }
 zeroize = { workspace = true, optional = true }
 # ConnectionProfile for display/redirect + performance/bitmap Fake configure glue (feature `rdp`).
 wormhole-domain = { workspace = true, optional = true }
+uuid = { workspace = true, features = ["v4"], optional = true }
 # Optional: BrokerPaneLayoutSink + pane_focus + session_surface + pane_split glue
 # (PaneId / SessionId → SurfaceHandle; split/merge → layout ticks). Path dep with
 # default-features off so we do not pull wormhole-ui `session` / tunnels into

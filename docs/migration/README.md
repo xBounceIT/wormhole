@@ -105,6 +105,7 @@
 | [adversarial-ledger-rdp-gateway.md](adversarial-ledger-rdp-gateway.md) | RDP gateway / tunnel policy review closed (2026-07-31 re-audit: solid; parent SKIP) |
 | [adversarial-ledger-rdp-external.md](adversarial-ledger-rdp-external.md) | RDP external mstsc + tunnel policy review closed (2026-07-31 re-audit: solid; parent SKIP) |
 | [adversarial-ledger-rdp-external-mstsc.md](adversarial-ledger-rdp-external-mstsc.md) | RDP external mstsc Fake policy glue (`RdpExternalMstscGlue`) review closed |
+| [adversarial-ledger-rdp-aad-external.md](adversarial-ledger-rdp-aad-external.md) | RDP Azure AD / external-client detection Fake glue (`RdpAadExternalClientGlue` / scripted catalog) review closed |
 | [adversarial-ledger-rdp-strict-auth.md](adversarial-ledger-rdp-strict-auth.md) | RDP tunnel + strict server-auth policy review closed (2026-07-31 re-audit: solid; parent SKIP) |
 | [adversarial-ledger-rdp-resolution.md](adversarial-ledger-rdp-resolution.md) | RDP ResolutionDebouncer review closed |
 | [adversarial-ledger-rdp-resize-glue.md](adversarial-ledger-rdp-resize-glue.md) | RDP `RdpResolutionLayoutGlue` / Fake resize glue review closed |

@@ -16,7 +16,8 @@
 //!   + CredSSP password-wipe ↔ connect-attempt Fake glue (no live OCX)
 //!   + ConnectionProfile display/redirect → Fake configure glue (no live OCX)
 //!   + ConnectionProfile performance flags / bitmap cache → Fake configure glue (no live OCX)
-//!   + External mstsc.exe + tunnel reject → Fake policy glue (no Process::Command).
+//!   + External mstsc.exe + tunnel reject → Fake policy glue (no Process::Command)
+//!   + Azure AD / external-client routing → Fake detection glue (no live WAM/AAD).
 
 mod host_bounds;
 mod resize_glue;
@@ -43,6 +44,8 @@ mod credssp_connect_glue;
 mod display_redirect_glue;
 #[cfg(all(windows, feature = "rdp"))]
 mod performance_flags_glue;
+#[cfg(all(windows, feature = "rdp"))]
+mod aad_external_client_glue;
 #[cfg(all(windows, feature = "rdp"))]
 mod external_mstsc_glue;
 #[cfg(all(windows, feature = "rdp"))]
@@ -83,6 +86,14 @@ pub use display_redirect_glue::{
     FakePropPut, FakePropRecord, FakeRdpPropertySurface, RdpDisplayRedirectGlue,
     RedirectDrivesIntent, DESKTOP_DEFAULT_HEIGHT, DESKTOP_DEFAULT_WIDTH, DESKTOP_MIN_HEIGHT,
     DESKTOP_MIN_WIDTH, LOUD_DISPLAY_PROPS, REDIRECT_DRIVES_ALL, SOFT_DISPLAY_REDIRECT_PROPS,
+};
+#[cfg(all(windows, feature = "rdp"))]
+pub use aad_external_client_glue::{
+    decide_rdp_client_routing, has_azure_ad_domain, has_azure_ad_prefix,
+    is_azure_ad_credential, is_azure_ad_profile, resolve_rdp_routing, FakeAadRoutingSurface,
+    FakeCredentialLookup, FakeRdpCredentialCatalog, RdpAadExternalClientGlue, RdpAadSignal,
+    RdpClientRouting, RdpConnectRouteOutcome, RdpRoutingResolution, ScriptedRdpCredential,
+    AZURE_AD_DOMAIN, AZURE_AD_USERNAME_PREFIX,
 };
 #[cfg(all(windows, feature = "rdp"))]
 pub use external_mstsc_glue::{

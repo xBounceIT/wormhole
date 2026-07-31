@@ -68,7 +68,9 @@ Result: **pass** — 10 unit tests in `external_mstsc_glue.rs` + full crate with
 
 ## Residual notes
 
-- C# `ShouldUseExternalClientAsync` (AAD auto-detect) remains deferred; glue takes effective `use_external_client`.
+- C# `ShouldUseExternalClientAsync` AAD auto-detect is implemented in
+  `aad_external_client_glue.rs` (`RdpAadExternalClientGlue`); this glue still takes effective
+  `use_external_client` when invoked directly.
 - Live `mstsc.exe` launch / crash-sentinel auto-flag remain deferred (no `Process::Command` in tests or glue).
 - Gateway / strict tunnel rejects stay in `configure.rs` / `prepare_rdp_connect_target` — not duplicated in this glue.
 - CredSSP / display / performance Fake glues unchanged.

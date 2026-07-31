@@ -24,7 +24,8 @@
 //!   + CredSSP password-wipe ↔ connect Fake glue
 //!   + ConnectionProfile display/redirect → Fake configure glue (TrySet soft-skip; no live OCX)
 //!   + ConnectionProfile performance flags / bitmap cache → Fake configure glue (TrySet soft-skip; no live OCX)
-//!   + External mstsc.exe + tunnel reject → Fake policy glue (no Process::Command).
+//!   + External mstsc.exe + tunnel reject → Fake policy glue (no Process::Command)
+//!   + Azure AD / external-client routing → Fake detection glue (no live WAM/AAD).
 //! - `pane-layout`: [`pane_layout::BrokerPaneLayoutSink`] — maps `wormhole_ui` pane
 //!   layout ticks to [`NativeSurfaceBroker::update_bounds`]; plus
 //!   [`pane_focus`] helpers that activate/cycle workspace panes, sync
