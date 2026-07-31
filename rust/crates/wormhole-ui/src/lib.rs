@@ -2,7 +2,8 @@
 //!
 //! Pure UI state (sidebar regions, tab strip, session tab bar, ≤4-pane layout tree,
 //! settings + terminal font/size/auto-copy apply glue, connection editor, Quick Connect
-//! + recent-history MRU, credential picker search glue, tunnel configs page / picker metadata
+//! + recent-history MRU, credential picker search glue, credentials page list/CRUD Fake glue,
+//! tunnel configs page / picker metadata
 //! Fake glue, serial COM picker + baud/parity
 //! preset glue) compiles without GPUI.
 //! Enable `--features gpui` for shell
@@ -27,6 +28,7 @@ mod bitwarden_onboarding_notice;
 mod settings_bitwarden_extensions;
 mod connection_editor;
 mod credential_picker;
+mod credentials_page_ui;
 mod tunnel_configs_ui;
 mod error;
 mod layout_sink;
@@ -81,6 +83,18 @@ pub use credential_picker::{
     CredentialPickerError, CredentialPickerSearchVm, CredentialProfileRow,
     CredentialProfileSource, FakeCredentialList,
 };
+pub use credentials_page_ui::{
+    credential_name_exists, filter_credentials_page, CredentialPageError, CredentialPageRow,
+    CredentialPageSource, CredentialSaveDraft, CredentialsPageCrudError, CredentialsPageVm,
+    FakeCredentialPageStore,
+};
+#[cfg(feature = "storage")]
+pub use credentials_page_ui::{
+    add_credential_profile, delete_credential_profile_page, update_credential_profile,
+    StorageCredentialPageSource,
+};
+#[cfg(feature = "secrets")]
+pub use credentials_page_ui::{read_password_for_edit, CatalogCredentialPageSource};
 pub use tunnel_configs_ui::{
     filter_tunnel_configs_page, filter_tunnel_picker_entries, is_sentinel_id,
     tunnel_kind_display_name, FakeTunnelConfigList, TunnelCatalogError, TunnelConfigRow,

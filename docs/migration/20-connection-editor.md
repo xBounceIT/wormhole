@@ -21,6 +21,7 @@
 | `TunnelUiState` / `TunnelUiSelection` | Inherit / No tunnel / Config(id) — mirrors tunnel picker sentinels |
 | `CredentialUiMode` | Saved picker vs inline/prompt (`UseSavedCredentials`) |
 | `credential_picker` / `FakeCredentialList` | Metadata-only name/username(/domain) filter; empty query = all; no secrets in Debug |
+| `credentials_page_ui` / `CredentialsPageVm` | Credentials page metadata list + search + multi-select + CRUD glue (`FakeCredentialPageStore`; optional `storage` + `secrets` adapters); password only in `CredentialSaveDraft` (Debug length-only); no GPUI |
 | `ValidationReport` / `ValidationError` | Save-button gate |
 | `save_validated_editor` / `load_inline_secret` / `EditorSaveOp` | Feature `storage`: validate → node → `ConnectionRepository` insert/update → CredMgr/`PasswordStore` (node Id); edit rehydrate |
 
@@ -204,6 +205,8 @@ $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 cd rust
 cargo test -p wormhole-ui --no-default-features --features storage
 cargo test -p wormhole-ui --no-default-features --lib credential_picker
+cargo test -p wormhole-ui --no-default-features --lib credentials_page
+cargo test -p wormhole-ui --no-default-features --features storage,secrets --lib credentials_page
 cargo test -p wormhole-ui serial_ports
 cargo test -p wormhole-ui serial_presets
 cargo test -p wormhole-serial
@@ -215,6 +218,7 @@ Focused suites:
 - `tests/connection_editor_validation.rs` — per-protocol validation matrix, visibility, tunnel tri-state, credential modes, load/write round-trip, `apply_resolved_profile`, Debug redaction
 - `tests/connection_editor_persist.rs` (+ `persist` unit tests) — temp DB insert/update round-trip, inline CredMgr Fake out-of-band, purge on leave-inline / blank, `load_inline_secret` preserve, Insert CredMgr rollback
 - `credential_picker` unit tests — Fake list filter / empty query / name+username(+domain) match / Debug no secrets / `from` source `Err` / VM last-good on load `Err` / replace-not-append
+- `credentials_page` unit tests — page filter delegates to picker matcher / VM load clears selection + last-good / multi-select + read-only deletable filter / sorted insert+rename / Fake store CRUD / Debug no password bodies / optional `storage` CRUD rollback + duplicate name / optional `secrets` catalog virtual rows + edit password resolve
 - `tunnel_configs` unit tests — configs page name+kind filter / picker sentinels + stale placeholder / `resolve_tunnel_for_commit` / last-good load / Debug no secrets / optional `storage` repo adapter
 - `serial_ports` unit tests — Fake enumerator refresh / empty / fail-closed / select into editor+QC host
 - `serial_presets` unit tests — PuTTY defaults, preset index select, illegal stop/data fail-closed, node round-trip / inherit
@@ -223,6 +227,7 @@ Adversarial reviews:
 - State machine: [adversarial-ledger-connection-editor.md](adversarial-ledger-connection-editor.md)
 - Persist glue: [adversarial-ledger-editor-save.md](adversarial-ledger-editor-save.md)
 - Credential picker search glue: [adversarial-ledger-credential-picker.md](adversarial-ledger-credential-picker.md)
+- Credentials page list/CRUD glue: [adversarial-ledger-credentials-page.md](adversarial-ledger-credentials-page.md)
 - Tunnel configs page / picker metadata glue: [adversarial-ledger-tunnel-configs-ui.md](adversarial-ledger-tunnel-configs-ui.md)
 - Tree Duplicate (sibling; no secret copy): [adversarial-ledger-tree-duplicate.md](adversarial-ledger-tree-duplicate.md)
 - Serial enumerate library: [adversarial-ledger-serial-enumerate.md](adversarial-ledger-serial-enumerate.md)

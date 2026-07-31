@@ -43,6 +43,7 @@
 | [21-quick-connect.md](21-quick-connect.md) | Quick Connect pure state / validation (`wormhole-ui`) |
 | [adversarial-ledger-connection-editor.md](adversarial-ledger-connection-editor.md) | ConnectionEditorState review closed (no GPUI) |
 | [adversarial-ledger-credential-picker.md](adversarial-ledger-credential-picker.md) | Credential picker search glue (`filter_credential_profiles` / Fake / SearchVm) review closed |
+| [adversarial-ledger-credentials-page.md](adversarial-ledger-credentials-page.md) | Credentials page list/CRUD Fake glue (`CredentialsPageVm` / `FakeCredentialPageStore` / storage+secrets adapters) review closed |
 | [adversarial-ledger-tunnel-configs-ui.md](adversarial-ledger-tunnel-configs-ui.md) | Tunnel configs page / picker metadata Fake glue (`TunnelConfigsVm` / `TunnelPickerVm`) review closed |
 | [gate-checklist.md](gate-checklist.md) | Executable pass/fail for gates 1–8 |
 | [gate-evidence-log.md](gate-evidence-log.md) | LabOnly vs HardwarePass evidence stubs (lab ≠ hardware) |

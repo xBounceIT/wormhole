@@ -147,6 +147,26 @@ Saved-credential **picker filtering** (C# `CredentialPickerSearch.Filter`) lives
 That glue **never** reads CredMgr / DPAPI; empty query returns all rows in stable order.
 See [20-connection-editor.md](20-connection-editor.md).
 
+### Credentials page list / CRUD (UI metadata + Fake glue)
+
+C# `CredentialsViewModel` list/search/multi-select and create/update/delete ordering are
+ported in `wormhole-ui::credentials_page_ui`:
+
+| Piece | Location |
+|---|---|
+| Page VM | `CredentialsPageVm` — cached list, search text, multi-select, `is_empty` / `has_no_matches`, last-good load |
+| Filter | Delegates to `credential_picker::profile_matches_query` (name / username / domain) |
+| Fake list | `FakeCredentialPageStore` — in-memory metadata CRUD for unit tests |
+| Storage adapter | `StorageCredentialPageSource` (`--features storage`) — `CredentialRepository::list_all` |
+| Catalog adapter | `CatalogCredentialPageSource` (`--features secrets`) — `BitwardenCredentialCatalogGlue::credential_page_profiles` |
+| CRUD glue | `add_credential_profile` / `update_credential_profile` / `delete_credential_profile_page` (`storage`) — SQLite metadata via `credential_glue` + `FakePasswordStore`; add rolls back row on CredMgr failure |
+| Edit password read | `read_password_for_edit` (`secrets`) — `CredentialPasswordResolverGlue` for local profiles only |
+
+Password bodies stay in `CredentialSaveDraft` (Debug exposes `password_len` only). List rows
+and `CredentialPageRow` Debug never carry CredMgr payloads. Virtual Bitwarden rows are
+read-only (`is_virtual_bitwarden`). See
+[adversarial-ledger-credentials-page.md](adversarial-ledger-credentials-page.md).
+
 ### Bitwarden virtual credential catalog (metadata only)
 
 C# `BitwardenCredentialCatalogService` merges saved `CredentialProfiles` with read-only
@@ -293,6 +313,7 @@ Never log passwords, key material, refresh tokens, or session keys.
 | `bitwarden_virtual_credential_ids` | `BITWARDEN_VIRTUAL_CREDENTIAL_NAMESPACE`, `bitwarden_virtual_credential_id`, `ensure_cache_entry_ids`, `BitwardenCredentialCacheEntry` (metadata only) |
 | `bitwarden_credential_catalog` | `BitwardenCredentialCatalogGlue`, `BitwardenCatalogProfile`, `FakeLocalCredentialCatalog`, `FakeBitwardenCredentialCache`, `demo_bitwarden_cache_entries` — virtual picker/page merge; locked session → empty cache |
 | `credential_password_resolver` | `CredentialPasswordResolverGlue`, `CredentialPasswordResolver`, `FakeBitwardenVaultPasswords`, `BitwardenVaultPasswordSource`, `CredentialPasswordError`, `resolved_password_len` — local CredMgr vs Bitwarden item id; locked / empty fail-closed; no `bw` |
+| *(UI — `wormhole-ui`)* | Credentials page list/CRUD Fake glue: `CredentialsPageVm` / `FakeCredentialPageStore` / optional `storage`+`secrets` adapters; composes picker filter + `credential_glue` + `CredentialPasswordResolverGlue`; no GPUI ([20-connection-editor.md](20-connection-editor.md), [adversarial-ledger-credentials-page.md](adversarial-ledger-credentials-page.md)) |
 | *(UI — `wormhole-ui`)* | Bitwarden onboarding notice versioning: `BitwardenOnboardingNoticeGlue` / `FakeBitwardenOnboardingNoticeUi` / `should_show_bitwarden_onboarding_notice` — settings `Seen`/`Pending` versions via `SettingsStore` only; app **0.7.x** gate; no `bw` / GPUI ([17-tree-settings-vm.md](17-tree-settings-vm.md), [adversarial-ledger-bitwarden-onboarding.md](adversarial-ledger-bitwarden-onboarding.md)) |
 | *(UI — `wormhole-ui`, `secrets` feature)* | Settings Extensions Bitwarden glue: `BitwardenSettingsExtensionsGlue` / `BitwardenSettingsUiState` — composes session + catalog + CLI pin + extension install Fakes + onboarding visibility; vault/browser toggles, unlock status, install summaries; locked vault → fail-closed virtual picker rows ([17-tree-settings-vm.md](17-tree-settings-vm.md), [adversarial-ledger-settings-bitwarden.md](adversarial-ledger-settings-bitwarden.md)) |
 | `transient_session` | `TransientSessionCredentialStore` trait, `MemoryTransientSessionCredentialStore` (production in-process), `FakeTransientSessionCredentialStore` (tests; Debug length-only + call counts); **never** SQLite / CredMgr / DPAPI; empty password → `SecretsError::EmptyPassword` |
