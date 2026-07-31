@@ -70,7 +70,16 @@ Default builds **do not** pull `vnc-rs`. They ship RFB subset types + a decode/i
 
 - **Session glue** (`session_glue`): pointer/key → existing `InputEventQueue` via `push_pointer_to_session` / `push_key_to_session`; Raw FB rect → `apply_framebuffer_rect` + `FramebufferDirtyNotify` (`FakeFramebufferDirtyNotify` for Lab). Fail-closed when not `Connected` (`NotConnected` — Idle / Negotiating / Closed; input after `close()` cleared); full queue → `InputQueueFull` (queue unchanged); apply errors (`InvalidFramebufferUpdate`) skip dirty notify (no partial invalidate; prior notifies retained). Orchestrator still `UnsupportedProtocol` before tunnel establish — glue does **not** open RFB.
 
-- **Clipboard glue** (`clipboard_glue`): outbound host text → Fake `VncSession` ClientCutText queue (`send_clipboard_to_session`); inbound ServerCutText → local buffer (`apply_server_cut_text`). Soft **1 MiB UTF-8** cap (parity with terminal paste); empty / oversize fail-closed (no send / buffer unchanged); not `Connected` → `NotConnected`; `close()` clears outbound queue + local buffer. `CutTextPayload` / session `Debug` expose lengths only (secrets-adjacent — same posture as terminal paste). C# `HandleServerClipboardUpdate` is still a no-op; no OS clipboard / GPUI.
+- **Clipboard glue** (`clipboard_glue`): outbound host text → Fake `VncSession` ClientCutText queue (`send_clipboard_to_session`); inbound ServerCutText → local buffer (`apply_server_cut_text`). Soft **1 MiB UTF-8** byte cap (parity with terminal paste / C# `MaximumClipboardPasteUtf8Bytes` — not Unicode scalar count); exact limit allowed. Outbound accumulates FIFO until `take_outbound_cut_texts` / `close()`; inbound replaces `local_clipboard`. `CutTextPayload` / session `Debug` / errors expose lengths only (secrets-adjacent — same posture as terminal paste). C# `HandleServerClipboardUpdate` is still a no-op; no OS clipboard / GPUI. See [adversarial-ledger-vnc-clipboard.md](adversarial-ledger-vnc-clipboard.md).
+
+  Fail-closed (no send / buffer unchanged; session gate before empty/oversize):
+
+  | Condition | Error |
+  |---|---|
+  | not `Connected` (Idle / Negotiating / Closed) | `NotConnected` |
+  | empty text (`utf8_len == 0`) while Connected | `ClipboardEmpty` |
+  | `utf8_len > MAX_VNC_CLIPBOARD_UTF8_BYTES` while Connected | `ClipboardTooLarge { actual, limit }` |
+  | `close()` | clears outbound queue + local buffer; subsequent cut-text → `NotConnected` |
 
 - OOB Raw blits **reject** (`InvalidFramebufferUpdate`) rather than clamping into the store; damage unions that cannot fit in `u16` expand to full-plane over-damage (never truncate to empty).
 

@@ -5,7 +5,7 @@
 //! - **Inbound:** ServerCutText event → session local clipboard buffer
 //!
 //! Size / empty policy mirrors terminal paste (`MAX_CLIPBOARD_PASTE_UTF8_BYTES`
-//! in `wormhole-terminal`): soft **1 MiB UTF-8** cap; empty fail-closed with
+//! in `wormhole-terminal`): soft **1 MiB UTF-8 byte** cap; empty fail-closed with
 //! **no** send / **no** local-buffer mutate. Exact limit is allowed.
 //!
 //! Clipboard bodies are secrets-adjacent (same posture as terminal paste /
@@ -82,24 +82,34 @@ pub fn validate_clipboard_utf8_len(actual: usize) -> Result<(), VncError> {
     Ok(())
 }
 
+/// Session gate then payload validate (shared by outbound / inbound).
+fn cut_text_when_connected(session: &VncSession, text: &str) -> Result<CutTextPayload, VncError> {
+    if session.state != VncSessionState::Connected {
+        return Err(VncError::NotConnected);
+    }
+    CutTextPayload::try_new(text)
+}
+
 /// Outbound: validate host text → append ClientCutText on the Fake session.
+///
+/// Session gate is checked **before** empty/oversize so Idle / Negotiating /
+/// Closed never surface [`VncError::ClipboardEmpty`] / [`VncError::ClipboardTooLarge`].
 ///
 /// | Condition | Behaviour |
 /// |---|---|
 /// | not Connected | [`VncError::NotConnected`] — no send |
 /// | empty | [`VncError::ClipboardEmpty`] — no send |
 /// | `> MAX_VNC_CLIPBOARD_UTF8_BYTES` | [`VncError::ClipboardTooLarge`] — no send |
-/// | ok | push one [`CutTextPayload`] onto [`VncSession::outbound_cut_texts`] |
+/// | ok | push one [`CutTextPayload`] onto [`VncSession::outbound_cut_texts`] (FIFO) |
 pub fn send_clipboard_to_session(session: &mut VncSession, text: &str) -> Result<(), VncError> {
-    if session.state != VncSessionState::Connected {
-        return Err(VncError::NotConnected);
-    }
-    let payload = CutTextPayload::try_new(text)?;
+    let payload = cut_text_when_connected(session, text)?;
     session.outbound_cut_texts.push(payload);
     Ok(())
 }
 
 /// Inbound: validate ServerCutText → replace the session local clipboard buffer.
+///
+/// Same session-gate-first precedence as [`send_clipboard_to_session`].
 ///
 /// | Condition | Behaviour |
 /// |---|---|
@@ -108,10 +118,7 @@ pub fn send_clipboard_to_session(session: &mut VncSession, text: &str) -> Result
 /// | oversize | [`VncError::ClipboardTooLarge`] — buffer unchanged |
 /// | ok | replace [`VncSession::local_clipboard`] |
 pub fn apply_server_cut_text(session: &mut VncSession, text: &str) -> Result<(), VncError> {
-    if session.state != VncSessionState::Connected {
-        return Err(VncError::NotConnected);
-    }
-    let payload = CutTextPayload::try_new(text)?;
+    let payload = cut_text_when_connected(session, text)?;
     session.local_clipboard = Some(payload);
     Ok(())
 }
@@ -319,6 +326,37 @@ mod tests {
     }
 
     #[test]
+    fn directions_fail_closed_independently() {
+        let mut session = connected_session();
+        send_clipboard_to_session(&mut session, "queued-out").unwrap();
+        apply_server_cut_text(&mut session, "local-in").unwrap();
+
+        assert_eq!(
+            send_clipboard_to_session(&mut session, ""),
+            Err(VncError::ClipboardEmpty)
+        );
+        assert_eq!(session.outbound_cut_texts.len(), 1);
+        assert_eq!(
+            session.local_clipboard.as_ref().map(CutTextPayload::as_str),
+            Some("local-in")
+        );
+
+        let huge = "z".repeat(MAX_VNC_CLIPBOARD_UTF8_BYTES + 1);
+        assert_eq!(
+            apply_server_cut_text(&mut session, &huge),
+            Err(VncError::ClipboardTooLarge {
+                actual: MAX_VNC_CLIPBOARD_UTF8_BYTES + 1,
+                limit: MAX_VNC_CLIPBOARD_UTF8_BYTES,
+            })
+        );
+        assert_eq!(session.outbound_cut_texts[0].as_str(), "queued-out");
+        assert_eq!(
+            session.local_clipboard.as_ref().map(CutTextPayload::as_str),
+            Some("local-in")
+        );
+    }
+
+    #[test]
     fn validate_helper_matches_try_new() {
         assert_eq!(
             validate_clipboard_utf8_len(0),
@@ -333,5 +371,139 @@ mod tests {
                 limit: MAX_VNC_CLIPBOARD_UTF8_BYTES,
             })
         );
+    }
+
+    #[test]
+    fn max_cap_matches_terminal_paste_and_csharp_1mib() {
+        // Parity with wormhole-terminal `MAX_CLIPBOARD_PASTE_UTF8_BYTES` and
+        // C# `TerminalBridge.MaximumClipboardPasteUtf8Bytes` (1024 * 1024).
+        assert_eq!(MAX_VNC_CLIPBOARD_UTF8_BYTES, 1024 * 1024);
+    }
+
+    #[test]
+    fn outbound_accumulates_fifo_and_take_drains() {
+        let mut session = connected_session();
+        send_clipboard_to_session(&mut session, "one").unwrap();
+        send_clipboard_to_session(&mut session, "two").unwrap();
+        assert_eq!(session.outbound_cut_texts.len(), 2);
+        let drained = session.take_outbound_cut_texts();
+        assert_eq!(
+            drained
+                .iter()
+                .map(CutTextPayload::as_str)
+                .collect::<Vec<_>>(),
+            vec!["one", "two"]
+        );
+        assert!(session.outbound_cut_texts.is_empty());
+        // Second drain is empty; local buffer untouched.
+        assert!(session.take_outbound_cut_texts().is_empty());
+        assert!(session.local_clipboard.is_none());
+    }
+
+    #[test]
+    fn not_connected_precedes_empty_and_oversize() {
+        // Fail-closed table: session gate first — do not report ClipboardEmpty /
+        // ClipboardTooLarge (or mutate) when not Connected.
+        let mut idle = VncSession::new(VncConnectOptions::new(addr()));
+        let huge = "x".repeat(MAX_VNC_CLIPBOARD_UTF8_BYTES + 1);
+        assert_eq!(
+            send_clipboard_to_session(&mut idle, ""),
+            Err(VncError::NotConnected)
+        );
+        assert_eq!(
+            apply_server_cut_text(&mut idle, ""),
+            Err(VncError::NotConnected)
+        );
+        assert_eq!(
+            send_clipboard_to_session(&mut idle, &huge),
+            Err(VncError::NotConnected)
+        );
+        assert_eq!(
+            apply_server_cut_text(&mut idle, &huge),
+            Err(VncError::NotConnected)
+        );
+        assert!(idle.outbound_cut_texts.is_empty());
+        assert!(idle.local_clipboard.is_none());
+
+        let mut negotiating = VncSession::new(VncConnectOptions::new(addr()));
+        negotiating
+            .negotiate_security(&[1])
+            .expect("None security accepted");
+        assert_eq!(negotiating.state, VncSessionState::Negotiating);
+        assert_eq!(
+            apply_server_cut_text(&mut negotiating, ""),
+            Err(VncError::NotConnected)
+        );
+        assert_eq!(
+            send_clipboard_to_session(&mut negotiating, &huge),
+            Err(VncError::NotConnected)
+        );
+        assert!(negotiating.outbound_cut_texts.is_empty());
+        assert!(negotiating.local_clipboard.is_none());
+    }
+
+    #[test]
+    fn utf8_byte_cap_not_scalar_count() {
+        // Cap is UTF-8 bytes (terminal paste parity), not Unicode scalars.
+        // U+1F600 😀 is 4 bytes — 262144 scalars == exactly 1 MiB; +1 fails.
+        let emoji = "\u{1F600}";
+        assert_eq!(emoji.len(), 4);
+        let exact_scalars = MAX_VNC_CLIPBOARD_UTF8_BYTES / emoji.len();
+        let exact = emoji.repeat(exact_scalars);
+        assert_eq!(exact.len(), MAX_VNC_CLIPBOARD_UTF8_BYTES);
+        assert_eq!(exact.chars().count(), exact_scalars);
+
+        let mut session = connected_session();
+        send_clipboard_to_session(&mut session, &exact).unwrap();
+        apply_server_cut_text(&mut session, &exact).unwrap();
+        assert_eq!(session.outbound_cut_texts[0].utf8_len(), MAX_VNC_CLIPBOARD_UTF8_BYTES);
+        assert_eq!(local_clipboard_utf8_len(&session), Some(MAX_VNC_CLIPBOARD_UTF8_BYTES));
+
+        let over = emoji.repeat(exact_scalars + 1);
+        assert_eq!(over.len(), MAX_VNC_CLIPBOARD_UTF8_BYTES + 4);
+        assert_eq!(
+            send_clipboard_to_session(&mut session, &over),
+            Err(VncError::ClipboardTooLarge {
+                actual: MAX_VNC_CLIPBOARD_UTF8_BYTES + 4,
+                limit: MAX_VNC_CLIPBOARD_UTF8_BYTES,
+            })
+        );
+        // Prior local buffer unchanged on oversize inbound reject.
+        assert_eq!(
+            apply_server_cut_text(&mut session, &over),
+            Err(VncError::ClipboardTooLarge {
+                actual: MAX_VNC_CLIPBOARD_UTF8_BYTES + 4,
+                limit: MAX_VNC_CLIPBOARD_UTF8_BYTES,
+            })
+        );
+        assert_eq!(local_clipboard_utf8_len(&session), Some(MAX_VNC_CLIPBOARD_UTF8_BYTES));
+        // First exact outbound still present (oversize did not append).
+        assert_eq!(session.outbound_cut_texts.len(), 1);
+    }
+
+    #[test]
+    fn clipboard_errors_display_sizes_only() {
+        let secret = "sekrit-clipboard-body!!";
+        let empty = VncError::ClipboardEmpty;
+        assert!(!format!("{empty}").contains(secret));
+        assert!(!format!("{empty:?}").contains(secret));
+        let too_large = VncError::ClipboardTooLarge {
+            actual: secret.len(),
+            limit: MAX_VNC_CLIPBOARD_UTF8_BYTES,
+        };
+        let display = format!("{too_large}");
+        assert!(display.contains(&secret.len().to_string()));
+        assert!(display.contains(&(MAX_VNC_CLIPBOARD_UTF8_BYTES).to_string()));
+        assert!(!display.contains(secret));
+        assert!(!format!("{too_large:?}").contains(secret));
+    }
+
+    #[test]
+    fn local_clipboard_text_helper_matches_buffer() {
+        let mut session = connected_session();
+        assert!(session.local_clipboard_text().is_none());
+        apply_server_cut_text(&mut session, "peek-me").unwrap();
+        assert_eq!(session.local_clipboard_text(), Some("peek-me"));
+        assert_eq!(local_clipboard_utf8_len(&session), Some(7));
     }
 }

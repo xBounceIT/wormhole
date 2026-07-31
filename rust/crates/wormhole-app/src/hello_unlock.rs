@@ -173,12 +173,22 @@ impl HelloUnlockGlue {
 /// Cancelled is detected only via exact [`HELLO_CANCELED_MESSAGE`] parity with
 /// C# `UserConsentVerificationResult.Canceled` copy — other rejections are
 /// Unavailable (fail closed for unlock). `verified: true` always wins.
+///
+/// Success / Cancelled always use [`status_text_for`] fixed C# UI constants
+/// (never forward freeform Fake / mis-scripted messages). Unavailable still
+/// forwards the probe/rejection reason so hosts can show device/busy/gap copy.
 fn map_verification(verification: HelloVerification) -> HelloUnlockResult {
     if verification.verified {
-        return HelloUnlockResult::new(HelloUnlockOutcome::Success, verification.message);
+        return HelloUnlockResult::new(
+            HelloUnlockOutcome::Success,
+            status_text_for(HelloUnlockOutcome::Success),
+        );
     }
     if verification.message == HELLO_CANCELED_MESSAGE {
-        return HelloUnlockResult::new(HelloUnlockOutcome::Cancelled, verification.message);
+        return HelloUnlockResult::new(
+            HelloUnlockOutcome::Cancelled,
+            status_text_for(HelloUnlockOutcome::Cancelled),
+        );
     }
     HelloUnlockResult::new(HelloUnlockOutcome::Unavailable, verification.message)
 }
@@ -393,7 +403,8 @@ mod tests {
             assert!(!r.is_unlocked());
         }
 
-        // verified: true wins even if message looks like cancel copy.
+        // verified: true wins even if message looks like cancel copy — and
+        // status_text is normalized to Verified. (never forward spoofed cancel).
         let spoof = FakeHelloPrompt::with_outcomes(
             HelloAvailability::new(true, HELLO_AVAILABLE_MESSAGE),
             HelloVerification::new(true, HELLO_CANCELED_MESSAGE),
@@ -401,7 +412,35 @@ mod tests {
         let glue = HelloUnlockGlue::new(Arc::new(spoof) as SharedHelloUnlockSource);
         let r = glue.request_unlock(1, DEFAULT_UNLOCK_PROMPT);
         assert_eq!(r.outcome, HelloUnlockOutcome::Success);
+        assert_eq!(r.status_text, HELLO_VERIFIED_MESSAGE);
         assert!(r.is_unlocked());
+        assert!(!r.status_text.contains("canceled"));
+
+        // Freeform success message must not leak into status_text.
+        let freeform = FakeHelloPrompt::with_outcomes(
+            HelloAvailability::new(true, HELLO_AVAILABLE_MESSAGE),
+            HelloVerification::new(true, "Unlocked with hunter2-biometric"),
+        );
+        let glue = HelloUnlockGlue::new(Arc::new(freeform) as SharedHelloUnlockSource);
+        let r = glue.request_unlock(1, DEFAULT_UNLOCK_PROMPT);
+        assert_eq!(r.outcome, HelloUnlockOutcome::Success);
+        assert_eq!(r.status_text, HELLO_VERIFIED_MESSAGE);
+        assert!(!r.status_text.contains("hunter2"));
+        assert!(!format!("{r:?}").contains("hunter2"));
+        assert!(!format!("{r}").contains("hunter2"));
+    }
+
+    #[test]
+    fn glue_remote_fake_unavailable_skips_verification() {
+        let fake = Arc::new(FakeHelloPrompt::remote_session());
+        let glue = HelloUnlockGlue::new(Arc::clone(&fake) as SharedHelloUnlockSource);
+        let r = glue.request_unlock(0, "Unlock with hunter2");
+        assert_eq!(r.outcome, HelloUnlockOutcome::Unavailable);
+        assert_eq!(r.status_text, REMOTE_DESKTOP_UNAVAILABLE_MESSAGE);
+        assert!(!r.is_unlocked());
+        assert!(!r.status_text.contains("hunter2"));
+        assert_eq!(fake.availability_calls(), 1);
+        assert_eq!(fake.verification_calls(), 0);
     }
 
     #[test]
@@ -435,21 +474,15 @@ mod tests {
 
     #[test]
     fn fake_ui_constructors_and_push() {
-        assert!(FakeHelloUnlockUi::success()
-            .request_unlock(0, "")
-            .is_unlocked());
-        assert_eq!(
-            FakeHelloUnlockUi::cancelled()
-                .request_unlock(0, "")
-                .outcome,
-            HelloUnlockOutcome::Cancelled
-        );
-        assert_eq!(
-            FakeHelloUnlockUi::unavailable()
-                .request_unlock(0, "")
-                .outcome,
-            HelloUnlockOutcome::Unavailable
-        );
+        let ok = FakeHelloUnlockUi::success().request_unlock(0, "");
+        assert!(ok.is_unlocked());
+        assert_eq!(ok.status_text, HELLO_VERIFIED_MESSAGE);
+        let cancel = FakeHelloUnlockUi::cancelled().request_unlock(0, "");
+        assert_eq!(cancel.outcome, HelloUnlockOutcome::Cancelled);
+        assert_eq!(cancel.status_text, HELLO_CANCELED_MESSAGE);
+        let gap = FakeHelloUnlockUi::unavailable().request_unlock(0, "");
+        assert_eq!(gap.outcome, HelloUnlockOutcome::Unavailable);
+        assert_eq!(gap.status_text, WINRT_HELLO_GAP);
         // Constructors are one-shot scripts (not sticky like FakeHelloPrompt).
         let once = FakeHelloUnlockUi::success();
         assert!(once.request_unlock(0, "").is_unlocked());

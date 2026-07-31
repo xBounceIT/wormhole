@@ -47,6 +47,7 @@
 | [adversarial-ledger-hello-cutover.md](adversarial-ledger-hello-cutover.md) | Hello / app-auth / Bitwarden browser / cutover review closed |
 | [adversarial-ledger-bitwarden-session.md](adversarial-ledger-bitwarden-session.md) | Bitwarden CLI session stub (`StubBitwardenSession` / Fake) review closed |
 | [adversarial-ledger-hello-stub.md](adversarial-ledger-hello-stub.md) | Hello AvailabilityProbe / HelloPrompt stub review closed |
+| [adversarial-ledger-hello-unlock-ui.md](adversarial-ledger-hello-unlock-ui.md) | Hello unlock prompt UI glue (`HelloUnlockGlue` / `FakeHelloUnlockUi`) review closed |
 | [adversarial-ledger-domain.md](adversarial-ledger-domain.md) | Domain review closed (73 tests) |
 | [adversarial-ledger-secrets.md](adversarial-ledger-secrets.md) | Secrets review closed (25 tests) |
 | [adversarial-ledger-dpapi-paths.md](adversarial-ledger-dpapi-paths.md) | DPAPI keys/tunnels path confinement review closed |
@@ -100,6 +101,7 @@
 | [adversarial-ledger-vnc-framebuffer.md](adversarial-ledger-vnc-framebuffer.md) | VNC framebuffer / input queue review closed |
 | [adversarial-ledger-vnc-forwarder.md](adversarial-ledger-vnc-forwarder.md) | VNC `select_vnc_connect_target` / LocalForwarder stub review closed |
 | [adversarial-ledger-vnc-session-glue.md](adversarial-ledger-vnc-session-glue.md) | VNC session glue (`push_*` / `apply_framebuffer_rect` / Fake dirty notify) review closed |
+| [adversarial-ledger-vnc-clipboard.md](adversarial-ledger-vnc-clipboard.md) | VNC clipboard cut-text glue (`clipboard_glue` ClientCutText / ServerCutText) review closed |
 | [adversarial-ledger-gpui-gates.md](adversarial-ledger-gpui-gates.md) | GPUI gates 1–2 review closed |
 | [adversarial-ledger-sftp-vpn.md](adversarial-ledger-sftp-vpn.md) | SFTP + OpenVPN/Fortinet review closed |
 | [adversarial-ledger-sftp-cancel.md](adversarial-ledger-sftp-cancel.md) | SFTP single-flight cancel / gate review closed |
