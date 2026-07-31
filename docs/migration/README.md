@@ -10,6 +10,7 @@
 |---|---|
 | [00-baseline.md](00-baseline.md) | Tag, commit, packaging |
 | [feature-matrix.md](feature-matrix.md) | Shipped feature parity matrix |
+| [todo.md](todo.md) | Open backlog (Spike→Lab, GPUI/live, hardware gates, cutover) |
 | [interop-inventory.md](interop-inventory.md) | Win32 / COM / WebView2 / secrets touchpoints + Rust crate ownership (LabOnly / Spike / Unwired) |
 | [native-surface-broker.md](native-surface-broker.md) | C# hosting → Rust broker design |
 | [deps-pins.md](deps-pins.md) | GPUI / WebView2 / `windows` crate pins |
