@@ -4,7 +4,8 @@
 //! settings + terminal font/size/auto-copy apply glue, connection editor, Quick Connect
 //! + recent-history MRU, credential picker search glue, credentials page list/CRUD Fake glue,
 //! tunnel configs page / picker metadata
-//! Fake glue, mRemoteNG import dialog Fake VM glue (`import` feature),
+//! Fake glue, tunnel test dialog Fake VM glue (`tunnels` feature),
+//! mRemoteNG import dialog Fake VM glue (`import` feature),
 //! serial COM picker + baud/parity
 //! preset glue) compiles without GPUI.
 //! Enable `--features gpui` for shell
@@ -33,6 +34,8 @@ mod credentials_page_ui;
 #[cfg(feature = "import")]
 mod mremoteng_import_dialog;
 mod tunnel_configs_ui;
+#[cfg(feature = "tunnels")]
+mod tunnel_test_dialog;
 mod error;
 mod layout_sink;
 mod pane_layout;
@@ -102,6 +105,12 @@ pub use tunnel_configs_ui::{
     filter_tunnel_configs_page, filter_tunnel_picker_entries, is_sentinel_id,
     tunnel_kind_display_name, FakeTunnelConfigList, TunnelCatalogError, TunnelConfigRow,
     TunnelConfigSource, TunnelConfigsVm, TunnelPickerVm, INHERIT_TUNNEL_ID, NO_TUNNEL_ID,
+};
+#[cfg(feature = "tunnels")]
+pub use tunnel_test_dialog::{
+    classify_informational, FakeTunnelTargetProbe, FakeTunnelTestLab,
+    TunnelTargetProbe, TunnelTestDialogError, TunnelTestDialogVm,
+    TunnelTestInformationalOutcome, INFORMATIONAL_ESTABLISH_PREFIX,
 };
 #[cfg(feature = "storage")]
 pub use tunnel_configs_ui::StorageTunnelConfigSource;

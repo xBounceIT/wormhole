@@ -69,7 +69,31 @@ picker.load_from(&fake)?;
 picker.load_from_node(Some(true), Some(config_id));
 ```
 
-Non-goals: tunnel editor dialog, test dialog, add/edit/delete/test commands, DPAPI read/write, debounce (host-owned). See [adversarial-ledger-tunnel-configs-ui.md](adversarial-ledger-tunnel-configs-ui.md).
+Non-goals: tunnel editor dialog, add/edit/delete commands, DPAPI read/write, debounce (host-owned). See [adversarial-ledger-tunnel-configs-ui.md](adversarial-ledger-tunnel-configs-ui.md).
+
+### Tunnel test dialog Fake VM (`wormhole-ui`, feature `tunnels`)
+
+Lab-only diagnostic VM mirroring C# `TunnelTestDialogViewModel`: prepare → run establish once via [`FakeTunnelTestLab`] compositing [`TunnelManager`] + [`FakeTunnelProvider`] + optional [`FakeTunnelTargetProbe`] (no live SOCKS dial). Progress lines reuse `wormhole_session::describe_tunnel_phase`. **No GPUI** / **no live sidecar**.
+
+| Type | Role |
+|---|---|
+| `TunnelTestDialogVm` | `prepare` / `run` / `request_cancel_for_close`; timestamped log; success / failure / cancel / informational result bindings |
+| `FakeTunnelTestLab` | In-memory config + secret lookups + manager over per-kind `FakeTunnelProvider` |
+| `FakeTunnelTargetProbe` | Scripted target dial (C# `DialAsync` stand-in) |
+| `TunnelTargetProbe` | Host-injectable probe trait for future live SOCKS |
+
+Informational Stormshield-style notices: `FakeTunnelProvider::fail_next("NOTICE:title\|message")` → `was_informational` (not alarming failure).
+
+```rust
+use wormhole_ui::{FakeTunnelTestLab, TunnelTestDialogVm, TunnelKind};
+use wormhole_tunnels::TunnelConfigRecord;
+let lab = FakeTunnelTestLab::wireguard(id, "corp-vpn", secret_bytes);
+let mut vm = TunnelTestDialogVm::new();
+vm.prepare_record(&TunnelConfigRecord::new(id, TunnelKind::WireGuard, "corp-vpn"))?;
+vm.run(&lab).await?;
+```
+
+Non-goals: GPUI dialog chrome; live sidecar / DPAPI; Stormshield recoverable exception types (lab uses `NOTICE:` prefix). See [adversarial-ledger-tunnel-test-dialog.md](adversarial-ledger-tunnel-test-dialog.md).
 
 ### Traits
 

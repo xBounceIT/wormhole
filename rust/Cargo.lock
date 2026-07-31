@@ -9300,6 +9300,7 @@ dependencies = [
 name = "wormhole-ui"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "gpui",
  "gpui_platform",
@@ -9308,6 +9309,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
+ "tokio-util",
  "uuid",
  "wormhole-domain",
  "wormhole-import",
