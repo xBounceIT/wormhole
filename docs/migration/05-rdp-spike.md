@@ -40,6 +40,7 @@ Reparenting into the shell HWND composites the OCX **behind** DirectComposition 
 | CredSSP password wipe ↔ connect-attempt Fake glue | **Works** (`RdpCredSspConnectGlue` / `FakeRdpCredSspSurface`; wipe on success / fail / cancel; **no** OCX) |
 | ConnectionProfile display + common redirects → Fake configure | **Works** (`RdpDisplayRedirectGlue` / `FakeRdpPropertySurface`; loud desktop axes fail-closed; TrySet soft-skip; **no** OCX) |
 | ConnectionProfile performance flags + bitmap cache → Fake configure | **Works** (`RdpPerformanceFlagsGlue` / `FakeRdpPerformanceSurface`; `BuildPerformanceFlags` parity; TrySet soft-skip; **no** OCX) |
+| External `mstsc.exe` + tunnel reject → Fake policy glue | **Works** (`RdpExternalMstscGlue` / `FakeExternalMstscSurface`; `AllowExternalMstsc` vs `RejectWhenTunnelEnabled`; C# message identity; **no** `Process::Command`) |
 | Brief STA message pump after Connect | **Works** (`pump_messages`) |
 | Drop order Unadvise → Close → revoke site → destroy overlay HWND | **Works** (OCX before host) |
 
@@ -159,6 +160,38 @@ Fake records accumulate across `apply_from_profile` calls unless the caller
 
 Adversarial review: [adversarial-ledger-rdp-performance-flags.md](adversarial-ledger-rdp-performance-flags.md).
 
+### External mstsc + tunnel reject (Fake policy glue)
+
+Parity target: C# `RdpSessionViewModel.ConnectAsync` after `ShouldUseExternalClientAsync`:
+when effective external routing is desired, `tunnel_enabled` must be false or the attempt
+fails closed with `TunnelExternalClientUnsupportedMessage` — **before** any `mstsc.exe`
+launch. Core bool policy also lives in [`validate_tunnel_rdp_policy`](../../rust/crates/wormhole-surface-win/src/rdp/configure.rs);
+this glue exposes the session-shaped `AllowExternalMstsc` vs `RejectWhenTunnelEnabled`
+decision + Fake counters only.
+
+| Input | Decision |
+|-------|----------|
+| `tunnel_enabled && use_external_client` | `RejectWhenTunnelEnabled` → `Err` (C# message) |
+| Otherwise | `AllowExternalMstsc` → `Ok` (Fake records launch eligibility; **no** spawn) |
+
+Does **not** resolve Azure AD auto-detect (`ShouldUseExternalClientAsync` deferred),
+rewrite CredSSP / display / performance glues, or spawn `mstsc.exe`.
+
+Adversarial review: [adversarial-ledger-rdp-external-mstsc.md](adversarial-ledger-rdp-external-mstsc.md).
+
+```rust
+use wormhole_surface_win::rdp::{
+    ExternalMstscPolicyInputs, RdpExternalMstscGlue,
+};
+
+let mut glue = RdpExternalMstscGlue::with_fake();
+let inputs = ExternalMstscPolicyInputs {
+    tunnel_enabled: profile.tunnel_enabled,
+    use_external_client: effective_external, // after inheritance / AAD resolution
+};
+glue.evaluate_external_route(inputs)?; // Err → overlay; Ok → launch eligible (Fake only)
+```
+
 ```rust
 use wormhole_domain::ConnectionProfile;
 use wormhole_surface_win::rdp::{build_performance_flags, RdpPerformanceFlagsGlue};
@@ -226,7 +259,7 @@ These helpers are **pure policy** (no COM, no mstscax, not a hardware / gate-6 l
 
 **Re-audit pin (2026-07-31):** gateway + tunnel reject stub is solid (`configure.rs` + `prepare_rdp_connect_target` before Fake bind). No further glue needed; session wiring stays deferred (no `wormhole-surface-win` dep from `wormhole-session`). See [adversarial-ledger-rdp-gateway.md](adversarial-ledger-rdp-gateway.md) — parent adversarial **SKIP**.
 
-**Re-audit pin (2026-07-31):** external `mstsc.exe` + tunnel reject stub is solid (`validate_tunnel_rdp_policy` External-first + `prepare_rdp_connect_target` before Fake bind / SOCKS). One test-oracle pin added (C# `TunnelExternalClientUnsupportedMessage` byte-match); no production policy change. Session AAD→external resolution stays deferred. See [adversarial-ledger-rdp-external.md](adversarial-ledger-rdp-external.md) — parent adversarial **SKIP**.
+**Re-audit pin (2026-07-31):** external `mstsc.exe` + tunnel reject stub is solid (`validate_tunnel_rdp_policy` External-first + `prepare_rdp_connect_target` before Fake bind / SOCKS). Callable Fake glue (`RdpExternalMstscGlue` / `AllowExternalMstsc` vs `RejectWhenTunnelEnabled`) added in `external_mstsc_glue.rs` — delegates message identity to configure; no `Process::Command`. Session AAD→external resolution stays deferred. See [adversarial-ledger-rdp-external-mstsc.md](adversarial-ledger-rdp-external-mstsc.md) (policy parent: [adversarial-ledger-rdp-external.md](adversarial-ledger-rdp-external.md)).
 
 **Re-audit pin (2026-07-31, strict server-auth):** `server_authentication == 1` + tunnel → `StrictServerAuth` (C# message identity; non-Require allow vectors; External → Gateway → Strict priority) is solid in the same helpers — docs-only, no glue. See [adversarial-ledger-rdp-strict-auth.md](adversarial-ledger-rdp-strict-auth.md) — parent adversarial **SKIP**.
 
@@ -303,6 +336,7 @@ let _ = prepare_rdp_connect_target("dc.local", 3389, policy, Some(&fake), false)
 | `rdp::credssp_connect_glue` | `RdpCredSspConnectGlue` / `FakeRdpCredSspSurface` — password wipe on success / fail / cancel (Fake; no OCX) |
 | `rdp::display_redirect_glue` | `RdpDisplayRedirectGlue` / `FakeRdpPropertySurface` — ConnectionProfile display + common redirects → Fake puts; TrySet soft-skip; desktop axes fail-closed |
 | `rdp::performance_flags_glue` | `RdpPerformanceFlagsGlue` / `FakeRdpPerformanceSurface` — ConnectionProfile performance flags + bitmap cache → Fake puts; TrySet soft-skip; no loud validator |
+| `rdp::external_mstsc_glue` | `RdpExternalMstscGlue` / `FakeExternalMstscSurface` — external mstsc + tunnel reject (`AllowExternalMstsc` / `RejectWhenTunnelEnabled`); no `Process::Command` |
 | `rdp::target` | `select_rdp_connect_target` / `prepare_rdp_connect_target` — Direct vs LocalForwarder; SOCKS-only reject; `FakeTunnelForwarder` |
 | `rdp::dispatch` | IDispatch put/get + soft missing-member mapping |
 | `rdp::site` | `IOleClientSite` + `IOleInPlaceSite` bound to overlay HWND |

@@ -15,7 +15,8 @@
 //!   + tunnel policy validation + BindLocalForwarder dial-target stub + event sink stub
 //!   + CredSSP password-wipe ↔ connect-attempt Fake glue (no live OCX)
 //!   + ConnectionProfile display/redirect → Fake configure glue (no live OCX)
-//!   + ConnectionProfile performance flags / bitmap cache → Fake configure glue (no live OCX).
+//!   + ConnectionProfile performance flags / bitmap cache → Fake configure glue (no live OCX)
+//!   + External mstsc.exe + tunnel reject → Fake policy glue (no Process::Command).
 
 mod host_bounds;
 mod resize_glue;
@@ -42,6 +43,8 @@ mod credssp_connect_glue;
 mod display_redirect_glue;
 #[cfg(all(windows, feature = "rdp"))]
 mod performance_flags_glue;
+#[cfg(all(windows, feature = "rdp"))]
+mod external_mstsc_glue;
 #[cfg(all(windows, feature = "rdp"))]
 mod dispatch;
 #[cfg(all(windows, feature = "rdp"))]
@@ -80,6 +83,12 @@ pub use display_redirect_glue::{
     FakePropPut, FakePropRecord, FakeRdpPropertySurface, RdpDisplayRedirectGlue,
     RedirectDrivesIntent, DESKTOP_DEFAULT_HEIGHT, DESKTOP_DEFAULT_WIDTH, DESKTOP_MIN_HEIGHT,
     DESKTOP_MIN_WIDTH, LOUD_DISPLAY_PROPS, REDIRECT_DRIVES_ALL, SOFT_DISPLAY_REDIRECT_PROPS,
+};
+#[cfg(all(windows, feature = "rdp"))]
+pub use external_mstsc_glue::{
+    decide_external_mstsc_tunnel, external_decision_matches_tunnel_policy,
+    validate_external_mstsc_tunnel, ExternalMstscGlueError, ExternalMstscPolicyInputs,
+    ExternalMstscTunnelDecision, FakeExternalMstscSurface, RdpExternalMstscGlue,
 };
 #[cfg(all(windows, feature = "rdp"))]
 pub use performance_flags_glue::{
