@@ -463,6 +463,16 @@ impl LocalCredentialCatalog for FakeLocalCredentialCatalog {
     }
 }
 
+impl LocalCredentialCatalog for &FakeLocalCredentialCatalog {
+    fn list_all(&self) -> Result<Vec<BitwardenCatalogProfile>, BitwardenCatalogError> {
+        (*self).list_all()
+    }
+
+    fn get_by_id(&self, id: Uuid) -> Result<Option<BitwardenCatalogProfile>, BitwardenCatalogError> {
+        (*self).get_by_id(id)
+    }
+}
+
 #[derive(Default)]
 struct FakeCacheInner {
     entries: Vec<BitwardenCredentialCacheEntry>,
@@ -538,6 +548,12 @@ impl BitwardenCredentialCacheSource for FakeBitwardenCredentialCache {
             return Ok(Vec::new());
         }
         Ok(guard.entries.clone())
+    }
+}
+
+impl BitwardenCredentialCacheSource for &FakeBitwardenCredentialCache {
+    fn list_all(&self) -> Result<Vec<BitwardenCredentialCacheEntry>, BitwardenCatalogError> {
+        (*self).list_all()
     }
 }
 

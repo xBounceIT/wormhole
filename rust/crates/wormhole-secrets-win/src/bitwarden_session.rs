@@ -345,6 +345,24 @@ impl BitwardenSession for FakeBitwardenSession {
     }
 }
 
+impl BitwardenSession for &FakeBitwardenSession {
+    fn status(&self) -> BitwardenSessionStatus {
+        (*self).status()
+    }
+
+    fn unlock(&self, master_password: &str) -> BitwardenUnlockResult {
+        (*self).unlock(master_password)
+    }
+
+    fn lock(&self) {
+        (*self).lock();
+    }
+
+    fn session_key(&self) -> Option<BitwardenSessionKey> {
+        (*self).session_key()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

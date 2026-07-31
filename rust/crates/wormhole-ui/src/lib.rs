@@ -7,7 +7,8 @@
 //! Enable `--features gpui` for shell
 //! chrome (`gpui_platform::application()`). Enable `--features storage` for the SQLite
 //! connection-tree read adapter, `StorageSettingsStore`, editor save glue, and tree
-//! connection reparent apply. Default features `session` / `tunnels` / `update` wire
+//! connection reparent apply. Enable `--features secrets` for Settings → Extensions
+//! Bitwarden vault/browser Fake glue (`settings_bitwarden_extensions`). Default features `session` / `tunnels` / `update` wire
 //! tree Open / Quick Connect → `wormhole-session`, OTP / Fortinet SAML / TLS trust prompt
 //! UI glue →
 //! `wormhole-tunnels` (`ChannelOtpPrompt` / `ChannelSamlAuthCallback` + Fake; no dialog /
@@ -21,6 +22,8 @@
 //! `docs/migration/13-update-logging.md`.
 
 mod bitwarden_onboarding_notice;
+#[cfg(feature = "secrets")]
+mod settings_bitwarden_extensions;
 mod connection_editor;
 mod credential_picker;
 mod error;
@@ -60,6 +63,11 @@ pub use bitwarden_onboarding_notice::{
     FakeBitwardenOnboardingNoticeUi, BITWARDEN_ONBOARDING_NOTICE_MESSAGE,
     BITWARDEN_ONBOARDING_NOTICE_TITLE, CURRENT_BITWARDEN_ONBOARDING_NOTICE_VERSION,
     with_fake_ui,
+};
+#[cfg(feature = "secrets")]
+pub use settings_bitwarden_extensions::{
+    demo_virtual_cache_entry_count, BitwardenSettingsExtensionsGlue,
+    BitwardenSettingsFakeHarness, BitwardenSettingsUiState,
 };
 pub use connection_editor::{
     ConnectionEditorMode, ConnectionEditorState, CredentialUiMode, RdpDriveRedirectMode,

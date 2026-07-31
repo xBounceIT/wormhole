@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "GPUI shell skeleton + tree / settings / terminal font-size-auto-copy apply glue + connection-editor / Quick Connect (+ recent-history MRU) + credential picker search glue + serial COM picker + baud/parity preset glue + tree Open→session + tunnel route prompt Fake glue + Bitwarden onboarding notice versioning Fake glue + OTP / Fortinet SAML prompt UI glue + update notify glue (GPUI optional)."
+description = "GPUI shell skeleton + tree / settings / terminal font-size-auto-copy apply glue + connection-editor / Quick Connect (+ recent-history MRU) + credential picker search glue + serial COM picker + baud/parity preset glue + tree Open→session + tunnel route prompt Fake glue + Bitwarden onboarding notice versioning Fake glue + Settings Extensions Bitwarden vault/browser Fake glue + OTP / Fortinet SAML prompt UI glue + update notify glue (GPUI optional)."
 publish = false
 
 [lib]
@@ -20,8 +20,10 @@ required-features = ["gpui"]
 default = ["session", "tunnels", "update"]
 # Optional GPUI chrome (same pins as surface-lab). Pure state machine works without it.
 gpui = ["dep:gpui", "dep:gpui_platform"]
+# Bitwarden session / catalog / install Fake glue composed into Settings Extensions VM.
+secrets = ["dep:wormhole-secrets-win"]
 # Optional SQLite tree read + settings.json StorageSettingsStore + editor save (CredMgr).
-storage = ["dep:wormhole-storage", "dep:wormhole-secrets-win"]
+storage = ["dep:wormhole-storage", "secrets"]
 # Session-orchestrator connect glue (tree Open + Quick Connect → wormhole-session).
 session = ["dep:wormhole-session"]
 # Tunnel OTP + Fortinet SAML prompt UI glue (Channel ↔ Fake UI; no GPUI / WebView2 dialog).
