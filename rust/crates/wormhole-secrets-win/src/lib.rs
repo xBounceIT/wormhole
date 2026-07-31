@@ -22,6 +22,8 @@
 //!   tracking; Disabled / Never never lock; zero/negative duration fail-closed; no GPUI
 //! - Bitwarden CLI unlock / memory-only session stub (`BitwardenSession` +
 //!   `StubBitwardenSession` / `FakeBitwardenSession`); `bw` process spawn is **not** wired yet
+//! - Bitwarden virtual credential catalog Fake glue (`BitwardenCredentialCatalogGlue` /
+//!   `FakeBitwardenCredentialCache` / stable virtual ids); locked vault → fail-closed
 //! - Process-local ephemeral session passwords (`TransientSessionCredentialStore` +
 //!   `MemoryTransientSessionCredentialStore` / `FakeTransientSessionCredentialStore`);
 //!   never SQLite / CredMgr / DPAPI — keyed by session or connection-node id
@@ -50,7 +52,9 @@
 mod app_auth;
 mod app_auth_service;
 mod azure_vpn_token_cache;
+mod bitwarden_credential_catalog;
 mod bitwarden_session;
+mod bitwarden_virtual_credential_ids;
 mod cred_mgr;
 mod dpapi;
 mod entropy;
@@ -81,10 +85,20 @@ pub use azure_vpn_token_cache::{
     write_azure_vpn_token_cache_under, AzureVpnTokenCacheStore, DpapiAzureVpnTokenCacheStore,
     FakeAzureVpnTokenCacheStore,
 };
+pub use bitwarden_credential_catalog::{
+    demo_bitwarden_cache_entries, BitwardenCatalogError, BitwardenCatalogProfile,
+    BitwardenCredentialCacheSource, BitwardenCredentialCatalogGlue,
+    BITWARDEN_VIRTUAL_PROTOCOLS, FakeBitwardenCredentialCache, FakeLocalCredentialCatalog,
+    LocalCredentialCatalog,
+};
 pub use bitwarden_session::{
     bitwarden_session_status, unlock_bitwarden_session, BitwardenSession, BitwardenSessionKey,
     BitwardenSessionStatus, BitwardenUnlockResult, FakeBitwardenSession, StubBitwardenSession,
     BITWARDEN_CLI_SESSION_GAP,
+};
+pub use bitwarden_virtual_credential_ids::{
+    bitwarden_virtual_credential_id, ensure_cache_entry_ids, BitwardenCredentialCacheEntry,
+    BitwardenVirtualIdError, BITWARDEN_VIRTUAL_CREDENTIAL_NAMESPACE,
 };
 pub use cred_mgr::{
     credential_target, delete_password, ensure_password_fits_cred_mgr, password_utf16_byte_len,

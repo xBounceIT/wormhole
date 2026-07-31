@@ -238,7 +238,7 @@ format_guid_d / parse_guid_d / format_timestamp_o / parse_timestamp_o
 
 - `GetByTunnelConfigId` (node reference sample for delete guards) and Bitwarden credential cache repository
 
-- Credentials page UI / Bitwarden virtual catalog rows (`IsVirtualBitwarden`)
+- Credentials page UI — virtual catalog merge is lab-stubbed in `wormhole-secrets-win::bitwarden_credential_catalog` ([adversarial-ledger-bitwarden-catalog.md](adversarial-ledger-bitwarden-catalog.md)); GPUI picker wiring Pending
 
 - DPAPI tunnel secret IO (lives in `wormhole-secrets-win`; not written by this repository)
 

@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Windows Credential Manager + DPAPI secrets for Wormhole (CredMgr / keys / tunnels)."
+description = "Windows Credential Manager + DPAPI secrets for Wormhole (CredMgr / keys / tunnels / Bitwarden catalog Fake glue)."
 publish = false
 
 [lib]
@@ -17,10 +17,13 @@ targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
 
 [dependencies]
 base64 = { workspace = true }
+chrono = { workspace = true }
 getrandom = { workspace = true }
 pbkdf2 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
+wormhole-domain = { workspace = true }
 # pbkdf2 0.12 needs digest 0.10; workspace sha2 0.11 is for update verify only.
 sha2 = { version = "=0.10.9", default-features = false }
 uuid = { workspace = true, features = ["v4"] }

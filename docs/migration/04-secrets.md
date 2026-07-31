@@ -147,6 +147,25 @@ Saved-credential **picker filtering** (C# `CredentialPickerSearch.Filter`) lives
 That glue **never** reads CredMgr / DPAPI; empty query returns all rows in stable order.
 See [20-connection-editor.md](20-connection-editor.md).
 
+### Bitwarden virtual credential catalog (metadata only)
+
+C# `BitwardenCredentialCatalogService` merges saved `CredentialProfiles` with read-only
+**virtual** rows projected from the `BitwardenCredentialCache` SQLite table (display metadata
+only — passwords resolve at connect via CLI). Rust lab glue:
+
+| Piece | Location |
+|---|---|
+| Stable virtual ids | `bitwarden_virtual_credential_ids` — SHA-256 namespace `wormhole-bitwarden-virtual-credential-v1:{Protocol}:{itemId}` → .NET `Guid` layout (C# `BitwardenVirtualCredentialIds`) |
+| Catalog merge | `bitwarden_credential_catalog` — `BitwardenCredentialCatalogGlue` + `FakeLocalCredentialCatalog` / `FakeBitwardenCredentialCache` / `demo_bitwarden_cache_entries` |
+| Locked vault | `BitwardenSessionStatus::Locked` → **empty** cache (no virtual rows); local profiles still listed |
+| Disabled vault | `vault_enabled == false` → local only (C# `EnableBitwardenVault`) |
+
+**No** live `bw` spawn. `Debug` on cache/catalog types omits password-shaped fields.
+Picker search remains `wormhole-ui::credential_picker` — map `BitwardenCatalogProfile` →
+`CredentialProfileRow` at the UI boundary later.
+
+See [adversarial-ledger-bitwarden-catalog.md](adversarial-ledger-bitwarden-catalog.md).
+
 ---
 
 ## DPAPI API
@@ -233,6 +252,8 @@ Never log passwords, key material, refresh tokens, or session keys.
 | `app_auth_service` | `AppAuthenticationService` set/verify/clear PIN·password (PBKDF2-SHA256); `AppAuthenticationMode` Disabled/Pin/Password (+ WindowsHello fallback slot); `FakeAppAuthenticationDataProtector` / `DpapiAppAuthenticationDataProtector`; `DEFAULT_PBKDF2_ITERATIONS` / `MAX_PBKDF2_ITERATIONS`; Debug never echoes secrets |
 | `hello` | `AvailabilityProbe` / `HelloPrompt` traits, `StubHelloPrompt` (fail-closed), `FakeHelloPrompt` (tests, no UI), free helpers `is_remote_desktop_session` / `check_hello_availability` / `request_hello_verification`, `WINRT_HELLO_GAP`, `REMOTE_DESKTOP_UNAVAILABLE_MESSAGE` |
 | `bitwarden_session` | `BitwardenSession` trait, `StubBitwardenSession` (fail-closed), `FakeBitwardenSession` (tests, no `bw`), `BitwardenSessionKey` (Debug redacts), `BITWARDEN_CLI_SESSION_GAP`, free helpers `unlock_bitwarden_session` / `bitwarden_session_status` |
+| `bitwarden_virtual_credential_ids` | `BITWARDEN_VIRTUAL_CREDENTIAL_NAMESPACE`, `bitwarden_virtual_credential_id`, `ensure_cache_entry_ids`, `BitwardenCredentialCacheEntry` (metadata only) |
+| `bitwarden_credential_catalog` | `BitwardenCredentialCatalogGlue`, `BitwardenCatalogProfile`, `FakeLocalCredentialCatalog`, `FakeBitwardenCredentialCache`, `demo_bitwarden_cache_entries` — virtual picker/page merge; locked session → empty cache |
 | *(UI — `wormhole-ui`)* | Bitwarden onboarding notice versioning: `BitwardenOnboardingNoticeGlue` / `FakeBitwardenOnboardingNoticeUi` / `should_show_bitwarden_onboarding_notice` — settings `Seen`/`Pending` versions via `SettingsStore` only; app **0.7.x** gate; no `bw` / GPUI ([17-tree-settings-vm.md](17-tree-settings-vm.md), [adversarial-ledger-bitwarden-onboarding.md](adversarial-ledger-bitwarden-onboarding.md)) |
 | `transient_session` | `TransientSessionCredentialStore` trait, `MemoryTransientSessionCredentialStore` (production in-process), `FakeTransientSessionCredentialStore` (tests; Debug length-only + call counts); **never** SQLite / CredMgr / DPAPI; empty password → `SecretsError::EmptyPassword` |
 | `redact` | `REDACTED`, `REDACT_TRUNCATE_DEFAULT`, `redact_secret`, `redact_truncated`, `redact_env_and_cli_secrets` |
