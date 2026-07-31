@@ -26,6 +26,9 @@
 //!   `FakeBitwardenCliReleaseSource`); no GitHub download / `bw` spawn yet
 //! - Bitwarden virtual credential catalog Fake glue (`BitwardenCredentialCatalogGlue` /
 //!   `FakeBitwardenCredentialCache` / stable virtual ids); locked vault → fail-closed
+//! - Bitwarden browser extension manual ZIP/folder install pin Fake glue
+//!   (`BitwardenExtensionInstallGlue` / `FakeExtensionInstallFs` / `FakeZipArchive`);
+//!   zip-slip fail-closed; manual sources pinned (no auto-update)
 //! - Process-local ephemeral session passwords (`TransientSessionCredentialStore` +
 //!   `MemoryTransientSessionCredentialStore` / `FakeTransientSessionCredentialStore`);
 //!   never SQLite / CredMgr / DPAPI — keyed by session or connection-node id
@@ -56,6 +59,7 @@ mod app_auth_service;
 mod azure_vpn_token_cache;
 mod bitwarden_credential_catalog;
 mod bitwarden_cli_install_glue;
+mod bitwarden_extension_install;
 mod bitwarden_session;
 mod bitwarden_virtual_credential_ids;
 mod cred_mgr;
@@ -101,6 +105,15 @@ pub use bitwarden_credential_catalog::{
     BitwardenCredentialCacheSource, BitwardenCredentialCatalogGlue,
     BITWARDEN_VIRTUAL_PROTOCOLS, FakeBitwardenCredentialCache, FakeLocalCredentialCatalog,
     LocalCredentialCatalog,
+};
+pub use bitwarden_extension_install::{
+    compare_browser_versions, confined_zip_destination, parse_browser_version,
+    parse_extension_manifest, replacement_install_path, sanitize_browser_version,
+    BitwardenBrowserExtensionSource, BitwardenExtensionInstall, BitwardenExtensionInstallError,
+    BitwardenExtensionInstallGlue, BitwardenExtensionInstallPatch, BitwardenExtensionManifest,
+    BitwardenExtensionSettingsSnapshot, BitwardenExtensionSettingsStore, ExtensionInstallFs,
+    ExtensionZipArchive, FakeBitwardenExtensionSettingsStore, FakeExtensionInstallFs,
+    FakeZipArchive, ZipEntrySpec,
 };
 pub use bitwarden_session::{
     bitwarden_session_status, unlock_bitwarden_session, BitwardenSession, BitwardenSessionKey,

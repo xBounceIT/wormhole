@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Windows Credential Manager + DPAPI secrets for Wormhole (CredMgr / keys / tunnels / Bitwarden catalog + CLI install pin Fake glue)."
+description = "Windows Credential Manager + DPAPI secrets for Wormhole (CredMgr / keys / tunnels / Bitwarden catalog + CLI + extension install pin Fake glue)."
 publish = false
 
 [lib]
