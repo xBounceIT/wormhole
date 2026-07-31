@@ -1,14 +1,17 @@
 //! SSH authentication method API (password / private key / agent / keyboard-interactive).
 //!
-//! Agent and keyboard-interactive are stubs that return
+//! Agent and keyboard-interactive **wire** auth are stubs that return
 //! [`SshError::AuthNotImplemented`]. Availability of a local agent endpoint is
 //! a separate always-on API ([`crate::is_agent_available`] /
 //! [`crate::FakeAgent`]) — probing never authenticates. Connect prep wires the
 //! probe into method selection via [`crate::select_auth_methods_for_connect`] /
 //! [`crate::filter_ssh_auth_methods_for_connect`] (include Agent only when
-//! available; probe errors fail closed). Password and private-key paths load
-//! credentials and delegate to an [`SshAuthenticator`] so unit tests can use a
-//! fake backend without a network.
+//! available; probe errors fail closed). Keyboard-interactive **multi-prompt
+//! Fake channel** glue ([`crate::FakeKbiChannel`] / [`crate::answer_kbi_round`])
+//! is also always on and offline-testable, but does **not** clear
+//! [`SshError::AuthNotImplemented`] for wire auth. Password and private-key
+//! paths load credentials and delegate to an [`SshAuthenticator`] so unit
+//! tests can use a fake backend without a network.
 //!
 //! # Private key sources
 //!
@@ -144,7 +147,13 @@ pub enum SshAuthMethod {
     Agent {
         username: String,
     },
-    /// Keyboard-interactive — stub.
+    /// Keyboard-interactive — **wire** stub.
+    ///
+    /// [`authenticate_with`] / [`ensure_auth_method_supported`] still return
+    /// [`SshError::AuthNotImplemented`] until a russh
+    /// `authenticate_keyboard_interactive_*` path lands. Offline multi-prompt
+    /// answer glue lives separately in [`crate::FakeKbiChannel`] /
+    /// [`crate::answer_kbi_round`] and does not authenticate over the wire.
     KeyboardInteractive {
         username: String,
     },
@@ -522,6 +531,36 @@ YnFdca2279Hz5wjekqcBS8uvS3ncKjrBINj8M=
             SshError::AuthNotImplemented("keyboard-interactive")
         ));
         assert!(fake.attempts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn kbi_fake_channel_does_not_clear_wire_auth_stub() {
+        // Offline prompt glue can succeed while wire auth stays unimplemented.
+        let mut channel = crate::FakeKbiChannel::from_answers(["offline-only"]);
+        let request = crate::KbiInfoRequest::new(
+            "Password",
+            "lab",
+            [crate::KbiPrompt::secret("Password: ")],
+        );
+        assert_eq!(
+            crate::answer_kbi_round(&mut channel, &request).unwrap(),
+            vec!["offline-only"]
+        );
+
+        let mut auth = FakeAuthenticator::default();
+        let err = authenticate_with(
+            &mut auth,
+            SshAuthMethod::KeyboardInteractive {
+                username: "alice".into(),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            SshError::AuthNotImplemented("keyboard-interactive")
+        ));
+        assert!(auth.attempts.is_empty());
     }
 
     #[test]

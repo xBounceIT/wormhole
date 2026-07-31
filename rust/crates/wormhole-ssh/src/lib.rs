@@ -5,9 +5,11 @@
 //! behind the `client` feature (on by default). Host-key known_hosts store,
 //! verify-on-connect decision + accept/reject prompt glue, auto-sudo prompt
 //! detector + session glue stub (Fake terminal), SSH reconnect / backoff policy
-//! stub (Fake schedule), SSH agent **availability** probe, and agent ↔ auth
-//! method select glue are always on. Agent and keyboard-interactive **wire**
-//! auth are stubs (`AuthNotImplemented`).
+//! stub (Fake schedule), SSH agent **availability** probe, agent ↔ auth method
+//! select glue, SOCKS5 tunnel route select glue (`TunnelEnabled` → Direct/Socks5;
+//! Serial never routes), and keyboard-interactive **multi-prompt Fake channel**
+//! glue are always on. Agent and keyboard-interactive **wire** auth remain stubs
+//! (`AuthNotImplemented`) — the KBI Fake channel does not clear that boundary.
 
 mod agent;
 mod agent_auth_select;
@@ -16,8 +18,10 @@ mod auto_sudo_glue;
 mod error;
 mod host_key_prompt;
 mod host_key_verify;
+mod kbi;
 mod known_hosts;
 mod reconnect;
+mod tunnel_route;
 #[cfg(feature = "client")]
 mod auth;
 #[cfg(feature = "client")]
@@ -54,6 +58,10 @@ pub use reconnect::{
     SshReconnectPolicy, AUTO_RECONNECT_DELAY, AUTO_RECONNECT_STABILITY_WINDOW,
     MAX_AUTO_RECONNECT_ATTEMPTS,
 };
+pub use tunnel_route::{
+    select_ssh_connect_target, select_ssh_tunnel_route, FakeTunnelSocks, SshConnectTarget,
+    SshRouteSessionKind, SshTunnelRouteError, TunnelSocksEndpoint, TunnelSocksSource,
+};
 pub use host_key_prompt::{
     resolve_host_key_prompted, FakeHostKeyPrompt, FakeKnownHosts, HostKeyPinStore,
     HostKeyPrompt, HostKeyPromptReason, HostKeyPromptRequest, HostKeyPromptResponse,
@@ -62,6 +70,10 @@ pub use host_key_prompt::{
 pub use host_key_verify::{
     verify_host_key_on_connect, HostKeyConnectVerdict, HostKeyMismatchPolicy,
     HostKeyRejectReason,
+};
+pub use kbi::{
+    answer_kbi_round, answer_kbi_rounds, FakeKbiChannel, KbiInfoRequest, KbiPrompt,
+    KbiPromptError, KbiRoundResponse, KeyboardInteractiveChannel, NullKbiChannel,
 };
 pub use known_hosts::{
     compute_fingerprint, decide, host_identity, HostKeyDecision, HostKeyPolicy, KnownHostsStore,

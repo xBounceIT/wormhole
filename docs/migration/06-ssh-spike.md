@@ -1,6 +1,6 @@
 # SSH library spike — russh
 
-**Status:** crate `wormhole-ssh` scaffold (auth methods + shell behind feature `client`; known_hosts + verify-on-connect + host-key prompt glue + agent availability probe + agent↔auth select glue + auto-sudo detector + session glue stub + reconnect/backoff policy stub always on)  
+**Status:** crate `wormhole-ssh` scaffold (auth methods + shell behind feature `client`; known_hosts + verify-on-connect + host-key prompt glue + agent availability probe + agent↔auth select glue + KBI multi-prompt Fake channel glue + auto-sudo detector + session glue stub + reconnect/backoff policy stub always on)  
 **Date:** 2026-07-31  
 **Context7 MCP:** unavailable in this environment; versions from crates.io / docs.rs.
 
@@ -20,8 +20,8 @@ Workspace pin uses **`ring`** (not `aws-lc-rs`): on Windows MSVC, `aws-lc-sys` r
 ## Why russh fits Wormhole
 
 1. **VPN / SOCKS5 hook points** — today's C# path dials the sidecar SOCKS5 then runs SSH.NET over that socket. russh's `connect_stream` is the same shape: dial SOCKS (or direct TCP) first, then hand the stream to SSH. See `wormhole_ssh::transport::{SshTransport, open_transport}`.
-2. **Auth methods + interactive shell** — `SshAuthMethod` on `SshConnectOptions` (password, private-key path/bytes, agent stub, keyboard-interactive stub). `connect_password_shell` dispatches auth then `request_pty` + `request_shell` (xterm-256color). Maps to C# `SshAuthMethodsBuilder`. Agent **availability** is a separate always-on probe (`is_agent_available` / `FakeAgent`); connect-prep **select glue** includes/excludes Agent from the method list based on that probe (fail closed on probe error). Wire agent auth stays `AuthNotImplemented`.
-3. **Testable auth backend** — `SshAuthenticator` + `FakeAuthenticator` unit-test password/key load without a network; agent/kbi return `AuthNotImplemented`. Agent presence / select glue uses `FakeAgent` / `FakeFallibleAgent` (offline).
+2. **Auth methods + interactive shell** — `SshAuthMethod` on `SshConnectOptions` (password, private-key path/bytes, agent stub, keyboard-interactive wire stub). `connect_password_shell` dispatches auth then `request_pty` + `request_shell` (xterm-256color). Maps to C# `SshAuthMethodsBuilder`. Agent **availability** is a separate always-on probe (`is_agent_available` / `FakeAgent`); connect-prep **select glue** includes/excludes Agent from the method list based on that probe (fail closed on probe error). Wire agent auth stays `AuthNotImplemented`. Keyboard-interactive has a separate always-on **multi-prompt Fake channel** (`FakeKbiChannel` / `answer_kbi_round`) for offline InfoRequest rounds; wire KBI auth stays `AuthNotImplemented`.
+3. **Testable auth backend** — `SshAuthenticator` + `FakeAuthenticator` unit-test password/key load without a network; agent/kbi **wire** return `AuthNotImplemented`. Agent presence / select glue uses `FakeAgent` / `FakeFallibleAgent` (offline). KBI prompt rounds use `FakeKbiChannel` (offline; does not authenticate).
 4. **SFTP later** — `russh-sftp` companion (not pinned yet) for the file-transfer dialog path.
 
 ## SOCKS5 design (hook only in this spike)
@@ -51,7 +51,7 @@ ConnectionProfile.tunnel_enabled
 | `client` | **on** | Pulls `russh`, `tokio`, `async-trait`, `wormhole-terminal`; exposes connect/shell APIs |
 
 `cargo check -p wormhole-ssh` exercises the default `client` feature.
-`cargo check -p wormhole-ssh --no-default-features` must still compile (transport/client modules gated off; **known_hosts**, **verify-on-connect**, **host-key prompt glue**, **agent probe**, **agent↔auth select glue**, **auto-sudo detector**, **auto-sudo session glue**, and **reconnect/backoff policy** always build).
+`cargo check -p wormhole-ssh --no-default-features` must still compile (transport/client modules gated off; **known_hosts**, **verify-on-connect**, **host-key prompt glue**, **agent probe**, **agent↔auth select glue**, **KBI multi-prompt Fake channel**, **auto-sudo detector**, **auto-sudo session glue**, and **reconnect/backoff policy** always build).
 
 ## Host-key known_hosts
 
@@ -115,11 +115,34 @@ Password, key passphrase, key bytes, and SOCKS credentials are redacted in `Debu
 | `Password` | Live | russh `authenticate_password` |
 | `PrivateKey` (`Path` / `Bytes` + optional passphrase) | Live load + russh publickey | Passphrase decrypts the key only (never sent as login password) |
 | `Agent` | Stub auth + live **probe** + **select glue** | Wire auth: `SshError::AuthNotImplemented("agent")` — fail closed **before** dial. Availability + connect-prep include/exclude: see below |
-| `KeyboardInteractive` | Stub | `SshError::AuthNotImplemented("keyboard-interactive")` — fail closed **before** dial |
+| `KeyboardInteractive` | Stub **wire** auth + **multi-prompt Fake channel** | Wire auth: `SshError::AuthNotImplemented("keyboard-interactive")` — fail closed **before** dial. Offline InfoRequest answer glue: see below — does **not** clear the wire stub |
 
 **Private key path contract:** `PrivateKeySource::Path` must be an **absolute** path with no `..` components (`validate_private_key_path` / `PrivateKeySource::absolute_path`). Relative / traversal paths are **not** auto-loaded against CWD. Prefer `PrivateKeySource::bytes` for DPAPI-decrypted or other in-memory PEM. Password, passphrase, and key bytes are redacted in `Debug`; load errors strip any accidental passphrase substring. Unit tests use `FakeAuthenticator` only (no network).
 
 **Connect-prep Agent select:** before dial, preferred methods that include Agent should run `select_auth_methods_for_connect` / `filter_ssh_auth_methods_for_connect` (always-on glue). Available → keep Agent; unavailable → drop Agent; probe `Err` → fail closed (`AgentAuthSelectError`). Probe is skipped when Agent is not a candidate. Does not reimplement the availability probe.
+
+### Keyboard-interactive multi-prompt Fake channel (always on)
+
+Thin offline glue modeling RFC 4256 / russh `InfoRequest` rounds (name,
+instructions, zero-or-more prompts with echo flags). **Honest boundary:**
+
+| Layer | Status | Behavior |
+|---|---|---|
+| Wire auth (`SshAuthMethod::KeyboardInteractive`) | Stub | `AuthNotImplemented("keyboard-interactive")` before dial — unchanged |
+| Prompt channel (`kbi` module) | Lab Fake | `FakeKbiChannel` / `NullKbiChannel` answer scripted rounds; no SSH bytes |
+
+| Item | API |
+|---|---|
+| Round | `KbiInfoRequest` + `KbiPrompt` (`echo` metadata) |
+| Response | `KbiRoundResponse::{Answers, Cancel}` — Cancel fail closed |
+| Channel | `KeyboardInteractiveChannel` / `FakeKbiChannel` / `NullKbiChannel` |
+| Drive | `answer_kbi_round` / `answer_kbi_rounds` — answer-count mismatch fail closed |
+| Errors | `KbiPromptError::{Cancelled, AnswerCountMismatch}` — never carry answer bytes |
+
+`Debug` for `KbiRoundResponse` / `FakeKbiChannel` redacts answer strings
+(`[REDACTED len=N]`); prompt labels may appear. Empty Fake script and
+`NullKbiChannel` cancel every round. Empty `prompts` requires empty answers.
+No GPUI; no live `authenticate_keyboard_interactive_*`.
 
 ## SSH agent availability probe (always on)
 
@@ -205,7 +228,7 @@ Orchestrator / UI loop wiring remains Pending.
 
 - Host-key mismatch **UI dialog** (prompt trait + Fake store glue exist; GPUI/WinUI dialog Pending)
 - Per-node SQLite `SshKnownHostFingerprint` sync (file store first; profile pin later)
-- Real SSH agent / keyboard-interactive wire protocols (availability probe + connect-prep select glue only; auth still stubs)
+- Real SSH agent / keyboard-interactive **wire** protocols (agent: availability probe + connect-prep select glue only; kbi: multi-prompt Fake channel only; both wire auths still `AuthNotImplemented`)
 - Pageant detection (OpenSSH named-pipe probe only on Windows)
 - Live auto-sudo against a real SSH shell / WebView2 pump (glue + Fake terminal only)
 - Live SSH reconnect loop / WebView2 rebind (policy + Fake schedule only)
@@ -222,7 +245,7 @@ cargo test -p wormhole-ssh
 cargo test -p wormhole-ssh --no-default-features
 cargo check -p wormhole-ssh
 cargo check -p wormhole-ssh --no-default-features
-# verify-on-connect + prompt glue + auto-sudo + reconnect policy + agent probe + agent↔auth select always on (Fake store / FakeAgent / FakeBackoff offline).
+# verify-on-connect + prompt glue + KBI Fake channel + auto-sudo + reconnect policy + agent probe + agent↔auth select always on (Fake store / FakeAgent / FakeKbiChannel / FakeBackoff offline).
 # Optional live server:
 # $env:WORMHOLE_SSH_HOST=...; $env:WORMHOLE_SSH_USER=...; $env:WORMHOLE_SSH_PASSWORD=...
 # cargo test -p wormhole-ssh -- --ignored

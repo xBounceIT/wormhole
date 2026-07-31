@@ -73,6 +73,7 @@
 | [adversarial-ledger-mcp-http.md](adversarial-ledger-mcp-http.md) | MCP Streamable HTTP loopback review closed |
 | [adversarial-ledger-mcp-bind.md](adversarial-ledger-mcp-bind.md) | MCP loopback bind hardening (`0.0.0.0` / mapped / zone) review closed |
 | [adversarial-ledger-mcp-tools-list.md](adversarial-ledger-mcp-tools-list.md) | MCP tools/list → capability-report glue (`FakeMcpCapabilityServer`) review closed |
+| [adversarial-ledger-mcp-session-registry.md](adversarial-ledger-mcp-session-registry.md) | MCP live SSH session registry Fake (`FakeMcpSessionRegistry`) review closed |
 | [adversarial-ledger-protocols.md](adversarial-ledger-protocols.md) | Terminal / serial / SSH review closed |
 | [adversarial-ledger-ssh-known-hosts.md](adversarial-ledger-ssh-known-hosts.md) | SSH KnownHostsStore review closed |
 | [adversarial-ledger-known-hosts-prompt.md](adversarial-ledger-known-hosts-prompt.md) | SSH known_hosts prompt glue (`resolve_host_key_prompted` / session gate) review closed |
@@ -81,6 +82,7 @@
 | [adversarial-ledger-ssh-agent.md](adversarial-ledger-ssh-agent.md) | SSH agent availability probe (`FakeAgent` / pipe bounds) review closed |
 | [adversarial-ledger-ssh-agent-auth.md](adversarial-ledger-ssh-agent-auth.md) | SSH agent ↔ auth select glue (`select_auth_methods_for_connect` / FakeFallible) review closed |
 | [adversarial-ledger-ssh-reconnect.md](adversarial-ledger-ssh-reconnect.md) | SSH reconnect / backoff policy stub (`SshReconnectPolicy` / Fake schedule) review closed |
+| [adversarial-ledger-ssh-kbi.md](adversarial-ledger-ssh-kbi.md) | SSH keyboard-interactive multi-prompt Fake channel (`FakeKbiChannel` / `answer_kbi_round`) review closed |
 | [adversarial-ledger-serial-enumerate.md](adversarial-ledger-serial-enumerate.md) | Serial port enumeration review closed |
 | [adversarial-ledger-serial-picker.md](adversarial-ledger-serial-picker.md) | Serial COM host-field picker glue (`wormhole-ui`) review closed |
 | [adversarial-ledger-serial-presets.md](adversarial-ledger-serial-presets.md) | Serial baud/parity preset VM glue (`SerialLineCombo` / DCB / editor↔QC) review closed |

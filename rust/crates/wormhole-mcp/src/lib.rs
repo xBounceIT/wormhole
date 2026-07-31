@@ -11,6 +11,7 @@ mod error;
 mod host;
 #[cfg(feature = "rmcp")]
 mod rmcp_handler;
+mod session_registry;
 mod stub;
 mod token;
 
@@ -27,6 +28,9 @@ pub use capability::{
 };
 pub use error::McpError;
 pub use host::McpServerHost;
+pub use session_registry::{
+    FakeMcpSessionRegistry, McpSessionInfo, McpSessionRegistry, McpSessionStatus,
+};
 pub use stub::HttpPlaceholderMcpHost;
 pub use token::{
     extract_bearer_token, generate_bearer_token, is_authorized, tokens_equal, McpTokenStore,

@@ -126,7 +126,8 @@ impl fmt::Debug for McpToolCapability {
 /// Secrets-free MCP capability summary for diagnostics / Settings Fake.
 ///
 /// Never carries a bearer token. `tools_executable` is always `false` for this
-/// stub (no live tool execution / SSH registry).
+/// stub (no live tool execution). Session id tracking for `list_sessions` lives
+/// in [`crate::FakeMcpSessionRegistry`] — not wired into HTTP dispatch here.
 #[derive(Clone, PartialEq, Eq)]
 pub struct McpCapabilityReport {
     pub endpoint_url: String,
