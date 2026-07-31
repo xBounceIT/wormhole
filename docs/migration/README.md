@@ -148,6 +148,7 @@
 | [adversarial-ledger-import-unsupported.md](adversarial-ledger-import-unsupported.md) | Import UnsupportedProtocol / HTTP-HTTPS-Serial soft-skip review closed |
 | [adversarial-ledger-import-apply.md](adversarial-ledger-import-apply.md) | Import plan → SQLite apply stub (`insert_many` / soft-skip / password OOB) review closed |
 | [adversarial-ledger-import-skip-report.md](adversarial-ledger-import-skip-report.md) | Import soft-skip UI report glue (`ImportSkipReport` / Fake) review closed |
+| [adversarial-ledger-backup.md](adversarial-ledger-backup.md) | Backup export/import Fake glue (`FakeBackupLab` / `export_backup` / `import_backup`) review closed |
 | [adversarial-ledger-crypto-auth.md](adversarial-ledger-crypto-auth.md) | AES-GCM + ovpn auth glue review closed |
 | [adversarial-ledger-otp-prompt.md](adversarial-ledger-otp-prompt.md) | OTP / SecondFactorPrompt stub review closed |
 | [adversarial-ledger-otp-ui.md](adversarial-ledger-otp-ui.md) | OTP prompt UI glue (`OtpPromptChannel` / Fake) review closed |

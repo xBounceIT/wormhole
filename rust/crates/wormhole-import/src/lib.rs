@@ -1,8 +1,8 @@
-//! mRemoteNG import + Wormhole backup envelope spike for the Rust migration.
+//! mRemoteNG import + Wormhole backup envelope + LabOnly export/import Fake glue.
 //!
-//! Mirrors `Services/MRemoteNg/*` (XML parse + SSH/RDP/VNC planning) and the
-//! lightweight `Models/Backup` document envelope. Password decrypt uses
-//! AES-256-GCM with mRemoteNG's **16-byte nonce** — see
+//! Mirrors `Services/MRemoteNg/*` (XML parse + SSH/RDP/VNC planning) and
+//! `Services/Backup/BackupService` (metadata + secret round-trip at Fake layer).
+//! Password decrypt for mRemoteNG uses AES-256-GCM with **16-byte nonce** — see
 //! [`crypto::decrypt_password_utf8`] and `docs/migration/12-import.md`.
 //!
 //! With the `storage` feature (default), [`apply_import_plan`] writes planned
@@ -11,12 +11,19 @@
 //! [`ImportSkipReport`] via [`report_unsupported_skips`] (Fake reporter; no GPUI).
 
 mod backup;
+mod backup_crypto;
 mod crypto;
 mod error;
 mod limits;
 mod mremoteng;
 mod protocol;
 mod skip_report;
+
+#[cfg(feature = "storage")]
+mod backup_payload;
+
+#[cfg(all(feature = "storage", feature = "secrets"))]
+mod backup_glue;
 
 #[cfg(feature = "storage")]
 mod apply;
@@ -28,6 +35,13 @@ pub use apply::{
 pub use backup::{
     encryption as BackupEncryption, inspect_backup_json, inspect_backup_path, BackupDocument,
     BackupEncryptedPayload, BackupInspectResult, BackupPayload, CURRENT_SCHEMA_VERSION,
+};
+pub use backup_crypto::{seal_payload, unseal_payload, BackupDecryptError, PBKDF2_ITERATIONS};
+#[cfg(all(feature = "storage", feature = "secrets"))]
+pub use backup_glue::{
+    build_backup_payload, export_backup, import_backup, import_backup_payload, parse_backup_payload,
+    BackupExportResult, BackupImportResult, BackupMetadataSink, BackupMetadataSource,
+    BackupSecretsPort, FakeBackupLab, StorageBackupSink, StorageBackupSource,
 };
 pub use crypto::{decrypt_password_utf8, DecryptError};
 pub use error::ImportError;

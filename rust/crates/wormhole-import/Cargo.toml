@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "mRemoteNG XML import spike + Wormhole backup envelope metadata (mirrors Services/MRemoteNg + Models/Backup)."
+description = "mRemoteNG XML import spike + Wormhole backup envelope + LabOnly export/import Fake glue (mirrors Services/MRemoteNg + Services/Backup)."
 publish = false
 
 [lib]
@@ -12,27 +12,35 @@ name = "wormhole_import"
 path = "src/lib.rs"
 
 [features]
-default = ["domain", "storage"]
+default = ["domain", "storage", "secrets"]
 domain = ["dep:wormhole-domain"]
 # Plan → SQLite write stub via wormhole-storage (Credential Manager still out of scope).
-storage = ["domain", "dep:wormhole-storage"]
+storage = ["domain", "dep:wormhole-storage", "dep:chrono"]
+# LabOnly backup export/import round-trip via Fake CredMgr / DPAPI stores.
+secrets = ["storage", "dep:wormhole-secrets-win"]
 
 [dependencies]
 aes-gcm = { workspace = true }
 base64 = { workspace = true }
-pbkdf2 = { workspace = true }
+chrono = { workspace = true, optional = true, features = ["serde"] }
+pbkdf2 = { workspace = true, features = ["hmac"] }
 quick-xml = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sha1 = { workspace = true }
+sha2 = { version = "=0.10.9", default-features = false }
+getrandom = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
-uuid = { workspace = true, features = ["std", "v4"] }
+unicode-normalization = { version = "=0.1.24" }
+uuid = { workspace = true, features = ["std", "v4", "serde"] }
 wormhole-domain = { workspace = true, optional = true }
+wormhole-secrets-win = { workspace = true, optional = true }
 wormhole-storage = { workspace = true, optional = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+wormhole-secrets-win = { workspace = true }
 wormhole-storage = { workspace = true }
 wormhole-testkit = { workspace = true }
 

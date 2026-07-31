@@ -1,6 +1,6 @@
 # mRemoteNG import + backup envelope (`wormhole-import`)
 
-**Status:** XML parse + **SSH / RDP / VNC only** plan green · password AES-GCM (16-byte nonce) green · backup envelope inspect green · **plan → SQLite apply stub** green (`ConnectionRepository::insert_many`) · **soft-skip → user-facing skip report** green (`ImportSkipReport` / Fake; no GPUI)
+**Status:** XML parse + **SSH / RDP / VNC only** plan green · password AES-GCM (16-byte nonce) green · backup envelope inspect green · **backup export/import Fake glue** green (metadata + secrets round-trip; temp/Fake FS) · **plan → SQLite apply stub** green · **soft-skip → user-facing skip report** green
 
 **Date:** 2026-07-31
 
@@ -65,7 +65,10 @@ Containers whose `Protocol` attribute is unmapped still become folders with `pro
 | `mremoteng` | Parse `<mrng:Connections>` → raw node tree; `plan_nodes` for folders + SSH/RDP/VNC |
 | `protocol` | `map_protocol` / `try_map_protocol` — SSH/RDP/VNC only; gaps → `UnsupportedProtocol` |
 | `crypto` | Password / `Protected` decrypt — AES-256-GCM **16-byte nonce** (BouncyCastle parity) |
-| `backup` | `BackupDocument` envelope + `inspect_backup_json` (no PBKDF2/AES yet) |
+| `backup` | `BackupDocument` envelope + `inspect_backup_json` / `inspect_backup_path` |
+| `backup_glue` | **LabOnly** export/import round-trip: `FakeBackupLab` + `export_backup` / `import_backup` (metadata + Fake CredMgr/DPAPI); optional `StorageBackupSource` / `StorageBackupSink` |
+| `backup_crypto` | PBKDF2-SHA256 (600k) + AES-GCM 12-byte nonce seal/unseal for encrypted exports |
+| `backup_payload` | Typed camelCase payload rows (nodes/credentials/tunnels/secrets arrays) |
 | `apply` | **Write stub:** `planned_to_connection_node` + `apply_import_plan` → `ConnectionRepository::insert_many` (feature `storage`) |
 | `skip_report` | **Report stub:** `ImportPlan` soft-skips → `ImportSkipReport` / `format_skip_summary` + `FakeImportSkipReporter` (no GPUI) |
 
@@ -112,9 +115,23 @@ Layout matches `MRemoteNgCrypto.cs` / mRemoteNG `AeadCryptographyProvider`:
 
 Pins: `aes-gcm =0.11.0`, `pbkdf2 =0.12.2`, `sha1 =0.10.6`, `zeroize =1.9.0` (see workspace `Cargo.toml` / [deps-pins.md](deps-pins.md)).
 
-### Backup envelope (optional spike)
+### Backup envelope + LabOnly round-trip
 
-`BackupDocument` / `BackupInspectResult` cover schema version + `encryption` (`none` | `aes-gcm`) without pulling Credential Manager / DPAPI secrets. `inspect_backup_json` / `inspect_backup_path` use a **slim envelope** (no payload materialization), reject unsupported encryption, cap files at 64 MiB (`MAX_IMPORT_FILE_BYTES`), and reject `..` / NUL path components.
+`BackupDocument` / `BackupInspectResult` cover schema version + `encryption` (`none` | `aes-gcm`). `inspect_backup_json` / `inspect_backup_path` use a **slim envelope** (no payload materialization), reject unsupported encryption, cap files at 64 MiB (`MAX_IMPORT_FILE_BYTES`), and reject `..` / NUL path components.
+
+**Export/import Fake glue** ([`backup_glue`](../../rust/crates/wormhole-import/src/backup_glue.rs), feature `secrets`):
+
+| Concern | Behavior |
+|---|---|
+| Metadata | Nodes, `CredentialProfiles`, `TunnelConfigs`, Bitwarden cache refs (cache export empty until repository lands) |
+| Secrets | `FakePasswordStore` / `FakeKeyMaterialStore` / `FakeTunnelPayloadStore` (+ inline node passwords); **never** logs bodies |
+| Export | `export_backup` → atomic `.tmp` then rename; optional password → PBKDF2 (600k) + AES-GCM |
+| Import | Merge-skip by id/name; restore secrets only for inserted rows or rows missing secrets; skip Bitwarden password bodies |
+| Corrupt / truncated | `parse_backup_payload` / `read_file_capped` fail closed; malformed payload arrays → `InvalidData` |
+| Tests | `FakeBackupLab` + temp SQLite (`StorageBackupSource` / `StorageBackupSink`); **no** live user AppData zip |
+| Out of scope | GPUI dialogs; `ScrubDanglingReferences`; transactional import; Bitwarden cache upsert |
+
+Encrypted backups use [`backup_crypto`](../../rust/crates/wormhole-import/src/backup_crypto.rs): PBKDF2-HMAC-SHA256 (NFC-normalized password), 12-byte GCM nonce, 5M iteration cap on import.
 
 ### XML safety
 
@@ -128,8 +145,8 @@ Pins: `aes-gcm =0.11.0`, `pbkdf2 =0.12.2`, `sha1 =0.10.6`, `zeroize =1.9.0` (see
 ## Non-goals (this spike)
 
 - Credential Manager / `CredentialProfiles` secret writes (node apply stub only)
-- Full-file encryption exports
-- Bitwarden / live secret material in fixtures
+- Full-file encryption exports (production UI wiring)
+- Bitwarden cache repository round-trip (export/import stub empty)
 - Changing any C# production code
 - **HTTP / HTTPS / Serial import mapping** (see gap table above)
 - RDP resolution / screen-size import mapping on apply
