@@ -12,6 +12,7 @@ mod host;
 #[cfg(feature = "rmcp")]
 mod rmcp_handler;
 mod session_registry;
+mod shutdown_order;
 mod stub;
 mod token;
 
@@ -34,6 +35,11 @@ pub use host::McpServerHost;
 pub use session_registry::{
     canonicalize_session_id, FakeMcpSessionRegistry, McpSessionInfo, McpSessionRegistry,
     McpSessionStatus,
+};
+pub use shutdown_order::{
+    mcp_stopped_before_webview_flush, prepare_for_process_exit, validate_shutdown_order,
+    AppExitShutdownStep, CSHARP_PARITY_SHUTDOWN_ORDER, FakeAppExitShutdownGlue,
+    MCP_STOP_TIMEOUT, ShutdownOrderError,
 };
 pub use stub::HttpPlaceholderMcpHost;
 pub use token::{

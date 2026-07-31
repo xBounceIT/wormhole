@@ -78,6 +78,7 @@
 | [adversarial-ledger-mcp-tools-list.md](adversarial-ledger-mcp-tools-list.md) | MCP tools/list → capability-report glue (`FakeMcpCapabilityServer`) review closed |
 | [adversarial-ledger-mcp-session-registry.md](adversarial-ledger-mcp-session-registry.md) | MCP live SSH session registry Fake (`FakeMcpSessionRegistry`) review closed |
 | [adversarial-ledger-mcp-approval-gate.md](adversarial-ledger-mcp-approval-gate.md) | MCP tool approval gate Fake glue (`FakeMcpToolApprovalGlue` / Approve/Deny/Cancel) review closed |
+| [adversarial-ledger-mcp-shutdown-order.md](adversarial-ledger-mcp-shutdown-order.md) | MCP clean-shutdown vs WebView2 flush ordering Fake glue (`FakeAppExitShutdownGlue` / `prepare_for_process_exit`) review closed |
 | [adversarial-ledger-protocols.md](adversarial-ledger-protocols.md) | Terminal / serial / SSH review closed |
 | [adversarial-ledger-ssh-known-hosts.md](adversarial-ledger-ssh-known-hosts.md) | SSH KnownHostsStore review closed |
 | [adversarial-ledger-known-hosts-prompt.md](adversarial-ledger-known-hosts-prompt.md) | SSH known_hosts prompt glue (`resolve_host_key_prompted` / session gate) review closed |
