@@ -39,16 +39,18 @@ Thin secrets-free glue in [`skip_report`](../../rust/crates/wormhole-import/src/
 | Summary | `format_skip_summary` → InfoBar-style text (count + sample lines; full reason, never truncated; `+N more` only when samples were listed and capped) |
 | Passwords | Never read `PlannedNode.password_plaintext`; report / `Debug` / Fake have no credential fields |
 | Fake | [`FakeImportSkipReporter`](../../rust/crates/wormhole-import/src/skip_report.rs) — canned or plan-driven; Fake `Debug` is counts-only; **no GPUI** |
+| **HTTP / HTTPS / Serial** | Soft-skips already surface here: `total_skipped` (C# InfoBar aggregate parity) + sample `protocol` labels (`HTTP` / `HTTPS` / `Serial` / …). **No separate per-protocol count glue** — C# `MRemoteNgImportDialogViewModel` also uses one skipped count + `name: protocol` samples |
 
 ### Protocol gaps (explicit non-goals for this spike)
 
 | Gap | Notes |
 |---|---|
-| **HTTP** | Wormhole has `ProtocolType::Http`; mRemoteNG `HTTP` Connection leaves are skipped |
-| **HTTPS** | Wormhole has `ProtocolType::Https`; fixture `appliance-https` is skipped |
-| **Serial** | Wormhole has `ProtocolType::Serial`; fixture `console-serial` is skipped |
+| **HTTP** | Wormhole has `ProtocolType::Http`; mRemoteNG `HTTP` Connection leaves are soft-skipped; UI summary via `ImportSkipReport` (above) — not imported |
+| **HTTPS** | Wormhole has `ProtocolType::Https`; fixture `appliance-https` soft-skipped + sample-labeled in skip report |
+| **Serial** | Wormhole has `ProtocolType::Serial`; fixture `console-serial` soft-skipped + sample-labeled in skip report |
 | Telnet / RAW / ICA / … | Unmapped; soft-skipped on Connection leaves like HTTP/HTTPS/Serial (`try_map_protocol` → `UnsupportedProtocol`; `plan_nodes` continues) |
 | Field mapping for HTTP/Serial | No host/port/baud/cert-policy import mapping yet — do not invent |
+| Per-protocol skip tallies | Not a C# parity gap; aggregate + labeled samples are the shipped InfoBar contract |
 
 Matches AGENTS.md: *“mRemoteNG import remains SSH/RDP/VNC-only (no HTTP/HTTPS/Serial yet).”*
 
