@@ -134,6 +134,81 @@ impl FakeTunnelConfigList {
         guard.configs = configs.into_iter().collect();
         guard.fail = None;
     }
+
+    pub fn get_by_id(&self, id: Uuid) -> Result<Option<TunnelConfigRow>, TunnelCatalogError> {
+        let guard = self.inner.lock().expect("FakeTunnelConfigList mutex poisoned");
+        if let Some(msg) = &guard.fail {
+            return Err(TunnelCatalogError::Load(msg.clone()));
+        }
+        Ok(guard.configs.iter().find(|r| r.id == id).cloned())
+    }
+
+    /// Lab CRUD: insert metadata row (payload via separate [`TunnelPayloadStore`]).
+    pub fn insert_row(&self, row: TunnelConfigRow) -> Result<(), TunnelCatalogError> {
+        let mut guard = self.inner.lock().expect("FakeTunnelConfigList mutex poisoned");
+        if let Some(msg) = &guard.fail {
+            return Err(TunnelCatalogError::Load(msg.clone()));
+        }
+        if row.is_sentinel() {
+            return Err(TunnelCatalogError::Load("cannot insert sentinel row".into()));
+        }
+        let index = sorted_tunnel_index_for(&guard.configs, &row.name);
+        guard.configs.insert(index, row);
+        Ok(())
+    }
+
+    pub fn update_row(&self, updated: TunnelConfigRow) -> Result<(), TunnelCatalogError> {
+        let mut guard = self.inner.lock().expect("FakeTunnelConfigList mutex poisoned");
+        if let Some(msg) = &guard.fail {
+            return Err(TunnelCatalogError::Load(msg.clone()));
+        }
+        if updated.is_sentinel() {
+            return Err(TunnelCatalogError::Load("cannot update sentinel row".into()));
+        }
+        let Some(index) = guard.configs.iter().position(|r| r.id == updated.id) else {
+            return Err(TunnelCatalogError::Load("tunnel config not found".into()));
+        };
+        if guard.configs[index].name != updated.name {
+            guard.configs.remove(index);
+            let insert_at = sorted_tunnel_index_for(&guard.configs, &updated.name);
+            guard.configs.insert(insert_at, updated);
+        } else {
+            guard.configs[index] = updated;
+        }
+        Ok(())
+    }
+
+    pub fn delete_row(&self, id: Uuid) -> Result<(), TunnelCatalogError> {
+        let mut guard = self.inner.lock().expect("FakeTunnelConfigList mutex poisoned");
+        if let Some(msg) = &guard.fail {
+            return Err(TunnelCatalogError::Load(msg.clone()));
+        }
+        let len_before = guard.configs.len();
+        guard.configs.retain(|r| r.id != id);
+        if guard.configs.len() == len_before {
+            return Err(TunnelCatalogError::Load("tunnel config not found".into()));
+        }
+        Ok(())
+    }
+}
+
+fn sorted_tunnel_index_for(rows: &[TunnelConfigRow], name: &str) -> usize {
+    rows.iter()
+        .position(|r| r.name.as_str() > name)
+        .unwrap_or(rows.len())
+}
+
+/// C# `NameExists` — case-insensitive name collision check.
+pub fn tunnel_name_exists(
+    configs: &[TunnelConfigRow],
+    name: &str,
+    excluding_id: Option<Uuid>,
+) -> bool {
+    configs.iter().any(|c| {
+        !c.is_sentinel()
+            && excluding_id.map_or(true, |id| c.id != id)
+            && c.name.eq_ignore_ascii_case(name)
+    })
 }
 
 impl fmt::Debug for FakeTunnelConfigList {

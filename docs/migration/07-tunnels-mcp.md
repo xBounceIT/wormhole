@@ -71,6 +71,30 @@ picker.load_from_node(Some(true), Some(config_id));
 
 Non-goals: tunnel editor dialog, add/edit/delete commands, DPAPI read/write, debounce (host-owned). See [adversarial-ledger-tunnel-configs-ui.md](adversarial-ledger-tunnel-configs-ui.md).
 
+### Tunnel editor dialog Fake VM (`wormhole-ui`, feature `tunnels`)
+
+Lab-only create/edit VM mirroring C# `TunnelDialog` metadata save + optional DPAPI payload write (C# `StoreTunnelConfigAsync` ordering). Composes [`FakeTunnelConfigList`] / optional [`StorageTunnelConfigSource`] + [`FakeTunnelPayloadStore`] (`secrets`). **No GPUI**; per-kind field validation stays host-owned.
+
+| Type | Role |
+|---|---|
+| `TunnelEditorDialogVm` | `prepare_new` / `prepare_edit` / `save_to_lab`; fail-closed empty name / missing kind |
+| `TunnelSaveDraft` | Commit carrier — `Debug` shows `payload_len` only |
+| `FakeTunnelEditorLab` | In-memory metadata + optional payload Fakes |
+| `save_tunnel_config` | `--features storage` metadata SQLite round-trip |
+| `save_tunnel_config_with_payload` | `--features storage,secrets` two-phase `UpdatedAt` bump after payload |
+
+```rust
+use wormhole_ui::{FakeTunnelEditorLab, TunnelEditorDialogVm, TunnelKind};
+let lab = FakeTunnelEditorLab::new();
+let mut vm = TunnelEditorDialogVm::new();
+vm.set_name("corp-vpn");
+vm.set_kind(TunnelKind::WireGuard);
+vm.set_payload_replace(secret_bytes); // secrets feature
+let row = vm.save_to_lab(&lab)?;
+```
+
+Non-goals: GPUI dialog chrome; per-kind required-field panels; live DPAPI; WatchGuard `.wgssl` import. See [adversarial-ledger-tunnel-editor.md](adversarial-ledger-tunnel-editor.md).
+
 ### Tunnel test dialog Fake VM (`wormhole-ui`, feature `tunnels`)
 
 Lab-only diagnostic VM mirroring C# `TunnelTestDialogViewModel`: prepare → run establish once via [`FakeTunnelTestLab`] compositing [`TunnelManager`] + [`FakeTunnelProvider`] + optional [`FakeTunnelTargetProbe`] (no live SOCKS dial). Progress lines reuse `wormhole_session::describe_tunnel_phase`. **No GPUI** / **no live sidecar**.

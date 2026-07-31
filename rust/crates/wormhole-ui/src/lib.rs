@@ -3,8 +3,7 @@
 //! Pure UI state (sidebar regions, tab strip, session tab bar, ≤4-pane layout tree,
 //! settings + terminal font/size/auto-copy apply glue, connection editor, Quick Connect
 //! + recent-history MRU, credential picker search glue, credentials page list/CRUD Fake glue,
-//! tunnel configs page / picker metadata
-//! Fake glue, tunnel test dialog Fake VM glue (`tunnels` feature),
+//! tunnel configs page / picker metadata Fake glue + tunnel test dialog Fake VM glue + tunnel editor dialog Fake VM glue
 //! mRemoteNG import dialog Fake VM glue (`import` feature),
 //! serial COM picker + baud/parity
 //! preset glue) compiles without GPUI.
@@ -36,6 +35,8 @@ mod mremoteng_import_dialog;
 mod tunnel_configs_ui;
 #[cfg(feature = "tunnels")]
 mod tunnel_test_dialog;
+#[cfg(feature = "tunnels")]
+mod tunnel_editor_dialog;
 mod error;
 mod layout_sink;
 mod pane_layout;
@@ -104,7 +105,8 @@ pub use credentials_page_ui::{read_password_for_edit, CatalogCredentialPageSourc
 pub use tunnel_configs_ui::{
     filter_tunnel_configs_page, filter_tunnel_picker_entries, is_sentinel_id,
     tunnel_kind_display_name, FakeTunnelConfigList, TunnelCatalogError, TunnelConfigRow,
-    TunnelConfigSource, TunnelConfigsVm, TunnelPickerVm, INHERIT_TUNNEL_ID, NO_TUNNEL_ID,
+    TunnelConfigSource, TunnelConfigsVm, TunnelPickerVm, tunnel_name_exists,
+    INHERIT_TUNNEL_ID, NO_TUNNEL_ID,
 };
 #[cfg(feature = "tunnels")]
 pub use tunnel_test_dialog::{
@@ -112,6 +114,14 @@ pub use tunnel_test_dialog::{
     TunnelTargetProbe, TunnelTestDialogError, TunnelTestDialogVm,
     TunnelTestInformationalOutcome, INFORMATIONAL_ESTABLISH_PREFIX,
 };
+#[cfg(feature = "tunnels")]
+pub use tunnel_editor_dialog::{
+    FakeTunnelEditorLab, TunnelEditorDialogError, TunnelEditorDialogVm, TunnelSaveDraft,
+};
+#[cfg(all(feature = "tunnels", feature = "storage"))]
+pub use tunnel_editor_dialog::save_tunnel_config;
+#[cfg(all(feature = "tunnels", feature = "storage", feature = "secrets"))]
+pub use tunnel_editor_dialog::save_tunnel_config_with_payload;
 #[cfg(feature = "storage")]
 pub use tunnel_configs_ui::StorageTunnelConfigSource;
 #[cfg(feature = "import")]
