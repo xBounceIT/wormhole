@@ -1,6 +1,7 @@
 //! App settings JSON model (mirrors `Wormhole.Models.AppSettings`).
 
 use serde::{Deserialize, Serialize};
+use wormhole_terminal::{DEFAULT_SSH_FONT_FAMILY, DEFAULT_SSH_FONT_SIZE};
 
 /// Current on-disk schema version (C# `AppSettings.CurrentSchemaVersion`).
 pub const CURRENT_SCHEMA_VERSION: i32 = 8;
@@ -392,10 +393,10 @@ fn default_true() -> bool {
     true
 }
 fn default_ssh_font() -> String {
-    "Cascadia Mono".into()
+    DEFAULT_SSH_FONT_FAMILY.into()
 }
 fn default_ssh_font_size() -> i32 {
-    12
+    DEFAULT_SSH_FONT_SIZE as i32
 }
 fn default_log_retention_days() -> i32 {
     14
