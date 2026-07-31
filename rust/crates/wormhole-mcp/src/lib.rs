@@ -15,7 +15,10 @@ mod session_registry;
 mod stub;
 mod token;
 
-pub use approval::{ApprovalDecision, ApprovalRequest, SessionApprovalGate};
+pub use approval::{
+    approve_pending, cancel_pending, deny_pending, ApprovalDecision, ApprovalRequest,
+    FakeMcpApprovalUi, FakeMcpToolApprovalGlue, SessionApprovalGate,
+};
 pub use bind::{
     ensure_bound_loopback, is_loopback_ip, is_unspecified_ip, loopback_endpoint_url, loopback_v4,
     parse_loopback_bind, validate_loopback_bind, validate_loopback_host, validate_mcp_port,
@@ -29,7 +32,8 @@ pub use capability::{
 pub use error::McpError;
 pub use host::McpServerHost;
 pub use session_registry::{
-    FakeMcpSessionRegistry, McpSessionInfo, McpSessionRegistry, McpSessionStatus,
+    canonicalize_session_id, FakeMcpSessionRegistry, McpSessionInfo, McpSessionRegistry,
+    McpSessionStatus,
 };
 pub use stub::HttpPlaceholderMcpHost;
 pub use token::{

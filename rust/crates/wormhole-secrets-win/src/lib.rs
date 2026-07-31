@@ -18,6 +18,8 @@
 //!   set/verify/clear (`AppAuthenticationService` + `FakeAppAuthenticationDataProtector`);
 //!   Windows Hello `AvailabilityProbe` / `HelloPrompt` (+ `FakeHelloPrompt` for tests);
 //!   interactive WinRT `UserConsentVerifier` is **not** wired yet
+//! - App idle-lock timeout glue (`AppIdleLockGlue` + `FakeIdleClock`); last-activity
+//!   tracking; Disabled / Never never lock; zero/negative duration fail-closed; no GPUI
 //! - Bitwarden CLI unlock / memory-only session stub (`BitwardenSession` +
 //!   `StubBitwardenSession` / `FakeBitwardenSession`); `bw` process spawn is **not** wired yet
 //! - Process-local ephemeral session passwords (`TransientSessionCredentialStore` +
@@ -53,6 +55,7 @@ mod cred_mgr;
 mod dpapi;
 mod entropy;
 mod hello;
+mod idle_lock;
 mod key_tunnel;
 mod paths;
 mod redact;
@@ -101,6 +104,9 @@ pub use hello::{
     is_remote_desktop_session_with, request_hello_verification, request_hello_verification_with,
     AvailabilityProbe, FakeHelloPrompt, HelloAvailability, HelloPrompt, HelloVerification,
     StubHelloPrompt, REMOTE_DESKTOP_UNAVAILABLE_MESSAGE, SM_REMOTESESSION, WINRT_HELLO_GAP,
+};
+pub use idle_lock::{
+    AppIdleLockGlue, FakeIdleClock, IdleInstant, IdleLockClock, SystemIdleLockClock,
 };
 pub use key_tunnel::{
     delete_key_payload, delete_key_payload_under, delete_tunnel_payload,

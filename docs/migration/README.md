@@ -1,4 +1,4 @@
-﻿# Wormhole migration: WinUI 3/C# → Rust/GPUI
+# Wormhole migration: WinUI 3/C# → Rust/GPUI
 
 **Status:** WinUI 3/C# remains production. Parallel Rust lab is active (`rust/` — ~20 crates: `surface-lab`, domain/storage/secrets, protocols, tunnels/MCP, session/UI stubs, diagnostics, etc.) with many adversarial ledgers closed. Surface-lab gates 1–8 are **LabOnly** only — see [gate-evidence-log.md](gate-evidence-log.md); none are `HardwarePass`, and there is **no cutover**.  
 **Baseline:** `fc0337e` (app 0.9.0) — see `00-baseline.md`  
@@ -51,6 +51,7 @@
 | [adversarial-ledger-bitwarden-session.md](adversarial-ledger-bitwarden-session.md) | Bitwarden CLI session stub (`StubBitwardenSession` / Fake) review closed |
 | [adversarial-ledger-hello-stub.md](adversarial-ledger-hello-stub.md) | Hello AvailabilityProbe / HelloPrompt stub review closed |
 | [adversarial-ledger-app-auth-pin.md](adversarial-ledger-app-auth-pin.md) | App-auth PIN/password Fake verifier (`AppAuthenticationService` / Fake protector) review closed |
+| [adversarial-ledger-idle-lock.md](adversarial-ledger-idle-lock.md) | App idle-lock timeout glue (`AppIdleLockGlue` / `FakeIdleClock`) review closed |
 | [adversarial-ledger-hello-unlock-ui.md](adversarial-ledger-hello-unlock-ui.md) | Hello unlock prompt UI glue (`HelloUnlockGlue` / `FakeHelloUnlockUi`) review closed |
 | [adversarial-ledger-domain.md](adversarial-ledger-domain.md) | Domain review closed (73 tests) |
 | [adversarial-ledger-node-change-notifier.md](adversarial-ledger-node-change-notifier.md) | Connection node change Fake pub/sub (`ConnectionNodeChangeEvent` / Fake) review closed |
@@ -76,6 +77,7 @@
 | [adversarial-ledger-mcp-bind.md](adversarial-ledger-mcp-bind.md) | MCP loopback bind hardening (`0.0.0.0` / mapped / zone) review closed |
 | [adversarial-ledger-mcp-tools-list.md](adversarial-ledger-mcp-tools-list.md) | MCP tools/list → capability-report glue (`FakeMcpCapabilityServer`) review closed |
 | [adversarial-ledger-mcp-session-registry.md](adversarial-ledger-mcp-session-registry.md) | MCP live SSH session registry Fake (`FakeMcpSessionRegistry`) review closed |
+| [adversarial-ledger-mcp-approval-gate.md](adversarial-ledger-mcp-approval-gate.md) | MCP tool approval gate Fake glue (`FakeMcpToolApprovalGlue` / Approve/Deny/Cancel) review closed |
 | [adversarial-ledger-protocols.md](adversarial-ledger-protocols.md) | Terminal / serial / SSH review closed |
 | [adversarial-ledger-ssh-known-hosts.md](adversarial-ledger-ssh-known-hosts.md) | SSH KnownHostsStore review closed |
 | [adversarial-ledger-known-hosts-prompt.md](adversarial-ledger-known-hosts-prompt.md) | SSH known_hosts prompt glue (`resolve_host_key_prompted` / session gate) review closed |
@@ -84,6 +86,7 @@
 | [adversarial-ledger-ssh-agent.md](adversarial-ledger-ssh-agent.md) | SSH agent availability probe (`FakeAgent` / pipe bounds) review closed |
 | [adversarial-ledger-ssh-agent-auth.md](adversarial-ledger-ssh-agent-auth.md) | SSH agent ↔ auth select glue (`select_auth_methods_for_connect` / FakeFallible) review closed |
 | [adversarial-ledger-ssh-reconnect.md](adversarial-ledger-ssh-reconnect.md) | SSH reconnect / backoff policy stub (`SshReconnectPolicy` / Fake schedule) review closed |
+| [adversarial-ledger-session-ssh-reconnect.md](adversarial-ledger-session-ssh-reconnect.md) | Session orch Fake SSH reconnect glue (`FakeSshReconnectGlue`) review closed |
 | [adversarial-ledger-ssh-socks-route.md](adversarial-ledger-ssh-socks-route.md) | SSH SOCKS5 tunnel route select (`select_ssh_connect_target` / FakeTunnelSocks) review closed |
 | [adversarial-ledger-ssh-kbi.md](adversarial-ledger-ssh-kbi.md) | SSH keyboard-interactive multi-prompt Fake channel (`FakeKbiChannel` / `answer_kbi_round`) review closed |
 | [adversarial-ledger-serial-enumerate.md](adversarial-ledger-serial-enumerate.md) | Serial port enumeration review closed |
@@ -100,6 +103,7 @@
 | [adversarial-ledger-rdp-resolution.md](adversarial-ledger-rdp-resolution.md) | RDP ResolutionDebouncer review closed |
 | [adversarial-ledger-rdp-resize-glue.md](adversarial-ledger-rdp-resize-glue.md) | RDP `RdpResolutionLayoutGlue` / Fake resize glue review closed |
 | [adversarial-ledger-rdp-display-redirect.md](adversarial-ledger-rdp-display-redirect.md) | RDP display/redirect Fake configure glue (`RdpDisplayRedirectGlue`) review closed |
+| [adversarial-ledger-rdp-performance-flags.md](adversarial-ledger-rdp-performance-flags.md) | RDP performance flags / bitmap-cache Fake configure glue (`RdpPerformanceFlagsGlue`) review closed |
 | [adversarial-ledger-rdp-forwarder.md](adversarial-ledger-rdp-forwarder.md) | RDP `select_rdp_connect_target` / LocalForwarder stub review closed |
 | [adversarial-ledger-focus-a11y.md](adversarial-ledger-focus-a11y.md) | FocusBroker + a11y (gates 7–8) review closed |
 | [adversarial-ledger-focus-cycle.md](adversarial-ledger-focus-cycle.md) | FocusCycle ring + FocusBroker integration review closed |

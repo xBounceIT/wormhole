@@ -1,8 +1,10 @@
 # Adversarial ledger — SSH reconnect / backoff policy stub
 
 **Scope:** `rust/crates/wormhole-ssh/src/reconnect.rs` (`SshReconnectPolicy` / `SshReconnectBudget` / `BackoffSchedule` / `FakeBackoffSchedule` / `FixedBackoffSchedule` / decide helpers), reconnect exports in `lib.rs`, reconnect section of `docs/migration/06-ssh-spike.md`  
-**Out of scope:** Live SSH reconnect loop / WebView2 rebind; session orchestrator wiring (Pending); credential fields; GPUI  
-**Date:** 2026-07-31  
+**Out of scope:** Live SSH reconnect loop / WebView2 rebind; credential fields; GPUI.
+Session orch Fake glue: [`adversarial-ledger-session-ssh-reconnect.md`](adversarial-ledger-session-ssh-reconnect.md).
+**Date:** 2026-07-31
+
 **Authority:** full adversarial-review-fix (edit in scope)  
 **Gates:** 2 clean adversarial cycles + 3 clean iterative-review-simplify cycles (adversarial renewed after simplify edits)
 

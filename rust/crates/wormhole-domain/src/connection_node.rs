@@ -132,3 +132,63 @@ impl Default for ConnectionNode {
         }
     }
 }
+
+impl ConnectionNode {
+    /// Full field copy with a fresh [`Id`] and no per-host / identity-scoped state.
+    ///
+    /// Mirrors C# `ConnectionNode.CloneAsNewIdentity` (tree Duplicate). Placement
+    /// (`Name`, `ParentId`, `SortOrder`) stays with the caller.
+    ///
+    /// Resets:
+    /// - `ssh_known_host_fingerprint` — host-scoped TOFU pin must not follow a new identity
+    /// - `use_inline_password` → `Some(false)` — CredMgr secrets are keyed by node Id; a
+    ///   fresh Id has no stored secret (never copies password bodies into SQLite)
+    ///
+    /// Keeps shared-pool references (`credential_id`, `rdp_gateway_credential_id`,
+    /// `tunnel_config_id`) by design — those are not secret material.
+    pub fn clone_as_new_identity(&self) -> Self {
+        let mut copy = self.clone();
+        copy.id = Uuid::new_v4();
+        copy.ssh_known_host_fingerprint = None;
+        copy.use_inline_password = Some(false);
+        copy
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ProtocolType;
+
+    #[test]
+    fn clone_as_new_identity_resets_host_scoped_fields() {
+        let cred = Uuid::new_v4();
+        let tunnel = Uuid::new_v4();
+        let source = ConnectionNode {
+            id: Uuid::new_v4(),
+            parent_id: Some(Uuid::new_v4()),
+            name: "prod".into(),
+            kind: NodeKind::Connection,
+            sort_order: 3,
+            protocol: Some(ProtocolType::Ssh),
+            host: Some("h.example".into()),
+            credential_id: Some(cred),
+            use_inline_password: Some(true),
+            ssh_known_host_fingerprint: Some("pinned".into()),
+            tunnel_config_id: Some(tunnel),
+            rdp_gateway_credential_id: Some(cred),
+            ..Default::default()
+        };
+        let copy = source.clone_as_new_identity();
+        assert_ne!(copy.id, source.id);
+        assert_eq!(copy.parent_id, source.parent_id);
+        assert_eq!(copy.name, source.name);
+        assert_eq!(copy.sort_order, source.sort_order);
+        assert_eq!(copy.host.as_deref(), Some("h.example"));
+        assert_eq!(copy.credential_id, Some(cred));
+        assert_eq!(copy.rdp_gateway_credential_id, Some(cred));
+        assert_eq!(copy.tunnel_config_id, Some(tunnel));
+        assert!(copy.ssh_known_host_fingerprint.is_none());
+        assert_eq!(copy.use_inline_password, Some(false));
+    }
+}

@@ -9,6 +9,7 @@
 //! - [`RawPixelBuffer`] with damage-rect merge (Raw encoding decode stub)
 //! - bounded [`InputEventQueue`] for pointer/key enqueue
 //! - [`session_glue`] — pointer/key → queue; Raw FB rect → dirty notify Fake
+//! - [`input_resize_glue`] — FB resize / disconnect drain+coalesce (Fake; OOB drop)
 //! - [`clipboard_glue`] — ClientCutText → Fake send; ServerCutText → local buffer
 //! - [`select_vnc_connect_target`] — Direct vs loopback forwarder (no SOCKS)
 //!
@@ -22,6 +23,7 @@ mod clipboard_glue;
 mod error;
 mod framebuffer;
 mod input;
+mod input_resize_glue;
 mod protocol;
 mod session;
 mod session_glue;
@@ -50,6 +52,11 @@ pub use framebuffer::{
 pub use input::{
     InputEvent, InputEventQueue, KeyEvent, PointerButtons, PointerEvent, RecordingInput,
     VncInputSink, DEFAULT_INPUT_QUEUE_CAPACITY,
+};
+pub use input_resize_glue::{
+    disconnect_session_input, drain_coalesce_on_resize, drain_discard_on_disconnect,
+    pointer_in_bounds, resize_session_framebuffer, FakeInputResizeSink, InputDisconnectDrainReport,
+    InputResizeDrainReport, VncInputResizeGlue,
 };
 pub use protocol::{
     RfbSecurityType, RfbVersion, SECURITY_TYPE_NONE, SECURITY_TYPE_VNC_AUTH,

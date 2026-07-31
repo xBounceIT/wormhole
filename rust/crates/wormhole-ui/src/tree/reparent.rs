@@ -295,7 +295,8 @@ fn is_ancestor_of(
     false
 }
 
-fn next_sort_order(nodes: &[ConnectionNode], parent_id: Option<Uuid>) -> i32 {
+/// Next sibling `SortOrder` under `parent_id` (max + 1, or 0 when empty; saturates).
+pub(crate) fn next_sort_order(nodes: &[ConnectionNode], parent_id: Option<Uuid>) -> i32 {
     let mut max: Option<i32> = None;
     for n in nodes {
         if n.parent_id == parent_id {

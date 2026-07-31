@@ -1077,6 +1077,63 @@ fn reparent_connection_stub_updates_parent_and_inheritance_chain() {
 }
 
 #[test]
+fn duplicate_connection_stub_copies_metadata_not_secrets() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = ConnectionRepository::new(&factory);
+
+    let folder_a = repo.create_folder("A", None).unwrap();
+    let cred = Uuid::parse_str("a1a1a1a1-a1a1-a1a1-a1a1-a1a1a1a1a1a1").unwrap();
+    let tunnel = Uuid::parse_str("b2b2b2b2-b2b2-b2b2-b2b2-b2b2b2b2b2b2").unwrap();
+    let conn_id = Uuid::parse_str("c3c3c3c3-c3c3-c3c3-c3c3-c3c3c3c3c3c3").unwrap();
+    repo.insert(&ConnectionNode {
+        id: conn_id,
+        parent_id: Some(folder_a.node.id),
+        name: "prod".into(),
+        kind: NodeKind::Connection,
+        sort_order: 0,
+        protocol: Some(ProtocolType::Ssh),
+        host: Some("h.example".into()),
+        credential_id: Some(cred),
+        use_inline_password: Some(true),
+        ssh_known_host_fingerprint: Some("pinned-fingerprint".into()),
+        tunnel_config_id: Some(tunnel),
+        ..Default::default()
+    })
+    .unwrap();
+
+    let copy = repo.duplicate_connection(conn_id).unwrap();
+    assert_ne!(copy.node.id, conn_id);
+    assert_eq!(copy.node.parent_id, Some(folder_a.node.id));
+    assert_eq!(copy.node.name, "prod (copy)");
+    assert_eq!(copy.node.sort_order, 1);
+    assert_eq!(copy.node.host.as_deref(), Some("h.example"));
+    assert_eq!(copy.node.credential_id, Some(cred));
+    assert_eq!(copy.node.tunnel_config_id, Some(tunnel));
+    assert!(copy.node.ssh_known_host_fingerprint.is_none());
+    assert_eq!(copy.node.use_inline_password, Some(false));
+
+    // Source row unchanged (including pinned fingerprint + inline flag).
+    let source = repo.get_by_id(conn_id).unwrap().unwrap();
+    assert_eq!(
+        source.node.ssh_known_host_fingerprint.as_deref(),
+        Some("pinned-fingerprint")
+    );
+    assert_eq!(source.node.use_inline_password, Some(true));
+
+    assert!(matches!(
+        repo.duplicate_connection(folder_a.node.id).unwrap_err(),
+        StorageError::InvalidArgument(_)
+    ));
+    let missing = Uuid::parse_str("d4d4d4d4-d4d4-d4d4-d4d4-d4d4d4d4d4d4").unwrap();
+    assert!(matches!(
+        repo.duplicate_connection(missing).unwrap_err(),
+        StorageError::NotFound(id) if id == missing
+    ));
+    assert_eq!(repo.list_all().unwrap().len(), 3);
+}
+
+#[test]
 fn next_sort_order_saturates_at_i32_max() {
     let (_dir, _path, factory) = temp_db();
     MigrationRunner::embedded().run(&factory).unwrap();

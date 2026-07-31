@@ -5,7 +5,8 @@
 //! [`wormhole_tunnels::TunnelLease`], then dispatches:
 //!
 //! - Serial → [`wormhole_serial`]
-//! - SSH → [`wormhole_ssh`] password path (+ known_hosts verify-on-connect + host-key prompt gate stub)
+//! - SSH → [`wormhole_ssh`] password path (+ known_hosts verify-on-connect + host-key prompt gate stub
+//!   + Fake reconnect loop glue over [`wormhole_ssh::reconnect`])
 //! - HTTP/HTTPS → [`wormhole_http`] target types (WebView2 hosting stays elsewhere)
 //!
 //! RDP / VNC prepare typed [`RdpConnectRequest`] / [`VncConnectRequest`] stubs, then
@@ -20,6 +21,7 @@ mod id;
 mod orchestrator;
 mod profile;
 mod rdp_vnc;
+mod ssh_reconnect;
 mod state;
 
 pub use connectors::{
@@ -39,6 +41,9 @@ pub use profile::profile_from_node;
 pub use rdp_vnc::{
     RdpConnectRequest, SessionKind, StubRdpConnector, StubVncConnector, UnsupportedProtocolReason,
     VncConnectRequest,
+};
+pub use ssh_reconnect::{
+    apply_fake_reconnect_result, FakeSshReconnectGlue, FakeSshReconnectResult,
 };
 pub use state::{ConnectedSession, SessionState, SshConnected};
 

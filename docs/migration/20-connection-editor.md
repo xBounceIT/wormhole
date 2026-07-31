@@ -153,6 +153,7 @@ load_inline_secret(&mut state, &passwords)?;
 | Insert id | Nil `editing_node_id` → assign `Uuid::new_v4()` before insert |
 | Inline secret | After DB commit: non-empty pending → `PasswordStore::store(node.id, …)`; blank / leaving inline → `delete` (never store `""`) |
 | Edit rehydrate | `load_inline_secret` after `load_from` (C# `LoadInlineSecretAsync`) — required so staying inline without clearing the field re-stores rather than deletes |
+| Tree Duplicate | Sibling path in [17-tree-settings-vm.md](17-tree-settings-vm.md) (`build_duplicate` / `duplicate_connection`) — fresh node Id + cleared inline flag / fingerprint; **does not** copy CredMgr secrets; editor Insert is the path that stores a new inline password when the user types one |
 | Editor chrome | Clears `inline_password` after successful apply; `Debug` still redacts |
 | Partial failure | `Insert` + CredMgr failure → best-effort compensating `repo.delete` of the new row; chrome keeps plaintext for retry. `Update` + CredMgr failure keeps the committed row + chrome plaintext |
 | Errors | `EditorSaveError` Display/Debug never embed secret material |
@@ -205,6 +206,7 @@ Adversarial reviews:
 - State machine: [adversarial-ledger-connection-editor.md](adversarial-ledger-connection-editor.md)
 - Persist glue: [adversarial-ledger-editor-save.md](adversarial-ledger-editor-save.md)
 - Credential picker search glue: [adversarial-ledger-credential-picker.md](adversarial-ledger-credential-picker.md)
+- Tree Duplicate (sibling; no secret copy): [adversarial-ledger-tree-duplicate.md](adversarial-ledger-tree-duplicate.md)
 - Serial enumerate library: [adversarial-ledger-serial-enumerate.md](adversarial-ledger-serial-enumerate.md)
 - Serial COM picker glue: [adversarial-ledger-serial-picker.md](adversarial-ledger-serial-picker.md)
 - Serial baud/parity presets: [adversarial-ledger-serial-presets.md](adversarial-ledger-serial-presets.md)

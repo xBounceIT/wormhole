@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Loopback MCP Streamable HTTP host + session-registry Fake (mirrors Services/Mcp)."
+description = "Loopback MCP Streamable HTTP host + session-registry / approval-gate Fakes (mirrors Services/Mcp)."
 publish = false
 
 [lib]

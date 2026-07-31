@@ -13,7 +13,7 @@ path = "src/lib.rs"
 
 [dependencies]
 thiserror = { workspace = true }
-uuid = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 uuid = { workspace = true, features = ["v4"] }

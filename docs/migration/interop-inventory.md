@@ -40,7 +40,7 @@ Never treat LabOnly / Spike / Unwired as shipped feature parity.
 | Touchpoint | Files | APIs / mechanism | Why it matters |
 |---|---|---|---|
 | MsRdp ActiveX class selection | `Interop/Rdp/AxMsRdpClient9.cs` | Registry probe `HKCR\CLSID\{…}` for Client11 / 10 / 9 NotSafeForScripting; `AxHost` subclass | Must activate newest registered `mstscax` class; fallback CLSID `8B918B82-7985-4C24-89DF-C33AD2BBFBCD` (v9). |
-| Property access | `RdpHostForm.cs` via `GetOcx()` + `dynamic` | Large optional IDispatch surface (CredSSP, gateway, redirects, SmartSizing, `UpdateSessionDisplaySettings`, performance flags, …) | Hand-rolled — no AxImp. Broker needs a stable RDP capability layer; missing props are soft-fail (`TrySetOptional`). |
+| Property access | `RdpHostForm.cs` via `GetOcx()` + `dynamic` | Large optional IDispatch surface (CredSSP, gateway, redirects, SmartSizing, `UpdateSessionDisplaySettings`, performance flags, …) | Hand-rolled — no AxImp. Broker needs a stable RDP capability layer; missing props are soft-fail (`TrySetOptional`). Rust Fake glues: display/redirect + performance/bitmap ([05-rdp-spike.md](05-rdp-spike.md)). |
 | Events | `Interop/Rdp/MsTscAxEventsSink.cs` | `[ComImport]` / `[Guid]` `IMsTscAxEvents`; `IConnectionPointContainer.Advise` | Connection/login/disconnect/fatal error sink; DISPID order is ABI. |
 | External client | `ViewModels/Sessions/RdpSessionViewModel.cs` | `Process.Start("mstsc.exe", /v:host:port)` | Escape hatch for AAD/WAM; incompatible with tunnel forwarder. Process lifetime tracked but not killed on tab close. |
 | Crash sentinel | `Services/Rdp/RdpCrashSentinelService.cs`, `App.xaml.cs` | Persist mid-handshake marker; on next launch auto-set `RdpUseExternalClient` | Mitigates SEH `0xC06D007F` from WAM delay-load in unpackaged process. |
@@ -64,7 +64,7 @@ All environments should live under `%LOCALAPPDATA%\Wormhole\…` (not beside Pro
 | WatchGuard SAML | `Services/Tunneling/Watchguard/DialogWatchguardSamlAuthService.cs` | `watchguard-saml-webview2\` | Embedded auth dialog | |
 | Azure VPN Entra | `Services/Tunneling/AzureVpn/DialogAzureVpnAuthService.cs`, `AzureVpnOAuthClient.cs` | `azurevpn-webview2\` | OAuth code flow; refresh tokens DPAPI-cached | Interactive Microsoft login |
 | Update changelog | `Views/Controls/UpdateChangelogView.xaml(.cs)` | `update-changelog-webview2\` | Renders Markdown→HTML | Low risk |
-| New-window policy | `Helpers/WebViewNewWindowNavigation.cs` | — | Redirect into existing session / suppress unmanaged popups | Prevents orphan Edge windows without proxy/certs |
+| New-window policy | `Helpers/WebViewNewWindowNavigation.cs` | — | Redirect into existing session / suppress unmanaged popups; Bitwarden HostPopup in-app | Prevents orphan Edge windows without proxy/certs; Rust Fake in `wormhole-http` `new_window` |
 
 **NativeSurfaceBroker takeaway:** Many concurrent WebView2 environments with **different** browser args (proxy/cert) must not share a user-data folder. Broker should centralize env creation, keyed folders, and ordered teardown (Bitwarden flush before exit).
 
@@ -188,7 +188,7 @@ Snapshot of where each major interop area lives under `rust/crates/`.
 | RDP crash sentinel / resolution debounce | `wormhole-surface-win/src/rdp/{sentinel,resolution,host_bounds}.rs` | **Spike** | Compile without `mstscax`; file/layout helpers only. |
 | RDP external `mstsc.exe` | — | **None** / **Unwired** | C# escape hatch not ported as a product host path. |
 | RDP overlay dialog suppress / owner subclass | partial via overlay host under `rdp` | **LabOnly** | Lab/spike surface; full `RdpOverlayCoordinator` parity **Unwired**. |
-| DPI / idle (`GetLastInputInfo`) / window subclass catalog | — (focus ops only today) | **Unwired** / **None** | No full `Win32Interop.cs` port; idle lock + subclass sync not a dedicated crate. |
+| DPI / idle (`GetLastInputInfo`) / window subclass catalog | idle policy in `wormhole-secrets-win::idle_lock` (last-activity Fake); OS idle Unwired | **Spike** (policy) / **Unwired** (OS idle + subclass) | No full `Win32Interop.cs` port; `GetLastInputInfo` not wired. |
 | Network path probing (`dnsapi` / `iphlpapi`) | — | **None** | Still C#-only. |
 
 ### 9.2 Secrets (CredMgr / DPAPI / Hello)
@@ -199,6 +199,7 @@ Snapshot of where each major interop area lives under `rust/crates/`.
 | Keys / tunnel DPAPI files | `wormhole-secrets-win` (`key_tunnel.rs`, `dpapi.rs`, `paths.rs`) | **Spike** | Null-entropy key/tunnel blobs; path confinement. |
 | Named / per-tunnel entropy | `wormhole-secrets-win` (`entropy.rs`) | **Spike** | App-auth, Bitwarden shared storage, Azure/WG/Stormshield cache entropy constants. |
 | App-auth store | `wormhole-secrets-win` (`app_auth.rs`, `app_auth_service.rs`) | **Spike** | `app-auth.dpapi` protect/unlock helpers + PIN/password set/verify/clear (`AppAuthenticationService` / Fake protector). |
+| Idle-lock timeout policy | `wormhole-secrets-win` (`idle_lock.rs`) | **Spike** | `AppIdleLockGlue` + `FakeIdleClock` (last-activity; Disabled/Never; zero/negative fail-closed). No `GetLastInputInfo` yet — host OS idle **Unwired**. |
 | Windows Hello / remote-session gate | `wormhole-secrets-win` (`hello.rs`, `win32.rs`) | **Unwired** (interactive) / **Spike** (stubs) | `AvailabilityProbe` / `HelloPrompt` stubs + `SM_REMOTESESSION` probe. WinRT `UserConsentVerifier` = `WINRT_HELLO_GAP` — **not wired**. |
 | Bitwarden CLI session | `wormhole-secrets-win` (`bitwarden_session.rs`) | **Unwired** (spawn) / **Spike** (stubs) | Memory-only session stubs; `bw` process spawn **not wired** (`BITWARDEN_CLI_SESSION_GAP`). |
 | Bitwarden browser WebView2 + DPAPI shared storage | — (entropy constant only in secrets-win) | **Unwired** / **None** | No Rust Bitwarden extension host / profile sync. |
@@ -226,8 +227,8 @@ Snapshot of where each major interop area lives under `rust/crates/`.
 | Serial ports | `wormhole-serial` + `wormhole-ui::SerialPortPickerState` | **Spike** | Enumerate + session I/O library; pure host-field picker glue (no GPUI chrome). |
 | SSH / known hosts / agent stubs | `wormhole-ssh` | **Spike** | russh-oriented library; agent probe stubs. |
 | SFTP queue / transport | `wormhole-sftp` | **Spike** | Serialized ops + dialog/progress/prewarm Fake glue; VPN SOCKS path library-level; live russh dial deferred. |
-| HTTP target / cert / route / nav-report / profile wipe | `wormhole-http` | **Spike** | Pure target/route/cert + Fake nav-result→status + Fake non-extension profile isolation/wipe — **no** WebView2 ownership. |
-| VNC / RFB | `wormhole-vnc` | **Spike** | Framebuffer/input spike; tunnel via forwarder stubs. |
+| HTTP target / cert / route / nav-report / profile wipe / new-window | `wormhole-http` | **Spike** | Pure target/route/cert + Fake nav-result→status + Fake non-extension profile isolation/wipe + Fake new-window/popup policy (AllowInTab/HostPopup/Block) — **no** WebView2 ownership. |
+| VNC / RFB | `wormhole-vnc` | **Spike** | Framebuffer/input spike + resize drain/coalesce glue; tunnel via forwarder stubs. |
 | Session orchestrator | `wormhole-session` | **Spike** | Connects protocol stubs + tunnel lease; not GPUI product shell. |
 | MCP loopback HTTP | `wormhole-mcp` | **Spike** | Bind/token/approval; optional `rmcp` feature. |
 | Diagnostics / WebView2 runtime probe | `wormhole-diagnostics` + `surface-lab --diagnostics` | **LabOnly** / **Spike** | Support snapshot helpers; not a shipped Help UI. |
@@ -237,7 +238,7 @@ Snapshot of where each major interop area lives under `rust/crates/`.
 | Concern | Start here |
 |---|---|
 | HWND broker / RDP / WebView2 | `rust/crates/wormhole-surface-win` + `rust/crates/surface-lab` |
-| CredMgr / DPAPI / Hello stubs | `rust/crates/wormhole-secrets-win` |
+| CredMgr / DPAPI / Hello / idle-lock stubs | `rust/crates/wormhole-secrets-win` |
 | Sidecars / SOCKS / forwarder | `rust/crates/wormhole-tunnels` |
 | xterm wire protocol | `rust/crates/wormhole-terminal` |
 | Import / backup crypto | `rust/crates/wormhole-import` |

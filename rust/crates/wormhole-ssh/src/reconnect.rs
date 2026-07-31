@@ -11,7 +11,8 @@
 //!   [`SshReconnectPolicy::on_disconnect`] with [`SshDisconnectCause::UserCancel`])
 //!
 //! No live SSH, no GPUI, no credential fields — fail closed on hostile budget /
-//! schedule inputs. LabOnly until session orchestrator / UI wire the loop.
+//! schedule inputs. Session orch Fake loop glue lives in
+//! `wormhole_session::ssh_reconnect`; live UI / WebView2 rebind still Pending.
 
 use std::fmt;
 use std::time::Duration;

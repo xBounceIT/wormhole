@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "RFB/VNC subset: auth types + password-only auth glue (Fake), Raw buffer/damage, input queue, session↔fb/input glue, clipboard cut-text glue stub, BindLocalForwarder target stub; optional vnc-rs engine."
+description = "RFB/VNC subset: auth types + password-only auth glue (Fake), Raw buffer/damage, input queue, session↔fb/input glue, input resize drain/coalesce glue, clipboard cut-text glue stub, BindLocalForwarder target stub; optional vnc-rs engine."
 publish = false
 
 [lib]

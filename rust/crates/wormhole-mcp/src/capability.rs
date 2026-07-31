@@ -11,6 +11,8 @@
 //! ASCII/Unicode control characters (diagnostics line spoofing), and duplicates.
 //!
 //! **Not** live Streamable HTTP, CredMgr, or SSH session control.
+//! Per-session Approve/Deny/Cancel before execute lives in
+//! [`crate::FakeMcpToolApprovalGlue`] (still fail-closed for live exec).
 
 use std::fmt;
 use std::net::SocketAddr;

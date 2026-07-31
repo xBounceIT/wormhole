@@ -4,7 +4,7 @@
 //! - [`SqliteConnectionFactory`] -- one connection per operation (pooling via rusqlite defaults)
 //! - [`MigrationRunner`] -- embedded `Data/Migrations/*.sql`, alphabetical, `__migration_history`
 //! - [`ConnectionRepository`] -- read/write path for connection / folder nodes
-//!   (including folder CRUD + connection reparent stub)
+//!   (including folder CRUD + connection reparent / duplicate stubs)
 //! - [`TunnelConfigRepository`] -- tunnel metadata rows (secrets stay DPAPI / out-of-band)
 //! - [`CredentialRepository`] + [`credential_glue`] -- credential profile metadata CRUD
 //!   (passwords stay CredMgr / Fake stubs; never in SQLite)

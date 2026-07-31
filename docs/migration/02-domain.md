@@ -65,6 +65,8 @@ C# PascalCase → Rust `snake_case` with identical nullability / tri-state seman
 | `TunnelConfigId` | `tunnel_config_id` |
 | `ParentFolderName` (profile) | `parent_folder_name` |
 
+`ConnectionNode::clone_as_new_identity` mirrors C# `CloneAsNewIdentity` (tree Duplicate): fresh `id`, clears `ssh_known_host_fingerprint`, sets `use_inline_password = Some(false)`. Shared pool refs (`credential_id` / gateway credential / `tunnel_config_id`) are kept — not secret bodies. Placement (`name` / `parent_id` / `sort_order`) stays with callers (`wormhole-ui` tree duplicate glue / `ConnectionRepository::duplicate_connection`).
+
 `SerialDefaults` and `RdpScreenSizes` constants match C# (`Helpers/RdpScreenSizes.cs`, `Models/SerialSettings.cs`).
 
 ## Inheritance behavior (parity checklist)

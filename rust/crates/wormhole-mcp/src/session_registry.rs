@@ -10,8 +10,10 @@
 //! shell / GPUI host. Fail-closed on blank / control-char ids, non-Connected
 //! register, duplicate register, and unknown unregister.
 //!
-//! **Not** Streamable HTTP, bearer mint, approval UI, or command execution —
-//! those stay on the host / approval / tool stubs.
+//! **Not** Streamable HTTP, bearer mint, or command execution — those stay on
+//! the host / tool stubs. Approval-gate Fake glue
+//! ([`crate::FakeMcpToolApprovalGlue`]) optionally consumes this registry for
+//! Connected eligibility before Approve/Deny/Cancel.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -119,7 +121,9 @@ pub trait McpSessionRegistry: Send + Sync {
 }
 
 /// Canonicalize + validate a session id (trim; reject blank / control chars).
-fn canonicalize_session_id(raw: &str) -> Result<String, McpError> {
+///
+/// Shared by the session registry Fake and the approval-gate glue.
+pub fn canonicalize_session_id(raw: &str) -> Result<String, McpError> {
     let id = raw.trim();
     if id.is_empty() {
         return Err(McpError::Message("MCP session id is required".to_owned()));

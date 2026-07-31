@@ -2,9 +2,10 @@
 //!
 //! Pure Rust port of `HttpConnectionTarget` / `BuildTargetAsync` from
 //! `ViewModels/Sessions/HttpSessionViewModel.cs`, plus Fake-WebView
-//! navigation-result → session-status glue (`nav_report`) and non-extension
-//! WebView2 profile isolation / wipe Fake glue (`profile_wipe`). Live WebView2
-//! hosting stays in `wormhole-surface-win`.
+//! navigation-result → session-status glue (`nav_report`), non-extension
+//! WebView2 profile isolation / wipe Fake glue (`profile_wipe`), and
+//! new-window / popup policy Fake glue (`new_window`). Live WebView2 hosting
+//! stays in `wormhole-surface-win`.
 //!
 //! See `docs/migration/10-http.md`.
 
@@ -12,6 +13,7 @@ mod bitwarden;
 mod browser_args;
 mod error;
 mod nav_report;
+mod new_window;
 mod profile_wipe;
 mod route;
 mod target;
@@ -27,6 +29,10 @@ pub use error::HttpError;
 pub use nav_report::{
     apply_navigation_report, validate_navigate_uri, FakeWebViewSurface, HttpNavSession,
     HttpSessionNavStatus, NavigationOutcome,
+};
+pub use new_window::{
+    build_bitwarden_popup_uri, decide_bitwarden_popup, decide_new_window_policy,
+    get_in_session_navigation_uri, FakeNewWindowSurface, NewWindowPolicy,
 };
 pub use profile_wipe::{
     keyed_shared_folder_fingerprint_args, keyed_shared_folder_name, requires_isolated_web_profile,

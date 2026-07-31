@@ -2,7 +2,7 @@
 
 
 
-**Status:** Raw pixel buffer + damage tracking + bounded input queue + session↔fb/input glue stub + client↔server clipboard cut-text glue stub + password-only auth glue stub + BindLocalForwarder target stub; live engine deferred behind feature  
+**Status:** Raw pixel buffer + damage tracking + bounded input queue + session↔fb/input glue stub + input resize drain/coalesce glue stub + client↔server clipboard cut-text glue stub + password-only auth glue stub + BindLocalForwarder target stub; live engine deferred behind feature
 
 **Date:** 2026-07-31  
 
@@ -75,6 +75,21 @@ Default builds **do not** pull `vnc-rs`. They ship RFB subset types + a decode/i
 
 - `InputEventQueue` — bounded pointer/key enqueue (`DEFAULT_INPUT_QUEUE_CAPACITY = 256`); **drop policy:** full → `VncError::InputQueueFull` (queue unchanged; no silent drop / no unbounded growth). Capacity `0` is coerced to `1`.
 
+- **Input resize glue** (`input_resize_glue`): on framebuffer resize or disconnect, drain pending pointer/key events under a documented coalesce policy (`drain_coalesce_on_resize` / `drain_discard_on_disconnect` / `VncInputResizeGlue` + `FakeInputResizeSink`). No live RFB send. Reports expose **counts only** (no keysyms / coords / secrets). See [adversarial-ledger-vnc-input-resize.md](adversarial-ledger-vnc-input-resize.md).
+
+  Coalesce policy (resize):
+
+  | Step | Behaviour |
+  |---|---|
+  | Drain | Take entire pending queue |
+  | OOB pointers | Drop when `x >= width` / `y >= height` / zero-size FB (no clamp) |
+  | Same-button consecutive pointers | Keep **last** only (classic move coalesce) |
+  | Keys | Preserve FIFO order (never coalesce down/up) |
+  | Re-enqueue | Kept events only; coalesce shrinks so capacity fits |
+  | not Connected (`resize_session_framebuffer`) | `NotConnected` — FB + queue unchanged |
+  | Disconnect | Discard all pending (fail-closed; no send after teardown) |
+  | Session resize order | Drain/coalesce input **then** `set_size` (no torn FB on re-enqueue fail) |
+
 - `FramebufferSink` / `VncInputSink` traits; `VncSession` wires buffer + queue (no TCP). Session / options `Debug` redacts nested password.
 
 - **Session glue** (`session_glue`): pointer/key → existing `InputEventQueue` via `push_pointer_to_session` / `push_key_to_session`; Raw FB rect → `apply_framebuffer_rect` + `FramebufferDirtyNotify` (`FakeFramebufferDirtyNotify` for Lab). Fail-closed when not `Connected` (`NotConnected` — Idle / Negotiating / Closed; input after `close()` cleared); full queue → `InputQueueFull` (queue unchanged); apply errors (`InvalidFramebufferUpdate`) skip dirty notify (no partial invalidate; prior notifies retained). Orchestrator still `UnsupportedProtocol` before tunnel establish — glue does **not** open RFB.
@@ -145,7 +160,7 @@ Adversarial review: [adversarial-ledger-vnc-forwarder.md](adversarial-ledger-vnc
 
 |---|---|---|
 
-| *(none)* | — | Protocol types + password-only auth glue + Raw buffer/damage + input queue + session stub + fb/input glue + clipboard cut-text glue + forwarder target selection |
+| *(none)* | — | Protocol types + password-only auth glue + Raw buffer/damage + input queue + session stub + fb/input glue + input resize drain/coalesce glue + clipboard cut-text glue + forwarder target selection |
 
 | `engine` | **off** | Pulls `vnc-rs` + tokio; exposes `VncRsEngineMarker` (presence-only; no live TCP yet) |
 

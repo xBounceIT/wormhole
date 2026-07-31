@@ -107,12 +107,13 @@ pub use shell::{ShellState, SidebarRegion};
 pub use tabs::{SessionTab, TabStrip};
 pub use theme::{ThemeTokens, THEME};
 pub use tree::{
-    apply_reparent_memory, fields_match_query_lower, node_matches_query, reparent_memory,
+    apply_duplicate_memory, apply_reparent_memory, build_duplicate, build_duplicate_from,
+    duplicate_memory, fields_match_query_lower, node_matches_query, reparent_memory,
     should_reject_drag_selection, should_reject_drag_selection_from, validate_reparent,
-    validate_reparent_from, visible_connection_ids, visible_connection_ids_from,
-    ConnectionNodeSource, ConnectionTreeModel, FlattenedRow, MemoryConnectionSource,
-    ReparentError, ReparentOptions, TreeError, TreeNode, ValidatedReparent,
-    MAX_DISPLAYED_SEARCH_MATCHES,
+    validate_reparent_from, visible_connection_ids, visible_connection_ids_from, BuiltDuplicate,
+    ConnectionNodeSource, ConnectionTreeModel, DuplicateError, FlattenedRow,
+    MemoryConnectionSource, ReparentError, ReparentOptions, TreeError, TreeNode, ValidatedReparent,
+    DUPLICATE_NAME_SUFFIX, MAX_DISPLAYED_SEARCH_MATCHES,
 };
 #[cfg(feature = "session")]
 pub use tree::{
@@ -134,7 +135,9 @@ pub use workspace::{PaneId, WorkspaceState, MAX_PANES};
 #[cfg(feature = "storage")]
 pub use settings::StorageSettingsStore;
 #[cfg(feature = "storage")]
-pub use tree::{reparent_connection_storage, StorageConnectionSource};
+pub use tree::{
+    duplicate_connection_storage, reparent_connection_storage, StorageConnectionSource,
+};
 
 #[cfg(feature = "tunnels")]
 pub use otp_prompt::{

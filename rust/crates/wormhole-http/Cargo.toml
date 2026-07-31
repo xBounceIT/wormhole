@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "HTTP/HTTPS session target types + Fake nav-report / profile-wipe glue (HttpSessionViewModel / WebBrowserView parity)."
+description = "HTTP/HTTPS session target types + Fake nav-report / profile-wipe / new-window glue (HttpSessionViewModel / WebBrowserView parity)."
 publish = false
 
 [lib]

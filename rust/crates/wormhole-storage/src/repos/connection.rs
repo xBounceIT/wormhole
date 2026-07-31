@@ -310,6 +310,37 @@ impl<'a> ConnectionRepository<'a> {
         let conn = self.factory.open()?;
         next_sort_order_on(&conn, parent_id)
     }
+
+    /// Duplicate a **connection** under the same parent (C# tree Duplicate).
+    ///
+    /// Fresh Id via [`ConnectionNode::clone_as_new_identity`], name `"{name} (copy)"`,
+    /// append `SortOrder`. Clears host-scoped fingerprint + inline-password flag — **never**
+    /// copies CredMgr/DPAPI secret bodies into SQLite. Shared pool ids (`CredentialId` /
+    /// `TunnelConfigId` / gateway credential) are preserved by design. Folders →
+    /// [`StorageError::InvalidArgument`]; missing → [`StorageError::NotFound`].
+    pub fn duplicate_connection(&self, source_id: Uuid) -> Result<StoredConnectionNode> {
+        let now = Utc::now();
+        let mut conn = self.factory.open()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let source = get_by_id_on(&tx, source_id)?
+            .ok_or(StorageError::NotFound(source_id))?;
+        if source.node.kind != NodeKind::Connection {
+            return Err(StorageError::InvalidArgument(
+                "duplicate_connection requires a connection node".into(),
+            ));
+        }
+        let mut node = source.node.clone_as_new_identity();
+        node.name = format!("{} (copy)", source.node.name);
+        node.parent_id = source.node.parent_id;
+        node.sort_order = next_sort_order_on(&tx, source.node.parent_id)?;
+        insert_on(&tx, &node, now)?;
+        tx.commit()?;
+        Ok(StoredConnectionNode {
+            node,
+            created_at: now,
+            updated_at: now,
+        })
+    }
 }
 
 fn get_by_id_on(conn: &Connection, id: Uuid) -> Result<Option<StoredConnectionNode>> {

@@ -1,13 +1,13 @@
 # HTTP/HTTPS target types — `wormhole-http`
 
-**Status:** pure Rust port of `HttpConnectionTarget` + browser-arg helper + Bitwarden profile fingerprinting + Fake-WebView nav-result glue + non-extension WebView2 profile isolation / wipe Fake glue
+**Status:** pure Rust port of `HttpConnectionTarget` + browser-arg helper + Bitwarden profile fingerprinting + Fake-WebView nav-result glue + non-extension WebView2 profile isolation / wipe Fake glue + new-window / popup policy Fake glue
 **Date:** 2026-07-31
 
 ## Scope
 
-C# source of truth: `ViewModels/Sessions/HttpSessionViewModel.cs` (`HttpConnectionTarget`, `BuildTargetAsync`, `ReportNavigationSucceeded` / `ReportNavigationFailed`), `Views/Sessions/WebBrowserView.xaml.cs` (`OnNavigationCompleted`, shared vs isolated env selection), `Helpers/WebViewBrowserArguments.cs`, `Helpers/AppPaths.cs` (`GetWebBrowser*`), `App.xaml.cs` (`ClearWebBrowserUserData`), and `Services/BitwardenBrowser/BitwardenBrowserWebViewProfile.cs` (path/arg helpers only).
+C# source of truth: `ViewModels/Sessions/HttpSessionViewModel.cs` (`HttpConnectionTarget`, `BuildTargetAsync`, `ReportNavigationSucceeded` / `ReportNavigationFailed`), `Views/Sessions/WebBrowserView.xaml.cs` (`OnNavigationCompleted`, `OnNewWindowRequested`, shared vs isolated env selection, `BuildBitwardenPopupUri`), `Helpers/WebViewNewWindowNavigation.cs`, `Helpers/WebViewBrowserArguments.cs`, `Helpers/AppPaths.cs` (`GetWebBrowser*`), `App.xaml.cs` (`ClearWebBrowserUserData`), and `Services/BitwardenBrowser/BitwardenBrowserWebViewProfile.cs` (path/arg helpers only).
 
-This crate owns **navigation description**, **Bitwarden profile folder fingerprinting**, a **Fake WebView navigation-result → session-status glue** stub (`nav_report`), and **non-extension WebView2 profile isolation / wipe Fake glue** (`profile_wipe`). WebView2 HWND hosting stays in `wormhole-surface-win` (wired later). Absolute Bitwarden roots (`bitwarden-browser-webview2\…`) live in `wormhole-secrets-win` path helpers.
+This crate owns **navigation description**, **Bitwarden profile folder fingerprinting**, a **Fake WebView navigation-result → session-status glue** stub (`nav_report`), **non-extension WebView2 profile isolation / wipe Fake glue** (`profile_wipe`), and **new-window / popup policy Fake glue** (`new_window`). WebView2 HWND hosting stays in `wormhole-surface-win` (wired later). Absolute Bitwarden roots (`bitwarden-browser-webview2\…`) live in `wormhole-secrets-win` path helpers.
 
 | Type / fn | C# analogue |
 |---|---|
@@ -38,6 +38,10 @@ This crate owns **navigation description**, **Bitwarden profile folder fingerpri
 | `select_web_browser_user_data_folder` (+ `_for_target`) | Resolve concrete UDF under `webview2-web\` |
 | `stale_keyed_folder_names` / Fake `sweep_stale_keyed_folders` | `SweepStaleKeyedFolders` selection (keep current fingerprint; leave `env-*`) |
 | `FakeWebBrowserProfileStore` / `clear_web_browser_user_data` | `App.ClearWebBrowserUserData` — Fake wipe of non-extension web root only |
+| `NewWindowPolicy::{AllowInTab,HostPopup,Block}` | `OnNewWindowRequested` + Bitwarden in-app popup decision |
+| `get_in_session_navigation_uri` / `decide_new_window_policy` | `WebViewNewWindowNavigation.GetInSessionNavigationUri` (+ AllowInTab/Block) |
+| `build_bitwarden_popup_uri` / `decide_bitwarden_popup` | `BuildBitwardenPopupUri` → HostPopup (never unmanaged Edge) |
+| `FakeNewWindowSurface` | Unit-test recorder for new-window / Bitwarden popup decisions |
 
 ### Navigation result glue (`nav_report`)
 
@@ -81,6 +85,37 @@ Production still wipes `%LOCALAPPDATA%\Wormhole\webview2-web\` at launch
 (`App.ClearWebBrowserUserData`). This Fake store is in-memory only (no disk I/O).
 `wormhole-surface-win` lab `unique_user_data_dir` remains a separate temp-folder
 helper for child HWND hosts — not a substitute for this shared/isolated contract.
+
+### New-window / popup policy Fake glue (`new_window`)
+
+Mirrors C# `WebViewNewWindowNavigation` + `WebBrowserView.OnNewWindowRequested`
+and documents the Bitwarden in-app popup path (`BuildBitwardenPopupUri`):
+
+| Decision | When |
+|---|---|
+| `AllowInTab` | Same-origin / remappable new-window URI → navigate existing tab (`Handled=true`) |
+| `HostPopup` | Bitwarden `chrome-extension://{id}/{popup}` only — hosted in-app WebView2 |
+| `Block` | Empty / whitespace / `about:blank` / unroutable cross-origin / userinfo / bad Bitwarden inputs |
+
+**Rules (parity + fail-closed):**
+
+1. Session `NewWindowRequested` **never** opens an unmanaged Edge window (would
+   bypass per-tab SOCKS / cert / tunnel). Outcome is AllowInTab or Block only —
+   HostPopup is **not** returned from `decide_new_window_policy`.
+2. Forwarder tabs: same origin as routed navigate URI → AllowInTab as-is; same
+   origin as `original_uri` → rewrite scheme/host/port to the loopback forwarder
+   (path/query/fragment preserved); else Block.
+3. Bitwarden toolbar / activation uses `decide_bitwarden_popup` /
+   `build_bitwarden_popup_uri` → HostPopup (or Block on empty / hostile id/path).
+   Never main-tab AllowInTab for that path.
+4. Empty / whitespace raw URI, `about:blank` (+ `?`/`#`), embedded userinfo, and
+   relative/unparsable targets (when both bases present) **fail closed** → Block.
+5. Secrets: `Debug` prints lengths / scheme / policy kind only — never full URIs,
+   extension ids, or query strings.
+
+**Non-goals for this stub:** live WebView2 `NewWindowRequested` wiring, GPUI popup
+dialogs, Bitwarden extension install / storage bridge, changelog external-link
+open (separate `UpdateChangelogView` path).
 
 ## Routing rules (parity)
 
@@ -176,7 +211,8 @@ Browser args are hardening + optional `socks5://host:port` only — no session t
 - Bitwarden extension **download** / install / cookie-IndexedDB seeding
 - Live disk wipe of `%LOCALAPPDATA%` (Fake store only; C# `App` still owns startup wipe)
 - Tunnel establishment (callers use `wormhole-tunnels`)
-- Live nav-result wiring into `wormhole-session` `SessionHandle` (Fake glue is crate-local)
+- Live nav-result / new-window wiring into `wormhole-session` `SessionHandle` (Fake glue is crate-local)
+- Live `CoreWebView2.NewWindowRequested` subscription / HWND popup hosting
 
 ## Verification
 
@@ -192,7 +228,9 @@ cargo test -p wormhole-surface-win --features webview --lib
 Direct / port-0 / cert composition / Serial N/A) + `nav_report` (success / fail /
 cancel / empty-URI fail-closed / cert-policy preserve / no-secret Debug) +
 `profile_wipe` (keyed fingerprint, shared vs isolated, Fake wipe leaves Bitwarden,
-stale keyed sweep, empty-path fail-closed, Debug redaction).
+stale keyed sweep, empty-path fail-closed, Debug redaction) + `new_window`
+(AllowInTab / HostPopup / Block, forwarder rewrite, about:blank + empty fail-closed,
+Bitwarden popup URI, userinfo Block, Debug redaction).
 `orchestrator_fakes` covers `connect_http` wiring (Direct without lease, SOCKS prefer,
 forwarder fallback, port-0 reject, Serial skips tunnel). The surface-win command covers
 `cert_policy_to_webview2_behavior` / leaf+target AlwaysAllow glue mapping tests

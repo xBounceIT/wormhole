@@ -1,6 +1,6 @@
 # Connection-tree + settings view-models — `wormhole-ui`
 
-**Status:** pure Rust view-models green (independent of GPUI chrome); tree Open→session glue stub; tree filter/search id glue stub; tree reparent/drag validation glue stub; terminal font/size/auto-copy settings apply glue stub
+**Status:** pure Rust view-models green (independent of GPUI chrome); tree Open→session glue stub; tree filter/search id glue stub; tree reparent/drag validation glue stub; tree duplicate connection glue stub; terminal font/size/auto-copy settings apply glue stub
 **Date:** 2026-07-31  
 **Crate:** `rust/crates/wormhole-ui` (`tree` + `settings` modules)  
 **C# mirrors:** `ViewModels/ConnectionTreeViewModel.cs`, `ViewModels/SettingsViewModel.cs`, `Services/AppSettingsService.cs`, `Models/AppSettings.cs`
@@ -19,6 +19,7 @@
 | Tree VM | `ConnectionTreeModel` | Load, search/filter projection, folder expand |
 | Filter glue | `visible_connection_ids` / `visible_connection_ids_from` | Thin query → visible ids (name **or** host); ancestor folders kept |
 | Reparent glue | `validate_reparent` / `should_reject_drag_selection` / `reparent_memory` / `reparent_connection_storage` | Drag/reparent validation (search, cycles, connection-as-parent); Fake apply; optional storage connection reparent |
+| Duplicate glue | `build_duplicate` / `duplicate_memory` / `duplicate_connection_storage` | Same-parent connection copy (fresh Id, `" (copy)"` name, append SortOrder); folders rejected; no secret bodies; Fake + optional storage |
 | Flatten | `flatten_visible()` | Depth-first rows respecting expand + search |
 | Tree Open glue | `prepare_connect_request` / `prepare_tree_connect` / `connect_from_tree` / `connect_from_selection` | Double-click / Open / selection → `InheritanceResolver` → [`ConnectRequest`] / [`TreeConnectRequest`] + out-of-band [`ConnectOptions`] → `SessionOrchestrator::connect` (default feature `session`) |
 | Settings model | `AppSettings` | PascalCase JSON, numeric enums (C# `System.Text.Json`) |
@@ -71,7 +72,23 @@ Thin pure-state helper mirroring C# `ShouldRejectDragSelection` + the validation
 
 **Out of scope (later):** full drag-drop sibling reorder UX / `PersistTreeStructureAsync` folder-into-folder persist batch, add/edit/delete **commands** on the VM, inheritance host tooltips, debounce (host may debounce `set_search_text`), GPUI TreeView bindings.
 
-**Storage write helpers:** `wormhole-storage::ConnectionRepository` exposes `create_folder` / `rename_folder` / `delete_folder` and `reparent_connection` (temp-SQLite covered; see [adversarial-ledger-folder-crud.md](adversarial-ledger-folder-crud.md)). Tree glue validates first, then calls `reparent_connection` for connections; the tree model still reloads via `list_all`. See [03-storage.md](03-storage.md). After successful writes, hosts should publish metadata-only events on `wormhole-domain::FakeConnectionNodeChangeNotifier` (create/update/delete/reparent — no secrets) so tree + open-session subscribers can refresh; see [02-domain.md](02-domain.md).
+**Storage write helpers:** `wormhole-storage::ConnectionRepository` exposes `create_folder` / `rename_folder` / `delete_folder`, `reparent_connection`, and `duplicate_connection` (temp-SQLite covered; see [adversarial-ledger-folder-crud.md](adversarial-ledger-folder-crud.md) / [adversarial-ledger-tree-duplicate.md](adversarial-ledger-tree-duplicate.md)). Tree glue validates first, then calls storage for connections; the tree model still reloads via `list_all`. See [03-storage.md](03-storage.md). After successful writes, hosts should publish metadata-only events on `wormhole-domain::FakeConnectionNodeChangeNotifier` (create/update/delete/reparent — no secrets) so tree + open-session subscribers can refresh; see [02-domain.md](02-domain.md).
+
+### Tree duplicate connection glue (`tree/duplicate.rs`)
+
+Thin pure-state helper mirroring C# `ConnectionTreeViewModel.Duplicate` + `ConnectionNode.CloneAsNewIdentity` (no GPUI). Distinct from connection-editor save (`save_validated_editor`) and reparent glue.
+
+| Check | Behaviour |
+|---|---|
+| Missing source | `DuplicateError::NotFound` (fail closed) |
+| Folder source | `DuplicateError::NotAConnection` (Lab rejects; C# Duplicate command silently no-ops) |
+| Identity | `ConnectionNode::clone_as_new_identity` — fresh Id; clears `ssh_known_host_fingerprint`; `use_inline_password = Some(false)` |
+| Placement | Same `ParentId`; name `"{name} (copy)"`; `SortOrder` = next sibling (saturating) |
+| Secrets | **Never** copies CredMgr / DPAPI secret bodies into SQLite or Fake rows. Shared pool ids (`credential_id` / `rdp_gateway_credential_id` / `tunnel_config_id`) re-used by design |
+| Fake apply | `duplicate_memory` / `apply_duplicate_memory` re-build against live snapshot then append; deleted source / id collision fail closed |
+| Storage apply (`--features storage`) | `duplicate_connection_storage` → `ConnectionRepository::duplicate_connection` |
+
+**Out of scope (later):** recursive folder duplicate, GPUI context-menu chrome, publishing change-notifier events inside glue (host responsibility).
 
 ### Tree Open / double-click → session (`tree/open.rs`)
 
@@ -114,6 +131,9 @@ node_matches_query(node, query) / fields_match_query_lower(name_lower, host_lowe
 validate_reparent / validate_reparent_from / should_reject_drag_selection[_from]
 reparent_memory / apply_reparent_memory / ReparentOptions / ValidatedReparent / ReparentError
 reparent_connection_storage (feature = "storage")
+build_duplicate / build_duplicate_from / duplicate_memory / apply_duplicate_memory
+BuiltDuplicate / DuplicateError / DUPLICATE_NAME_SUFFIX
+duplicate_connection_storage (feature = "storage")
 
 # feature = "session" (default):
 prepare_connect_request(id, source) -> ConnectRequest
@@ -139,6 +159,10 @@ $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 cd rust
 cargo test -p wormhole-ui reparent
 cargo test -p wormhole-ui --features storage reparent
+cargo test -p wormhole-ui --lib tree::duplicate --no-default-features
+cargo test -p wormhole-ui --lib tree::duplicate --features storage
+cargo test -p wormhole-storage duplicate_connection
+cargo test -p wormhole-domain clone_as_new_identity
 cargo test -p wormhole-ui terminal_apply
 cargo test -p wormhole-terminal settings_apply
 cargo test -p wormhole-ui
@@ -151,20 +175,22 @@ cargo test -p wormhole-ui --features gpui
 
 ## Coordination with storage-writes
 
-- **Tree reads:** `ConnectionNodeSource` + optional `StorageConnectionSource` (`--features storage`) call `ConnectionRepository::list_all`. Node **writes** stay on the storage agent; tree reparent glue may call `reparent_connection` after validate (`--features storage`).
+- **Tree reads:** `ConnectionNodeSource` + optional `StorageConnectionSource` (`--features storage`) call `ConnectionRepository::list_all`. Node **writes** stay on the storage agent; tree reparent / duplicate glue may call `reparent_connection` / `duplicate_connection` after validate (`--features storage`).
 - **Settings:** `SettingsStore` trait + `JsonFileSettingsStore` / `MemorySettingsStore` live in `wormhole-ui` so the VM is not blocked on storage. Prefer a single writer: inject `StorageSettingsStore` (`--features storage`) to drive `wormhole-storage::SettingsStore`, or use the UI file/memory backends alone — do not dual-write the same path. See [03-storage.md](03-storage.md).
 
 ## Related docs
 
-- [08-ui.md](08-ui.md) — shell / panes / optional GPUI chrome  
-- [03-storage.md](03-storage.md) — SQLite read path consumed by `StorageConnectionSource`  
-- [02-domain.md](02-domain.md) — `ConnectionNode` / `NodeKind`  
-- [16-session-orchestrator.md](16-session-orchestrator.md) — protocol connect after resolve  
-- [21-quick-connect.md](21-quick-connect.md) — ephemeral QC → session glue + recent-history MRU (sibling path; not the connection tree)  
-- [adversarial-ledger-tree-settings-vm.md](adversarial-ledger-tree-settings-vm.md) — adversarial review ledger  
-- [adversarial-ledger-tree-filter.md](adversarial-ledger-tree-filter.md) — tree filter/search id glue ledger  
-- [adversarial-ledger-tree-open-session.md](adversarial-ledger-tree-open-session.md) — tree Open → session connect glue ledger  
+- [08-ui.md](08-ui.md) — shell / panes / optional GPUI chrome
+- [03-storage.md](03-storage.md) — SQLite read path consumed by `StorageConnectionSource`
+- [02-domain.md](02-domain.md) — `ConnectionNode` / `NodeKind` / `clone_as_new_identity`
+- [16-session-orchestrator.md](16-session-orchestrator.md) — protocol connect after resolve
+- [20-connection-editor.md](20-connection-editor.md) — editor save vs tree Duplicate (sibling; no secret copy on Duplicate)
+- [21-quick-connect.md](21-quick-connect.md) — ephemeral QC → session glue + recent-history MRU (sibling path; not the connection tree)
+- [adversarial-ledger-tree-settings-vm.md](adversarial-ledger-tree-settings-vm.md) — adversarial review ledger
+- [adversarial-ledger-tree-filter.md](adversarial-ledger-tree-filter.md) — tree filter/search id glue ledger
+- [adversarial-ledger-tree-open-session.md](adversarial-ledger-tree-open-session.md) — tree Open → session connect glue ledger
 - [adversarial-ledger-tree-reparent.md](adversarial-ledger-tree-reparent.md) — tree reparent / drag validation glue ledger
+- [adversarial-ledger-tree-duplicate.md](adversarial-ledger-tree-duplicate.md) — tree duplicate connection glue ledger
 - [adversarial-ledger-folder-crud.md](adversarial-ledger-folder-crud.md) — storage folder CRUD + `reparent_connection` stub
 - [adversarial-ledger-settings-apply.md](adversarial-ledger-settings-apply.md) — SettingsViewModel → StorageSettingsStore apply glue ledger
 - [14-terminal-bridge.md](14-terminal-bridge.md) — terminal font/size/auto-copy settings apply (`settings_apply` / Fake)

@@ -1,6 +1,6 @@
 # 16 — Session orchestrator (`wormhole-session`)
 
-**Status:** skeleton crate — Serial / SSH (password) / HTTP target dispatch + optional tunnel lease; RDP/VNC typed stubs; UI callers prepare via tree Open / Quick Connect glue  
+**Status:** skeleton crate — Serial / SSH (password) / HTTP target dispatch + optional tunnel lease; RDP/VNC typed stubs; SSH Fake reconnect glue; UI callers prepare via tree Open / Quick Connect glue
 
 **Date:** 2026-07-31  
 
@@ -14,7 +14,7 @@ Starts a protocol session from a **resolved** [`ConnectionProfile`](../../rust/c
 | Cancel | `tokio_util::sync::CancellationToken` on `ConnectOptions` (checked before/during tunnel + protocol); cancel lands `Failed` + `Cancelled`, never leaves `Connecting`. Tab close glue cancels the same token via [`close_tab_and_dispose_session`](../../rust/crates/wormhole-app/src/session_tabs.rs). |
 | Tunnel | When `tunnel_enabled` **and** protocol ≠ Serial **and** protocol is supported: establish a [`TunnelLease`](../../rust/crates/wormhole-tunnels/src/lease.rs) before connect; release on fail/cancel |
 | Serial | `wormhole-serial` (fake COM in unit tests) — **never** opens a tunnel |
-| SSH | `wormhole-ssh` password path; route select `select_ssh_connect_target` / `FakeTunnelSocks` (`TunnelEnabled` → Direct/Socks5; fail-closed missing SOCKS; Serial never); SOCKS5 dial when the lease exposes a SOCKS endpoint (CONNECT still stub); host-key **verify** stub `verify_ssh_host_key` (Accept / Reject / Prompt; Fake store; LabOnly) + gate stub `gate_ssh_host_key` / `FakeKnownHosts` (prompt Accept-pin / Reject fail-closed; no live SSH in unit tests; orchestrator still uses `ssh_accept_any_host_key` until UI prompt is wired); reconnect/backoff policy lives in `wormhole_ssh::reconnect` (`SshReconnectPolicy` / `FakeBackoffSchedule`; orch loop Pending) |
+| SSH | `wormhole-ssh` password path; route select `select_ssh_connect_target` / `FakeTunnelSocks` (`TunnelEnabled` → Direct/Socks5; fail-closed missing SOCKS; Serial never); SOCKS5 dial when the lease exposes a SOCKS endpoint (CONNECT still stub); host-key **verify** stub `verify_ssh_host_key` (Accept / Reject / Prompt; Fake store; LabOnly) + gate stub `gate_ssh_host_key` / `FakeKnownHosts` (prompt Accept-pin / Reject fail-closed; no live SSH in unit tests; orchestrator still uses `ssh_accept_any_host_key` until UI prompt is wired); reconnect/backoff policy in `wormhole_ssh::reconnect` (`SshReconnectPolicy` / `FakeBackoffSchedule`); orch **Fake** loop glue [`FakeSshReconnectGlue`](../../rust/crates/wormhole-session/src/ssh_reconnect.rs) (`UnexpectedDrop` → policy Retry; `UserCancel` never reconnects; budget exhausted → `SessionState::Failed` + note; delays recorded, never slept; live UI/WebView2 rebind Pending) |
 | HTTP/HTTPS | Builds `wormhole-http` `HttpConnectionTarget` (direct / SOCKS / local forwarder when no SOCKS) — WebView2 hosting stays in surface-win |
 | RDP / VNC | Prepare [`RdpConnectRequest`](../../rust/crates/wormhole-session/src/rdp_vnc.rs) / [`VncConnectRequest`](../../rust/crates/wormhole-session/src/rdp_vnc.rs) (host, port, tunnel flags; no COM/OLE/VNC engine), then fail closed with `SessionError::UnsupportedProtocol { protocol, reason }` **before** any tunnel establish. `SessionKind::Rdp` / `Vnc` mark surface stubs for UI branching. VNC framebuffer/input glue lives in `wormhole-vnc::session_glue` (Fake dirty notify; no orch connect). |
 
@@ -68,9 +68,10 @@ Pure state + Fake connectors only — no GPUI window. See [08-ui.md](08-ui.md).
 $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 cd rust
 cargo test -p wormhole-session
+cargo test -p wormhole-ssh
 cargo test -p wormhole-ui
 cargo test -p wormhole-app --test services_smoke
 cargo test -p wormhole-app --lib session_tabs
 ```
 
-Adversarial ledgers: [`adversarial-ledger-session.md`](adversarial-ledger-session.md) (orchestrator), [`adversarial-ledger-session-rdp-vnc.md`](adversarial-ledger-session-rdp-vnc.md) (RDP/VNC stubs), [`adversarial-ledger-session-tabs.md`](adversarial-ledger-session-tabs.md) (`SessionTabBarState`), [`adversarial-ledger-session-tab-orch.md`](adversarial-ledger-session-tab-orch.md) (app tab ↔ orchestrator glue), [`adversarial-ledger-tab-close-dispose.md`](adversarial-ledger-tab-close-dispose.md) (tab close → dispose), [`adversarial-ledger-qc-session-connect.md`](adversarial-ledger-qc-session-connect.md) (Quick Connect → orchestrator glue).
+Adversarial ledgers: [`adversarial-ledger-session.md`](adversarial-ledger-session.md) (orchestrator), [`adversarial-ledger-session-ssh-reconnect.md`](adversarial-ledger-session-ssh-reconnect.md) (Fake reconnect glue), [`adversarial-ledger-session-rdp-vnc.md`](adversarial-ledger-session-rdp-vnc.md) (RDP/VNC stubs), [`adversarial-ledger-session-tabs.md`](adversarial-ledger-session-tabs.md) (`SessionTabBarState`), [`adversarial-ledger-session-tab-orch.md`](adversarial-ledger-session-tab-orch.md) (app tab ↔ orchestrator glue), [`adversarial-ledger-tab-close-dispose.md`](adversarial-ledger-tab-close-dispose.md) (tab close → dispose), [`adversarial-ledger-qc-session-connect.md`](adversarial-ledger-qc-session-connect.md) (Quick Connect → orchestrator glue).

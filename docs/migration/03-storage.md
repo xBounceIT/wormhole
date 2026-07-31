@@ -106,6 +106,8 @@ Context7 MCP was unavailable; pins follow the same crates.io research approach a
 
 | Reparent stub | Drag-drop `PersistTreeStructureAsync` (full sibling rewrite) | `reparent_connection` — sets connection `ParentId` (+ append `SortOrder` in the same `IMMEDIATE` tx); rejects connection-as-parent so `InheritanceResolver` assumptions hold; full folder drag-reorder stays UI-side |
 
+| Duplicate stub | Tree VM `Duplicate` → `CloneAsNewIdentity` + `AddAsync` | `duplicate_connection` — fresh Id, `"{name} (copy)"`, same parent, append `SortOrder`; clears fingerprint + inline-password flag; **never** copies CredMgr/DPAPI secret bodies; keeps shared credential/tunnel ids; folders → `InvalidArgument`; missing → `NotFound` |
+
 | Parent delete | `ON DELETE CASCADE` | Same schema; deleting a folder removes descendants (`delete_folder` same cascade) |
 
 | TunnelConfigs | `TunnelConfigRepository` — Id/Name/Kind/CreatedAt/UpdatedAt only; secrets DPAPI under `tunnels/` | `TunnelConfigRepository` — same columns; `insert` stamps both times; `update` persists caller `UpdatedAt` **verbatim** (no auto-stamp — TunnelManager pool invalidation); blank names rejected (`InvalidArgument`); `delete` is **fail-open** on in-use configs (no `Nodes.TunnelConfigId` check — editor owns that, matching C#) |
@@ -169,6 +171,8 @@ ConnectionRepository::new(&factory)
   -> create_folder(name, parent_id) / rename_folder(id, name) / delete_folder(id)
 
   -> reparent_connection(connection_id, new_parent_folder_id)   // move stub
+
+  -> duplicate_connection(source_id)   // connection-only; no secret bodies
 
   -> next_sort_order(parent_id)
 

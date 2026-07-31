@@ -254,7 +254,10 @@ Defaults: 3 attempts, `AUTO_RECONNECT_DELAY` = 10s, `AUTO_RECONNECT_STABILITY_WI
 auto-reconnect. `SshReconnectPolicy::on_disconnect(UserCancel)` resets the
 budget (C# Disconnect pairing); pure `decide_after_disconnect` does not mutate.
 `begin_retry` validates the next slot **before** recording (atomic fail-closed).
-Orchestrator / UI loop wiring remains Pending.
+Session orchestrator **Fake** reconnect loop glue lives in
+`wormhole_session::ssh_reconnect` (`FakeSshReconnectGlue` — UnexpectedDrop /
+UserCancel / budget→Failed; Fake schedule; no live SSH). Live UI / WebView2
+rebind remains Pending.
 
 ## Non-goals (this spike)
 
@@ -263,7 +266,7 @@ Orchestrator / UI loop wiring remains Pending.
 - Real SSH agent / keyboard-interactive **wire** protocols (agent: availability probe + connect-prep select glue only; kbi: multi-prompt Fake channel only; both wire auths still `AuthNotImplemented`)
 - Pageant detection (OpenSSH named-pipe probe only on Windows)
 - Live auto-sudo against a real SSH shell / WebView2 pump (glue + Fake terminal only)
-- Live SSH reconnect loop / WebView2 rebind (policy + Fake schedule only)
+- Live SSH reconnect loop / WebView2 rebind (policy + Fake schedule + orch Fake glue; UI Pending)
 - Real SOCKS5 dialer implementation (route select + Fake endpoint only; CONNECT handshake still stub)
 - Orchestrator auto-wiring of `select_ssh_connect_target` before dial (API ready; session loop Pending)
 - Wiring into GPUI / WebView2 terminal bridge

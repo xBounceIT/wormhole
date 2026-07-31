@@ -14,7 +14,8 @@
 //! - `--features rdp`: owned overlay + OLE in-place MsRdpClient + CredSSP configure
 //!   + tunnel policy validation + BindLocalForwarder dial-target stub + event sink stub
 //!   + CredSSP password-wipe ↔ connect-attempt Fake glue (no live OCX)
-//!   + ConnectionProfile display/redirect → Fake configure glue (no live OCX).
+//!   + ConnectionProfile display/redirect → Fake configure glue (no live OCX)
+//!   + ConnectionProfile performance flags / bitmap cache → Fake configure glue (no live OCX).
 
 mod host_bounds;
 mod resize_glue;
@@ -39,6 +40,8 @@ mod configure;
 mod credssp_connect_glue;
 #[cfg(all(windows, feature = "rdp"))]
 mod display_redirect_glue;
+#[cfg(all(windows, feature = "rdp"))]
+mod performance_flags_glue;
 #[cfg(all(windows, feature = "rdp"))]
 mod dispatch;
 #[cfg(all(windows, feature = "rdp"))]
@@ -77,6 +80,15 @@ pub use display_redirect_glue::{
     FakePropPut, FakePropRecord, FakeRdpPropertySurface, RdpDisplayRedirectGlue,
     RedirectDrivesIntent, DESKTOP_DEFAULT_HEIGHT, DESKTOP_DEFAULT_WIDTH, DESKTOP_MIN_HEIGHT,
     DESKTOP_MIN_WIDTH, LOUD_DISPLAY_PROPS, REDIRECT_DRIVES_ALL, SOFT_DISPLAY_REDIRECT_PROPS,
+};
+#[cfg(all(windows, feature = "rdp"))]
+pub use performance_flags_glue::{
+    build_performance_flags, FakePerfPropOutcome, FakePerfPropPut, FakePerfPropRecord,
+    FakeRdpPerformanceSurface, PerformanceFlagsGlueError, PerformanceFlagsReport,
+    RdpPerformanceFlagsGlue, SOFT_PERFORMANCE_PROPS, TS_PERF_DISABLE_CURSORSETTINGS,
+    TS_PERF_DISABLE_CURSOR_SHADOW, TS_PERF_DISABLE_FULLWINDOWDRAG, TS_PERF_DISABLE_MENUANIMATIONS,
+    TS_PERF_DISABLE_THEMING, TS_PERF_DISABLE_WALLPAPER, TS_PERF_ENABLE_DESKTOP_COMPOSITION,
+    TS_PERF_ENABLE_FONT_SMOOTHING, TS_PERF_VISUAL_STYLES_OFF_MASK,
 };
 #[cfg(all(windows, feature = "rdp"))]
 pub use events::RdpEventState;

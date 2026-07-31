@@ -15,7 +15,8 @@ path = "src/lib.rs"
 default = []
 # RDP ActiveX owned-overlay spike (CoCreate + OLE in-place + GWLP_HWNDPARENT). mstscax is runtime-only.
 # `windows` is always linked for SetFocus/GetFocus (gate 7); this flag enables COM/OLE/overlay.
-# `wormhole-domain` is for ConnectionProfile → Fake display/redirect configure glue only (no COM).
+# `wormhole-domain` is for ConnectionProfile → Fake display/redirect + performance/bitmap
+# configure glue only (no COM).
 rdp = ["dep:zeroize", "dep:wormhole-domain"]
 # Real WebView2 child HWND hosting via wry 0.56 (not gpui-wry).
 # `wormhole-http` is for the pure HttpCertPolicy → Default|AlwaysAllow adapter +
@@ -39,7 +40,7 @@ raw-window-handle = { workspace = true, optional = true }
 wormhole-http = { workspace = true, optional = true }
 # SecureString-equivalent for ClearTextPassword put (feature `rdp` configure path).
 zeroize = { workspace = true, optional = true }
-# ConnectionProfile for display/redirect Fake configure glue (feature `rdp`).
+# ConnectionProfile for display/redirect + performance/bitmap Fake configure glue (feature `rdp`).
 wormhole-domain = { workspace = true, optional = true }
 # Optional: BrokerPaneLayoutSink + pane_focus + session_surface + pane_split glue
 # (PaneId / SessionId → SurfaceHandle; split/merge → layout ticks). Path dep with

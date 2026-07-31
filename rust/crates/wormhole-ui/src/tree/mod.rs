@@ -3,8 +3,10 @@
 //! Open / double-click → session glue lives in [`open`] behind `--features session`
 //! (default). Thin filter query → visible ids lives in [`filter`]. Reparent / drag
 //! validation (+ Fake apply / optional storage connection reparent) lives in
-//! [`reparent`].
+//! [`reparent`]. Duplicate connection (+ Fake apply / optional storage) lives in
+//! [`duplicate`].
 
+mod duplicate;
 mod error;
 mod filter;
 mod model;
@@ -15,6 +17,10 @@ mod source;
 #[cfg(feature = "session")]
 mod open;
 
+pub use duplicate::{
+    apply_duplicate_memory, build_duplicate, build_duplicate_from, duplicate_memory, BuiltDuplicate,
+    DuplicateError, DUPLICATE_NAME_SUFFIX,
+};
 pub use error::TreeError;
 pub use filter::{
     fields_match_query_lower, node_matches_query, visible_connection_ids,
@@ -29,6 +35,8 @@ pub use reparent::{
 };
 pub use source::{ConnectionNodeSource, MemoryConnectionSource};
 
+#[cfg(feature = "storage")]
+pub use duplicate::duplicate_connection_storage;
 #[cfg(feature = "storage")]
 pub use reparent::reparent_connection_storage;
 #[cfg(feature = "storage")]
