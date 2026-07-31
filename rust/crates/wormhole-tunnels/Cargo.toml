@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "TunnelManager: ref-counted leases, coalesce, all tunnel-kind sidecar control planes (mirrors Services/Tunneling)."
+description = "TunnelManager: ref-counted leases, coalesce, all tunnel-kind sidecar control planes + physical network path Fake glue (mirrors Services/Tunneling)."
 publish = false
 
 [lib]

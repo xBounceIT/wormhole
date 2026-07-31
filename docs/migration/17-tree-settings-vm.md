@@ -118,6 +118,7 @@ Unit tests use `MemoryConnectionSource` + Fake serial/SSH (+ optional Fake crede
 - Unknown forward-compat JSON keys round-trip via `AppSettings::unknown_fields` (UI + storage shapes) so `StorageSettingsStore` apply does not strip them.
 - No secrets in `settings.json` (MCP token / passwords stay elsewhere). Prefer one shared store instance per path (`&mut` VM; storage write lock on a single `Arc`).
 - **Terminal font / size / auto-copy apply** (`settings/terminal_apply.rs`): maps `default_ssh_font` / `default_ssh_font_size` / `auto_copy_on_select` into `wormhole_terminal::TerminalSettingsConfig` → validate + typed Lab apply messages on `FakeTerminalSettingsSurface`. Empty / whitespace font (Unicode `trim`, including NBSP) and size ≤ 0 fail closed (Fake unchanged). Defaults share `DEFAULT_SSH_FONT_*` with the terminal crate. Auto-copy gate also rejects oversize selections (`MAX_SELECTION_UTF8_BYTES`). Live xterm options push still Pending — see [14-terminal-bridge.md](14-terminal-bridge.md).
+- **Bitwarden onboarding notice versioning** (`bitwarden_onboarding_notice.rs`): mirrors C# `BitwardenOnboardingNoticeService` — soft one-time notice gated on app **0.7.x**, `BitwardenOnboardingNoticePendingVersion >= 1`, and `SeenVersion < 1`. Schema migration `< 6` sets `pending = 1` (`BITWARDEN_ONBOARDING_INTRODUCED_SCHEMA_VERSION`). `FakeBitwardenOnboardingNoticeUi` + `MemorySettingsStore` / `SettingsStore` only — no `bw` CLI, no GPUI dialog. Dialog failure does not mark seen or save; cancellation returns `BitwardenOnboardingError::Cancelled` without mutation. See [adversarial-ledger-bitwarden-onboarding.md](adversarial-ledger-bitwarden-onboarding.md).
 
 ## Public API
 
@@ -150,6 +151,9 @@ SettingsViewModel::new / set_theme / set_* / stage / apply / save / reload
 AppSettings (+ enums) — CURRENT_SCHEMA_VERSION = 8
 terminal_settings_config_from_app / apply_terminal_settings_from_app
   / apply_terminal_settings_to_fake (+ re-exported FakeTerminalSettingsSurface)
+
+BitwardenOnboardingNoticeGlue::show_if_needed / should_show_bitwarden_onboarding_notice
+  / FakeBitwardenOnboardingNoticeUi / with_fake_ui / CURRENT_BITWARDEN_ONBOARDING_NOTICE_VERSION
 ```
 
 ## Verification
@@ -164,6 +168,7 @@ cargo test -p wormhole-ui --lib tree::duplicate --features storage
 cargo test -p wormhole-storage duplicate_connection
 cargo test -p wormhole-domain clone_as_new_identity
 cargo test -p wormhole-ui terminal_apply
+cargo test -p wormhole-ui --lib bitwarden_onboarding
 cargo test -p wormhole-terminal settings_apply
 cargo test -p wormhole-ui
 cargo test -p wormhole-ui --features storage
@@ -195,3 +200,4 @@ cargo test -p wormhole-ui --features gpui
 - [adversarial-ledger-settings-apply.md](adversarial-ledger-settings-apply.md) — SettingsViewModel → StorageSettingsStore apply glue ledger
 - [14-terminal-bridge.md](14-terminal-bridge.md) — terminal font/size/auto-copy settings apply (`settings_apply` / Fake)
 - [adversarial-ledger-terminal-settings-apply.md](adversarial-ledger-terminal-settings-apply.md) — terminal font/size/auto-copy settings apply glue ledger
+- [adversarial-ledger-bitwarden-onboarding.md](adversarial-ledger-bitwarden-onboarding.md) — Bitwarden onboarding notice versioning Fake glue ledger

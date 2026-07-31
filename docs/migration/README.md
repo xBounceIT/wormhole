@@ -49,6 +49,7 @@
 | [adversarial-review-policy.md](adversarial-review-policy.md) | Run adversarial-review-fix after each subagent |
 | [adversarial-ledger-hello-cutover.md](adversarial-ledger-hello-cutover.md) | Hello / app-auth / Bitwarden browser / cutover review closed |
 | [adversarial-ledger-bitwarden-session.md](adversarial-ledger-bitwarden-session.md) | Bitwarden CLI session stub (`StubBitwardenSession` / Fake) review closed |
+| [adversarial-ledger-bitwarden-onboarding.md](adversarial-ledger-bitwarden-onboarding.md) | Bitwarden onboarding notice versioning Fake glue (`BitwardenOnboardingNoticeGlue` / settings store) review closed |
 | [adversarial-ledger-hello-stub.md](adversarial-ledger-hello-stub.md) | Hello AvailabilityProbe / HelloPrompt stub review closed |
 | [adversarial-ledger-app-auth-pin.md](adversarial-ledger-app-auth-pin.md) | App-auth PIN/password Fake verifier (`AppAuthenticationService` / Fake protector) review closed |
 | [adversarial-ledger-idle-lock.md](adversarial-ledger-idle-lock.md) | App idle-lock timeout glue (`AppIdleLockGlue` / `FakeIdleClock`) review closed |
@@ -74,6 +75,7 @@
 | [adversarial-ledger-tunnels-mcp.md](adversarial-ledger-tunnels-mcp.md) | Tunnels / MCP / app review closed |
 | [adversarial-ledger-tunnel-lease.md](adversarial-ledger-tunnel-lease.md) | TunnelManager lease glue (coalesce / UpdatedAt / cancel / secret Debug) review closed |
 | [adversarial-ledger-tunnel-route-prompt.md](adversarial-ledger-tunnel-route-prompt.md) | Per-connect tunnel route prompt Fake glue (`resolve_tunnel_route` / `FakeTunnelRoutePromptUi`) review closed |
+| [adversarial-ledger-physical-path.md](adversarial-ledger-physical-path.md) | Physical network path / split-routing Fake glue (`FakePhysicalNetworkPath` / `classify_split_route`) review closed |
 | [adversarial-ledger-mcp-http.md](adversarial-ledger-mcp-http.md) | MCP Streamable HTTP loopback review closed |
 | [adversarial-ledger-mcp-bind.md](adversarial-ledger-mcp-bind.md) | MCP loopback bind hardening (`0.0.0.0` / mapped / zone) review closed |
 | [adversarial-ledger-mcp-tools-list.md](adversarial-ledger-mcp-tools-list.md) | MCP tools/list → capability-report glue (`FakeMcpCapabilityServer`) review closed |
@@ -141,6 +143,7 @@
 | [adversarial-ledger-crypto-auth.md](adversarial-ledger-crypto-auth.md) | AES-GCM + ovpn auth glue review closed |
 | [adversarial-ledger-otp-prompt.md](adversarial-ledger-otp-prompt.md) | OTP / SecondFactorPrompt stub review closed |
 | [adversarial-ledger-otp-ui.md](adversarial-ledger-otp-ui.md) | OTP prompt UI glue (`OtpPromptChannel` / Fake) review closed |
+| [adversarial-ledger-tls-trust-prompt.md](adversarial-ledger-tls-trust-prompt.md) | TLS trust prompt Fake glue (`TlsTrustPrompt` / `TlsTrustPromptChannel` / Fake) review closed |
 | [adversarial-ledger-watchguard-auth.md](adversarial-ledger-watchguard-auth.md) | WatchGuard Firebox auth stub review closed |
 | [adversarial-ledger-watchguard-establish.md](adversarial-ledger-watchguard-establish.md) | WatchGuard establish-path glue (`establish_watchguard` / `_crv1` / `_portal`) review closed |
 | [adversarial-ledger-fortinet-saml.md](adversarial-ledger-fortinet-saml.md) | Fortinet SamlAuthFlow stub review closed |

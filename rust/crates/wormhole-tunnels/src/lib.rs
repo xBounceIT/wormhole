@@ -18,6 +18,7 @@ mod forwarder;
 mod kinds;
 mod lease;
 mod manager;
+mod physical_network_path;
 mod providers;
 pub mod sidecar;
 mod socks5;
@@ -32,6 +33,12 @@ pub use forwarder::{
 pub use kinds::{all_kinds, TunnelKind};
 pub use lease::TunnelLease;
 pub use manager::TunnelManager;
+pub use physical_network_path::{
+    build_physical_network_path, classify_split_route, is_vpn_like_adapter,
+    physical_adapter_score, FakePhysicalNetworkPath, PhysicalAdapterKind, PhysicalAdapterRecord,
+    PhysicalNetworkAdapter, PhysicalNetworkPath, PhysicalNetworkPathProbe, PhysicalNetworkRoute,
+    MAX_PHYSICAL_ADAPTERS,
+};
 pub use socks5::Socks5Client;
 pub use providers::{
     answer_aggregate_auth_form, authenticate_fortinet_saml, build_fortinet_sidecar_config,
@@ -70,25 +77,30 @@ pub use providers::auth_glue::{
     clear_entra_refresh_token_cache, compose_sns_auth_password, compute_azure_vpn_identity_hash,
     decode_azure_token_cache_json, decode_stormshield_cache_json, decode_watchguard_cache_json,
     encode_azure_token_cache_json, persist_entra_refresh_token, request_entra_access_token,
-    request_otp, request_second_factor, request_stormshield_otp, resolve_sns_data_plane_auth,
+    request_otp, request_second_factor, request_stormshield_otp, request_tls_trust,
+    resolve_sns_data_plane_auth,
     stormshield_materials, stormshield_materials_from_sns, stormshield_sns_to_sidecar_json,
     try_read_azure_token_cache, try_read_stormshield_cache, try_read_watchguard_cache,
     watchguard_materials, AccessToken, AzureVpnAuthGlue, AzureVpnCacheIdentity,
-    AzureVpnRefreshTokenCache, AzureVpnTokenCacheRecord, ChannelOtpPrompt, EntraTokenError,
+    AzureVpnRefreshTokenCache, AzureVpnTokenCacheRecord, ChannelOtpPrompt, ChannelTlsTrustPrompt,
+    EntraTokenError,
     EntraTokenProvider, EntraTokenRequest, EntraTokenResponse, EntraTokenResult,
     FakeAzureVpnRefreshTokenCache, FakeEntraTokenProvider, FakeOtpPrompt, FakeStormshieldSnsAuth,
-    MemoryAzureVpnRefreshTokenCache, MemoryEntraTokenProvider, MemoryOtpPrompt,
-    MemoryStormshieldSnsAuth, NullEntraTokenProvider, NullOtpPrompt, NullStormshieldSnsAuth,
+    FakeTlsTrustPrompt, MemoryAzureVpnRefreshTokenCache, MemoryEntraTokenProvider, MemoryOtpPrompt,
+    MemoryStormshieldSnsAuth, MemoryTlsTrustPrompt, NullEntraTokenProvider, NullOtpPrompt,
+    NullStormshieldSnsAuth, NullTlsTrustPrompt,
     OpenVpnSidecarConfig, OpenVpnTransportRemote, OtpCode, OtpPrompt, OtpPromptError,
-    OtpPromptRequest, OtpPromptResponse, OvpnAuthGlue, PendingOtpPrompt, RefreshToken,
+    OtpPromptRequest, OtpPromptResponse, OvpnAuthGlue, PendingOtpPrompt, PendingTlsTrustPrompt,
+    RefreshToken,
     ResolvedOvpnMaterials, SecondFactorPrompt, SharedAzureVpnRefreshTokenCache,
-    SharedEntraTokenProvider, SharedOtpPrompt, SharedStormshieldSnsAuth, StormshieldAuthGlue,
-    StormshieldOtpSpend, StormshieldOvpnCacheRecord, StormshieldPassword, StormshieldSnsAuth,
+    SharedEntraTokenProvider, SharedOtpPrompt, SharedTlsTrustPrompt, SharedStormshieldSnsAuth,
+    StormshieldAuthGlue, StormshieldOtpSpend, StormshieldOvpnCacheRecord, StormshieldPassword, StormshieldSnsAuth,
     StormshieldSnsAuthRequest, StormshieldSnsAuthResult, StormshieldSnsCredentials,
     StormshieldUsername, WatchguardAuthGlue, WatchguardOvpnCacheRecord, AZURE_AAD_USERNAME,
     AZURE_TOKEN_CACHE_MAX_AGE, AZURE_TOKEN_CACHE_SCHEMA, ENTRA_OPENVPN_USERNAME,
     STORM_SHIELD_CACHE_SCHEMA, STORMSHIELD_OTP_SUBTITLE, STORMSHIELD_OTP_TITLE_PREFIX,
-    WATCHGUARD_CACHE_SCHEMA,
+    WATCHGUARD_CACHE_SCHEMA, ACCEPT_BUTTON_LABEL, TlsTrustChoice, TlsTrustPrompt,
+    TlsTrustPromptError, TlsTrustPromptRequest, TlsTrustPromptResponse,
 };
 #[cfg(feature = "secrets")]
 pub use providers::auth_glue::DpapiAzureVpnRefreshTokenCache;

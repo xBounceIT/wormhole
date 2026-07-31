@@ -14,6 +14,8 @@
 //!   [`crate::providers::secret_shape`] / establish
 //! - [`OtpPrompt`] / [`SecondFactorPrompt`] stub + [`request_otp`] hook (UI later;
 //!   portal loops not wired yet)
+//! - [`TlsTrustPrompt`] stub + [`request_tls_trust`] hook (Stormshield portal TLS
+//!   consent not wired yet)
 //! - [`EntraTokenProvider`] stub + [`request_entra_access_token`] (access token → OpenVPN
 //!   password with username `AzureAD`; refresh via [`AzureVpnRefreshTokenCache`]; WebView2 not wired)
 //! - [`StormshieldSnsAuth`] stub + username/password + optional OTP typing
@@ -27,6 +29,7 @@ mod cache;
 mod entra_refresh_cache;
 mod entra_token;
 mod otp_prompt;
+mod tls_trust_prompt;
 mod sidecar_config;
 mod stormshield_sns;
 
@@ -59,6 +62,12 @@ pub use otp_prompt::{
     request_otp, request_second_factor, ChannelOtpPrompt, FakeOtpPrompt, MemoryOtpPrompt,
     NullOtpPrompt, OtpCode, OtpPrompt, OtpPromptError, OtpPromptRequest, OtpPromptResponse,
     PendingOtpPrompt, SecondFactorPrompt, SharedOtpPrompt,
+};
+pub use tls_trust_prompt::{
+    request_tls_trust, ChannelTlsTrustPrompt, FakeTlsTrustPrompt, MemoryTlsTrustPrompt,
+    NullTlsTrustPrompt, PendingTlsTrustPrompt, SharedTlsTrustPrompt, TlsTrustChoice,
+    TlsTrustPrompt, TlsTrustPromptError, TlsTrustPromptRequest, TlsTrustPromptResponse,
+    ACCEPT_BUTTON_LABEL,
 };
 pub use sidecar_config::{OpenVpnSidecarConfig, OpenVpnTransportRemote};
 pub use stormshield_sns::{

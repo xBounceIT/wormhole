@@ -47,6 +47,11 @@ pub enum TunnelError {
         port: u16,
         reason: String,
     },
+    #[error("invalid host for physical path probe: {reason} (host={host})")]
+    InvalidHost {
+        host: String,
+        reason: String,
+    },
     #[error("SOCKS5: {0}")]
     Socks5(String),
     #[error("local forwarder: {0}")]

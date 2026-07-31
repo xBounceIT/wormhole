@@ -8,16 +8,19 @@
 //! chrome (`gpui_platform::application()`). Enable `--features storage` for the SQLite
 //! connection-tree read adapter, `StorageSettingsStore`, editor save glue, and tree
 //! connection reparent apply. Default features `session` / `tunnels` / `update` wire
-//! tree Open / Quick Connect → `wormhole-session`, OTP / Fortinet SAML prompt UI glue →
+//! tree Open / Quick Connect → `wormhole-session`, OTP / Fortinet SAML / TLS trust prompt
+//! UI glue →
 //! `wormhole-tunnels` (`ChannelOtpPrompt` / `ChannelSamlAuthCallback` + Fake; no dialog /
 //! WebView2 chrome), and update notify glue → `wormhole-update` (`check_now` +
-//! Fake / NetworkStub; no live HTTP).
+//! Fake / NetworkStub; no live HTTP). Bitwarden onboarding notice versioning
+//! (`bitwarden_onboarding_notice` / Fake UI + settings store; no `bw` / GPUI).
 //!
 //! See `docs/migration/08-ui.md`, `docs/migration/17-tree-settings-vm.md`,
 //! `docs/migration/16-session-orchestrator.md`, `docs/migration/20-connection-editor.md`,
 //! `docs/migration/21-quick-connect.md`, `docs/migration/07-tunnels-mcp.md`, and
 //! `docs/migration/13-update-logging.md`.
 
+mod bitwarden_onboarding_notice;
 mod connection_editor;
 mod credential_picker;
 mod error;
@@ -41,6 +44,8 @@ mod tunnel_route_prompt;
 mod otp_prompt;
 #[cfg(feature = "tunnels")]
 mod saml_prompt;
+#[cfg(feature = "tunnels")]
+mod tls_trust_prompt;
 
 #[cfg(feature = "update")]
 mod update_notify;
@@ -48,6 +53,14 @@ mod update_notify;
 #[cfg(feature = "gpui")]
 mod gpui_host;
 
+pub use bitwarden_onboarding_notice::{
+    should_show_bitwarden_onboarding_notice, AppReleaseVersion,
+    BitwardenOnboardingError, BitwardenOnboardingNoticeGlue, BitwardenOnboardingNoticeUi,
+    BitwardenOnboardingShowOutcome, BitwardenOnboardingUiError,
+    FakeBitwardenOnboardingNoticeUi, BITWARDEN_ONBOARDING_NOTICE_MESSAGE,
+    BITWARDEN_ONBOARDING_NOTICE_TITLE, CURRENT_BITWARDEN_ONBOARDING_NOTICE_VERSION,
+    with_fake_ui,
+};
 pub use connection_editor::{
     ConnectionEditorMode, ConnectionEditorState, CredentialUiMode, RdpDriveRedirectMode,
     SshAutoSudoMode, TunnelUiSelection, TunnelUiState, ValidationError, ValidationReport,
@@ -159,14 +172,21 @@ pub use saml_prompt::{
     cancel_pending_saml, submit_auth_id, submit_saml_result, submit_svpn_cookie, FakeSamlPromptUi,
     SamlPromptChannel,
 };
+#[cfg(feature = "tunnels")]
+pub use tls_trust_prompt::{
+    accept_pending as accept_tls_trust_pending, reject_pending as reject_tls_trust_pending,
+    FakeTlsTrustPromptUi, TlsTrustPromptChannel,
+};
 // Glue-facing tunnels types + hooks used by the OTP / SAML UI surfaces.
 #[cfg(feature = "tunnels")]
 pub use wormhole_tunnels::{
-    authenticate_fortinet_saml, request_otp, request_second_factor, ChannelOtpPrompt,
-    ChannelSamlAuthCallback, OtpCode, OtpPromptError, OtpPromptRequest, OtpPromptResponse,
-    PendingOtpPrompt, PendingSamlPrompt, SamlAuthCallback, SamlAuthError, SamlAuthFlow,
-    SamlAuthRequest, SamlAuthResult, SamlPromptResponse, SharedOtpPrompt, SharedSamlAuthCallback,
-    TunnelError, DEFAULT_SAML_REDIRECT_PORT,
+    authenticate_fortinet_saml, request_otp, request_second_factor, request_tls_trust,
+    ChannelOtpPrompt, ChannelSamlAuthCallback, ChannelTlsTrustPrompt, OtpCode, OtpPromptError,
+    OtpPromptRequest, OtpPromptResponse, PendingOtpPrompt, PendingSamlPrompt, PendingTlsTrustPrompt,
+    SamlAuthCallback, SamlAuthError, SamlAuthFlow, SamlAuthRequest, SamlAuthResult,
+    SamlPromptResponse, SharedOtpPrompt, SharedSamlAuthCallback, SharedTlsTrustPrompt, TlsTrustChoice,
+    TlsTrustPromptError, TlsTrustPromptRequest, TlsTrustPromptResponse, TunnelError,
+    ACCEPT_BUTTON_LABEL, DEFAULT_SAML_REDIRECT_PORT,
 };
 
 #[cfg(feature = "update")]
