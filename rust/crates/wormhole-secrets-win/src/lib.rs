@@ -26,6 +26,8 @@
 //!   `FakeBitwardenCliReleaseSource`); no GitHub download / `bw` spawn yet
 //! - Bitwarden virtual credential catalog Fake glue (`BitwardenCredentialCatalogGlue` /
 //!   `FakeBitwardenCredentialCache` / stable virtual ids); locked vault → fail-closed
+//! - Credential password resolution Fake glue (`CredentialPasswordResolverGlue` /
+//!   `FakeBitwardenVaultPasswords`); local CredMgr vs Bitwarden item id; locked / empty → fail-closed
 //! - Bitwarden browser extension manual ZIP/folder install pin Fake glue
 //!   (`BitwardenExtensionInstallGlue` / `FakeExtensionInstallFs` / `FakeZipArchive`);
 //!   zip-slip fail-closed; manual sources pinned (no auto-update)
@@ -62,6 +64,7 @@ mod bitwarden_cli_install_glue;
 mod bitwarden_extension_install;
 mod bitwarden_session;
 mod bitwarden_virtual_credential_ids;
+mod credential_password_resolver;
 mod cred_mgr;
 mod dpapi;
 mod entropy;
@@ -123,6 +126,10 @@ pub use bitwarden_session::{
 pub use bitwarden_virtual_credential_ids::{
     bitwarden_virtual_credential_id, ensure_cache_entry_ids, BitwardenCredentialCacheEntry,
     BitwardenVirtualIdError, BITWARDEN_VIRTUAL_CREDENTIAL_NAMESPACE,
+};
+pub use credential_password_resolver::{
+    resolved_password_len, BitwardenVaultPasswordSource, CredentialPasswordError,
+    CredentialPasswordResolver, CredentialPasswordResolverGlue, FakeBitwardenVaultPasswords,
 };
 pub use cred_mgr::{
     credential_target, delete_password, ensure_password_fits_cred_mgr, password_utf16_byte_len,

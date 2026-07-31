@@ -2,7 +2,8 @@
 //!
 //! Pure UI state (sidebar regions, tab strip, session tab bar, ≤4-pane layout tree,
 //! settings + terminal font/size/auto-copy apply glue, connection editor, Quick Connect
-//! + recent-history MRU, credential picker search glue, serial COM picker + baud/parity
+//! + recent-history MRU, credential picker search glue, tunnel configs page / picker metadata
+//! Fake glue, serial COM picker + baud/parity
 //! preset glue) compiles without GPUI.
 //! Enable `--features gpui` for shell
 //! chrome (`gpui_platform::application()`). Enable `--features storage` for the SQLite
@@ -26,6 +27,7 @@ mod bitwarden_onboarding_notice;
 mod settings_bitwarden_extensions;
 mod connection_editor;
 mod credential_picker;
+mod tunnel_configs_ui;
 mod error;
 mod layout_sink;
 mod pane_layout;
@@ -79,6 +81,13 @@ pub use credential_picker::{
     CredentialPickerError, CredentialPickerSearchVm, CredentialProfileRow,
     CredentialProfileSource, FakeCredentialList,
 };
+pub use tunnel_configs_ui::{
+    filter_tunnel_configs_page, filter_tunnel_picker_entries, is_sentinel_id,
+    tunnel_kind_display_name, FakeTunnelConfigList, TunnelCatalogError, TunnelConfigRow,
+    TunnelConfigSource, TunnelConfigsVm, TunnelPickerVm, INHERIT_TUNNEL_ID, NO_TUNNEL_ID,
+};
+#[cfg(feature = "storage")]
+pub use tunnel_configs_ui::StorageTunnelConfigSource;
 #[cfg(feature = "storage")]
 pub use connection_editor::{
     load_inline_secret, save_validated_editor, EditorSaveError, EditorSaveOp, EditorSaveResult,

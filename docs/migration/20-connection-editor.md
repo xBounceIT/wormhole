@@ -127,6 +127,22 @@ let hits = vm.filtered();
 
 Non-goals: SQLite credential-catalog repository, Bitwarden virtual rows, `ResolveExact` / commit helpers, GPUI combo chrome.
 
+### Tunnel picker VM glue (`tunnel_configs_ui`)
+
+[`tunnel_configs_ui`](../../rust/crates/wormhole-ui/src/tunnel_configs_ui.rs) (crate root) ports C# `TunnelPickerViewModel` metadata subset — composes existing [`TunnelUiState`](../../rust/crates/wormhole-ui/src/connection_editor/tunnel.rs) for tri-state writes:
+
+| Op | Behavior |
+|---|---|
+| Sentinels | `INHERIT_TUNNEL_ID` / `NO_TUNNEL_ID` fixed guids; inherit label per host (`"(Inherit from folder)"` vs parent) |
+| `load_from` | Rebuild available list: inherit (when allowed) + no tunnel + repo rows; last-good on source `Err` |
+| `load_from_node` | Atomic tri-state load + stale `(missing tunnel {guid:N})` placeholder when config deleted elsewhere |
+| `filter_tunnel_configs` | Empty query → all (incl. sentinels); else name substring only (not kind) |
+| `resolve_tunnel_for_commit` | Exact name (case-insensitive), else unique non-sentinel substring; ambiguous → `None` |
+| `configure_inheritance` | Quick Connect path: drop inherit sentinel; coerce inherit → no tunnel |
+| Secrets | Never loads DPAPI payloads — metadata only ([04-secrets.md](04-secrets.md), [07-tunnels-mcp.md](07-tunnels-mcp.md)) |
+
+Configs-page list/search/selection: `TunnelConfigsVm` + `filter_tunnel_configs_page` (name **or** kind display). See [adversarial-ledger-tunnel-configs-ui.md](adversarial-ledger-tunnel-configs-ui.md).
+
 ## Persist glue (`--features storage`)
 
 Validated Persistent editor → `ConnectionRepository` insert/update, then CredMgr (or `FakePasswordStore`) keyed by **node Id**:
@@ -199,6 +215,7 @@ Focused suites:
 - `tests/connection_editor_validation.rs` — per-protocol validation matrix, visibility, tunnel tri-state, credential modes, load/write round-trip, `apply_resolved_profile`, Debug redaction
 - `tests/connection_editor_persist.rs` (+ `persist` unit tests) — temp DB insert/update round-trip, inline CredMgr Fake out-of-band, purge on leave-inline / blank, `load_inline_secret` preserve, Insert CredMgr rollback
 - `credential_picker` unit tests — Fake list filter / empty query / name+username(+domain) match / Debug no secrets / `from` source `Err` / VM last-good on load `Err` / replace-not-append
+- `tunnel_configs` unit tests — configs page name+kind filter / picker sentinels + stale placeholder / `resolve_tunnel_for_commit` / last-good load / Debug no secrets / optional `storage` repo adapter
 - `serial_ports` unit tests — Fake enumerator refresh / empty / fail-closed / select into editor+QC host
 - `serial_presets` unit tests — PuTTY defaults, preset index select, illegal stop/data fail-closed, node round-trip / inherit
 
@@ -206,6 +223,7 @@ Adversarial reviews:
 - State machine: [adversarial-ledger-connection-editor.md](adversarial-ledger-connection-editor.md)
 - Persist glue: [adversarial-ledger-editor-save.md](adversarial-ledger-editor-save.md)
 - Credential picker search glue: [adversarial-ledger-credential-picker.md](adversarial-ledger-credential-picker.md)
+- Tunnel configs page / picker metadata glue: [adversarial-ledger-tunnel-configs-ui.md](adversarial-ledger-tunnel-configs-ui.md)
 - Tree Duplicate (sibling; no secret copy): [adversarial-ledger-tree-duplicate.md](adversarial-ledger-tree-duplicate.md)
 - Serial enumerate library: [adversarial-ledger-serial-enumerate.md](adversarial-ledger-serial-enumerate.md)
 - Serial COM picker glue: [adversarial-ledger-serial-picker.md](adversarial-ledger-serial-picker.md)

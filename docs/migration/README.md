@@ -43,6 +43,7 @@
 | [21-quick-connect.md](21-quick-connect.md) | Quick Connect pure state / validation (`wormhole-ui`) |
 | [adversarial-ledger-connection-editor.md](adversarial-ledger-connection-editor.md) | ConnectionEditorState review closed (no GPUI) |
 | [adversarial-ledger-credential-picker.md](adversarial-ledger-credential-picker.md) | Credential picker search glue (`filter_credential_profiles` / Fake / SearchVm) review closed |
+| [adversarial-ledger-tunnel-configs-ui.md](adversarial-ledger-tunnel-configs-ui.md) | Tunnel configs page / picker metadata Fake glue (`TunnelConfigsVm` / `TunnelPickerVm`) review closed |
 | [gate-checklist.md](gate-checklist.md) | Executable pass/fail for gates 1–8 |
 | [gate-evidence-log.md](gate-evidence-log.md) | LabOnly vs HardwarePass evidence stubs (lab ≠ hardware) |
 | [toolchain.md](toolchain.md) | Existing Rust PATH/versions for agents |
@@ -50,6 +51,7 @@
 | [adversarial-ledger-hello-cutover.md](adversarial-ledger-hello-cutover.md) | Hello / app-auth / Bitwarden browser / cutover review closed |
 | [adversarial-ledger-bitwarden-session.md](adversarial-ledger-bitwarden-session.md) | Bitwarden CLI session stub (`StubBitwardenSession` / Fake) review closed |
 | [adversarial-ledger-bitwarden-catalog.md](adversarial-ledger-bitwarden-catalog.md) | Bitwarden virtual credential catalog Fake glue (`BitwardenCredentialCatalogGlue` / stable virtual ids) review closed |
+| [adversarial-ledger-credential-resolve.md](adversarial-ledger-credential-resolve.md) | Credential password resolution Fake glue (`CredentialPasswordResolverGlue` / local CredMgr vs Bitwarden vault Fake) review closed |
 | [adversarial-ledger-bitwarden-cli-pin.md](adversarial-ledger-bitwarden-cli-pin.md) | Bitwarden CLI install pin + hash Fake glue (`BitwardenCliInstallGlue` / release catalog) review closed |
 | [adversarial-ledger-bitwarden-zip-pin.md](adversarial-ledger-bitwarden-zip-pin.md) | Bitwarden browser extension manual ZIP/folder install pin Fake glue (`BitwardenExtensionInstallGlue` / Fake FS + Fake zip) review closed |
 | [adversarial-ledger-bitwarden-onboarding.md](adversarial-ledger-bitwarden-onboarding.md) | Bitwarden onboarding notice versioning Fake glue (`BitwardenOnboardingNoticeGlue` / settings store) review closed |

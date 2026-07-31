@@ -45,6 +45,32 @@ SQLite `TunnelConfigs` rows are metadata only (`Id`, `Name`, `Kind`, `CreatedAt`
 
 `TunnelConfigRepository::delete` is **fail-open** for in-use configs: it does not consult `Nodes.TunnelConfigId` (no FK). Matching C# `DeleteAsync`, the editor must refuse deletion while connections still reference the id (C# `TunnelConfigsViewModel.DeleteTunnelAsync` + partial index `IX_Nodes_TunnelConfigId`).
 
+### Tunnel configs page / picker UI glue (`wormhole-ui`)
+
+Lab-only metadata VMs mirroring C# `TunnelConfigsViewModel` list/filter/select and `TunnelPickerViewModel` picker subset — **no** DPAPI payload I/O, **no** GPUI chrome:
+
+| Type | Role |
+|---|---|
+| `TunnelConfigRow` | Metadata row (`id` / `name` / `kind` / optional timestamps); sentinels use `kind=None` |
+| `TunnelConfigSource` | `list_all()` trait — Fake in tests |
+| `FakeTunnelConfigList` | In-memory catalog (`Debug` = len + fail flag only) |
+| `StorageTunnelConfigSource` | `--features storage` → `TunnelConfigRepository::list_all` |
+| `TunnelConfigsVm` | Configs page: load (replace snapshot; last-good on `Err`), search filter (name **or** kind display), `selected_config` for editor |
+| `TunnelPickerVm` | Picker: inherit / no-tunnel sentinels (`INHERIT_TUNNEL_ID` / `NO_TUNNEL_ID`), repo load, stale `(missing tunnel …)` placeholder, `filter_tunnel_configs`, `resolve_tunnel_for_commit`, composes `TunnelUiState` |
+
+```rust
+use wormhole_ui::{
+    FakeTunnelConfigList, TunnelConfigsVm, TunnelPickerVm, TunnelKind, tunnel_kind_display_name,
+};
+let mut page = TunnelConfigsVm::new();
+page.load_from(&FakeTunnelConfigList::with_configs([/* rows */]))?;
+let mut picker = TunnelPickerVm::new("(Inherit from folder)");
+picker.load_from(&fake)?;
+picker.load_from_node(Some(true), Some(config_id));
+```
+
+Non-goals: tunnel editor dialog, test dialog, add/edit/delete/test commands, DPAPI read/write, debounce (host-owned). See [adversarial-ledger-tunnel-configs-ui.md](adversarial-ledger-tunnel-configs-ui.md).
+
 ### Traits
 
 ```text

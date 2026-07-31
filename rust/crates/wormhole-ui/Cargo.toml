@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "GPUI shell skeleton + tree / settings / terminal font-size-auto-copy apply glue + connection-editor / Quick Connect (+ recent-history MRU) + credential picker search glue + serial COM picker + baud/parity preset glue + tree Open→session + tunnel route prompt Fake glue + Bitwarden onboarding notice versioning Fake glue + Settings Extensions Bitwarden vault/browser Fake glue + OTP / Fortinet SAML prompt UI glue + update notify glue (GPUI optional)."
+description = "GPUI shell skeleton + tree / settings / terminal font-size-auto-copy apply glue + connection-editor / Quick Connect (+ recent-history MRU) + credential picker search glue + tunnel configs page / picker metadata Fake glue + serial COM picker + baud/parity preset glue + tree Open→session + tunnel route prompt Fake glue + Bitwarden onboarding notice versioning Fake glue + Settings Extensions Bitwarden vault/browser Fake glue + OTP / Fortinet SAML prompt UI glue + update notify glue (GPUI optional)."
 publish = false
 
 [lib]
@@ -37,6 +37,7 @@ uuid = { workspace = true, features = ["std", "v4"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 wormhole-domain = { workspace = true }
+chrono = { workspace = true }
 wormhole-serial = { workspace = true }
 wormhole-session = { workspace = true, optional = true }
 wormhole-storage = { workspace = true, optional = true }
