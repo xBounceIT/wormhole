@@ -33,6 +33,7 @@
 | [adversarial-ledger-tree-filter.md](adversarial-ledger-tree-filter.md) | Tree filter/search id glue (`visible_connection_ids` / host match) review closed |
 | [adversarial-ledger-tree-open-session.md](adversarial-ledger-tree-open-session.md) | Tree Open → session connect glue review closed |
 | [adversarial-ledger-tree-reparent.md](adversarial-ledger-tree-reparent.md) | Tree reparent / drag validation glue review closed |
+| [adversarial-ledger-tree-duplicate.md](adversarial-ledger-tree-duplicate.md) | Tree duplicate connection glue review closed |
 | [adversarial-ledger-settings-apply.md](adversarial-ledger-settings-apply.md) | SettingsViewModel → StorageSettingsStore stage/apply glue review closed |
 | [16-session-orchestrator.md](16-session-orchestrator.md) | Session orchestrator (`wormhole-session`) Serial/SSH/HTTP + tunnel lease |
 | [18-rust-installer.md](18-rust-installer.md) | Rust `Build-Rust-Artifacts.ps1` + parallel Inno channel spike (WinUI untouched) |
@@ -110,9 +111,11 @@
 | [adversarial-ledger-http-route.md](adversarial-ledger-http-route.md) | HTTP SOCKS vs local-forwarder selection — full gates (2 adv + 3 simplify) |
 | [adversarial-ledger-http-nav-report.md](adversarial-ledger-http-nav-report.md) | HTTP/HTTPS nav-result → session-status Fake glue review closed |
 | [adversarial-ledger-http-profile-wipe.md](adversarial-ledger-http-profile-wipe.md) | HTTP/HTTPS WebView2 profile isolation / wipe Fake glue review closed |
+| [adversarial-ledger-http-new-window.md](adversarial-ledger-http-new-window.md) | HTTP/HTTPS new-window / popup policy Fake glue review closed |
 | [adversarial-ledger-vnc-framebuffer.md](adversarial-ledger-vnc-framebuffer.md) | VNC framebuffer / input queue review closed |
 | [adversarial-ledger-vnc-forwarder.md](adversarial-ledger-vnc-forwarder.md) | VNC `select_vnc_connect_target` / LocalForwarder stub review closed |
 | [adversarial-ledger-vnc-session-glue.md](adversarial-ledger-vnc-session-glue.md) | VNC session glue (`push_*` / `apply_framebuffer_rect` / Fake dirty notify) review closed |
+| [adversarial-ledger-vnc-input-resize.md](adversarial-ledger-vnc-input-resize.md) | VNC input queue drain/coalesce on resize + disconnect Fake glue review closed |
 | [adversarial-ledger-vnc-clipboard.md](adversarial-ledger-vnc-clipboard.md) | VNC clipboard cut-text glue (`clipboard_glue` ClientCutText / ServerCutText) review closed |
 | [adversarial-ledger-vnc-password-auth.md](adversarial-ledger-vnc-password-auth.md) | VNC password-only auth glue (`auth_glue` / `FakeVncPasswordProvider`) review closed |
 | [adversarial-ledger-gpui-gates.md](adversarial-ledger-gpui-gates.md) | GPUI gates 1–2 review closed |
@@ -122,6 +125,7 @@
 | [adversarial-ledger-sftp-dialog.md](adversarial-ledger-sftp-dialog.md) | SFTP file-transfer dialog glue (`ConnectedSshContext` / `start_transfer`) review closed |
 | [adversarial-ledger-sftp-progress.md](adversarial-ledger-sftp-progress.md) | SFTP transfer progress callback glue (`report_progress` / Fake chunks) review closed |
 | [adversarial-ledger-sftp-prewarm.md](adversarial-ledger-sftp-prewarm.md) | SFTP client prewarm / borrow Fake glue (`SftpPrewarmGlue` / `BorrowedShellTunnel`) review closed |
+| [adversarial-ledger-sftp-conflict.md](adversarial-ledger-sftp-conflict.md) | SFTP transfer conflict overlay policy (`resolve_conflict_overlay` / Fake) review closed |
 | [adversarial-ledger-import-vpn.md](adversarial-ledger-import-vpn.md) | Import + remaining VPN review closed |
 | [adversarial-ledger-import-unsupported.md](adversarial-ledger-import-unsupported.md) | Import UnsupportedProtocol / HTTP-HTTPS-Serial soft-skip review closed |
 | [adversarial-ledger-import-apply.md](adversarial-ledger-import-apply.md) | Import plan → SQLite apply stub (`insert_many` / soft-skip / password OOB) review closed |

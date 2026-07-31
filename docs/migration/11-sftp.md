@@ -1,8 +1,8 @@
 # SFTP — serialized ops + transfer queue (`wormhole-sftp`)
 
-**Status:** types + serialization gate + fake backend green · SOCKS5 tunnel target selection stub · file-transfer dialog glue (SSH context → SOCKS + cancel queue) · transfer progress callback glue (Fake chunks; no live SFTP) · SFTP client prewarm / tunnel-borrow Fake glue (`SftpPrewarmGlue` / `BorrowedShellTunnel`) · live `russh-sftp` channel wiring deferred
+**Status:** types + serialization gate + fake backend green · SOCKS5 tunnel target selection stub · file-transfer dialog glue (SSH context → SOCKS + cancel queue) · transfer progress callback glue (Fake chunks; no live SFTP) · transfer conflict overlay policy stub (`resolve_conflict_overlay` / Fake; no GPUI) · SFTP client prewarm / tunnel-borrow Fake glue (`SftpPrewarmGlue` / `BorrowedShellTunnel`) · live `russh-sftp` channel wiring deferred
 **Date:** 2026-07-31
-**C# mirrors:** `Services/ISftpService.cs`, `Services/Ssh/SftpSession.cs`, `Services/Sftp/FileTransferOrchestrator.cs`, `Services/SftpService.cs` (SOCKS when tunnel present), `Services/FileTransferDialogService.cs` / `SshSessionViewModel.CanOpenFileTransfer`, `ViewModels/Sessions/Transfer/TransferItemViewModel.ProgressFraction`, `SshSessionViewModel` prewarm (`TryConsumePrewarmedSftp` / `BorrowTunnelForSftp` / `BorrowedTunnelInstance`)
+**C# mirrors:** `Services/ISftpService.cs`, `Services/Ssh/SftpSession.cs`, `Services/Sftp/FileTransferOrchestrator.cs`, `Services/Sftp/IFileTransferOrchestrator.cs` (`ConflictDecision` / `ConflictContext` / `ConflictResolver`), `Services/SftpService.cs` (SOCKS when tunnel present), `Services/FileTransferDialogService.cs` / `SshSessionViewModel.CanOpenFileTransfer`, `Views/Dialogs/FileTransferDialog.xaml(.cs)` conflict overlay, `ViewModels/Sessions/Transfer/TransferItemViewModel.ProgressFraction`, `SshSessionViewModel` prewarm (`TryConsumePrewarmedSftp` / `BorrowTunnelForSftp` / `BorrowedTunnelInstance`)
 
 ---
 
@@ -43,12 +43,36 @@ Gate ownership in `SerializedSftpSession::drive` matches the C# anti-pattern fix
 | `SerializedSftpSession<B>` | Single-flight wrapper around any backend |
 | `TransferQueue` / `TransferRequest` / `TransferJob` | Queue model for the transfer strip |
 | `report_progress` / `run_fake_transfer` / `TransferProgress` | Progress callback glue (cumulative bytes → %, cancel-aware) |
+| `resolve_conflict_overlay` / `FakeConflictOverlay` / `ConflictDecision` | Conflict overlay policy (exists → Skip/Overwrite/Rename/Cancel; sticky apply-to-all; Fake) |
 | `SftpPrewarmGlue` / `FakePrewarmedSftp` / `BorrowedShellTunnel` | SSH-tab prewarm cache + non-owning tunnel borrow (Fake; no live SFTP) |
 | `FakeSftpBackend` | In-memory FS for unit tests |
 | `select_sftp_transport` / `SftpTransport` | Direct vs SOCKS5 from optional tunnel lease (stub) |
 | `FakeTunnelSocks` | In-memory tunnel SOCKS view for unit tests (no network) |
 | `ConnectedSshContext` / `FileTransferDialogState` | Dialog glue: Connected SSH → SOCKS select → queue (`open_from_ssh_session`) |
 | feature `russh` | Optional `russh-sftp =2.3.0` link (compile marker) |
+
+### Transfer conflict overlay policy (stub)
+
+C# `FileTransferOrchestrator` peeks the destination before enqueueing a row;
+when it exists, `ConflictResolver` returns `(ConflictDecision, ApplyToAll)`.
+WinUI overlay buttons are Overwrite / Skip / Cancel (Cancel → Skip without
+apply-all). Sticky apply-to-all covers Skip / Overwrite for the rest of the
+batch.
+
+Rust parity lives in `wormhole_sftp::resolve_conflict_overlay` /
+`apply_conflict_choice` / `FakeConflictOverlay`:
+
+- Destination missing → `Proceed` (no prompt)
+- Destination exists → Skip / Overwrite / Rename / Cancel (`ConflictOutcome`)
+- Empty / whitespace-only `item_name` or `destination_path` → `EmptyPath` (fail closed)
+- `existing_is_directory` → `ExistingDirectory` (fail closed; C# never prompts dirs here)
+- Sticky apply-to-all only for Skip / Overwrite; Rename / Cancel + `apply_to_all` → `InvalidSticky`
+- Rename requires a safe non-empty leaf (`is_safe_remote_name`); `suggest_rename_name` helper
+- Cancel clears sticky and aborts the batch (Lab keeps Cancel distinct from Skip)
+- No credentials on the surface; errors / Debug never echo secret-shaped text
+- Orchestrator flatten / live transfer apply / GPUI overlay remain host / follow-up
+
+Review: [adversarial-ledger-sftp-conflict.md](adversarial-ledger-sftp-conflict.md).
 
 ### SFTP client prewarm / tunnel borrow (Fake glue)
 
@@ -105,6 +129,7 @@ C# opens the dual-pane dialog only from a **Connected** SSH tab
 - `start_transfer` delegates to `TransferQueue::enqueue_and_run_file` (existing cancel / single-flight; concurrent starts stay peak_in_flight == 1)
 - No credentials on the glue surface; `Debug` omits secret-shaped fields
 - Dual-pane UI / conflict overlays / live russh dial remain host / follow-up work
+  (conflict **policy** decisions are Lab-ready via `resolve_conflict_overlay`; GPUI chrome Pending)
 
 Fake-backed tests live in `dialog::tests` (`open_with_fake`). Review: [adversarial-ledger-sftp-dialog.md](adversarial-ledger-sftp-dialog.md).
 
