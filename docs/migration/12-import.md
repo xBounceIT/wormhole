@@ -1,6 +1,6 @@
 # mRemoteNG import + backup envelope (`wormhole-import`)
 
-**Status:** XML parse + **SSH / RDP / VNC only** plan green · password AES-GCM (16-byte nonce) green · backup envelope inspect green · **backup export/import Fake glue** green (metadata + secrets round-trip; temp/Fake FS) · **plan → SQLite apply stub** green · **soft-skip → user-facing skip report** green
+**Status:** XML parse + **SSH / RDP / VNC only** plan green · password AES-GCM (16-byte nonce) green · backup envelope inspect green · **backup export/import Fake glue** green (metadata + secrets round-trip; temp/Fake FS) · **plan → SQLite apply stub** green · **soft-skip → user-facing skip report** green · **import dialog Fake VM glue** green (`wormhole-ui` / `import` feature)
 
 **Date:** 2026-07-31
 
@@ -71,6 +71,7 @@ Containers whose `Protocol` attribute is unmapped still become folders with `pro
 | `backup_payload` | Typed camelCase payload rows (nodes/credentials/tunnels/secrets arrays) |
 | `apply` | **Write stub:** `planned_to_connection_node` + `apply_import_plan` → `ConnectionRepository::insert_many` (feature `storage`) |
 | `skip_report` | **Report stub:** `ImportPlan` soft-skips → `ImportSkipReport` / `format_skip_summary` + `FakeImportSkipReporter` (no GPUI) |
+| `wormhole-ui::mremoteng_import_dialog` | **Dialog VM stub:** Fake path pick → plan → skip summary → optional `apply_import_plan` via `FakeMRemoteNgImportLab` (feature `import`; no GPUI / COM picker) |
 
 Workspace member: `rust/crates/wormhole-import`. Fixture: `wormhole-testkit/fixtures/mremoteng-sample.xml`.
 
@@ -92,6 +93,22 @@ Mirrors the node-insert half of C# `MRemoteNgImportService.CommitAsync` (without
 | Atomicity | `insert_many` is one transaction: FK failure, duplicate PK, or child-before-parent rolls the whole batch back |
 
 Hostile XML (DOCTYPE / `..` / size / nesting) still fail-closed at parse time — apply never sees them.
+
+### Import dialog Fake VM (`wormhole-ui`, feature `import`)
+
+Mirrors C# `MRemoteNgImportDialogViewModel` orchestration at the VM layer (no WinUI / GPUI chrome):
+
+| Concern | Behavior |
+|---|---|
+| Path pick | [`FakeMRemoteNgImportPathUi`](../../rust/crates/wormhole-ui/src/mremoteng_import_dialog.rs) — canned path or error; **no** `FileOpenPicker` COM |
+| Plan | `set_xml_path` / `pick_and_plan_from_ui` → `inspect_xml` + `parse_xml_path` + `plan_nodes` |
+| Fail-closed | Empty / whitespace path → `EmptyPath`; parse / DOCTYPE → `Import` error; no partial plan |
+| Skip report | [`FakeImportSkipReporter`](../../rust/crates/wormhole-import/src/skip_report.rs) → `ImportPlanPreview.skip_summary` |
+| Apply | Optional `apply` via [`MRemoteNgImportApplySink`](../../rust/crates/wormhole-ui/src/mremoteng_import_dialog.rs) (`FakeMRemoteNgImportLab` temp SQLite or `StorageMRemoteNgImportSink`) |
+| Double apply | `AlreadyApplied` — no duplicate SQLite inserts |
+| Stale plan | `set_xml_path` / `set_import_password` clear plan + apply state |
+| Secrets | VM / preview [`Debug`](../../rust/crates/wormhole-ui/src/mremoteng_import_dialog.rs) counts-only; `import_password` never echoed |
+| Out of scope | CredMgr on commit; GPUI dialog; tree refresh |
 
 ### Password decrypt (ConfVersion 2.7)
 
@@ -150,7 +167,7 @@ Encrypted backups use [`backup_crypto`](../../rust/crates/wormhole-import/src/ba
 - Changing any C# production code
 - **HTTP / HTTPS / Serial import mapping** (see gap table above)
 - RDP resolution / screen-size import mapping on apply
-- GPUI / WinUI import dialog wiring for skip summaries (Fake reporter only)
+- GPUI / WinUI import dialog wiring for skip summaries (Fake reporter + VM glue only)
 
 ---
 
@@ -160,6 +177,7 @@ Encrypted backups use [`backup_crypto`](../../rust/crates/wormhole-import/src/ba
 $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 cd rust
 cargo test -p wormhole-import
+cargo test -p wormhole-ui --no-default-features --features import --lib mremoteng_import
 cargo test -p wormhole-storage
 cargo test -p wormhole-testkit
 ```

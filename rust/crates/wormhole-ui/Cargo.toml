@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "GPUI shell skeleton + tree / settings / terminal font-size-auto-copy apply glue + connection-editor / Quick Connect (+ recent-history MRU) + credential picker search glue + credentials page list/CRUD Fake glue + tunnel configs page / picker metadata Fake glue + serial COM picker + baud/parity preset glue + tree Open→session + tunnel route prompt Fake glue + Bitwarden onboarding notice versioning Fake glue + Settings Extensions Bitwarden vault/browser Fake glue + OTP / Fortinet SAML prompt UI glue + update notify glue (GPUI optional)."
+description = "GPUI shell skeleton + tree / settings / terminal font-size-auto-copy apply glue + connection-editor / Quick Connect (+ recent-history MRU) + credential picker search glue + credentials page list/CRUD Fake glue + tunnel configs page / picker metadata Fake glue + mRemoteNG import dialog Fake VM glue + serial COM picker + baud/parity preset glue + tree Open→session + tunnel route prompt Fake glue + Bitwarden onboarding notice versioning Fake glue + Settings Extensions Bitwarden vault/browser Fake glue + OTP / Fortinet SAML prompt UI glue + update notify glue (GPUI optional)."
 publish = false
 
 [lib]
@@ -24,6 +24,8 @@ gpui = ["dep:gpui", "dep:gpui_platform"]
 secrets = ["dep:wormhole-secrets-win"]
 # Optional SQLite tree read + settings.json StorageSettingsStore + editor save (CredMgr).
 storage = ["dep:wormhole-storage", "secrets"]
+# mRemoteNG import dialog VM composing wormhole-import plan/skip/apply Fake glue.
+import = ["storage", "dep:wormhole-import"]
 # Session-orchestrator connect glue (tree Open + Quick Connect → wormhole-session).
 session = ["dep:wormhole-session"]
 # Tunnel OTP + Fortinet SAML prompt UI glue (Channel ↔ Fake UI; no GPUI / WebView2 dialog).
@@ -40,6 +42,7 @@ wormhole-domain = { workspace = true }
 chrono = { workspace = true }
 wormhole-serial = { workspace = true }
 wormhole-session = { workspace = true, optional = true }
+wormhole-import = { workspace = true, optional = true }
 wormhole-storage = { workspace = true, optional = true }
 wormhole-secrets-win = { workspace = true, optional = true }
 wormhole-terminal = { workspace = true }
@@ -54,6 +57,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "ti
 uuid = { workspace = true, features = ["std", "v4"] }
 tempfile = { workspace = true }
 wormhole-storage = { workspace = true }
+wormhole-import = { workspace = true }
 wormhole-secrets-win = { workspace = true }
 wormhole-tunnels = { workspace = true }
 wormhole-update = { workspace = true }

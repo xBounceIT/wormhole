@@ -4,7 +4,8 @@
 //! settings + terminal font/size/auto-copy apply glue, connection editor, Quick Connect
 //! + recent-history MRU, credential picker search glue, credentials page list/CRUD Fake glue,
 //! tunnel configs page / picker metadata
-//! Fake glue, serial COM picker + baud/parity
+//! Fake glue, mRemoteNG import dialog Fake VM glue (`import` feature),
+//! serial COM picker + baud/parity
 //! preset glue) compiles without GPUI.
 //! Enable `--features gpui` for shell
 //! chrome (`gpui_platform::application()`). Enable `--features storage` for the SQLite
@@ -29,6 +30,8 @@ mod settings_bitwarden_extensions;
 mod connection_editor;
 mod credential_picker;
 mod credentials_page_ui;
+#[cfg(feature = "import")]
+mod mremoteng_import_dialog;
 mod tunnel_configs_ui;
 mod error;
 mod layout_sink;
@@ -102,6 +105,12 @@ pub use tunnel_configs_ui::{
 };
 #[cfg(feature = "storage")]
 pub use tunnel_configs_ui::StorageTunnelConfigSource;
+#[cfg(feature = "import")]
+pub use mremoteng_import_dialog::{
+    FakeMRemoteNgImportLab, FakeMRemoteNgImportPathUi, ImportPlanPreview,
+    MRemoteNgImportApplyOutcome, MRemoteNgImportApplySink, MRemoteNgImportDialogError,
+    MRemoteNgImportDialogVm, MRemoteNgImportPathUi, StorageMRemoteNgImportSink,
+};
 #[cfg(feature = "storage")]
 pub use connection_editor::{
     load_inline_secret, save_validated_editor, EditorSaveError, EditorSaveOp, EditorSaveResult,

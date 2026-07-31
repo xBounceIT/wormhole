@@ -37,7 +37,7 @@ $env:Path = "C:\Users\dange\.cargo\bin;$env:Path"
 | [`wormhole-tunnels`](crates/wormhole-tunnels) | TunnelManager lease/coalesce + provider stubs |
 | [`wormhole-mcp`](crates/wormhole-mcp) | Loopback MCP host stub (`rmcp` / HTTP placeholder) |
 | [`wormhole-app`](crates/wormhole-app) | `AppServices` composition + tracing + bootstrap bin |
-| [`wormhole-ui`](crates/wormhole-ui) | Shell state + optional GPUI chrome (`--features gpui`; example `wormhole-ui-lab`) |
+| [`wormhole-ui`](crates/wormhole-ui) | Shell state + optional GPUI chrome (`--features gpui`; `import` feature for mRemoteNG dialog VM; example `wormhole-ui-lab`) |
 | [`wormhole-vnc`](crates/wormhole-vnc) | RFB subset: Raw pixel buffer + damage, input queue, session↔fb/input glue; optional `vnc-rs` |
 | [`wormhole-http`](crates/wormhole-http) | `HttpConnectionTarget` + browser-arg helper |
 | [`wormhole-import`](crates/wormhole-import) | mRemoteNG XML + backup envelope spike |

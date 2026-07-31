@@ -9310,6 +9310,7 @@ dependencies = [
  "tokio",
  "uuid",
  "wormhole-domain",
+ "wormhole-import",
  "wormhole-secrets-win",
  "wormhole-serial",
  "wormhole-session",
