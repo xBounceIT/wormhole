@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "PTY-like terminal session traits and xterm.js WebView2 bridge message types."
+description = "PTY-like terminal session traits, xterm.js bridge messages, paste→session glue, and font/size/auto-copy settings apply Fake."
 publish = false
 
 [lib]

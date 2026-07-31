@@ -1,6 +1,6 @@
 # Connection-tree + settings view-models — `wormhole-ui`
 
-**Status:** pure Rust view-models green (independent of GPUI chrome); tree Open→session glue stub; tree filter/search id glue stub; tree reparent/drag validation glue stub  
+**Status:** pure Rust view-models green (independent of GPUI chrome); tree Open→session glue stub; tree filter/search id glue stub; tree reparent/drag validation glue stub; terminal font/size/auto-copy settings apply glue stub
 **Date:** 2026-07-31  
 **Crate:** `rust/crates/wormhole-ui` (`tree` + `settings` modules)  
 **C# mirrors:** `ViewModels/ConnectionTreeViewModel.cs`, `ViewModels/SettingsViewModel.cs`, `Services/AppSettingsService.cs`, `Models/AppSettings.cs`
@@ -27,6 +27,7 @@
 | Memory store | `MemorySettingsStore` | Tests / injected host state |
 | Storage settings | `StorageSettingsStore` | `--features storage` → wraps `wormhole-storage::SettingsStore` (fail-closed on corrupt) |
 | Settings VM | `SettingsViewModel` | Immediate setters persist; `stage` / `apply` for dirty→apply→reload batch edits |
+| Terminal display apply | `terminal_apply` → `wormhole_terminal::settings_apply` | AppSettings font/size/auto-copy → Lab apply messages / `FakeTerminalSettingsSurface`; empty font / non-positive size fail-closed |
 
 ### Connection tree behaviour (parity subset)
 
@@ -99,6 +100,7 @@ Unit tests use `MemoryConnectionSource` + Fake serial/SSH (+ optional Fake crede
 - Batch path: `stage(|s| …)` marks dirty without IO; `apply()` persists; `reload()` re-reads and clears dirty. Persist paths stamp `SettingsSchemaVersion` in memory and on disk to `CURRENT_SCHEMA_VERSION` (8).
 - Unknown forward-compat JSON keys round-trip via `AppSettings::unknown_fields` (UI + storage shapes) so `StorageSettingsStore` apply does not strip them.
 - No secrets in `settings.json` (MCP token / passwords stay elsewhere). Prefer one shared store instance per path (`&mut` VM; storage write lock on a single `Arc`).
+- **Terminal font / size / auto-copy apply** (`settings/terminal_apply.rs`): maps `default_ssh_font` / `default_ssh_font_size` / `auto_copy_on_select` into `wormhole_terminal::TerminalSettingsConfig` → validate + typed Lab apply messages on `FakeTerminalSettingsSurface`. Empty / whitespace font (Unicode `trim`, including NBSP) and size ≤ 0 fail closed (Fake unchanged). Defaults share `DEFAULT_SSH_FONT_*` with the terminal crate. Auto-copy gate also rejects oversize selections (`MAX_SELECTION_UTF8_BYTES`). Live xterm options push still Pending — see [14-terminal-bridge.md](14-terminal-bridge.md).
 
 ## Public API
 
@@ -126,6 +128,8 @@ JsonFileSettingsStore::in_directory / new (path-confined) / MemorySettingsStore
 StorageSettingsStore::new / in_directory / default_local (feature = "storage")
 SettingsViewModel::new / set_theme / set_* / stage / apply / save / reload
 AppSettings (+ enums) — CURRENT_SCHEMA_VERSION = 8
+terminal_settings_config_from_app / apply_terminal_settings_from_app
+  / apply_terminal_settings_to_fake (+ re-exported FakeTerminalSettingsSurface)
 ```
 
 ## Verification
@@ -135,6 +139,8 @@ $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 cd rust
 cargo test -p wormhole-ui reparent
 cargo test -p wormhole-ui --features storage reparent
+cargo test -p wormhole-ui terminal_apply
+cargo test -p wormhole-terminal settings_apply
 cargo test -p wormhole-ui
 cargo test -p wormhole-ui --features storage
 # Optional: tree Open + QC session glue off
@@ -160,4 +166,6 @@ cargo test -p wormhole-ui --features gpui
 - [adversarial-ledger-tree-open-session.md](adversarial-ledger-tree-open-session.md) — tree Open → session connect glue ledger  
 - [adversarial-ledger-tree-reparent.md](adversarial-ledger-tree-reparent.md) — tree reparent / drag validation glue ledger
 - [adversarial-ledger-folder-crud.md](adversarial-ledger-folder-crud.md) — storage folder CRUD + `reparent_connection` stub
-- [adversarial-ledger-settings-apply.md](adversarial-ledger-settings-apply.md) — SettingsViewModel → StorageSettingsStore apply glue ledger 
+- [adversarial-ledger-settings-apply.md](adversarial-ledger-settings-apply.md) — SettingsViewModel → StorageSettingsStore apply glue ledger
+- [14-terminal-bridge.md](14-terminal-bridge.md) — terminal font/size/auto-copy settings apply (`settings_apply` / Fake)
+- [adversarial-ledger-terminal-settings-apply.md](adversarial-ledger-terminal-settings-apply.md) — terminal font/size/auto-copy settings apply glue ledger

@@ -104,7 +104,7 @@ fn ensure_parent(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn replace_file(src: &Path, dest: &Path) -> Result<()> {
+pub(crate) fn replace_file(src: &Path, dest: &Path) -> Result<()> {
     #[cfg(windows)]
     {
         replace_file_windows(src, dest)

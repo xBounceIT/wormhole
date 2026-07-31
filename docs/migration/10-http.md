@@ -1,13 +1,13 @@
 # HTTP/HTTPS target types — `wormhole-http`
 
-**Status:** pure Rust port of `HttpConnectionTarget` + browser-arg helper + Bitwarden profile fingerprinting + Fake-WebView nav-result glue  
-**Date:** 2026-07-31  
+**Status:** pure Rust port of `HttpConnectionTarget` + browser-arg helper + Bitwarden profile fingerprinting + Fake-WebView nav-result glue + non-extension WebView2 profile isolation / wipe Fake glue
+**Date:** 2026-07-31
 
 ## Scope
 
-C# source of truth: `ViewModels/Sessions/HttpSessionViewModel.cs` (`HttpConnectionTarget`, `BuildTargetAsync`, `ReportNavigationSucceeded` / `ReportNavigationFailed`), `Views/Sessions/WebBrowserView.xaml.cs` (`OnNavigationCompleted`), `Helpers/WebViewBrowserArguments.cs`, and `Services/BitwardenBrowser/BitwardenBrowserWebViewProfile.cs` (path/arg helpers only).
+C# source of truth: `ViewModels/Sessions/HttpSessionViewModel.cs` (`HttpConnectionTarget`, `BuildTargetAsync`, `ReportNavigationSucceeded` / `ReportNavigationFailed`), `Views/Sessions/WebBrowserView.xaml.cs` (`OnNavigationCompleted`, shared vs isolated env selection), `Helpers/WebViewBrowserArguments.cs`, `Helpers/AppPaths.cs` (`GetWebBrowser*`), `App.xaml.cs` (`ClearWebBrowserUserData`), and `Services/BitwardenBrowser/BitwardenBrowserWebViewProfile.cs` (path/arg helpers only).
 
-This crate owns **navigation description**, **Bitwarden profile folder fingerprinting**, and a **Fake WebView navigation-result → session-status glue** stub (`nav_report`). WebView2 HWND hosting stays in `wormhole-surface-win` (wired later). Absolute Bitwarden roots (`bitwarden-browser-webview2\…`) live in `wormhole-secrets-win` path helpers.
+This crate owns **navigation description**, **Bitwarden profile folder fingerprinting**, a **Fake WebView navigation-result → session-status glue** stub (`nav_report`), and **non-extension WebView2 profile isolation / wipe Fake glue** (`profile_wipe`). WebView2 HWND hosting stays in `wormhole-surface-win` (wired later). Absolute Bitwarden roots (`bitwarden-browser-webview2\…`) live in `wormhole-secrets-win` path helpers.
 
 | Type / fn | C# analogue |
 |---|---|
@@ -32,6 +32,12 @@ This crate owns **navigation description**, **Bitwarden profile folder fingerpri
 | `user_data_folder` / `user_data_folder_for_target` | `GetUserDataFolder` overloads (root injected; target overload returns `Result`, rejects non-HTTPS) |
 | `HttpNavSession` / `FakeWebViewSurface` / `NavigationOutcome` | VM report path + view `NavigationCompleted` (Fake only; no GPUI / WebView2) |
 | `apply_navigation_report` / `validate_navigate_uri` | success→Connected / fail→Failed / cancel no-op; empty URI fail-closed |
+| `keyed_shared_folder_name` / `keyed_shared_folder_fingerprint_args` | `WebViewBrowserArguments.KeyedSharedFolderName` (SHA-256 of hardening → `shared-` + 8 hex) |
+| `requires_isolated_web_profile` / `select_web_browser_profile_kind` | SOCKS **or** ignore-cert → isolated `env-<id>`; else shared |
+| `web_browser_shared_user_data` / `web_browser_isolated_user_data` | `GetWebBrowserShared*` / `GetWebBrowserIsolated*` (root injected) |
+| `select_web_browser_user_data_folder` (+ `_for_target`) | Resolve concrete UDF under `webview2-web\` |
+| `stale_keyed_folder_names` / Fake `sweep_stale_keyed_folders` | `SweepStaleKeyedFolders` selection (keep current fingerprint; leave `env-*`) |
+| `FakeWebBrowserProfileStore` / `clear_web_browser_user_data` | `App.ClearWebBrowserUserData` — Fake wipe of non-extension web root only |
 
 ### Navigation result glue (`nav_report`)
 
@@ -56,6 +62,25 @@ target is **preserved** through begin / Fake navigate / success / fail / cancel
 
 **Non-goals for this stub:** live WebView2, GPUI, SOCKS reachability probe after
 transport failure, AlwaysAllow COM subscribe (surface-win mapping only).
+
+### Profile isolation / wipe Fake glue (`profile_wipe`)
+
+Mirrors C# regular-web (non-Bitwarden) environment identity and startup cleanup:
+
+| Rule | Behavior |
+|---|---|
+| Fingerprint | `keyed_shared_folder_name` = `shared-` + first 8 hex of SHA-256(hardening args) — golden `shared-815e5671` |
+| Shared tab | No SOCKS and no ignore-cert → `web_root/shared-<fingerprint>` |
+| Isolated tab | SOCKS **or** resolved `IgnoreErrors` → `web_root/env-<id>` (id required) |
+| Startup wipe | `FakeWebBrowserProfileStore::clear_web_browser_user_data` clears **all** web folders; Bitwarden root untouched |
+| Stale keyed sweep | Removes other `shared-*` siblings; keeps current fingerprint + `env-*` / foreign names; empty / non-`shared-*` keep → no-op |
+| Fail-closed | Empty / whitespace web or Bitwarden roots; empty / hostile isolated ids; web≡Bitwarden root collision |
+| Secrets | `Debug` prints lengths / counts only — never full paths or isolated ids |
+
+Production still wipes `%LOCALAPPDATA%\Wormhole\webview2-web\` at launch
+(`App.ClearWebBrowserUserData`). This Fake store is in-memory only (no disk I/O).
+`wormhole-surface-win` lab `unique_user_data_dir` remains a separate temp-folder
+helper for child HWND hosts — not a substitute for this shared/isolated contract.
 
 ## Routing rules (parity)
 
@@ -149,6 +174,7 @@ Browser args are hardening + optional `socks5://host:port` only — no session t
 
 - Creating WebView2 environments / GPUI browser panes
 - Bitwarden extension **download** / install / cookie-IndexedDB seeding
+- Live disk wipe of `%LOCALAPPDATA%` (Fake store only; C# `App` still owns startup wipe)
 - Tunnel establishment (callers use `wormhole-tunnels`)
 - Live nav-result wiring into `wormhole-session` `SessionHandle` (Fake glue is crate-local)
 
@@ -164,7 +190,9 @@ cargo test -p wormhole-surface-win --features webview --lib
 
 `wormhole-http` covers builders + `select_http_tunnel_route` (SOCKS prefer / forwarder /
 Direct / port-0 / cert composition / Serial N/A) + `nav_report` (success / fail /
-cancel / empty-URI fail-closed / cert-policy preserve / no-secret Debug).
+cancel / empty-URI fail-closed / cert-policy preserve / no-secret Debug) +
+`profile_wipe` (keyed fingerprint, shared vs isolated, Fake wipe leaves Bitwarden,
+stale keyed sweep, empty-path fail-closed, Debug redaction).
 `orchestrator_fakes` covers `connect_http` wiring (Direct without lease, SOCKS prefer,
 forwarder fallback, port-0 reject, Serial skips tunnel). The surface-win command covers
 `cert_policy_to_webview2_behavior` / leaf+target AlwaysAllow glue mapping tests

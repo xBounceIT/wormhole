@@ -1,8 +1,8 @@
 # SFTP — serialized ops + transfer queue (`wormhole-sftp`)
 
-**Status:** types + serialization gate + fake backend green · SOCKS5 tunnel target selection stub · file-transfer dialog glue (SSH context → SOCKS + cancel queue) · transfer progress callback glue (Fake chunks; no live SFTP) · live `russh-sftp` channel wiring deferred  
-**Date:** 2026-07-31  
-**C# mirrors:** `Services/ISftpService.cs`, `Services/Ssh/SftpSession.cs`, `Services/Sftp/FileTransferOrchestrator.cs`, `Services/SftpService.cs` (SOCKS when tunnel present), `Services/FileTransferDialogService.cs` / `SshSessionViewModel.CanOpenFileTransfer`, `ViewModels/Sessions/Transfer/TransferItemViewModel.ProgressFraction`
+**Status:** types + serialization gate + fake backend green · SOCKS5 tunnel target selection stub · file-transfer dialog glue (SSH context → SOCKS + cancel queue) · transfer progress callback glue (Fake chunks; no live SFTP) · SFTP client prewarm / tunnel-borrow Fake glue (`SftpPrewarmGlue` / `BorrowedShellTunnel`) · live `russh-sftp` channel wiring deferred
+**Date:** 2026-07-31
+**C# mirrors:** `Services/ISftpService.cs`, `Services/Ssh/SftpSession.cs`, `Services/Sftp/FileTransferOrchestrator.cs`, `Services/SftpService.cs` (SOCKS when tunnel present), `Services/FileTransferDialogService.cs` / `SshSessionViewModel.CanOpenFileTransfer`, `ViewModels/Sessions/Transfer/TransferItemViewModel.ProgressFraction`, `SshSessionViewModel` prewarm (`TryConsumePrewarmedSftp` / `BorrowTunnelForSftp` / `BorrowedTunnelInstance`)
 
 ---
 
@@ -43,11 +43,36 @@ Gate ownership in `SerializedSftpSession::drive` matches the C# anti-pattern fix
 | `SerializedSftpSession<B>` | Single-flight wrapper around any backend |
 | `TransferQueue` / `TransferRequest` / `TransferJob` | Queue model for the transfer strip |
 | `report_progress` / `run_fake_transfer` / `TransferProgress` | Progress callback glue (cumulative bytes → %, cancel-aware) |
+| `SftpPrewarmGlue` / `FakePrewarmedSftp` / `BorrowedShellTunnel` | SSH-tab prewarm cache + non-owning tunnel borrow (Fake; no live SFTP) |
 | `FakeSftpBackend` | In-memory FS for unit tests |
 | `select_sftp_transport` / `SftpTransport` | Direct vs SOCKS5 from optional tunnel lease (stub) |
 | `FakeTunnelSocks` | In-memory tunnel SOCKS view for unit tests (no network) |
 | `ConnectedSshContext` / `FileTransferDialogState` | Dialog glue: Connected SSH → SOCKS select → queue (`open_from_ssh_session`) |
 | feature `russh` | Optional `russh-sftp =2.3.0` link (compile marker) |
+
+### SFTP client prewarm / tunnel borrow (Fake glue)
+
+C# `SshSessionViewModel` pre-warms a sibling `SftpClient` on SSH Connected and
+hands it to the file-transfer dialog via `TryConsumePrewarmedSftp`. The shell's
+VPN tunnel is lent as a non-owning `BorrowedTunnelInstance` so SFTP does **not**
+establish a second tunnel (OTP-interactive VPNs must not re-prompt / burn a code).
+Disconnect cancels in-flight prewarm and disposes the cached pair; disposing the
+borrow never tears down the shell-owned tunnel.
+
+Rust parity lives in `wormhole_sftp::SftpPrewarmGlue`:
+
+- Connected + `prime_credentials` → start Fake prewarm (`ImmediateSuccess` /
+  `Deferred` / `ImmediateFail` connect modes); no credentials → silent no-op
+- `try_consume` transfers ownership once; re-warms while still Connected; stale
+  (`!is_connected`) → dispose + `None` (on-demand fallback)
+- Cancel / disconnect → clear in-flight token + dispose cached session under the
+  same lock as clearing Connected (no Connected+empty window from a racing cancel);
+  late `finish_prewarm` with a cancelled / foreign token fails closed (no stash)
+- `BorrowedShellTunnel` Drop / dispose never increments `FakeShellTunnel::close_count`
+- No secret bytes on the glue surface (`credentials_present` flag only); `Debug` pinned
+- Live russh dial / dialog wiring of the consumed pair remain host / follow-up
+
+Review: [adversarial-ledger-sftp-prewarm.md](adversarial-ledger-sftp-prewarm.md).
 
 ### Transfer progress callback glue (stub)
 

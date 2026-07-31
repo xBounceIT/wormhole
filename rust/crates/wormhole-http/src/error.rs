@@ -21,4 +21,16 @@ pub enum HttpError {
     /// Bitwarden extension WebView2 profiles are HTTPS-only (logical target).
     #[error("Bitwarden browser profiles require an HTTPS logical target")]
     BitwardenRequiresHttps,
+
+    /// Empty / whitespace path rejected before Fake wipe or profile join.
+    #[error("path must not be empty")]
+    EmptyPath,
+
+    /// Isolated `env-<id>` segment missing or not a single relative folder name.
+    #[error("isolated profile id must not be empty")]
+    EmptyIsolatedId,
+
+    /// Fake store refused identical web + Bitwarden roots (wipe would be unsafe).
+    #[error("web browser and Bitwarden profile roots must differ")]
+    WebProfileRootCollision,
 }

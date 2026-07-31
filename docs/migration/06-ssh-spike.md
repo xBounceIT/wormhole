@@ -1,6 +1,6 @@
 # SSH library spike — russh
 
-**Status:** crate `wormhole-ssh` scaffold (auth methods + shell behind feature `client`; known_hosts + verify-on-connect + host-key prompt glue + agent availability probe + agent↔auth select glue + KBI multi-prompt Fake channel glue + auto-sudo detector + session glue stub + reconnect/backoff policy stub always on)  
+**Status:** crate `wormhole-ssh` scaffold (auth methods + shell behind feature `client`; known_hosts + verify-on-connect + host-key prompt glue + agent availability probe + agent↔auth select glue + SOCKS5 tunnel route select glue + KBI multi-prompt Fake channel glue + auto-sudo detector + session glue stub + reconnect/backoff policy stub always on)
 **Date:** 2026-07-31  
 **Context7 MCP:** unavailable in this environment; versions from crates.io / docs.rs.
 
@@ -19,21 +19,53 @@ Workspace pin uses **`ring`** (not `aws-lc-rs`): on Windows MSVC, `aws-lc-sys` r
 
 ## Why russh fits Wormhole
 
-1. **VPN / SOCKS5 hook points** — today's C# path dials the sidecar SOCKS5 then runs SSH.NET over that socket. russh's `connect_stream` is the same shape: dial SOCKS (or direct TCP) first, then hand the stream to SSH. See `wormhole_ssh::transport::{SshTransport, open_transport}`.
+1. **VPN / SOCKS5 hook points** — today's C# path dials the sidecar SOCKS5 then runs SSH.NET over that socket. russh's `connect_stream` is the same shape: dial SOCKS (or direct TCP) first, then hand the stream to SSH. Route select (`select_ssh_connect_target` / `FakeTunnelSocks`) picks Direct vs Socks5 from `TunnelEnabled` before the dialer hook (`wormhole_ssh::transport::{SshTransport, open_transport}`).
 2. **Auth methods + interactive shell** — `SshAuthMethod` on `SshConnectOptions` (password, private-key path/bytes, agent stub, keyboard-interactive wire stub). `connect_password_shell` dispatches auth then `request_pty` + `request_shell` (xterm-256color). Maps to C# `SshAuthMethodsBuilder`. Agent **availability** is a separate always-on probe (`is_agent_available` / `FakeAgent`); connect-prep **select glue** includes/excludes Agent from the method list based on that probe (fail closed on probe error). Wire agent auth stays `AuthNotImplemented`. Keyboard-interactive has a separate always-on **multi-prompt Fake channel** (`FakeKbiChannel` / `answer_kbi_round`) for offline InfoRequest rounds; wire KBI auth stays `AuthNotImplemented`.
 3. **Testable auth backend** — `SshAuthenticator` + `FakeAuthenticator` unit-test password/key load without a network; agent/kbi **wire** return `AuthNotImplemented`. Agent presence / select glue uses `FakeAgent` / `FakeFallibleAgent` (offline). KBI prompt rounds use `FakeKbiChannel` (offline; does not authenticate).
 4. **SFTP later** — `russh-sftp` companion (not pinned yet) for the file-transfer dialog path.
 
-## SOCKS5 design (hook only in this spike)
+## SOCKS5 design (route select + dial hook)
+
+### Route select glue (always on)
+
+Pure decision stub (no network / no live SSH) — parity with C# `SshSessionService` /
+`SftpService` SOCKS-when-tunnel and SFTP's `select_sftp_transport`:
+
+| Session | `tunnel_enabled` | SOCKS on lease | Result |
+|---|---|---|---|
+| **Serial** | * | * | `SshConnectTarget::Direct` (never routes) |
+| SSH | `false` | * | `Direct` |
+| SSH | `true` | `Some(ep)` port ≠ 0 | `Socks5(TunnelSocksEndpoint)` (proxy-only; SSH host unchanged) |
+| SSH | `true` | missing / `None` | `SshTunnelRouteError::TunnelSocksRequired` (fail closed) |
+| SSH | `true` | port `0` | `InvalidSocksPort` (fail closed) |
+
+| Item | API |
+|---|---|
+| Select | `select_ssh_connect_target` / `select_ssh_tunnel_route` (SSH-only convenience) |
+| Target | `SshConnectTarget::{Direct,Socks5}` |
+| Fake | `FakeTunnelSocks` / `TunnelSocksSource` (in-memory; no bind) |
+| Endpoint | `TunnelSocksEndpoint` (`addr` only — matches tunnels/SFTP; distinct from dialer `Socks5Endpoint` with optional creds) |
+| Map → dial | `SshConnectTarget::to_transport` (`client` feature) → `SshTransport` |
+
+Unlike HTTP, there is **no** local-forwarder fallback. Review:
+[adversarial-ledger-ssh-socks-route.md](adversarial-ledger-ssh-socks-route.md).
+
+### Dial hook (`client` feature)
 
 ```text
-ConnectionProfile.tunnel_enabled
+ConnectionProfile.tunnel_enabled (resolved) + lease.socks5_endpoint?
         │
         ▼
- TunnelManager lease → Socks5Endpoint(127.0.0.1:ephemeral)
+ select_ssh_connect_target(Ssh|Serial, enabled, lease?)
+        │  Serial → always Direct
+        │  enabled=false → Direct
+        │  enabled=true + SOCKS → Socks5(ep)  (SSH host unchanged)
+        │  enabled=true + missing/port0 → Err (fail closed)
+        ▼
+ to_transport() → SshTransport::{Direct,Socks5}   (`client`)
         │
         ▼
- open_transport(SshTransport::Socks5(ep), target_addr)
+ open_transport(transport, target_addr)
         │  (TODO: SOCKS5 CONNECT handshake)
         ▼
  russh::client::connect_stream(config, stream, handler)
@@ -51,7 +83,7 @@ ConnectionProfile.tunnel_enabled
 | `client` | **on** | Pulls `russh`, `tokio`, `async-trait`, `wormhole-terminal`; exposes connect/shell APIs |
 
 `cargo check -p wormhole-ssh` exercises the default `client` feature.
-`cargo check -p wormhole-ssh --no-default-features` must still compile (transport/client modules gated off; **known_hosts**, **verify-on-connect**, **host-key prompt glue**, **agent probe**, **agent↔auth select glue**, **KBI multi-prompt Fake channel**, **auto-sudo detector**, **auto-sudo session glue**, and **reconnect/backoff policy** always build).
+`cargo check -p wormhole-ssh --no-default-features` must still compile (transport/client modules gated off; **known_hosts**, **verify-on-connect**, **host-key prompt glue**, **agent probe**, **agent↔auth select glue**, **SOCKS5 tunnel route select**, **KBI multi-prompt Fake channel**, **auto-sudo detector**, **auto-sudo session glue**, and **reconnect/backoff policy** always build).
 
 ## Host-key known_hosts
 
@@ -232,7 +264,8 @@ Orchestrator / UI loop wiring remains Pending.
 - Pageant detection (OpenSSH named-pipe probe only on Windows)
 - Live auto-sudo against a real SSH shell / WebView2 pump (glue + Fake terminal only)
 - Live SSH reconnect loop / WebView2 rebind (policy + Fake schedule only)
-- Real SOCKS5 dialer implementation
+- Real SOCKS5 dialer implementation (route select + Fake endpoint only; CONNECT handshake still stub)
+- Orchestrator auto-wiring of `select_ssh_connect_target` before dial (API ready; session loop Pending)
 - Wiring into GPUI / WebView2 terminal bridge
 - Cross-process merge of concurrent known_hosts writers (last atomic writer wins)
 
@@ -245,7 +278,8 @@ cargo test -p wormhole-ssh
 cargo test -p wormhole-ssh --no-default-features
 cargo check -p wormhole-ssh
 cargo check -p wormhole-ssh --no-default-features
-# verify-on-connect + prompt glue + KBI Fake channel + auto-sudo + reconnect policy + agent probe + agent↔auth select always on (Fake store / FakeAgent / FakeKbiChannel / FakeBackoff offline).
+# verify-on-connect + prompt glue + KBI Fake channel + auto-sudo + reconnect policy + agent probe + agent↔auth select
+# + SOCKS5 tunnel route select always on (Fake store / FakeAgent / FakeTunnelSocks / FakeKbiChannel / FakeBackoff offline).
 # Optional live server:
 # $env:WORMHOLE_SSH_HOST=...; $env:WORMHOLE_SSH_USER=...; $env:WORMHOLE_SSH_PASSWORD=...
 # cargo test -p wormhole-ssh -- --ignored

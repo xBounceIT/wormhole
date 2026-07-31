@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Serialized SFTP ops + transfer queue + SSH dialog glue + progress callback (mirrors SftpSession / FileTransferOrchestrator / FileTransferDialogService)."
+description = "Serialized SFTP ops + transfer queue + SSH dialog/progress/prewarm Fake glue (mirrors SftpSession / FileTransferOrchestrator / FileTransferDialogService / SshSessionViewModel prewarm)."
 publish = false
 
 [lib]

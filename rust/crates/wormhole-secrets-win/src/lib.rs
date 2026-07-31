@@ -14,9 +14,10 @@
 //!   ([`AzureVpnTokenCacheStore`] + DPAPI/`Fake`; tunnel-id entropy, atomic write; opaque
 //!   bytes — JSON / identity live in `wormhole-tunnels::auth_glue`)
 //! - Named / per-tunnel entropy constants for app-auth, Bitwarden, Azure/WatchGuard/Stormshield caches
-//! - App-auth stub unlock (`app-auth.dpapi` + `APP_AUTHENTICATION_V1`) and Windows Hello
-//!   `AvailabilityProbe` / `HelloPrompt` (+ `FakeHelloPrompt` for tests); interactive WinRT
-//!   `UserConsentVerifier` is **not** wired yet
+//! - App-auth stub unlock (`app-auth.dpapi` + `APP_AUTHENTICATION_V1`) plus PIN/password
+//!   set/verify/clear (`AppAuthenticationService` + `FakeAppAuthenticationDataProtector`);
+//!   Windows Hello `AvailabilityProbe` / `HelloPrompt` (+ `FakeHelloPrompt` for tests);
+//!   interactive WinRT `UserConsentVerifier` is **not** wired yet
 //! - Bitwarden CLI unlock / memory-only session stub (`BitwardenSession` +
 //!   `StubBitwardenSession` / `FakeBitwardenSession`); `bw` process spawn is **not** wired yet
 //! - Process-local ephemeral session passwords (`TransientSessionCredentialStore` +
@@ -39,11 +40,13 @@
 //! [`ensure_confined_under`] / [`key_path_under`] / [`tunnel_path_under`] /
 //! [`azure_vpn_token_cache_path_under`];
 //! [`SecretsError::PathNotConfined`] never embeds the candidate path.
+//! [`SecretsError::InvalidAppAuthSecret`] carries fixed UI copy only (never the secret).
 
 #![cfg_attr(not(windows), allow(dead_code))]
 #![deny(missing_docs)]
 
 mod app_auth;
+mod app_auth_service;
 mod azure_vpn_token_cache;
 mod bitwarden_session;
 mod cred_mgr;
@@ -62,6 +65,12 @@ pub use app_auth::{
     unlock_app_authentication_store, unlock_app_authentication_store_at,
     unprotect_app_authentication, write_app_authentication_store,
     write_app_authentication_store_at, AppAuthUnlock,
+};
+pub use app_auth_service::{
+    AppAuthenticationDataProtector, AppAuthenticationMethod, AppAuthenticationMode,
+    AppAuthenticationSecretStatus, AppAuthenticationSecretValidation, AppAuthenticationService,
+    DpapiAppAuthenticationDataProtector, FakeAppAuthenticationDataProtector,
+    DEFAULT_PBKDF2_ITERATIONS, MAX_PBKDF2_ITERATIONS,
 };
 pub use azure_vpn_token_cache::{
     clear_azure_vpn_token_cache, clear_azure_vpn_token_cache_under, read_azure_vpn_token_cache,
@@ -164,6 +173,13 @@ pub enum SecretsError {
     /// `ITransientSessionCredentialStore.Store`. Display/Debug never embed the
     /// password (there is none to embed).
     EmptyPassword,
+    /// App PIN / password candidate failed validation (or document serialize / salt RNG).
+    ///
+    /// `reason` is fixed UI copy only — **never** the secret, salt, or hash.
+    InvalidAppAuthSecret {
+        /// Fixed validation / failure message (safe to log / show).
+        reason: &'static str,
+    },
 }
 
 impl fmt::Display for SecretsError {
@@ -190,6 +206,7 @@ impl fmt::Display for SecretsError {
                 f,
                 "transient session credential store rejected an empty password"
             ),
+            Self::InvalidAppAuthSecret { reason } => write!(f, "{reason}"),
         }
     }
 }

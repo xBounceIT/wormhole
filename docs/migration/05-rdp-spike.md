@@ -38,6 +38,7 @@ Reparenting into the shell HWND composites the OCX **behind** DirectComposition 
 | Layout → `ResolutionDebouncer` → Fake resize glue | **Works** (`RdpResolutionLayoutGlue` / `FakeRdpResizeSurface`; coalesce + min-dim / NaN fail-closed; **no** OCX) |
 | Password via `Zeroizing` + clear-after-`ClearTextPassword` put | **Works** (never logged; Debug redacts) |
 | CredSSP password wipe ↔ connect-attempt Fake glue | **Works** (`RdpCredSspConnectGlue` / `FakeRdpCredSspSurface`; wipe on success / fail / cancel; **no** OCX) |
+| ConnectionProfile display + common redirects → Fake configure | **Works** (`RdpDisplayRedirectGlue` / `FakeRdpPropertySurface`; loud desktop axes fail-closed; TrySet soft-skip; **no** OCX) |
 | Brief STA message pump after Connect | **Works** (`pump_messages`) |
 | Drop order Unadvise → Close → revoke site → destroy overlay HWND | **Works** (OCX before host) |
 
@@ -45,7 +46,8 @@ Reparenting into the shell HWND composites the OCX **behind** DirectComposition 
 
 | Piece | Why deferred |
 |-------|----------------|
-| Full redirect / audio / performance / bitmap-cache Configure surface | Soft-optional polish; core CredSSP path lands first |
+| Audio / performance / bitmap-cache / keyboard-hook Configure surface | Soft-optional polish beyond display + common redirects Fake glue |
+| Live OCX apply of display/redirect Fake puts | Fake glue only; wire into `RdpOcx::configure` later |
 | RD Gateway (`TransportSettings2`) apply | Rejected when tunnel on; full gateway apply stays app-layer |
 | Wire `ResolutionDebouncer` → live `UpdateSessionDisplaySettings` | Layout→debouncer→Fake glue landed; live OCX apply still needs Connected session |
 | SmartSizing re-assert on every resize | Non-fatal polish after bounds pipeline |
@@ -97,6 +99,39 @@ let mut opts = RdpConfigureOptions::new("host", 3389).with_password(secret);
 let _report = glue.attempt_connect(&mut opts)?; // wipe on Ok or Err
 assert!(opts.password.is_none());
 // glue.cancel_attempt(&mut opts); // wipe without Connect
+```
+
+### Display + common redirects (Fake configure glue)
+
+Parity target: C# `RdpHostForm.Configure` display / redirection subset (not CredSSP, not
+gateway, not audio/performance). Maps `wormhole_domain::ConnectionProfile` onto
+`FakeRdpPropertySurface` puts — **no** live OCX / `mstscax`.
+
+| Property | Loud / soft | Notes |
+|----------|-------------|--------|
+| `DesktopWidth` / `DesktopHeight` | **Loud** | Resolved via `resolve_connect_desktop_size` (`RdpDesktopSizeResolver` parity); then fail-closed by `validate_desktop_axes` (positive, ≤ `MAX_DESKTOP_AXIS` = 16384) |
+| `ColorDepth` | **Loud** | `normalise_color_depth` (existing configure helper) |
+| `SmartSizing` | Soft (always `true`) | TrySet-style skip when Fake scripts miss |
+| `UseMultimon` | Soft | Profile `rdp_use_all_monitors` |
+| `RedirectClipboard` / `Printers` / `SmartCards` / `Ports` / `Devices` | Soft | Profile redirect bools |
+| `RedirectDrives` | Soft | `""` → off; `"all"` → on; `"C,D"` → on + `DriveCollection` filter |
+| `DriveCollection` | Soft | Custom letters only; soft-miss → force `RedirectDrives=false` (least privilege, C# catch path); master soft-miss → skip collection |
+
+`DisplayRedirectReport::redirect_drives_master` is the **final** Fake master enable (`last_applied == "true"`), not raw `redirect_drives` intent — so DriveCollection soft-miss / RedirectDrives soft-miss both report `false`.
+Unknown / scripted-missing soft props soft-skip into `DisplayRedirectReport::soft_skips`
+(never hard-`Err`). Hostile fixed sizes such as `16385x768` (and full-content surface/fallback over `MAX_DESKTOP_AXIS`) fail closed **before** any put.
+Does **not** rewrite CredSSP wipe / OLE configure core.
+
+Adversarial review: [adversarial-ledger-rdp-display-redirect.md](adversarial-ledger-rdp-display-redirect.md).
+
+```rust
+use wormhole_domain::ConnectionProfile;
+use wormhole_surface_win::rdp::{DesktopSizeContext, RdpDisplayRedirectGlue};
+
+let mut glue = RdpDisplayRedirectGlue::with_fake();
+let profile = ConnectionProfile { /* rdp_screen_size, redirects, … */ ..Default::default() };
+let report = glue.apply_from_profile(&profile, DesktopSizeContext::with_surface(1024, 768))?;
+// report.soft_skips lists TrySet misses; report.desktop_width/height are resolved axes
 ```
 
 ```rust
@@ -230,6 +265,7 @@ let _ = prepare_rdp_connect_target("dc.local", 3389, policy, Some(&fake), false)
 | `rdp::clsid` (`rdp` feature) | Probe HKCR for MsRdpClient **11 → 10 → 9** CLSIDs |
 | `rdp::configure` | `RdpConfigureOptions`, CredSSP soft stubs, `validate_rdp_gateway_tunnel_combo`, `validate_tunnel_rdp_policy` |
 | `rdp::credssp_connect_glue` | `RdpCredSspConnectGlue` / `FakeRdpCredSspSurface` — password wipe on success / fail / cancel (Fake; no OCX) |
+| `rdp::display_redirect_glue` | `RdpDisplayRedirectGlue` / `FakeRdpPropertySurface` — ConnectionProfile display + common redirects → Fake puts; TrySet soft-skip; desktop axes fail-closed |
 | `rdp::target` | `select_rdp_connect_target` / `prepare_rdp_connect_target` — Direct vs LocalForwarder; SOCKS-only reject; `FakeTunnelForwarder` |
 | `rdp::dispatch` | IDispatch put/get + soft missing-member mapping |
 | `rdp::site` | `IOleClientSite` + `IOleInPlaceSite` bound to overlay HWND |
@@ -281,10 +317,11 @@ CLSIDs (same as C# `AxMsRdpClient9.cs`):
 - Missing OCX → runtime `Error` (acceptable for the lab).
 - Uses `windows` **0.61.3** + `windows-core` **0.61.2** for `#[implement]`.
 - `zeroize` **1.9.0** is pulled only with `--features rdp` (password wipe).
+- `wormhole-domain` is pulled only with `--features rdp` (ConnectionProfile display/redirect Fake glue).
 
 ```toml
 # wormhole-surface-win
-rdp = ["dep:zeroize"]   # windows / windows-core always linked; flag gates COM/OLE modules
+rdp = ["dep:zeroize", "dep:wormhole-domain"]   # windows / windows-core always linked; flag gates COM/OLE modules
 
 # surface-lab
 rdp = ["wormhole-surface-win/rdp"]
@@ -321,7 +358,7 @@ Gate 6 always exercises (with `--features rdp`):
 4. Mark before Connect path; Clear on Connected / Disconnected / FatalError (and teardown); drop OCX before overlay HWND
 
 `--gate06-live` additionally calls the Connect stub and pumps messages briefly.
-Full login / gateway apply remain deferred. Resolution debounce **logic** (`ResolutionDebouncer`, cancel-on-drop, instant/fake-clock tests) is unit-covered without COM; layout→debouncer→`FakeRdpResizeSurface` glue (`RdpResolutionLayoutGlue`) is also unit-covered without COM. Live wiring to `UpdateSessionDisplaySettings` stays deferred. CredSSP configure + password-wipe↔connect Fake glue + tunnel policy + BindLocalForwarder dial-target selection are unit-covered under `--features rdp`.
+Full login / gateway apply remain deferred. Resolution debounce **logic** (`ResolutionDebouncer`, cancel-on-drop, instant/fake-clock tests) is unit-covered without COM; layout→debouncer→`FakeRdpResizeSurface` glue (`RdpResolutionLayoutGlue`) is also unit-covered without COM. Live wiring to `UpdateSessionDisplaySettings` stays deferred. CredSSP configure + password-wipe↔connect Fake glue + display/redirect Fake glue + tunnel policy + BindLocalForwarder dial-target selection are unit-covered under `--features rdp`.
 
 ## Crash sentinel semantics (high level)
 
@@ -345,7 +382,7 @@ Empty / whitespace-only `nodeId` is rejected on Mark and treated as malformed on
 |---------|--------|
 | `cargo check` | OK without `rdp` / without mstscax |
 | `cargo check -p wormhole-surface-win --features rdp` | OK on Windows MSVC; needs `windows 0.61.3` |
-| `cargo test -p wormhole-surface-win --features rdp` | OK — includes tunnel policy + configure soft-put unit tests |
+| `cargo test -p wormhole-surface-win --features rdp` | OK — includes tunnel policy + configure soft-put + display/redirect Fake glue unit tests |
 | `cargo check -p surface-lab --features rdp` | OK on Windows MSVC |
 | `cargo run -p surface-lab --features rdp` | Overlay + OLE activate when mstscax registered; else prints runtime error and continues |
 | `--gate06-live` | Connect may fail without a reachable RDP server / credentials — still proves API wiring |

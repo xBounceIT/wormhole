@@ -2,6 +2,7 @@
 
 mod model;
 mod store;
+mod terminal_apply;
 mod view_model;
 
 #[cfg(feature = "storage")]
@@ -15,6 +16,10 @@ pub use model::{
 pub use store::{
     confined_settings_path, JsonFileSettingsStore, MemorySettingsStore, SettingsError,
     SettingsStore,
+};
+pub use terminal_apply::{
+    apply_terminal_settings_from_app, apply_terminal_settings_to_fake,
+    terminal_settings_config_from_app,
 };
 pub use view_model::{normalize_retention_days, SettingsViewModel};
 

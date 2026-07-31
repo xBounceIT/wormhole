@@ -182,7 +182,7 @@ Snapshot of where each major interop area lives under `rust/crates/`.
 | Win32 focus / SetFocus | `wormhole-surface-win/src/focus/` | **Spike** / **LabOnly** | `FocusBroker` + `Win32FocusOps`; gate 7 lab path. Not full GPUI↔product focus chrome. |
 | Pane layout → broker bounds | `wormhole-surface-win` feature `pane-layout` | **Spike** / **LabOnly** | Maps `wormhole-ui` pane ticks → `update_bounds`; lab smoke only. |
 | WebView2 child HWND | `wormhole-surface-win/src/webview/` (feature `webview`) | **LabOnly** | wry 0.56 `ChildWebViewHost`; unique UDF; gates 3–5. Cert-policy **adapter only** — COM `ServerCertificateErrorDetected` **not** subscribed in create/lab. |
-| xterm.js / terminal bridge wire | `wormhole-terminal` + lab gate 5 + `webview` assets helpers | **Spike** / **LabOnly** | Message types / backpressure / clipboard helpers; lab hosts Assets/web. Not a shipping SSH tab. |
+| xterm.js / terminal bridge wire | `wormhole-terminal` + lab gate 5 + `webview` assets helpers | **Spike** / **LabOnly** | Message types / backpressure / clipboard helpers + font/size/auto-copy settings apply Fake (`settings_apply`); lab hosts Assets/web. Not a shipping SSH tab / live `term.options` push. |
 | Host clipboard (Win32) | `wormhole-terminal` feature `clipboard-win` | **Spike** | Optional Win32 clipboard; fakes for tests. |
 | RDP owned overlay / ActiveX | `wormhole-surface-win/src/rdp/` (feature `rdp`) | **LabOnly** / **Spike** | Owned overlay + OLE in-place + CredSSP configure + CLSID probe (gate 6). Event sink / connect paths remain spike-level; **not** product session chrome. |
 | RDP crash sentinel / resolution debounce | `wormhole-surface-win/src/rdp/{sentinel,resolution,host_bounds}.rs` | **Spike** | Compile without `mstscax`; file/layout helpers only. |
@@ -198,7 +198,7 @@ Snapshot of where each major interop area lives under `rust/crates/`.
 | Credential Manager passwords | `wormhole-secrets-win` (`cred_mgr.rs`) | **Spike** | `Wormhole:<guid>` + 2560 UTF-16 guard + `FakePasswordStore`. Library API — not UI-wired. |
 | Keys / tunnel DPAPI files | `wormhole-secrets-win` (`key_tunnel.rs`, `dpapi.rs`, `paths.rs`) | **Spike** | Null-entropy key/tunnel blobs; path confinement. |
 | Named / per-tunnel entropy | `wormhole-secrets-win` (`entropy.rs`) | **Spike** | App-auth, Bitwarden shared storage, Azure/WG/Stormshield cache entropy constants. |
-| App-auth store | `wormhole-secrets-win` (`app_auth.rs`) | **Spike** | `app-auth.dpapi` protect/unlock helpers. |
+| App-auth store | `wormhole-secrets-win` (`app_auth.rs`, `app_auth_service.rs`) | **Spike** | `app-auth.dpapi` protect/unlock helpers + PIN/password set/verify/clear (`AppAuthenticationService` / Fake protector). |
 | Windows Hello / remote-session gate | `wormhole-secrets-win` (`hello.rs`, `win32.rs`) | **Unwired** (interactive) / **Spike** (stubs) | `AvailabilityProbe` / `HelloPrompt` stubs + `SM_REMOTESESSION` probe. WinRT `UserConsentVerifier` = `WINRT_HELLO_GAP` — **not wired**. |
 | Bitwarden CLI session | `wormhole-secrets-win` (`bitwarden_session.rs`) | **Unwired** (spawn) / **Spike** (stubs) | Memory-only session stubs; `bw` process spawn **not wired** (`BITWARDEN_CLI_SESSION_GAP`). |
 | Bitwarden browser WebView2 + DPAPI shared storage | — (entropy constant only in secrets-win) | **Unwired** / **None** | No Rust Bitwarden extension host / profile sync. |
@@ -225,8 +225,8 @@ Snapshot of where each major interop area lives under `rust/crates/`.
 |---|---|---|---|
 | Serial ports | `wormhole-serial` + `wormhole-ui::SerialPortPickerState` | **Spike** | Enumerate + session I/O library; pure host-field picker glue (no GPUI chrome). |
 | SSH / known hosts / agent stubs | `wormhole-ssh` | **Spike** | russh-oriented library; agent probe stubs. |
-| SFTP queue / transport | `wormhole-sftp` | **Spike** | Serialized ops + fakes; VPN SOCKS path library-level. |
-| HTTP target / cert / route / nav-report | `wormhole-http` | **Spike** | Pure target/route/cert + Fake nav-result→status glue — **no** WebView2 ownership. |
+| SFTP queue / transport | `wormhole-sftp` | **Spike** | Serialized ops + dialog/progress/prewarm Fake glue; VPN SOCKS path library-level; live russh dial deferred. |
+| HTTP target / cert / route / nav-report / profile wipe | `wormhole-http` | **Spike** | Pure target/route/cert + Fake nav-result→status + Fake non-extension profile isolation/wipe — **no** WebView2 ownership. |
 | VNC / RFB | `wormhole-vnc` | **Spike** | Framebuffer/input spike; tunnel via forwarder stubs. |
 | Session orchestrator | `wormhole-session` | **Spike** | Connects protocol stubs + tunnel lease; not GPUI product shell. |
 | MCP loopback HTTP | `wormhole-mcp` | **Spike** | Bind/token/approval; optional `rmcp` feature. |

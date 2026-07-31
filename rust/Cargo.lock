@@ -9145,9 +9145,16 @@ dependencies = [
 name = "wormhole-secrets-win"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.3.4",
+ "pbkdf2 0.12.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "uuid",
  "windows 0.61.3",
+ "zeroize",
 ]
 
 [[package]]
@@ -9229,6 +9236,7 @@ dependencies = [
  "webview2-com",
  "windows 0.61.3",
  "windows-core 0.61.2",
+ "wormhole-domain",
  "wormhole-http",
  "wormhole-ui",
  "wry",
@@ -9287,6 +9295,7 @@ dependencies = [
  "wormhole-serial",
  "wormhole-session",
  "wormhole-storage",
+ "wormhole-terminal",
  "wormhole-tunnels",
  "wormhole-update",
 ]

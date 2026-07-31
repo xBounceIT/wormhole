@@ -1,8 +1,9 @@
 //! HTTP/HTTPS connection target types for Wormhole web sessions.
 //!
 //! Pure Rust port of `HttpConnectionTarget` / `BuildTargetAsync` from
-//! `ViewModels/Sessions/HttpSessionViewModel.cs`, plus a Fake-WebView
-//! navigation-result → session-status glue stub (`nav_report`). Live WebView2
+//! `ViewModels/Sessions/HttpSessionViewModel.cs`, plus Fake-WebView
+//! navigation-result → session-status glue (`nav_report`) and non-extension
+//! WebView2 profile isolation / wipe Fake glue (`profile_wipe`). Live WebView2
 //! hosting stays in `wormhole-surface-win`.
 //!
 //! See `docs/migration/10-http.md`.
@@ -11,6 +12,7 @@ mod bitwarden;
 mod browser_args;
 mod error;
 mod nav_report;
+mod profile_wipe;
 mod route;
 mod target;
 mod uri;
@@ -25,6 +27,14 @@ pub use error::HttpError;
 pub use nav_report::{
     apply_navigation_report, validate_navigate_uri, FakeWebViewSurface, HttpNavSession,
     HttpSessionNavStatus, NavigationOutcome,
+};
+pub use profile_wipe::{
+    keyed_shared_folder_fingerprint_args, keyed_shared_folder_name, requires_isolated_web_profile,
+    select_web_browser_profile_kind, select_web_browser_user_data_folder,
+    select_web_browser_user_data_folder_for_target, stale_keyed_folder_names,
+    target_requires_isolated_web_profile, web_browser_isolated_user_data,
+    web_browser_shared_user_data, FakeWebBrowserProfileStore, WebBrowserProfileKind,
+    WebBrowserWipeReport,
 };
 pub use route::{
     select_http_tunnel_route, FakeHttpTunnelRoute, HttpTunnelRoute, HttpTunnelRouteSource,

@@ -9,6 +9,7 @@ mod error;
 mod messages;
 mod paste_glue;
 mod session;
+mod settings_apply;
 
 pub use backpressure::{
     BackpressureAction, OutputBackpressure, HIGH_WATERMARK_BYTES, IMMEDIATE_FRAME_THRESHOLD_BYTES,
@@ -32,6 +33,12 @@ pub use paste_glue::{
 pub use session::{
     channel_stub_pair, FakeTerminalSession, TerminalEvent, TerminalEventReceiver,
     TerminalEventSender, TerminalSession, TerminalSize, CHANNEL_STUB_CAPACITY,
+};
+pub use settings_apply::{
+    accept_selection_auto_copy, apply_terminal_settings, terminal_settings_apply_messages,
+    validate_terminal_settings, AppliedTerminalSettings, FakeTerminalSettingsSurface,
+    TerminalSettingsApplyError, TerminalSettingsApplyMessage, TerminalSettingsConfig,
+    DEFAULT_SSH_FONT_FAMILY, DEFAULT_SSH_FONT_SIZE,
 };
 
 #[cfg(all(windows, feature = "clipboard-win"))]

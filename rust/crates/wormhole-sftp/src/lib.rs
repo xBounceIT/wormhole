@@ -3,7 +3,8 @@
 //! Mirrors C# `ISftpSession` / `FileTransferOrchestrator`: **one SFTP op at a time
 //! per session**. File-transfer dialog glue opens from a connected SSH context and
 //! wires SOCKS select + the cancel/single-flight queue. Progress callback glue
-//! normalizes cumulative byte reports for the transfer strip. See `docs/migration/11-sftp.md`.
+//! normalizes cumulative byte reports for the transfer strip. Prewarm / tunnel-borrow
+//! Fake glue caches a Fake SFTP handle on SSH Connected. See `docs/migration/11-sftp.md`.
 
 mod dialog;
 mod entry;
@@ -11,6 +12,7 @@ mod error;
 mod fake;
 mod ops;
 mod path;
+mod prewarm;
 mod progress;
 mod queue;
 mod session;
@@ -27,6 +29,10 @@ pub use error::SftpError;
 pub use fake::FakeSftpBackend;
 pub use ops::SftpOps;
 pub use path::{is_safe_remote_name, remote_join};
+pub use prewarm::{
+    BorrowedShellTunnel, FakePrewarmConnectMode, FakePrewarmedSftp, FakeShellTunnel,
+    PrewarmToken, PrewarmedSftpPair, SftpPrewarmGlue,
+};
 pub use progress::{
     report_progress, report_to_callback, run_fake_transfer, RecordingProgressCallback,
     TransferProgress, TransferProgressCallback, TransferProgressError,

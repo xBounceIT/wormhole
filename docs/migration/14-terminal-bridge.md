@@ -1,12 +1,13 @@
 # Terminal bridge — wormhole-terminal ↔ WebView2 / xterm.js
 
 **Status:** LabOnly / Partial — codec + session trait + output backpressure +
-host clipboard paste helpers + paste→session write glue stub green; auto-sudo
+host clipboard paste helpers + paste→session write glue stub + font/size/auto-copy
+settings apply glue (`FakeTerminalSettingsSurface`) green; auto-sudo
 prompt **detector** + session **glue stub** (`FakeTerminalSession` inject) live
 in `wormhole-ssh`. Full pump orchestration still C# (`TerminalBridge`);
 surface-lab gate 5 posts `f:` / `d:` but does **not** claim WebView2 paste
-assembly or product SSH-tab parity.  
-**Date:** 2026-07-31  
+assembly, live font `term.options` push, or product SSH-tab parity.
+**Date:** 2026-07-31
 **Assets:** [Assets/web/README.md](../../Assets/web/README.md)  
 **Ledgers:** [adversarial-ledger-terminal-bridge.md](adversarial-ledger-terminal-bridge.md)
 (codec / gate 5),
@@ -15,13 +16,15 @@ assembly or product SSH-tab parity.
 [adversarial-ledger-terminal-paste.md](adversarial-ledger-terminal-paste.md)
 (chunking / Debug redaction),
 [adversarial-ledger-clipboard-paste.md](adversarial-ledger-clipboard-paste.md)
-(paste → session write glue)
+(paste → session write glue),
+[adversarial-ledger-terminal-settings-apply.md](adversarial-ledger-terminal-settings-apply.md)
+(font / size / auto-copy settings apply)
 
-> **Honest LabOnly:** unit-tested wire types, clipboard helpers, and
-> Fake-backed paste→session write glue ≠ a Rust `TerminalBridge` pump, ≠
-> gate-checklist hardware pass, ≠ shipping SSH tab. Gate 5 `STATUS` is
-> `Partial` when `--features webview` is on; note text still says clipboard
-> paste assembly is lab-partial.
+> **Honest LabOnly:** unit-tested wire types, clipboard helpers,
+> Fake-backed paste→session write glue, and font/size/auto-copy settings apply
+> ≠ a Rust `TerminalBridge` pump, ≠ gate-checklist hardware pass, ≠ shipping SSH tab.
+> Gate 5 `STATUS` is `Partial` when `--features webview` is on; note text still
+> says clipboard paste assembly is lab-partial.
 
 ## Wire protocol
 
@@ -107,11 +110,28 @@ Size caps and watermarks mirror `TerminalBridge`:
   `TerminalBridge`). `PasteToSessionResult` and `FakeTerminalSession` `Debug`
   expose sizes/ids only.
 
+- **Font / size / auto-copy settings apply** (`settings_apply` /
+  `FakeTerminalSettingsSurface`): maps the AppSettings-shaped slice
+  (`DefaultSshFont` / `DefaultSshFontSize` / `AutoCopyOnSelect`) → validated
+  `AppliedTerminalSettings` + typed Lab apply messages
+  (`SetFontFamily` / `SetFontSize` / `SetAutoCopyOnSelect`). Empty /
+  whitespace-only font (Unicode `trim`, including NBSP) and non-positive size
+  **fail closed** (Fake unchanged). Auto-copy is host policy (C# reads the
+  toggle on each `c:` — never auto-sends clipboard into the session); skips
+  empty and oversize (`MAX_SELECTION_UTF8_BYTES`) selections.
+  `accept_selection_auto_copy` /
+  `FakeTerminalSettingsSurface::try_auto_copy_selection` gate selection copy and
+  record lengths only. Defaults: `Cascadia Mono` / 12 / auto-copy on. **Not** on
+  the wire codec / live xterm `term.options` push yet. UI mapper:
+  `wormhole-ui::settings::terminal_apply` (`terminal_settings_config_from_app` /
+  `apply_terminal_settings_to_fake`). See [17-tree-settings-vm.md](17-tree-settings-vm.md).
+
 **Not yet in Rust:** the live pump that drains `p:` / writes `c:`, applies
 backpressure to a real session, and drives paste-drain/begin/chunk/end over
 WebView2 — that remains C# `TerminalBridge` until surface cutover. Gate 5 does
 not exercise paste assembly. The session-write glue above is a Fake-backed stub
-for chunk-bound paste delivery tests, not product bridge parity.
+for chunk-bound paste delivery tests, not product bridge parity. Live font
+`term.options` / `ExecuteScript` apply is also still Pending.
 
 ## Auto-sudo detector + session glue (`wormhole-ssh`)
 
@@ -168,6 +188,8 @@ $env:Path = "$env:USERPROFILE\.cargo\bin;$env:Path"
 cd rust
 cargo test -p wormhole-terminal
 cargo test -p wormhole-terminal --features clipboard-win
+cargo test -p wormhole-terminal settings_apply
+cargo test -p wormhole-ui terminal_apply
 cargo test -p wormhole-ssh
 # Auto-sudo detector + FakeTerminalSession glue tests are always on.
 cargo test -p wormhole-surface-win --features webview --lib

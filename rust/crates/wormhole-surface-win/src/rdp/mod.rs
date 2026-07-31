@@ -13,7 +13,8 @@
 //!   (no `mstscax`).
 //! - `--features rdp`: owned overlay + OLE in-place MsRdpClient + CredSSP configure
 //!   + tunnel policy validation + BindLocalForwarder dial-target stub + event sink stub
-//!   + CredSSP password-wipe ↔ connect-attempt Fake glue (no live OCX).
+//!   + CredSSP password-wipe ↔ connect-attempt Fake glue (no live OCX)
+//!   + ConnectionProfile display/redirect → Fake configure glue (no live OCX).
 
 mod host_bounds;
 mod resize_glue;
@@ -36,6 +37,8 @@ mod clsid;
 mod configure;
 #[cfg(all(windows, feature = "rdp"))]
 mod credssp_connect_glue;
+#[cfg(all(windows, feature = "rdp"))]
+mod display_redirect_glue;
 #[cfg(all(windows, feature = "rdp"))]
 mod dispatch;
 #[cfg(all(windows, feature = "rdp"))]
@@ -66,6 +69,14 @@ pub use configure::{
 pub use credssp_connect_glue::{
     CredSspConnectGlueError, FakeRdpCredSspSurface, RdpCredSspConnectAttempt,
     RdpCredSspConnectGlue,
+};
+#[cfg(all(windows, feature = "rdp"))]
+pub use display_redirect_glue::{
+    parse_redirect_drives, resolve_connect_desktop_size, validate_desktop_axes,
+    DesktopSizeContext, DisplayRedirectGlueError, DisplayRedirectReport, FakePropOutcome,
+    FakePropPut, FakePropRecord, FakeRdpPropertySurface, RdpDisplayRedirectGlue,
+    RedirectDrivesIntent, DESKTOP_DEFAULT_HEIGHT, DESKTOP_DEFAULT_WIDTH, DESKTOP_MIN_HEIGHT,
+    DESKTOP_MIN_WIDTH, LOUD_DISPLAY_PROPS, REDIRECT_DRIVES_ALL, SOFT_DISPLAY_REDIRECT_PROPS,
 };
 #[cfg(all(windows, feature = "rdp"))]
 pub use events::RdpEventState;

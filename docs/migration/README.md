@@ -13,7 +13,7 @@
 | [interop-inventory.md](interop-inventory.md) | Win32 / COM / WebView2 / secrets touchpoints + Rust crate ownership (LabOnly / Spike / Unwired) |
 | [native-surface-broker.md](native-surface-broker.md) | C# hosting → Rust broker design |
 | [deps-pins.md](deps-pins.md) | GPUI / WebView2 / `windows` crate pins |
-| [06-ssh-spike.md](06-ssh-spike.md) | russh choice + SOCKS5 hook points |
+| [06-ssh-spike.md](06-ssh-spike.md) | russh choice + SOCKS5 route select + dial hook points |
 | [01-surface-lab.md](01-surface-lab.md) | How to run the lab + gate map |
 | [02-domain.md](02-domain.md) | `wormhole-domain` C#→Rust map + inheritance parity |
 | [03-storage.md](03-storage.md) | SQLite / rusqlite + embedded migrations |
@@ -49,6 +49,7 @@
 | [adversarial-ledger-hello-cutover.md](adversarial-ledger-hello-cutover.md) | Hello / app-auth / Bitwarden browser / cutover review closed |
 | [adversarial-ledger-bitwarden-session.md](adversarial-ledger-bitwarden-session.md) | Bitwarden CLI session stub (`StubBitwardenSession` / Fake) review closed |
 | [adversarial-ledger-hello-stub.md](adversarial-ledger-hello-stub.md) | Hello AvailabilityProbe / HelloPrompt stub review closed |
+| [adversarial-ledger-app-auth-pin.md](adversarial-ledger-app-auth-pin.md) | App-auth PIN/password Fake verifier (`AppAuthenticationService` / Fake protector) review closed |
 | [adversarial-ledger-hello-unlock-ui.md](adversarial-ledger-hello-unlock-ui.md) | Hello unlock prompt UI glue (`HelloUnlockGlue` / `FakeHelloUnlockUi`) review closed |
 | [adversarial-ledger-domain.md](adversarial-ledger-domain.md) | Domain review closed (73 tests) |
 | [adversarial-ledger-node-change-notifier.md](adversarial-ledger-node-change-notifier.md) | Connection node change Fake pub/sub (`ConnectionNodeChangeEvent` / Fake) review closed |
@@ -82,6 +83,7 @@
 | [adversarial-ledger-ssh-agent.md](adversarial-ledger-ssh-agent.md) | SSH agent availability probe (`FakeAgent` / pipe bounds) review closed |
 | [adversarial-ledger-ssh-agent-auth.md](adversarial-ledger-ssh-agent-auth.md) | SSH agent ↔ auth select glue (`select_auth_methods_for_connect` / FakeFallible) review closed |
 | [adversarial-ledger-ssh-reconnect.md](adversarial-ledger-ssh-reconnect.md) | SSH reconnect / backoff policy stub (`SshReconnectPolicy` / Fake schedule) review closed |
+| [adversarial-ledger-ssh-socks-route.md](adversarial-ledger-ssh-socks-route.md) | SSH SOCKS5 tunnel route select (`select_ssh_connect_target` / FakeTunnelSocks) review closed |
 | [adversarial-ledger-ssh-kbi.md](adversarial-ledger-ssh-kbi.md) | SSH keyboard-interactive multi-prompt Fake channel (`FakeKbiChannel` / `answer_kbi_round`) review closed |
 | [adversarial-ledger-serial-enumerate.md](adversarial-ledger-serial-enumerate.md) | Serial port enumeration review closed |
 | [adversarial-ledger-serial-picker.md](adversarial-ledger-serial-picker.md) | Serial COM host-field picker glue (`wormhole-ui`) review closed |
@@ -96,6 +98,7 @@
 | [adversarial-ledger-rdp-strict-auth.md](adversarial-ledger-rdp-strict-auth.md) | RDP tunnel + strict server-auth policy review closed (2026-07-31 re-audit: solid; parent SKIP) |
 | [adversarial-ledger-rdp-resolution.md](adversarial-ledger-rdp-resolution.md) | RDP ResolutionDebouncer review closed |
 | [adversarial-ledger-rdp-resize-glue.md](adversarial-ledger-rdp-resize-glue.md) | RDP `RdpResolutionLayoutGlue` / Fake resize glue review closed |
+| [adversarial-ledger-rdp-display-redirect.md](adversarial-ledger-rdp-display-redirect.md) | RDP display/redirect Fake configure glue (`RdpDisplayRedirectGlue`) review closed |
 | [adversarial-ledger-rdp-forwarder.md](adversarial-ledger-rdp-forwarder.md) | RDP `select_rdp_connect_target` / LocalForwarder stub review closed |
 | [adversarial-ledger-focus-a11y.md](adversarial-ledger-focus-a11y.md) | FocusBroker + a11y (gates 7–8) review closed |
 | [adversarial-ledger-focus-cycle.md](adversarial-ledger-focus-cycle.md) | FocusCycle ring + FocusBroker integration review closed |
@@ -106,6 +109,7 @@
 | [adversarial-ledger-http-cert-glue.md](adversarial-ledger-http-cert-glue.md) | HTTP ignore-cert → WebView2 AlwaysAllow leaf/target glue review closed |
 | [adversarial-ledger-http-route.md](adversarial-ledger-http-route.md) | HTTP SOCKS vs local-forwarder selection — full gates (2 adv + 3 simplify) |
 | [adversarial-ledger-http-nav-report.md](adversarial-ledger-http-nav-report.md) | HTTP/HTTPS nav-result → session-status Fake glue review closed |
+| [adversarial-ledger-http-profile-wipe.md](adversarial-ledger-http-profile-wipe.md) | HTTP/HTTPS WebView2 profile isolation / wipe Fake glue review closed |
 | [adversarial-ledger-vnc-framebuffer.md](adversarial-ledger-vnc-framebuffer.md) | VNC framebuffer / input queue review closed |
 | [adversarial-ledger-vnc-forwarder.md](adversarial-ledger-vnc-forwarder.md) | VNC `select_vnc_connect_target` / LocalForwarder stub review closed |
 | [adversarial-ledger-vnc-session-glue.md](adversarial-ledger-vnc-session-glue.md) | VNC session glue (`push_*` / `apply_framebuffer_rect` / Fake dirty notify) review closed |
@@ -117,6 +121,7 @@
 | [adversarial-ledger-sftp-socks.md](adversarial-ledger-sftp-socks.md) | SFTP `select_sftp_transport` SOCKS routing review closed |
 | [adversarial-ledger-sftp-dialog.md](adversarial-ledger-sftp-dialog.md) | SFTP file-transfer dialog glue (`ConnectedSshContext` / `start_transfer`) review closed |
 | [adversarial-ledger-sftp-progress.md](adversarial-ledger-sftp-progress.md) | SFTP transfer progress callback glue (`report_progress` / Fake chunks) review closed |
+| [adversarial-ledger-sftp-prewarm.md](adversarial-ledger-sftp-prewarm.md) | SFTP client prewarm / borrow Fake glue (`SftpPrewarmGlue` / `BorrowedShellTunnel`) review closed |
 | [adversarial-ledger-import-vpn.md](adversarial-ledger-import-vpn.md) | Import + remaining VPN review closed |
 | [adversarial-ledger-import-unsupported.md](adversarial-ledger-import-unsupported.md) | Import UnsupportedProtocol / HTTP-HTTPS-Serial soft-skip review closed |
 | [adversarial-ledger-import-apply.md](adversarial-ledger-import-apply.md) | Import plan → SQLite apply stub (`insert_many` / soft-skip / password OOB) review closed |
@@ -145,6 +150,7 @@
 | [adversarial-ledger-auto-sudo-session-glue.md](adversarial-ledger-auto-sudo-session-glue.md) | Auto-sudo session glue (`AutoSudoSessionGlue` / FakeTerminalSession) review closed |
 | [adversarial-ledger-terminal-paste.md](adversarial-ledger-terminal-paste.md) | Terminal paste chunking / ClipboardHook Debug review closed |
 | [adversarial-ledger-clipboard-paste.md](adversarial-ledger-clipboard-paste.md) | Paste → session write glue (`paste_request_to_session` / Fake) review closed |
+| [adversarial-ledger-terminal-settings-apply.md](adversarial-ledger-terminal-settings-apply.md) | Terminal font/size/auto-copy settings apply glue (`settings_apply` / `terminal_apply` / Fake) review closed |
 | [adversarial-ledger-pane-layout.md](adversarial-ledger-pane-layout.md) | BrokerPaneLayoutSink / pane-layout review closed |
 | [adversarial-ledger-pane-focus.md](adversarial-ledger-pane-focus.md) | Pane focus activate/cycle ↔ FocusCycle glue review closed |
 | [adversarial-ledger-broker-session-surface.md](adversarial-ledger-broker-session-surface.md) | Session open/close ↔ Fake broker bind/unbind glue review closed |

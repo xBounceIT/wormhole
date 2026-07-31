@@ -68,6 +68,14 @@ Parity with C# `Socks5Client` / `LocalTcpForwarder` / `SocksTunnelInstance.BindL
 
 SSH/SFTP consume `socks5_endpoint` directly; RDP/VNC use `bind_local_forwarder` because the ActiveX / RFB client opens its own socket.
 
+**SSH route select (pure stub):** `wormhole_ssh::select_ssh_connect_target` /
+`select_ssh_tunnel_route` maps resolved `TunnelEnabled` + optional lease SOCKS →
+`SshConnectTarget::{Direct,Socks5}` (`FakeTunnelSocks`; fail-closed when tunnel on
+without SOCKS / port `0`). **Serial never routes** (always Direct). Live SOCKS
+CONNECT remains the transport hook. See [06-ssh-spike.md](06-ssh-spike.md) and
+[adversarial-ledger-ssh-socks-route.md](adversarial-ledger-ssh-socks-route.md).
+SFTP's parallel stub is `wormhole_sftp::select_sftp_transport`.
+
 ### SidecarProcess (control plane)
 
 `wormhole_tunnels::sidecar` owns path resolution + process supervision for the existing Go binaries (do **not** rewrite them):

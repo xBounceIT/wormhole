@@ -102,7 +102,7 @@ host can open the same profile. Verify before any dual-write or cutover:
 | Piece | Status in Rust |
 |---|---|
 | DPAPI protect/unprotect of verifier store | Stub unlock API (`unlock_app_authentication_store`); wrong entropy → `DpapiUnprotect`; `AppAuthUnlock` Debug redacts plaintext |
-| PBKDF2 PIN/password verify | Still C# (`AppAuthenticationService`) — port later |
+| PBKDF2 PIN/password verify | Spike in `wormhole-secrets-win::app_auth_service` — `AppAuthenticationService` set/verify/clear; Fake protector for unit tests (no live DPAPI); modes Disabled/Pin/Password (+ WindowsHello fallback slot only); wrong/missing/corrupt / oversized `Iterations` → fail closed; ASCII PIN + UTF-16 password length; Debug never echoes secrets ([adversarial-ledger-app-auth-pin.md](adversarial-ledger-app-auth-pin.md)). Interactive lock UI / idle timer still Pending. |
 | Interactive Hello UI | **WinRT gap** — `UserConsentVerifier` **not** wired; `StubHelloPrompt` / `check_hello_availability` / `request_hello_verification` always fail closed (`available`/`verified` = false) with either the remote-session message or `WINRT_HELLO_GAP`. Tests use `FakeHelloPrompt` (no biometric UI; `Debug` omits freeform messages / never retains prompts). |
 | Hello unlock prompt UI glue | Spike in `wormhole-app::hello_unlock` — `HelloUnlockGlue` / `FakeHelloUnlockUi` map request-unlock → Success / Cancelled / Unavailable (fail-closed; no GPUI / no live WinRT; Debug never retains prompts / biometric material). Not a hardware gate. |
 | Remote-session gate | Implemented (`SM_REMOTESESSION` / `SESSIONNAME` `RDP-` prefix) — does **not** imply Hello can succeed on a local console |

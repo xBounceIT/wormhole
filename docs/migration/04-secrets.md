@@ -64,7 +64,7 @@ See [adversarial-ledger-dpapi-paths.md](adversarial-ledger-dpapi-paths.md),
 |---|---|---|
 | `keys\<id:N>.dpapi` | **none** (`null`) | Yes — `key_path` / `KeyMaterialStore` write/read/delete (confined); metadata stays in SQLite |
 | `tunnels\<id:N>.dpapi` | **none** (`null`) | Yes — `tunnel_path` / `TunnelPayloadStore` write/read/delete (confined); SQLite metadata-only |
-| `app-auth.dpapi` | UTF-8 `Wormhole.AppAuthentication.v1` | Path + entropy + stub unlock (`app_auth`); Hello availability / WinRT gap in `hello` |
+| `app-auth.dpapi` | UTF-8 `Wormhole.AppAuthentication.v1` | Path + entropy + stub unlock (`app_auth`) + PIN/password set/verify/clear (`app_auth_service`); Hello availability / WinRT gap in `hello` |
 | `bitwarden-browser-storage.dpapi` | UTF-8 `Wormhole.BitwardenBrowser.SharedStorage.v1` | Entropy + path helpers; storage protocol later |
 | `stormshield-cache\<id:N>.ovpncache` | `tunnelConfigId.ToByteArray()` | Path + `tunnel_id_entropy`; cache JSON decode in `wormhole-tunnels::auth_glue` |
 | `watchguard-cache\<id:N>.ovpncache` | `tunnelConfigId.ToByteArray()` | Path + `tunnel_id_entropy`; cache JSON decode in `wormhole-tunnels::auth_glue` |
@@ -230,11 +230,12 @@ Never log passwords, key material, refresh tokens, or session keys.
 | `key_tunnel` | `KeyMaterialStore` / `DpapiKeyMaterialStore` / `FakeKeyMaterialStore`; `TunnelPayloadStore` / `DpapiTunnelPayloadStore` / `FakeTunnelPayloadStore`; `write`/`read`/`delete_*_payload` (+ `_under`) — null entropy, path-confined, coherent non-atomic write (C# CredentialService); Fake Debug length-only + defensive copies; delete never unprotects; metadata stays out of DPAPI blobs |
 | `azure_vpn_token_cache` | `AzureVpnTokenCacheStore` / `DpapiAzureVpnTokenCacheStore` / `FakeAzureVpnTokenCacheStore`; `write`/`read`/`clear_azure_vpn_token_cache` (+ `_under`) — tunnel-id entropy, atomic write, path-confined under `azurevpn-cache\`; opaque bytes only |
 | `app_auth` | `protect_app_authentication`, `unprotect_app_authentication`, read/write/unlock store helpers, `AppAuthUnlock` (Debug redacts plaintext) |
+| `app_auth_service` | `AppAuthenticationService` set/verify/clear PIN·password (PBKDF2-SHA256); `AppAuthenticationMode` Disabled/Pin/Password (+ WindowsHello fallback slot); `FakeAppAuthenticationDataProtector` / `DpapiAppAuthenticationDataProtector`; `DEFAULT_PBKDF2_ITERATIONS` / `MAX_PBKDF2_ITERATIONS`; Debug never echoes secrets |
 | `hello` | `AvailabilityProbe` / `HelloPrompt` traits, `StubHelloPrompt` (fail-closed), `FakeHelloPrompt` (tests, no UI), free helpers `is_remote_desktop_session` / `check_hello_availability` / `request_hello_verification`, `WINRT_HELLO_GAP`, `REMOTE_DESKTOP_UNAVAILABLE_MESSAGE` |
 | `bitwarden_session` | `BitwardenSession` trait, `StubBitwardenSession` (fail-closed), `FakeBitwardenSession` (tests, no `bw`), `BitwardenSessionKey` (Debug redacts), `BITWARDEN_CLI_SESSION_GAP`, free helpers `unlock_bitwarden_session` / `bitwarden_session_status` |
 | `transient_session` | `TransientSessionCredentialStore` trait, `MemoryTransientSessionCredentialStore` (production in-process), `FakeTransientSessionCredentialStore` (tests; Debug length-only + call counts); **never** SQLite / CredMgr / DPAPI; empty password → `SecretsError::EmptyPassword` |
 | `redact` | `REDACTED`, `REDACT_TRUNCATE_DEFAULT`, `redact_secret`, `redact_truncated`, `redact_env_and_cli_secrets` |
-| root | `Result`, `SecretsError` (includes `InvalidPathSegment`, `PathNotConfined`, `EmptyPassword`) |
+| root | `Result`, `SecretsError` (includes `InvalidPathSegment`, `PathNotConfined`, `EmptyPassword`, `InvalidAppAuthSecret`) |
 
 ---
 
@@ -245,6 +246,8 @@ use wormhole_secrets_win::{
     check_hello_availability, unlock_app_authentication_store,
     protect_app_authentication, AppAuthUnlock, AvailabilityProbe, FakeHelloPrompt,
     HelloPrompt, StubHelloPrompt, WINRT_HELLO_GAP,
+    AppAuthenticationMethod, AppAuthenticationMode, AppAuthenticationService,
+    FakeAppAuthenticationDataProtector, DEFAULT_PBKDF2_ITERATIONS, MAX_PBKDF2_ITERATIONS,
 };
 
 // Always unavailable until WinRT UserConsentVerifier is wired (or remote-session message).
@@ -260,21 +263,54 @@ assert!(!HelloPrompt::request_verification(&stub, 0, "Unlock").verified);
 let fake = FakeHelloPrompt::winrt_gap();
 assert!(!fake.check_availability().available);
 
-// Stub unlock: DPAPI-unprotect app-auth.dpapi (PBKDF2 verify is a higher layer).
+// Stub unlock: DPAPI-unprotect app-auth.dpapi (raw JSON bytes).
 match unlock_app_authentication_store()? {
     AppAuthUnlock::Missing => { /* no verifier configured */ }
     AppAuthUnlock::Unlocked { plaintext } => { /* parse JSON verifiers */ }
 }
 let _ = protect_app_authentication(br#"{"Version":1}"#)?;
+
+// PIN / password set · verify · clear (Fake protector — no live DPAPI).
+let svc = AppAuthenticationService::with_fake_protector(&path, 1_000);
+svc.set_secret(AppAuthenticationMethod::Pin, "1234")?;
+assert!(svc.verify_secret(AppAuthenticationMethod::Pin, "1234")?);
+assert!(!svc.verify_secret(AppAuthenticationMethod::Pin, "0000")?); // fail closed
+assert!(svc.verify_for_mode(
+    AppAuthenticationMode::Disabled,
+    AppAuthenticationMethod::Pin,
+    "ignored",
+)?);
+svc.clear()?;
+let _ = (
+    FakeAppAuthenticationDataProtector::new(),
+    DEFAULT_PBKDF2_ITERATIONS,
+    MAX_PBKDF2_ITERATIONS,
+);
 ```
 
 **Interactive WinRT gap:** C# uses `Windows.Security.Credentials.UI.UserConsentVerifier`
 (+ optional `RequestVerificationForWindowAsync` with owner HWND). That projection is
-**not wired** in this crate yet; unlock via PIN/password fallback against the DPAPI store.
+**not wired** in this crate yet; unlock via PIN/password fallback against the DPAPI store
+(`AppAuthenticationService` + `app_auth` helpers).
 `StubHelloPrompt` / `request_hello_verification` never return `verified: true`. Never log
 biometric material or caller prompt strings that may embed secrets. `FakeHelloPrompt` is for
 tests only (no biometric UI); its `Debug` omits freeform outcome messages (booleans + call
 counts only) and never retains the caller prompt.
+
+**PIN / password verifier glue** (`app_auth_service`): PBKDF2-HMAC-SHA256 (default
+**600_000** iterations, 16-byte salt, 32-byte hash), JSON document
+`{ Version, Pin?, Password? }` with Base64 salt/hash (parity with C#
+`AppAuthenticationService`). Modes **Disabled / Pin / Password** (plus WindowsHello
+**fallback slot** only — interactive Hello stays in `hello` / `wormhole-app::hello_unlock`).
+Wrong secret / missing / corrupted store → verify `false` (fail closed).
+PIN is **ASCII digits only** (4–12); password length is **UTF-16 code units** (8–128),
+matching C# `string.Length`. Stored / configured `Iterations` above
+`MAX_PBKDF2_ITERATIONS` (= default) → invalid shape / corrupted (DoS fail-closed;
+shipping C# always writes the default).
+`FakeAppAuthenticationDataProtector` is pass-through for unit tests (no live DPAPI);
+`DpapiAppAuthenticationDataProtector` wraps `APP_AUTHENTICATION_V1`. `Debug` / errors never
+echo PIN, password, salt, or hash (`SecretsError::InvalidAppAuthSecret` is fixed UI copy).
+See [adversarial-ledger-app-auth-pin.md](adversarial-ledger-app-auth-pin.md).
 
 **Unlock prompt UI glue** (lock overlay — C# `MainWindow.TryUnlockWithWindowsHelloAsync`)
 lives in `wormhole-app::hello_unlock` (not this crate): `HelloUnlockGlue` maps
@@ -377,7 +413,7 @@ cd rust
 cargo test -p wormhole-secrets-win
 ```
 
-Coverage: target/path/entropy formatting (no OS), DPAPI round-trips (null / named / tunnel-id), protected file I/O + atomic overwrite, CredMgr round-trip (empty / Unicode / embedded NUL / 2560 UTF-16-byte ceiling incl. astral surrogate pins / concurrent — [adversarial-ledger-credmgr-size.md](adversarial-ledger-credmgr-size.md)), **CredMgr password CRUD glue** (`store`/`read`/`delete`; `Wormhole:<guid:D>`; missing delete Ok; `WinCredPasswordStore` ≡ free helpers; `FakePasswordStore` multi-id + concurrent Debug-safe; CredFree Drop guard — [adversarial-ledger-credmgr-crud.md](adversarial-ledger-credmgr-crud.md)), redaction case / `=` forms / UTF-8 truncate safety, app-auth protect/unlock + wrong-entropy / Debug redaction, Hello remote-session + WinRT-gap fail-closed stubs (`AvailabilityProbe` / `HelloPrompt` / `FakeHelloPrompt` without interactive UI; Fake `Debug` omits freeform messages — [adversarial-ledger-hello-stub.md](adversarial-ledger-hello-stub.md)), Bitwarden CLI session stub (`StubBitwardenSession` / `FakeBitwardenSession` + key Debug redaction), Bitwarden path segment rejection, **transient session credential store** (`TransientSessionCredentialStore` / `MemoryTransientSessionCredentialStore` / `FakeTransientSessionCredentialStore`; put/get/clear by session or node key; empty password fail-closed; never SQLite; Debug length-only + concurrent — [adversarial-ledger-transient-credentials.md](adversarial-ledger-transient-credentials.md)), **keys/tunnels/azurevpn-cache path confinement** (`ensure_confined_under` empty-root + `..` / absolute / prefix-escape rejects; `key_path_under` / `tunnel_path_under` / `azure_vpn_token_cache_path_under` + temp-dir payload round-trips; write/read/**delete|clear** hostile roots rejected before I/O with untouched temp dirs; `PathNotConfined` never embeds path or key material — [adversarial-ledger-dpapi-paths.md](adversarial-ledger-dpapi-paths.md)), **private-key DPAPI CRUD stub** (`KeyMaterialStore` + DPAPI + Fake; non-atomic write matching C# CredentialService; Fake defensive copies + concurrent Debug-safe; delete never unprotects — [adversarial-ledger-key-dpapi-crud.md](adversarial-ledger-key-dpapi-crud.md)), **tunnel payload DPAPI CRUD stub** (`TunnelPayloadStore` / `DpapiTunnelPayloadStore` / `FakeTunnelPayloadStore`; confinement before I/O; no sibling `keys\` escape; missing delete Ok; never unprotect on delete; Fake ↔ DPAPI contract; Debug length-only — [adversarial-ledger-tunnel-payload-dpapi.md](adversarial-ledger-tunnel-payload-dpapi.md)), **Azure VPN Entra refresh-token cache store** (`AzureVpnTokenCacheStore` + DPAPI + Fake; atomic write + tunnel-id entropy; clear on logout; never unprotects; never logs tokens; sibling keys/tunnels escape fail-closed — [adversarial-ledger-entra-token-cache.md](adversarial-ledger-entra-token-cache.md)).
+Coverage: target/path/entropy formatting (no OS), DPAPI round-trips (null / named / tunnel-id), protected file I/O + atomic overwrite, CredMgr round-trip (empty / Unicode / embedded NUL / 2560 UTF-16-byte ceiling incl. astral surrogate pins / concurrent — [adversarial-ledger-credmgr-size.md](adversarial-ledger-credmgr-size.md)), **CredMgr password CRUD glue** (`store`/`read`/`delete`; `Wormhole:<guid:D>`; missing delete Ok; `WinCredPasswordStore` ≡ free helpers; `FakePasswordStore` multi-id + concurrent Debug-safe; CredFree Drop guard — [adversarial-ledger-credmgr-crud.md](adversarial-ledger-credmgr-crud.md)), redaction case / `=` forms / UTF-8 truncate safety, app-auth protect/unlock + wrong-entropy / Debug redaction, **PIN/password verifier glue** (`AppAuthenticationService` + `FakeAppAuthenticationDataProtector`; set/verify/clear; wrong secret / corrupt / oversized Iterations fail-closed; ASCII PIN + UTF-16 password length; modes Disabled/Pin/Password; Debug never echoes — unit tests use low PBKDF2 iterations — [adversarial-ledger-app-auth-pin.md](adversarial-ledger-app-auth-pin.md)), Hello remote-session + WinRT-gap fail-closed stubs (`AvailabilityProbe` / `HelloPrompt` / `FakeHelloPrompt` without interactive UI; Fake `Debug` omits freeform messages — [adversarial-ledger-hello-stub.md](adversarial-ledger-hello-stub.md)), Bitwarden CLI session stub (`StubBitwardenSession` / `FakeBitwardenSession` + key Debug redaction), Bitwarden path segment rejection, **transient session credential store** (`TransientSessionCredentialStore` / `MemoryTransientSessionCredentialStore` / `FakeTransientSessionCredentialStore`; put/get/clear by session or node key; empty password fail-closed; never SQLite; Debug length-only + concurrent — [adversarial-ledger-transient-credentials.md](adversarial-ledger-transient-credentials.md)), **keys/tunnels/azurevpn-cache path confinement** (`ensure_confined_under` empty-root + `..` / absolute / prefix-escape rejects; `key_path_under` / `tunnel_path_under` / `azure_vpn_token_cache_path_under` + temp-dir payload round-trips; write/read/**delete|clear** hostile roots rejected before I/O with untouched temp dirs; `PathNotConfined` never embeds path or key material — [adversarial-ledger-dpapi-paths.md](adversarial-ledger-dpapi-paths.md)), **private-key DPAPI CRUD stub** (`KeyMaterialStore` + DPAPI + Fake; non-atomic write matching C# CredentialService; Fake defensive copies + concurrent Debug-safe; delete never unprotects — [adversarial-ledger-key-dpapi-crud.md](adversarial-ledger-key-dpapi-crud.md)), **tunnel payload DPAPI CRUD stub** (`TunnelPayloadStore` / `DpapiTunnelPayloadStore` / `FakeTunnelPayloadStore`; confinement before I/O; no sibling `keys\` escape; missing delete Ok; never unprotect on delete; Fake ↔ DPAPI contract; Debug length-only — [adversarial-ledger-tunnel-payload-dpapi.md](adversarial-ledger-tunnel-payload-dpapi.md)), **Azure VPN Entra refresh-token cache store** (`AzureVpnTokenCacheStore` + DPAPI + Fake; atomic write + tunnel-id entropy; clear on logout; never unprotects; never logs tokens; sibling keys/tunnels escape fail-closed — [adversarial-ledger-entra-token-cache.md](adversarial-ledger-entra-token-cache.md)).
 
 ---
 

@@ -5,10 +5,10 @@
 //! `DpapiAppAuthenticationDataProtector`.
 //!
 //! This module is the **stub unlock** surface for the Rust host: it can
-//! protect/unprotect/read/write the verifier blob. Full PIN/password verify
-//! (PBKDF2-SHA256, 600_000 iterations, JSON document shape) stays in a higher
-//! layer — see C# `AppAuthenticationService`. Interactive Windows Hello UI is
-//! documented in [`crate::hello::WINRT_HELLO_GAP`].
+//! protect/unprotect/read/write the verifier blob. PIN/password set · verify ·
+//! clear (PBKDF2-SHA256, JSON document shape) lives in [`crate::app_auth_service`]
+//! (tests: [`crate::FakeAppAuthenticationDataProtector`]). Interactive Windows
+//! Hello UI is documented in [`crate::hello::WINRT_HELLO_GAP`].
 
 use std::fmt;
 use std::path::Path;
@@ -81,10 +81,10 @@ impl fmt::Debug for AppAuthUnlock {
 
 /// Stub unlock: unprotect `app-auth.dpapi` with [`APP_AUTHENTICATION_V1`].
 ///
-/// Does **not** prompt Windows Hello and does **not** run PBKDF2 verify — those
-/// belong to UI + `AppAuthenticationService` parity. Use this after Hello is
-/// unavailable ([`crate::hello::check_hello_availability`]) or as the fallback
-/// path once the user supplies a PIN/password to a higher layer.
+/// Does **not** prompt Windows Hello and does **not** run PBKDF2 verify — use
+/// [`crate::AppAuthenticationService`] for PIN/password set · verify · clear.
+/// Use this after Hello is unavailable ([`crate::hello::check_hello_availability`])
+/// or to obtain the raw verifier JSON for a higher layer.
 pub fn unlock_app_authentication_store() -> Result<AppAuthUnlock> {
     unlock_app_authentication_store_at(&app_authentication_path())
 }

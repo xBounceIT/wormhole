@@ -1,8 +1,9 @@
 //! Wormhole GPUI shell skeleton + connection-tree / settings / connection-editor VMs.
 //!
 //! Pure UI state (sidebar regions, tab strip, session tab bar, ≤4-pane layout tree,
-//! settings, connection editor, Quick Connect + recent-history MRU, credential picker
-//! search glue, serial COM picker + baud/parity preset glue) compiles without GPUI.
+//! settings + terminal font/size/auto-copy apply glue, connection editor, Quick Connect
+//! + recent-history MRU, credential picker search glue, serial COM picker + baud/parity
+//! preset glue) compiles without GPUI.
 //! Enable `--features gpui` for shell
 //! chrome (`gpui_platform::application()`). Enable `--features storage` for the SQLite
 //! connection-tree read adapter, `StorageSettingsStore`, editor save glue, and tree
@@ -86,11 +87,18 @@ pub use layout_sink::{
     NopPaneLayoutSink, PaneLayoutSink, PaneLayoutUpdate, PanePhysicalBounds, RecordingPaneLayoutSink,
 };
 pub use settings::{
-    confined_settings_path, normalize_retention_days, AppAuthenticationFallbackMethod,
+    apply_terminal_settings_from_app, apply_terminal_settings_to_fake, confined_settings_path,
+    normalize_retention_days, terminal_settings_config_from_app, AppAuthenticationFallbackMethod,
     AppAuthenticationMode, AppSettings, ApplicationTheme, BitwardenBrowserExtensionSource,
     BitwardenCliServerRegion, JsonFileSettingsStore, MemorySettingsStore, SettingsError,
     SettingsStore, SettingsViewModel, BITWARDEN_ONBOARDING_INTRODUCED_SCHEMA_VERSION,
     CURRENT_SCHEMA_VERSION,
+};
+// Re-export terminal settings apply types used by the AppSettings mapper.
+pub use wormhole_terminal::{
+    accept_selection_auto_copy, apply_terminal_settings, AppliedTerminalSettings,
+    FakeTerminalSettingsSurface, TerminalSettingsApplyError, TerminalSettingsApplyMessage,
+    TerminalSettingsConfig, DEFAULT_SSH_FONT_FAMILY, DEFAULT_SSH_FONT_SIZE,
 };
 pub use session_tab_bar::{
     sanitize_session_tab_title, ProtocolBadge, SessionId, SessionTabBarState, SessionTabModel,

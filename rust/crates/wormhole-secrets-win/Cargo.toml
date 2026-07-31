@@ -16,7 +16,15 @@ default-target = "x86_64-pc-windows-msvc"
 targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
 
 [dependencies]
+base64 = { workspace = true }
+getrandom = { workspace = true }
+pbkdf2 = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+# pbkdf2 0.12 needs digest 0.10; workspace sha2 0.11 is for update verify only.
+sha2 = { version = "=0.10.9", default-features = false }
 uuid = { workspace = true, features = ["v4"] }
+zeroize = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
