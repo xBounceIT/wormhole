@@ -1,19 +1,27 @@
-//! GitHub release update check / download stubs for the Wormhole Rust migration.
+//! GitHub release update check / download / installer-launch + changelog state glue
+//! for the Wormhole Rust migration.
 //!
 //! Mirrors the pure helpers and result shape of `Services/UpdateService.cs` and
-//! `Models/UpdateCheckResult.cs`. **Does not** implement installer UX, silent launch,
-//! Mark-of-the-Web strip, or live HTTP — see `docs/migration/13-update-logging.md`.
+//! `Models/UpdateCheckResult.cs`. The download + SHA-256 verify leg lives in
+//! [`download`] and the installer-launch / Bitwarden-flush ordering tail in
+//! [`installer`]; the changelog selection VM lives in [`changelog_vm`]. **Does not**
+//! do live HTTP, real `Process.Start`, silent launch flags, or Mark-of-the-Web strip
+//! — see `docs/migration/13-update-logging.md`.
 //!
 //! Inject [`UpdateChecker`] implementations: production [`NetworkStubUpdateChecker`]
 //! (fail-closed) or test [`FakeUpdateChecker`]. Wire UI notify via [`check_now`] /
-//! [`UpdateNotifyStatus`]. **Never** log API tokens ([`UpdateApiToken`]).
+//! [`UpdateNotifyStatus`], installer launch via [`UpdateInstallerGlue`], and
+//! changelog state via [`UpdateChangelogVm`]. **Never** log API tokens
+//! ([`UpdateApiToken`]).
 
 mod channel;
 mod changelog;
+mod changelog_vm;
 mod check;
 mod download;
 mod error;
 mod github;
+mod installer;
 mod notify;
 mod version;
 
@@ -27,6 +35,7 @@ pub use notify::{
     UPDATE_NOTIFY_ERROR_TEXT, UPDATE_NOTIFY_UP_TO_DATE_TEXT,
 };
 pub use changelog::{fetch_changelog_live_stub, ChangelogDocument};
+pub use changelog_vm::*;
 pub use check::{
     check_for_update_live_stub, check_for_update_with_manifest, evaluate_release, UpdateCheckResult,
 };
@@ -41,6 +50,7 @@ pub use github::{
     parse_sha_sidecar, target_architecture, try_parse_repo_url, try_validate_http_url,
     ReleaseAsset, ReleaseManifest,
 };
+pub use installer::*;
 pub use version::{
     compare_versions, is_newer, parse_tag_version, try_parse_tag_version, AppVersion,
 };

@@ -18,6 +18,7 @@ mod forwarder;
 mod kinds;
 mod lease;
 mod manager;
+mod os_adapters;
 mod physical_network_path;
 mod providers;
 pub mod sidecar;
@@ -33,6 +34,10 @@ pub use forwarder::{
 pub use kinds::{all_kinds, TunnelKind};
 pub use lease::TunnelLease;
 pub use manager::TunnelManager;
+pub use os_adapters::{
+    AdapterSourceError, FakeAdapterSource, WindowsAdapterSource, Win32AdapterSource,
+    Win32PhysicalNetworkPathProbe,
+};
 pub use physical_network_path::{
     build_physical_network_path, classify_split_route, is_vpn_like_adapter,
     physical_adapter_score, FakePhysicalNetworkPath, PhysicalAdapterKind, PhysicalAdapterRecord,
@@ -104,6 +109,31 @@ pub use providers::auth_glue::{
 };
 #[cfg(feature = "secrets")]
 pub use providers::auth_glue::DpapiAzureVpnRefreshTokenCache;
+pub use providers::stormshield::{
+    encode_stormshield_cache_record, establish_stormshield_portal, extract_ovpn_remote_hosts,
+    looks_like_openvpn_profile, prompt_guarded_stormshield_otp, require_nonempty_profile,
+    require_physical_path, stormshield_cache_record_is_current, validate_stormshield_portal_settings,
+    AutomaticOutcome, FakeStormshieldPortalFetcher, MemoryStormshieldPortalFetcher,
+    MemoryStormshieldProfileCache, ResolveError, SharedStormshieldPortalFetcher,
+    StormshieldOtpReuseGuard, StormshieldPortalFetchCall, StormshieldPortalFetcher,
+    StormshieldPortalRequest, StormshieldPortalSettings, StormshieldProfileCache,
+    StormshieldTlsFailure, STORMSHIELD_CACHE_MAX_AGE, STORMSHIELD_CONFIG_DOWNLOAD_PATH,
+    STORMSHIELD_CONFIG_HASH_PATH, STORMSHIELD_DEFAULT_APP_TOKEN, STORMSHIELD_OTP_REUSE_WINDOW,
+};
+#[cfg(feature = "secrets")]
+pub use providers::stormshield::DpapiStormshieldProfileCache;
+pub use providers::watchguard::{
+    encode_watchguard_cache_record, establish_watchguard_automatic,
+    map_watchguard_resolve_error, prompt_guarded_watchguard_otp,
+    validate_watchguard_portal_settings, watchguard_cache_record_is_current,
+    FakeWatchguardPortalFetcher, MemoryWatchguardPortalFetcher, MemoryWatchguardProfileCache,
+    SharedWatchguardPortalFetcher, WatchguardOtpReuseGuard, WatchguardOutcome,
+    WatchguardPortalFetchCall, WatchguardPortalFetcher, WatchguardPortalRequest,
+    WatchguardPortalSettings, WatchguardProfileCache, WatchguardResolveError, WatchguardTlsFailure,
+    WATCHGUARD_CACHE_MAX_AGE, WATCHGUARD_OTP_REUSE_WINDOW,
+};
+#[cfg(feature = "secrets")]
+pub use providers::watchguard::DpapiWatchguardProfileCache;
 pub use sidecar::{
     candidate_paths, locate_sidecar, parse_ready_or_socks_line, sidecar_binary_name,
     sidecar_relative_path, validate_sidecar_dir, SidecarBinary, SidecarProcess,

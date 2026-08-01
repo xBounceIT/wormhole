@@ -10,6 +10,9 @@
 //! Bitwarden extension roots (`bitwarden-browser-webview2\…`) are **never** wiped.
 //! Empty / whitespace roots and isolated ids **fail closed**. HTTP(S) is
 //! credential-less: [`Debug`] prints lengths / counts / folder-name shapes only.
+//!
+//! The live-disk application of these selection rules (injectable-FS real wipe +
+//! env-args directory glue) lives in [`crate::profile_fs`].
 
 use std::collections::BTreeSet;
 use std::fmt;

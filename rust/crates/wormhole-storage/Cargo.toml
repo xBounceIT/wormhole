@@ -15,8 +15,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 wormhole-domain = { workspace = true }
+wormhole-secrets-win = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 wormhole-testkit = { workspace = true }
-wormhole-secrets-win = { workspace = true }

@@ -1,4 +1,4 @@
-# Wormhole migration: WinUI 3/C# → Rust/GPUI
+﻿# Wormhole migration: WinUI 3/C# → Rust/GPUI
 
 **Status:** WinUI 3/C# remains production. Parallel Rust lab is active (`rust/` — ~20 crates: `surface-lab`, domain/storage/secrets, protocols, tunnels/MCP, session/UI stubs, diagnostics, etc.) with many adversarial ledgers closed. Surface-lab gates 1–8 are **LabOnly** only — see [gate-evidence-log.md](gate-evidence-log.md); none are `HardwarePass`, and there is **no cutover**.  
 **Baseline:** `fc0337e` (app 0.9.0) — see `00-baseline.md`  
@@ -44,6 +44,7 @@
 | [21-quick-connect.md](21-quick-connect.md) | Quick Connect pure state / validation (`wormhole-ui`) |
 | [adversarial-ledger-connection-editor.md](adversarial-ledger-connection-editor.md) | ConnectionEditorState review closed (no GPUI) |
 | [adversarial-ledger-credential-picker.md](adversarial-ledger-credential-picker.md) | Credential picker search glue (`filter_credential_profiles` / Fake / SearchVm) review closed |
+| [adversarial-ledger-credential-binding.md](adversarial-ledger-credential-binding.md) | Credential binding service UI glue (`CredentialBindingVm` / inherit-none-saved constraints, commit-key resolution) review closed |
 | [adversarial-ledger-credentials-page.md](adversarial-ledger-credentials-page.md) | Credentials page list/CRUD Fake glue (`CredentialsPageVm` / `FakeCredentialPageStore` / storage+secrets adapters) review closed |
 | [adversarial-ledger-tunnel-configs-ui.md](adversarial-ledger-tunnel-configs-ui.md) | Tunnel configs page / picker metadata Fake glue (`TunnelConfigsVm` / `TunnelPickerVm`) review closed |
 | [adversarial-ledger-tunnel-test-dialog.md](adversarial-ledger-tunnel-test-dialog.md) | Tunnel test dialog Fake VM glue (`TunnelTestDialogVm` / `FakeTunnelTestLab`) review closed |
@@ -55,17 +56,22 @@
 | [adversarial-ledger-hello-cutover.md](adversarial-ledger-hello-cutover.md) | Hello / app-auth / Bitwarden browser / cutover review closed |
 | [adversarial-ledger-bitwarden-session.md](adversarial-ledger-bitwarden-session.md) | Bitwarden CLI session stub (`StubBitwardenSession` / Fake) review closed |
 | [adversarial-ledger-bitwarden-catalog.md](adversarial-ledger-bitwarden-catalog.md) | Bitwarden virtual credential catalog Fake glue (`BitwardenCredentialCatalogGlue` / stable virtual ids) review closed |
+| [adversarial-ledger-bitwarden-cache-repo.md](adversarial-ledger-bitwarden-cache-repo.md) | Bitwarden SQLite cache repo (`SqliteBitwardenCredentialCacheRepository` / Fake; 0014/0015 schema) review closed |
 | [adversarial-ledger-credential-resolve.md](adversarial-ledger-credential-resolve.md) | Credential password resolution Fake glue (`CredentialPasswordResolverGlue` / local CredMgr vs Bitwarden vault Fake) review closed |
 | [adversarial-ledger-bitwarden-cli-pin.md](adversarial-ledger-bitwarden-cli-pin.md) | Bitwarden CLI install pin + hash Fake glue (`BitwardenCliInstallGlue` / release catalog) review closed |
 | [adversarial-ledger-bitwarden-zip-pin.md](adversarial-ledger-bitwarden-zip-pin.md) | Bitwarden browser extension manual ZIP/folder install pin Fake glue (`BitwardenExtensionInstallGlue` / Fake FS + Fake zip) review closed |
 | [adversarial-ledger-bitwarden-onboarding.md](adversarial-ledger-bitwarden-onboarding.md) | Bitwarden onboarding notice versioning Fake glue (`BitwardenOnboardingNoticeGlue` / settings store) review closed |
 | [adversarial-ledger-settings-bitwarden.md](adversarial-ledger-settings-bitwarden.md) | Settings Extensions Bitwarden vault/browser Fake glue (`BitwardenSettingsExtensionsGlue` / composed secrets Fakes) review closed |
+| [adversarial-ledger-settings-mcp-security.md](adversarial-ledger-settings-mcp-security.md) | Settings MCP toggle + Security section VM glue (`McpSettingsVm` / `SecuritySettingsVm` / Fakes; re-entrancy guard) review closed |
 | [adversarial-ledger-hello-stub.md](adversarial-ledger-hello-stub.md) | Hello AvailabilityProbe / HelloPrompt stub review closed |
 | [adversarial-ledger-app-auth-pin.md](adversarial-ledger-app-auth-pin.md) | App-auth PIN/password Fake verifier (`AppAuthenticationService` / Fake protector) review closed |
 | [adversarial-ledger-idle-lock.md](adversarial-ledger-idle-lock.md) | App idle-lock timeout glue (`AppIdleLockGlue` / `FakeIdleClock`) review closed |
+| [adversarial-ledger-os-idle.md](adversarial-ledger-os-idle.md) | OS idle sampling (`os_idle` / `InputIdleSampler` / real `GetLastInputInfo`) review closed |
 | [adversarial-ledger-hello-unlock-ui.md](adversarial-ledger-hello-unlock-ui.md) | Hello unlock prompt UI glue (`HelloUnlockGlue` / `FakeHelloUnlockUi`) review closed |
+| [adversarial-ledger-hello-consent-ssh-resolver.md](adversarial-ledger-hello-consent-ssh-resolver.md) | Hello consent glue + SSH password resolver/unlock glue (`HelloConsentGlue` / `SshPasswordResolverGlue`) review closed |
 | [adversarial-ledger-domain.md](adversarial-ledger-domain.md) | Domain review closed (73 tests) |
 | [adversarial-ledger-node-change-notifier.md](adversarial-ledger-node-change-notifier.md) | Connection node change Fake pub/sub (`ConnectionNodeChangeEvent` / Fake) review closed |
+| [adversarial-ledger-tree-node-change.md](adversarial-ledger-tree-node-change.md) | Tree node-change subscriber glue (`TreeNodeChangeGlue` / `TreeRefreshSink` / Fake) review closed |
 | [adversarial-ledger-secrets.md](adversarial-ledger-secrets.md) | Secrets review closed (25 tests) |
 | [adversarial-ledger-dpapi-paths.md](adversarial-ledger-dpapi-paths.md) | DPAPI keys/tunnels path confinement review closed |
 | [adversarial-ledger-key-dpapi-crud.md](adversarial-ledger-key-dpapi-crud.md) | Private-key / tunnel DPAPI CRUD stubs (`KeyMaterialStore` / `TunnelPayloadStore`) review closed |
@@ -82,6 +88,7 @@
 | [adversarial-ledger-rust-installer.md](adversarial-ledger-rust-installer.md) | Rust publish/Inno spike review closed |
 | [adversarial-ledger-diagnostics.md](adversarial-ledger-diagnostics.md) | Diagnostics / soak stubs review closed |
 | [adversarial-ledger-diagnostics-runner.md](adversarial-ledger-diagnostics-runner.md) | SoakRunner / FakeClock glue review closed |
+| [adversarial-ledger-crash-wer.md](adversarial-ledger-crash-wer.md) | Crash WER LocalDumps config + sentinel glue (`CrashDiagnosticsGlue` / `FakeWerRegistry`) review closed |
 | [adversarial-ledger-tunnels-mcp.md](adversarial-ledger-tunnels-mcp.md) | Tunnels / MCP / app review closed |
 | [adversarial-ledger-tunnel-lease.md](adversarial-ledger-tunnel-lease.md) | TunnelManager lease glue (coalesce / UpdatedAt / cancel / secret Debug) review closed |
 | [adversarial-ledger-tunnel-route-prompt.md](adversarial-ledger-tunnel-route-prompt.md) | Per-connect tunnel route prompt Fake glue (`resolve_tunnel_route` / `FakeTunnelRoutePromptUi`) review closed |
@@ -90,6 +97,7 @@
 | [adversarial-ledger-mcp-bind.md](adversarial-ledger-mcp-bind.md) | MCP loopback bind hardening (`0.0.0.0` / mapped / zone) review closed |
 | [adversarial-ledger-mcp-tools-list.md](adversarial-ledger-mcp-tools-list.md) | MCP tools/list → capability-report glue (`FakeMcpCapabilityServer`) review closed |
 | [adversarial-ledger-mcp-session-registry.md](adversarial-ledger-mcp-session-registry.md) | MCP live SSH session registry Fake (`FakeMcpSessionRegistry`) review closed |
+| [adversarial-ledger-mcp-tool-runner-scan.md](adversarial-ledger-mcp-tool-runner-scan.md) | MCP tool-runner + live open-tab scan glue (`McpToolRunnerGlue` / `McpLiveTabScanner`) review closed |
 | [adversarial-ledger-mcp-approval-gate.md](adversarial-ledger-mcp-approval-gate.md) | MCP tool approval gate Fake glue (`FakeMcpToolApprovalGlue` / Approve/Deny/Cancel) review closed |
 | [adversarial-ledger-mcp-shutdown-order.md](adversarial-ledger-mcp-shutdown-order.md) | MCP clean-shutdown vs WebView2 flush ordering Fake glue (`FakeAppExitShutdownGlue` / `prepare_for_process_exit`) review closed |
 | [adversarial-ledger-protocols.md](adversarial-ledger-protocols.md) | Terminal / serial / SSH review closed |
@@ -120,6 +128,7 @@
 | [adversarial-ledger-rdp-resolution.md](adversarial-ledger-rdp-resolution.md) | RDP ResolutionDebouncer review closed |
 | [adversarial-ledger-rdp-resize-glue.md](adversarial-ledger-rdp-resize-glue.md) | RDP `RdpResolutionLayoutGlue` / Fake resize glue review closed |
 | [adversarial-ledger-rdp-display-redirect.md](adversarial-ledger-rdp-display-redirect.md) | RDP display/redirect Fake configure glue (`RdpDisplayRedirectGlue`) review closed |
+| [adversarial-ledger-rdp-drive-list.md](adversarial-ledger-rdp-drive-list.md) | RDP drive-list parity module (`DriveCollection` parse/validate/normalise; C#-exact UTF-16 counting) review closed |
 | [adversarial-ledger-rdp-performance-flags.md](adversarial-ledger-rdp-performance-flags.md) | RDP performance flags / bitmap-cache Fake configure glue (`RdpPerformanceFlagsGlue`) review closed |
 | [adversarial-ledger-rdp-forwarder.md](adversarial-ledger-rdp-forwarder.md) | RDP `select_rdp_connect_target` / LocalForwarder stub review closed |
 | [adversarial-ledger-focus-a11y.md](adversarial-ledger-focus-a11y.md) | FocusBroker + a11y (gates 7–8) review closed |
@@ -132,6 +141,7 @@
 | [adversarial-ledger-http-route.md](adversarial-ledger-http-route.md) | HTTP SOCKS vs local-forwarder selection — full gates (2 adv + 3 simplify) |
 | [adversarial-ledger-http-nav-report.md](adversarial-ledger-http-nav-report.md) | HTTP/HTTPS nav-result → session-status Fake glue review closed |
 | [adversarial-ledger-http-profile-wipe.md](adversarial-ledger-http-profile-wipe.md) | HTTP/HTTPS WebView2 profile isolation / wipe Fake glue review closed |
+| [adversarial-ledger-http-profile-fs.md](adversarial-ledger-http-profile-fs.md) | HTTP/HTTPS profile wipe real-FS glue (`ProfileWipeGlue` / `ProfileFs` real+fake; Bitwarden markers preserved) review closed |
 | [adversarial-ledger-http-new-window.md](adversarial-ledger-http-new-window.md) | HTTP/HTTPS new-window / popup policy Fake glue review closed |
 | [adversarial-ledger-vnc-framebuffer.md](adversarial-ledger-vnc-framebuffer.md) | VNC framebuffer / input queue review closed |
 | [adversarial-ledger-vnc-forwarder.md](adversarial-ledger-vnc-forwarder.md) | VNC `select_vnc_connect_target` / LocalForwarder stub review closed |
@@ -159,6 +169,7 @@
 | [adversarial-ledger-tls-trust-prompt.md](adversarial-ledger-tls-trust-prompt.md) | TLS trust prompt Fake glue (`TlsTrustPrompt` / `TlsTrustPromptChannel` / Fake) review closed |
 | [adversarial-ledger-watchguard-auth.md](adversarial-ledger-watchguard-auth.md) | WatchGuard Firebox auth stub review closed |
 | [adversarial-ledger-watchguard-establish.md](adversarial-ledger-watchguard-establish.md) | WatchGuard establish-path glue (`establish_watchguard` / `_crv1` / `_portal`) review closed |
+| [adversarial-ledger-tunnels-os-adapters-watchguard.md](adversarial-ledger-tunnels-os-adapters-watchguard.md) | Live iphlpapi adapter source (`Win32AdapterSource`) + WatchGuard portal/OTP establish glue review closed |
 | [adversarial-ledger-fortinet-saml.md](adversarial-ledger-fortinet-saml.md) | Fortinet SamlAuthFlow stub review closed |
 | [adversarial-ledger-fortinet-saml-ui.md](adversarial-ledger-fortinet-saml-ui.md) | Fortinet SAML prompt UI glue (`SamlPromptChannel` / Fake) review closed |
 | [adversarial-ledger-fortinet-establish.md](adversarial-ledger-fortinet-establish.md) | Fortinet establish-path glue (`establish_fortinet` / settings → sidecar) review closed |
@@ -173,6 +184,7 @@
 | [adversarial-ledger-logging-boot.md](adversarial-ledger-logging-boot.md) | Logging boot/settings → redaction glue (`apply_logging_boot` / `FakeLogSink`) review closed |
 | [adversarial-ledger-update-channel.md](adversarial-ledger-update-channel.md) | UpdateChecker / NetworkStub / Fake / UpdateApiToken review closed |
 | [adversarial-ledger-update-notify.md](adversarial-ledger-update-notify.md) | Update check UI notify glue (`check_now` / `UpdateNotifyGlue` stamp/skip/startup) review closed |
+| [adversarial-ledger-update-installer.md](adversarial-ledger-update-installer.md) | Update installer launch + changelog VM glue (`UpdateInstallerGlue` / `FakeInstallerLauncher` / `UpdateChangelogVm`) review closed |
 | [adversarial-ledger-terminal-bridge.md](adversarial-ledger-terminal-bridge.md) | Terminal bridge + gate05 review closed |
 | [adversarial-ledger-clipboard-auto-sudo.md](adversarial-ledger-clipboard-auto-sudo.md) | HostClipboard + auto-sudo detector review closed |
 | [adversarial-ledger-auto-sudo-session-glue.md](adversarial-ledger-auto-sudo-session-glue.md) | Auto-sudo session glue (`AutoSudoSessionGlue` / FakeTerminalSession) review closed |
@@ -193,8 +205,10 @@
 | [adversarial-ledger-session-tabs.md](adversarial-ledger-session-tabs.md) | SessionTabBarState / ProtocolBadge review closed |
 | [adversarial-ledger-session-tab-orch.md](adversarial-ledger-session-tab-orch.md) | Session tab ↔ orchestrator glue review closed |
 | [adversarial-ledger-tab-close-dispose.md](adversarial-ledger-tab-close-dispose.md) | Tab close → orchestrator dispose (`SessionBindings` / cancel / lease) review closed |
+| [adversarial-ledger-tab-close-confirm.md](adversarial-ledger-tab-close-confirm.md) | Session tab close-confirm Fake VM glue (`TabCloseConfirmVm` / Fake + channel UI) review closed |
 | [adversarial-ledger-stormshield-auth.md](adversarial-ledger-stormshield-auth.md) | Stormshield SNS auth_glue stub review closed |
 | [adversarial-ledger-stormshield-establish.md](adversarial-ledger-stormshield-establish.md) | Stormshield SNS establish-path glue (`establish_stormshield` / `_sns`) review closed |
+| [adversarial-ledger-stormshield-portal.md](adversarial-ledger-stormshield-portal.md) | Stormshield portal/cache/ConfirmTrust/physical-path Fake glue (`StormshieldPortalGlue` / OTP reuse guard) review closed |
 | [adversarial-ledger-cisco-auth.md](adversarial-ledger-cisco-auth.md) | Cisco aggregate-auth stub review closed |
 | [adversarial-ledger-cisco-establish.md](adversarial-ledger-cisco-establish.md) | Cisco establish-path glue review closed |
 | [adversarial-ledger-openvpn-establish.md](adversarial-ledger-openvpn-establish.md) | OpenVPN establish-path glue (`establish_openvpn` / Fake lookups) review closed |

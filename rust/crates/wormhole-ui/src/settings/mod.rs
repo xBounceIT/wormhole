@@ -5,6 +5,10 @@ mod store;
 mod terminal_apply;
 mod view_model;
 
+#[cfg(feature = "mcp")]
+mod mcp;
+mod security;
+
 #[cfg(feature = "storage")]
 mod storage_store;
 
@@ -22,6 +26,18 @@ pub use terminal_apply::{
     terminal_settings_config_from_app,
 };
 pub use view_model::{normalize_retention_days, SettingsViewModel};
+
+#[cfg(feature = "mcp")]
+pub use mcp::{
+    validate_mcp_port_setting, FakeMcpApplyHost, FakeMcpTokenHandle, McpApplyError,
+    McpApplyHost, McpNestedSink, McpPortError, McpSettingsError, McpSettingsFakeHarness,
+    McpSettingsGlue, McpSettingsUiState, McpSettingsVm, McpTokenError, McpTokenHandle,
+};
+pub use security::{
+    effective_idle_policy, fallback_relevant, validate_idle_timeout,
+    IdleLockPolicy, SecuritySettingsError, SecuritySettingsFakeHarness, SecuritySettingsGlue,
+    SecuritySettingsUiState, SecuritySettingsVm, IDLE_TIMEOUT_PRESETS,
+};
 
 #[cfg(feature = "storage")]
 pub use storage_store::StorageSettingsStore;

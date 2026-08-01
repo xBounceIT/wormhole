@@ -4,13 +4,17 @@
 //! (default). Thin filter query → visible ids lives in [`filter`]. Reparent / drag
 //! validation (+ Fake apply / optional storage connection reparent) lives in
 //! [`reparent`]. Duplicate connection (+ Fake apply / optional storage) lives in
-//! [`duplicate`].
+//! [`duplicate`]. Live refresh from `wormhole-domain` node-change pub/sub
+//! (events → tree reload / in-place patch / session-profile refresh hints) lives
+//! in [`node_change`]; hosts consume it through [`TreeNodeChangeGlue`] and a
+//! [`TreeRefreshSink`] (with [`FakeTreeRefreshSink`] for tests).
 
 mod duplicate;
 mod error;
 mod filter;
 mod model;
 mod node;
+mod node_change;
 mod reparent;
 mod source;
 
@@ -28,6 +32,10 @@ pub use filter::{
 };
 pub use model::{ConnectionTreeModel, FlattenedRow, MAX_DISPLAYED_SEARCH_MATCHES};
 pub use node::TreeNode;
+pub use node_change::{
+    FakeTreeRefreshSink, TreeRefreshCall, TreeNodeChangeCounters, TreeNodeChangeGlue,
+    TreeRefreshSink,
+};
 pub use reparent::{
     apply_reparent_memory, reparent_memory, should_reject_drag_selection,
     should_reject_drag_selection_from, validate_reparent, validate_reparent_from, ReparentError,

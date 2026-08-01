@@ -32,7 +32,7 @@ pub const FAKE_STORMSHIELD_PROFILE_OVPN: &str = "client\nremote 127.0.0.1 443 tc
 /// ovpn-backed providers already exercise.
 pub const FAKE_STORMSHIELD_SIDECAR_JSON: &[u8] = br#"{"profile_ovpn":"client\nremote 127.0.0.1 443 tcp\n","username":"sns-user","password":"x"}"#;
 
-fn require_stormshield_provider(provider: &dyn TunnelProvider) -> Result<(), TunnelError> {
+pub(crate) fn require_stormshield_provider(provider: &dyn TunnelProvider) -> Result<(), TunnelError> {
     if provider.kind() != TunnelKind::Stormshield {
         return Err(TunnelError::WrongKind {
             expected: TunnelKind::Stormshield,
@@ -42,7 +42,7 @@ fn require_stormshield_provider(provider: &dyn TunnelProvider) -> Result<(), Tun
     Ok(())
 }
 
-fn load_stormshield_record(
+pub(crate) fn load_stormshield_record(
     config_id: Uuid,
     configs: &dyn TunnelConfigLookup,
 ) -> Result<crate::TunnelConfigRecord, TunnelError> {
@@ -60,7 +60,7 @@ fn load_stormshield_record(
     Ok(record)
 }
 
-async fn establish_with_secret(
+pub(crate) async fn establish_with_secret(
     record: &crate::TunnelConfigRecord,
     secret: &[u8],
     provider: &dyn TunnelProvider,

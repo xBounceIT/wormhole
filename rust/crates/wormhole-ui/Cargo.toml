@@ -32,6 +32,8 @@ session = ["dep:wormhole-session"]
 tunnels = ["dep:wormhole-tunnels", "dep:tokio", "dep:tokio-util", "dep:async-trait", "session"]
 # UpdateChecker → Settings/UI notify glue (Fake / NetworkStub; no live HTTP).
 update = ["dep:wormhole-update"]
+# Settings MCP toggle / port / bearer-token VM glue (no live server start/stop).
+mcp = ["dep:wormhole-mcp"]
 
 [dependencies]
 thiserror = { workspace = true }
@@ -50,6 +52,7 @@ wormhole-tunnels = { workspace = true, optional = true }
 tokio-util = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 wormhole-update = { workspace = true, optional = true }
+wormhole-mcp = { workspace = true, default-features = false, optional = true }
 tokio = { workspace = true, optional = true, features = ["sync", "macros", "rt", "time"] }
 gpui = { workspace = true, optional = true }
 gpui_platform = { workspace = true, optional = true }
@@ -63,6 +66,7 @@ wormhole-import = { workspace = true }
 wormhole-secrets-win = { workspace = true }
 wormhole-tunnels = { workspace = true }
 wormhole-update = { workspace = true }
+wormhole-mcp = { workspace = true, default-features = false }
 
 [[test]]
 name = "connection_editor_persist"

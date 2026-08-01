@@ -39,6 +39,15 @@ uuid = { workspace = true, features = ["std"] }
 wormhole-domain = { workspace = true, optional = true }
 wormhole-secrets-win = { workspace = true, optional = true }
 
+[target.'cfg(windows)'.dependencies]
+# Live `GetAdaptersAddresses` / `GetBestInterfaceEx` enumeration for the physical-path probe.
+# The workspace root already enables `Win32_NetworkManagement_IpHelper`; the IpHelper
+# `IP_ADAPTER_ADDRESSES_LH` struct and `GetBestInterfaceEx` also need the Ndis + WinSock modules.
+windows = { workspace = true, features = [
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+] }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "process", "io-util", "net"] }

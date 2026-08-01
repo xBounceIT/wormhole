@@ -13,8 +13,10 @@
 //! | elapsed since last activity ≥ timeout | lock |
 //! | already locked | `false` (do not re-fire) |
 //!
-//! Production OS idle sampling (`GetLastInputInfo`) and suspend-gap estimation
-//! remain host responsibilities — this stub tracks last-activity only.
+//! Production OS idle sampling (`GetLastInputInfo`) now lives in
+//! [`crate::os_idle`] (`Win32InputIdleSampler`); suspend-gap estimation (C#
+//! `SuspendedTimerGap`) remains a host responsibility — this glue tracks
+//! last-activity only.
 //! [`FakeIdleClock`] keeps unit tests deterministic (no wall sleep).
 //!
 //! **Never** log PIN / password / biometric material — this module holds no

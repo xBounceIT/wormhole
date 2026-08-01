@@ -41,6 +41,19 @@ pub enum UpdateError {
         /// Configured maximum.
         max: usize,
     },
+    /// Installer flow precondition not met (nothing staged / wrong stage).
+    ///
+    /// Returned when [`crate::UpdateInstallerGlue::verify`] /
+    /// [`prepare_and_launch`](crate::UpdateInstallerGlue::prepare_and_launch) is
+    /// driven out of sequence — fail closed, never launch from the wrong stage.
+    InstallerNotStaged,
+    /// Live installer launch failed (host's `Process.Start` wrapper returned an error).
+    ///
+    /// The glue transitions to a `LaunchFailed` phase and **never reports success**.
+    InstallerLaunchFailed(String),
+    /// The Bitwarden-flush / session-close hook before launch failed
+    /// (C# `PrepareForProcessExitAsync`). Aborts **before** launching.
+    PrepareForInstallFailed(String),
     /// Filesystem I/O while writing the installer temp / cache file.
     Io(std::io::Error),
 }
@@ -81,6 +94,11 @@ impl fmt::Display for UpdateError {
             Self::InstallerTooLarge { size, max } => {
                 write!(f, "installer payload too large: {size} bytes (max {max})")
             }
+            Self::InstallerNotStaged => {
+                write!(f, "installer flow is not in the expected stage (not staged yet or wrong phase)")
+            }
+            Self::InstallerLaunchFailed(s) => write!(f, "failed to launch installer: {s}"),
+            Self::PrepareForInstallFailed(s) => write!(f, "failed to prepare for install: {s}"),
             Self::Io(e) => write!(f, "I/O error: {e}"),
         }
     }

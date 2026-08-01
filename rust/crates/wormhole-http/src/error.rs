@@ -30,7 +30,23 @@ pub enum HttpError {
     #[error("isolated profile id must not be empty")]
     EmptyIsolatedId,
 
-    /// Fake store refused identical web + Bitwarden roots (wipe would be unsafe).
+    /// Refused identical or nested web + Bitwarden roots (a wipe would otherwise
+    /// reach the persistent Bitwarden storage).
     #[error("web browser and Bitwarden profile roots must differ")]
     WebProfileRootCollision,
+
+    /// Web profile path escaped the web root (`..`, absolute, empty) — rejected
+    /// before any wipe IO. Never embeds the offending path.
+    #[error("web browser profile path is not confined under the web root")]
+    UnsafeProfilePath,
+
+    /// Injectable web-profile filesystem operation failed (IO / confinement / not found).
+    #[error("web profile filesystem: {0}")]
+    ProfileFs(crate::profile_fs::ProfileFsError),
+}
+
+impl From<crate::profile_fs::ProfileFsError> for HttpError {
+    fn from(value: crate::profile_fs::ProfileFsError) -> Self {
+        HttpError::ProfileFs(value)
+    }
 }

@@ -14,6 +14,7 @@ mod browser_args;
 mod error;
 mod nav_report;
 mod new_window;
+mod profile_fs;
 mod profile_wipe;
 mod route;
 mod target;
@@ -33,6 +34,10 @@ pub use nav_report::{
 pub use new_window::{
     build_bitwarden_popup_uri, decide_bitwarden_popup, decide_new_window_policy,
     get_in_session_navigation_uri, FakeNewWindowSurface, NewWindowPolicy,
+};
+pub use profile_fs::{
+    confine_profile_path, FakeProfileFs, ProfileFs, ProfileFsError, ProfileWipeGlue,
+    ProfileWipeReport, RealProfileFs,
 };
 pub use profile_wipe::{
     keyed_shared_folder_fingerprint_args, keyed_shared_folder_name, requires_isolated_web_profile,

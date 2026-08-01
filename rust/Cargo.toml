@@ -63,7 +63,7 @@ wormhole-serial = { path = "crates/wormhole-serial" }
 wormhole-ssh = { path = "crates/wormhole-ssh" }
 wormhole-sftp = { path = "crates/wormhole-sftp" }
 wormhole-tunnels = { path = "crates/wormhole-tunnels" }
-wormhole-mcp = { path = "crates/wormhole-mcp" }
+wormhole-mcp = { path = "crates/wormhole-mcp", default-features = false }
 wormhole-app = { path = "crates/wormhole-app" }
 wormhole-ui = { path = "crates/wormhole-ui" }
 wormhole-vnc = { path = "crates/wormhole-vnc" }
@@ -148,4 +148,5 @@ features = [
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_NetworkManagement_IpHelper",
 ]

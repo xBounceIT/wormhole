@@ -28,6 +28,7 @@ mod bitwarden_onboarding_notice;
 #[cfg(feature = "secrets")]
 mod settings_bitwarden_extensions;
 mod connection_editor;
+mod credential_binding;
 mod credential_picker;
 mod credentials_page_ui;
 #[cfg(feature = "import")]
@@ -44,6 +45,7 @@ mod quick_connect;
 mod serial_ports;
 mod serial_presets;
 mod session_tab_bar;
+mod tab_close_confirm;
 mod settings;
 mod shell;
 mod tabs;
@@ -84,6 +86,12 @@ pub use connection_editor::{
     ConnectionEditorMode, ConnectionEditorState, CredentialUiMode, RdpDriveRedirectMode,
     SshAutoSudoMode, TunnelUiSelection, TunnelUiState, ValidationError, ValidationReport,
     VisibleFields, WriteOptions,
+};
+pub use credential_binding::{
+    parse_credential_id_text, resolve_commit_credential, CredentialBindingError,
+    CredentialBindingGlue, CredentialBindingPlan, CredentialBindingReport,
+    CredentialBindingVm, CredentialBindingWarning, FakeCredentialBindingLab,
+    ParentBindingContext,
 };
 pub use credential_picker::{
     filter_credential_profiles, filter_credential_profiles_from, profile_matches_query,
@@ -169,6 +177,17 @@ pub use settings::{
     SettingsStore, SettingsViewModel, BITWARDEN_ONBOARDING_INTRODUCED_SCHEMA_VERSION,
     CURRENT_SCHEMA_VERSION,
 };
+pub use settings::{
+    effective_idle_policy, fallback_relevant, validate_idle_timeout, IdleLockPolicy,
+    SecuritySettingsError, SecuritySettingsFakeHarness, SecuritySettingsGlue,
+    SecuritySettingsUiState, SecuritySettingsVm, IDLE_TIMEOUT_PRESETS,
+};
+#[cfg(feature = "mcp")]
+pub use settings::{
+    validate_mcp_port_setting, FakeMcpApplyHost, FakeMcpTokenHandle, McpApplyError, McpApplyHost,
+    McpNestedSink, McpPortError, McpSettingsError, McpSettingsFakeHarness, McpSettingsGlue,
+    McpSettingsUiState, McpSettingsVm, McpTokenError, McpTokenHandle,
+};
 // Re-export terminal settings apply types used by the AppSettings mapper.
 pub use wormhole_terminal::{
     accept_selection_auto_copy, apply_terminal_settings, AppliedTerminalSettings,
@@ -180,15 +199,20 @@ pub use session_tab_bar::{
 };
 pub use shell::{ShellState, SidebarRegion};
 pub use tabs::{SessionTab, TabStrip};
+pub use tab_close_confirm::{
+    ChannelTabCloseConfirmUi, CloseAllOutcome, CloseRequestOutcome, FakeTabCloseConfirmUi,
+    TabCloseConfirmChannel, TabCloseConfirmRequest, TabCloseConfirmUi, TabCloseConfirmVm,
+};
 pub use theme::{ThemeTokens, THEME};
 pub use tree::{
     apply_duplicate_memory, apply_reparent_memory, build_duplicate, build_duplicate_from,
     duplicate_memory, fields_match_query_lower, node_matches_query, reparent_memory,
     should_reject_drag_selection, should_reject_drag_selection_from, validate_reparent,
     validate_reparent_from, visible_connection_ids, visible_connection_ids_from, BuiltDuplicate,
-    ConnectionNodeSource, ConnectionTreeModel, DuplicateError, FlattenedRow,
-    MemoryConnectionSource, ReparentError, ReparentOptions, TreeError, TreeNode, ValidatedReparent,
-    DUPLICATE_NAME_SUFFIX, MAX_DISPLAYED_SEARCH_MATCHES,
+    ConnectionNodeSource, ConnectionTreeModel, DuplicateError, FakeTreeRefreshSink, FlattenedRow,
+    MemoryConnectionSource, ReparentError, ReparentOptions, TreeError, TreeNode,
+    TreeNodeChangeCounters, TreeNodeChangeGlue, TreeRefreshCall, TreeRefreshSink,
+    ValidatedReparent, DUPLICATE_NAME_SUFFIX, MAX_DISPLAYED_SEARCH_MATCHES,
 };
 #[cfg(feature = "session")]
 pub use tree::{

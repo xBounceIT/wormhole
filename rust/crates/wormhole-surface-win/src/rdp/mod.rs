@@ -10,7 +10,8 @@
 //!
 //! - [`HostBounds`], [`RdpCrashSentinel`], [`ResolutionDebouncer`], and
 //!   [`RdpResolutionLayoutGlue`] / [`FakeRdpResizeSurface`] always compile
-//!   (no `mstscax`).
+//!   (no `mstscax`); so does [`normalise_drive_list`] / [`parse_drive_letters`] /
+//!   [`validate_drive_list`] + [`DriveLetters`] (pure `RdpDriveList` port, no COM).
 //! - `--features rdp`: owned overlay + OLE in-place MsRdpClient + CredSSP configure
 //!   + tunnel policy validation + BindLocalForwarder dial-target stub + event sink stub
 //!   + CredSSP password-wipe ↔ connect-attempt Fake glue (no live OCX)
@@ -19,11 +20,16 @@
 //!   + External mstsc.exe + tunnel reject → Fake policy glue (no Process::Command)
 //!   + Azure AD / external-client routing → Fake detection glue (no live WAM/AAD).
 
+mod drive_list;
 mod host_bounds;
 mod resize_glue;
 mod resolution;
 mod sentinel;
 
+pub use drive_list::{
+    normalise_drive_list, parse_drive_letters, validate_drive_list, DriveLetters,
+    RdpDriveListError, RdpDriveListErrorKind, DRIVE_LIST_ALL_SENTINEL,
+};
 pub use host_bounds::HostBounds;
 pub use resize_glue::{
     desktop_size_from_layout_f64, FakeRdpResizeSurface, RdpResolutionLayoutGlue,
@@ -81,9 +87,9 @@ pub use credssp_connect_glue::{
 };
 #[cfg(all(windows, feature = "rdp"))]
 pub use display_redirect_glue::{
-    parse_redirect_drives, resolve_connect_desktop_size, validate_desktop_axes,
-    DesktopSizeContext, DisplayRedirectGlueError, DisplayRedirectReport, FakePropOutcome,
-    FakePropPut, FakePropRecord, FakeRdpPropertySurface, RdpDisplayRedirectGlue,
+    parse_redirect_drives, parse_redirect_drives_canonical, resolve_connect_desktop_size,
+    validate_desktop_axes, DesktopSizeContext, DisplayRedirectGlueError, DisplayRedirectReport,
+    FakePropOutcome, FakePropPut, FakePropRecord, FakeRdpPropertySurface, RdpDisplayRedirectGlue,
     RedirectDrivesIntent, DESKTOP_DEFAULT_HEIGHT, DESKTOP_DEFAULT_WIDTH, DESKTOP_MIN_HEIGHT,
     DESKTOP_MIN_WIDTH, LOUD_DISPLAY_PROPS, REDIRECT_DRIVES_ALL, SOFT_DISPLAY_REDIRECT_PROPS,
 };

@@ -17,6 +17,7 @@ use std::fmt;
 
 use wormhole_domain::{ConnectionProfile, RdpScreenSizes};
 
+use super::drive_list;
 use super::configure::{normalise_color_depth, MAX_DESKTOP_AXIS};
 
 /// C# `RdpDesktopSizeResolver.MinimumWidth` — connect-time logon UI floor.
@@ -241,6 +242,23 @@ pub fn parse_redirect_drives(raw: &str) -> RedirectDrivesIntent {
         RedirectDrivesIntent::None
     } else {
         RedirectDrivesIntent::Letters(letters)
+    }
+}
+
+/// Canonical drive-list parse → glue intent (thin [`drive_list`] adapter).
+///
+/// Behaviorally identical to [`parse_redirect_drives`], but delegates to the
+/// shared `RdpDriveList.ParseLetters`-parity module instead of re-parsing inline:
+/// empty/whitespace → [`RedirectDrivesIntent::None`], `"all"` →
+/// [`RedirectDrivesIntent::All`], letter list → [`RedirectDrivesIntent::Letters`].
+/// The closed [`parse_redirect_drives`] passes through unchanged (adversarial-ledger
+/// display-redirect reviewed clean); this adapter is the canonical path for callers
+/// that want the shared `rdp::drive_list` parser (incl. its fail-closed letter rule).
+pub fn parse_redirect_drives_canonical(raw: &str) -> RedirectDrivesIntent {
+    match drive_list::parse_drive_letters(Some(raw)) {
+        None => RedirectDrivesIntent::All,
+        Some(letters) if letters.is_empty() => RedirectDrivesIntent::None,
+        Some(letters) => RedirectDrivesIntent::Letters(letters.into_iter().collect()),
     }
 }
 
@@ -949,5 +967,24 @@ mod tests {
         assert_eq!(parse_redirect_drives("ALL"), RedirectDrivesIntent::All);
         // Whitespace around sentinel is not "all" (C# OrdinalIgnoreCase on raw) → junk → None.
         assert_eq!(parse_redirect_drives(" all "), RedirectDrivesIntent::None);
+    }
+
+    #[test]
+    fn canonical_adapter_matches_closed_parse() {
+        // Thin drive_list adapter must be behavior-identical to the closed glue parse
+        // (no regressions against the reviewed display-redirect ledger).
+        let cases = [
+            "C", "c", "C,D,E", "c;d;e", "C D E", "  C , d ; e ", "C,C,c", "Z,A",
+            "C,12,D", "cf", "all", "ALL", " all ", "allx", "", "   ", "\t\r\n",
+            "C,,D", "C,", ",C", "é", "1", "😀", "A,😀", "C\x01", "\x01",
+            "all\t", "\u{00A0}all", "C,\u{00A0}D", "A,B,A", "\u{1f600}\u{1f601}",
+        ];
+        for raw in cases {
+            assert_eq!(
+                parse_redirect_drives_canonical(raw),
+                parse_redirect_drives(raw),
+                "pair mismatch for {raw:?}"
+            );
+        }
     }
 }

@@ -18,8 +18,21 @@
 //!   set/verify/clear (`AppAuthenticationService` + `FakeAppAuthenticationDataProtector`);
 //!   Windows Hello `AvailabilityProbe` / `HelloPrompt` (+ `FakeHelloPrompt` for tests);
 //!   interactive WinRT `UserConsentVerifier` is **not** wired yet
+//! - Windows Hello consent glue (`HelloConsentGlue` + `HelloConsentUi` /
+//!   `FakeHelloConsentUi` / `HelloConsentChannel` + `RemoteSessionDetector` /
+//!   `FakeRemoteSessionDetector`): remote → availability → UI fail-closed ordering;
+//!   never fail-open to a weaker auth; no WinRT/user-verification I/O
+//! - SSH full password resolver + Bitwarden unlock-prompt glue
+//!   (`SshPasswordResolverGlue` + `UnlockPromptUi` / `FakeUnlockPromptUi` /
+//!   `UnlockPromptChannel`): inline (leaf-only) → saved local → Bitwarden vault in
+//!   C# order; locked vault → prompt → unlock → retry once; cancel/error abort;
+//!   password values `Debug` length-only
 //! - App idle-lock timeout glue (`AppIdleLockGlue` + `FakeIdleClock`); last-activity
 //!   tracking; Disabled / Never never lock; zero/negative duration fail-closed; no GPUI
+//! - OS idle sampling (`os_idle`: `InputIdleSampler` + `Win32InputIdleSampler` /
+//!   `FakeInputIdleSampler`, `idle_duration`, `should_lock_with_os_idle`) —
+//!   `GetLastInputInfo` wired and fail-closed; suspend-gap estimation (C#
+//!   `SuspendedTimerGap`) and WinRT Hello consent still unwired
 //! - Bitwarden CLI unlock / memory-only session stub (`BitwardenSession` +
 //!   `StubBitwardenSession` / `FakeBitwardenSession`); `bw` process spawn is **not** wired yet
 //! - Bitwarden CLI install pin + hash Fake glue (`BitwardenCliInstallGlue` /
@@ -69,10 +82,13 @@ mod cred_mgr;
 mod dpapi;
 mod entropy;
 mod hello;
+mod hello_consent;
 mod idle_lock;
 mod key_tunnel;
+mod os_idle;
 mod paths;
 mod redact;
+mod ssh_password_resolver;
 mod transient_session;
 #[cfg(windows)]
 mod win32;
@@ -150,8 +166,17 @@ pub use hello::{
     AvailabilityProbe, FakeHelloPrompt, HelloAvailability, HelloPrompt, HelloVerification,
     StubHelloPrompt, REMOTE_DESKTOP_UNAVAILABLE_MESSAGE, SM_REMOTESESSION, WINRT_HELLO_GAP,
 };
+pub use hello_consent::{
+    ChannelHelloConsentUi, FakeHelloConsentUi, FakeRemoteSessionDetector, HELLO_CONSENT_CANCELED_MESSAGE,
+    HELLO_CONSENT_CONFIRMED_MESSAGE, HelloConsentChannel, HelloConsentChoice, HelloConsentGlue,
+    HelloConsentResult, HelloConsentUi, PendingHelloConsent, RemoteSessionDetector,
+};
 pub use idle_lock::{
     AppIdleLockGlue, FakeIdleClock, IdleInstant, IdleLockClock, SystemIdleLockClock,
+};
+pub use os_idle::{
+    idle_duration, should_lock_with_os_idle, FakeInputIdleSampler, IdleSampleError,
+    InputIdleSampler, Win32InputIdleSampler,
 };
 pub use key_tunnel::{
     delete_key_payload, delete_key_payload_under, delete_tunnel_payload,
@@ -173,6 +198,12 @@ pub use paths::{
 };
 pub use redact::{
     redact_env_and_cli_secrets, redact_secret, redact_truncated, REDACTED, REDACT_TRUNCATE_DEFAULT,
+};
+pub use ssh_password_resolver::{
+    ChannelUnlockPromptUi, FakeUnlockPromptScript, FakeUnlockPromptUi, PendingUnlockPrompt,
+    SshPasswordError, SshPasswordRequest, SshPasswordResolution, SshPasswordResolverGlue,
+    SshPasswordSource, SshPasswordValue, UnlockPromptChannel, UnlockPromptChoice,
+    UnlockPromptResponse, UnlockPromptUi,
 };
 pub use transient_session::{
     FakeTransientSessionCredentialStore, MemoryTransientSessionCredentialStore,

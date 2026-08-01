@@ -9292,6 +9292,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "windows 0.61.3",
  "wormhole-domain",
  "wormhole-secrets-win",
 ]
@@ -9313,6 +9314,7 @@ dependencies = [
  "uuid",
  "wormhole-domain",
  "wormhole-import",
+ "wormhole-mcp",
  "wormhole-secrets-win",
  "wormhole-serial",
  "wormhole-session",

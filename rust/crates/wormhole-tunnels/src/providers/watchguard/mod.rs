@@ -14,6 +14,7 @@
 
 pub mod establish;
 pub mod firebox_auth;
+pub mod portal;
 
 pub use establish::{
     establish_watchguard, establish_watchguard_crv1, establish_watchguard_portal,
@@ -26,3 +27,15 @@ pub use firebox_auth::{
     FireboxCredentials, FireboxPassword, FireboxSecondFactor, FireboxUsername,
     FIREBOX_DEFAULT_DOMAIN, FIREBOX_PUSH_SELECTOR,
 };
+pub use portal::{
+    encode_watchguard_cache_record, establish_watchguard_automatic,
+    map_watchguard_resolve_error, prompt_guarded_watchguard_otp,
+    validate_watchguard_portal_settings, watchguard_cache_record_is_current,
+    FakeWatchguardPortalFetcher, MemoryWatchguardPortalFetcher, MemoryWatchguardProfileCache,
+    SharedWatchguardPortalFetcher, WatchguardOtpReuseGuard, WatchguardOutcome,
+    WatchguardPortalFetchCall, WatchguardPortalFetcher, WatchguardPortalRequest,
+    WatchguardPortalSettings, WatchguardProfileCache, WatchguardResolveError,
+    WatchguardTlsFailure, WATCHGUARD_CACHE_MAX_AGE, WATCHGUARD_OTP_REUSE_WINDOW,
+};
+#[cfg(feature = "secrets")]
+pub use portal::DpapiWatchguardProfileCache;

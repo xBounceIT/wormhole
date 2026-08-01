@@ -9,12 +9,14 @@ mod bind;
 mod capability;
 mod error;
 mod host;
+mod live_tab_scan;
 #[cfg(feature = "rmcp")]
 mod rmcp_handler;
 mod session_registry;
 mod shutdown_order;
 mod stub;
 mod token;
+mod tool_runner;
 
 pub use approval::{
     approve_pending, cancel_pending, deny_pending, ApprovalDecision, ApprovalRequest,
@@ -32,6 +34,9 @@ pub use capability::{
 };
 pub use error::McpError;
 pub use host::McpServerHost;
+pub use live_tab_scan::{
+    FakeMcpOpenTabSource, McpLiveTabScanner, McpOpenTabSource, McpScanReport, ScanTick,
+};
 pub use session_registry::{
     canonicalize_session_id, FakeMcpSessionRegistry, McpSessionInfo, McpSessionRegistry,
     McpSessionStatus,
@@ -45,6 +50,11 @@ pub use stub::HttpPlaceholderMcpHost;
 pub use token::{
     extract_bearer_token, generate_bearer_token, is_authorized, tokens_equal, McpTokenStore,
     MemoryTokenStore,
+};
+pub use tool_runner::{
+    FakeMcpShellRunner, FakeMcpToolDispatch, McpDispatchRequest, McpShellCallKind,
+    McpShellCallRecord, McpShellCommandResult, McpShellRunner, McpToolDispatch, McpToolResult,
+    McpToolRunnerGlue, ToolCallArgs,
 };
 
 #[cfg(feature = "secrets")]

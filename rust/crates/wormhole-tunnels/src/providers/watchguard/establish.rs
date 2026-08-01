@@ -35,7 +35,7 @@ pub const FAKE_WATCHGUARD_PROFILE_OVPN: &str = "client\nremote 127.0.0.1 443 tcp
 /// ovpn-backed providers already exercise.
 pub const FAKE_WATCHGUARD_SIDECAR_JSON: &[u8] = br#"{"profile_ovpn":"client\nremote 127.0.0.1 443 tcp\n","username":"wg-user","password":"x"}"#;
 
-fn require_watchguard_provider(provider: &dyn TunnelProvider) -> Result<(), TunnelError> {
+pub(crate) fn require_watchguard_provider(provider: &dyn TunnelProvider) -> Result<(), TunnelError> {
     if provider.kind() != TunnelKind::Watchguard {
         return Err(TunnelError::WrongKind {
             expected: TunnelKind::Watchguard,
@@ -45,7 +45,7 @@ fn require_watchguard_provider(provider: &dyn TunnelProvider) -> Result<(), Tunn
     Ok(())
 }
 
-fn load_watchguard_record(
+pub(crate) fn load_watchguard_record(
     config_id: Uuid,
     configs: &dyn TunnelConfigLookup,
 ) -> Result<crate::TunnelConfigRecord, TunnelError> {
@@ -63,7 +63,7 @@ fn load_watchguard_record(
     Ok(record)
 }
 
-async fn establish_with_secret(
+pub(crate) async fn establish_with_secret(
     record: &crate::TunnelConfigRecord,
     secret: &[u8],
     provider: &dyn TunnelProvider,

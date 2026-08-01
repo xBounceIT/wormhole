@@ -5,20 +5,25 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use tempfile::TempDir;
 use uuid::Uuid;
 use wormhole_domain::InheritanceResolver;
 use wormhole_domain::ResolveError;
-use wormhole_secrets_win::{FakeKeyMaterialStore, FakePasswordStore, KeyMaterialStore, PasswordStore};
+use wormhole_secrets_win::{
+    BitwardenCredentialCacheEntry, FakeKeyMaterialStore, FakePasswordStore, KeyMaterialStore,
+    PasswordStore, bitwarden_virtual_credential_id,
+};
 use wormhole_storage::{
-    create_credential_profile, delete_credential_profile, format_guid_d, format_timestamp_o,
-    parse_timestamp_o, rename_credential_profile, AppSettings, ConnectionNode, ConnectionRepository,
-    CredentialBindingMode, CredentialKind, CredentialProfileDraft, CredentialRepository,
-    CredentialSecretProvider, CredentialSecrets, MemoryCredentialSecrets, Migration,
-    MigrationRunner, NodeKind, ProtocolType, SerialFlowControlMode, SerialParityMode,
-    SerialStopBitsMode, SettingsStore, SqliteConnectionFactory, StorageError, TunnelConfig,
-    TunnelConfigRepository, TunnelKind, BITWARDEN_PASSWORD_FIELD_PATH,
+    AppSettings, BITWARDEN_PASSWORD_FIELD_PATH, BitwardenCredentialCacheRepository, ConnectionNode,
+    ConnectionRepository, CredentialBindingMode, CredentialKind, CredentialProfileDraft,
+    CredentialRepository, CredentialSecretProvider, CredentialSecrets,
+    FakeBitwardenCredentialCacheRepository, MemoryCredentialSecrets, Migration, MigrationRunner,
+    NodeKind, ProtocolType, SerialFlowControlMode, SerialParityMode, SerialStopBitsMode,
+    SettingsStore, SqliteBitwardenCredentialCacheRepository, SqliteConnectionFactory, StorageError,
+    TunnelConfig, TunnelConfigRepository, TunnelKind, create_credential_profile,
+    delete_credential_profile, format_guid_d, format_timestamp_o, parse_timestamp_o,
+    rename_credential_profile,
 };
 
 fn temp_db() -> (TempDir, PathBuf, SqliteConnectionFactory) {
@@ -36,7 +41,9 @@ fn apply_all_embedded_migrations_on_empty_db() {
 
     let conn = factory.open().unwrap();
     let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM __migration_history;", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM __migration_history;", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(count, 17);
 
@@ -85,7 +92,9 @@ fn apply_all_embedded_migrations_on_empty_db() {
     // Idempotent second run.
     runner.run(&factory).expect("re-migrate");
     let count2: i64 = conn
-        .query_row("SELECT COUNT(*) FROM __migration_history;", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM __migration_history;", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(count2, 17);
 }
@@ -275,11 +284,7 @@ fn foreign_keys_enforced_on_parent_id() {
     let err = conn.execute(
         "INSERT INTO Nodes (Id, ParentId, Name, Kind, SortOrder, CreatedAt, UpdatedAt)
          VALUES (?1, ?2, 'orphan', 1, 0, ?3, ?3);",
-        rusqlite::params![
-            format_guid_d(orphan),
-            format_guid_d(missing_parent),
-            now
-        ],
+        rusqlite::params![format_guid_d(orphan), format_guid_d(missing_parent), now],
     );
     assert!(err.is_err(), "orphan ParentId must fail FK check");
 }
@@ -305,7 +310,9 @@ fn corrupted_applied_at_does_not_block_idempotent_migrate() {
 
     let conn = factory.open().unwrap();
     let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM __migration_history;", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM __migration_history;", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(count, 17);
 }
@@ -438,7 +445,9 @@ fn open_golden_empty_schema_fixture() {
 
     let conn = factory.open().unwrap();
     let mig_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM __migration_history;", [], |r| r.get(0))
+        .query_row("SELECT COUNT(*) FROM __migration_history;", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(mig_count, 17);
 
@@ -630,9 +639,11 @@ fn insert_many_is_transactional_parent_before_child() {
 
     let conns = repo.list_connections().unwrap();
     assert_eq!(conns.len(), 2);
-    assert!(conns.iter().any(|n| {
-        n.node.name == "jump-ssh" && n.node.protocol == Some(ProtocolType::Ssh)
-    }));
+    assert!(
+        conns
+            .iter()
+            .any(|n| { n.node.name == "jump-ssh" && n.node.protocol == Some(ProtocolType::Ssh) })
+    );
     assert!(conns.iter().any(|n| {
         n.node.name == "dc-rdp"
             && n.node.protocol == Some(ProtocolType::Rdp)
@@ -853,7 +864,8 @@ fn update_host_fingerprint_rejects_blank_and_writes_o_timestamp() {
     MigrationRunner::embedded().run(&factory).unwrap();
     let repo = ConnectionRepository::new(&factory);
     let id = Uuid::parse_str("d1111111-1111-1111-1111-111111111111").unwrap();
-    repo.insert(&ssh_node(id, None, "ssh", "127.0.0.1")).unwrap();
+    repo.insert(&ssh_node(id, None, "ssh", "127.0.0.1"))
+        .unwrap();
 
     assert!(matches!(
         repo.update_host_fingerprint(Uuid::nil(), "fp").unwrap_err(),
@@ -906,9 +918,7 @@ fn folder_crud_create_rename_delete_temp_sqlite() {
     assert_folder_row_has_no_secrets(&root.node);
     assert!(root.node.host.is_none());
 
-    let nested = repo
-        .create_folder("Nested", Some(root.node.id))
-        .unwrap();
+    let nested = repo.create_folder("Nested", Some(root.node.id)).unwrap();
     assert_eq!(nested.node.parent_id, Some(root.node.id));
     assert_eq!(nested.node.sort_order, 0);
     assert_folder_row_has_no_secrets(&nested.node);
@@ -921,9 +931,7 @@ fn folder_crud_create_rename_delete_temp_sqlite() {
     assert_eq!(unicode.node.sort_order, 2);
     assert_folder_row_has_no_secrets(&unicode.node);
 
-    let renamed = repo
-        .rename_folder(root.node.id, "  Lab-2  ")
-        .unwrap();
+    let renamed = repo.rename_folder(root.node.id, "  Lab-2  ").unwrap();
     assert_eq!(renamed.node.name, "Lab-2");
     assert!(matches!(
         repo.rename_folder(root.node.id, " \n ").unwrap_err(),
@@ -1028,7 +1036,8 @@ fn reparent_connection_stub_updates_parent_and_inheritance_chain() {
 
     // Reject connection-as-parent / folder-as-move-target misuse.
     assert!(matches!(
-        repo.reparent_connection(conn_id, Some(conn_id)).unwrap_err(),
+        repo.reparent_connection(conn_id, Some(conn_id))
+            .unwrap_err(),
         StorageError::InvalidArgument(_)
     ));
     assert!(matches!(
@@ -1049,10 +1058,8 @@ fn reparent_connection_stub_updates_parent_and_inheritance_chain() {
 
     // InheritanceResolver still walks ParentId after reparent (domain contract).
     let all = repo.list_all().unwrap();
-    let by_id: std::collections::HashMap<_, _> = all
-        .into_iter()
-        .map(|s| (s.node.id, s.node))
-        .collect();
+    let by_id: std::collections::HashMap<_, _> =
+        all.into_iter().map(|s| (s.node.id, s.node)).collect();
     let profile = InheritanceResolver::new()
         .resolve(by_id.get(&conn_id).unwrap(), &by_id)
         .expect("resolve after reparent");
@@ -1063,10 +1070,8 @@ fn reparent_connection_stub_updates_parent_and_inheritance_chain() {
     let rooted = repo.reparent_connection(conn_id, None).unwrap();
     assert!(rooted.node.parent_id.is_none());
     let all = repo.list_all().unwrap();
-    let by_id: std::collections::HashMap<_, _> = all
-        .into_iter()
-        .map(|s| (s.node.id, s.node))
-        .collect();
+    let by_id: std::collections::HashMap<_, _> =
+        all.into_iter().map(|s| (s.node.id, s.node)).collect();
     let err = InheritanceResolver::new()
         .resolve(by_id.get(&conn_id).unwrap(), &by_id)
         .expect_err("root leaf without host must fail closed");
@@ -1212,7 +1217,9 @@ fn tunnel_config_insert_list_get_update_delete_round_trip() {
     assert_eq!(stored_b.kind, TunnelKind::WireGuard);
     assert_eq!(stored_b.created_at, stored_b.updated_at);
 
-    let stored_a = repo.insert(id_a, "alpha-ovpn", TunnelKind::OpenVpn).unwrap();
+    let stored_a = repo
+        .insert(id_a, "alpha-ovpn", TunnelKind::OpenVpn)
+        .unwrap();
     assert_eq!(stored_a.kind, TunnelKind::OpenVpn);
 
     // list_all is ordered by Name.
@@ -1229,10 +1236,7 @@ fn tunnel_config_insert_list_get_update_delete_round_trip() {
         let conn = factory.open().unwrap();
         conn.execute(
             "UPDATE TunnelConfigs SET Id = ?1 WHERE Id = ?2;",
-            rusqlite::params![
-                "A1111111-BBBB-1111-1111-111111111111",
-                format_guid_d(id_b)
-            ],
+            rusqlite::params!["A1111111-BBBB-1111-1111-111111111111", format_guid_d(id_b)],
         )
         .unwrap();
     }
@@ -1388,9 +1392,7 @@ fn tunnel_config_rejects_blank_name_on_insert_and_update() {
     let id = Uuid::parse_str("f1111111-ffff-1111-1111-111111111111").unwrap();
 
     for blank in ["", "   ", "\t\n"] {
-        let err = repo
-            .insert(id, blank, TunnelKind::WireGuard)
-            .unwrap_err();
+        let err = repo.insert(id, blank, TunnelKind::WireGuard).unwrap_err();
         assert!(
             matches!(err, StorageError::InvalidArgument(_)),
             "insert blank {blank:?}: {err:?}"
@@ -1405,7 +1407,10 @@ fn tunnel_config_rejects_blank_name_on_insert_and_update() {
     let mut row = repo.get_by_id(id).unwrap().unwrap();
     row.name = "   ".into();
     let err = repo.update(&row).unwrap_err();
-    assert!(matches!(err, StorageError::InvalidArgument(_)), "got {err:?}");
+    assert!(
+        matches!(err, StorageError::InvalidArgument(_)),
+        "got {err:?}"
+    );
     assert_eq!(repo.get_by_id(id).unwrap().unwrap().name, "keep-me");
 
     row.name = "  renamed  ".into();
@@ -1420,9 +1425,7 @@ fn tunnel_config_duplicate_id_insert_rejected() {
     let repo = TunnelConfigRepository::new(&factory);
     let id = Uuid::parse_str("f2222222-ffff-2222-2222-222222222222").unwrap();
     repo.insert(id, "first", TunnelKind::WireGuard).unwrap();
-    let err = repo
-        .insert(id, "second", TunnelKind::Fortinet)
-        .unwrap_err();
+    let err = repo.insert(id, "second", TunnelKind::Fortinet).unwrap_err();
     assert!(matches!(err, StorageError::Sqlite(_)), "got {err:?}");
     let all = repo.list_all().unwrap();
     assert_eq!(all.len(), 1);
@@ -1454,7 +1457,8 @@ fn tunnel_config_delete_succeeds_even_when_node_references_id() {
     let repo = TunnelConfigRepository::new(&factory);
     let tunnel_id = Uuid::parse_str("f5555555-ffff-5555-5555-555555555555").unwrap();
     let node_id = Uuid::parse_str("f6666666-ffff-6666-6666-666666666666").unwrap();
-    repo.insert(tunnel_id, "in-use", TunnelKind::WireGuard).unwrap();
+    repo.insert(tunnel_id, "in-use", TunnelKind::WireGuard)
+        .unwrap();
     {
         let conn = factory.open().unwrap();
         let now = format_timestamp_o(Utc::now());
@@ -1540,17 +1544,11 @@ fn credential_profile_create_rename_delete_round_trip() {
         let conn = factory.open().unwrap();
         conn.execute(
             "UPDATE CredentialProfiles SET Id = ?1 WHERE Id = ?2;",
-            rusqlite::params![
-                "AA111111-BBBB-1111-1111-111111111111",
-                format_guid_d(id_b)
-            ],
+            rusqlite::params!["AA111111-BBBB-1111-1111-111111111111", format_guid_d(id_b)],
         )
         .unwrap();
     }
-    assert_eq!(
-        repo.get_by_id(id_b).unwrap().unwrap().name,
-        "bravo-renamed"
-    );
+    assert_eq!(repo.get_by_id(id_b).unwrap().unwrap().name, "bravo-renamed");
 
     // Writers emit lowercase format D; no password columns on the table.
     {
@@ -1573,7 +1571,16 @@ fn credential_profile_create_rename_delete_round_trip() {
                 "SELECT Id, Name, Kind, Protocol, SecretProvider, CreatedAt
                  FROM CredentialProfiles WHERE Id = ?1;",
                 rusqlite::params![format_guid_d(id_c)],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(id_text, "aa333333-cccc-3333-3333-333333333333");
@@ -1592,7 +1599,11 @@ fn credential_profile_create_rename_delete_round_trip() {
                 .map(|r| r.unwrap())
                 .collect()
         };
-        assert_eq!(col_names.len(), 12, "CredentialProfiles metadata-only column count");
+        assert_eq!(
+            col_names.len(),
+            12,
+            "CredentialProfiles metadata-only column count"
+        );
         for forbidden in ["Password", "Secret", "CredentialBlob", "PrivateKey"] {
             assert!(
                 !col_names.iter().any(|c| c.eq_ignore_ascii_case(forbidden)),
@@ -1615,11 +1626,9 @@ fn credential_profile_rejects_blank_name_on_create_rename_update() {
     let id = Uuid::parse_str("bb111111-ffff-1111-1111-111111111111").unwrap();
 
     for blank in ["", "   ", "\t\n"] {
-        let err = create_credential_profile(
-            &repo,
-            CredentialProfileDraft::local_password(id, blank),
-        )
-        .unwrap_err();
+        let err =
+            create_credential_profile(&repo, CredentialProfileDraft::local_password(id, blank))
+                .unwrap_err();
         assert!(
             matches!(err, StorageError::InvalidArgument(_)),
             "create blank {blank:?}: {err:?}"
@@ -1646,7 +1655,10 @@ fn credential_profile_rejects_blank_name_on_create_rename_update() {
     let mut row = repo.get_by_id(id).unwrap().unwrap();
     row.name = "   ".into();
     let err = repo.update(&row).unwrap_err();
-    assert!(matches!(err, StorageError::InvalidArgument(_)), "got {err:?}");
+    assert!(
+        matches!(err, StorageError::InvalidArgument(_)),
+        "got {err:?}"
+    );
 }
 
 #[test]
@@ -1764,7 +1776,10 @@ fn credential_profile_rejects_unknown_kind_on_read() {
         .unwrap();
     }
     let repo = CredentialRepository::new(&factory);
-    assert!(matches!(repo.list_all().unwrap_err(), StorageError::Sqlite(_)));
+    assert!(matches!(
+        repo.list_all().unwrap_err(),
+        StorageError::Sqlite(_)
+    ));
     assert!(matches!(
         repo.get_by_id(id).unwrap_err(),
         StorageError::Sqlite(_)
@@ -1790,7 +1805,10 @@ fn credential_profile_normalize_blank_bitwarden_field_path() {
     let mut draft2 = CredentialProfileDraft::local_password(id2, "bw-trim");
     draft2.bitwarden_field_path = Some("  login.custom  ".into());
     let stored2 = create_credential_profile(&repo, draft2).unwrap();
-    assert_eq!(stored2.bitwarden_field_path.as_deref(), Some("login.custom"));
+    assert_eq!(
+        stored2.bitwarden_field_path.as_deref(),
+        Some("login.custom")
+    );
 
     let id3 = Uuid::parse_str("ff333333-ffff-3333-3333-333333333335").unwrap();
     let mut draft3 = CredentialProfileDraft::local_password(id3, "bw-none");
@@ -1884,11 +1902,9 @@ fn credential_profile_duplicate_id_insert_rejected() {
     let repo = CredentialRepository::new(&factory);
     let id = Uuid::parse_str("ff999999-ffff-9999-9999-999999999999").unwrap();
     create_credential_profile(&repo, CredentialProfileDraft::local_password(id, "first")).unwrap();
-    let err = create_credential_profile(
-        &repo,
-        CredentialProfileDraft::local_password(id, "second"),
-    )
-    .unwrap_err();
+    let err =
+        create_credential_profile(&repo, CredentialProfileDraft::local_password(id, "second"))
+            .unwrap_err();
     assert!(matches!(err, StorageError::Sqlite(_)), "got {err:?}");
     assert_eq!(repo.list_all().unwrap().len(), 1);
     assert_eq!(repo.get_by_id(id).unwrap().unwrap().name, "first");
@@ -1929,7 +1945,10 @@ fn credential_profile_rejects_unknown_protocol_and_provider_on_read() {
         repo.get_by_id(bad_provider).unwrap_err(),
         StorageError::Sqlite(_)
     ));
-    assert!(matches!(repo.list_all().unwrap_err(), StorageError::Sqlite(_)));
+    assert!(matches!(
+        repo.list_all().unwrap_err(),
+        StorageError::Sqlite(_)
+    ));
 }
 
 #[test]
@@ -1951,4 +1970,690 @@ fn credential_profile_secret_cleanup_errors_do_not_resurrect_row() {
     create_credential_profile(&repo, CredentialProfileDraft::local_password(id, "gone")).unwrap();
     delete_credential_profile(&repo, id, Some(&FailingSecrets)).unwrap();
     assert!(repo.get_by_id(id).unwrap().is_none());
+}
+
+fn bitwarden_cache_entry(item_id: &str, name: &str) -> BitwardenCredentialCacheEntry {
+    BitwardenCredentialCacheEntry {
+        item_id: item_id.into(),
+        ssh_credential_id: Uuid::nil(),
+        rdp_credential_id: Uuid::nil(),
+        vnc_credential_id: Uuid::nil(),
+        name: name.into(),
+        username: None,
+        revision_date: None,
+        last_seen_sync_utc: DateTime::<Utc>::MIN_UTC,
+        updated_at_utc: DateTime::<Utc>::MIN_UTC,
+    }
+}
+
+fn utc_ts(s: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+}
+
+fn bitwarden_cache_repo(
+    factory: &SqliteConnectionFactory,
+) -> SqliteBitwardenCredentialCacheRepository<'_> {
+    SqliteBitwardenCredentialCacheRepository::new(factory)
+}
+
+#[test]
+fn bitwarden_cache_get_all_orders_by_name_and_ensures_virtual_ids() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = bitwarden_cache_repo(&factory);
+
+    let mut bravo = bitwarden_cache_entry("item-b", "Bravo");
+    bravo.revision_date = Some("2026-07-30T00:00:00Z".into());
+    // Pin one id to prove ensure only fills nil slots.
+    let pinned = Uuid::parse_str("11111111-2222-3333-4444-555555555555").unwrap();
+    bravo.rdp_credential_id = pinned;
+    repo.replace_from_full_sync(
+        &[bitwarden_cache_entry("item-a", "Alpha"), bravo],
+        utc_ts("2026-07-31T10:18:44.1234567Z"),
+    )
+    .unwrap();
+
+    let all = repo.get_all().unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].item_id, "item-a");
+    assert_eq!(all[1].item_id, "item-b");
+    assert_eq!(
+        all[1].ssh_credential_id,
+        bitwarden_virtual_credential_id("item-b", ProtocolType::Ssh).unwrap()
+    );
+    assert_eq!(all[1].rdp_credential_id, pinned);
+    assert_eq!(
+        all[1].vnc_credential_id,
+        bitwarden_virtual_credential_id("item-b", ProtocolType::Vnc).unwrap()
+    );
+    assert_eq!(
+        all[1].revision_date.as_deref(),
+        Some("2026-07-30T00:00:00Z")
+    );
+    // nil virtual ids are never persisted — format-D GUID text in the row.
+    assert_ne!(all[0].ssh_credential_id, Uuid::nil());
+}
+
+#[test]
+fn bitwarden_cache_replace_full_sync_upserts_and_deletes_stale() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = bitwarden_cache_repo(&factory);
+    let sync1 = utc_ts("2026-01-01T00:00:00Z");
+    let sync2 = utc_ts("2026-06-01T00:00:00.0000000Z");
+
+    repo.replace_from_full_sync(
+        &[
+            bitwarden_cache_entry("item-a", "Alpha"),
+            bitwarden_cache_entry("item-b", "Bravo"),
+            bitwarden_cache_entry("item-c", "Charlie"),
+        ],
+        sync1,
+    )
+    .unwrap();
+
+    // Second sync keeps B and D only; B's name is refreshed (upsert, not insert).
+    repo.replace_from_full_sync(
+        &[
+            bitwarden_cache_entry("item-b", "Bravo-renamed"),
+            bitwarden_cache_entry("item-d", "Delta"),
+        ],
+        sync2,
+    )
+    .unwrap();
+
+    let all = repo.get_all().unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].name, "Bravo-renamed");
+    assert_eq!(all[0].last_seen_sync_utc, sync2);
+    assert_eq!(all[1].item_id, "item-d");
+    assert_eq!(all[1].updated_at_utc, sync2);
+}
+
+#[test]
+fn bitwarden_cache_replace_full_sync_empty_deletes_everything() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = bitwarden_cache_repo(&factory);
+    repo.replace_from_full_sync(
+        &[
+            bitwarden_cache_entry("item-a", "Alpha"),
+            bitwarden_cache_entry("item-b", "Bravo"),
+        ],
+        utc_ts("2026-01-01T00:00:00Z"),
+    )
+    .unwrap();
+
+    repo.replace_from_full_sync(&[], utc_ts("2026-06-01T00:00:00Z"))
+        .unwrap();
+
+    assert!(repo.get_all().unwrap().is_empty());
+    let conn = factory.open().unwrap();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM BitwardenCredentialCache;", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn bitwarden_cache_replace_full_sync_rolls_back_on_error() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = bitwarden_cache_repo(&factory);
+    repo.replace_from_full_sync(
+        &[
+            bitwarden_cache_entry("item-a", "Alpha"),
+            bitwarden_cache_entry("item-b", "Bravo"),
+        ],
+        utc_ts("2026-01-01T00:00:00Z"),
+    )
+    .unwrap();
+
+    {
+        let conn = factory.open().unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER bitwarden_cache_boom BEFORE INSERT ON BitwardenCredentialCache
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+    }
+    let err = repo
+        .replace_from_full_sync(
+            &[bitwarden_cache_entry("item-c", "Charlie")],
+            utc_ts("2026-06-01T00:00:00Z"),
+        )
+        .unwrap_err();
+    assert!(matches!(err, StorageError::Sqlite(_)), "got {err:?}");
+
+    // Upsert failure rolled the whole tx back: no insert, no stale delete.
+    let conn = factory.open().unwrap();
+    conn.execute("DROP TRIGGER bitwarden_cache_boom;", [])
+        .unwrap();
+    let all = repo.get_all().unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].item_id, "item-a");
+    assert_eq!(all[1].item_id, "item-b");
+}
+
+#[test]
+fn bitwarden_cache_upsert_imported_never_deletes_stale_and_dedupes() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = bitwarden_cache_repo(&factory);
+    repo.replace_from_full_sync(
+        &[
+            bitwarden_cache_entry("item-a", "Alpha"),
+            bitwarden_cache_entry("item-b", "Bravo"),
+        ],
+        utc_ts("2026-01-01T00:00:00Z"),
+    )
+    .unwrap();
+
+    // Import never removes rows missing from the batch.
+    repo.upsert_imported(&[
+        bitwarden_cache_entry("item-a", "Alpha-renamed"),
+        bitwarden_cache_entry("item-c", "Charlie"),
+    ])
+    .unwrap();
+    let all = repo.get_all().unwrap();
+    assert_eq!(all.len(), 3);
+    assert_eq!(all[0].name, "Alpha-renamed");
+    assert_eq!(all[1].item_id, "item-b");
+    assert_eq!(all[2].item_id, "item-c");
+
+    // Dedupe within one call: last occurrence wins.
+    repo.upsert_imported(&[
+        bitwarden_cache_entry("item-d", "D-first"),
+        bitwarden_cache_entry("item-d", "D-last"),
+    ])
+    .unwrap();
+    let all = repo.get_all().unwrap();
+    assert_eq!(all.len(), 4);
+    let d = all.iter().find(|e| e.item_id == "item-d").unwrap();
+    assert_eq!(d.name, "D-last");
+
+    // Empty input is a no-op.
+    repo.upsert_imported(&[]).unwrap();
+    assert_eq!(repo.get_all().unwrap().len(), 4);
+}
+
+#[test]
+fn bitwarden_cache_normalize_trims_falls_back_and_defaults_timestamps() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = bitwarden_cache_repo(&factory);
+
+    let mut messy = bitwarden_cache_entry("  item-1  ", "   ");
+    messy.username = Some("  admin  ".into());
+    messy.revision_date = Some("   ".into());
+    let mut pinned_ts = bitwarden_cache_entry("item-2", "  Router  ");
+    pinned_ts.last_seen_sync_utc = utc_ts("2026-05-05T05:05:05Z");
+    pinned_ts.updated_at_utc = utc_ts("2026-05-06T06:06:06Z");
+    let mut blank_user = bitwarden_cache_entry("item-3", "BlankUser");
+    blank_user.username = Some("".into());
+
+    let sync = utc_ts("2026-07-31T10:18:44.1234567Z");
+    repo.replace_from_full_sync(&[messy, pinned_ts, blank_user], sync)
+        .unwrap();
+
+    let all = repo.get_all().unwrap();
+    // Byte-order by Name: "BlankUser" < "Router" < "item-1".
+    assert_eq!(all[0].item_id, "item-3");
+    assert_eq!(all[0].name, "BlankUser");
+    assert_eq!(all[1].item_id, "item-2");
+    assert_eq!(all[1].name, "Router");
+    assert_eq!(all[2].item_id, "item-1");
+    assert_eq!(all[2].name, "item-1"); // blank Name falls back to trimmed ItemId
+    assert_eq!(all[0].username, None); // empty Username → NULL
+    assert_eq!(all[1].username, None);
+    assert_eq!(all[2].username.as_deref(), Some("admin"));
+    assert_eq!(all[2].revision_date, None); // blank RevisionDate → NULL
+    // Year-0001 sentinel timestamps default to the sync time.
+    assert_eq!(all[2].last_seen_sync_utc, sync);
+    assert_eq!(all[2].updated_at_utc, sync);
+    assert_eq!(all[1].last_seen_sync_utc, utc_ts("2026-05-05T05:05:05Z"));
+    assert_eq!(all[1].updated_at_utc, utc_ts("2026-05-06T06:06:06Z"));
+
+    // Raw row shape: trimmed text, NULL username, .NET O timestamp text.
+    let conn = factory.open().unwrap();
+    let (item_id, name, username, ts): (String, String, Option<String>, String) = conn
+        .query_row(
+            "SELECT ItemId, Name, Username, LastSeenSyncUtc FROM BitwardenCredentialCache
+             WHERE ItemId = 'item-1';",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(item_id, "item-1");
+    assert_eq!(name, "item-1");
+    assert_eq!(username.as_deref(), Some("admin"));
+    assert_eq!(ts, "2026-07-31T10:18:44.1234567Z");
+    assert_eq!(parse_timestamp_o(&ts).unwrap(), sync);
+}
+
+#[test]
+fn bitwarden_cache_normalize_skips_blank_item_ids_and_dedupes_ordinal() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = bitwarden_cache_repo(&factory);
+
+    repo.replace_from_full_sync(
+        &[
+            bitwarden_cache_entry("", "Empty"),
+            bitwarden_cache_entry("   ", "Whitespace"),
+            bitwarden_cache_entry("\t", "Tab"),
+            bitwarden_cache_entry("dup", "First"),
+            bitwarden_cache_entry("dup", "Second"),
+            // Dedupe happens on the *trimmed* key: both forms collapse to "dup".
+            bitwarden_cache_entry("  dup  ", "First-trimmed"),
+            bitwarden_cache_entry("dup", "Second-trimmed"),
+            bitwarden_cache_entry("case", "Zebra"),
+            bitwarden_cache_entry("alpha", "Alpha"),
+            bitwarden_cache_entry("zeta", "zeta"),
+        ],
+        utc_ts("2026-01-01T00:00:00Z"),
+    )
+    .unwrap();
+
+    let all = repo.get_all().unwrap();
+    // Blank ItemIds dropped (fail closed); "dup" deduped last-wins across trim forms.
+    assert_eq!(all.len(), 4);
+    // Ordinal byte order: "Alpha" < "Second-trimmed" < "Zebra" < "zeta" (uppercase before lowercase).
+    assert_eq!(all[0].item_id, "alpha");
+    assert_eq!(all[1].name, "Second-trimmed");
+    assert_eq!(all[2].item_id, "case");
+    assert_eq!(all[3].item_id, "zeta");
+}
+
+#[test]
+fn bitwarden_cache_fake_repository_matches_sqlite_semantics() {
+    let fake = FakeBitwardenCredentialCacheRepository::with_entries([
+        bitwarden_cache_entry("item-b", "Bravo"),
+        bitwarden_cache_entry("item-a", "Alpha"),
+    ]);
+
+    // Reads sort by Name and ensure virtual ids, even on raw seeds.
+    let all = fake.get_all().unwrap();
+    assert_eq!(all[0].item_id, "item-a");
+    assert_eq!(all[1].item_id, "item-b");
+    assert_ne!(all[0].ssh_credential_id, Uuid::nil());
+
+    // replace_from_full_sync: stale delete + explicit sync time.
+    let sync = utc_ts("2026-07-31T10:18:44.1234567Z");
+    fake.replace_from_full_sync(&[bitwarden_cache_entry("item-c", "Charlie")], sync)
+        .unwrap();
+    let all = fake.get_all().unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].item_id, "item-c");
+    assert_eq!(all[0].last_seen_sync_utc, sync);
+
+    // Empty replace clears everything.
+    fake.replace_from_full_sync(&[], sync).unwrap();
+    assert!(fake.get_all().unwrap().is_empty());
+
+    // upsert_imported: no stale delete, dedupe last-wins.
+    fake.replace_from_full_sync(&[bitwarden_cache_entry("item-a", "Alpha")], sync)
+        .unwrap();
+    fake.upsert_imported(&[
+        bitwarden_cache_entry("item-b", "Bravo"),
+        bitwarden_cache_entry("item-b", "Bravo-renamed"),
+    ])
+    .unwrap();
+    let all = fake.get_all().unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].name, "Alpha");
+    assert_eq!(all[1].name, "Bravo-renamed");
+
+    // Empty import is a no-op; Debug reports count only.
+    fake.upsert_imported(&[]).unwrap();
+    let dbg = format!("{fake:?}");
+    assert!(dbg.contains("len"), "{dbg}");
+    assert!(!dbg.contains("Alpha"), "{dbg}");
+}
+
+#[test]
+fn bitwarden_cache_same_name_ties_are_deterministic_and_match_fake() {
+    // HashMap iteration order is per-run random; the persisted upsert order (and the
+    // rowid tie order under ORDER BY Name) must still be deterministic, and the fake
+    // must agree with SQLite in every case.
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = bitwarden_cache_repo(&factory);
+    let fake = FakeBitwardenCredentialCacheRepository::new();
+    let sync = utc_ts("2026-01-01T00:00:00Z");
+
+    // Same-Name batch: ties resolve to ItemId order (deterministic insert order).
+    repo.replace_from_full_sync(
+        &[
+            bitwarden_cache_entry("z-3", "Same"),
+            bitwarden_cache_entry("a-1", "Same"),
+            bitwarden_cache_entry("m-2", "Same"),
+        ],
+        sync,
+    )
+    .unwrap();
+    fake.replace_from_full_sync(
+        &[
+            bitwarden_cache_entry("z-3", "Same"),
+            bitwarden_cache_entry("a-1", "Same"),
+            bitwarden_cache_entry("m-2", "Same"),
+        ],
+        sync,
+    )
+    .unwrap();
+    let all = repo.get_all().unwrap();
+    let ids: Vec<&str> = all.iter().map(|e| e.item_id.as_str()).collect();
+    assert_eq!(ids, ["a-1", "m-2", "z-3"]);
+    let all = fake.get_all().unwrap();
+    let fake_ids: Vec<&str> = all.iter().map(|e| e.item_id.as_str()).collect();
+    assert_eq!(fake_ids, ids);
+
+    // A later-inserted row ("b-9") ties in Name too; ORDER BY Name breaks the tie by
+    // rowid (insertion) order, not by ItemId — and the fake must agree.
+    repo.upsert_imported(&[bitwarden_cache_entry("b-9", "Same")])
+        .unwrap();
+    fake.upsert_imported(&[bitwarden_cache_entry("b-9", "Same")])
+        .unwrap();
+    let expected = ["a-1", "m-2", "z-3", "b-9"];
+    let all = repo.get_all().unwrap();
+    let ids: Vec<&str> = all.iter().map(|e| e.item_id.as_str()).collect();
+    assert_eq!(ids, expected, "sqlite rowid tie order");
+    let all = fake.get_all().unwrap();
+    let fake_ids: Vec<&str> = all.iter().map(|e| e.item_id.as_str()).collect();
+    assert_eq!(fake_ids, expected, "fake must match sqlite");
+}
+
+#[test]
+fn bitwarden_cache_fail_closed_on_blank_item_id_rows() {
+    // Blank ItemId rows are never written by this repo (Normalize drops them); a raw
+    // row means DB corruption and reads must fail closed — never yield nil virtual ids.
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = bitwarden_cache_repo(&factory);
+    repo.replace_from_full_sync(
+        &[bitwarden_cache_entry("item-a", "Alpha")],
+        utc_ts("2026-01-01T00:00:00Z"),
+    )
+    .unwrap();
+
+    let now = format_timestamp_o(Utc::now());
+    {
+        let conn = factory.open().unwrap();
+        conn.execute(
+            "INSERT INTO BitwardenCredentialCache
+                (ItemId, SshCredentialId, RdpCredentialId, VncCredentialId,
+                 Name, Username, RevisionDate, LastSeenSyncUtc, UpdatedAtUtc)
+             VALUES ('   ', '00000000-0000-0000-0000-000000000000',
+                     '00000000-0000-0000-0000-000000000000',
+                     '00000000-0000-0000-0000-000000000000',
+                     'blank-id', NULL, NULL, ?1, ?1);",
+            rusqlite::params![now],
+        )
+        .unwrap();
+    }
+    let err = repo.get_all().unwrap_err();
+    assert!(
+        matches!(err, StorageError::Sqlite(_)),
+        "blank ItemId row must fail closed, got {err:?}"
+    );
+
+    // Fake mirrors the same contract for raw seeds.
+    let fake = FakeBitwardenCredentialCacheRepository::with_entries([
+        bitwarden_cache_entry("   ", "blank"),
+        bitwarden_cache_entry("item-b", "Bravo"),
+    ]);
+    let err = fake.get_all().unwrap_err();
+    assert!(
+        matches!(err, StorageError::Sqlite(_)),
+        "fake blank ItemId row must fail closed, got {err:?}"
+    );
+}
+
+#[test]
+fn bitwarden_cache_replace_full_sync_rolls_back_when_stale_delete_fails() {
+    // A failure in the stale-delete phase must roll back the whole replacement —
+    // including the upserts of the incoming batch.
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = bitwarden_cache_repo(&factory);
+    repo.replace_from_full_sync(
+        &[
+            bitwarden_cache_entry("item-a", "Alpha"),
+            bitwarden_cache_entry("item-b", "Bravo"),
+        ],
+        utc_ts("2026-01-01T00:00:00Z"),
+    )
+    .unwrap();
+
+    {
+        let conn = factory.open().unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER bitwarden_cache_boom_del BEFORE DELETE ON BitwardenCredentialCache
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+    }
+    // item-b is stale and must be deleted, item-a is upserted (renamed) — both inside the tx.
+    let err = repo
+        .replace_from_full_sync(
+            &[
+                bitwarden_cache_entry("item-a", "Alpha-renamed"),
+                bitwarden_cache_entry("item-c", "Charlie"),
+            ],
+            utc_ts("2026-06-01T00:00:00Z"),
+        )
+        .unwrap_err();
+    assert!(matches!(err, StorageError::Sqlite(_)), "got {err:?}");
+
+    {
+        let conn = factory.open().unwrap();
+        conn.execute("DROP TRIGGER bitwarden_cache_boom_del;", [])
+            .unwrap();
+    }
+    let all = repo.get_all().unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].item_id, "item-a");
+    assert_eq!(all[0].name, "Alpha", "upserted rename must be rolled back");
+    assert_eq!(all[1].item_id, "item-b");
+    assert!(
+        !all.iter().any(|e| e.item_id == "item-c"),
+        "no partial insert"
+    );
+}
+
+#[test]
+fn bitwarden_cache_upsert_imported_rolls_back_on_error() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = bitwarden_cache_repo(&factory);
+    repo.replace_from_full_sync(
+        &[bitwarden_cache_entry("item-a", "Alpha")],
+        utc_ts("2026-01-01T00:00:00Z"),
+    )
+    .unwrap();
+
+    {
+        let conn = factory.open().unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER bitwarden_cache_boom_ins BEFORE INSERT ON BitwardenCredentialCache
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+    }
+    let err = repo
+        .upsert_imported(&[
+            bitwarden_cache_entry("item-b", "Bravo"),
+            bitwarden_cache_entry("item-c", "Charlie"),
+        ])
+        .unwrap_err();
+    assert!(matches!(err, StorageError::Sqlite(_)), "got {err:?}");
+
+    {
+        let conn = factory.open().unwrap();
+        conn.execute("DROP TRIGGER bitwarden_cache_boom_ins;", [])
+            .unwrap();
+    }
+    let all = repo.get_all().unwrap();
+    assert_eq!(
+        all.len(),
+        1,
+        "failed import batch must not partially persist"
+    );
+    assert_eq!(all[0].item_id, "item-a");
+}
+
+#[test]
+fn bitwarden_cache_upsert_imported_defaults_timestamps_to_now_utc() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = bitwarden_cache_repo(&factory);
+    let fake = FakeBitwardenCredentialCacheRepository::new();
+
+    let before = Utc::now();
+    repo.upsert_imported(&[bitwarden_cache_entry("item-n", "Now")])
+        .unwrap();
+    fake.upsert_imported(&[bitwarden_cache_entry("item-n", "Now")])
+        .unwrap();
+
+    for all in [repo.get_all().unwrap(), fake.get_all().unwrap()] {
+        let row = &all[0];
+        assert_eq!(row.last_seen_sync_utc, row.updated_at_utc);
+        assert!(
+            row.last_seen_sync_utc >= before,
+            "imported rows default to Utc::now, got {}",
+            row.last_seen_sync_utc
+        );
+    }
+}
+
+#[test]
+fn bitwarden_cache_replace_all_blank_item_ids_wipes_table() {
+    // C# parity: a non-empty payload that normalizes to zero entries (all blank
+    // ItemIds) still triggers the whole-table delete, exactly like an empty payload.
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = bitwarden_cache_repo(&factory);
+    let fake = FakeBitwardenCredentialCacheRepository::new();
+    let sync = utc_ts("2026-01-01T00:00:00Z");
+    let seed = [
+        bitwarden_cache_entry("item-a", "Alpha"),
+        bitwarden_cache_entry("item-b", "Bravo"),
+    ];
+    let blank_payload = [
+        bitwarden_cache_entry("", "empty-id"),
+        bitwarden_cache_entry("   ", "whitespace-id"),
+        bitwarden_cache_entry("\t\n", "control-id"),
+    ];
+
+    repo.replace_from_full_sync(&seed, sync).unwrap();
+    repo.replace_from_full_sync(&blank_payload, sync).unwrap();
+    assert!(
+        repo.get_all().unwrap().is_empty(),
+        "sqlite: all-blank payload must wipe"
+    );
+    let count: i64 = factory
+        .open()
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM BitwardenCredentialCache;", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 0);
+
+    fake.replace_from_full_sync(&seed, sync).unwrap();
+    fake.replace_from_full_sync(&blank_payload, sync).unwrap();
+    assert!(
+        fake.get_all().unwrap().is_empty(),
+        "fake: all-blank payload must wipe"
+    );
+}
+
+#[test]
+fn bitwarden_cache_get_all_fails_closed_on_corrupt_timestamp_or_guid() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = bitwarden_cache_repo(&factory);
+    repo.replace_from_full_sync(
+        &[bitwarden_cache_entry("item-a", "Alpha")],
+        utc_ts("2026-01-01T00:00:00Z"),
+    )
+    .unwrap();
+
+    {
+        let conn = factory.open().unwrap();
+        conn.execute(
+            "UPDATE BitwardenCredentialCache SET LastSeenSyncUtc = 'garbage' WHERE ItemId = 'item-a';",
+            [],
+        )
+        .unwrap();
+    }
+    assert!(matches!(
+        repo.get_all().unwrap_err(),
+        StorageError::Sqlite(_)
+    ));
+
+    {
+        let conn = factory.open().unwrap();
+        conn.execute(
+            "UPDATE BitwardenCredentialCache
+             SET LastSeenSyncUtc = '2026-01-01T00:00:00.0000000Z',
+                 SshCredentialId = 'garbage'
+             WHERE ItemId = 'item-a';",
+            [],
+        )
+        .unwrap();
+    }
+    assert!(matches!(
+        repo.get_all().unwrap_err(),
+        StorageError::Sqlite(_)
+    ));
+
+    {
+        let conn = factory.open().unwrap();
+        conn.execute(
+            "UPDATE BitwardenCredentialCache
+             SET SshCredentialId = '00000000-0000-0000-0000-000000000000'
+             WHERE ItemId = 'item-a';",
+            [],
+        )
+        .unwrap();
+    }
+    assert_eq!(repo.get_all().unwrap().len(), 1);
+}
+
+#[test]
+fn bitwarden_cache_unicode_whitespace_trim_and_hostile_name_bound() {
+    let (_dir, _path, factory) = temp_db();
+    MigrationRunner::embedded().run(&factory).unwrap();
+    let repo = bitwarden_cache_repo(&factory);
+
+    // U+3000 (ideographic space) is trimmed by both .NET Trim and Rust trim.
+    let mut ws = bitwarden_cache_entry(" \u{3000} item-u \t ", " \u{3000} ");
+    ws.username = Some(" \u{3000} root ".into());
+    ws.revision_date = Some("\u{3000}".into());
+    repo.replace_from_full_sync(&[ws], utc_ts("2026-01-01T00:00:00Z"))
+        .unwrap();
+    let all = repo.get_all().unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].item_id, "item-u");
+    assert_eq!(
+        all[0].name, "item-u",
+        "blank-after-unicode-trim Name falls back"
+    );
+    assert_eq!(all[0].username.as_deref(), Some("root"));
+    assert_eq!(all[0].revision_date, None);
+
+    // Hostile Name must round-trip as bound text, never execute.
+    let hostile = "'; DROP TABLE BitwardenCredentialCache;--";
+    repo.replace_from_full_sync(
+        &[bitwarden_cache_entry("item-h", hostile)],
+        utc_ts("2026-01-01T00:00:00Z"),
+    )
+    .unwrap();
+    let all = repo.get_all().unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].name, hostile);
+    assert_eq!(all[0].item_id, "item-h");
 }
