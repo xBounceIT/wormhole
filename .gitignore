@@ -2,6 +2,9 @@
 bin/
 obj/
 artifacts/
+node_modules/
+dist/
+dist-electron/
 *.binlog
 
 # Visual Studio
