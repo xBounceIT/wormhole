@@ -38,6 +38,13 @@ Quick Connect are not wired in this migration slice. A connection configured
 for a VPN tunnel is rejected until Electron tunnel routing is available rather
 than falling back to a direct SSH connection.
 
+VNC sessions use the same bundled Go backend as a long-lived JSON-lines
+process. The renderer sends connect, pointer, and key commands over the
+preload bridge; the Go process owns the native RFB connection, framebuffer
+decoding, and DPAPI-backed password lookup. An effective VPN route currently
+fails closed until the Electron Go tunnel providers are migrated; it is never
+silently replaced with a direct TCP connection.
+
 On the first Windows launch, the Electron main process copies legacy local
 Wormhole passwords (saved profiles, inline connection passwords, and the MCP
 token) from Windows Credential Manager into the existing

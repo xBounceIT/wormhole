@@ -108,6 +108,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { getTreeRowGeometry } from './tree-layout';
+import { VncSurface } from './components/VncSurface';
 
 type Protocol = 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
 type NavItem = 'sessions' | 'credentials' | 'tunnels' | 'settings';
@@ -146,6 +147,7 @@ type TreeNode = {
   kind: 'folder' | 'connection';
   protocol?: Protocol;
   host?: string;
+  port?: number;
   children?: TreeNode[];
 };
 
@@ -285,8 +287,9 @@ type Session = {
   title: string;
   protocol: Protocol;
   host: string;
-  canTransfer?: boolean;
   nodeId?: string;
+  port?: number;
+  canTransfer?: boolean;
   backendSessionId?: string;
   status: 'connecting' | 'connected' | 'failed' | 'closed' | 'placeholder';
   output: string;
@@ -1226,9 +1229,10 @@ function App() {
       id: `session-${node.id}`,
       title: node.name,
       protocol: node.protocol,
-      host: node.host ?? 'inherited target',
-      canTransfer: node.protocol === 'ssh',
+      host: node.host ?? '',
       nodeId: node.id,
+      port: node.port,
+      canTransfer: node.protocol === 'ssh',
       backendSessionId,
       status: node.protocol === 'ssh' ? 'connecting' : 'placeholder',
       output: '',
@@ -2645,20 +2649,42 @@ function SessionsPage({
             ))}
           </TabsList>
         </div>
-        {selectedSession.protocol === 'ssh' ? (
-          <SshTerminalSurface onInput={onSshInput} session={selectedSession} />
-        ) : (
-          <div className="flex min-h-0 flex-1 items-center justify-center bg-background p-8 text-center">
-            <div>
-              <p className="font-mono text-[9px] uppercase tracking-[0.14em] text-muted-foreground">
-                {protocolLabel(selectedSession.protocol)} session
-              </p>
-              <p className="mt-2 text-xs text-muted-foreground">
-                This protocol surface is still being migrated to the Electron shell.
-              </p>
-            </div>
-          </div>
-        )}
+        {sessions.map((session) => (
+          <TabsContent
+            className="flex min-h-0 flex-1 flex-col"
+            forceMount
+            key={session.id}
+            value={session.id}
+          >
+            {session.protocol === 'ssh' ? (
+              <SshTerminalSurface onInput={onSshInput} session={session} />
+            ) : session.protocol === 'vnc' ? (
+              <VncSurface
+                session={{
+                  id: session.id,
+                  nodeId: session.nodeId,
+                  host: session.host,
+                  port: session.port,
+                }}
+              />
+            ) : (
+              <div
+                aria-label="Connection canvas"
+                className="grid h-full place-items-center bg-background p-8 text-center"
+              >
+                <div>
+                  <p className="font-mono text-[9px] uppercase tracking-[0.14em] text-muted-foreground">
+                    {protocolLabel(session.protocol)}
+                  </p>
+                  <p className="mt-2 text-sm font-medium">Protocol surface ready for migration</p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {session.host || 'inherited target'}:{session.port ?? 'default'}
+                  </p>
+                </div>
+              </div>
+            )}
+          </TabsContent>
+        ))}
       </Tabs>
     </section>
   );

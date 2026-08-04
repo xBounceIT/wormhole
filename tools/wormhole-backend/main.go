@@ -56,6 +56,7 @@ type treeNode struct {
 	Kind     string      `json:"kind"`
 	Protocol string      `json:"protocol,omitempty"`
 	Host     string      `json:"host,omitempty"`
+	Port     int         `json:"port,omitempty"`
 	Children []*treeNode `json:"children,omitempty"`
 }
 
@@ -83,6 +84,7 @@ type nodeRow struct {
 	SortOrder int64
 	Protocol  sql.NullInt64
 	Host      sql.NullString
+	Port      sql.NullInt64
 }
 
 type credentialRow struct {
@@ -102,7 +104,7 @@ type tunnelRow struct {
 }
 
 func main() {
-	operation := flag.String("operation", "workspace", "backend operation: workspace, migrate, ssh, or auth-*")
+	operation := flag.String("operation", "workspace", "backend operation: workspace, migrate, ssh, serve, or auth-*")
 	databasePath := flag.String("database", "", "path to the Wormhole SQLite database")
 	credentialReader := flag.String("credential-reader", "", "path to the Windows Credential Manager reader")
 	flag.Parse()
@@ -153,6 +155,12 @@ func main() {
 		result = verifyWindowsHello()
 	case "auth-system-idle":
 		result = map[string]int64{"seconds": systemIdleSeconds()}
+	case "serve":
+		if err := serveBackend(*databasePath); err != nil {
+			writeError(err.Error())
+			os.Exit(1)
+		}
+		return
 	default:
 		err = fmt.Errorf("unsupported operation %q", *operation)
 	}
@@ -562,8 +570,16 @@ func loadTree(database *sql.DB) ([]*treeNode, error) {
 	if err != nil || !exists {
 		return []*treeNode{}, err
 	}
+	columns, err := tableColumns(database, "Nodes")
+	if err != nil {
+		return nil, err
+	}
+	portExpression := "NULL"
+	if _, ok := columns["Port"]; ok {
+		portExpression = "Port"
+	}
 	rows, err := database.Query(`
-SELECT Id, ParentId, Name, Kind, SortOrder, Protocol, Host
+SELECT Id, ParentId, Name, Kind, SortOrder, Protocol, Host, ` + portExpression + ` AS Port
 FROM Nodes
 ORDER BY SortOrder, Name, Id;`)
 	if err != nil {
@@ -574,9 +590,11 @@ ORDER BY SortOrder, Name, Id;`)
 	all := make([]*treeNode, 0)
 	parents := make([]string, 0)
 	byID := map[string]*treeNode{}
+	parentByID := map[string]string{}
+	protocolByID := map[string]sql.NullInt64{}
 	for rows.Next() {
 		var row nodeRow
-		if err := rows.Scan(&row.ID, &row.ParentID, &row.Name, &row.Kind, &row.SortOrder, &row.Protocol, &row.Host); err != nil {
+		if err := rows.Scan(&row.ID, &row.ParentID, &row.Name, &row.Kind, &row.SortOrder, &row.Protocol, &row.Host, &row.Port); err != nil {
 			return nil, fmt.Errorf("cannot read a connection: %w", err)
 		}
 		node := &treeNode{ID: strings.TrimSpace(row.ID), Name: row.Name}
@@ -588,16 +606,48 @@ ORDER BY SortOrder, Name, Id;`)
 			if row.Host.Valid {
 				node.Host = row.Host.String
 			}
+			if row.Port.Valid && row.Port.Int64 > 0 && row.Port.Int64 <= 65535 {
+				node.Port = int(row.Port.Int64)
+			}
 		}
 		all = append(all, node)
 		parents = append(parents, "")
-		byID[normalizeID(row.ID)] = node
+		normalizedID := normalizeID(row.ID)
+		byID[normalizedID] = node
+		protocolByID[normalizedID] = row.Protocol
 		if row.ParentID.Valid {
-			parents[len(parents)-1] = normalizeID(row.ParentID.String)
+			parentID := normalizeID(row.ParentID.String)
+			parents[len(parents)-1] = parentID
+			parentByID[normalizedID] = parentID
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("cannot enumerate connections: %w", err)
+	}
+	for _, node := range all {
+		if node.Kind != "connection" {
+			continue
+		}
+		currentID := normalizeID(node.ID)
+		resolvedProtocol := protocolByID[currentID]
+		seen := map[string]struct{}{}
+		for !resolvedProtocol.Valid {
+			if _, ok := seen[currentID]; ok {
+				return nil, errors.New("cannot resolve inherited protocol: node tree contains a cycle")
+			}
+			seen[currentID] = struct{}{}
+			parentID := parentByID[currentID]
+			if parentID == "" {
+				break
+			}
+			parentProtocol, ok := protocolByID[parentID]
+			if !ok {
+				break
+			}
+			resolvedProtocol = parentProtocol
+			currentID = parentID
+		}
+		node.Protocol = protocolName(resolvedProtocol)
 	}
 
 	roots := make([]*treeNode, 0, len(all))

@@ -15,6 +15,8 @@ const wormholeDataDirectoryName = 'Wormhole';
 const backendTimeoutMs = 30_000;
 const backendMaxBuffer = 16 * 1024 * 1024;
 const backendMaxRequestBytes = 64 * 1024;
+const nativeBackendLineLimit = 32 * 1024 * 1024;
+const nativeBackendCommandTimeoutMs = 15_000;
 
 type BackendOperation =
   | 'workspace'
@@ -26,6 +28,36 @@ type BackendOperation =
   | 'auth-hello-status'
   | 'auth-hello-verify'
   | 'auth-system-idle';
+type VncAction = 'vnc.connect' | 'vnc.disconnect' | 'vnc.pointer' | 'vnc.key';
+type VncCommand = {
+  action: VncAction;
+  sessionId: string;
+  nodeId?: string;
+  credentialId?: string;
+  host?: string;
+  port?: number;
+  password?: string;
+  x?: number;
+  y?: number;
+  buttons?: number;
+  down?: boolean;
+  keysym?: number;
+};
+type BackendResponse = {
+  id: string;
+  ok: boolean;
+  error?: string;
+};
+type BackendEvent = {
+  type: string;
+  sessionId: string;
+  status?: string;
+  message?: string;
+  passwordRequired?: boolean;
+  width?: number;
+  height?: number;
+  image?: string;
+};
 type MigrationResponse = {
   status: 'completed' | 'already-completed' | 'skipped-non-windows';
   migrated: number;
@@ -148,6 +180,219 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
     return { type: 'error', sessionId: value.session_id, error: value.error };
   }
   return undefined;
+}
+
+class NativeBackendProcess {
+  private child: ReturnType<typeof spawn> | undefined;
+  private startPromise: Promise<void> | undefined;
+  private outputBuffer = '';
+  private requestSequence = 0;
+  private readonly pending = new Map<
+    string,
+    { resolve: (response: BackendResponse) => void; reject: (error: Error) => void }
+  >();
+
+  async send(command: VncCommand): Promise<BackendResponse> {
+    await this.start();
+    const child = this.child;
+    if (!child?.stdin || child.stdin.destroyed) {
+      throw new Error('Native backend is not available.');
+    }
+
+    const id = `electron-${++this.requestSequence}`;
+    const payload = JSON.stringify({ id, ...command }) + '\n';
+    const response = new Promise<BackendResponse>((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+    });
+    try {
+      child.stdin.write(payload);
+    } catch (error) {
+      this.pending.delete(id);
+      throw error instanceof Error ? error : new Error(String(error));
+    }
+
+    const timeout = setTimeout(() => {
+      const pending = this.pending.get(id);
+      if (!pending) return;
+      this.pending.delete(id);
+      pending.reject(new Error('Native backend command timed out.'));
+    }, nativeBackendCommandTimeoutMs);
+
+    return response.finally(() => clearTimeout(timeout));
+  }
+
+  stop(): void {
+    const child = this.child;
+    this.child = undefined;
+    this.outputBuffer = '';
+    if (!child) return;
+
+    const error = new Error('Native backend stopped.');
+    for (const pending of this.pending.values()) pending.reject(error);
+    this.pending.clear();
+    child.stdin?.end();
+    setTimeout(() => {
+      if (!child.killed) child.kill();
+    }, 1_000);
+  }
+
+  private async start(): Promise<void> {
+    if (this.child) return;
+    if (this.startPromise) return this.startPromise;
+
+    this.startPromise = new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const child = spawn(
+        backendPath(),
+        ['--operation', 'serve', '--database', wormholeDatabasePath()],
+        { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] },
+      );
+      this.child = child;
+      child.stdout?.setEncoding('utf8');
+      child.stdout?.on('data', (chunk: string | Buffer) => this.readOutput(String(chunk)));
+      child.stdout?.once('error', (error) => {
+        this.rejectAll(error instanceof Error ? error : new Error(String(error)));
+        this.stop();
+      });
+      child.stdin?.once('error', (error) => {
+        this.rejectAll(error instanceof Error ? error : new Error(String(error)));
+      });
+      child.once('spawn', () => {
+        settled = true;
+        resolve();
+      });
+      child.once('error', (error) => {
+        this.child = undefined;
+        this.rejectAll(error instanceof Error ? error : new Error(String(error)));
+        if (!settled) reject(error instanceof Error ? error : new Error(String(error)));
+      });
+      child.once('close', (code) => {
+        this.child = undefined;
+        this.outputBuffer = '';
+        const error = new Error(
+          code === null ? 'Native backend stopped.' : `Native backend exited (${code}).`,
+        );
+        this.rejectAll(error);
+        if (!settled) reject(error);
+      });
+    }).finally(() => {
+      this.startPromise = undefined;
+    });
+
+    return this.startPromise;
+  }
+
+  private readOutput(chunk: string): void {
+    this.outputBuffer += chunk;
+    if (this.outputBuffer.length > nativeBackendLineLimit) {
+      this.stop();
+      return;
+    }
+
+    while (true) {
+      const newline = this.outputBuffer.indexOf('\n');
+      if (newline < 0) return;
+      const line = this.outputBuffer.slice(0, newline).trim();
+      this.outputBuffer = this.outputBuffer.slice(newline + 1);
+      if (!line) continue;
+
+      let message: unknown;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (!message || typeof message !== 'object') continue;
+      if ('id' in message && typeof message.id === 'string') {
+        const pending = this.pending.get(message.id);
+        if (pending) {
+          this.pending.delete(message.id);
+          pending.resolve(message as BackendResponse);
+        }
+        continue;
+      }
+      if ('type' in message && typeof message.type === 'string') {
+        if (!authSession.isAccessAllowed) continue;
+        for (const window of BrowserWindow.getAllWindows()) {
+          if (window.isDestroyed()) continue;
+          try {
+            window.webContents.send('backend:event', message as BackendEvent);
+          } catch {
+            // The window may be destroyed between isDestroyed() and send().
+          }
+        }
+      }
+    }
+  }
+
+  private rejectAll(error: Error): void {
+    for (const pending of this.pending.values()) pending.reject(error);
+    this.pending.clear();
+  }
+}
+
+let nativeBackend: NativeBackendProcess | undefined;
+let isQuitting = false;
+
+function parseVncCommand(value: unknown): VncCommand {
+  if (!value || typeof value !== 'object') throw new Error('Invalid VNC command.');
+  const input = value as Record<string, unknown>;
+  const action = input.action;
+  const sessionId = input.sessionId;
+  if (
+    (action !== 'vnc.connect' &&
+      action !== 'vnc.disconnect' &&
+      action !== 'vnc.pointer' &&
+      action !== 'vnc.key') ||
+    typeof sessionId !== 'string' ||
+    sessionId.length === 0 ||
+    sessionId.length > 128
+  ) {
+    throw new Error('Invalid VNC command.');
+  }
+
+  const command: VncCommand = { action, sessionId };
+  const stringField = (name: string, maxLength: number): string | undefined => {
+    const field = input[name];
+    if (field === undefined) return undefined;
+    if (typeof field !== 'string' || field.length > maxLength)
+      throw new Error(`Invalid VNC ${name}.`);
+    return field;
+  };
+  const numberField = (name: string, max: number): number | undefined => {
+    const field = input[name];
+    if (field === undefined) return undefined;
+    if (typeof field !== 'number' || !Number.isInteger(field) || field < 0 || field > max) {
+      throw new Error(`Invalid VNC ${name}.`);
+    }
+    return field;
+  };
+
+  if (action === 'vnc.connect') {
+    command.nodeId = stringField('nodeId', 128);
+    command.credentialId = stringField('credentialId', 128);
+    command.host = stringField('host', 1024);
+    command.password = stringField('password', 16 * 1024);
+    command.port = numberField('port', 65535);
+    return command;
+  }
+  if (action === 'vnc.pointer') {
+    command.x = numberField('x', 65535);
+    command.y = numberField('y', 65535);
+    command.buttons = numberField('buttons', 255);
+    if (command.x === undefined || command.y === undefined || command.buttons === undefined) {
+      throw new Error('Invalid VNC pointer command.');
+    }
+    return command;
+  }
+  if (action === 'vnc.key') {
+    command.keysym = numberField('keysym', 0xffffffff);
+    if (typeof input.down !== 'boolean' || command.keysym === undefined || command.keysym === 0) {
+      throw new Error('Invalid VNC key command.');
+    }
+    command.down = input.down;
+  }
+  return command;
 }
 
 function wormholeDatabasePath(): string {
@@ -642,6 +887,30 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!isSshSessionId(sessionId)) throw new Error('SSH close request is invalid.');
     sshBackend.close(sessionId);
   });
+  ipcMain.handle('vnc:command', async (_event, input: unknown) => {
+    if (isQuitting) {
+      return { id: '', ok: false, error: 'Native backend is stopping.' };
+    }
+    if (process.platform !== 'win32') {
+      return { id: '', ok: false, error: 'Native VNC sessions are available on Windows builds.' };
+    }
+
+    let command: VncCommand;
+    try {
+      command = parseVncCommand(input);
+    } catch (error) {
+      return {
+        id: '',
+        ok: false,
+        error: error instanceof Error ? error.message : 'Invalid VNC command.',
+      };
+    }
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      nativeBackend ??= new NativeBackendProcess();
+      return nativeBackend.send(command);
+    });
+  });
 }
 
 function createWindow() {
@@ -711,6 +980,12 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+app.on('before-quit', () => {
+  isQuitting = true;
+  nativeBackend?.stop();
+  nativeBackend = undefined;
 });
 
 app.on('window-all-closed', () => {

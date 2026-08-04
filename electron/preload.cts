@@ -35,4 +35,10 @@ contextBridge.exposeInMainWorld('wormhole', {
   checkWindowsHello: () => ipcRenderer.invoke('auth:hello-status'),
   verifyWindowsHello: () => ipcRenderer.invoke('auth:hello-verify'),
   getSystemIdleSeconds: () => ipcRenderer.invoke('auth:system-idle'),
+  sendVncCommand: (command: unknown) => ipcRenderer.invoke('vnc:command', command),
+  onBackendEvent: (listener: (event: unknown) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
+    ipcRenderer.on('backend:event', handler);
+    return () => ipcRenderer.removeListener('backend:event', handler);
+  },
 });

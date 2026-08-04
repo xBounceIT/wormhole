@@ -8,6 +8,7 @@ interface WormholeWorkspaceNode {
   kind: 'folder' | 'connection';
   protocol?: WormholeProtocol;
   host?: string;
+  port?: number;
   children?: WormholeWorkspaceNode[];
 }
 
@@ -86,6 +87,37 @@ interface WormholeAuthSettingsRequest {
   idleTimeoutMinutes: number | null;
 }
 
+type WormholeVncCommand =
+  | {
+      action: 'vnc.connect';
+      sessionId: string;
+      nodeId?: string;
+      credentialId?: string;
+      host?: string;
+      port?: number;
+      password?: string;
+    }
+  | { action: 'vnc.disconnect'; sessionId: string }
+  | { action: 'vnc.pointer'; sessionId: string; x: number; y: number; buttons: number }
+  | { action: 'vnc.key'; sessionId: string; down: boolean; keysym: number };
+
+interface WormholeBackendResponse {
+  id: string;
+  ok: boolean;
+  error?: string;
+}
+
+interface WormholeBackendEvent {
+  type: 'vnc.status' | 'vnc.frame';
+  sessionId: string;
+  status?: 'connecting' | 'connected' | 'failed' | 'disconnected';
+  message?: string;
+  passwordRequired?: boolean;
+  width?: number;
+  height?: number;
+  image?: string;
+}
+
 interface Window {
   wormhole?: {
     loadWorkspace(): Promise<WormholeWorkspaceSnapshot>;
@@ -107,5 +139,7 @@ interface Window {
     checkWindowsHello(): Promise<WormholeHelloStatus>;
     verifyWindowsHello(): Promise<WormholeAuthVerification>;
     getSystemIdleSeconds(): Promise<{ seconds: number }>;
+    sendVncCommand(command: WormholeVncCommand): Promise<WormholeBackendResponse>;
+    onBackendEvent(listener: (event: WormholeBackendEvent) => void): () => void;
   };
 }

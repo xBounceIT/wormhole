@@ -13,6 +13,7 @@ wormhole-backend-x64.exe --operation auth-status --database <path>
 wormhole-backend-x64.exe --operation auth-verify --database <path> < request.json
 wormhole-backend-x64.exe --operation auth-set-secret --database <path> < request.json
 wormhole-backend-x64.exe --operation auth-update-settings --database <path> < request.json
+wormhole-backend-x64.exe --operation serve --database <path>
 ```
 
 `migrate` is Windows-only and records
@@ -25,3 +26,10 @@ the same `%LOCALAPPDATA%\Wormhole\settings.json` fields and raw DPAPI document
 (`app-auth.dpapi`, with `Wormhole.AppAuthentication.v1` entropy) as the WinUI
 implementation, so an existing verifier works across both shells. Secrets are
 accepted on stdin and never as command-line arguments.
+
+`serve` keeps a Go-native JSON-lines backend process open for the Electron
+renderer. It owns VNC connections, framebuffer decoding, pointer/key input,
+and DPAPI-backed password lookup. Effective VPN-routed VNC targets fail closed
+until the Electron tunnel providers are migrated; the backend never falls back
+to direct TCP. Responses and events are written to stdout; diagnostic output
+is kept off the protocol stream.
