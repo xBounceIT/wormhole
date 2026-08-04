@@ -33,8 +33,32 @@ interface WormholeWorkspaceSnapshot {
   tunnels: WormholeWorkspaceTunnel[];
 }
 
+interface WormholeSshConnected {
+  sessionId: string;
+  host: string;
+  port: number;
+  username: string;
+  fingerprint: string;
+}
+
+type WormholeSshEvent =
+  | ({ type: 'connected' } & WormholeSshConnected)
+  | { type: 'data'; sessionId: string; data: string }
+  | { type: 'closed'; sessionId: string }
+  | { type: 'error'; sessionId: string; error: string };
+
 interface Window {
   wormhole?: {
     loadWorkspace(): Promise<WormholeWorkspaceSnapshot>;
+    openSshSession(request: {
+      sessionId: string;
+      nodeId: string;
+      columns: number;
+      rows: number;
+    }): Promise<WormholeSshConnected>;
+    sendSshInput(sessionId: string, data: string): Promise<void>;
+    resizeSshSession(sessionId: string, columns: number, rows: number): Promise<void>;
+    closeSshSession(sessionId: string): Promise<void>;
+    onSshEvent(listener: (event: WormholeSshEvent) => void): () => void;
   };
 }

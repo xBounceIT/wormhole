@@ -101,7 +101,7 @@ type tunnelRow struct {
 }
 
 func main() {
-	operation := flag.String("operation", "workspace", "backend operation: workspace or migrate")
+	operation := flag.String("operation", "workspace", "backend operation: workspace, migrate, or ssh")
 	databasePath := flag.String("database", "", "path to the Wormhole SQLite database")
 	credentialReader := flag.String("credential-reader", "", "path to the Windows Credential Manager reader")
 	flag.Parse()
@@ -109,6 +109,13 @@ func main() {
 	if *databasePath == "" {
 		writeError("database path is required")
 		os.Exit(1)
+		return
+	}
+	if *operation == "ssh" {
+		if err := serveSSH(*databasePath, os.Stdin, os.Stdout); err != nil {
+			writeError(err.Error())
+			os.Exit(1)
+		}
 		return
 	}
 

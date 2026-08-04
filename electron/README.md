@@ -25,6 +25,17 @@ the UI stays empty; it does not create demo connections or credentials. The
 shell shape mirrors the current WinUI layout (title bar, update strip,
 connection tree, footer navigation, session tabs, and protocol surface).
 
+Saved SSH connections opened from the tree use a persistent Go backend process
+over a JSON-lines stdio channel. The backend resolves inherited connection data,
+decrypts migrated DPAPI secrets, and creates the PTY with Go's native
+`golang.org/x/crypto/ssh` package. The renderer receives only session metadata
+and base64 terminal bytes through the preload bridge; it never opens a socket or
+reads Credential Manager / DPAPI data directly. Local saved passwords and SSH
+keys are supported; Bitwarden credentials, interactive credential prompts, and
+Quick Connect are not wired in this migration slice. A connection configured
+for a VPN tunnel is rejected until Electron tunnel routing is available rather
+than falling back to a direct SSH connection.
+
 On the first Windows launch, the Electron main process copies legacy local
 Wormhole passwords (saved profiles, inline connection passwords, and the MCP
 token) from Windows Credential Manager into the existing

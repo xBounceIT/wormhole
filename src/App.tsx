@@ -2,6 +2,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type ComponentProps,
   type CSSProperties,
@@ -277,6 +278,12 @@ type Session = {
   protocol: Protocol;
   host: string;
   canTransfer?: boolean;
+  nodeId?: string;
+  backendSessionId?: string;
+  status: 'connecting' | 'connected' | 'failed' | 'closed' | 'placeholder';
+  output: string;
+  error?: string;
+  fingerprint?: string;
 };
 
 type CredentialRecord = {
@@ -294,6 +301,34 @@ type TunnelRecord = {
   name: string;
   kind: string;
 };
+
+function newSessionToken(): string {
+  return typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `ssh-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function decodeTerminalData(value: string, decoder: TextDecoder, stream: boolean): string {
+  try {
+    const binary = atob(value);
+    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+    return decoder.decode(bytes, { stream });
+  } catch {
+    return '';
+  }
+}
+
+function encodeTerminalData(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary);
+}
+
+function appendTerminalOutput(current: string, next: string): string {
+  const combined = current + next;
+  return combined.length > 256_000 ? combined.slice(-256_000) : combined;
+}
 
 const navItems: Array<{ id: NavItem; label: string; hint: string }> = [
   { id: 'credentials', label: 'Credentials', hint: 'Stored access profiles' },
@@ -607,6 +642,7 @@ function App() {
     id: string;
     placement: DropPlacement;
   } | null>(null);
+  const terminalDecoders = useRef(new Map<string, TextDecoder>());
 
   const visibleTree = useMemo(
     () => filterTree(tree, searchText.trim().toLowerCase()),
@@ -663,6 +699,63 @@ function App() {
     void loadWorkspace();
     return () => {
       mounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const decoders = terminalDecoders.current;
+    const unsubscribe = window.wormhole?.onSshEvent((event) => {
+      let output = '';
+      if (event.type === 'connected') {
+        decoders.set(event.sessionId, new TextDecoder());
+      } else if (event.type === 'data') {
+        const decoder = decoders.get(event.sessionId) ?? new TextDecoder();
+        decoders.set(event.sessionId, decoder);
+        output = decodeTerminalData(event.data, decoder, true);
+      } else if (event.type === 'closed') {
+        const decoder = decoders.get(event.sessionId);
+        if (decoder) output = decoder.decode();
+        decoders.delete(event.sessionId);
+      }
+
+      setSessions((current) =>
+        current.map((session) => {
+          if (session.backendSessionId !== event.sessionId) return session;
+          if (event.type === 'connected') {
+            return {
+              ...session,
+              status: 'connected',
+              host: event.host,
+              fingerprint: event.fingerprint,
+              error: undefined,
+            };
+          }
+          if (event.type === 'data') {
+            return {
+              ...session,
+              output: appendTerminalOutput(session.output, output),
+            };
+          }
+          if (event.type === 'error') {
+            return {
+              ...session,
+              status: 'failed',
+              output: appendTerminalOutput(session.output, output),
+              error: event.error,
+            };
+          }
+          return {
+            ...session,
+            status: 'closed',
+            output: appendTerminalOutput(session.output, output),
+          };
+        }),
+      );
+    });
+
+    return () => {
+      unsubscribe?.();
+      decoders.clear();
     };
   }, []);
 
@@ -794,6 +887,36 @@ function App() {
     setDropTarget(null);
   }
 
+  function startSshSession(sessionId: string, nodeId: string) {
+    const api = window.wormhole;
+    if (!api) {
+      setSessions((current) =>
+        current.map((session) =>
+          session.backendSessionId === sessionId
+            ? { ...session, status: 'failed', error: 'The native SSH bridge is unavailable.' }
+            : session,
+        ),
+      );
+      return;
+    }
+
+    void api
+      .openSshSession({ sessionId, nodeId, columns: 80, rows: 24 })
+      .catch((error: unknown) => {
+        setSessions((current) =>
+          current.map((session) =>
+            session.backendSessionId === sessionId
+              ? {
+                  ...session,
+                  status: 'failed',
+                  error: error instanceof Error ? error.message : String(error),
+                }
+              : session,
+          ),
+        );
+      });
+  }
+
   function openConnection(node: TreeNode) {
     if (node.kind !== 'connection' || !node.protocol) return;
 
@@ -804,23 +927,34 @@ function App() {
       return;
     }
 
+    const backendSessionId = node.protocol === 'ssh' ? newSessionToken() : undefined;
     const session: Session = {
       id: `session-${node.id}`,
       title: node.name,
       protocol: node.protocol,
       host: node.host ?? 'inherited target',
       canTransfer: node.protocol === 'ssh',
+      nodeId: node.id,
+      backendSessionId,
+      status: node.protocol === 'ssh' ? 'connecting' : 'placeholder',
+      output: '',
     };
 
     setSessions((current) => [...current, session]);
     setSelectedSessionId(session.id);
     setActivePage('sessions');
+    if (backendSessionId) startSshSession(backendSessionId, node.id);
   }
 
   function closeSession(id: string) {
+    const closing = sessions.find((session) => session.id === id);
     const index = sessions.findIndex((session) => session.id === id);
     const nextSessions = sessions.filter((session) => session.id !== id);
     setSessions(nextSessions);
+
+    if (closing?.backendSessionId) {
+      void window.wormhole?.closeSshSession(closing.backendSessionId);
+    }
 
     if (selectedSessionId === id) {
       setSelectedSessionId(nextSessions[index]?.id ?? nextSessions[index - 1]?.id ?? '');
@@ -828,7 +962,27 @@ function App() {
   }
 
   function reconnectSession(id: string) {
-    if (!sessions.some((session) => session.id === id)) return;
+    const source = sessions.find((session) => session.id === id);
+    if (!source) return;
+
+    if (source.backendSessionId) void window.wormhole?.closeSshSession(source.backendSessionId);
+    if (source.nodeId && source.protocol === 'ssh') {
+      const backendSessionId = newSessionToken();
+      setSessions((current) =>
+        current.map((session) =>
+          session.id === id
+            ? {
+                ...session,
+                backendSessionId,
+                status: 'connecting',
+                output: '',
+                error: undefined,
+              }
+            : session,
+        ),
+      );
+      startSshSession(backendSessionId, source.nodeId);
+    }
 
     setSelectedSessionId(id);
     setActivePage('sessions');
@@ -842,6 +996,10 @@ function App() {
       ...source,
       id: `session-duplicate-${Date.now()}`,
       title: `${source.title} (copy)`,
+      backendSessionId: source.protocol === 'ssh' ? newSessionToken() : undefined,
+      status: source.protocol === 'ssh' ? 'connecting' : 'placeholder',
+      output: '',
+      error: undefined,
     };
     setSessions((current) => {
       const index = current.findIndex((session) => session.id === id);
@@ -853,11 +1011,35 @@ function App() {
     });
     setSelectedSessionId(duplicate.id);
     setActivePage('sessions');
+    if (duplicate.backendSessionId && duplicate.nodeId) {
+      startSshSession(duplicate.backendSessionId, duplicate.nodeId);
+    }
   }
 
   function openFileTransfer(id: string) {
     setSelectedSessionId(id);
     setActivePage('sessions');
+  }
+
+  function sendSshInput(sessionId: string, value: string) {
+    const session = sessions.find((candidate) => candidate.id === sessionId);
+    if (!session?.backendSessionId || session.status !== 'connected') return;
+
+    void window.wormhole
+      ?.sendSshInput(session.backendSessionId, encodeTerminalData(value))
+      .catch((error: unknown) => {
+        setSessions((current) =>
+          current.map((candidate) =>
+            candidate.id === sessionId
+              ? {
+                  ...candidate,
+                  status: 'failed',
+                  error: error instanceof Error ? error.message : String(error),
+                }
+              : candidate,
+          ),
+        );
+      });
   }
 
   function openQuickConnect() {
@@ -916,6 +1098,12 @@ function App() {
         protocol: quickConnectForm.protocol,
         host,
         canTransfer: quickConnectForm.protocol === 'ssh',
+        status: 'placeholder',
+        output: '',
+        error:
+          quickConnectForm.protocol === 'ssh'
+            ? 'Quick Connect needs a saved SSH credential before it can connect.'
+            : undefined,
       },
     ]);
     setSelectedSessionId(id);
@@ -930,6 +1118,13 @@ function App() {
     const editingId = editingConnectionId;
 
     if (editingId) {
+      const editedSessionId = `session-${editingId}`;
+      const editedSession = sessions.find((session) => session.id === editedSessionId);
+      if (editedSession?.backendSessionId) {
+        void window.wormhole?.closeSshSession(editedSession.backendSessionId);
+      }
+      const backendSessionId =
+        editedSession && newConnectionForm.protocol === 'ssh' ? newSessionToken() : undefined;
       setTree((current) =>
         updateConnectionInTree(current, editingId, newConnectionForm.folder, {
           name,
@@ -939,17 +1134,23 @@ function App() {
       );
       setSessions((current) =>
         current.map((session) =>
-          session.id === `session-${editingId}`
+          session.id === editedSessionId
             ? {
                 ...session,
                 title: name,
                 host,
                 protocol: newConnectionForm.protocol,
                 canTransfer: newConnectionForm.protocol === 'ssh',
+                nodeId: editingId,
+                backendSessionId,
+                status: newConnectionForm.protocol === 'ssh' ? 'connecting' : 'placeholder',
+                output: '',
+                error: undefined,
               }
             : session,
         ),
       );
+      if (backendSessionId) startSshSession(backendSessionId, editingId);
     } else {
       const id = `connection-${Date.now()}`;
       const connection: TreeNode = {
@@ -1354,6 +1555,7 @@ function App() {
                   onOpenQuickConnect={openQuickConnect}
                   onReconnectSession={reconnectSession}
                   onSelectSession={setSelectedSessionId}
+                  onSshInput={sendSshInput}
                   selectedSession={selectedSession}
                   sessions={sessions}
                 />
@@ -1874,6 +2076,120 @@ function App() {
   );
 }
 
+function SshTerminalSurface({
+  session,
+  onInput,
+}: {
+  session: Session;
+  onInput: (sessionId: string, value: string) => void;
+}) {
+  const [command, setCommand] = useState('');
+  const surfaceRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    const surface = surfaceRef.current;
+    const backendSessionId = session.backendSessionId;
+    if (
+      !surface ||
+      !backendSessionId ||
+      session.status !== 'connected' ||
+      typeof ResizeObserver === 'undefined'
+    )
+      return;
+
+    const resize = () => {
+      const columns = Math.max(1, Math.floor(surface.clientWidth / 7.2));
+      const rows = Math.max(1, Math.floor((surface.clientHeight - 72) / 17));
+      const api = window.wormhole;
+      if (!api) return;
+      void api.resizeSshSession(backendSessionId, columns, rows).catch(() => {
+        // A resize can race with a remote close; the closed event owns the visible session state.
+      });
+    };
+    const observer = new ResizeObserver(resize);
+    observer.observe(surface);
+    resize();
+    return () => observer.disconnect();
+  }, [session.backendSessionId, session.status]);
+
+  function submitCommand() {
+    if (!command || session.status !== 'connected') return;
+    onInput(session.id, `${command}\r`);
+    setCommand('');
+  }
+
+  return (
+    <div
+      className="flex min-h-0 flex-1 flex-col bg-[#090909] text-zinc-100"
+      onClick={() => inputRef.current?.focus()}
+      ref={surfaceRef}
+    >
+      <div className="flex h-8 shrink-0 items-center gap-2 border-b border-white/10 px-4 font-mono text-[10px] text-zinc-400">
+        <span
+          className={`size-1.5 rounded-full ${
+            session.status === 'connected'
+              ? 'bg-emerald-400'
+              : session.status === 'connecting'
+                ? 'animate-pulse bg-amber-400'
+                : 'bg-red-400'
+          }`}
+        />
+        <span>{session.host}</span>
+        <span className="text-zinc-600">·</span>
+        <span>{session.status}</span>
+        {session.fingerprint ? (
+          <span className="ml-auto truncate text-zinc-600" title={session.fingerprint}>
+            {session.fingerprint}
+          </span>
+        ) : null}
+      </div>
+      <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap px-4 py-3 font-mono text-[12px] leading-relaxed">
+        {session.output ||
+          (session.status === 'connecting'
+            ? 'Connecting to SSH server…'
+            : session.error || (session.status === 'closed' ? 'SSH session closed.' : ''))}
+      </pre>
+      <form
+        className="flex shrink-0 items-end gap-2 border-t border-white/10 p-3"
+        onSubmit={(event) => {
+          event.preventDefault();
+          submitCommand();
+        }}
+      >
+        <span className="pb-2 font-mono text-xs text-emerald-400">$</span>
+        <Textarea
+          aria-label="SSH terminal input"
+          className="min-h-9 resize-none border-white/10 bg-white/5 font-mono text-xs text-zinc-100 placeholder:text-zinc-600 focus-visible:ring-white/20"
+          disabled={session.status !== 'connected'}
+          onChange={(event) => setCommand(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.ctrlKey && event.key.toLowerCase() === 'c') {
+              event.preventDefault();
+              onInput(session.id, '\u0003');
+              setCommand('');
+            } else if (event.key === 'Enter' && !event.shiftKey) {
+              event.preventDefault();
+              submitCommand();
+            }
+          }}
+          placeholder={
+            session.status === 'connected'
+              ? 'Type a command and press Enter'
+              : 'Terminal unavailable'
+          }
+          ref={inputRef}
+          rows={1}
+          value={command}
+        />
+        <Button disabled={session.status !== 'connected' || !command} size="sm" type="submit">
+          Send
+        </Button>
+      </form>
+    </div>
+  );
+}
+
 function SessionsPage({
   sessions,
   selectedSession,
@@ -1883,6 +2199,7 @@ function SessionsPage({
   onSelectSession,
   onOpenQuickConnect,
   onReconnectSession,
+  onSshInput,
 }: {
   sessions: Session[];
   selectedSession?: Session;
@@ -1892,6 +2209,7 @@ function SessionsPage({
   onSelectSession: (id: string) => void;
   onOpenQuickConnect: () => void;
   onReconnectSession: (id: string) => void;
+  onSshInput: (sessionId: string, value: string) => void;
 }) {
   if (!selectedSession || sessions.length === 0) {
     return (
@@ -1971,7 +2289,20 @@ function SessionsPage({
             ))}
           </TabsList>
         </div>
-        <div aria-label="Connection canvas" className="min-h-0 flex-1 bg-background" />
+        {selectedSession.protocol === 'ssh' ? (
+          <SshTerminalSurface onInput={onSshInput} session={selectedSession} />
+        ) : (
+          <div className="flex min-h-0 flex-1 items-center justify-center bg-background p-8 text-center">
+            <div>
+              <p className="font-mono text-[9px] uppercase tracking-[0.14em] text-muted-foreground">
+                {protocolLabel(selectedSession.protocol)} session
+              </p>
+              <p className="mt-2 text-xs text-muted-foreground">
+                This protocol surface is still being migrated to the Electron shell.
+              </p>
+            </div>
+          </div>
+        )}
       </Tabs>
     </section>
   );

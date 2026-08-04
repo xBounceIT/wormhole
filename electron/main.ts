@@ -1,7 +1,8 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
-import { execFile } from 'node:child_process';
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
+import { createInterface, type Interface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
@@ -26,6 +27,112 @@ type WorkspaceResponse = {
   credentials: unknown[];
   tunnels: unknown[];
 };
+
+type SshConnectedResponse = {
+  sessionId: string;
+  host: string;
+  port: number;
+  username: string;
+  fingerprint: string;
+};
+
+type SshBackendEvent =
+  | {
+      type: 'connected';
+      sessionId: string;
+      host: string;
+      port: number;
+      username: string;
+      fingerprint: string;
+    }
+  | { type: 'data'; sessionId: string; data: string }
+  | { type: 'closed'; sessionId: string }
+  | { type: 'error'; sessionId: string; error: string };
+
+type SshOpenRequest = {
+  sessionId: string;
+  nodeId: string;
+  columns: number;
+  rows: number;
+};
+
+const sshMaxSessionIdLength = 128;
+const sshMaxInputLength = 1_500_000;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isSshSessionId(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= sshMaxSessionIdLength &&
+    value.trim() === value
+  );
+}
+
+function isSshOpenRequest(value: unknown): value is SshOpenRequest {
+  return (
+    isRecord(value) &&
+    isSshSessionId(value.sessionId) &&
+    isSshSessionId(value.nodeId) &&
+    typeof value.columns === 'number' &&
+    Number.isInteger(value.columns) &&
+    value.columns >= 0 &&
+    value.columns <= 500 &&
+    typeof value.rows === 'number' &&
+    Number.isInteger(value.rows) &&
+    value.rows >= 0 &&
+    value.rows <= 500
+  );
+}
+
+function isSshInput(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= sshMaxInputLength;
+}
+
+function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(value) || typeof value.type !== 'string' || !isSshSessionId(value.session_id)) {
+    return undefined;
+  }
+
+  if (
+    value.type === 'connected' &&
+    typeof value.host === 'string' &&
+    typeof value.port === 'number' &&
+    Number.isInteger(value.port) &&
+    value.port > 0 &&
+    value.port <= 65535 &&
+    typeof value.username === 'string' &&
+    typeof value.fingerprint === 'string'
+  ) {
+    return {
+      type: 'connected',
+      sessionId: value.session_id,
+      host: value.host,
+      port: value.port,
+      username: value.username,
+      fingerprint: value.fingerprint,
+    };
+  }
+  if (value.type === 'data' && typeof value.data === 'string') {
+    return { type: 'data', sessionId: value.session_id, data: value.data };
+  }
+  if (value.type === 'closed') {
+    return { type: 'closed', sessionId: value.session_id };
+  }
+  if (value.type === 'error' && typeof value.error === 'string') {
+    return { type: 'error', sessionId: value.session_id, error: value.error };
+  }
+  return undefined;
+}
 
 function wormholeDatabasePath(): string {
   const localAppData = process.env.LOCALAPPDATA;
@@ -93,6 +200,187 @@ async function runBackend<T>(operation: BackendOperation): Promise<T> {
   }
 }
 
+class NativeSshBackend {
+  private child: ChildProcessWithoutNullStreams | undefined;
+  private lineReader: Interface | undefined;
+  private readonly activeSessions = new Set<string>();
+  private readonly openWaiters = new Map<
+    string,
+    {
+      resolve: (response: SshConnectedResponse) => void;
+      reject: (error: Error) => void;
+      timeout: NodeJS.Timeout;
+    }
+  >();
+
+  async open(request: SshOpenRequest): Promise<SshConnectedResponse> {
+    if (this.openWaiters.has(request.sessionId) || this.activeSessions.has(request.sessionId)) {
+      throw new Error('SSH session id is already in use.');
+    }
+    this.ensureStarted();
+
+    return new Promise<SshConnectedResponse>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const waiter = this.openWaiters.get(request.sessionId);
+        if (!waiter || waiter.timeout !== timeout) return;
+        this.openWaiters.delete(request.sessionId);
+        reject(new Error('SSH connection timed out.'));
+        try {
+          this.write({ type: 'close', session_id: request.sessionId });
+        } catch {
+          // The backend may already have stopped; the timeout has released the renderer.
+        }
+      }, backendTimeoutMs);
+      this.openWaiters.set(request.sessionId, { resolve, reject, timeout });
+      try {
+        this.write({
+          type: 'open',
+          session_id: request.sessionId,
+          node_id: request.nodeId,
+          columns: request.columns,
+          rows: request.rows,
+        });
+      } catch (error) {
+        this.openWaiters.delete(request.sessionId);
+        clearTimeout(timeout);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+  }
+
+  sendInput(sessionId: string, data: string): void {
+    this.write({ type: 'input', session_id: sessionId, data });
+  }
+
+  resize(sessionId: string, columns: number, rows: number): void {
+    this.write({ type: 'resize', session_id: sessionId, columns, rows });
+  }
+
+  close(sessionId: string): void {
+    const waiter = this.openWaiters.get(sessionId);
+    if (waiter) {
+      this.openWaiters.delete(sessionId);
+      clearTimeout(waiter.timeout);
+      waiter.reject(new Error('SSH connection closed while connecting.'));
+    }
+    if (this.child && !this.child.killed) {
+      try {
+        this.write({ type: 'close', session_id: sessionId });
+      } catch {
+        // The backend may exit between the state check and the write. The renderer is already
+        // removing this tab, so there is no useful recovery action here.
+      }
+    }
+  }
+
+  dispose(): void {
+    for (const waiter of this.openWaiters.values()) {
+      clearTimeout(waiter.timeout);
+      waiter.reject(new Error('SSH backend stopped.'));
+    }
+    this.openWaiters.clear();
+    this.activeSessions.clear();
+    this.lineReader?.close();
+    this.lineReader = undefined;
+    const child = this.child;
+    this.child = undefined;
+    if (!child || child.killed) return;
+    child.stdin.end();
+    child.kill();
+  }
+
+  private ensureStarted(): void {
+    if (process.platform !== 'win32') {
+      throw new Error('Native SSH sessions are currently available on Windows only.');
+    }
+    if (this.child && !this.child.killed) return;
+
+    const child = spawn(
+      backendPath(),
+      ['--operation', 'ssh', '--database', wormholeDatabasePath()],
+      { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+    this.child = child;
+    const lineReader = createInterface({ input: child.stdout, crlfDelay: Infinity });
+    this.lineReader = lineReader;
+    lineReader.on('line', (line) => {
+      if (this.child === child) this.handleLine(line);
+    });
+    child.stdin.on('error', (error) => {
+      if (this.child !== child) return;
+      this.failOpenWaiters(new Error(`Native SSH backend input failed: ${error.message}`));
+    });
+    child.stderr.on('data', () => {
+      // The backend deliberately keeps protocol events on stdout. Drain stderr so a native
+      // failure cannot block the session pipe; do not mirror raw backend text into the UI.
+    });
+    child.on('error', (error) => {
+      if (this.child !== child) return;
+      this.failOpenWaiters(new Error(`Native SSH backend failed: ${error.message}`));
+    });
+    child.on('exit', () => {
+      lineReader.close();
+      if (this.child !== child) return;
+      this.child = undefined;
+      if (this.lineReader === lineReader) this.lineReader = undefined;
+      const closedSessions = [...this.activeSessions];
+      this.activeSessions.clear();
+      for (const sessionId of closedSessions) {
+        this.broadcast({ type: 'closed', sessionId });
+      }
+      this.failOpenWaiters(new Error('Native SSH backend stopped.'));
+    });
+  }
+
+  private write(command: Record<string, unknown>): void {
+    const child = this.child;
+    if (!child || child.killed || child.stdin.destroyed) {
+      throw new Error('Native SSH backend is not running.');
+    }
+    child.stdin.write(`${JSON.stringify(command)}\n`, 'utf8');
+  }
+
+  private handleLine(line: string): void {
+    const event = parseSshBackendEvent(line);
+    if (!event) return;
+
+    if (event.type === 'connected') {
+      this.activeSessions.add(event.sessionId);
+      const waiter = this.openWaiters.get(event.sessionId);
+      if (waiter) {
+        this.openWaiters.delete(event.sessionId);
+        clearTimeout(waiter.timeout);
+        waiter.resolve(event);
+      }
+    } else if (event.type === 'error') {
+      const waiter = this.openWaiters.get(event.sessionId);
+      if (waiter) {
+        this.openWaiters.delete(event.sessionId);
+        clearTimeout(waiter.timeout);
+        waiter.reject(new Error(event.error || 'SSH connection failed.'));
+      }
+    } else if (event.type === 'closed') {
+      this.activeSessions.delete(event.sessionId);
+    }
+
+    this.broadcast(event);
+  }
+
+  private broadcast(event: SshBackendEvent): void {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send('ssh:event', event);
+    }
+  }
+
+  private failOpenWaiters(error: Error): void {
+    for (const waiter of this.openWaiters.values()) {
+      clearTimeout(waiter.timeout);
+      waiter.reject(error);
+    }
+    this.openWaiters.clear();
+  }
+}
+
 async function runFirstLaunchMigrations(): Promise<void> {
   // The legacy Credential Manager is a Windows-only source. Keeping this guard in the Electron
   // main process also prevents the Windows backend/helper from being loaded on other platforms.
@@ -108,7 +396,7 @@ async function runFirstLaunchMigrations(): Promise<void> {
   }
 }
 
-function registerIpcHandlers(): void {
+function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   ipcMain.handle('workspace:load', async () => {
     if (process.platform !== 'win32') {
       return { tree: [], credentials: [], tunnels: [] };
@@ -118,6 +406,39 @@ function registerIpcHandlers(): void {
       `[Wormhole] Workspace loaded: ${workspace.tree.length} roots, ${workspace.credentials.length} credentials, ${workspace.tunnels.length} tunnels.`,
     );
     return workspace;
+  });
+  ipcMain.handle('ssh:open', async (_event, request: unknown) => {
+    if (!isSshOpenRequest(request)) throw new Error('SSH open request is invalid.');
+    return sshBackend.open(request);
+  });
+  ipcMain.handle('ssh:input', async (_event, sessionId: unknown, data: unknown) => {
+    if (!isSshSessionId(sessionId) || !isSshInput(data)) {
+      throw new Error('SSH input request is invalid.');
+    }
+    sshBackend.sendInput(sessionId, data);
+  });
+  ipcMain.handle(
+    'ssh:resize',
+    async (_event, sessionId: unknown, columns: unknown, rows: unknown) => {
+      if (
+        !isSshSessionId(sessionId) ||
+        typeof columns !== 'number' ||
+        !Number.isInteger(columns) ||
+        columns < 0 ||
+        columns > 500 ||
+        typeof rows !== 'number' ||
+        !Number.isInteger(rows) ||
+        rows < 0 ||
+        rows > 500
+      ) {
+        throw new Error('SSH resize request is invalid.');
+      }
+      sshBackend.resize(sessionId, columns, rows);
+    },
+  );
+  ipcMain.handle('ssh:close', async (_event, sessionId: unknown) => {
+    if (!isSshSessionId(sessionId)) throw new Error('SSH close request is invalid.');
+    sshBackend.close(sessionId);
   });
 }
 
@@ -158,8 +479,10 @@ function createWindow() {
   }
 }
 
+const sshBackend = new NativeSshBackend();
+
 app.whenReady().then(async () => {
-  registerIpcHandlers();
+  registerIpcHandlers(sshBackend);
   try {
     await runFirstLaunchMigrations();
   } catch (error) {
@@ -179,4 +502,8 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
+});
+
+app.on('before-quit', () => {
+  sshBackend.dispose();
 });
