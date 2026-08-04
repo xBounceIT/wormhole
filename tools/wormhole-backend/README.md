@@ -14,6 +14,7 @@ wormhole-backend-x64.exe --operation auth-verify --database <path> < request.jso
 wormhole-backend-x64.exe --operation auth-set-secret --database <path> < request.json
 wormhole-backend-x64.exe --operation auth-update-settings --database <path> < request.json
 wormhole-backend-x64.exe --operation serve --database <path>
+wormhole-backend-x64.exe --operation rdp --database <path> [--rdp-host <path>] [--freerdp <path>]
 ```
 
 `migrate` is Windows-only and records
@@ -33,3 +34,9 @@ and DPAPI-backed password lookup. Effective VPN-routed VNC targets fail closed
 until the Electron tunnel providers are migrated; the backend never falls back
 to direct TCP. Responses and events are written to stdout; diagnostic output
 is kept off the protocol stream.
+
+`rdp` is a long-lived JSON-lines supervisor. On Windows it launches the
+packaged `wormhole-rdp-host-<arch>.exe` ActiveX host; on Linux and macOS it
+launches `xfreerdp`/`xfreerdp3` (or the macOS `sdl-freerdp` clients). The
+supervisor forwards sanitized lifecycle events but never emits the connection
+profile or credential values back to Electron.

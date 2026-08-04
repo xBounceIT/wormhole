@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <UseWindowsForms>true</UseWindowsForms>
+    <WindowsPackageType>None</WindowsPackageType>
+    <Platforms>x64;arm64</Platforms>
+    <PlatformTarget Condition="'$(Platform)' == 'arm64' Or '$(Platform)' == 'ARM64'">arm64</PlatformTarget>
+    <PlatformTarget Condition="'$(Platform)' != 'arm64' And '$(Platform)' != 'ARM64'">x64</PlatformTarget>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <EnableDefaultApplicationDefinition>false</EnableDefaultApplicationDefinition>
+    <AssemblyName>Wormhole.RdpHost</AssemblyName>
+    <RootNamespace>Wormhole.RdpHost</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Link only the tested ActiveX host slice. Referencing the WinUI executable project would
+         import its Windows App SDK global usings into this WinForms process and make unrelated
+         XAML code ambiguous at build time. -->
+    <Compile Include="Program.cs" />
+    <Compile Include="..\..\Helpers\Win32Interop.cs" Link="Wormhole\Helpers\Win32Interop.cs" />
+    <Compile Include="..\..\Helpers\RdpDesktopSizeResolver.cs" Link="Wormhole\Helpers\RdpDesktopSizeResolver.cs" />
+    <Compile Include="..\..\Helpers\RdpDriveList.cs" Link="Wormhole\Helpers\RdpDriveList.cs" />
+    <Compile Include="..\..\Helpers\RdpScreenSizes.cs" Link="Wormhole\Helpers\RdpScreenSizes.cs" />
+    <Compile Include="..\..\Models\ConnectionProfile.cs" Link="Wormhole\Models\ConnectionProfile.cs" />
+    <Compile Include="..\..\Models\ProtocolType.cs" Link="Wormhole\Models\ProtocolType.cs" />
+    <Compile Include="..\..\Models\SerialSettings.cs" Link="Wormhole\Models\SerialSettings.cs" />
+    <Compile Include="..\..\Interop\Rdp\AxMsRdpClient9.cs" Link="Wormhole\Interop\Rdp\AxMsRdpClient9.cs" />
+    <Compile Include="..\..\Interop\Rdp\MsTscAxEventsSink.cs" Link="Wormhole\Interop\Rdp\MsTscAxEventsSink.cs" />
+    <Compile Include="..\..\Interop\Rdp\RdpHostBoundsWindowPos.cs" Link="Wormhole\Interop\Rdp\RdpHostBoundsWindowPos.cs" />
+    <Compile Include="..\..\Interop\Rdp\RdpHostForm.cs" Link="Wormhole\Interop\Rdp\RdpHostForm.cs" />
+  </ItemGroup>
+
+</Project>

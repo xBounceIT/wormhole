@@ -2,6 +2,76 @@
 
 type WormholeProtocol = 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
 
+interface WormholeRdpSurfaceRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+interface WormholeRdpProfile {
+  nodeId?: string;
+  name?: string;
+  host: string;
+  port?: number;
+  username?: string;
+  domain?: string;
+  password?: string;
+  gatewayHostname?: string;
+  gatewayUsername?: string;
+  gatewayPassword?: string;
+  screenSize?: string;
+  fullScreen?: boolean;
+  colorDepth?: number;
+  useAllMonitors?: boolean;
+  audioMode?: number;
+  audioCaptureMode?: number;
+  keyboardHookMode?: number;
+  redirectClipboard?: boolean;
+  redirectPrinters?: boolean;
+  redirectSmartCards?: boolean;
+  redirectPorts?: boolean;
+  redirectDevices?: boolean;
+  redirectDrives?: string;
+  connectionSpeed?: number;
+  desktopBackground?: boolean;
+  fontSmoothing?: boolean;
+  desktopComposition?: boolean;
+  windowDrag?: boolean;
+  menuAnimation?: boolean;
+  visualStyles?: boolean;
+  bitmapCaching?: boolean;
+  autoReconnect?: boolean;
+  serverAuthentication?: number;
+  gatewayUsageMethod?: number;
+  gatewayBypassLocal?: boolean;
+  gatewayUseSameCreds?: boolean;
+  useExternalClient?: boolean;
+}
+
+interface WormholeRdpBackendEvent {
+  type:
+    | 'started'
+    | 'ready'
+    | 'connected'
+    | 'loginComplete'
+    | 'disconnected'
+    | 'fatalError'
+    | 'logonError'
+    | 'autoReconnecting'
+    | 'autoReconnected'
+    | 'exited'
+    | 'ack'
+    | 'error';
+  requestId?: string;
+  sessionId?: string;
+  backend?: 'activex' | 'freerdp';
+  code?: number;
+  attempt?: number;
+  max?: number;
+  message?: string;
+}
+
 interface WormholeWorkspaceNode {
   id: string;
   name: string;
@@ -141,5 +211,20 @@ interface Window {
     getSystemIdleSeconds(): Promise<{ seconds: number }>;
     sendVncCommand(command: WormholeVncCommand): Promise<WormholeBackendResponse>;
     onBackendEvent(listener: (event: WormholeBackendEvent) => void): () => void;
+    startRdpSession(request: {
+      sessionId: string;
+      profile: WormholeRdpProfile;
+      bounds?: WormholeRdpSurfaceRect;
+    }): Promise<WormholeRdpBackendEvent>;
+    resizeRdpSession(request: {
+      sessionId: string;
+      bounds?: WormholeRdpSurfaceRect;
+    }): Promise<WormholeRdpBackendEvent>;
+    commandRdpSession(request: {
+      sessionId: string;
+      operation: 'show' | 'hide' | 'focus' | 'disconnect';
+      bounds?: WormholeRdpSurfaceRect;
+    }): Promise<WormholeRdpBackendEvent>;
+    onRdpEvent(listener: (event: WormholeRdpBackendEvent) => void): () => void;
   };
 }

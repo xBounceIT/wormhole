@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { RdpBackendEvent, RdpCommandRequest, RdpStartRequest } from './rdp-contract.js';
 
 contextBridge.exposeInMainWorld('wormhole', {
   loadWorkspace: () => ipcRenderer.invoke('workspace:load'),
@@ -40,5 +41,15 @@ contextBridge.exposeInMainWorld('wormhole', {
     const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
     ipcRenderer.on('backend:event', handler);
     return () => ipcRenderer.removeListener('backend:event', handler);
+  },
+  startRdpSession: (request: RdpStartRequest) => ipcRenderer.invoke('rdp:start', request),
+  resizeRdpSession: (request: RdpCommandRequest) => ipcRenderer.invoke('rdp:resize', request),
+  commandRdpSession: (
+    request: RdpCommandRequest & { operation: 'show' | 'hide' | 'focus' | 'disconnect' },
+  ) => ipcRenderer.invoke('rdp:command', request),
+  onRdpEvent: (listener: (event: RdpBackendEvent) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: RdpBackendEvent) => listener(value);
+    ipcRenderer.on('rdp:event', handler);
+    return () => ipcRenderer.removeListener('rdp:event', handler);
   },
 });

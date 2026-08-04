@@ -19,7 +19,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
-    <DefaultItemExcludes>$(DefaultItemExcludes);bin\**;obj\**;Wormhole.Tests\**;Wormhole.Tests.Integration\**;Assets\web\node_modules\**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);bin\**;obj\**;Wormhole.Tests\**;Wormhole.Tests.Integration\**;tools\wormhole-rdp-host\**;Assets\web\node_modules\**</DefaultItemExcludes>
     <NoWarn>$(NoWarn);MVVMTK0045</NoWarn>
     <DefaultLanguage>en-US</DefaultLanguage>
     <WormholeUsePinnedSqliteNative>true</WormholeUsePinnedSqliteNative>

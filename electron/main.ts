@@ -1,10 +1,18 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, ipcMain, screen } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { createInterface, type Interface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { AuthSession } from './auth-session.js';
+import { RdpBackendClient } from './rdp.js';
+import type {
+  RdpBackendEvent,
+  RdpCommandRequest,
+  RdpProfile,
+  RdpStartRequest,
+  RdpSurfaceRect,
+} from './rdp-contract.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rendererUrl = process.env.VITE_DEV_SERVER_URL;
@@ -17,6 +25,7 @@ const backendMaxBuffer = 16 * 1024 * 1024;
 const backendMaxRequestBytes = 64 * 1024;
 const nativeBackendLineLimit = 32 * 1024 * 1024;
 const nativeBackendCommandTimeoutMs = 15_000;
+let rdpClient: RdpBackendClient | undefined;
 
 type BackendOperation =
   | 'workspace'
@@ -396,12 +405,16 @@ function parseVncCommand(value: unknown): VncCommand {
 }
 
 function wormholeDatabasePath(): string {
-  const localAppData = process.env.LOCALAPPDATA;
-  if (!localAppData) {
-    throw new Error('LOCALAPPDATA is not set; cannot locate the Wormhole database.');
-  }
+  const configured = process.env.WORMHOLE_DATABASE?.trim();
+  if (configured) return configured;
 
-  return path.join(localAppData, wormholeDataDirectoryName, 'wormhole.db');
+  const localAppData = process.env.LOCALAPPDATA;
+  if (localAppData) return path.join(localAppData, wormholeDataDirectoryName, 'wormhole.db');
+
+  // Linux/macOS do not have the Windows compatibility root. The Electron user-data directory
+  // is deliberately kept separate from the renderer profile, while still giving the Go backend
+  // one stable location for future cross-platform persistence.
+  return path.join(app.getPath('userData'), wormholeDataDirectoryName, 'wormhole.db');
 }
 
 function findBundledExecutable(name: string): string | undefined {
@@ -415,12 +428,18 @@ function findBundledExecutable(name: string): string | undefined {
 
 function backendPath(): string {
   const architecture = process.arch === 'arm64' ? 'arm64' : 'x64';
-  const executableName = `wormhole-backend-${architecture}.exe`;
+  const executableName = `wormhole-backend-${architecture}${process.platform === 'win32' ? '.exe' : ''}`;
   const executablePath = findBundledExecutable(executableName);
   if (!executablePath) {
     throw new Error(`Electron Go backend is missing (${executableName}).`);
   }
   return executablePath;
+}
+
+function nativeRdpHostPath(): string | undefined {
+  if (process.platform !== 'win32') return undefined;
+  const architecture = process.arch === 'arm64' ? 'arm64' : 'x64';
+  return findBundledExecutable(`wormhole-rdp-host-${architecture}.exe`);
 }
 
 function credentialReaderPath(): string | undefined {
@@ -911,6 +930,185 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       return nativeBackend.send(command);
     });
   });
+
+  ipcMain.handle('rdp:start', async (event, value: unknown) => {
+    const request = parseRdpStartRequest(value);
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
+
+    const client = getRdpClient();
+    const bounds = toScreenBounds(ownerWindow, request.bounds);
+    return client.start(request, nativeWindowHandle(ownerWindow), bounds);
+  });
+
+  ipcMain.handle('rdp:resize', async (event, value: unknown) => {
+    const request = parseRdpCommandRequest(value);
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
+
+    const client = getRdpClient();
+    const bounds = request.bounds ? toScreenBounds(ownerWindow, request.bounds) : undefined;
+    return client.resize({ ...request, bounds }, nativeWindowHandle(ownerWindow));
+  });
+
+  ipcMain.handle('rdp:command', async (event, value: unknown) => {
+    const request = parseRdpCommandRequest(value);
+    const operation = valueAsString(value, 'operation');
+    if (
+      operation !== 'show' &&
+      operation !== 'hide' &&
+      operation !== 'focus' &&
+      operation !== 'disconnect'
+    ) {
+      throw new Error('Unsupported RDP command.');
+    }
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
+    const bounds = request.bounds ? toScreenBounds(ownerWindow, request.bounds) : undefined;
+    return getRdpClient().command(
+      operation,
+      request.sessionId,
+      nativeWindowHandle(ownerWindow),
+      bounds,
+    );
+  });
+}
+
+function getRdpClient(): RdpBackendClient {
+  if (rdpClient) return rdpClient;
+
+  const args = ['--operation', 'rdp', '--database', wormholeDatabasePath()];
+  const hostPath = nativeRdpHostPath();
+  if (hostPath) args.push('--rdp-host', hostPath);
+  const configuredFreeRdp = process.env.WORMHOLE_FREERDP_PATH?.trim();
+  if (configuredFreeRdp) args.push('--freerdp', configuredFreeRdp);
+
+  rdpClient = new RdpBackendClient({ executable: backendPath(), args });
+  rdpClient.onEvent((event: RdpBackendEvent) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send('rdp:event', event);
+    }
+  });
+  return rdpClient;
+}
+
+function nativeWindowHandle(window: BrowserWindow): string {
+  const handle = window.getNativeWindowHandle();
+  if (handle.length >= 8) return handle.readBigUInt64LE(0).toString();
+  if (handle.length >= 4) return handle.readUInt32LE(0).toString();
+  throw new Error('RDP native owner window handle is unavailable.');
+}
+
+function toScreenBounds(window: BrowserWindow, rect?: RdpSurfaceRect): RdpSurfaceRect | undefined {
+  if (!rect) return undefined;
+  const content = window.getContentBounds();
+  const dipRect = {
+    x: content.x + rect.x,
+    y: content.y + rect.y,
+    width: rect.width,
+    height: rect.height,
+  };
+  if (process.platform === 'win32') {
+    // The renderer and Electron window bounds are DIP coordinates, while SetWindowPos in the
+    // ActiveX helper needs physical pixels. Electron's conversion handles negative monitor
+    // origins and per-monitor DPI correctly, including a window moved between displays.
+    const physical = screen.dipToScreenRect(window, dipRect);
+    return {
+      x: physical.x,
+      y: physical.y,
+      width: Math.max(1, physical.width),
+      height: Math.max(1, physical.height),
+    };
+  }
+
+  const display = screen.getDisplayNearestPoint({ x: dipRect.x, y: dipRect.y });
+  const scale = display.scaleFactor > 0 ? display.scaleFactor : 1;
+  return {
+    x: Math.round(dipRect.x),
+    y: Math.round(dipRect.y),
+    width: Math.max(1, Math.round(rect.width * scale)),
+    height: Math.max(1, Math.round(rect.height * scale)),
+  };
+}
+
+function parseRdpStartRequest(value: unknown): RdpStartRequest {
+  if (!value || typeof value !== 'object') throw new Error('Invalid RDP start request.');
+  const sessionId = valueAsString(value, 'sessionId');
+  const profile = valueAsObject(value, 'profile') as RdpProfile;
+  const host = typeof profile.host === 'string' ? profile.host.trim() : '';
+  if (!sessionId || sessionId.length > 128 || !host || host.length > 253) {
+    throw new Error('RDP session or host is invalid.');
+  }
+  if (
+    profile.port !== undefined &&
+    (typeof profile.port !== 'number' ||
+      !Number.isInteger(profile.port) ||
+      profile.port < 0 ||
+      profile.port > 65535)
+  ) {
+    throw new Error('RDP port is invalid.');
+  }
+  if (typeof profile.password === 'string' && profile.password.length > 4096) {
+    throw new Error('RDP password is too long.');
+  }
+  if (typeof profile.gatewayPassword === 'string' && profile.gatewayPassword.length > 4096) {
+    throw new Error('RDP gateway password is too long.');
+  }
+  return {
+    sessionId,
+    profile: { ...profile, host },
+    bounds: parseOptionalBounds(valueAsUnknown(value, 'bounds')),
+  };
+}
+
+function parseRdpCommandRequest(value: unknown): RdpCommandRequest {
+  if (!value || typeof value !== 'object') throw new Error('Invalid RDP command request.');
+  const sessionId = valueAsString(value, 'sessionId');
+  if (!sessionId || sessionId.length > 128) throw new Error('RDP session ID is invalid.');
+  return {
+    sessionId,
+    bounds: parseOptionalBounds(valueAsUnknown(value, 'bounds')),
+  };
+}
+
+function parseOptionalBounds(value: unknown): RdpSurfaceRect | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object') throw new Error('RDP surface bounds are invalid.');
+  const bounds = value as Record<string, unknown>;
+  const numbers = ['x', 'y', 'width', 'height'].map((key) => bounds[key]);
+  if (!numbers.every((number) => typeof number === 'number' && Number.isFinite(number))) {
+    throw new Error('RDP surface bounds are invalid.');
+  }
+  return {
+    x: numbers[0] as number,
+    y: numbers[1] as number,
+    width: numbers[2] as number,
+    height: numbers[3] as number,
+  };
+}
+
+function valueAsUnknown(value: unknown, key: string): unknown {
+  return valueAsRecord(value)[key];
+}
+
+function valueAsString(value: unknown, key: string): string {
+  const result = valueAsRecord(value)[key];
+  return typeof result === 'string' ? result.trim() : '';
+}
+
+function valueAsObject(value: unknown, key: string): Record<string, unknown> {
+  const result = valueAsRecord(value)[key];
+  if (!result || typeof result !== 'object' || Array.isArray(result)) {
+    throw new Error(`RDP ${key} is invalid.`);
+  }
+  return result as Record<string, unknown>;
+}
+
+function valueAsRecord(value: unknown): Record<string, any> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Invalid RDP request.');
+  }
+  return value as Record<string, any>;
 }
 
 function createWindow() {
@@ -989,9 +1187,11 @@ app.on('before-quit', () => {
 });
 
 app.on('window-all-closed', () => {
+  void rdpClient?.dispose();
   if (process.platform !== 'darwin') app.quit();
 });
 
 app.on('before-quit', () => {
   sshBackend.dispose();
+  void rdpClient?.dispose();
 });

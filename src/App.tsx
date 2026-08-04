@@ -109,6 +109,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { getTreeRowGeometry } from './tree-layout';
 import { VncSurface } from './components/VncSurface';
+import { RdpSurface, type RdpUiStatus } from './components/RdpSurface';
+import { applyRdpBackendEvent } from './rdp-state';
 
 type Protocol = 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
 type NavItem = 'sessions' | 'credentials' | 'tunnels' | 'settings';
@@ -295,6 +297,16 @@ type Session = {
   output: string;
   error?: string;
   fingerprint?: string;
+  rdpStatus?: RdpUiStatus;
+  rdpBackend?: 'activex' | 'freerdp';
+  rdpError?: string;
+  rdpProfile?: WormholeRdpProfile;
+};
+
+type RdpCredentials = {
+  username: string;
+  domain: string;
+  password: string;
 };
 
 type CredentialRecord = {
@@ -788,6 +800,13 @@ function App() {
   const [searchText, setSearchText] = useState('');
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState('');
+  const [rdpCredentials, setRdpCredentials] = useState<Record<string, RdpCredentials>>({});
+  const [rdpCredentialPrompt, setRdpCredentialPrompt] = useState<string | null>(null);
+  const [rdpCredentialForm, setRdpCredentialForm] = useState<RdpCredentials>({
+    username: '',
+    domain: '',
+    password: '',
+  });
   const [quickConnectOpen, setQuickConnectOpen] = useState(false);
   const [quickConnectForm, setQuickConnectForm] = useState({
     name: '',
@@ -1057,6 +1076,19 @@ function App() {
   }, [authGate]);
 
   useEffect(() => {
+    const unsubscribe = window.wormhole?.onRdpEvent((event) => {
+      if (!event.sessionId) return;
+      setSessions((current) =>
+        current.map((session) => {
+          if (session.id !== event.sessionId) return session;
+          return applyRdpBackendEvent(session, event);
+        }),
+      );
+    });
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
     const handleSystemThemeChange = (event: MediaQueryListEvent) => {
       setSystemTheme(event.matches ? 'dark' : 'light');
@@ -1214,6 +1246,119 @@ function App() {
       });
   }
 
+  function defaultRdpProfile(session: Session, credentials?: RdpCredentials): WormholeRdpProfile {
+    return {
+      nodeId: session.nodeId,
+      name: session.title,
+      host: session.host,
+      username: credentials?.username || undefined,
+      domain: credentials?.domain || undefined,
+      password: credentials?.password || undefined,
+      screenSize: 'Full connection content',
+      colorDepth: 32,
+      redirectClipboard: true,
+      connectionSpeed: 7,
+      desktopBackground: true,
+      fontSmoothing: true,
+      desktopComposition: true,
+      windowDrag: true,
+      menuAnimation: true,
+      visualStyles: true,
+      bitmapCaching: true,
+      autoReconnect: true,
+      serverAuthentication: 2,
+      gatewayBypassLocal: true,
+    };
+  }
+
+  function requestRdpCredentials(sessionId: string) {
+    const session = sessions.find((candidate) => candidate.id === sessionId);
+    if (!session || session.protocol !== 'rdp') return;
+    const existing = rdpCredentials[sessionId];
+    setRdpCredentialForm(
+      existing ?? {
+        username: '',
+        domain: '',
+        password: '',
+      },
+    );
+    setRdpCredentialPrompt(sessionId);
+    setSelectedSessionId(sessionId);
+    setActivePage('sessions');
+  }
+
+  function startRdpSession(sessionId: string, credentials: RdpCredentials) {
+    const session = sessions.find((candidate) => candidate.id === sessionId);
+    if (!session || session.protocol !== 'rdp') return;
+
+    const normalizedCredentials = {
+      username: credentials.username.trim(),
+      domain: credentials.domain.trim(),
+      password: credentials.password,
+    };
+    setRdpCredentials((current) => ({ ...current, [sessionId]: normalizedCredentials }));
+    setSessions((current) =>
+      current.map((candidate) =>
+        candidate.id === sessionId
+          ? {
+              ...candidate,
+              rdpStatus: 'starting',
+              rdpError: undefined,
+              rdpProfile: defaultRdpProfile(candidate, normalizedCredentials),
+            }
+          : candidate,
+      ),
+    );
+
+    if (!window.wormhole) {
+      setSessions((current) =>
+        current.map((candidate) =>
+          candidate.id === sessionId
+            ? {
+                ...candidate,
+                rdpStatus: 'failed',
+                rdpError: 'The native RDP bridge is unavailable.',
+              }
+            : candidate,
+        ),
+      );
+      return;
+    }
+
+    void window.wormhole
+      .startRdpSession({
+        sessionId,
+        profile: defaultRdpProfile(session, normalizedCredentials),
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : 'The RDP backend could not start.';
+        setSessions((current) =>
+          current.map((candidate) =>
+            candidate.id === sessionId
+              ? { ...candidate, rdpStatus: 'failed', rdpError: message }
+              : candidate,
+          ),
+        );
+      });
+  }
+
+  function retryRdpSession(sessionId: string) {
+    const credentials = rdpCredentials[sessionId];
+    if (credentials) {
+      startRdpSession(sessionId, credentials);
+    } else {
+      requestRdpCredentials(sessionId);
+    }
+  }
+
+  function submitRdpCredentials(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!rdpCredentialPrompt) return;
+    const sessionId = rdpCredentialPrompt;
+    setRdpCredentialPrompt(null);
+    startRdpSession(sessionId, rdpCredentialForm);
+  }
+
   function openConnection(node: TreeNode) {
     if (node.kind !== 'connection' || !node.protocol) return;
 
@@ -1221,6 +1366,9 @@ function App() {
     if (existing) {
       setSelectedSessionId(existing.id);
       setActivePage('sessions');
+      if (existing.protocol === 'rdp' && existing.rdpStatus !== 'connected') {
+        requestRdpCredentials(existing.id);
+      }
       return;
     }
 
@@ -1236,16 +1384,26 @@ function App() {
       backendSessionId,
       status: node.protocol === 'ssh' ? 'connecting' : 'placeholder',
       output: '',
+      rdpStatus: node.protocol === 'rdp' ? 'idle' : undefined,
     };
 
     setSessions((current) => [...current, session]);
     setSelectedSessionId(session.id);
     setActivePage('sessions');
     if (backendSessionId) startSshSession(backendSessionId, node.id);
+    if (session.protocol === 'rdp') {
+      setRdpCredentialForm({ username: '', domain: '', password: '' });
+      setRdpCredentialPrompt(session.id);
+    }
   }
 
   function closeSession(id: string) {
     const closing = sessions.find((session) => session.id === id);
+    if (closing?.protocol === 'rdp') {
+      void window.wormhole
+        ?.commandRdpSession({ sessionId: id, operation: 'disconnect' })
+        .catch(() => undefined);
+    }
     const index = sessions.findIndex((session) => session.id === id);
     const nextSessions = sessions.filter((session) => session.id !== id);
     setSessions(nextSessions);
@@ -1257,6 +1415,12 @@ function App() {
     if (selectedSessionId === id) {
       setSelectedSessionId(nextSessions[index]?.id ?? nextSessions[index - 1]?.id ?? '');
     }
+    setRdpCredentials((current) => {
+      if (!(id in current)) return current;
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
   }
 
   function reconnectSession(id: string) {
@@ -1284,6 +1448,8 @@ function App() {
 
     setSelectedSessionId(id);
     setActivePage('sessions');
+    const session = sessions.find((candidate) => candidate.id === id);
+    if (session?.protocol === 'rdp') retryRdpSession(id);
   }
 
   function duplicateSession(id: string) {
@@ -1298,6 +1464,8 @@ function App() {
       status: source.protocol === 'ssh' ? 'connecting' : 'placeholder',
       output: '',
       error: undefined,
+      rdpStatus: source.protocol === 'rdp' ? 'idle' : source.rdpStatus,
+      rdpError: undefined,
     };
     setSessions((current) => {
       const index = current.findIndex((session) => session.id === id);
@@ -1311,6 +1479,11 @@ function App() {
     setActivePage('sessions');
     if (duplicate.backendSessionId && duplicate.nodeId) {
       startSshSession(duplicate.backendSessionId, duplicate.nodeId);
+    }
+    if (duplicate.protocol === 'rdp') {
+      const existing = rdpCredentials[id];
+      setRdpCredentialForm(existing ?? { username: '', domain: '', password: '' });
+      setRdpCredentialPrompt(duplicate.id);
     }
   }
 
@@ -1402,11 +1575,16 @@ function App() {
           quickConnectForm.protocol === 'ssh'
             ? 'Quick Connect needs a saved SSH credential before it can connect.'
             : undefined,
+        rdpStatus: quickConnectForm.protocol === 'rdp' ? 'idle' : undefined,
       },
     ]);
     setSelectedSessionId(id);
     setActivePage('sessions');
     setQuickConnectOpen(false);
+    if (quickConnectForm.protocol === 'rdp') {
+      setRdpCredentialForm({ username: '', domain: '', password: '' });
+      setRdpCredentialPrompt(id);
+    }
   }
 
   function submitNewConnection(event: FormEvent<HTMLFormElement>) {
@@ -1900,10 +2078,12 @@ function App() {
               {activePage === 'sessions' ? (
                 <SessionsPage
                   onCloseSession={closeSession}
+                  onConnectRdp={requestRdpCredentials}
                   onDuplicateSession={duplicateSession}
                   onOpenFileTransfer={openFileTransfer}
                   onOpenQuickConnect={openQuickConnect}
                   onReconnectSession={reconnectSession}
+                  onRetryRdp={retryRdpSession}
                   onSelectSession={setSelectedSessionId}
                   onSshInput={sendSshInput}
                   selectedSession={selectedSession}
@@ -2397,6 +2577,69 @@ function App() {
 
         <Dialog
           onOpenChange={(open) => {
+            setRdpCredentialPrompt(open ? rdpCredentialPrompt : null);
+          }}
+          open={rdpCredentialPrompt !== null}
+        >
+          <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>RDP credentials</DialogTitle>
+              <DialogDescription>
+                Credentials stay in memory for this app session and are passed directly to the
+                native RDP provider.
+              </DialogDescription>
+            </DialogHeader>
+            <form className="grid gap-4" onSubmit={submitRdpCredentials}>
+              <div className="grid gap-2">
+                <Label htmlFor="rdp-username">Username</Label>
+                <Input
+                  autoFocus
+                  id="rdp-username"
+                  onChange={(event) =>
+                    setRdpCredentialForm((form) => ({ ...form, username: event.target.value }))
+                  }
+                  placeholder="user or DOMAIN\\user"
+                  required
+                  value={rdpCredentialForm.username}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="rdp-domain">Domain</Label>
+                <Input
+                  id="rdp-domain"
+                  onChange={(event) =>
+                    setRdpCredentialForm((form) => ({ ...form, domain: event.target.value }))
+                  }
+                  placeholder="Optional"
+                  value={rdpCredentialForm.domain}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="rdp-password">Password</Label>
+                <Input
+                  id="rdp-password"
+                  onChange={(event) =>
+                    setRdpCredentialForm((form) => ({ ...form, password: event.target.value }))
+                  }
+                  type="password"
+                  value={rdpCredentialForm.password}
+                />
+              </div>
+              <DialogFooter>
+                <Button onClick={() => setRdpCredentialPrompt(null)} type="button" variant="ghost">
+                  Cancel
+                </Button>
+                <Button type="submit">
+                  <Power data-icon="inline-start" />
+                  Connect
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog
+          onOpenChange={(open) => {
             setNewFolderOpen(open);
             if (!open) setNewFolderParentId(null);
           }}
@@ -2554,22 +2797,26 @@ function SessionsPage({
   sessions,
   selectedSession,
   onCloseSession,
+  onConnectRdp,
   onDuplicateSession,
   onOpenFileTransfer,
   onSelectSession,
   onOpenQuickConnect,
   onReconnectSession,
   onSshInput,
+  onRetryRdp,
 }: {
   sessions: Session[];
   selectedSession?: Session;
   onCloseSession: (id: string) => void;
+  onConnectRdp: (id: string) => void;
   onDuplicateSession: (id: string) => void;
   onOpenFileTransfer: (id: string) => void;
   onSelectSession: (id: string) => void;
   onOpenQuickConnect: () => void;
   onReconnectSession: (id: string) => void;
   onSshInput: (sessionId: string, value: string) => void;
+  onRetryRdp: (id: string) => void;
 }) {
   if (!selectedSession || sessions.length === 0) {
     return (
@@ -2658,6 +2905,15 @@ function SessionsPage({
           >
             {session.protocol === 'ssh' ? (
               <SshTerminalSurface onInput={onSshInput} session={session} />
+            ) : session.protocol === 'rdp' ? (
+              <RdpSurface
+                backend={session.rdpBackend}
+                error={session.rdpError}
+                onConnect={() => onConnectRdp(session.id)}
+                onRetry={() => onRetryRdp(session.id)}
+                sessionId={session.id}
+                status={session.rdpStatus ?? 'idle'}
+              />
             ) : session.protocol === 'vnc' ? (
               <VncSurface
                 session={{

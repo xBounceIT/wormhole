@@ -362,11 +362,11 @@ internal sealed class RdpHostForm : FormsForm
         // mstsc-style: pass password through ClearTextPassword. Connect() is asynchronous
         // and the OCX may still need the value after Start() returns, including for its own
         // reconnect flow, so do not mutate it after the handshake starts.
-        if (password is not null) adv.ClearTextPassword = password;
+        if (!string.IsNullOrEmpty(password)) adv.ClearTextPassword = password;
         ApplyPromptSuppression(
             ocx,
             adv,
-            hasPassword: password is not null,
+            hasPassword: !string.IsNullOrEmpty(password),
             ownerHwnd: ownerHwnd,
             hasUsername: !string.IsNullOrEmpty(profile.Username),
             hasDomain: !string.IsNullOrEmpty(profile.RdpDomain));

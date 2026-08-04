@@ -21,6 +21,10 @@ The renderer uses Vite 8, React, TypeScript 7, Shadcn/Radix components, Oxlint,
 and Oxfmt. `npm run build` creates the static renderer in `dist/` and
 the Electron process bundle in `dist-electron/`.
 
+The generic `dev` and `build` commands also compile the Go backend for the
+current host platform. Windows adds the Credential Manager reader and native
+ActiveX host through the `dev:windows` / `build:windows` commands.
+
 The renderer loads connection, credential, and tunnel metadata from the Go
 backend over the Electron preload bridge. If the database is missing or empty,
 the UI stays empty; it does not create demo connections or credentials. The
@@ -61,9 +65,24 @@ Electron process before running the Windows app:
 npm run build:windows
 ```
 
-Use `npm run build:windows:arm64` for an ARM64 build. The cross-platform
-`npm run build` command intentionally builds only the renderer and Electron
-bundle; the Windows-only helper is included by the Windows build commands.
+Use `npm run build:windows:arm64` for an ARM64 build. The Windows-only helper
+is included by the Windows build commands; Linux and macOS use the installed
+FreeRDP client at runtime.
+
+RDP follows the same split as the native client. Windows ships a separate
+`wormhole-rdp-host-<arch>.exe` process that reuses the tested WinForms
+`RdpHostForm`/mstscax ActiveX surface; the Go backend owns its lifecycle and
+forwards secret-free status events to Electron. Linux and macOS launch the
+installed `xfreerdp`, `xfreerdp3`, or macOS SDL FreeRDP client under Go
+(`WORMHOLE_FREERDP_PATH` can override discovery). X11 Linux uses FreeRDP's
+parent-window option to place the client in the Electron surface. macOS
+FreeRDP builds are launched as their native client window because an X11
+parent cannot be attached to an Electron Cocoa window.
+
+The RDP credential prompt keeps credentials in memory for the current app
+session only. Build the Windows ActiveX host directly with
+`npm run build:rdp-host` or `npm run build:rdp-host:arm64` when iterating on
+the native path.
 
 The Go backend tests run with:
 

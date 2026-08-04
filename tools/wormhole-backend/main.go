@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf16"
 
@@ -104,9 +105,11 @@ type tunnelRow struct {
 }
 
 func main() {
-	operation := flag.String("operation", "workspace", "backend operation: workspace, migrate, ssh, serve, or auth-*")
+	operation := flag.String("operation", "workspace", "backend operation: workspace, migrate, ssh, serve, rdp, or auth-*")
 	databasePath := flag.String("database", "", "path to the Wormhole SQLite database")
 	credentialReader := flag.String("credential-reader", "", "path to the Windows Credential Manager reader")
+	rdpHost := flag.String("rdp-host", "", "path to the Windows ActiveX RDP host")
+	freerdpPath := flag.String("freerdp", "", "path to the FreeRDP client")
 	flag.Parse()
 
 	if *databasePath == "" {
@@ -161,6 +164,8 @@ func main() {
 			os.Exit(1)
 		}
 		return
+	case "rdp":
+		err = runRdpController(*rdpHost, *freerdpPath)
 	default:
 		err = fmt.Errorf("unsupported operation %q", *operation)
 	}
@@ -191,6 +196,12 @@ func decodeInputReader[T any](reader io.Reader, target *T) error {
 	}
 	return nil
 }
+
+// rdpOutputMu is deliberately process-wide. The RDP controller writes events from the
+// FreeRDP wait goroutine and from the Windows helper's event reader while the command loop may
+// also be writing acknowledgements. Interleaved JSON lines would make the IPC stream
+// unrecoverable for the Electron main process.
+var rdpOutputMu sync.Mutex
 
 func writeError(message string) {
 	// Backend errors are intentionally generic at the process boundary. In particular, never
