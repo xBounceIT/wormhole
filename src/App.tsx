@@ -1270,7 +1270,7 @@ function App() {
           <span
             className={[
               'grid size-5 shrink-0 place-items-center',
-              isFolder ? 'text-muted-foreground' : protocolTone(protocol),
+              isFolder ? 'text-muted-foreground' : `${protocolTone(protocol)} translate-y-px`,
             ].join(' ')}
           >
             {isFolder ? (
