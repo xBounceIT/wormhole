@@ -2,14 +2,17 @@
 
 # Wormhole — Agent guide
 
-Wormhole is a .NET 10 / WinUI 3 Windows desktop app: a tabbed multi-protocol
-connection manager (SSH, RDP, VNC, HTTP/HTTPS, Serial, SFTP file transfer) positioned
-as a philosophical sequel to mRemoteNG. This file orients agents touching the codebase.
+Wormhole is migrating to an Electron Windows desktop app: TypeScript owns the
+frontend/renderer and Go owns every backend function (SQLite, secrets, migration,
+protocols, and services). The repository still contains the legacy .NET 10 / WinUI 3
+implementation while the migration proceeds. This file orients agents touching the codebase.
 
 ## Daily workflow
 
 - Build: `dotnet build Wormhole.csproj -c Debug -p:Platform=x64`
 - Run tests: `dotnet test Wormhole.Tests/Wormhole.Tests.csproj`
+- Electron build: `npm run build`; Windows Go backend and Credential Manager helper: `npm run build:windows`
+- Electron/Go tests: `npm run test:electron`
 - Run the app: build, then launch the produced `Wormhole.exe` from `bin\x64\Debug\net10.0-windows10.0.19041.0\`.
 - Installer: `scripts/Build-Installer.ps1 -Configuration Release -Architecture x64` publishes the app and builds the Inno Setup `.exe` (requires Inno Setup 6). Use `-DryRun` only to inspect paths.
 - VPN integration tests (Linux/WSL2 + Docker): `tests/vpn-fixtures/bootstrap.sh` -> `docker compose -f tests/vpn-fixtures/docker-compose.yml up -d` -> `dotnet test Wormhole.Tests.Integration/Wormhole.Tests.Integration.csproj`. See [tests/vpn-fixtures/README.md](tests/vpn-fixtures/README.md). CI runs this on `ubuntu-latest`; locally the tests skip if env vars / sidecar binaries aren't set up.
@@ -22,8 +25,10 @@ as a philosophical sequel to mRemoteNG. This file orients agents touching the co
 - MVVM: `CommunityToolkit.Mvvm` (`ObservableObject`, `[ObservableProperty]`, `[RelayCommand]`). View models live under [ViewModels/](ViewModels).
 - Logging: log via `ILogger<T>` from MEL. Serilog is the provider. Logs land in `%LOCALAPPDATA%\Wormhole\logs\`.
 - Persistence: SQLite via `Microsoft.Data.Sqlite` + Dapper at `%LOCALAPPDATA%\Wormhole\wormhole.db`. Schema is versioned by `.sql` files in [Data/Migrations/](Data/Migrations) (embedded resources), applied in alphabetical order by [Data/MigrationRunner.cs](Data/MigrationRunner.cs) at startup. Tracking table: `__migration_history`. To add a migration, drop a new `NNNN_description.sql` in that folder. Open connections via `ISqliteConnectionFactory.Open()` — one connection per operation (Microsoft.Data.Sqlite pools).
+- Electron language boundary: the Electron app's frontend is TypeScript, and every Electron backend function is Go. Do not add backend behavior in TypeScript, Node.js, or Electron main-process code; keep TypeScript limited to the renderer and a minimal IPC/lifecycle bridge, with persistence, migrations, secrets, protocols, and services implemented in Go.
 - Secrets:
   - **Passwords** → Windows Credential Manager via `Meziantou.Framework.Win32.CredentialManager` (key = `Wormhole:<credId>`). 2560-byte limit.
+  - **Electron migration secrets** → the Go backend reads legacy passwords only on the first Windows launch, protects them with Windows DPAPI, and stores them in local SQLite `CredentialSecrets`; new Electron code must not access Credential Manager directly.
   - **Private keys** → DPAPI-encrypted files under `%LOCALAPPDATA%\Wormhole\keys\` (Credential Manager is too small).
   - **Tunnel payloads** → DPAPI-encrypted files under `%LOCALAPPDATA%\Wormhole\tunnels\`; SQLite stores only the tunnel row metadata.
   - **Never** log credentials. Add a redaction enricher before adding new logging around auth.

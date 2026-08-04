@@ -105,8 +105,9 @@ import {
 } from '@/components/ui/sidebar';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
+import { getTreeRowGeometry } from './tree-layout';
 
-type Protocol = 'ssh' | 'rdp' | 'https' | 'vnc' | 'serial';
+type Protocol = 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
 type NavItem = 'sessions' | 'credentials' | 'tunnels' | 'settings';
 type Theme = 'system' | 'light' | 'dark';
 type ResolvedTheme = Exclude<Theme, 'system'>;
@@ -159,35 +160,39 @@ function containsTreeNode(node: TreeNode, nodeId: string): boolean {
   );
 }
 
-function extractTreeNode(
+function extractTreeNodes(
   nodes: TreeNode[],
-  nodeId: string,
-): { nodes: TreeNode[]; node?: TreeNode } {
-  let extracted: TreeNode | undefined;
+  nodeIds: ReadonlySet<string>,
+): { nodes: TreeNode[]; extracted: TreeNode[] } {
+  const extracted: TreeNode[] = [];
   const remaining = nodes.flatMap((node) => {
-    if (node.id === nodeId) {
-      extracted = node;
+    if (nodeIds.has(node.id)) {
+      extracted.push(node);
       return [];
     }
 
     if (!node.children) return [node];
 
-    const childResult = extractTreeNode(node.children, nodeId);
-    if (childResult.node) extracted = childResult.node;
+    const childResult = extractTreeNodes(node.children, nodeIds);
+    extracted.push(...childResult.extracted);
     return [{ ...node, children: childResult.nodes }];
   });
 
-  return { nodes: remaining, node: extracted };
+  return { nodes: remaining, extracted };
 }
 
-function insertIntoTreeFolder(nodes: TreeNode[], folderId: string, child: TreeNode): TreeNode[] {
+function insertIntoTreeFolder(
+  nodes: TreeNode[],
+  folderId: string,
+  children: TreeNode[],
+): TreeNode[] {
   return nodes.map((node) => {
     if (node.id === folderId) {
-      return { ...node, children: [...(node.children ?? []), child] };
+      return { ...node, children: [...(node.children ?? []), ...children] };
     }
 
     return node.children
-      ? { ...node, children: insertIntoTreeFolder(node.children, folderId, child) }
+      ? { ...node, children: insertIntoTreeFolder(node.children, folderId, children) }
       : node;
   });
 }
@@ -195,54 +200,75 @@ function insertIntoTreeFolder(nodes: TreeNode[], folderId: string, child: TreeNo
 function insertRelativeToTreeNode(
   nodes: TreeNode[],
   targetId: string,
-  child: TreeNode,
+  children: TreeNode[],
   placement: Exclude<DropPlacement, 'inside'>,
 ): TreeNode[] {
   const targetIndex = nodes.findIndex((node) => node.id === targetId);
   if (targetIndex >= 0) {
     const next = [...nodes];
-    next.splice(targetIndex + (placement === 'after' ? 1 : 0), 0, child);
+    next.splice(targetIndex + (placement === 'after' ? 1 : 0), 0, ...children);
     return next;
   }
 
   return nodes.map((node) =>
     node.children
-      ? { ...node, children: insertRelativeToTreeNode(node.children, targetId, child, placement) }
+      ? {
+          ...node,
+          children: insertRelativeToTreeNode(node.children, targetId, children, placement),
+        }
       : node,
   );
 }
 
-function canDropTreeNode(
+function canDropTreeNodes(
   nodes: TreeNode[],
-  draggedId: string,
+  draggedIds: readonly string[],
   targetId: string,
   placement: DropPlacement,
 ): boolean {
-  if (draggedId === targetId) return false;
-
-  const dragged = findTreeNode(nodes, draggedId);
   const target = findTreeNode(nodes, targetId);
-  if (!dragged || !target) return false;
-  if (placement === 'inside' && target.kind !== 'folder') return false;
-  if (dragged.kind === 'folder' && containsTreeNode(dragged, targetId)) return false;
+  const uniqueDraggedIds = [...new Set(draggedIds)];
+  if (!target || uniqueDraggedIds.length === 0 || uniqueDraggedIds.includes(targetId)) return false;
 
-  return true;
+  return uniqueDraggedIds.every((draggedId) => {
+    const dragged = findTreeNode(nodes, draggedId);
+    if (!dragged) return false;
+    if (placement === 'inside' && target.kind !== 'folder') return false;
+    if (dragged.kind === 'folder' && containsTreeNode(dragged, targetId)) return false;
+    return true;
+  });
 }
 
-function moveTreeNode(
+function moveTreeNodes(
   nodes: TreeNode[],
-  draggedId: string,
+  draggedIds: readonly string[],
   targetId: string,
   placement: DropPlacement,
 ): TreeNode[] {
-  if (!canDropTreeNode(nodes, draggedId, targetId, placement)) return nodes;
+  if (!canDropTreeNodes(nodes, draggedIds, targetId, placement)) return nodes;
 
-  const { nodes: remaining, node: dragged } = extractTreeNode(nodes, draggedId);
-  if (!dragged) return nodes;
+  const uniqueDraggedIds = [...new Set(draggedIds)];
+  const { nodes: remaining, extracted } = extractTreeNodes(nodes, new Set(uniqueDraggedIds));
+  if (extracted.length !== uniqueDraggedIds.length) return nodes;
 
   return placement === 'inside'
-    ? insertIntoTreeFolder(remaining, targetId, dragged)
-    : insertRelativeToTreeNode(remaining, targetId, dragged, placement);
+    ? insertIntoTreeFolder(remaining, targetId, extracted)
+    : insertRelativeToTreeNode(remaining, targetId, extracted, placement);
+}
+
+function parseDraggedNodeIds(value: string): string[] {
+  if (!value) return [];
+
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (Array.isArray(parsed) && parsed.every((id) => typeof id === 'string')) {
+      return [...new Set(parsed)];
+    }
+  } catch {
+    // Fall back to the single-node payload used by older drag sources.
+  }
+
+  return [value];
 }
 
 type Session = {
@@ -256,7 +282,7 @@ type Session = {
 type CredentialRecord = {
   id: string;
   name: string;
-  protocol: Extract<Protocol, 'ssh' | 'rdp' | 'vnc'>;
+  protocol: Protocol;
   username: string;
   domain?: string;
   provider: 'Local' | 'Bitwarden';
@@ -266,110 +292,8 @@ type CredentialRecord = {
 type TunnelRecord = {
   id: string;
   name: string;
-  kind: 'WireGuard' | 'OpenVPN' | 'Cisco Secure Client';
+  kind: string;
 };
-
-const credentialRecords: CredentialRecord[] = [
-  {
-    id: 'credential-production-admin',
-    name: 'Production admin',
-    protocol: 'ssh',
-    username: 'wormhole-admin',
-    provider: 'Local',
-  },
-  {
-    id: 'credential-finance-desktop',
-    name: 'Finance desktop',
-    protocol: 'rdp',
-    username: 'finance.ops',
-    domain: 'CORP',
-    provider: 'Bitwarden',
-  },
-  {
-    id: 'credential-operations-vnc',
-    name: 'Operations console',
-    protocol: 'vnc',
-    username: 'ops-console',
-    provider: 'Local',
-    readOnly: true,
-  },
-];
-
-const tunnelRecords: TunnelRecord[] = [
-  { id: 'tunnel-production-wireguard', name: 'Production edge', kind: 'WireGuard' },
-  { id: 'tunnel-eu-openvpn', name: 'EU West appliance route', kind: 'OpenVPN' },
-  {
-    id: 'tunnel-cisco-operations',
-    name: 'Operations remote access',
-    kind: 'Cisco Secure Client',
-  },
-];
-
-const initialTree: TreeNode[] = [
-  {
-    id: 'production',
-    name: 'Production',
-    kind: 'folder',
-    children: [
-      {
-        id: 'edge-router',
-        name: 'edge-router-01',
-        kind: 'connection',
-        protocol: 'ssh',
-        host: '10.22.4.18',
-      },
-      {
-        id: 'finance-rdp',
-        name: 'finance-desktop',
-        kind: 'connection',
-        protocol: 'rdp',
-        host: '10.22.4.62',
-      },
-      {
-        id: 'firewall-console',
-        name: 'firewall-console',
-        kind: 'connection',
-        protocol: 'https',
-        host: 'fw-eu-west.wormhole.local',
-      },
-    ],
-  },
-  {
-    id: 'platform',
-    name: 'Platform',
-    kind: 'folder',
-    children: [
-      {
-        id: 'build-runner',
-        name: 'build-runner-02',
-        kind: 'connection',
-        protocol: 'ssh',
-        host: '10.22.7.21',
-      },
-      {
-        id: 'ops-vnc',
-        name: 'ops-console',
-        kind: 'connection',
-        protocol: 'vnc',
-        host: '10.22.7.44',
-      },
-    ],
-  },
-  {
-    id: 'lab',
-    name: 'Lab devices',
-    kind: 'folder',
-    children: [
-      {
-        id: 'serial-gateway',
-        name: 'serial-gateway',
-        kind: 'connection',
-        protocol: 'serial',
-        host: 'COM3',
-      },
-    ],
-  },
-];
 
 const navItems: Array<{ id: NavItem; label: string; hint: string }> = [
   { id: 'credentials', label: 'Credentials', hint: 'Stored access profiles' },
@@ -379,13 +303,15 @@ const navItems: Array<{ id: NavItem; label: string; hint: string }> = [
 ];
 
 function protocolLabel(protocol: Protocol) {
-  return { ssh: 'SSH', rdp: 'RDP', https: 'HTTPS', vnc: 'VNC', serial: 'Serial' }[protocol];
+  return { ssh: 'SSH', rdp: 'RDP', http: 'HTTP', https: 'HTTPS', vnc: 'VNC', serial: 'Serial' }[
+    protocol
+  ];
 }
 
 function ProtocolIcon({ protocol, size = 15 }: { protocol: Protocol; size?: number }) {
   if (protocol === 'ssh') return <Terminal size={size} />;
   if (protocol === 'rdp') return <Monitor size={size} />;
-  if (protocol === 'https') return <Globe size={size} />;
+  if (protocol === 'http' || protocol === 'https') return <Globe size={size} />;
   if (protocol === 'vnc') return <Monitor size={size} />;
   return <Radio size={size} />;
 }
@@ -394,6 +320,7 @@ function protocolTone(protocol: Protocol) {
   return {
     ssh: 'text-foreground',
     rdp: 'text-muted-foreground',
+    http: 'text-foreground/70',
     https: 'text-foreground/80',
     vnc: 'text-muted-foreground/80',
     serial: 'text-foreground/60',
@@ -421,6 +348,17 @@ function collectFolders(nodes: TreeNode[]): TreeNode[] {
   return nodes.flatMap((node) =>
     node.kind === 'folder' ? [node, ...(node.children ? collectFolders(node.children) : [])] : [],
   );
+}
+
+function findFirstConnection(nodes: TreeNode[]): TreeNode | undefined {
+  for (const node of nodes) {
+    if (node.kind === 'connection') return node;
+    if (node.children) {
+      const match = findFirstConnection(node.children);
+      if (match) return match;
+    }
+  }
+  return undefined;
 }
 
 function findParentFolderId(nodes: TreeNode[], childId: string): string | undefined {
@@ -460,7 +398,7 @@ function updateConnectionInTree(
   const remaining = removeConnection(nodes);
   if (!editedConnection) return nodes;
 
-  return insertIntoTreeFolder(remaining, folderId, editedConnection);
+  return insertIntoTreeFolder(remaining, folderId, [editedConnection]);
 }
 
 type IconButtonProps = Omit<ComponentProps<typeof Button>, 'children' | 'size'> & {
@@ -587,15 +525,62 @@ function NodeTooltip({ node, children }: { node: TreeNode; children: ReactNode }
   );
 }
 
+function TreeSelectionCheckbox({
+  checked,
+  label,
+  onCheckedChange,
+}: {
+  checked: boolean;
+  label: string;
+  onCheckedChange: (checked: boolean) => void;
+}) {
+  return (
+    <span
+      aria-checked={checked}
+      aria-label={label}
+      className={[
+        'relative z-30 grid size-4 shrink-0 cursor-pointer place-items-center rounded-[4px] border transition-colors outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50',
+        checked
+          ? 'border-primary bg-primary text-primary-foreground'
+          : 'border-input bg-sidebar text-transparent hover:border-ring group-hover/button:bg-sidebar-accent',
+      ].join(' ')}
+      data-state={checked ? 'checked' : 'unchecked'}
+      draggable={false}
+      onClick={(event) => {
+        event.stopPropagation();
+        onCheckedChange(!checked);
+      }}
+      onDragStart={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onKeyDown={(event) => {
+        if (event.key !== ' ' && event.key !== 'Enter') return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        onCheckedChange(!checked);
+      }}
+      onPointerDown={(event) => event.stopPropagation()}
+      role="checkbox"
+      tabIndex={0}
+    >
+      {checked ? <Check className="size-3.5" /> : null}
+    </span>
+  );
+}
+
 function App() {
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme);
-  const [tree, setTree] = useState<TreeNode[]>(initialTree);
+  const [tree, setTree] = useState<TreeNode[]>([]);
+  const [credentials, setCredentials] = useState<CredentialRecord[]>([]);
+  const [tunnels, setTunnels] = useState<TunnelRecord[]>([]);
+  const [workspaceStatus, setWorkspaceStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [activePage, setActivePage] = useState<NavItem>('sessions');
-  const [expanded, setExpanded] = useState<Set<string>>(
-    () => new Set(['production', 'platform', 'lab']),
-  );
-  const [selectedNodeId, setSelectedNodeId] = useState('edge-router');
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const [selectedNodeId, setSelectedNodeId] = useState('');
+  const [selectedTreeNodeIds, setSelectedTreeNodeIds] = useState<Set<string>>(() => new Set());
   const [searchText, setSearchText] = useState('');
   const [sessions, setSessions] = useState<Session[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState('');
@@ -611,13 +596,13 @@ function App() {
     name: '',
     host: '',
     protocol: 'ssh' as Protocol,
-    folder: 'production',
+    folder: '',
   });
   const [newFolderOpen, setNewFolderOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [newFolderParentId, setNewFolderParentId] = useState<string | null>(null);
   const [updateVisible, setUpdateVisible] = useState(true);
-  const [draggedNodeId, setDraggedNodeId] = useState<string | null>(null);
+  const [draggedNodeIds, setDraggedNodeIds] = useState<string[]>([]);
   const [dropTarget, setDropTarget] = useState<{
     id: string;
     placement: DropPlacement;
@@ -641,6 +626,45 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem(themeStorageKey, theme);
   }, [theme]);
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function loadWorkspace() {
+      if (!window.wormhole) {
+        setWorkspaceStatus('error');
+        return;
+      }
+
+      try {
+        const workspace = await window.wormhole.loadWorkspace();
+        if (!mounted) return;
+
+        setTree(workspace.tree);
+        setCredentials(workspace.credentials);
+        setTunnels(workspace.tunnels);
+        setSelectedTreeNodeIds(new Set());
+        setExpanded(new Set(collectFolderIds(workspace.tree)));
+        const firstConnection = findFirstConnection(workspace.tree);
+        setSelectedNodeId(firstConnection?.id ?? workspace.tree[0]?.id ?? '');
+        setWorkspaceStatus('ready');
+      } catch {
+        if (!mounted) return;
+        setTree([]);
+        setCredentials([]);
+        setTunnels([]);
+        setSelectedTreeNodeIds(new Set());
+        setExpanded(new Set());
+        setSelectedNodeId('');
+        setWorkspaceStatus('error');
+      }
+    }
+
+    void loadWorkspace();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
@@ -677,6 +701,33 @@ function App() {
     });
   }
 
+  function toggleTreeNodeSelection(id: string, checked: boolean) {
+    setSelectedTreeNodeIds((current) => {
+      const next = new Set(current);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  }
+
+  function getDraggedNodeIds(node: TreeNode): string[] {
+    if (!selectedTreeNodeIds.has(node.id)) return [node.id];
+
+    const selectedIds = [...selectedTreeNodeIds].filter((id) => findTreeNode(tree, id));
+    const selectedNodes = selectedIds
+      .map((id) => findTreeNode(tree, id))
+      .filter((selected): selected is TreeNode => Boolean(selected));
+
+    return selectedNodes
+      .filter(
+        (selected) =>
+          !selectedNodes.some(
+            (ancestor) => ancestor.id !== selected.id && containsTreeNode(ancestor, selected.id),
+          ),
+      )
+      .map((selected) => selected.id);
+  }
+
   function getTreeDropPlacement(event: DragEvent<HTMLDivElement>, node: TreeNode): DropPlacement {
     const bounds = event.currentTarget.getBoundingClientRect();
     const position = (event.clientY - bounds.top) / Math.max(bounds.height, 1);
@@ -692,16 +743,17 @@ function App() {
     }
 
     event.dataTransfer.effectAllowed = 'move';
-    event.dataTransfer.setData('text/plain', node.id);
-    setDraggedNodeId(node.id);
+    const draggedIds = getDraggedNodeIds(node);
+    event.dataTransfer.setData('text/plain', JSON.stringify(draggedIds));
+    setDraggedNodeIds(draggedIds);
     setDropTarget(null);
   }
 
   function handleTreeDragOver(event: DragEvent<HTMLDivElement>, node: TreeNode) {
-    if (!draggedNodeId || searchText.trim()) return;
+    if (draggedNodeIds.length === 0 || searchText.trim()) return;
 
     const placement = getTreeDropPlacement(event, node);
-    if (!canDropTreeNode(tree, draggedNodeId, node.id, placement)) {
+    if (!canDropTreeNodes(tree, draggedNodeIds, node.id, placement)) {
       event.dataTransfer.dropEffect = 'none';
       setDropTarget(null);
       return;
@@ -721,21 +773,24 @@ function App() {
 
   function handleTreeDrop(event: DragEvent<HTMLDivElement>, node: TreeNode) {
     event.preventDefault();
-    const sourceId = draggedNodeId ?? event.dataTransfer.getData('text/plain');
-    if (!sourceId || searchText.trim()) return;
+    const sourceIds =
+      draggedNodeIds.length > 0
+        ? draggedNodeIds
+        : parseDraggedNodeIds(event.dataTransfer.getData('text/plain'));
+    if (sourceIds.length === 0 || searchText.trim()) return;
 
     const placement = getTreeDropPlacement(event, node);
-    if (!canDropTreeNode(tree, sourceId, node.id, placement)) return;
+    if (!canDropTreeNodes(tree, sourceIds, node.id, placement)) return;
 
-    setTree((current) => moveTreeNode(current, sourceId, node.id, placement));
-    setSelectedNodeId(sourceId);
+    setTree((current) => moveTreeNodes(current, sourceIds, node.id, placement));
+    setSelectedNodeId(sourceIds[0]);
     if (placement === 'inside') toggleFolder(node.id, true);
-    setDraggedNodeId(null);
+    setDraggedNodeIds([]);
     setDropTarget(null);
   }
 
   function handleTreeDragEnd() {
-    setDraggedNodeId(null);
+    setDraggedNodeIds([]);
     setDropTarget(null);
   }
 
@@ -822,7 +877,7 @@ function App() {
       name: '',
       host: '',
       protocol: 'ssh',
-      folder: folderId ?? getCreationFolderId() ?? 'production',
+      folder: folderId ?? getCreationFolderId() ?? folders[0]?.id ?? '',
     });
     setNewConnectionOpen(true);
   }
@@ -836,7 +891,7 @@ function App() {
       name: node.name,
       host: node.host ?? '',
       protocol: node.protocol,
-      folder: findParentFolderId(tree, node.id) ?? folders[0]?.id ?? 'production',
+      folder: findParentFolderId(tree, node.id) ?? folders[0]?.id ?? '',
     });
     setNewConnectionOpen(true);
   }
@@ -905,11 +960,17 @@ function App() {
         host,
       };
 
-      setTree((current) => insertIntoTreeFolder(current, newConnectionForm.folder, connection));
+      setTree((current) =>
+        newConnectionForm.folder
+          ? insertIntoTreeFolder(current, newConnectionForm.folder, [connection])
+          : [...current, connection],
+      );
       setSelectedNodeId(id);
     }
 
-    setExpanded((current) => new Set(current).add(newConnectionForm.folder));
+    if (newConnectionForm.folder) {
+      setExpanded((current) => new Set(current).add(newConnectionForm.folder));
+    }
     setEditingConnectionId(null);
     setNewConnectionOpen(false);
   }
@@ -923,7 +984,7 @@ function App() {
     const folder: TreeNode = { id, name, kind: 'folder', children: [] };
     setTree((current) =>
       newFolderParentId
-        ? insertIntoTreeFolder(current, newFolderParentId, folder)
+        ? insertIntoTreeFolder(current, newFolderParentId, [folder])
         : [...current, folder],
     );
     setExpanded((current) => {
@@ -939,14 +1000,17 @@ function App() {
   function renderTree(nodes: TreeNode[], depth = 0): ReactNode {
     return nodes.map((node, index) => {
       const isFolder = node.kind === 'folder';
+      const protocol = node.protocol ?? 'ssh';
       const isLastSibling = index === nodes.length - 1;
       const isExpanded = searchText.trim() ? true : expanded.has(node.id);
       const hasChildren = Boolean(node.children?.length);
       const isSelected = node.kind === 'folder' && selectedNodeId === node.id;
       const creationFolderId = node.kind === 'folder' ? node.id : findParentFolderId(tree, node.id);
       const activeDropPlacement = dropTarget?.id === node.id ? dropTarget.placement : null;
-      const isDragging = draggedNodeId === node.id;
+      const isDragging = draggedNodeIds.includes(node.id);
       const treeDragEnabled = !searchText.trim();
+      const treeGeometry = getTreeRowGeometry(depth);
+      const branchGeometry = treeGeometry.branch;
       const dropIndicator =
         activeDropPlacement === 'before' ? (
           <span
@@ -959,6 +1023,13 @@ function App() {
             className="pointer-events-none absolute inset-x-2 bottom-0 z-30 h-0.5 rounded-full bg-primary"
           />
         ) : null;
+      const treeCheckbox = (
+        <TreeSelectionCheckbox
+          checked={selectedTreeNodeIds.has(node.id)}
+          label={`Select ${node.name}`}
+          onCheckedChange={(checked) => toggleTreeNodeSelection(node.id, checked)}
+        />
+      );
       const row = (
         <Button
           aria-current={isSelected ? 'true' : undefined}
@@ -980,22 +1051,25 @@ function App() {
           onDragEnd={handleTreeDragEnd}
           onDragStart={(event) => handleTreeDragStart(event, node)}
           onDoubleClick={() => openConnection(node)}
-          style={{ paddingLeft: `${8 + depth * 12}px` }}
+          style={{ paddingLeft: `${treeGeometry.paddingLeft}px` }}
           variant="ghost"
         >
-          <span className="grid size-4 shrink-0 place-items-center text-muted-foreground">
-            {isFolder && hasChildren ? (
-              isExpanded ? (
-                <ChevronDown size={13} />
-              ) : (
-                <ChevronRight size={13} />
-              )
-            ) : null}
-          </span>
+          {treeCheckbox}
+          {isFolder ? (
+            <span className="grid size-4 shrink-0 place-items-center text-muted-foreground">
+              {hasChildren ? (
+                isExpanded ? (
+                  <ChevronDown size={13} />
+                ) : (
+                  <ChevronRight size={13} />
+                )
+              ) : null}
+            </span>
+          ) : null}
           <span
             className={[
               'grid size-5 shrink-0 place-items-center',
-              isFolder ? 'text-muted-foreground' : protocolTone(node.protocol!),
+              isFolder ? 'text-muted-foreground' : protocolTone(protocol),
             ].join(' ')}
           >
             {isFolder ? (
@@ -1005,42 +1079,44 @@ function App() {
                 <Folder size={15} />
               )
             ) : (
-              <ProtocolIcon protocol={node.protocol!} />
+              <ProtocolIcon protocol={protocol} />
             )}
           </span>
           <span className="min-w-0 flex-1 truncate">{node.name}</span>
         </Button>
       );
       const treeVerticalGuide =
-        depth > 0 && (!isFolder || !isLastSibling) ? (
+        branchGeometry && (!isFolder || !isLastSibling) ? (
           <span
             aria-hidden="true"
             className={[
-              'pointer-events-none absolute top-0 z-20 w-px bg-foreground/50',
+              'pointer-events-none absolute top-0 z-0 w-px bg-foreground/50',
               isLastSibling ? '' : 'bottom-0',
             ].join(' ')}
             style={{
               bottom: isLastSibling ? '50%' : undefined,
-              left: `${depth * 12 + 4}px`,
+              left: `${branchGeometry.left}px`,
             }}
           />
         ) : null;
       const treeRowVerticalGuide =
-        depth > 0 && isFolder && isLastSibling ? (
+        branchGeometry && isFolder && isLastSibling ? (
           <span
             aria-hidden="true"
-            className="pointer-events-none absolute top-0 z-20 h-1/2 w-px bg-foreground/50"
-            style={{ left: `${depth * 12 + 4}px` }}
+            className="pointer-events-none absolute top-0 z-0 h-1/2 w-px bg-foreground/50"
+            style={{ left: `${branchGeometry.left}px` }}
           />
         ) : null;
-      const treeConnector =
-        depth > 0 ? (
-          <span
-            aria-hidden="true"
-            className="pointer-events-none absolute top-1/2 z-20 h-px w-[25px] bg-foreground/50"
-            style={{ left: `${depth * 12 + 5}px` }}
-          />
-        ) : null;
+      const treeConnector = branchGeometry ? (
+        <span
+          aria-hidden="true"
+          className="pointer-events-none absolute top-1/2 z-0 h-px bg-foreground/50"
+          style={{
+            left: `${branchGeometry.connectorLeft}px`,
+            width: `${branchGeometry.connectorWidth}px`,
+          }}
+        />
+      ) : null;
 
       if (!isFolder) {
         return (
@@ -1229,7 +1305,11 @@ function App() {
                       renderTree(visibleTree)
                     ) : (
                       <p className="px-3 py-8 text-center text-xs text-muted-foreground">
-                        Nothing here yet.
+                        {workspaceStatus === 'loading'
+                          ? 'Loading connections…'
+                          : workspaceStatus === 'error'
+                            ? 'Unable to load connections.'
+                            : 'Nothing here yet.'}
                       </p>
                     )}
                   </ScrollArea>
@@ -1280,9 +1360,9 @@ function App() {
               ) : activePage === 'settings' ? (
                 <SettingsPage onThemeChange={setTheme} theme={theme} />
               ) : activePage === 'credentials' ? (
-                <CredentialsPage />
+                <CredentialsPage initialCredentials={credentials} />
               ) : activePage === 'tunnels' ? (
-                <TunnelsPage />
+                <TunnelsPage tunnels={tunnels} />
               ) : (
                 <UtilityPage item={currentPage} sessions={sessions} />
               )}
@@ -1337,6 +1417,7 @@ function App() {
                   <SelectContent>
                     <SelectItem value="ssh">SSH</SelectItem>
                     <SelectItem value="rdp">RDP</SelectItem>
+                    <SelectItem value="http">HTTP</SelectItem>
                     <SelectItem value="https">HTTPS</SelectItem>
                     <SelectItem value="vnc">VNC</SelectItem>
                     <SelectItem value="serial">Serial</SelectItem>
@@ -1453,6 +1534,7 @@ function App() {
                           <SelectContent>
                             <SelectItem value="ssh">SSH</SelectItem>
                             <SelectItem value="rdp">RDP</SelectItem>
+                            <SelectItem value="http">HTTP</SelectItem>
                             <SelectItem value="https">HTTPS</SelectItem>
                             <SelectItem value="vnc">VNC</SelectItem>
                             <SelectItem value="serial">Serial</SelectItem>
@@ -1473,7 +1555,8 @@ function App() {
                           placeholder={
                             newConnectionForm.protocol === 'serial'
                               ? 'COM1'
-                              : newConnectionForm.protocol === 'https'
+                              : newConnectionForm.protocol === 'http' ||
+                                  newConnectionForm.protocol === 'https'
                                 ? '10.0.0.1:8443'
                                 : 'hostname or IP address'
                           }
@@ -1483,7 +1566,8 @@ function App() {
                       </div>
                     </div>
 
-                    {newConnectionForm.protocol === 'https' ? (
+                    {newConnectionForm.protocol === 'http' ||
+                    newConnectionForm.protocol === 'https' ? (
                       <p className="text-[11px] leading-relaxed text-muted-foreground">
                         Enter the host or IP. Include a port if the appliance uses a non-standard
                         one, for example 10.0.0.1:8443.
@@ -1893,10 +1977,15 @@ function SessionsPage({
   );
 }
 
-function CredentialsPage() {
-  const [credentials, setCredentials] = useState(credentialRecords);
+function CredentialsPage({ initialCredentials }: { initialCredentials: CredentialRecord[] }) {
+  const [credentials, setCredentials] = useState(initialCredentials);
   const [searchText, setSearchText] = useState('');
   const [selectedCredentials, setSelectedCredentials] = useState<string[]>([]);
+
+  useEffect(() => {
+    setCredentials(initialCredentials);
+    setSelectedCredentials([]);
+  }, [initialCredentials]);
 
   const filteredCredentials = useMemo(() => {
     const query = searchText.trim().toLowerCase();
@@ -2051,16 +2140,16 @@ function CredentialsPage() {
   );
 }
 
-function TunnelsPage() {
+function TunnelsPage({ tunnels }: { tunnels: TunnelRecord[] }) {
   const [searchText, setSearchText] = useState('');
   const filteredTunnels = useMemo(() => {
     const query = searchText.trim().toLowerCase();
     return query
-      ? tunnelRecords.filter((tunnel) =>
+      ? tunnels.filter((tunnel) =>
           [tunnel.name, tunnel.kind].some((value) => value.toLowerCase().includes(query)),
         )
-      : tunnelRecords;
-  }, [searchText]);
+      : tunnels;
+  }, [searchText, tunnels]);
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden px-6 py-4">
@@ -2086,10 +2175,10 @@ function TunnelsPage() {
             <div className="max-w-[420px] space-y-3">
               <Network className="mx-auto size-12 text-muted-foreground/50" />
               <h3 className="text-sm font-semibold">
-                {tunnelRecords.length === 0 ? 'No VPN tunnels yet' : 'No tunnels match your search'}
+                {tunnels.length === 0 ? 'No VPN tunnels yet' : 'No tunnels match your search'}
               </h3>
               <p className="text-xs leading-relaxed text-muted-foreground">
-                {tunnelRecords.length === 0
+                {tunnels.length === 0
                   ? 'Add a VPN tunnel to route a connection through an in-process userspace endpoint.'
                   : 'Try a different tunnel name or provider.'}
               </p>
@@ -2726,7 +2815,7 @@ function UtilityPage({
           <AlertTitle className="text-xs">WinUI implementation remains active</AlertTitle>
           <AlertDescription className="text-[10px]">
             This Electron surface is intentionally beside the existing desktop shell. The next
-            migration step can replace the mock providers one surface at a time.
+            migration step can replace the remaining provider actions one surface at a time.
           </AlertDescription>
         </div>
       </Alert>
