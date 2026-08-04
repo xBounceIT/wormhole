@@ -27,4 +27,12 @@ contextBridge.exposeInMainWorld('wormhole', {
     ipcRenderer.on('ssh:event', handler);
     return () => ipcRenderer.removeListener('ssh:event', handler);
   },
+  getAuthState: () => ipcRenderer.invoke('auth:status'),
+  verifyAuth: (request: unknown) => ipcRenderer.invoke('auth:verify', request),
+  setAuthSecret: (request: unknown) => ipcRenderer.invoke('auth:set-secret', request),
+  updateAuthSettings: (request: unknown) => ipcRenderer.invoke('auth:update-settings', request),
+  lockAuthentication: () => ipcRenderer.invoke('auth:lock'),
+  checkWindowsHello: () => ipcRenderer.invoke('auth:hello-status'),
+  verifyWindowsHello: () => ipcRenderer.invoke('auth:hello-verify'),
+  getSystemIdleSeconds: () => ipcRenderer.invoke('auth:system-idle'),
 });

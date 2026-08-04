@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -112,6 +113,13 @@ type Protocol = 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
 type NavItem = 'sessions' | 'credentials' | 'tunnels' | 'settings';
 type Theme = 'system' | 'light' | 'dark';
 type ResolvedTheme = Exclude<Theme, 'system'>;
+type AuthPromptKind = 'lock' | 'confirmation';
+
+type AuthPromptRequest = {
+  kind: AuthPromptKind;
+  reason: string;
+  autoWindowsHello: boolean;
+};
 
 const themeStorageKey = 'wormhole-theme';
 
@@ -605,6 +613,154 @@ function TreeSelectionCheckbox({
   );
 }
 
+function AuthPrompt({
+  state,
+  request,
+  onResult,
+}: {
+  state: WormholeAuthState;
+  request: AuthPromptRequest;
+  onResult: (succeeded: boolean) => void;
+}) {
+  const [secret, setSecret] = useState('');
+  const [status, setStatus] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [helloBusy, setHelloBusy] = useState(false);
+  const method: WormholeAuthFallback =
+    state.mode === 'password' || (state.mode === 'windowsHello' && state.fallback === 'password')
+      ? 'password'
+      : 'pin';
+  const isHelloMode = state.mode === 'windowsHello';
+
+  async function tryWindowsHello() {
+    if (helloBusy || !window.wormhole) return;
+
+    setHelloBusy(true);
+    setStatus('Waiting for Windows Hello…');
+    try {
+      const availability = await window.wormhole.checkWindowsHello();
+      if (!availability.available) {
+        setStatus(`${availability.message} Use the fallback below.`);
+        return;
+      }
+      const result = await window.wormhole.verifyWindowsHello();
+      if (result.succeeded) {
+        onResult(true);
+        return;
+      }
+      setStatus(result.message || 'Windows Hello could not verify you. Use the fallback below.');
+    } catch {
+      setStatus('Windows Hello is unavailable. Use the configured fallback below.');
+    } finally {
+      setHelloBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    setSecret('');
+    setStatus('');
+    if (request.autoWindowsHello && isHelloMode) void tryWindowsHello();
+    // The prompt is intentionally restarted when the configured mode changes. The callback is
+    // local to this prompt instance and does not need to be a stable dependency.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [request.reason, request.autoWindowsHello, isHelloMode, method]);
+
+  async function submitSecret(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy || !secret || !window.wormhole) return;
+
+    setBusy(true);
+    setStatus('Checking…');
+    try {
+      const result = await window.wormhole.verifyAuth({ method, secret });
+      if (result.succeeded) {
+        onResult(true);
+        return;
+      }
+      setSecret('');
+      setStatus(result.message || (method === 'pin' ? 'Invalid PIN.' : 'Invalid password.'));
+    } catch {
+      setStatus('The native authentication service could not be reached.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div
+      aria-modal="true"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-background/90 p-6 backdrop-blur-sm"
+      role="dialog"
+    >
+      <Card className="w-full max-w-sm border-primary/30 bg-card/95 shadow-2xl shadow-primary/10">
+        <CardHeader className="gap-4 border-l-2 border-primary py-5">
+          <div className="flex items-start gap-3">
+            <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
+              <KeyRound className="size-4" />
+            </div>
+            <div className="min-w-0 space-y-1">
+              <CardTitle className="text-base">
+                {request.kind === 'lock' ? 'Wormhole is locked' : 'Confirm your identity'}
+              </CardTitle>
+              <CardDescription>{request.reason}</CardDescription>
+            </div>
+          </div>
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            Your connection metadata stays behind the native Windows protection boundary until you
+            unlock this workspace.
+          </p>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          {isHelloMode ? (
+            <div className="space-y-2 rounded-lg border border-border/70 bg-background/50 p-3">
+              <p className="text-[11px] text-muted-foreground">{state.windowsHello.message}</p>
+              <Button
+                className="w-full"
+                disabled={helloBusy}
+                onClick={() => void tryWindowsHello()}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                <RefreshCcw data-icon="inline-start" />
+                {helloBusy ? 'Waiting for Windows Hello…' : 'Use Windows Hello'}
+              </Button>
+            </div>
+          ) : null}
+          <form className="space-y-3" onSubmit={submitSecret}>
+            <div className="grid gap-2">
+              <Label htmlFor="auth-secret">
+                {method === 'pin' ? 'Wormhole PIN' : 'Wormhole password'}
+              </Label>
+              <Input
+                autoFocus={!isHelloMode || !request.autoWindowsHello}
+                autoComplete="current-password"
+                id="auth-secret"
+                inputMode={method === 'pin' ? 'numeric' : undefined}
+                onChange={(event) => setSecret(event.target.value)}
+                placeholder={method === 'pin' ? 'Enter your PIN' : 'Enter your password'}
+                type="password"
+                value={secret}
+              />
+            </div>
+            {status ? <p className="text-[11px] text-destructive">{status}</p> : null}
+            <div className="flex justify-end gap-2">
+              {request.kind === 'confirmation' ? (
+                <Button onClick={() => onResult(false)} size="sm" type="button" variant="ghost">
+                  Cancel
+                </Button>
+              ) : null}
+              <Button disabled={busy || !secret} size="sm" type="submit">
+                {request.kind === 'confirmation' ? 'Confirm' : 'Unlock'}
+              </Button>
+            </div>
+          </form>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 function App() {
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme);
@@ -612,6 +768,16 @@ function App() {
   const [credentials, setCredentials] = useState<CredentialRecord[]>([]);
   const [tunnels, setTunnels] = useState<TunnelRecord[]>([]);
   const [workspaceStatus, setWorkspaceStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [authState, setAuthState] = useState<WormholeAuthState | null>(null);
+  const [authGate, setAuthGate] = useState<'loading' | 'locked' | 'unlocked' | 'error'>('loading');
+  const [authError, setAuthError] = useState('');
+  const [authRetry, setAuthRetry] = useState(0);
+  const [lockReason, setLockReason] = useState('Unlock Wormhole to continue.');
+  const [authPrompt, setAuthPrompt] = useState<AuthPromptRequest | null>(null);
+  const authPromptResolver = useRef<((succeeded: boolean) => void) | null>(null);
+  const idleCheckInFlight = useRef(false);
+  const lastActivityAt = useRef(Date.now());
+  const workspaceLoaded = useRef(false);
   const [activePage, setActivePage] = useState<NavItem>('sessions');
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [selectedNodeId, setSelectedNodeId] = useState('');
@@ -666,6 +832,38 @@ function App() {
   useEffect(() => {
     let mounted = true;
 
+    async function loadAuth() {
+      if (!window.wormhole) {
+        setAuthError('The native authentication bridge is unavailable.');
+        setAuthGate('error');
+        return;
+      }
+
+      try {
+        const state = await window.wormhole.getAuthState();
+        if (!mounted) return;
+        setAuthState(state);
+        setAuthError('');
+        setAuthGate(state.configured ? 'locked' : 'unlocked');
+      } catch (error) {
+        if (!mounted) return;
+        setAuthError(
+          error instanceof Error ? error.message : 'Native authentication failed to start.',
+        );
+        setAuthGate('error');
+      }
+    }
+
+    void loadAuth();
+    return () => {
+      mounted = false;
+    };
+  }, [authRetry]);
+
+  useEffect(() => {
+    if (authGate !== 'unlocked' || workspaceLoaded.current) return;
+    let mounted = true;
+
     async function loadWorkspace() {
       if (!window.wormhole) {
         setWorkspaceStatus('error');
@@ -684,6 +882,7 @@ function App() {
         const firstConnection = findFirstConnection(workspace.tree);
         setSelectedNodeId(firstConnection?.id ?? workspace.tree[0]?.id ?? '');
         setWorkspaceStatus('ready');
+        workspaceLoaded.current = true;
       } catch {
         if (!mounted) return;
         setTree([]);
@@ -699,6 +898,54 @@ function App() {
     void loadWorkspace();
     return () => {
       mounted = false;
+    };
+  }, [authGate]);
+
+  const requestAuthentication = useCallback(
+    (reason: string) => {
+      if (!authState?.configured || authState.mode === 'disabled') return Promise.resolve(true);
+
+      return new Promise<boolean>((resolve) => {
+        authPromptResolver.current = resolve;
+        setAuthPrompt({ kind: 'confirmation', reason, autoWindowsHello: true });
+      });
+    },
+    [authState],
+  );
+
+  function handleAuthPromptResult(succeeded: boolean) {
+    const activePrompt =
+      authPrompt ??
+      (authGate === 'locked' && authState?.configured
+        ? { kind: 'lock' as const, reason: lockReason, autoWindowsHello: true }
+        : null);
+    if (!activePrompt) return;
+
+    if (activePrompt.kind === 'lock') {
+      if (succeeded) {
+        setAuthGate('unlocked');
+        setLockReason('Unlock Wormhole to continue.');
+        lastActivityAt.current = Date.now();
+      }
+      return;
+    }
+
+    authPromptResolver.current?.(succeeded);
+    authPromptResolver.current = null;
+    setAuthPrompt(null);
+  }
+
+  useEffect(() => {
+    const markActivity = () => {
+      lastActivityAt.current = Date.now();
+    };
+    window.addEventListener('keydown', markActivity);
+    window.addEventListener('pointerdown', markActivity);
+    window.addEventListener('touchstart', markActivity);
+    return () => {
+      window.removeEventListener('keydown', markActivity);
+      window.removeEventListener('pointerdown', markActivity);
+      window.removeEventListener('touchstart', markActivity);
     };
   }, []);
 
@@ -758,6 +1005,53 @@ function App() {
       decoders.clear();
     };
   }, []);
+
+  useEffect(() => {
+    const timeoutMinutes = authState?.idleTimeoutMinutes;
+    if (
+      authGate !== 'unlocked' ||
+      !authState?.configured ||
+      timeoutMinutes === null ||
+      timeoutMinutes === undefined
+    ) {
+      return;
+    }
+
+    const checkIdle = async () => {
+      if (idleCheckInFlight.current || !window.wormhole) return;
+      idleCheckInFlight.current = true;
+      try {
+        const systemIdle = await window.wormhole.getSystemIdleSeconds();
+        const localIdle = Math.max(0, (Date.now() - lastActivityAt.current) / 1000);
+        if (Math.max(systemIdle.seconds, localIdle) >= timeoutMinutes * 60) {
+          try {
+            await window.wormhole.lockAuthentication();
+            setLockReason('Wormhole locked after inactivity.');
+            setAuthGate('locked');
+          } catch {
+            // Do not present a lock screen until the native session confirms that it is locked.
+          }
+        }
+      } catch {
+        // A failed idle sample must not lock a user out. The native verifier remains required
+        // when the app next starts or when the user manually changes security settings.
+      } finally {
+        idleCheckInFlight.current = false;
+      }
+    };
+
+    const timer = window.setInterval(() => void checkIdle(), 15_000);
+    return () => window.clearInterval(timer);
+  }, [authGate, authState]);
+
+  useEffect(() => {
+    if (authGate === 'unlocked') return;
+    setQuickConnectOpen(false);
+    setNewConnectionOpen(false);
+    setNewFolderOpen(false);
+    setEditingConnectionId(null);
+    setNewFolderParentId(null);
+  }, [authGate]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
@@ -1384,10 +1678,62 @@ function App() {
   }
 
   const currentPage = navItems.find((item) => item.id === activePage)!;
+  const visibleAuthPrompt =
+    authPrompt ??
+    (authGate === 'locked' && authState?.configured
+      ? { kind: 'lock' as const, reason: lockReason, autoWindowsHello: true }
+      : null);
 
   return (
     <TooltipProvider delayDuration={300}>
-      <div className="flex h-full min-w-[960px] flex-col bg-background font-sans text-foreground">
+      {authGate === 'loading' ? (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background/95 p-6 backdrop-blur-sm">
+          <Card className="w-full max-w-sm border-border/70 bg-card/95 shadow-2xl">
+            <CardContent className="flex items-center gap-3 py-6">
+              <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
+                <KeyRound className="size-4" />
+              </div>
+              <div className="space-y-1">
+                <p className="text-sm font-medium">Starting Wormhole protection</p>
+                <p className="text-[11px] text-muted-foreground">
+                  Checking the native security service…
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      ) : null}
+      {authGate === 'error' ? (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background/95 p-6 backdrop-blur-sm">
+          <Card className="w-full max-w-sm border-destructive/40 bg-card/95 shadow-2xl">
+            <CardHeader className="gap-3 border-l-2 border-destructive py-5">
+              <CardTitle>Native protection could not start</CardTitle>
+              <CardDescription>
+                Wormhole stays closed until its Go security service is available.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <p className="text-[11px] text-destructive">{authError}</p>
+              <Button onClick={() => setAuthRetry((value) => value + 1)} size="sm">
+                <RefreshCcw data-icon="inline-start" />
+                Retry native service
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+      ) : null}
+      {visibleAuthPrompt && authState ? (
+        <AuthPrompt
+          onResult={handleAuthPromptResult}
+          request={visibleAuthPrompt}
+          state={authState}
+        />
+      ) : null}
+      <div
+        aria-hidden={authGate !== 'unlocked'}
+        className="flex h-full min-w-[960px] flex-col bg-background font-sans text-foreground"
+        inert={authGate !== 'unlocked'}
+      >
         <header className="relative flex h-12 shrink-0 items-center border-b border-border bg-background px-3 text-foreground [-webkit-app-region:drag]">
           <div className="flex min-w-0 items-center gap-2.5 [-webkit-app-region:no-drag]">
             <div className="grid size-8 shrink-0 place-items-center rounded-md p-1">
@@ -1560,7 +1906,14 @@ function App() {
                   sessions={sessions}
                 />
               ) : activePage === 'settings' ? (
-                <SettingsPage onThemeChange={setTheme} theme={theme} />
+                <SettingsPage
+                  authGate={authGate}
+                  authState={authState}
+                  onAuthStateChange={setAuthState}
+                  onRequestAuthentication={requestAuthentication}
+                  onThemeChange={setTheme}
+                  theme={theme}
+                />
               ) : activePage === 'credentials' ? (
                 <CredentialsPage initialCredentials={credentials} />
               ) : activePage === 'tunnels' ? (
@@ -1752,7 +2105,10 @@ function App() {
                         <Input
                           id="connection-host"
                           onChange={(event) =>
-                            setNewConnectionForm((form) => ({ ...form, host: event.target.value }))
+                            setNewConnectionForm((form) => ({
+                              ...form,
+                              host: event.target.value,
+                            }))
                           }
                           placeholder={
                             newConnectionForm.protocol === 'serial'
@@ -2618,19 +2974,163 @@ function SettingsTabPanel({ value, children }: { value: string; children: ReactN
   );
 }
 
+function authSecretLabel(method: WormholeAuthFallback): string {
+  return method === 'pin' ? 'PIN' : 'password';
+}
+
+function authModeLabel(mode: WormholeAuthMode): string {
+  switch (mode) {
+    case 'pin':
+      return 'PIN';
+    case 'password':
+      return 'password';
+    case 'windowsHello':
+      return 'Windows Hello';
+    default:
+      return 'disabled';
+  }
+}
+
+function authStateHasSecret(
+  state: WormholeAuthState | null,
+  method: WormholeAuthFallback,
+): boolean {
+  return method === 'pin' ? Boolean(state?.hasPin) : Boolean(state?.hasPassword);
+}
+
+function AuthSecretDialog({
+  error,
+  method,
+  onOpenChange,
+  onSubmit,
+  open,
+  busy,
+}: {
+  error: string;
+  method: WormholeAuthFallback;
+  onOpenChange: (open: boolean) => void;
+  onSubmit: (secret: string) => Promise<void>;
+  open: boolean;
+  busy: boolean;
+}) {
+  const [secret, setSecret] = useState('');
+  const [confirmation, setConfirmation] = useState('');
+  const [validationError, setValidationError] = useState('');
+
+  useEffect(() => {
+    if (!open) {
+      setSecret('');
+      setConfirmation('');
+      setValidationError('');
+    }
+  }, [open]);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy) return;
+    if (!secret) {
+      setValidationError(`Enter a ${authSecretLabel(method)}.`);
+      return;
+    }
+    if (secret !== confirmation) {
+      setValidationError('The entries do not match.');
+      return;
+    }
+    setValidationError('');
+    await onSubmit(secret);
+  }
+
+  const secretLabel = authSecretLabel(method);
+
+  return (
+    <Dialog onOpenChange={(nextOpen) => !busy && onOpenChange(nextOpen)} open={open}>
+      <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Set Wormhole {secretLabel}</DialogTitle>
+          <DialogDescription>
+            The native Go backend stores only a DPAPI-protected verifier. The {secretLabel} is sent
+            once over the isolated bridge and is never placed on a command line or persisted by the
+            renderer.
+          </DialogDescription>
+        </DialogHeader>
+        <form className="grid gap-4" onSubmit={submit}>
+          <div className="grid gap-2">
+            <Label htmlFor="auth-new-secret">New {secretLabel}</Label>
+            <Input
+              autoFocus
+              autoComplete="new-password"
+              id="auth-new-secret"
+              inputMode={method === 'pin' ? 'numeric' : undefined}
+              onChange={(event) => setSecret(event.target.value)}
+              placeholder={method === 'pin' ? '4–12 digits' : 'At least 8 characters'}
+              type="password"
+              value={secret}
+            />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="auth-confirm-secret">Confirm {secretLabel}</Label>
+            <Input
+              autoComplete="new-password"
+              id="auth-confirm-secret"
+              inputMode={method === 'pin' ? 'numeric' : undefined}
+              onChange={(event) => setConfirmation(event.target.value)}
+              type="password"
+              value={confirmation}
+            />
+          </div>
+          {validationError || error ? (
+            <p className="text-[11px] text-destructive">{validationError || error}</p>
+          ) : null}
+          <DialogFooter>
+            <Button
+              disabled={busy}
+              onClick={() => onOpenChange(false)}
+              type="button"
+              variant="outline"
+            >
+              Cancel
+            </Button>
+            <Button disabled={busy || !secret || !confirmation} type="submit">
+              {busy ? 'Saving…' : 'Save secret'}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function SettingsPage({
   theme,
   onThemeChange,
+  authGate,
+  authState,
+  onAuthStateChange,
+  onRequestAuthentication,
 }: {
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
+  authGate: 'loading' | 'locked' | 'unlocked' | 'error';
+  authState: WormholeAuthState | null;
+  onAuthStateChange: (state: WormholeAuthState) => void;
+  onRequestAuthentication: (reason: string) => Promise<boolean>;
 }) {
   const [confirmOnTabClose, setConfirmOnTabClose] = useState(true);
   const [autoCopyOnSelect, setAutoCopyOnSelect] = useState(false);
   const [promptBeforeTunnelConnect, setPromptBeforeTunnelConnect] = useState(true);
-  const [authMethod, setAuthMethod] = useState('disabled');
-  const [helloFallback, setHelloFallback] = useState('pin');
-  const [idleTimeout, setIdleTimeout] = useState('15');
+  const [authMethod, setAuthMethod] = useState<WormholeAuthMode>(authState?.mode ?? 'disabled');
+  const [helloFallback, setHelloFallback] = useState<WormholeAuthFallback>(
+    authState?.fallback ?? 'pin',
+  );
+  const [idleTimeout, setIdleTimeout] = useState<number | null>(
+    authState?.idleTimeoutMinutes ?? 15,
+  );
+  const [securityBusy, setSecurityBusy] = useState(false);
+  const [securityError, setSecurityError] = useState('');
+  const [securityMessage, setSecurityMessage] = useState('');
+  const [secretDialog, setSecretDialog] = useState<WormholeAuthFallback | null>(null);
+  const pendingSecretAction = useRef<(() => Promise<void>) | null>(null);
+  const helloStatusMode = useRef<WormholeAuthMode | null>(null);
   const [bitwardenEnabled, setBitwardenEnabled] = useState(false);
   const [bitwardenPath, setBitwardenPath] = useState('bw');
   const [browserExtensionEnabled, setBrowserExtensionEnabled] = useState(false);
@@ -2639,6 +3139,261 @@ function SettingsPage({
   const [mcpEnabled, setMcpEnabled] = useState(false);
   const [mcpPort, setMcpPort] = useState('8765');
   const [mcpClient, setMcpClient] = useState('codex');
+
+  useEffect(() => {
+    if (authGate === 'unlocked') return;
+    setSecretDialog(null);
+    pendingSecretAction.current = null;
+  }, [authGate]);
+
+  useEffect(() => {
+    if (!authState) return;
+    setAuthMethod(authState.mode);
+    setHelloFallback(authState.fallback);
+    setIdleTimeout(authState.idleTimeoutMinutes);
+  }, [authState]);
+
+  useEffect(() => {
+    if (!authState || authState.mode !== 'windowsHello' || !window.wormhole) {
+      helloStatusMode.current = null;
+      return;
+    }
+    if (helloStatusMode.current === authState.mode) return;
+    helloStatusMode.current = authState.mode;
+    let active = true;
+    void window.wormhole
+      .checkWindowsHello()
+      .then((windowsHello) => {
+        if (active) onAuthStateChange({ ...authState, windowsHello });
+      })
+      .catch(() => {
+        // The manual refresh action exposes failures without interrupting settings changes.
+      });
+    return () => {
+      active = false;
+    };
+  }, [authState, onAuthStateChange]);
+
+  function clearSecurityStatus() {
+    setSecurityError('');
+    setSecurityMessage('');
+  }
+
+  function errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : 'The native authentication service failed.';
+  }
+
+  async function persistAuthSettings(
+    mode: WormholeAuthMode,
+    fallback: WormholeAuthFallback,
+    timeout: number | null,
+  ): Promise<WormholeAuthState> {
+    if (!window.wormhole) throw new Error('The native authentication bridge is unavailable.');
+    const nextState = await window.wormhole.updateAuthSettings({
+      mode,
+      fallback,
+      idleTimeoutMinutes: timeout,
+    });
+    onAuthStateChange(nextState);
+    return nextState;
+  }
+
+  function openSecretDialog(method: WormholeAuthFallback, afterSecret?: () => Promise<void>) {
+    pendingSecretAction.current = afterSecret ?? null;
+    setSecurityError('');
+    setSecretDialog(method);
+  }
+
+  function closeSecretDialog(open: boolean) {
+    if (open || securityBusy) return;
+    pendingSecretAction.current = null;
+    setSecretDialog(null);
+  }
+
+  async function saveAuthSecret(secret: string) {
+    if (!secretDialog || !window.wormhole) return;
+
+    setSecurityBusy(true);
+    setSecurityError('');
+    setSecurityMessage('');
+    try {
+      const nextState = await window.wormhole.setAuthSecret({ method: secretDialog, secret });
+      onAuthStateChange(nextState);
+      setSecretDialog(null);
+      const afterSecret = pendingSecretAction.current;
+      pendingSecretAction.current = null;
+      if (afterSecret) {
+        await afterSecret();
+      } else {
+        setSecurityMessage(`${authSecretLabel(secretDialog)} saved.`);
+      }
+    } catch (error) {
+      setSecurityError(errorMessage(error));
+    } finally {
+      setSecurityBusy(false);
+    }
+  }
+
+  async function requireCurrentAuthentication(reason: string): Promise<boolean> {
+    if (!authState?.configured) return true;
+    const authenticated = await onRequestAuthentication(reason);
+    if (!authenticated) {
+      setSecurityError('Authentication was not confirmed.');
+    }
+    return authenticated;
+  }
+
+  async function handleAuthMethodChange(value: string) {
+    if (securityBusy || !authState) return;
+    if (
+      value !== 'disabled' &&
+      value !== 'pin' &&
+      value !== 'password' &&
+      value !== 'windowsHello'
+    ) {
+      return;
+    }
+
+    const nextMode = value as WormholeAuthMode;
+    const previousMode = authMethod;
+    clearSecurityStatus();
+    setSecurityBusy(true);
+    try {
+      if (
+        !(await requireCurrentAuthentication(
+          `Change the unlock method to ${authModeLabel(nextMode)}.`,
+        ))
+      ) {
+        return;
+      }
+
+      let configuredFallback: WormholeAuthFallback = helloFallback;
+      const requiredMethod: WormholeAuthFallback =
+        nextMode === 'password' ? 'password' : nextMode === 'windowsHello' ? helloFallback : 'pin';
+      if (nextMode === 'windowsHello' && !authStateHasSecret(authState, requiredMethod)) {
+        const alternate: WormholeAuthFallback = requiredMethod === 'pin' ? 'password' : 'pin';
+        if (authStateHasSecret(authState, alternate)) configuredFallback = alternate;
+      }
+      const secretMethodForMode = nextMode === 'windowsHello' ? configuredFallback : requiredMethod;
+      if (nextMode !== 'disabled' && !authStateHasSecret(authState, secretMethodForMode)) {
+        setSecurityBusy(false);
+        openSecretDialog(secretMethodForMode, async () => {
+          await persistAuthSettings(nextMode, configuredFallback, idleTimeout ?? 15);
+          setSecurityMessage(`${authModeLabel(nextMode)} authentication enabled.`);
+        });
+        return;
+      }
+
+      await persistAuthSettings(
+        nextMode,
+        configuredFallback,
+        nextMode === 'disabled' ? idleTimeout : (idleTimeout ?? 15),
+      );
+      setSecurityMessage(
+        nextMode === 'disabled'
+          ? 'App authentication disabled and stored verifiers removed.'
+          : `${authModeLabel(nextMode)} authentication enabled.`,
+      );
+    } catch (error) {
+      setAuthMethod(previousMode);
+      setSecurityError(errorMessage(error));
+    } finally {
+      setSecurityBusy(false);
+    }
+  }
+
+  async function handleFallbackChange(value: string) {
+    if (securityBusy || !authState || (value !== 'pin' && value !== 'password')) return;
+    const nextFallback = value as WormholeAuthFallback;
+    if (nextFallback === helloFallback) return;
+
+    clearSecurityStatus();
+    setSecurityBusy(true);
+    try {
+      if (!(await requireCurrentAuthentication('Change the Windows Hello fallback method.')))
+        return;
+      if (!authStateHasSecret(authState, nextFallback)) {
+        setSecurityBusy(false);
+        openSecretDialog(nextFallback, async () => {
+          await persistAuthSettings(authMethod, nextFallback, idleTimeout);
+          setSecurityMessage(`Windows Hello will fall back to a ${authSecretLabel(nextFallback)}.`);
+        });
+        return;
+      }
+
+      await persistAuthSettings(authMethod, nextFallback, idleTimeout);
+      setSecurityMessage(`Windows Hello will fall back to a ${authSecretLabel(nextFallback)}.`);
+    } catch (error) {
+      setSecurityError(errorMessage(error));
+    } finally {
+      setSecurityBusy(false);
+    }
+  }
+
+  async function handleIdleTimeoutChange(value: string) {
+    if (securityBusy || !authState) return;
+    const nextTimeout = value === 'none' ? null : Number(value);
+    if (nextTimeout !== null && ![1, 5, 15, 30, 60].includes(nextTimeout)) return;
+
+    clearSecurityStatus();
+    setSecurityBusy(true);
+    try {
+      if (!(await requireCurrentAuthentication('Change the inactivity lock timeout.'))) return;
+      await persistAuthSettings(authMethod, helloFallback, nextTimeout);
+      setSecurityMessage(
+        nextTimeout === null
+          ? 'Inactivity locking disabled.'
+          : `Wormhole will lock after ${nextTimeout} minutes.`,
+      );
+    } catch (error) {
+      setSecurityError(errorMessage(error));
+    } finally {
+      setSecurityBusy(false);
+    }
+  }
+
+  async function handleSetSecret() {
+    if (securityBusy || !authState || authMethod === 'disabled') return;
+    clearSecurityStatus();
+    if (!(await requireCurrentAuthentication('Change the Wormhole authentication secret.'))) return;
+    const method = authMethod === 'windowsHello' ? helloFallback : authMethod;
+    openSecretDialog(method);
+  }
+
+  async function handleTestUnlock() {
+    if (securityBusy || !authState) return;
+    clearSecurityStatus();
+    if (!authState.configured) {
+      setSecurityMessage('App authentication is currently disabled.');
+      return;
+    }
+    if (await onRequestAuthentication('Test Wormhole authentication.')) {
+      setSecurityMessage('Authentication verified.');
+    } else {
+      setSecurityError('Authentication was not confirmed.');
+    }
+  }
+
+  async function handleRefreshWindowsHello() {
+    if (securityBusy || !authState || !window.wormhole) return;
+    clearSecurityStatus();
+    setSecurityBusy(true);
+    try {
+      const windowsHello = await window.wormhole.checkWindowsHello();
+      onAuthStateChange({ ...authState, windowsHello });
+      setSecurityMessage(windowsHello.message);
+    } catch (error) {
+      setSecurityError(errorMessage(error));
+    } finally {
+      setSecurityBusy(false);
+    }
+  }
+
+  const selectedSecretMethod: WormholeAuthFallback | null =
+    authMethod === 'disabled' ? null : authMethod === 'windowsHello' ? helloFallback : authMethod;
+  const selectedSecretExists = selectedSecretMethod
+    ? authStateHasSecret(authState, selectedSecretMethod)
+    : false;
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden p-6">
@@ -2748,12 +3503,28 @@ function SettingsPage({
             description="Protect the local Wormhole workspace when the app is unattended."
             title="App authentication"
           >
-            <p className="text-[11px] text-muted-foreground">
-              Authentication is disabled in this migration preview.
-            </p>
+            <div className="space-y-2 rounded-lg border border-border/70 bg-card/40 p-3">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-xs font-medium">Native protection status</p>
+                <Badge variant={authState?.configured ? 'default' : 'secondary'}>
+                  {authState?.configured ? 'Enabled' : 'Disabled'}
+                </Badge>
+              </div>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                {authState?.isCorrupted
+                  ? 'The protected verifier could not be read. Set a new secret to repair it.'
+                  : authState?.configured
+                    ? `Unlock with ${authModeLabel(authState.mode)}. Secrets stay in the native Go backend.`
+                    : 'Authentication is managed by the native Go backend and is currently disabled.'}
+              </p>
+            </div>
             <div className="grid max-w-64 gap-2">
               <Label htmlFor="settings-auth-method">Unlock method</Label>
-              <Select onValueChange={setAuthMethod} value={authMethod}>
+              <Select
+                disabled={!authState || securityBusy}
+                onValueChange={(value) => void handleAuthMethodChange(value)}
+                value={authMethod}
+              >
                 <SelectTrigger id="settings-auth-method" className="w-full">
                   <SelectValue />
                 </SelectTrigger>
@@ -2761,19 +3532,29 @@ function SettingsPage({
                   <SelectItem value="disabled">Disabled</SelectItem>
                   <SelectItem value="pin">PIN</SelectItem>
                   <SelectItem value="password">Password</SelectItem>
-                  <SelectItem value="hello">Windows Hello</SelectItem>
+                  <SelectItem value="windowsHello">Windows Hello</SelectItem>
                 </SelectContent>
               </Select>
             </div>
 
-            {authMethod === 'hello' ? (
+            {authMethod === 'windowsHello' && authState ? (
               <div className="space-y-3 rounded-lg border border-border/70 bg-card/40 p-3">
-                <p className="text-[11px] text-muted-foreground">
-                  Windows Hello status will be checked by the native implementation.
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs font-medium">Windows Hello</p>
+                  <Badge variant={authState.windowsHello.available ? 'default' : 'secondary'}>
+                    {authState.windowsHello.available ? 'Available' : 'Unavailable'}
+                  </Badge>
+                </div>
+                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  {authState.windowsHello.message}
                 </p>
                 <div className="grid max-w-64 gap-2">
                   <Label htmlFor="settings-hello-fallback">Windows Hello fallback</Label>
-                  <Select onValueChange={setHelloFallback} value={helloFallback}>
+                  <Select
+                    disabled={securityBusy}
+                    onValueChange={(value) => void handleFallbackChange(value)}
+                    value={helloFallback}
+                  >
                     <SelectTrigger id="settings-hello-fallback" className="w-full">
                       <SelectValue />
                     </SelectTrigger>
@@ -2783,7 +3564,14 @@ function SettingsPage({
                     </SelectContent>
                   </Select>
                 </div>
-                <Button size="sm" variant="outline">
+                <Button
+                  disabled={securityBusy}
+                  onClick={() => void handleRefreshWindowsHello()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  <RefreshCcw data-icon="inline-start" />
                   Refresh Windows Hello status
                 </Button>
               </div>
@@ -2792,9 +3580,9 @@ function SettingsPage({
             <div className="grid max-w-64 gap-2">
               <Label htmlFor="settings-idle-timeout">Lock after inactivity</Label>
               <Select
-                disabled={authMethod === 'disabled'}
-                onValueChange={setIdleTimeout}
-                value={idleTimeout}
+                disabled={!authState || securityBusy}
+                onValueChange={(value) => void handleIdleTimeoutChange(value)}
+                value={idleTimeout === null ? 'none' : String(idleTimeout)}
               >
                 <SelectTrigger id="settings-idle-timeout" className="w-full">
                   <SelectValue />
@@ -2810,13 +3598,30 @@ function SettingsPage({
               </Select>
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button disabled={authMethod === 'disabled'} size="sm">
-                Set authentication secret
+              <Button
+                disabled={!authState || authMethod === 'disabled' || securityBusy}
+                onClick={() => void handleSetSecret()}
+                size="sm"
+                type="button"
+              >
+                {selectedSecretExists
+                  ? `Change ${authSecretLabel(selectedSecretMethod!)}`
+                  : `Set ${authSecretLabel(selectedSecretMethod ?? 'pin')}`}
               </Button>
-              <Button disabled={authMethod === 'disabled'} size="sm" variant="outline">
+              <Button
+                disabled={!authState || securityBusy}
+                onClick={() => void handleTestUnlock()}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
                 Test unlock
               </Button>
             </div>
+            {securityError ? <p className="text-[11px] text-destructive">{securityError}</p> : null}
+            {securityMessage ? (
+              <p className="text-[11px] text-emerald-400">{securityMessage}</p>
+            ) : null}
           </SettingsSection>
         </SettingsTabPanel>
 
@@ -3073,6 +3878,14 @@ function SettingsPage({
           </SettingsSection>
         </SettingsTabPanel>
       </Tabs>
+      <AuthSecretDialog
+        busy={securityBusy}
+        error={securityError}
+        method={secretDialog ?? 'pin'}
+        onOpenChange={closeSecretDialog}
+        onSubmit={saveAuthSecret}
+        open={secretDialog !== null}
+      />
     </section>
   );
 }

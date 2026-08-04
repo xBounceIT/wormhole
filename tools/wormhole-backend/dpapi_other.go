@@ -19,3 +19,11 @@ func unprotectSecret(string) ([]byte, error) {
 func unprotectFile(string) ([]byte, error) {
 	return nil, errors.New("Windows DPAPI is unavailable on this platform")
 }
+
+func protectAuthDocument([]byte) ([]byte, error) {
+	return nil, errors.New("Windows DPAPI is unavailable on this platform")
+}
+
+func unprotectAuthDocument([]byte) ([]byte, error) {
+	return nil, errors.New("Windows DPAPI is unavailable on this platform")
+}

@@ -1,12 +1,22 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestDecodeInputRejectsOversizedRequest(t *testing.T) {
+	var request authVerifyRequest
+	input := `{"method":"pin","secret":"` + strings.Repeat("x", backendMaxRequestBytes) + `"}`
+	if err := decodeInputReader(bytes.NewBufferString(input), &request); err == nil {
+		t.Fatal("oversized backend request was accepted")
+	}
+}
 
 func TestLoadWorkspaceMapsPersistedRowsWithoutDemoData(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")

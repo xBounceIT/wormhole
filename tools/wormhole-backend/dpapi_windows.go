@@ -13,6 +13,8 @@ import (
 
 const protectedSecretEncoding = "windows-dpapi-v1"
 
+var appAuthenticationEntropy = []byte("Wormhole.AppAuthentication.v1")
+
 type dataBlob struct {
 	cbData uint32
 	pbData *byte
@@ -27,17 +29,40 @@ var (
 )
 
 func protectSecret(value string) (string, error) {
-	inputBytes := []byte(value)
+	protected, err := protectDpapi([]byte(value), nil)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(protected), nil
+}
+
+func protectAuthDocument(plaintext []byte) ([]byte, error) {
+	return protectDpapi(plaintext, appAuthenticationEntropy)
+}
+
+func unprotectAuthDocument(protected []byte) ([]byte, error) {
+	if len(protected) == 0 {
+		return nil, errors.New("Windows DPAPI returned an invalid protected value")
+	}
+	return unprotectDpapi(protected, appAuthenticationEntropy)
+}
+
+func protectDpapi(value, entropy []byte) ([]byte, error) {
+	inputBytes := value
 	if len(inputBytes) == 0 {
 		// CryptProtectData rejects a nil pointer even when cbData is zero. Keep a stable one-byte
 		// backing store while still reporting an empty payload to DPAPI.
 		inputBytes = []byte{0}
 	}
 	input := dataBlob{cbData: uint32(len(value)), pbData: &inputBytes[0]}
+	var entropyBlob *dataBlob
+	if len(entropy) > 0 {
+		entropyBlob = &dataBlob{cbData: uint32(len(entropy)), pbData: &entropy[0]}
+	}
 	var output dataBlob
 	result, _, callErr := cryptProtectData.Call(
 		uintptr(unsafe.Pointer(&input)),
-		0,
+		uintptr(unsafe.Pointer(entropyBlob)),
 		0,
 		0,
 		0,
@@ -46,16 +71,49 @@ func protectSecret(value string) (string, error) {
 	)
 	if result == 0 {
 		if callErr != syscall.Errno(0) {
-			return "", fmt.Errorf("Windows DPAPI failed: %w", callErr)
+			return nil, fmt.Errorf("Windows DPAPI failed: %w", callErr)
 		}
-		return "", errors.New("Windows DPAPI failed")
+		return nil, errors.New("Windows DPAPI failed")
 	}
 	if output.pbData == nil || output.cbData == 0 {
-		return "", errors.New("Windows DPAPI returned an empty value")
+		return nil, errors.New("Windows DPAPI returned an empty value")
 	}
 	defer localFree.Call(uintptr(unsafe.Pointer(output.pbData)))
 	protected := unsafe.Slice(output.pbData, output.cbData)
-	return base64.StdEncoding.EncodeToString(protected), nil
+	return append([]byte(nil), protected...), nil
+}
+
+func unprotectDpapi(protected, entropy []byte) ([]byte, error) {
+	if len(protected) == 0 {
+		return nil, errors.New("Windows DPAPI returned an invalid protected value")
+	}
+
+	input := dataBlob{cbData: uint32(len(protected)), pbData: &protected[0]}
+	var entropyBlob *dataBlob
+	if len(entropy) > 0 {
+		entropyBlob = &dataBlob{cbData: uint32(len(entropy)), pbData: &entropy[0]}
+	}
+	var output dataBlob
+	result, _, callErr := cryptUnprotectData.Call(
+		uintptr(unsafe.Pointer(&input)),
+		uintptr(unsafe.Pointer(entropyBlob)),
+		0,
+		0,
+		0,
+		0x1, // CRYPTPROTECT_UI_FORBIDDEN
+		uintptr(unsafe.Pointer(&output)),
+	)
+	if result == 0 {
+		if callErr != syscall.Errno(0) {
+			return nil, fmt.Errorf("Windows DPAPI failed: %w", callErr)
+		}
+		return nil, errors.New("Windows DPAPI failed")
+	}
+	if output.pbData == nil {
+		return nil, errors.New("Windows DPAPI returned an empty value")
+	}
+	defer localFree.Call(uintptr(unsafe.Pointer(output.pbData)))
+	return append([]byte(nil), unsafe.Slice(output.pbData, output.cbData)...), nil
 }
 
 func unprotectSecret(encoded string) ([]byte, error) {

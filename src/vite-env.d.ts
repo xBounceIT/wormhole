@@ -46,6 +46,45 @@ type WormholeSshEvent =
   | { type: 'data'; sessionId: string; data: string }
   | { type: 'closed'; sessionId: string }
   | { type: 'error'; sessionId: string; error: string };
+type WormholeAuthMode = 'disabled' | 'pin' | 'password' | 'windowsHello';
+type WormholeAuthFallback = 'pin' | 'password';
+
+interface WormholeHelloStatus {
+  available: boolean;
+  message: string;
+}
+
+interface WormholeAuthState {
+  mode: WormholeAuthMode;
+  fallback: WormholeAuthFallback;
+  idleTimeoutMinutes: number | null;
+  hasPin: boolean;
+  hasPassword: boolean;
+  isCorrupted: boolean;
+  configured: boolean;
+  windowsHello: WormholeHelloStatus;
+}
+
+interface WormholeAuthVerification {
+  succeeded: boolean;
+  message: string;
+}
+
+interface WormholeAuthVerificationRequest {
+  method: WormholeAuthFallback;
+  secret: string;
+}
+
+interface WormholeAuthSecretRequest {
+  method: WormholeAuthFallback;
+  secret: string;
+}
+
+interface WormholeAuthSettingsRequest {
+  mode: WormholeAuthMode;
+  fallback: WormholeAuthFallback;
+  idleTimeoutMinutes: number | null;
+}
 
 interface Window {
   wormhole?: {
@@ -60,5 +99,13 @@ interface Window {
     resizeSshSession(sessionId: string, columns: number, rows: number): Promise<void>;
     closeSshSession(sessionId: string): Promise<void>;
     onSshEvent(listener: (event: WormholeSshEvent) => void): () => void;
+    getAuthState(): Promise<WormholeAuthState>;
+    verifyAuth(request: WormholeAuthVerificationRequest): Promise<WormholeAuthVerification>;
+    setAuthSecret(request: WormholeAuthSecretRequest): Promise<WormholeAuthState>;
+    updateAuthSettings(request: WormholeAuthSettingsRequest): Promise<WormholeAuthState>;
+    lockAuthentication(): Promise<void>;
+    checkWindowsHello(): Promise<WormholeHelloStatus>;
+    verifyWindowsHello(): Promise<WormholeAuthVerification>;
+    getSystemIdleSeconds(): Promise<{ seconds: number }>;
   };
 }

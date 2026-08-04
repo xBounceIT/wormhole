@@ -26,6 +26,7 @@ const (
 	mcpTokenCredentialID         = "a7f3c1e2-9b6d-4e8a-bf21-7c0d2e5a4b91"
 	credentialReaderTimeout      = 15 * time.Second
 	credentialReaderMaxOutput    = 16 * 1024 * 1024
+	backendMaxRequestBytes       = 64 * 1024
 	maxCredentialTargetLength    = 256
 	maxCredentialAccountLength   = 513
 	maxCredentialPasswordUnits   = 1280
@@ -101,7 +102,7 @@ type tunnelRow struct {
 }
 
 func main() {
-	operation := flag.String("operation", "workspace", "backend operation: workspace, migrate, or ssh")
+	operation := flag.String("operation", "workspace", "backend operation: workspace, migrate, ssh, or auth-*")
 	databasePath := flag.String("database", "", "path to the Wormhole SQLite database")
 	credentialReader := flag.String("credential-reader", "", "path to the Windows Credential Manager reader")
 	flag.Parse()
@@ -126,6 +127,32 @@ func main() {
 		result, err = loadWorkspace(*databasePath)
 	case "migrate":
 		result, err = migrateCredentials(*databasePath, *credentialReader)
+	case "auth-status":
+		result, err = authState(*databasePath)
+	case "auth-verify":
+		var request authVerifyRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = authVerify(*databasePath, request)
+		}
+	case "auth-set-secret":
+		var request authSetSecretRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = authSetSecret(*databasePath, request)
+		}
+	case "auth-update-settings":
+		var request authSettingsRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = authUpdateSettings(*databasePath, request)
+		}
+	case "auth-hello-status":
+		result = checkWindowsHello()
+	case "auth-hello-verify":
+		result = verifyWindowsHello()
+	case "auth-system-idle":
+		result = map[string]int64{"seconds": systemIdleSeconds()}
 	default:
 		err = fmt.Errorf("unsupported operation %q", *operation)
 	}
@@ -140,6 +167,21 @@ func main() {
 		writeError("failed to encode backend response")
 		os.Exit(1)
 	}
+}
+
+func decodeInput[T any](target *T) error {
+	return decodeInputReader(os.Stdin, target)
+}
+
+func decodeInputReader[T any](reader io.Reader, target *T) error {
+	contents, err := io.ReadAll(io.LimitReader(reader, backendMaxRequestBytes+1))
+	if err != nil || len(contents) > backendMaxRequestBytes {
+		return errors.New("backend request was invalid")
+	}
+	if err := json.Unmarshal(contents, target); err != nil {
+		return errors.New("backend request was invalid")
+	}
+	return nil
 }
 
 func writeError(message string) {

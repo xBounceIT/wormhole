@@ -1,12 +1,11 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { createInterface, type Interface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
+import { AuthSession } from './auth-session.js';
 
-const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rendererUrl = process.env.VITE_DEV_SERVER_URL;
 const nativeTitlebarColor = '#0a0a0a00';
@@ -15,8 +14,18 @@ const nativeTitlebarHeight = 48;
 const wormholeDataDirectoryName = 'Wormhole';
 const backendTimeoutMs = 30_000;
 const backendMaxBuffer = 16 * 1024 * 1024;
+const backendMaxRequestBytes = 64 * 1024;
 
-type BackendOperation = 'workspace' | 'migrate';
+type BackendOperation =
+  | 'workspace'
+  | 'migrate'
+  | 'auth-status'
+  | 'auth-verify'
+  | 'auth-set-secret'
+  | 'auth-update-settings'
+  | 'auth-hello-status'
+  | 'auth-hello-verify'
+  | 'auth-system-idle';
 type MigrationResponse = {
   status: 'completed' | 'already-completed' | 'skipped-non-windows';
   migrated: number;
@@ -27,6 +36,13 @@ type WorkspaceResponse = {
   credentials: unknown[];
   tunnels: unknown[];
 };
+type AuthStateResponse = {
+  mode: string;
+  configured: boolean;
+};
+
+const authSession = new AuthSession();
+let authOperationQueue: Promise<void> = Promise.resolve();
 
 type SshConnectedResponse = {
   sessionId: string;
@@ -167,32 +183,79 @@ function credentialReaderPath(): string | undefined {
   return findBundledExecutable(`wormhole-credential-reader-${architecture}.exe`);
 }
 
-async function runBackend<T>(operation: BackendOperation): Promise<T> {
+async function runBackend<T>(operation: BackendOperation, request?: unknown): Promise<T> {
   const args = ['--operation', operation, '--database', wormholeDatabasePath()];
   if (operation === 'migrate') {
     const reader = credentialReaderPath();
     if (reader) args.push('--credential-reader', reader);
   }
-
-  let stdout: string;
-  try {
-    ({ stdout } = await execFileAsync(backendPath(), args, {
-      windowsHide: true,
-      maxBuffer: backendMaxBuffer,
-      timeout: backendTimeoutMs,
-      encoding: 'utf8',
-    }));
-  } catch (error) {
-    const stderr =
-      typeof error === 'object' &&
-      error !== null &&
-      'stderr' in error &&
-      typeof error.stderr === 'string'
-        ? error.stderr.trim()
-        : '';
-    throw new Error(stderr || 'Electron Go backend failed.');
+  let requestPayload: string | undefined;
+  if (request !== undefined) {
+    requestPayload = JSON.stringify(request);
+    if (
+      requestPayload === undefined ||
+      Buffer.byteLength(requestPayload, 'utf8') > backendMaxRequestBytes
+    ) {
+      throw new Error('Electron Go backend request is too large.');
+    }
   }
-  const output = stdout;
+
+  const child = spawn(backendPath(), args, {
+    stdio: 'pipe',
+    windowsHide: true,
+  });
+
+  const output = await new Promise<string>((resolve, reject) => {
+    let stdout = '';
+    let stdoutBytes = 0;
+    let stderr = '';
+    let settled = false;
+    const timeout = setTimeout(() => {
+      child.kill();
+      finishReject(new Error('Electron Go backend timed out.'));
+    }, backendTimeoutMs);
+
+    function finishReject(error: Error) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      reject(error);
+    }
+
+    child.stdout?.setEncoding('utf8');
+    child.stderr?.setEncoding('utf8');
+    child.stdout?.on('data', (chunk: string) => {
+      stdout += chunk;
+      stdoutBytes += Buffer.byteLength(chunk, 'utf8');
+      if (stdoutBytes > backendMaxBuffer) {
+        child.kill();
+        finishReject(new Error('Electron Go backend returned too much data.'));
+      }
+    });
+    child.stderr?.on('data', (chunk: string) => {
+      stderr += chunk;
+      if (stderr.length > backendMaxBuffer) stderr = stderr.slice(-backendMaxBuffer);
+    });
+    child.on('error', (error) => finishReject(error));
+    child.stdin?.on('error', (error) => finishReject(error));
+    child.on('close', (code) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      if (code !== 0) {
+        reject(new Error(stderr.trim() || 'Electron Go backend failed.'));
+        return;
+      }
+      resolve(stdout);
+    });
+
+    if (requestPayload === undefined) {
+      child.stdin?.end();
+    } else {
+      child.stdin?.end(requestPayload);
+    }
+  });
+
   try {
     return JSON.parse(output) as T;
   } catch {
@@ -367,6 +430,9 @@ class NativeSshBackend {
   }
 
   private broadcast(event: SshBackendEvent): void {
+    // Lifecycle notifications let the locked renderer settle pending tabs, but terminal bytes
+    // must never cross the native authentication boundary until the session is unlocked again.
+    if (event.type === 'data' && !authSession.isAccessAllowed) return;
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed()) window.webContents.send('ssh:event', event);
     }
@@ -379,6 +445,35 @@ class NativeSshBackend {
     }
     this.openWaiters.clear();
   }
+}
+
+function serializeAuthOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const result = authOperationQueue.then(operation, operation);
+  authOperationQueue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+function rememberAuthState(state: AuthStateResponse, assumeUnlocked: boolean): AuthStateResponse {
+  authSession.remember(state, assumeUnlocked);
+  return state;
+}
+
+async function refreshAuthSession(): Promise<AuthStateResponse> {
+  const state = await runBackend<AuthStateResponse>('auth-status');
+  return rememberAuthState(state, false);
+}
+
+async function ensureAuthSession(): Promise<void> {
+  if (!authSession.isInitialized) await refreshAuthSession();
+}
+
+async function requireNativeAuth(): Promise<void> {
+  if (process.platform !== 'win32') return;
+  await ensureAuthSession();
+  authSession.requireUnlocked();
 }
 
 async function runFirstLaunchMigrations(): Promise<void> {
@@ -401,21 +496,125 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (process.platform !== 'win32') {
       return { tree: [], credentials: [], tunnels: [] };
     }
-    const workspace = await runBackend<WorkspaceResponse>('workspace');
-    console.info(
-      `[Wormhole] Workspace loaded: ${workspace.tree.length} roots, ${workspace.credentials.length} credentials, ${workspace.tunnels.length} tunnels.`,
-    );
-    return workspace;
+    return serializeAuthOperation(async () => {
+      await ensureAuthSession();
+      authSession.requireUnlocked();
+      const workspace = await runBackend<WorkspaceResponse>('workspace');
+      console.info(
+        `[Wormhole] Workspace loaded: ${workspace.tree.length} roots, ${workspace.credentials.length} credentials, ${workspace.tunnels.length} tunnels.`,
+      );
+      return workspace;
+    });
+  });
+
+  ipcMain.handle('auth:status', async () => {
+    if (process.platform !== 'win32') {
+      return {
+        mode: 'disabled',
+        fallback: 'pin',
+        idleTimeoutMinutes: 15,
+        hasPin: false,
+        hasPassword: false,
+        isCorrupted: false,
+        configured: false,
+        windowsHello: {
+          available: false,
+          message: 'Windows Hello is only available on Windows.',
+        },
+      };
+    }
+    return serializeAuthOperation(refreshAuthSession);
+  });
+
+  ipcMain.handle('auth:verify', async (_event, request: unknown) => {
+    if (process.platform !== 'win32')
+      return { succeeded: false, message: 'Authentication is unavailable.' };
+    return serializeAuthOperation(async () => {
+      await ensureAuthSession();
+      const result = await runBackend<{ succeeded: boolean }>('auth-verify', request);
+      if (result.succeeded) authSession.markUnlocked();
+      return result;
+    });
+  });
+
+  ipcMain.handle('auth:set-secret', async (_event, request: unknown) => {
+    if (process.platform !== 'win32') throw new Error('Authentication is unavailable.');
+    return serializeAuthOperation(async () => {
+      await ensureAuthSession();
+      authSession.requireUnlocked();
+      const state = await runBackend<AuthStateResponse>('auth-set-secret', request);
+      return rememberAuthState(state, true);
+    });
+  });
+
+  ipcMain.handle('auth:update-settings', async (_event, request: unknown) => {
+    if (process.platform !== 'win32') throw new Error('Authentication is unavailable.');
+    return serializeAuthOperation(async () => {
+      await ensureAuthSession();
+      authSession.requireUnlocked();
+      const state = await runBackend<AuthStateResponse>('auth-update-settings', request);
+      return rememberAuthState(state, true);
+    });
+  });
+
+  ipcMain.handle('auth:lock', async () => {
+    if (process.platform !== 'win32') return;
+    return serializeAuthOperation(async () => {
+      await ensureAuthSession();
+      authSession.lock();
+    });
+  });
+
+  ipcMain.handle('auth:hello-status', async () => {
+    if (process.platform !== 'win32') {
+      return { available: false, message: 'Windows Hello is only available on Windows.' };
+    }
+    return runBackend('auth-hello-status');
+  });
+
+  ipcMain.handle('auth:hello-verify', async () => {
+    if (process.platform !== 'win32') {
+      return { succeeded: false, message: 'Windows Hello is only available on Windows.' };
+    }
+    return serializeAuthOperation(async () => {
+      await ensureAuthSession();
+      const state = await refreshAuthSession();
+      if (state.mode !== 'windowsHello' || !state.configured) {
+        return {
+          succeeded: false,
+          message: 'Windows Hello is not the configured unlock method.',
+        };
+      }
+      const result = await runBackend<{ succeeded: boolean }>('auth-hello-verify');
+      if (result.succeeded) authSession.markUnlocked();
+      return result;
+    });
+  });
+
+  ipcMain.handle('auth:system-idle', async () => {
+    if (process.platform !== 'win32') return { seconds: 0 };
+    return runBackend('auth-system-idle');
   });
   ipcMain.handle('ssh:open', async (_event, request: unknown) => {
     if (!isSshOpenRequest(request)) throw new Error('SSH open request is invalid.');
-    return sshBackend.open(request);
+    let connection: Promise<SshConnectedResponse> | undefined;
+    await serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      // Start the long-lived connection inside the authorization queue, but do not make the
+      // queue wait for the remote handshake. This keeps a lock request responsive while a host
+      // is unreachable or still negotiating.
+      connection = sshBackend.open(request);
+    });
+    return connection!;
   });
   ipcMain.handle('ssh:input', async (_event, sessionId: unknown, data: unknown) => {
     if (!isSshSessionId(sessionId) || !isSshInput(data)) {
       throw new Error('SSH input request is invalid.');
     }
-    sshBackend.sendInput(sessionId, data);
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      sshBackend.sendInput(sessionId, data);
+    });
   });
   ipcMain.handle(
     'ssh:resize',
@@ -433,7 +632,10 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       ) {
         throw new Error('SSH resize request is invalid.');
       }
-      sshBackend.resize(sessionId, columns, rows);
+      return serializeAuthOperation(async () => {
+        await requireNativeAuth();
+        sshBackend.resize(sessionId, columns, rows);
+      });
     },
   );
   ipcMain.handle('ssh:close', async (_event, sessionId: unknown) => {
@@ -466,6 +668,17 @@ function createWindow() {
       nodeIntegration: false,
       preload: path.join(__dirname, 'preload.cjs'),
     },
+  });
+
+  window.webContents.on('did-start-loading', () => {
+    if (process.platform !== 'win32') return;
+    void serializeAuthOperation(async () => {
+      // A renderer reload creates a fresh UI process context. Do not let a previous renderer's
+      // native unlock survive into the new context before it proves possession of the secret.
+      authSession.lock();
+    }).catch((error) => {
+      console.error('[Wormhole] Could not reset native authentication for the renderer.', error);
+    });
   });
 
   window.webContents.on('preload-error', (_event, preloadPath, error) => {
