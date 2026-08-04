@@ -11,9 +11,11 @@ npm install
 npm run dev
 ```
 
-On Windows, use `npm run dev:windows` so the Go backend and Credential Manager
-reader are built before Electron starts.
-On ARM64 Windows, use `npm run dev:windows:arm64` instead.
+The default `npm run dev` command detects the host platform and architecture.
+On Windows it builds the Go backend and Credential Manager reader before
+Electron starts; on other platforms it skips the Windows-only binaries.
+`npm run dev:windows:arm64` remains available for an explicit ARM64 Windows
+build.
 
 The renderer uses Vite 8, React, TypeScript 7, Shadcn/Radix components, Oxlint,
 and Oxfmt. `npm run build` creates the static renderer in `dist/` and

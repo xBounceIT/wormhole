@@ -25,8 +25,9 @@ export function getTreeRowGeometry(depth: number): TreeRowGeometry {
   if (depth === 0) return { paddingLeft, branch: null };
 
   const left = treeRowInset + (depth - 1) * treeIndentStep + treeSelectionSlotWidth / 2;
-  const branchEnd = paddingLeft + treeSelectionSlotWidth + treeSlotGap;
-  const width = branchEnd - left;
+  // Connectors terminate at the selection slot instead of continuing beneath the
+  // checkbox toward the disclosure/protocol icon rail.
+  const width = paddingLeft - left;
   return {
     paddingLeft,
     branch: {

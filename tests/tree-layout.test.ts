@@ -37,19 +37,19 @@ test('horizontal connectors start after the vertical rail', () => {
   );
 });
 
-test('folder branch connectors end before the disclosure slot', () => {
+test('branch connectors end at the checkbox slot', () => {
   for (const depth of [1, 2, 3, 12]) {
     const geometry = getTreeRowGeometry(depth);
     assert.ok(geometry.branch);
-    assert.equal(geometry.branch.left + geometry.branch.width, geometry.paddingLeft + 22);
+    assert.equal(geometry.branch.left + geometry.branch.width, geometry.paddingLeft);
     assert.ok(geometry.branch.width > 0);
   }
 });
 
-test('connection branch connectors reach the protocol icon rail', () => {
+test('connection branch connectors stop before the protocol icon rail', () => {
   const geometry = getTreeRowGeometry(2);
   assert.ok(geometry.branch);
-  assert.equal(geometry.branch.left + geometry.branch.width, geometry.paddingLeft + 22);
+  assert.equal(geometry.branch.left + geometry.branch.width, geometry.paddingLeft);
 });
 
 test('tree depth rejects invalid values', () => {
