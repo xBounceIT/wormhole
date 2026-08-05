@@ -47,16 +47,18 @@ func protectSecret(value string) (string, error) {
 	return base64.StdEncoding.EncodeToString(protected), nil
 }
 
-func protectAuthDocument(plaintext []byte) ([]byte, error) {
+func protectAuthDocument(_ string, plaintext []byte) ([]byte, error) {
 	return protectDpapi(plaintext, appAuthenticationEntropy)
 }
 
-func unprotectAuthDocument(protected []byte) ([]byte, error) {
+func unprotectAuthDocument(_ string, protected []byte) ([]byte, error) {
 	if len(protected) == 0 {
 		return nil, errors.New("Windows DPAPI returned an invalid protected value")
 	}
 	return unprotectDpapi(protected, appAuthenticationEntropy)
 }
+
+func deleteAuthProtectionKey(string) {}
 
 func protectDpapi(value, entropy []byte) ([]byte, error) {
 	inputBytes := value

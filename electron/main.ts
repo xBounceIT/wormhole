@@ -2078,9 +2078,6 @@ class NativeSshBackend {
   }
 
   private ensureStarted(): void {
-    if (process.platform !== 'win32') {
-      throw new Error('Native SSH sessions are currently available on Windows only.');
-    }
     if (this.child && !this.child.killed) return;
 
     const child = spawn(
@@ -2264,8 +2261,7 @@ async function ensureAuthSession(): Promise<void> {
   if (!authSession.isInitialized) await refreshAuthSession();
 }
 
-async function requireNativeAuth(): Promise<void> {
-  if (process.platform !== 'win32') return;
+async function requireWorkspaceAuth(): Promise<void> {
   await ensureAuthSession();
   authSession.requireUnlocked();
 }
@@ -2309,9 +2305,6 @@ async function runFirstLaunchMigrations(): Promise<void> {
 
 function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   ipcMain.handle('workspace:load', async () => {
-    if (process.platform !== 'win32') {
-      return { tree: [], credentials: [], tunnels: [] };
-    }
     return serializeAuthOperation(async () => {
       await ensureAuthSession();
       authSession.requireUnlocked();
@@ -2327,7 +2320,6 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!isWorkspaceNodeSshSettingsRequest(request)) {
       throw new Error('Workspace node settings are invalid.');
     }
-    if (process.platform !== 'win32') return { updated: false };
     return serializeAuthOperation(async () => {
       await ensureAuthSession();
       authSession.requireUnlocked();
@@ -2336,27 +2328,10 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   });
 
   ipcMain.handle('auth:status', async () => {
-    if (process.platform !== 'win32') {
-      return {
-        mode: 'disabled',
-        fallback: 'pin',
-        idleTimeoutMinutes: 15,
-        hasPin: false,
-        hasPassword: false,
-        isCorrupted: false,
-        configured: false,
-        windowsHello: {
-          available: false,
-          message: 'Windows Hello is only available on Windows.',
-        },
-      };
-    }
     return serializeAuthOperation(refreshAuthSession);
   });
 
   ipcMain.handle('auth:verify', async (_event, request: unknown) => {
-    if (process.platform !== 'win32')
-      return { succeeded: false, message: 'Authentication is unavailable.' };
     return serializeAuthOperation(async () => {
       await ensureAuthSession();
       const result = await runBackend<{ succeeded: boolean }>('auth-verify', request);
@@ -2366,7 +2341,6 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   });
 
   ipcMain.handle('auth:set-secret', async (_event, request: unknown) => {
-    if (process.platform !== 'win32') throw new Error('Authentication is unavailable.');
     return serializeAuthOperation(async () => {
       await ensureAuthSession();
       authSession.requireUnlocked();
@@ -2376,7 +2350,6 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   });
 
   ipcMain.handle('auth:update-settings', async (_event, request: unknown) => {
-    if (process.platform !== 'win32') throw new Error('Authentication is unavailable.');
     return serializeAuthOperation(async () => {
       await ensureAuthSession();
       authSession.requireUnlocked();
@@ -2386,7 +2359,6 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   });
 
   ipcMain.handle('auth:lock', async (event) => {
-    if (process.platform !== 'win32') return;
     return serializeAuthOperation(async () => {
       await ensureAuthSession();
       authSession.lock();
@@ -2410,14 +2382,14 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
 
   ipcMain.handle('auth:hello-status', async () => {
     if (process.platform !== 'win32') {
-      return { available: false, message: 'Windows Hello is only available on Windows.' };
+      return { available: false, message: 'Windows Hello only works on Windows.' };
     }
     return runBackend('auth-hello-status');
   });
 
-  ipcMain.handle('auth:hello-verify', async () => {
+  ipcMain.handle('auth:hello-verify', async (event) => {
     if (process.platform !== 'win32') {
-      return { succeeded: false, message: 'Windows Hello is only available on Windows.' };
+      return { succeeded: false, message: 'Windows Hello only works on Windows.' };
     }
     return serializeAuthOperation(async () => {
       await ensureAuthSession();
@@ -2425,23 +2397,30 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       if (state.mode !== 'windowsHello' || !state.configured) {
         return {
           succeeded: false,
-          message: 'Windows Hello is not the configured unlock method.',
+          message: 'Choose Windows Hello in Settings first.',
         };
       }
-      const result = await runBackend<{ succeeded: boolean }>('auth-hello-verify');
+      const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+      if (!ownerWindow || ownerWindow.isDestroyed()) {
+        return { succeeded: false, message: 'Bring Wormhole to the front and try again.' };
+      }
+      if (!ownerWindow.isVisible()) ownerWindow.show();
+      ownerWindow.focus();
+      const result = await runBackend<{ succeeded: boolean }>('auth-hello-verify', {
+        ownerWindow: nativeWindowHandle(ownerWindow),
+      });
       if (result.succeeded) authSession.markUnlocked();
       return result;
     });
   });
 
   ipcMain.handle('auth:system-idle', async () => {
-    if (process.platform !== 'win32') return { seconds: 0 };
     return runBackend('auth-system-idle');
   });
   ipcMain.handle('mcp:status', async () => {
     if (process.platform !== 'win32') return defaultMcpStatus;
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       return sshBackend.mcpStatus();
     });
   });
@@ -2449,14 +2428,14 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
     const parsedPort = parseMcpPort(port);
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       return sshBackend.startMcp(parsedPort);
     });
   });
   ipcMain.handle('mcp:stop', async () => {
     if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       return sshBackend.stopMcp();
     });
   });
@@ -2464,21 +2443,21 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
     const parsedPort = parseMcpPort(port);
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       return sshBackend.setMcpPort(parsedPort);
     });
   });
   ipcMain.handle('mcp:get-token', async () => {
     if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       return sshBackend.getMcpToken();
     });
   });
   ipcMain.handle('mcp:regenerate-token', async () => {
     if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       return sshBackend.regenerateMcpToken();
     });
   });
@@ -2486,7 +2465,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
     const approval = parseMcpApproval(value);
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       await sshBackend.respondMcpApproval(approval.requestId, approval.approved);
     });
   });
@@ -2508,7 +2487,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!ownerWindow || ownerWindow.isDestroyed())
       throw new Error('Web session owner window is unavailable.');
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       return webSurfaces.open(ownerWindow, request);
     });
   });
@@ -2529,7 +2508,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow || ownerWindow.isDestroyed()) return;
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       webSurfaces.command(ownerWindow, request);
     });
   });
@@ -2543,7 +2522,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!isSshOpenRequest(request)) throw new Error('SSH open request is invalid.');
     let connection: Promise<SshConnectedResponse> | undefined;
     await serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       // Start the long-lived connection inside the authorization queue, but do not make the
       // queue wait for the remote handshake. This keeps a lock request responsive while a host
       // is unreachable or still negotiating.
@@ -2556,7 +2535,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       throw new Error('SSH host-key trust request is invalid.');
     }
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       return runBackend('ssh-trust-host-key', request);
     });
   });
@@ -2565,7 +2544,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       throw new Error('SSH input request is invalid.');
     }
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       sshBackend.sendInput(sessionId, data);
     });
   });
@@ -2586,7 +2565,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         throw new Error('SSH resize request is invalid.');
       }
       return serializeAuthOperation(async () => {
-        await requireNativeAuth();
+        await requireWorkspaceAuth();
         sshBackend.resize(sessionId, columns, rows);
       });
     },
@@ -2596,7 +2575,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       throw new Error('SFTP open request is invalid.');
     }
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       sshBackend.openSftp(sessionId, typeof requestId === 'string' ? requestId : '');
     });
   });
@@ -2611,7 +2590,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         throw new Error('SFTP list request is invalid.');
       }
       return serializeAuthOperation(async () => {
-        await requireNativeAuth();
+        await requireWorkspaceAuth();
         sshBackend.listSftp(sessionId, path, typeof requestId === 'string' ? requestId : '');
       });
     },
@@ -2627,7 +2606,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         throw new Error('Local SFTP list request is invalid.');
       }
       return serializeAuthOperation(async () => {
-        await requireNativeAuth();
+        await requireWorkspaceAuth();
         sshBackend.listLocalSftp(sessionId, path, requestId);
       });
     },
@@ -2637,7 +2616,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       throw new Error('SFTP operation request is invalid.');
     }
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       sshBackend.operateSftp(sessionId, request);
     });
   });
@@ -2646,7 +2625,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       throw new Error('SFTP transfer request is invalid.');
     }
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       sshBackend.startSftpTransfer(sessionId, request);
     });
   });
@@ -2670,7 +2649,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         throw new Error('SFTP transfer decision is invalid.');
       }
       return serializeAuthOperation(async () => {
-        await requireNativeAuth();
+        await requireWorkspaceAuth();
         sshBackend.decideSftpConflict(sessionId, transferId, itemId, decision, applyToAll);
       });
     },
@@ -2686,7 +2665,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         throw new Error('SFTP transfer cancellation is invalid.');
       }
       return serializeAuthOperation(async () => {
-        await requireNativeAuth();
+        await requireWorkspaceAuth();
         sshBackend.cancelSftpTransfer(
           sessionId,
           transferId,
@@ -2709,7 +2688,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!isSerialOpenRequest(request)) throw new Error('Serial open request is invalid.');
     let connection: Promise<SerialConnectedResponse> | undefined;
     await serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       connection = getSerialBackend().open(request as SerialOpenRequest);
     });
     return connection!;
@@ -2719,7 +2698,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       throw new Error('Serial input request is invalid.');
     }
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       getSerialBackend().sendInput(sessionId, data);
     });
   });
@@ -2740,7 +2719,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         throw new Error('Serial resize request is invalid.');
       }
       return serializeAuthOperation(async () => {
-        await requireNativeAuth();
+        await requireWorkspaceAuth();
         getSerialBackend().resize(sessionId, columns, rows);
       });
     },
@@ -2753,10 +2732,6 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (isQuitting) {
       return { id: '', ok: false, error: 'Native backend is stopping.' };
     }
-    if (process.platform !== 'win32') {
-      return { id: '', ok: false, error: 'Native VNC sessions are available on Windows builds.' };
-    }
-
     let command: VncCommand;
     try {
       command = parseVncCommand(input);
@@ -2768,7 +2743,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       };
     }
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       nativeBackend ??= new NativeBackendProcess();
       return nativeBackend.send(command);
     });
@@ -2780,7 +2755,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
 
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       const client = getRdpClient();
       const bounds = toScreenBounds(ownerWindow, request.bounds);
       return client.start(request, nativeWindowHandle(ownerWindow), bounds);
@@ -2793,7 +2768,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
 
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       const client = getRdpClient();
       const bounds = request.bounds ? toScreenBounds(ownerWindow, request.bounds) : undefined;
       return client.resize({ ...request, bounds }, nativeWindowHandle(ownerWindow));
@@ -2818,7 +2793,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       getRdpClient().command(operation, request.sessionId, nativeWindowHandle(ownerWindow), bounds);
     if (operation === 'hide' || operation === 'disconnect') return command();
     return serializeAuthOperation(async () => {
-      await requireNativeAuth();
+      await requireWorkspaceAuth();
       return command();
     });
   });
@@ -3013,7 +2988,6 @@ function createWindow() {
 
   window.webContents.on('did-start-loading', () => {
     webSurfaces.closeForWindow(window);
-    if (process.platform !== 'win32') return;
     void serializeAuthOperation(async () => {
       // A renderer reload creates a fresh UI process context. Do not let a previous renderer's
       // native unlock survive into the new context before it proves possession of the secret.

@@ -182,6 +182,38 @@ func TestAuthDocumentRejectsOversizedStore(t *testing.T) {
 	}
 }
 
+func TestAuthDocumentEnvelopeRoundTripRejectsTampering(t *testing.T) {
+	key := bytes.Repeat([]byte{0x4a}, authProtectionKeyLength)
+	plaintext := []byte(`{"Version":1}`)
+	protected, err := encryptAuthDocument(plaintext, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(protected, plaintext) {
+		t.Fatal("authentication document was not encrypted")
+	}
+
+	decoded, err := decryptAuthDocument(protected, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decoded, plaintext) {
+		t.Fatalf("unexpected decrypted authentication document: %q", decoded)
+	}
+	clearBytes(decoded)
+
+	tampered := append([]byte(nil), protected...)
+	tampered[len(tampered)-1] ^= 0x01
+	if _, err := decryptAuthDocument(tampered, key); err == nil {
+		t.Fatal("tampered authentication document was accepted")
+	}
+
+	wrongKey := bytes.Repeat([]byte{0x7c}, authProtectionKeyLength)
+	if _, err := decryptAuthDocument(protected, wrongKey); err == nil {
+		t.Fatal("authentication document was accepted with a different key")
+	}
+}
+
 func TestAuthDocumentRoundTripUsesProtectedStore(t *testing.T) {
 	if !isWindowsRuntime() {
 		t.Skip("Windows DPAPI is Windows-only")
@@ -206,7 +238,7 @@ func TestAuthDocumentRoundTripUsesProtectedStore(t *testing.T) {
 	if len(protected) == 0 {
 		t.Fatal("protected authentication store is empty")
 	}
-	decoded, err := unprotectAuthDocument(protected)
+	decoded, err := unprotectAuthDocument(storePath, protected)
 	if err != nil {
 		t.Fatal(err)
 	}

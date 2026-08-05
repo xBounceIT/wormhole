@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -75,6 +76,18 @@ var (
 		Data3: 0x4DDC,
 		Data4: [8]byte{0xB8, 0xB5, 0x97, 0x34, 0x47, 0x62, 0x7C, 0x65},
 	}
+	iidUserConsentVerifierInterop = windowsGUID{
+		Data1: 0x39E050C3,
+		Data2: 0x4E74,
+		Data3: 0x441A,
+		Data4: [8]byte{0x8D, 0xC0, 0xB8, 0x11, 0x04, 0xDF, 0x94, 0x9C},
+	}
+	iidUserConsentVerificationOperation = windowsGUID{
+		Data1: 0xFD596FFD,
+		Data2: 0x2318,
+		Data3: 0x558F,
+		Data4: [8]byte{0x9D, 0xBE, 0xD2, 0x1D, 0xF4, 0x37, 0x64, 0xA5},
+	}
 	iidAsyncInfo = windowsGUID{
 		Data1: 0x00000036,
 		Data4: [8]byte{0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46},
@@ -87,11 +100,11 @@ const (
 	asyncCompleted            = 1
 	asyncCanceled             = 2
 	asyncError                = 3
-	remoteDesktopHelloMessage = "Remote Desktop session detected. Windows Hello is disabled in remote sessions. Use your configured fallback method to unlock Wormhole."
+	remoteDesktopHelloMessage = "Windows Hello isn't available in Remote Desktop. Use your Wormhole PIN or password."
 )
 
 func unqueriedWindowsHelloStatus() authHelloStatus {
-	return authHelloStatus{Message: "Windows Hello status has not been checked."}
+	return authHelloStatus{Message: "Windows Hello hasn't been checked yet."}
 }
 
 func checkWindowsHello() authHelloStatus {
@@ -99,55 +112,67 @@ func checkWindowsHello() authHelloStatus {
 		return authHelloStatus{Message: remoteDesktopHelloMessage}
 	}
 
-	result, err := callWindowsHelloOperation(false, "")
+	result, err := callWindowsHelloOperation(false, "", 0)
 	if err != nil {
-		return authHelloStatus{Message: "Windows Hello is unavailable."}
+		return authHelloStatus{Message: "Windows Hello isn't available."}
 	}
 	switch result {
 	case 0:
-		return authHelloStatus{Available: true, Message: "Windows Hello is available."}
+		return authHelloStatus{Available: true, Message: "Windows Hello is ready."}
 	case 1:
-		return authHelloStatus{Message: "No Windows Hello device is present."}
+		return authHelloStatus{Message: "No Windows Hello device was found."}
 	case 2:
-		return authHelloStatus{Message: "Windows Hello is not configured for this Windows user."}
+		return authHelloStatus{Message: "Windows Hello isn't set up for this Windows account."}
 	case 3:
-		return authHelloStatus{Message: "Windows Hello is disabled by policy."}
+		return authHelloStatus{Message: "Windows Hello is blocked by your organization."}
 	case 4:
-		return authHelloStatus{Message: "Windows Hello is busy."}
+		return authHelloStatus{Message: "Windows Hello is busy. Try again."}
 	default:
-		return authHelloStatus{Message: "Windows Hello is unavailable."}
+		return authHelloStatus{Message: "Windows Hello isn't available."}
 	}
 }
 
-func verifyWindowsHello() authVerificationResponse {
+func verifyWindowsHello(request authHelloVerifyRequest) authVerificationResponse {
 	if isRemoteSession() {
 		return authVerificationResponse{Message: remoteDesktopHelloMessage}
 	}
-	result, err := callWindowsHelloOperation(true, "Unlock Wormhole")
+	ownerWindow, err := parseOwnerWindow(request.OwnerWindow)
 	if err != nil {
-		return authVerificationResponse{Message: "Windows Hello is unavailable."}
+		return authVerificationResponse{Message: "Bring Wormhole to the front and try again."}
+	}
+	result, err := callWindowsHelloOperation(true, "Unlock Wormhole", ownerWindow)
+	if err != nil {
+		return authVerificationResponse{Message: "Windows Hello isn't available."}
 	}
 	switch result {
 	case 0:
 		return authVerificationResponse{Succeeded: true, Message: "Verified."}
 	case 1:
-		return authVerificationResponse{Message: "No Windows Hello device is present."}
+		return authVerificationResponse{Message: "No Windows Hello device was found."}
 	case 2:
-		return authVerificationResponse{Message: "Windows Hello is not configured for this Windows user."}
+		return authVerificationResponse{Message: "Windows Hello isn't set up for this Windows account."}
 	case 3:
-		return authVerificationResponse{Message: "Windows Hello is disabled by policy."}
+		return authVerificationResponse{Message: "Windows Hello is blocked by your organization."}
 	case 4:
-		return authVerificationResponse{Message: "Windows Hello is busy."}
+		return authVerificationResponse{Message: "Windows Hello is busy. Try again."}
 	case 5:
-		return authVerificationResponse{Message: "Windows Hello retries were exhausted."}
+		return authVerificationResponse{Message: "Too many attempts. Try again later."}
 	case 6:
 		return authVerificationResponse{Message: "Windows Hello was canceled."}
 	default:
-		return authVerificationResponse{Message: "Windows Hello verification failed."}
+		return authVerificationResponse{Message: "Windows Hello didn't recognize you."}
 	}
 }
 
-func callWindowsHelloOperation(verify bool, message string) (uint32, error) {
+func parseOwnerWindow(value string) (uintptr, error) {
+	ownerWindow, err := strconv.ParseUint(value, 10, int(unsafe.Sizeof(uintptr(0))*8))
+	if err != nil || ownerWindow == 0 {
+		return 0, errors.New("invalid owner window")
+	}
+	return uintptr(ownerWindow), nil
+}
+
+func callWindowsHelloOperation(verify bool, message string, ownerWindow uintptr) (uint32, error) {
 	initialized := false
 	result, _, _ := roInitialize.Call(1) // RO_INIT_MULTITHREADED
 	if result == 0 || result == 1 {
@@ -171,10 +196,14 @@ func callWindowsHelloOperation(verify bool, message string) (uint32, error) {
 	}
 	defer windowsDeleteString.Call(hstring)
 
+	factoryIID := &iidUserConsentVerifierStatics
+	if verify {
+		factoryIID = &iidUserConsentVerifierInterop
+	}
 	var factory uintptr
 	result, _, _ = roGetActivationFactory.Call(
 		hstring,
-		uintptr(unsafe.Pointer(&iidUserConsentVerifierStatics)),
+		uintptr(unsafe.Pointer(factoryIID)),
 		uintptr(unsafe.Pointer(&factory)),
 	)
 	if result != 0 || factory == 0 {
@@ -186,7 +215,6 @@ func callWindowsHelloOperation(verify bool, message string) (uint32, error) {
 	methodSlot := 6
 	var arguments []uintptr
 	if verify {
-		methodSlot = 7
 		messageValue := utf16.Encode([]rune(message))
 		var messageString uintptr
 		result, _, _ = windowsCreateString.Call(
@@ -198,7 +226,12 @@ func callWindowsHelloOperation(verify bool, message string) (uint32, error) {
 			return 0, errors.New("Windows Hello message creation failed")
 		}
 		defer windowsDeleteString.Call(messageString)
-		arguments = []uintptr{messageString, uintptr(unsafe.Pointer(&operation))}
+		arguments = []uintptr{
+			ownerWindow,
+			messageString,
+			uintptr(unsafe.Pointer(&iidUserConsentVerificationOperation)),
+			uintptr(unsafe.Pointer(&operation)),
+		}
 	} else {
 		arguments = []uintptr{uintptr(unsafe.Pointer(&operation))}
 	}
@@ -251,15 +284,10 @@ func awaitWindowsHelloResult(operation uintptr) (uint32, error) {
 }
 
 func comCall(object uintptr, slot int, arguments ...uintptr) (uintptr, error) {
-	if object == 0 {
-		return 0, errors.New("invalid COM object")
+	method, err := comMethod(object, slot)
+	if err != nil {
+		return 0, err
 	}
-	// COM returns object addresses through the Win32 ABI as uintptr values. Copy the address
-	// through a pointer-sized slot before reading the unmanaged vtable; converting the uintptr
-	// directly is rejected by go vet's unsafe-pointer analyzer even though this is the COM ABI.
-	objectPointer := *(*unsafe.Pointer)(unsafe.Pointer(&object))
-	vtable := *(*[32]uintptr)(objectPointer)
-	method := vtable[slot]
 	callArguments := make([]uintptr, 0, len(arguments)+1)
 	callArguments = append(callArguments, object)
 	callArguments = append(callArguments, arguments...)
@@ -271,6 +299,26 @@ func comCall(object uintptr, slot int, arguments ...uintptr) (uintptr, error) {
 		return result, errors.New("Windows Runtime call failed")
 	}
 	return result, nil
+}
+
+func comMethod(object uintptr, slot int) (uintptr, error) {
+	if object == 0 || slot < 0 || slot >= 32 {
+		return 0, errors.New("invalid COM object")
+	}
+	// A COM interface pointer addresses an object whose first field is a pointer to the vtable.
+	// Copy the ABI address through pointer-sized Go values so go vet can verify the conversion,
+	// then dereference both the interface pointer and its vtable pointer explicitly.
+	objectPointer := *(*unsafe.Pointer)(unsafe.Pointer(&object))
+	vtablePointer := *(*unsafe.Pointer)(objectPointer)
+	if vtablePointer == nil {
+		return 0, errors.New("invalid COM vtable")
+	}
+	vtable := *(*[32]uintptr)(vtablePointer)
+	method := vtable[slot]
+	if method == 0 {
+		return 0, errors.New("invalid COM method")
+	}
+	return method, nil
 }
 
 func comQueryInterface(object uintptr, identifier *windowsGUID, output *uintptr) (uintptr, error) {

@@ -31,6 +31,14 @@ the UI stays empty; it does not create demo connections or credentials. The
 shell shape mirrors the current WinUI layout (title bar, update strip,
 connection tree, footer navigation, session tabs, and protocol surface).
 
+App authentication is available on every Electron platform. Go owns PIN and
+password verification, startup/reload locking, confirmation prompts, and idle
+locking. Windows uses the same DPAPI verifier document as WinUI; macOS and
+Linux keep a per-workspace encryption key in the system keychain and use it to
+protect the verifier document. Windows Hello remains Windows-only, uses the
+Electron window as the native verification dialog owner, and always falls back
+to the configured PIN or password elsewhere.
+
 Saved SSH connections opened from the tree use a persistent Go backend process
 over a JSON-lines stdio channel. The backend resolves inherited connection data,
 decrypts migrated DPAPI secrets, and creates the PTY with Go's native

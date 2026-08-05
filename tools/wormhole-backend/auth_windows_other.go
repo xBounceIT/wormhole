@@ -9,15 +9,15 @@ func replaceAuthFile(source, destination string) error {
 }
 
 func unqueriedWindowsHelloStatus() authHelloStatus {
-	return authHelloStatus{Message: "Windows Hello is only available on Windows."}
+	return authHelloStatus{Message: "Windows Hello only works on Windows."}
 }
 
 func checkWindowsHello() authHelloStatus {
 	return unqueriedWindowsHelloStatus()
 }
 
-func verifyWindowsHello() authVerificationResponse {
-	return authVerificationResponse{Message: "Windows Hello is only available on Windows."}
+func verifyWindowsHello(_ authHelloVerifyRequest) authVerificationResponse {
+	return authVerificationResponse{Message: "Windows Hello only works on Windows."}
 }
 
 func systemIdleSeconds() int64 {

@@ -867,21 +867,24 @@ function AuthPrompt({
   const [status, setStatus] = useState('');
   const [busy, setBusy] = useState(false);
   const [helloBusy, setHelloBusy] = useState(false);
+  const helloInFlight = useRef(false);
   const method: WormholeAuthFallback =
     state.mode === 'password' || (state.mode === 'windowsHello' && state.fallback === 'password')
       ? 'password'
       : 'pin';
   const isHelloMode = state.mode === 'windowsHello';
+  const fallbackName = method === 'pin' ? 'Wormhole PIN' : 'Wormhole password';
 
   async function tryWindowsHello() {
-    if (helloBusy || !window.wormhole) return;
+    if (helloInFlight.current || !window.wormhole) return;
 
+    helloInFlight.current = true;
     setHelloBusy(true);
     setStatus('Waiting for Windows Hello…');
     try {
       const availability = await window.wormhole.checkWindowsHello();
       if (!availability.available) {
-        setStatus(`${availability.message} Use the fallback below.`);
+        setStatus(`${availability.message} You can use your ${fallbackName} instead.`);
         return;
       }
       const result = await window.wormhole.verifyWindowsHello();
@@ -889,10 +892,11 @@ function AuthPrompt({
         onResult(true);
         return;
       }
-      setStatus(result.message || 'Windows Hello could not verify you. Use the fallback below.');
+      setStatus(result.message || `Windows Hello didn't recognize you. Use your ${fallbackName}.`);
     } catch {
-      setStatus('Windows Hello is unavailable. Use the configured fallback below.');
+      setStatus(`Windows Hello isn't available right now. Use your ${fallbackName}.`);
     } finally {
+      helloInFlight.current = false;
       setHelloBusy(false);
     }
   }
@@ -921,7 +925,7 @@ function AuthPrompt({
       setSecret('');
       setStatus(result.message || (method === 'pin' ? 'Invalid PIN.' : 'Invalid password.'));
     } catch {
-      setStatus('The native authentication service could not be reached.');
+      setStatus("Wormhole couldn't check your PIN. Try again.");
     } finally {
       setBusy(false);
     }
@@ -929,29 +933,34 @@ function AuthPrompt({
 
   return (
     <div
+      aria-describedby="auth-prompt-description"
+      aria-labelledby="auth-prompt-title"
       aria-modal="true"
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-background/90 p-6 backdrop-blur-sm"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-background/85 p-5 backdrop-blur-md"
       role="dialog"
     >
-      <Card className="w-full max-w-sm border-primary/30 bg-card/95 shadow-2xl shadow-primary/10">
-        <CardHeader className="gap-4 border-l-2 border-primary py-5">
+      <Card className="w-full max-w-[400px] gap-0 border-border/80 bg-card py-0 shadow-[0_24px_80px_rgba(0,0,0,0.45)]">
+        <CardHeader className="gap-3 px-5 py-5">
           <div className="flex items-start gap-3">
-            <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
+            <div className="grid size-9 shrink-0 place-items-center rounded-lg border border-border/70 bg-muted/60 text-foreground">
               <KeyRound className="size-4" />
             </div>
             <div className="min-w-0 space-y-1">
-              <CardTitle className="text-base">
-                {request.kind === 'lock' ? 'Wormhole is locked' : 'Confirm your identity'}
+              <CardTitle className="text-base" id="auth-prompt-title">
+                {request.kind === 'lock' ? 'Wormhole is locked' : 'Unlock Wormhole'}
               </CardTitle>
-              <CardDescription>{request.reason}</CardDescription>
+              <CardDescription className="text-xs leading-relaxed">
+                {request.reason}
+              </CardDescription>
             </div>
           </div>
-          <p className="text-[11px] leading-relaxed text-muted-foreground">
-            Your connection metadata stays behind the native Windows protection boundary until you
-            unlock this workspace.
+          <p className="text-xs leading-relaxed text-muted-foreground" id="auth-prompt-description">
+            {isHelloMode
+              ? `Windows Hello will open now. You can also use your ${fallbackName} below.`
+              : `Enter your ${fallbackName} to continue.`}
           </p>
         </CardHeader>
-        <CardContent className="space-y-3">
+        <CardContent className="space-y-4 border-t border-border/60 px-5 py-4">
           {isHelloMode ? (
             <div className="space-y-2 rounded-lg border border-border/70 bg-background/50 p-3">
               <p className="text-[11px] text-muted-foreground">{state.windowsHello.message}</p>
@@ -963,29 +972,43 @@ function AuthPrompt({
                 type="button"
                 variant="outline"
               >
-                <RefreshCcw data-icon="inline-start" />
+                {helloBusy ? (
+                  <LoaderCircle className="animate-spin" data-icon="inline-start" />
+                ) : (
+                  <KeyRound data-icon="inline-start" />
+                )}
                 {helloBusy ? 'Waiting for Windows Hello…' : 'Use Windows Hello'}
               </Button>
             </div>
           ) : null}
           <form className="space-y-3" onSubmit={submitSecret}>
             <div className="grid gap-2">
-              <Label htmlFor="auth-secret">
-                {method === 'pin' ? 'Wormhole PIN' : 'Wormhole password'}
-              </Label>
+              <Label htmlFor="auth-secret">{fallbackName}</Label>
+              {isHelloMode && method === 'pin' ? (
+                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  Use the PIN you created in Wormhole, not your Windows PIN.
+                </p>
+              ) : null}
               <Input
                 autoFocus={!isHelloMode || !request.autoWindowsHello}
                 autoComplete="current-password"
                 id="auth-secret"
                 inputMode={method === 'pin' ? 'numeric' : undefined}
                 onChange={(event) => setSecret(event.target.value)}
-                placeholder={method === 'pin' ? 'Enter your PIN' : 'Enter your password'}
+                placeholder={`Enter your ${method === 'pin' ? 'Wormhole PIN' : 'password'}`}
                 type="password"
                 value={secret}
               />
             </div>
-            {status ? <p className="text-[11px] text-destructive">{status}</p> : null}
-            <div className="flex justify-end gap-2">
+            {status ? (
+              <p
+                className={`text-[11px] ${helloBusy || busy ? 'text-muted-foreground' : 'text-destructive'}`}
+                role={helloBusy || busy ? 'status' : 'alert'}
+              >
+                {status}
+              </p>
+            ) : null}
+            <div className="flex justify-end gap-2 pt-1">
               {request.kind === 'confirmation' ? (
                 <Button onClick={() => onResult(false)} size="sm" type="button" variant="ghost">
                   Cancel
@@ -1106,7 +1129,7 @@ function App() {
 
     async function loadAuth() {
       if (!window.wormhole) {
-        setAuthError('The native authentication bridge is unavailable.');
+        setAuthError("Wormhole couldn't start app lock.");
         setAuthGate('error');
         return;
       }
@@ -1117,11 +1140,9 @@ function App() {
         setAuthState(state);
         setAuthError('');
         setAuthGate(state.configured ? 'locked' : 'unlocked');
-      } catch (error) {
+      } catch {
         if (!mounted) return;
-        setAuthError(
-          error instanceof Error ? error.message : 'Native authentication failed to start.',
-        );
+        setAuthError("Wormhole couldn't start app lock.");
         setAuthGate('error');
       }
     }
@@ -1649,7 +1670,7 @@ function App() {
         if (Math.max(systemIdle.seconds, localIdle) >= timeoutMinutes * 60) {
           try {
             await window.wormhole.lockAuthentication();
-            setLockReason('Wormhole locked after inactivity.');
+            setLockReason('Locked after inactivity.');
             setAuthGate('locked');
           } catch {
             // Do not present a lock screen until the native session confirms that it is locked.
@@ -3751,10 +3772,8 @@ function App() {
                 <KeyRound className="size-4" />
               </div>
               <div className="space-y-1">
-                <p className="text-sm font-medium">Starting Wormhole protection</p>
-                <p className="text-[11px] text-muted-foreground">
-                  Checking the native security service…
-                </p>
+                <p className="text-sm font-medium">Opening Wormhole</p>
+                <p className="text-[11px] text-muted-foreground">Checking app lock…</p>
               </div>
             </CardContent>
           </Card>
@@ -3764,16 +3783,16 @@ function App() {
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background/95 p-6 backdrop-blur-sm">
           <Card className="w-full max-w-sm border-destructive/40 bg-card/95 shadow-2xl">
             <CardHeader className="gap-3 border-l-2 border-destructive py-5">
-              <CardTitle>Native protection could not start</CardTitle>
+              <CardTitle>Wormhole couldn't open</CardTitle>
               <CardDescription>
-                Wormhole stays closed until its Go security service is available.
+                Try again. If this keeps happening, restart Wormhole.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-3">
               <p className="text-[11px] text-destructive">{authError}</p>
               <Button onClick={() => setAuthRetry((value) => value + 1)} size="sm">
                 <RefreshCcw data-icon="inline-start" />
-                Retry native service
+                Try again
               </Button>
             </CardContent>
           </Card>
@@ -7242,16 +7261,16 @@ function AuthSecretDialog({
     <Dialog onOpenChange={(nextOpen) => !busy && onOpenChange(nextOpen)} open={open}>
       <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-sm">
         <DialogHeader>
-          <DialogTitle>Set Wormhole {secretLabel}</DialogTitle>
+          <DialogTitle>Set your Wormhole {secretLabel}</DialogTitle>
           <DialogDescription>
-            The native Go backend stores only a DPAPI-protected verifier. The {secretLabel} is sent
-            once over the isolated bridge and is never placed on a command line or persisted by the
-            renderer.
+            {method === 'pin'
+              ? 'Choose a PIN just for Wormhole. Do not use your Windows PIN.'
+              : 'Choose a password just for Wormhole.'}
           </DialogDescription>
         </DialogHeader>
         <form className="grid gap-4" onSubmit={submit}>
           <div className="grid gap-2">
-            <Label htmlFor="auth-new-secret">New {secretLabel}</Label>
+            <Label htmlFor="auth-new-secret">{secretLabel}</Label>
             <Input
               autoFocus
               autoComplete="new-password"
@@ -7287,7 +7306,7 @@ function AuthSecretDialog({
               Cancel
             </Button>
             <Button disabled={busy || !secret || !confirmation} type="submit">
-              {busy ? 'Saving…' : 'Save secret'}
+              {busy ? 'Saving…' : 'Save'}
             </Button>
           </DialogFooter>
         </form>
@@ -7406,7 +7425,10 @@ function SettingsPage({
   }
 
   function errorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : 'The native authentication service failed.';
+    if (error instanceof Error && /^(PIN|Password) (must|can)/.test(error.message)) {
+      return error.message;
+    }
+    return "Wormhole couldn't save this change. Try again.";
   }
 
   async function persistAuthSettings(
@@ -7414,7 +7436,7 @@ function SettingsPage({
     fallback: WormholeAuthFallback,
     timeout: number | null,
   ): Promise<WormholeAuthState> {
-    if (!window.wormhole) throw new Error('The native authentication bridge is unavailable.');
+    if (!window.wormhole) throw new Error("Wormhole isn't ready. Try again.");
     const nextState = await window.wormhole.updateAuthSettings({
       mode,
       fallback,
@@ -7464,7 +7486,7 @@ function SettingsPage({
     if (!authState?.configured) return true;
     const authenticated = await onRequestAuthentication(reason);
     if (!authenticated) {
-      setSecurityError('Authentication was not confirmed.');
+      setSecurityError('Unlock canceled.');
     }
     return authenticated;
   }
@@ -7485,11 +7507,7 @@ function SettingsPage({
     clearSecurityStatus();
     setSecurityBusy(true);
     try {
-      if (
-        !(await requireCurrentAuthentication(
-          `Change the unlock method to ${authModeLabel(nextMode)}.`,
-        ))
-      ) {
+      if (!(await requireCurrentAuthentication('Unlock Wormhole to change how it locks.'))) {
         return;
       }
 
@@ -7505,7 +7523,7 @@ function SettingsPage({
         setSecurityBusy(false);
         openSecretDialog(secretMethodForMode, async () => {
           await persistAuthSettings(nextMode, configuredFallback, idleTimeout ?? 15);
-          setSecurityMessage(`${authModeLabel(nextMode)} authentication enabled.`);
+          setSecurityMessage(`Unlock method set to ${authModeLabel(nextMode)}.`);
         });
         return;
       }
@@ -7517,8 +7535,8 @@ function SettingsPage({
       );
       setSecurityMessage(
         nextMode === 'disabled'
-          ? 'App authentication disabled and stored verifiers removed.'
-          : `${authModeLabel(nextMode)} authentication enabled.`,
+          ? 'App lock turned off.'
+          : `Unlock method set to ${authModeLabel(nextMode)}.`,
       );
     } catch (error) {
       setAuthMethod(previousMode);
@@ -7536,19 +7554,19 @@ function SettingsPage({
     clearSecurityStatus();
     setSecurityBusy(true);
     try {
-      if (!(await requireCurrentAuthentication('Change the Windows Hello fallback method.')))
+      if (!(await requireCurrentAuthentication('Unlock Wormhole to change the backup method.')))
         return;
       if (!authStateHasSecret(authState, nextFallback)) {
         setSecurityBusy(false);
         openSecretDialog(nextFallback, async () => {
           await persistAuthSettings(authMethod, nextFallback, idleTimeout);
-          setSecurityMessage(`Windows Hello will fall back to a ${authSecretLabel(nextFallback)}.`);
+          setSecurityMessage(`Backup method set to ${authSecretLabel(nextFallback)}.`);
         });
         return;
       }
 
       await persistAuthSettings(authMethod, nextFallback, idleTimeout);
-      setSecurityMessage(`Windows Hello will fall back to a ${authSecretLabel(nextFallback)}.`);
+      setSecurityMessage(`Backup method set to ${authSecretLabel(nextFallback)}.`);
     } catch (error) {
       setSecurityError(errorMessage(error));
     } finally {
@@ -7564,12 +7582,10 @@ function SettingsPage({
     clearSecurityStatus();
     setSecurityBusy(true);
     try {
-      if (!(await requireCurrentAuthentication('Change the inactivity lock timeout.'))) return;
+      if (!(await requireCurrentAuthentication('Unlock Wormhole to change auto-lock.'))) return;
       await persistAuthSettings(authMethod, helloFallback, nextTimeout);
       setSecurityMessage(
-        nextTimeout === null
-          ? 'Inactivity locking disabled.'
-          : `Wormhole will lock after ${nextTimeout} minutes.`,
+        nextTimeout === null ? 'Auto-lock turned off.' : `Auto-lock set to ${nextTimeout} minutes.`,
       );
     } catch (error) {
       setSecurityError(errorMessage(error));
@@ -7581,8 +7597,13 @@ function SettingsPage({
   async function handleSetSecret() {
     if (securityBusy || !authState || authMethod === 'disabled') return;
     clearSecurityStatus();
-    if (!(await requireCurrentAuthentication('Change the Wormhole authentication secret.'))) return;
     const method = authMethod === 'windowsHello' ? helloFallback : authMethod;
+    if (
+      !(await requireCurrentAuthentication(
+        `Unlock Wormhole to change your ${authSecretLabel(method)}.`,
+      ))
+    )
+      return;
     openSecretDialog(method);
   }
 
@@ -7590,14 +7611,25 @@ function SettingsPage({
     if (securityBusy || !authState) return;
     clearSecurityStatus();
     if (!authState.configured) {
-      setSecurityMessage('App authentication is currently disabled.');
+      setSecurityMessage('App lock is off.');
       return;
     }
-    if (await onRequestAuthentication('Test Wormhole authentication.')) {
-      setSecurityMessage('Authentication verified.');
-    } else {
-      setSecurityError('Authentication was not confirmed.');
+    if (authState.mode === 'windowsHello' && window.wormhole) {
+      setSecurityBusy(true);
+      try {
+        const result = await window.wormhole.verifyWindowsHello();
+        if (result.succeeded) setSecurityMessage('Windows Hello works.');
+        else setSecurityError(result.message || 'Windows Hello was canceled.');
+      } catch (error) {
+        setSecurityError(errorMessage(error));
+      } finally {
+        setSecurityBusy(false);
+      }
+      return;
     }
+    if (await onRequestAuthentication('Unlock Wormhole to test app lock.'))
+      setSecurityMessage('App lock works.');
+    else setSecurityError('Test canceled.');
   }
 
   async function handleRefreshWindowsHello() {
@@ -7867,26 +7899,26 @@ function SettingsPage({
 
         <SettingsTabPanel value="security">
           <SettingsSection
-            description="Protect the local Wormhole workspace when the app is unattended."
-            title="App authentication"
+            description="Ask for a PIN, password, or Windows Hello when Wormhole opens or is left idle."
+            title="App lock"
           >
             <div className="space-y-2 rounded-lg border border-border/70 bg-card/40 p-3">
               <div className="flex items-center justify-between gap-3">
-                <p className="text-xs font-medium">Native protection status</p>
+                <p className="text-xs font-medium">App lock</p>
                 <Badge variant={authState?.configured ? 'default' : 'secondary'}>
                   {authState?.configured ? 'Enabled' : 'Disabled'}
                 </Badge>
               </div>
               <p className="text-[11px] leading-relaxed text-muted-foreground">
                 {authState?.isCorrupted
-                  ? 'The protected verifier could not be read. Set a new secret to repair it.'
+                  ? "Wormhole can't read the saved lock. Set a new PIN or password."
                   : authState?.configured
-                    ? `Unlock with ${authModeLabel(authState.mode)}. Secrets stay in the native Go backend.`
-                    : 'Authentication is managed by the native Go backend and is currently disabled.'}
+                    ? `Unlock with ${authModeLabel(authState.mode)}.`
+                    : 'Wormhole opens without asking you to unlock it.'}
               </p>
             </div>
             <div className="grid max-w-64 gap-2">
-              <Label htmlFor="settings-auth-method">Unlock method</Label>
+              <Label htmlFor="settings-auth-method">How to unlock</Label>
               <Select
                 disabled={!authState || securityBusy}
                 onValueChange={(value) => void handleAuthMethodChange(value)}
@@ -7916,7 +7948,7 @@ function SettingsPage({
                   {authState.windowsHello.message}
                 </p>
                 <div className="grid max-w-64 gap-2">
-                  <Label htmlFor="settings-hello-fallback">Windows Hello fallback</Label>
+                  <Label htmlFor="settings-hello-fallback">If Windows Hello doesn't work</Label>
                   <Select
                     disabled={securityBusy}
                     onValueChange={(value) => void handleFallbackChange(value)}
@@ -7939,13 +7971,13 @@ function SettingsPage({
                   variant="outline"
                 >
                   <RefreshCcw data-icon="inline-start" />
-                  Refresh Windows Hello status
+                  Check again
                 </Button>
               </div>
             ) : null}
 
             <div className="grid max-w-64 gap-2">
-              <Label htmlFor="settings-idle-timeout">Lock after inactivity</Label>
+              <Label htmlFor="settings-idle-timeout">Auto-lock after</Label>
               <Select
                 disabled={!authState || securityBusy}
                 onValueChange={(value) => void handleIdleTimeoutChange(value)}
@@ -7982,7 +8014,7 @@ function SettingsPage({
                 type="button"
                 variant="outline"
               >
-                Test unlock
+                Test app lock
               </Button>
             </div>
             {securityError ? <p className="text-[11px] text-destructive">{securityError}</p> : null}

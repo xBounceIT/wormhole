@@ -72,6 +72,10 @@ type authVerifyRequest struct {
 	Secret string `json:"secret"`
 }
 
+type authHelloVerifyRequest struct {
+	OwnerWindow string `json:"ownerWindow"`
+}
+
 type authSetSecretRequest struct {
 	Method string `json:"method"`
 	Secret string `json:"secret"`
@@ -214,7 +218,7 @@ func readAuthDocument(storePath string) (authDocument, bool, error) {
 		return authDocument{Version: authStoreVersion}, true, nil
 	}
 
-	plaintext, err := unprotectAuthDocument(contents)
+	plaintext, err := unprotectAuthDocument(storePath, contents)
 	if err != nil {
 		return authDocument{Version: authStoreVersion}, true, nil
 	}
@@ -235,7 +239,7 @@ func writeAuthDocument(storePath string, document authDocument) error {
 	}
 	defer clearBytes(plaintext)
 
-	protected, err := protectAuthDocument(plaintext)
+	protected, err := protectAuthDocument(storePath, plaintext)
 	if err != nil {
 		return fmt.Errorf("cannot protect the authentication store: %w", err)
 	}
@@ -256,11 +260,13 @@ func writeAuthDocument(storePath string, document authDocument) error {
 func deleteAuthDocument(storePath string) error {
 	err := os.Remove(storePath)
 	if errors.Is(err, os.ErrNotExist) {
+		deleteAuthProtectionKey(storePath)
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("cannot remove the authentication store: %w", err)
 	}
+	deleteAuthProtectionKey(storePath)
 	return nil
 }
 
@@ -338,7 +344,7 @@ func authVerify(databasePath string, request authVerifyRequest) (authVerificatio
 	}
 	expectedMethod, configured := configuredAuthMethod(settings)
 	if !configured {
-		return authVerificationResponse{Message: "Authentication is not configured."}, nil
+		return authVerificationResponse{Message: "App lock is off."}, nil
 	}
 	if method != expectedMethod {
 		return authVerificationResponse{Message: invalidAuthSecretMessage(expectedMethod)}, nil
@@ -351,7 +357,7 @@ func authVerify(databasePath string, request authVerifyRequest) (authVerificatio
 		return authVerificationResponse{}, err
 	}
 	if corrupted {
-		return authVerificationResponse{Message: "The authentication store is unreadable."}, nil
+		return authVerificationResponse{Message: "Wormhole can't read your saved app lock."}, nil
 	}
 	verifier := authVerifierForFallback(document, method)
 	if verifier == nil || !verifyAuthSecret(request.Secret, verifier) {
@@ -416,7 +422,7 @@ func authUpdateSettings(databasePath string, request authSettingsRequest) (authS
 		return authStateResponse{}, err
 	}
 	if corrupted && mode != 0 {
-		return authStateResponse{}, errors.New("the authentication store is unreadable; set a new secret first")
+		return authStateResponse{}, errors.New("Wormhole can't read the saved app lock. Set a new PIN or password")
 	}
 	if mode != 0 {
 		candidateSettings := authSettings{Mode: mode, Fallback: fallback, IdleTimeoutMinutes: request.IdleTimeoutMinutes}

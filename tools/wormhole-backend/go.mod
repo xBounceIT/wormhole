@@ -7,12 +7,15 @@ require (
 	github.com/kward/go-vnc v0.0.0-20260515191714-83d72ad87d5f
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/pkg/sftp v1.13.9
+	github.com/zalando/go-keyring v0.2.8
 	go.bug.st/serial v1.8.0
 	modernc.org/sqlite v1.56.0
 )
 
 require (
 	github.com/Netflix/go-expect v0.0.0-20180615182759-c93bf25de8e8 // indirect
+	github.com/danieljoos/wincred v1.2.3 // indirect
+	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/kr/fs v0.1.0 // indirect
 	github.com/kr/pty v1.1.1 // indirect

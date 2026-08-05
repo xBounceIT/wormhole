@@ -29,6 +29,7 @@ implementation while the migration proceeds. This file orients agents touching t
 - Secrets:
   - **Passwords** → Windows Credential Manager via `Meziantou.Framework.Win32.CredentialManager` (key = `Wormhole:<credId>`). 2560-byte limit.
   - **Electron migration secrets** → the Go backend reads legacy passwords only on the first Windows launch, protects them with Windows DPAPI, and stores them in local SQLite `CredentialSecrets`; new Electron code must not access Credential Manager directly.
+  - **Electron app authentication** → Go owns the PIN/password verifier. Windows uses the shared DPAPI `app-auth.dpapi` document; macOS/Linux keep a per-workspace encryption key in the OS keychain and an AES-GCM-protected verifier document. New Electron code must never persist or verify the app secret in TypeScript.
   - **Private keys** → DPAPI-encrypted files under `%LOCALAPPDATA%\Wormhole\keys\` (Credential Manager is too small).
   - **Tunnel payloads** → DPAPI-encrypted files under `%LOCALAPPDATA%\Wormhole\tunnels\`; SQLite stores only the tunnel row metadata.
   - **Never** log credentials. Add a redaction enricher before adding new logging around auth.

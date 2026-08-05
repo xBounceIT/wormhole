@@ -207,7 +207,11 @@ func main() {
 	case "auth-hello-status":
 		result = checkWindowsHello()
 	case "auth-hello-verify":
-		result = verifyWindowsHello()
+		var request authHelloVerifyRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result = verifyWindowsHello(request)
+		}
 	case "auth-system-idle":
 		result = map[string]int64{"seconds": systemIdleSeconds()}
 	case "ssh-trust-host-key":

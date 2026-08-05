@@ -22,7 +22,8 @@ license, OpenVPN Inc. offers commercial licensing at <https://openvpn.net/>.
 
 ## Go modules (sidecar binaries)
 
-Used by `tools/wormhole-wgproxy` and `tools/wormhole-ovpnproxy`.
+Used by the Go sidecar binaries, including `tools/wormhole-backend`,
+`tools/wormhole-wgproxy`, and `tools/wormhole-ovpnproxy`.
 
 | Module | License |
 | --- | --- |
@@ -31,6 +32,9 @@ Used by `tools/wormhole-wgproxy` and `tools/wormhole-ovpnproxy`.
 | [`gvisor.dev/gvisor`](https://gvisor.dev/) (netstack) | [Apache-2.0](https://github.com/google/gvisor/blob/master/LICENSE) |
 | [`golang.org/x/crypto`](https://pkg.go.dev/golang.org/x/crypto), [`x/net`](https://pkg.go.dev/golang.org/x/net), [`x/sys`](https://pkg.go.dev/golang.org/x/sys), [`x/time`](https://pkg.go.dev/golang.org/x/time) | [BSD-3-Clause](https://cs.opensource.google/go/x/crypto/+/master:LICENSE) |
 | [`github.com/google/btree`](https://github.com/google/btree) | [Apache-2.0](https://github.com/google/btree/blob/master/LICENSE) |
+| [`github.com/zalando/go-keyring`](https://github.com/zalando/go-keyring) | [MIT](https://github.com/zalando/go-keyring/blob/master/LICENSE) |
+| [`github.com/godbus/dbus/v5`](https://github.com/godbus/dbus) | [BSD-2-Clause](https://github.com/godbus/dbus/blob/master/LICENSE) |
+| [`github.com/danieljoos/wincred`](https://github.com/danieljoos/wincred) | [MIT](https://github.com/danieljoos/wincred/blob/master/LICENSE) |
 
 ## NuGet packages (managed side)
 
