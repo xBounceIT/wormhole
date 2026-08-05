@@ -16,6 +16,10 @@ func unprotectSecret(string) ([]byte, error) {
 	return nil, errors.New("Windows DPAPI is unavailable on this platform")
 }
 
+func unprotectElectronSafeStorageSecret(string, string) ([]byte, error) {
+	return nil, errors.New("Windows DPAPI is unavailable on this platform")
+}
+
 func unprotectFile(string) ([]byte, error) {
 	return nil, errors.New("Windows DPAPI is unavailable on this platform")
 }

@@ -42,6 +42,7 @@ export class RdpBackendClient {
   private readonly pending = new Map<string, PendingRequest>();
   private readonly listeners = new Set<(event: RdpBackendEvent) => void>();
   private readonly bounds = new Map<string, RdpSurfaceRect>();
+  private readonly sessionIds = new Set<string>();
   private starting: Promise<void> | undefined;
 
   constructor(options: RdpBackendClientOptions) {
@@ -62,6 +63,7 @@ export class RdpBackendClient {
     ownerWindow: string,
     bounds?: RdpSurfaceRect,
   ): Promise<RdpBackendEvent> {
+    this.sessionIds.add(request.sessionId);
     const remembered = bounds ? sanitizeBounds(bounds) : this.bounds.get(request.sessionId);
     if (remembered) this.bounds.set(request.sessionId, remembered);
     await this.ensureProcess();
@@ -91,19 +93,32 @@ export class RdpBackendClient {
     ownerWindow: string,
     bounds?: RdpSurfaceRect,
   ): Promise<RdpBackendEvent> {
+    const child = this.process;
+    if (
+      (op === 'hide' || op === 'disconnect') &&
+      (!child || child.killed || !child.stdin.writable)
+    ) {
+      if (op === 'disconnect') this.forgetSession(sessionId);
+      return { type: 'ack', sessionId };
+    }
     if (bounds) this.rememberBounds(sessionId, bounds);
     await this.ensureProcess();
-    return this.send({
+    const response = await this.send({
       op,
       sessionId,
       ownerWindow,
       bounds: this.bounds.get(sessionId),
     });
+    if (op === 'disconnect') {
+      this.forgetSession(sessionId);
+    }
+    return response;
   }
 
   async dispose(): Promise<void> {
+    this.sessionIds.clear();
+    this.bounds.clear();
     const child = this.process;
-    this.process = undefined;
     this.starting = undefined;
     if (!child) return;
 
@@ -112,12 +127,31 @@ export class RdpBackendClient {
     } catch {
       // The process may already have exited. The finally path still closes the pipes.
     }
+    if (this.process === child) this.process = undefined;
     if (!child.killed) child.kill();
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error('RDP backend stopped.'));
     }
     this.pending.clear();
+  }
+
+  async hideAll(ownerWindow: string): Promise<void> {
+    const child = this.process;
+    if (!child || child.killed || !child.stdin.writable) return;
+
+    const sessionIds = [...new Set([...this.sessionIds, ...this.bounds.keys()])];
+    await Promise.allSettled(
+      sessionIds.map((sessionId) =>
+        this.sendToProcess(child, {
+          op: 'hide',
+          requestId: randomUUID(),
+          sessionId,
+          ownerWindow,
+          bounds: this.bounds.get(sessionId),
+        }),
+      ),
+    );
   }
 
   private async ensureProcess(): Promise<void> {
@@ -139,7 +173,7 @@ export class RdpBackendClient {
 
       this.process = child;
       const output = createInterface({ input: child.stdout });
-      output.on('line', (line) => this.handleLine(line));
+      output.on('line', (line) => this.handleLineForProcess(child, line));
       child.stdin.once('error', () => {
         if (this.process !== child) return;
         this.process = undefined;
@@ -224,6 +258,16 @@ export class RdpBackendClient {
       }
     }
     for (const listener of this.listeners) listener(event);
+  }
+
+  private handleLineForProcess(child: ChildProcessWithoutNullStreams, line: string): void {
+    if (this.process !== child) return;
+    this.handleLine(line);
+  }
+
+  private forgetSession(sessionId: string): void {
+    this.sessionIds.delete(sessionId);
+    this.bounds.delete(sessionId);
   }
 
   private rejectPending(message: string): void {

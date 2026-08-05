@@ -19,21 +19,34 @@ import (
 )
 
 const (
-	sshConnectTimeout      = 15 * time.Second
-	sshKeepAliveInterval   = 30 * time.Second
-	sshOutputDrainTimeout  = 2 * time.Second
-	sshInputMaxBytes       = 1024 * 1024
-	sshInputQueueCapacity  = 16
-	sshOutputChunk         = 16 * 1024
-	sshMaxColumns          = 500
-	sshMaxRows             = 500
+	sshConnectTimeout     = 15 * time.Second
+	sshKeepAliveInterval  = 30 * time.Second
+	sshOutputDrainTimeout = 2 * time.Second
+	sshInputMaxBytes      = 1024 * 1024
+	sshInputQueueCapacity = 16
+	sshOutputChunk        = 16 * 1024
+	sshMaxColumns         = 500
+	sshMaxRows            = 500
 )
 
 var (
-	errSSHSessionClosed           = errors.New("SSH session is closed")
-	errSSHInputFull               = errors.New("SSH input queue is full")
-	errSSHHostFingerprintChanged  = errors.New("SSH host fingerprint changed while connecting")
+	errSSHSessionClosed          = errors.New("SSH session is closed")
+	errSSHInputFull              = errors.New("SSH input queue is full")
+	errSSHHostFingerprintChanged = errors.New("SSH host fingerprint changed while connecting")
 )
+
+type sshHostKeyMismatchError struct {
+	expected string
+	received string
+}
+
+func (err *sshHostKeyMismatchError) Error() string {
+	return fmt.Sprintf(
+		"SSH host key mismatch (expected %s, received %s)",
+		err.expected,
+		err.received,
+	)
+}
 
 type sshWireCommand struct {
 	Type      string `json:"type"`
@@ -45,14 +58,22 @@ type sshWireCommand struct {
 }
 
 type sshWireEvent struct {
-	Type        string `json:"type"`
-	SessionID   string `json:"session_id"`
-	Data        string `json:"data,omitempty"`
-	Host        string `json:"host,omitempty"`
-	Port        int    `json:"port,omitempty"`
-	Username    string `json:"username,omitempty"`
-	Fingerprint string `json:"fingerprint,omitempty"`
-	Error       string `json:"error,omitempty"`
+	Type            string            `json:"type"`
+	SessionID       string            `json:"session_id"`
+	Frame           *sshTerminalFrame `json:"frame,omitempty"`
+	Host            string            `json:"host,omitempty"`
+	Port            int               `json:"port,omitempty"`
+	Username        string            `json:"username,omitempty"`
+	Fingerprint     string            `json:"fingerprint,omitempty"`
+	Error           string            `json:"error,omitempty"`
+	HostKeyExpected string            `json:"host_key_expected,omitempty"`
+	HostKeyReceived string            `json:"host_key_received,omitempty"`
+}
+
+type sshHostKeyTrustRequest struct {
+	NodeID   string `json:"nodeId"`
+	Expected string `json:"expected"`
+	Received string `json:"received"`
 }
 
 type sshNodeRow struct {
@@ -106,26 +127,29 @@ type sshCredentialRow struct {
 }
 
 type sshNativeSession struct {
-	id      string
-	client  *ssh.Client
-	session *ssh.Session
-	stdin   io.WriteCloser
-	stdout  io.Reader
-	stderr  io.Reader
-	server  *sshServer
+	id       string
+	client   *ssh.Client
+	session  *ssh.Session
+	stdin    io.WriteCloser
+	stdout   io.Reader
+	stderr   io.Reader
+	server   *sshServer
+	terminal *sshTerminalEmulator
 
-	inputQueue chan []byte
-	done       chan struct{}
-	outputWG   sync.WaitGroup
-	lifecycleMu sync.Mutex
-	started     bool
-	closed      bool
-	closeOnce  sync.Once
+	inputQueue       chan []byte
+	done             chan struct{}
+	outputWG         sync.WaitGroup
+	lifecycleMu      sync.Mutex
+	terminalOutputMu sync.Mutex
+	started          bool
+	closed           bool
+	closeOnce        sync.Once
 }
 
 type sshServer struct {
-	databasePath string
-	output       *sshEventWriter
+	databasePath         string
+	electronUserDataPath string
+	output               *sshEventWriter
 
 	mu       sync.Mutex
 	sessions map[string]*sshNativeSession
@@ -143,12 +167,17 @@ func (writer *sshEventWriter) write(event sshWireEvent) {
 	_ = writer.encoder.Encode(event)
 }
 
-func serveSSH(databasePath string, input io.Reader, output io.Writer) error {
+func serveSSH(databasePath string, input io.Reader, output io.Writer, electronUserDataPath ...string) error {
+	userDataPath := ""
+	if len(electronUserDataPath) > 0 {
+		userDataPath = electronUserDataPath[0]
+	}
 	server := &sshServer{
-		databasePath: databasePath,
-		output:       &sshEventWriter{encoder: json.NewEncoder(output)},
-		sessions:     make(map[string]*sshNativeSession),
-		pending:      make(map[string]context.CancelFunc),
+		databasePath:         databasePath,
+		electronUserDataPath: userDataPath,
+		output:               &sshEventWriter{encoder: json.NewEncoder(output)},
+		sessions:             make(map[string]*sshNativeSession),
+		pending:              make(map[string]context.CancelFunc),
 	}
 
 	scanner := bufio.NewScanner(input)
@@ -183,6 +212,8 @@ func (server *sshServer) handle(command sshWireCommand) {
 		server.input(command)
 	case "resize":
 		server.resize(command)
+	case "snapshot":
+		server.snapshot(command)
 	case "close":
 		server.close(command.SessionID)
 	default:
@@ -215,11 +246,28 @@ func (server *sshServer) open(command sshWireCommand) {
 	server.mu.Unlock()
 
 	go func() {
-		native, target, err := openNativeSSH(ctx, server.databasePath, nodeID, command.Columns, command.Rows)
+		native, target, err := openNativeSSH(
+			ctx,
+			server.databasePath,
+			server.electronUserDataPath,
+			nodeID,
+			command.Columns,
+			command.Rows,
+		)
 		if err != nil {
 			pending := server.finishPending(command.SessionID)
 			if pending && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-				server.writeError(command.SessionID, safeSSHError(err))
+				event := sshWireEvent{
+					Type:      "error",
+					SessionID: command.SessionID,
+					Error:     safeSSHError(err),
+				}
+				var mismatch *sshHostKeyMismatchError
+				if errors.As(err, &mismatch) {
+					event.HostKeyExpected = mismatch.expected
+					event.HostKeyReceived = mismatch.received
+				}
+				server.output.write(event)
 			}
 			return
 		}
@@ -241,6 +289,7 @@ func (server *sshServer) open(command sshWireCommand) {
 			native.close(false)
 			return
 		}
+		native.publishTerminalFrame(native.terminal.initialFrame())
 		native.start()
 	}()
 }
@@ -283,6 +332,16 @@ func (server *sshServer) resize(command sshWireCommand) {
 			server.writeError(command.SessionID, "SSH terminal resize failed")
 		}
 	}
+}
+
+func (server *sshServer) snapshot(command sshWireCommand) {
+	server.mu.Lock()
+	native := server.sessions[command.SessionID]
+	server.mu.Unlock()
+	if native == nil {
+		return
+	}
+	native.snapshot()
 }
 
 func (server *sshServer) close(sessionID string) {
@@ -434,16 +493,63 @@ func (native *sshNativeSession) readOutput(reader io.Reader) {
 	for {
 		count, err := reader.Read(buffer)
 		if count > 0 {
-			native.server.output.write(sshWireEvent{
-				Type:      "data",
-				SessionID: native.id,
-				Data:      base64.StdEncoding.EncodeToString(buffer[:count]),
-			})
+			native.publishTerminalData(buffer[:count])
 		}
 		if err != nil {
 			return
 		}
 	}
+}
+
+func (native *sshNativeSession) publishTerminalData(data []byte) {
+	if native.server == nil || native.terminal == nil {
+		return
+	}
+	native.terminalOutputMu.Lock()
+	defer native.terminalOutputMu.Unlock()
+	if native.isClosed() {
+		return
+	}
+	frame, changed, err := native.terminal.write(data)
+	if err != nil {
+		native.server.writeError(native.id, fmt.Sprintf("SSH terminal emulation failed: %v", err))
+		return
+	}
+	if changed {
+		native.publishTerminalFrameLocked(frame)
+	}
+}
+
+func (native *sshNativeSession) publishTerminalFrame(frame *sshTerminalFrame) {
+	if native.server == nil || frame == nil {
+		return
+	}
+	native.terminalOutputMu.Lock()
+	defer native.terminalOutputMu.Unlock()
+	if native.isClosed() {
+		return
+	}
+	native.publishTerminalFrameLocked(frame)
+}
+
+func (native *sshNativeSession) publishTerminalFrameLocked(frame *sshTerminalFrame) {
+	native.server.output.write(sshWireEvent{
+		Type:      "screen",
+		SessionID: native.id,
+		Frame:     frame,
+	})
+}
+
+func (native *sshNativeSession) snapshot() {
+	if native.server == nil || native.terminal == nil {
+		return
+	}
+	native.terminalOutputMu.Lock()
+	defer native.terminalOutputMu.Unlock()
+	if native.isClosed() {
+		return
+	}
+	native.publishTerminalFrameLocked(native.terminal.snapshot())
 }
 
 func (native *sshNativeSession) write(data []byte) error {
@@ -472,11 +578,27 @@ func (native *sshNativeSession) write(data []byte) error {
 
 func (native *sshNativeSession) resize(columns, rows uint32) error {
 	columns, rows = normalizeTerminalSize(columns, rows)
-	return native.session.WindowChange(int(rows), int(columns))
+	native.terminalOutputMu.Lock()
+	defer native.terminalOutputMu.Unlock()
+	if native.isClosed() {
+		return errSSHSessionClosed
+	}
+	if err := native.session.WindowChange(int(rows), int(columns)); err != nil {
+		return err
+	}
+	if native.terminal != nil {
+		frame := native.terminal.resize(columns, rows)
+		if native.server != nil {
+			native.publishTerminalFrameLocked(frame)
+		}
+	}
+	return nil
 }
 
 func (native *sshNativeSession) close(notify bool) {
 	native.closeOnce.Do(func() {
+		native.terminalOutputMu.Lock()
+		defer native.terminalOutputMu.Unlock()
 		native.lifecycleMu.Lock()
 		native.closed = true
 		native.lifecycleMu.Unlock()
@@ -501,6 +623,12 @@ func (native *sshNativeSession) close(notify bool) {
 	})
 }
 
+func (native *sshNativeSession) isClosed() bool {
+	native.lifecycleMu.Lock()
+	defer native.lifecycleMu.Unlock()
+	return native.closed
+}
+
 func (native *sshNativeSession) startInputPump() {
 	if native.inputQueue == nil || native.done == nil || native.stdin == nil {
 		return
@@ -523,6 +651,7 @@ func (native *sshNativeSession) startInputPump() {
 func openNativeSSH(
 	ctx context.Context,
 	databasePath string,
+	electronUserDataPath string,
 	nodeID string,
 	columns uint32,
 	rows uint32,
@@ -530,7 +659,7 @@ func openNativeSSH(
 	if err := ctx.Err(); err != nil {
 		return nil, sshTarget{}, err
 	}
-	target, err := loadSSHTarget(databasePath, nodeID)
+	target, err := loadSSHTarget(databasePath, nodeID, electronUserDataPath)
 	if err != nil {
 		return nil, sshTarget{}, err
 	}
@@ -569,11 +698,10 @@ func dialNativeSSH(
 		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
 			fingerprint = ssh.FingerprintSHA256(key)
 			if target.knownHostFingerprint != "" && target.knownHostFingerprint != fingerprint {
-				return fmt.Errorf(
-					"SSH host key mismatch (expected %s, received %s)",
-					target.knownHostFingerprint,
-					fingerprint,
-				)
+				return &sshHostKeyMismatchError{
+					expected: target.knownHostFingerprint,
+					received: fingerprint,
+				}
 			}
 			return nil
 		},
@@ -614,6 +742,12 @@ func dialNativeSSH(
 	clientConnection, channels, requests, err := ssh.NewClientConn(connection, address, config)
 	if err != nil {
 		_ = connection.Close()
+		if target.knownHostFingerprint != "" && fingerprint != "" && target.knownHostFingerprint != fingerprint {
+			return nil, "", &sshHostKeyMismatchError{
+				expected: target.knownHostFingerprint,
+				received: fingerprint,
+			}
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, "", ctxErr
 		}
@@ -667,13 +801,20 @@ func dialNativeSSH(
 		_ = client.Close()
 		return nil, "", fmt.Errorf("SSH server rejected the shell: %w", err)
 	}
+	terminal, err := newSSHTerminalEmulator(columns, rows)
+	if err != nil {
+		_ = session.Close()
+		_ = client.Close()
+		return nil, "", fmt.Errorf("could not create the SSH terminal emulator: %w", err)
+	}
 	native := &sshNativeSession{
-		id:      "",
-		client:  client,
-		session: session,
-		stdin:   stdin,
-		stdout:  stdout,
-		stderr:  stderr,
+		id:         "",
+		client:     client,
+		session:    session,
+		stdin:      stdin,
+		stdout:     stdout,
+		stderr:     stderr,
+		terminal:   terminal,
 		inputQueue: make(chan []byte, sshInputQueueCapacity),
 		done:       make(chan struct{}),
 	}
@@ -705,7 +846,7 @@ func normalizeTerminalSize(columns, rows uint32) (uint32, uint32) {
 	return columns, rows
 }
 
-func loadSSHTarget(databasePath, nodeID string) (sshTarget, error) {
+func loadSSHTarget(databasePath, nodeID string, electronUserDataPath ...string) (sshTarget, error) {
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		return sshTarget{}, err
@@ -829,13 +970,13 @@ func loadSSHTarget(databasePath, nodeID string) (sshTarget, error) {
 		knownHostFingerprint: knownFingerprint,
 	}
 	if root.useInlinePassword {
-		secret, err := readCredentialSecret(database, root.id)
+		secret, err := readCredentialSecret(database, root.id, electronUserDataPath...)
 		if err != nil {
 			return sshTarget{}, fmt.Errorf("could not read the SSH password: %w", err)
 		}
 		target.password = string(secret)
 	} else if credentialID != "" {
-		if err := loadSSHCredential(database, databasePath, credentialID, &target); err != nil {
+		if err := loadSSHCredential(database, databasePath, credentialID, &target, electronUserDataPath...); err != nil {
 			return sshTarget{}, err
 		}
 	}
@@ -936,7 +1077,12 @@ func loadSSHNodes(database *sql.DB) (map[string]*sshNode, error) {
 	return result, nil
 }
 
-func loadSSHCredential(database *sql.DB, databasePath, credentialID string, target *sshTarget) error {
+func loadSSHCredential(
+	database *sql.DB,
+	databasePath, credentialID string,
+	target *sshTarget,
+	electronUserDataPath ...string,
+) error {
 	if strings.TrimSpace(credentialID) == "" {
 		return errors.New("SSH credential id is empty")
 	}
@@ -990,14 +1136,14 @@ func loadSSHCredential(database *sql.DB, databasePath, credentialID string, targ
 			return errors.New("could not read the SSH private key")
 		}
 		target.privateKey = key
-		passphrase, err := readOptionalCredentialSecret(database, credentialID)
+		passphrase, err := readOptionalCredentialSecret(database, credentialID, electronUserDataPath...)
 		if err != nil {
 			return fmt.Errorf("could not read the SSH key passphrase: %w", err)
 		}
 		target.keyPassphrase = string(passphrase)
 		return nil
 	}
-	secret, err := readCredentialSecret(database, credentialID)
+	secret, err := readCredentialSecret(database, credentialID, electronUserDataPath...)
 	if err != nil {
 		return fmt.Errorf("could not read the SSH password: %w", err)
 	}
@@ -1024,7 +1170,7 @@ func protectedCredentialFileStem(id string) (string, error) {
 	return strings.ReplaceAll(normalized, "-", ""), nil
 }
 
-func readCredentialSecret(database *sql.DB, credentialID string) ([]byte, error) {
+func readCredentialSecret(database *sql.DB, credentialID string, electronUserDataPath ...string) ([]byte, error) {
 	exists, err := tableExists(database, "CredentialSecrets")
 	if err != nil {
 		return nil, err
@@ -1043,17 +1189,17 @@ func readCredentialSecret(database *sql.DB, credentialID string) ([]byte, error)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read stored SSH secret: %w", err)
 	}
-	if encoding != protectedSecretEncoding {
+	secret, err := unprotectStoredSecret(encoded, encoding, electronUserDataPath...)
+	if errors.Is(err, errUnsupportedSecretEncoding) {
 		return nil, errors.New("stored SSH secret uses an unsupported encoding")
 	}
-	secret, err := unprotectSecret(encoded)
 	if err != nil {
 		return nil, errors.New("stored SSH secret could not be decrypted")
 	}
 	return secret, nil
 }
 
-func readOptionalCredentialSecret(database *sql.DB, credentialID string) ([]byte, error) {
+func readOptionalCredentialSecret(database *sql.DB, credentialID string, electronUserDataPath ...string) ([]byte, error) {
 	exists, err := tableExists(database, "CredentialSecrets")
 	if err != nil {
 		return nil, err
@@ -1072,10 +1218,10 @@ func readOptionalCredentialSecret(database *sql.DB, credentialID string) ([]byte
 	if err != nil {
 		return nil, fmt.Errorf("cannot read stored SSH secret: %w", err)
 	}
-	if encoding != protectedSecretEncoding {
+	secret, err := unprotectStoredSecret(encoded, encoding, electronUserDataPath...)
+	if errors.Is(err, errUnsupportedSecretEncoding) {
 		return nil, errors.New("stored SSH secret uses an unsupported encoding")
 	}
-	secret, err := unprotectSecret(encoded)
 	if err != nil {
 		return nil, errors.New("stored SSH secret could not be decrypted")
 	}
@@ -1131,6 +1277,126 @@ func persistSSHFingerprint(databasePath, nodeID, fingerprint string) error {
 		return fmt.Errorf("%w: expected %s, received %s", errSSHHostFingerprintChanged, existing.String, fingerprint)
 	}
 	return nil
+}
+
+func trustSSHFingerprint(databasePath string, request sshHostKeyTrustRequest) error {
+	nodeID := strings.TrimSpace(request.NodeID)
+	if nodeID == "" || len(nodeID) > 128 {
+		return errors.New("SSH connection id is invalid")
+	}
+	expected, err := normalizeSSHFingerprint(request.Expected)
+	if err != nil {
+		return fmt.Errorf("expected SSH fingerprint is invalid: %w", err)
+	}
+	received, err := normalizeSSHFingerprint(request.Received)
+	if err != nil {
+		return fmt.Errorf("received SSH fingerprint is invalid: %w", err)
+	}
+	if expected == received {
+		return errors.New("the new SSH fingerprint must differ from the saved fingerprint")
+	}
+
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	columns, err := tableColumns(database, "Nodes")
+	if err != nil {
+		return err
+	}
+	if _, ok := columns["SshKnownHostFingerprint"]; !ok {
+		return errors.New("SSH fingerprint column is missing")
+	}
+	effectiveFingerprint, err := loadEffectiveSSHFingerprint(database, nodeID, columns)
+	if err != nil {
+		return err
+	}
+	if effectiveFingerprint != expected {
+		return errors.New("SSH host fingerprint changed; reload the connection before trusting it")
+	}
+	result, err := database.Exec(
+		"UPDATE Nodes SET SshKnownHostFingerprint = ?, UpdatedAt = ? WHERE lower(Id) = ? AND (COALESCE(TRIM(SshKnownHostFingerprint), '') = '' OR TRIM(SshKnownHostFingerprint) = ?);",
+		received,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		normalizeID(nodeID),
+		expected,
+	)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected > 0 {
+		return nil
+	}
+
+	var current sql.NullString
+	err = database.QueryRow(
+		"SELECT SshKnownHostFingerprint FROM Nodes WHERE lower(Id) = ? LIMIT 1;",
+		normalizeID(nodeID),
+	).Scan(&current)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errors.New("SSH connection was not found")
+	}
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(nullableString(current)) != expected {
+		return errors.New("SSH host fingerprint changed; reload the connection before trusting it")
+	}
+	return errors.New("SSH host fingerprint could not be updated")
+}
+
+func loadEffectiveSSHFingerprint(
+	database *sql.DB,
+	nodeID string,
+	columns map[string]struct{},
+) (string, error) {
+	parentExpression := "NULL"
+	if _, ok := columns["ParentId"]; ok {
+		parentExpression = "ParentId"
+	}
+	currentID := normalizeID(nodeID)
+	seen := make(map[string]struct{})
+	for currentID != "" {
+		if _, duplicate := seen[currentID]; duplicate {
+			return "", errors.New("SSH connection tree contains a cycle")
+		}
+		seen[currentID] = struct{}{}
+
+		var parentID, fingerprint sql.NullString
+		err := database.QueryRow(
+			"SELECT "+parentExpression+", SshKnownHostFingerprint FROM Nodes WHERE lower(Id) = ? LIMIT 1;",
+			currentID,
+		).Scan(&parentID, &fingerprint)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", errors.New("SSH connection was not found")
+		}
+		if err != nil {
+			return "", err
+		}
+		if value := strings.TrimSpace(nullableString(fingerprint)); value != "" {
+			return value, nil
+		}
+		currentID = normalizeID(nullableString(parentID))
+	}
+	return "", nil
+}
+
+func normalizeSSHFingerprint(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	const prefix = "SHA256:"
+	if !strings.HasPrefix(value, prefix) {
+		return "", errors.New("fingerprint must use the SHA256 format")
+	}
+	digest, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(value, prefix))
+	if err != nil || len(digest) != 32 {
+		return "", errors.New("fingerprint is not a valid SHA256 fingerprint")
+	}
+	return value, nil
 }
 
 func safeSSHError(err error) string {

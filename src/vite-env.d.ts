@@ -112,11 +112,43 @@ interface WormholeSshConnected {
   fingerprint: string;
 }
 
+interface WormholeSshTerminalCell {
+  character: string;
+  foreground: number;
+  background: number;
+}
+
+interface WormholeSshTerminalCellChange extends WormholeSshTerminalCell {
+  index: number;
+}
+
+interface WormholeSshTerminalFrame {
+  columns: number;
+  rows: number;
+  full: boolean;
+  cells?: WormholeSshTerminalCell[];
+  changes: WormholeSshTerminalCellChange[];
+  scrollbackReset: boolean;
+  scrollback?: string[];
+  cursorX: number;
+  cursorY: number;
+  cursorVisible: boolean;
+  applicationCursor: boolean;
+  title?: string;
+  sequence: number;
+}
+
 type WormholeSshEvent =
   | ({ type: 'connected' } & WormholeSshConnected)
-  | { type: 'data'; sessionId: string; data: string }
+  | { type: 'screen'; sessionId: string; frame: WormholeSshTerminalFrame }
   | { type: 'closed'; sessionId: string }
-  | { type: 'error'; sessionId: string; error: string };
+  | {
+      type: 'error';
+      sessionId: string;
+      error: string;
+      hostKeyExpected?: string;
+      hostKeyReceived?: string;
+    };
 type WormholeAuthMode = 'disabled' | 'pin' | 'password' | 'windowsHello';
 type WormholeAuthFallback = 'pin' | 'password';
 
@@ -197,6 +229,11 @@ interface Window {
       columns: number;
       rows: number;
     }): Promise<WormholeSshConnected>;
+    trustSshHostKey(request: {
+      nodeId: string;
+      expected: string;
+      received: string;
+    }): Promise<{ updated: boolean }>;
     sendSshInput(sessionId: string, data: string): Promise<void>;
     resizeSshSession(sessionId: string, columns: number, rows: number): Promise<void>;
     closeSshSession(sessionId: string): Promise<void>;

@@ -5,6 +5,8 @@ contextBridge.exposeInMainWorld('wormhole', {
   loadWorkspace: () => ipcRenderer.invoke('workspace:load'),
   openSshSession: (request: { sessionId: string; nodeId: string; columns: number; rows: number }) =>
     ipcRenderer.invoke('ssh:open', request),
+  trustSshHostKey: (request: { nodeId: string; expected: string; received: string }) =>
+    ipcRenderer.invoke('ssh:trust-host-key', request),
   sendSshInput: (sessionId: string, data: string) =>
     ipcRenderer.invoke('ssh:input', sessionId, data),
   resizeSshSession: (sessionId: string, columns: number, rows: number) =>
@@ -12,13 +14,36 @@ contextBridge.exposeInMainWorld('wormhole', {
   closeSshSession: (sessionId: string) => ipcRenderer.invoke('ssh:close', sessionId),
   onSshEvent: (
     listener: (event: {
-      type: 'connected' | 'data' | 'closed' | 'error';
+      type: 'connected' | 'screen' | 'closed' | 'error';
       sessionId: string;
       host?: string;
       port?: number;
       username?: string;
       fingerprint?: string;
-      data?: string;
+      hostKeyExpected?: string;
+      hostKeyReceived?: string;
+      frame?: {
+        columns: number;
+        rows: number;
+        full: boolean;
+        cells?: Array<{
+          character: string;
+          foreground: number;
+          background: number;
+        }>;
+        changes?: Array<{
+          index: number;
+          character: string;
+          foreground: number;
+          background: number;
+        }>;
+        cursorX: number;
+        cursorY: number;
+        cursorVisible: boolean;
+        applicationCursor: boolean;
+        title?: string;
+        sequence: number;
+      };
       error?: string;
     }) => void,
   ) => {

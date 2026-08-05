@@ -316,6 +316,220 @@ VALUES ('node', 'SHA256:already-pinned', 'now');
 	}
 }
 
+func TestTrustSSHFingerprintReplacesOnlyTheExpectedPin(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    SshKnownHostFingerprint TEXT NULL,
+    UpdatedAt TEXT NOT NULL
+);
+INSERT INTO Nodes (Id, SshKnownHostFingerprint, UpdatedAt)
+VALUES ('node', 'SHA256:KfNRucV0MaZ9lkCIfmHHZgcCsxJrf3frwycqo2/cw9k', 'now');
+`)
+	database.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var request sshHostKeyTrustRequest
+	if err := json.Unmarshal([]byte(`{"nodeId":"node","expected":"SHA256:KfNRucV0MaZ9lkCIfmHHZgcCsxJrf3frwycqo2/cw9k","received":"SHA256:rjnaNoqbDUI5dQiifXn9cdTeEZ0dRAD/TTLe6sBbOiw"}`), &request); err != nil {
+		t.Fatal(err)
+	}
+	err = trustSSHFingerprint(databasePath, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	database, err = openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var fingerprint string
+	if err := database.QueryRow("SELECT SshKnownHostFingerprint FROM Nodes WHERE Id = 'node';").Scan(&fingerprint); err != nil {
+		t.Fatal(err)
+	}
+	if fingerprint != "SHA256:rjnaNoqbDUI5dQiifXn9cdTeEZ0dRAD/TTLe6sBbOiw" {
+		t.Fatalf("unexpected trusted fingerprint: %q", fingerprint)
+	}
+}
+
+func TestTrustSSHFingerprintRejectsAStaleExpectedPin(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    SshKnownHostFingerprint TEXT NULL,
+    UpdatedAt TEXT NOT NULL
+);
+INSERT INTO Nodes (Id, SshKnownHostFingerprint, UpdatedAt)
+VALUES ('node', 'SHA256:KfNRucV0MaZ9lkCIfmHHZgcCsxJrf3frwycqo2/cw9k', 'now');
+`)
+	database.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = trustSSHFingerprint(databasePath, sshHostKeyTrustRequest{
+		NodeID:   "node",
+		Expected: "SHA256:rjnaNoqbDUI5dQiifXn9cdTeEZ0dRAD/TTLe6sBbOiw",
+		Received: "SHA256:KfNRucV0MaZ9lkCIfmHHZgcCsxJrf3frwycqo2/cw9k",
+	})
+	if err == nil || !strings.Contains(err.Error(), "fingerprint changed") {
+		t.Fatalf("expected stale-pin rejection, got %v", err)
+	}
+}
+
+func TestDialNativeSSHReportsStructuredHostKeyMismatch(t *testing.T) {
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signer, err := ssh.NewSignerFromKey(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	serverConfig := &ssh.ServerConfig{
+		PasswordCallback: func(connection ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+			if connection.User() != "operator" || string(password) != "secret" {
+				return nil, errors.New("invalid test credentials")
+			}
+			return nil, nil
+		},
+	}
+	serverConfig.AddHostKey(signer)
+	serverDone := make(chan error, 1)
+	go func() {
+		rawConnection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			serverDone <- acceptErr
+			return
+		}
+		defer rawConnection.Close()
+		_, _, _, handshakeErr := ssh.NewServerConn(rawConnection, serverConfig)
+		serverDone <- handshakeErr
+	}()
+
+	_, _, err = dialNativeSSH(context.Background(), sshTarget{
+		host:                 "127.0.0.1",
+		port:                 listener.Addr().(*net.TCPAddr).Port,
+		username:             "operator",
+		password:             "secret",
+		knownHostFingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+	}, 80, 24)
+	var mismatch *sshHostKeyMismatchError
+	if !errors.As(err, &mismatch) {
+		t.Fatalf("expected structured host-key mismatch, got %v", err)
+	}
+	if mismatch.expected != "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" {
+		t.Fatalf("unexpected expected fingerprint: %q", mismatch.expected)
+	}
+	if mismatch.received != ssh.FingerprintSHA256(signer.PublicKey()) {
+		t.Fatalf("unexpected received fingerprint: %q", mismatch.received)
+	}
+	if serverErr := <-serverDone; serverErr == nil {
+		t.Fatal("expected the server handshake to be rejected")
+	}
+}
+
+func TestSSHNativeSessionSnapshotPublishesAFullFrame(t *testing.T) {
+	var output bytes.Buffer
+	server := &sshServer{
+		output:   &sshEventWriter{encoder: json.NewEncoder(&output)},
+		sessions: make(map[string]*sshNativeSession),
+		pending:  make(map[string]context.CancelFunc),
+	}
+	terminal, err := newSSHTerminalEmulator(8, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := &sshNativeSession{
+		id:       "session",
+		server:   server,
+		terminal: terminal,
+		done:     make(chan struct{}),
+	}
+	server.sessions[native.id] = native
+
+	native.snapshot()
+
+	var event sshWireEvent
+	if err := json.NewDecoder(&output).Decode(&event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != "screen" || event.Frame == nil || !event.Frame.Full {
+		t.Fatalf("snapshot did not publish a full screen frame: %#v", event)
+	}
+	if event.Frame.Columns != 8 || event.Frame.Rows != 2 || len(event.Frame.Cells) != 16 {
+		t.Fatalf("unexpected snapshot dimensions: %#v", event.Frame)
+	}
+}
+
+func TestSSHSnapshotIgnoresAClosedSession(t *testing.T) {
+	var output bytes.Buffer
+	server := &sshServer{
+		output:   &sshEventWriter{encoder: json.NewEncoder(&output)},
+		sessions: make(map[string]*sshNativeSession),
+		pending:  make(map[string]context.CancelFunc),
+	}
+
+	server.snapshot(sshWireCommand{SessionID: "closed-session"})
+	if output.Len() != 0 {
+		t.Fatalf("closed-session snapshot emitted an unexpected event: %s", output.String())
+	}
+}
+
+func TestSSHNativeSessionDropsFramesAfterClose(t *testing.T) {
+	var output bytes.Buffer
+	server := &sshServer{
+		output:   &sshEventWriter{encoder: json.NewEncoder(&output)},
+		sessions: make(map[string]*sshNativeSession),
+		pending:  make(map[string]context.CancelFunc),
+	}
+	terminal, err := newSSHTerminalEmulator(8, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	native := &sshNativeSession{
+		id:       "session",
+		server:   server,
+		terminal: terminal,
+		done:     make(chan struct{}),
+	}
+	server.sessions[native.id] = native
+
+	native.close(true)
+	native.publishTerminalFrame(terminal.initialFrame())
+
+	decoder := json.NewDecoder(&output)
+	var event sshWireEvent
+	if err := decoder.Decode(&event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Type != "closed" {
+		t.Fatalf("unexpected close event: %#v", event)
+	}
+	var extra sshWireEvent
+	if err := decoder.Decode(&extra); err != io.EOF {
+		t.Fatalf("late terminal frame was published after close: event=%#v err=%v", extra, err)
+	}
+}
+
 func TestDialNativeSSHHonorsContextCancellationDuringHandshake(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

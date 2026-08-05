@@ -98,7 +98,7 @@ func (w *backendLineWriter) write(value any) error {
 	return w.writer.Flush()
 }
 
-func serveBackend(databasePath string) error {
+func serveBackend(databasePath string, electronUserDataPath ...string) error {
 	database, err := openDatabase(databasePath, true)
 	if err != nil {
 		return err
@@ -108,7 +108,7 @@ func serveBackend(databasePath string) error {
 	}
 
 	output := newBackendLineWriter(os.Stdout)
-	manager := newVncManager(database, output)
+	manager := newVncManager(database, output, electronUserDataPath...)
 	defer manager.close()
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -128,18 +128,28 @@ func serveBackend(databasePath string) error {
 }
 
 type vncManager struct {
-	database *sql.DB
-	output   *backendLineWriter
+	database             *sql.DB
+	electronUserDataPath string
+	output               *backendLineWriter
 
 	mu       sync.Mutex
 	sessions map[string]*vncSession
 }
 
-func newVncManager(database *sql.DB, output *backendLineWriter) *vncManager {
+func newVncManager(
+	database *sql.DB,
+	output *backendLineWriter,
+	electronUserDataPath ...string,
+) *vncManager {
+	userDataPath := ""
+	if len(electronUserDataPath) > 0 {
+		userDataPath = electronUserDataPath[0]
+	}
 	return &vncManager{
-		database: database,
-		output:   output,
-		sessions: make(map[string]*vncSession),
+		database:             database,
+		electronUserDataPath: userDataPath,
+		output:               output,
+		sessions:             make(map[string]*vncSession),
 	}
 }
 
@@ -185,7 +195,7 @@ func (m *vncManager) connect(command backendCommand) {
 	}
 
 	m.respond(command.ID, nil)
-	go session.connect(command, m.database)
+	go session.connect(command, m.database, m.electronUserDataPath)
 }
 
 func (m *vncManager) disconnect(command backendCommand) {
@@ -275,8 +285,8 @@ func newVncSession(id string, output *backendLineWriter, manager *vncManager) *v
 	}
 }
 
-func (s *vncSession) connect(command backendCommand, database *sql.DB) {
-	target, err := resolveVncTarget(database, command)
+func (s *vncSession) connect(command backendCommand, database *sql.DB, electronUserDataPath ...string) {
+	target, err := resolveVncTarget(database, command, electronUserDataPath...)
 	if err != nil {
 		s.fail(err)
 		return
@@ -827,7 +837,11 @@ func validateBackendCommand(command backendCommand) error {
 	return nil
 }
 
-func resolveVncTarget(database *sql.DB, command backendCommand) (vncTarget, error) {
+func resolveVncTarget(
+	database *sql.DB,
+	command backendCommand,
+	electronUserDataPath ...string,
+) (vncTarget, error) {
 	target := vncTarget{host: strings.TrimSpace(command.Host), port: command.Port, password: command.Password}
 	hostHasPort := target.host != "" && vncHostIncludesPort(target.host)
 	if database != nil && (command.NodeID != "" || command.CredentialID != "") {
@@ -836,6 +850,7 @@ func resolveVncTarget(database *sql.DB, command backendCommand) (vncTarget, erro
 			command.NodeID,
 			command.CredentialID,
 			command.Password == "",
+			electronUserDataPath...,
 		)
 		if err != nil {
 			return vncTarget{}, err
@@ -999,10 +1014,15 @@ type vncNodeRow struct {
 	tunnelEnabled  sql.NullInt64
 }
 
-func readVncTargetFromDatabase(database *sql.DB, nodeID, credentialID string, resolvePassword bool) (vncTarget, error) {
+func readVncTargetFromDatabase(
+	database *sql.DB,
+	nodeID, credentialID string,
+	resolvePassword bool,
+	electronUserDataPath ...string,
+) (vncTarget, error) {
 	target := vncTarget{}
 	if resolvePassword && credentialID != "" {
-		password, _, err := readVncCredentialSecret(database, credentialID)
+		password, _, err := readVncCredentialSecret(database, credentialID, electronUserDataPath...)
 		if err != nil {
 			return vncTarget{}, err
 		}
@@ -1074,7 +1094,11 @@ func readVncTargetFromDatabase(database *sql.DB, nodeID, credentialID string, re
 				case 2:
 					inheritCredential = false
 					if resolvePassword && row.credentialID.Valid && strings.TrimSpace(row.credentialID.String) != "" {
-						password, found, err := readVncCredentialSecret(database, row.credentialID.String)
+						password, found, err := readVncCredentialSecret(
+							database,
+							row.credentialID.String,
+							electronUserDataPath...,
+						)
 						if err != nil {
 							return vncTarget{}, err
 						}
@@ -1085,7 +1109,11 @@ func readVncTargetFromDatabase(database *sql.DB, nodeID, credentialID string, re
 				}
 			} else if row.credentialID.Valid && strings.TrimSpace(row.credentialID.String) != "" {
 				if resolvePassword {
-					password, found, err := readVncCredentialSecret(database, row.credentialID.String)
+					password, found, err := readVncCredentialSecret(
+						database,
+						row.credentialID.String,
+						electronUserDataPath...,
+					)
 					if err != nil {
 						return vncTarget{}, err
 					}
@@ -1140,7 +1168,11 @@ func readVncNode(database *sql.DB, columns map[string]struct{}, id string) (vncN
 	return row, err
 }
 
-func readVncCredentialSecret(database *sql.DB, credentialID string) (string, bool, error) {
+func readVncCredentialSecret(
+	database *sql.DB,
+	credentialID string,
+	electronUserDataPath ...string,
+) (string, bool, error) {
 	columns, err := tableColumns(database, "CredentialProfiles")
 	if err != nil {
 		return "", false, err
@@ -1181,10 +1213,10 @@ func readVncCredentialSecret(database *sql.DB, credentialID string) (string, boo
 	if kind.Valid && kind.Int64 != 0 {
 		return "", false, nil
 	}
-	return readStoredSecret(database, credentialID)
+	return readStoredSecret(database, credentialID, electronUserDataPath...)
 }
 
-func readStoredSecret(database *sql.DB, id string) (string, bool, error) {
+func readStoredSecret(database *sql.DB, id string, electronUserDataPath ...string) (string, bool, error) {
 	exists, err := tableExists(database, "CredentialSecrets")
 	if err != nil || !exists {
 		return "", false, err
@@ -1200,10 +1232,10 @@ func readStoredSecret(database *sql.DB, id string) (string, bool, error) {
 	if len(encoded) > maxVncEncodedSecret {
 		return "", false, errors.New("stored VNC secret is too large")
 	}
-	if encoding != protectedSecretEncoding {
+	secretBytes, err := unprotectStoredSecret(encoded, encoding, electronUserDataPath...)
+	if errors.Is(err, errUnsupportedSecretEncoding) {
 		return "", false, errors.New("stored secret uses an unsupported encoding")
 	}
-	secretBytes, err := unprotectSecret(encoded)
 	if err != nil {
 		return "", false, err
 	}

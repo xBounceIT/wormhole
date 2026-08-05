@@ -3,8 +3,14 @@ module github.com/xBounceIT/wormhole/tools/wormhole-backend
 go 1.25.0
 
 require (
+	github.com/ActiveState/vt10x v1.3.1
 	github.com/kward/go-vnc v0.0.0-20260515191714-83d72ad87d5f
 	modernc.org/sqlite v1.56.0
+)
+
+require (
+	github.com/Netflix/go-expect v0.0.0-20180615182759-c93bf25de8e8 // indirect
+	github.com/kr/pty v1.1.1 // indirect
 )
 
 require (

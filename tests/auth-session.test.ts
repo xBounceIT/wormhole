@@ -45,3 +45,25 @@ test('a newly enabled configuration starts locked after a disabled transition', 
   session.remember({ configured: true }, false);
   assert.throws(() => session.requireUnlocked(), /Authentication is required/);
 });
+
+test('unlock listeners fire once when access crosses the locked boundary', () => {
+  const session = new AuthSession();
+  let notifications = 0;
+  const unsubscribe = session.onUnlocked(() => notifications++);
+
+  session.remember({ configured: true }, false);
+  assert.equal(notifications, 0);
+
+  session.markUnlocked();
+  session.markUnlocked();
+  assert.equal(notifications, 1);
+
+  session.lock();
+  session.markUnlocked();
+  assert.equal(notifications, 2);
+
+  unsubscribe();
+  session.lock();
+  session.markUnlocked();
+  assert.equal(notifications, 2);
+});

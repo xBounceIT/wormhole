@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -13,6 +14,7 @@ import {
 } from 'react';
 import wormholeIcon from '../Assets/Wormhole.png';
 import {
+  AlertCircle,
   ArrowRightLeft,
   ChevronDown,
   ChevronRight,
@@ -25,6 +27,7 @@ import {
   FolderPlus,
   Globe,
   KeyRound,
+  LoaderCircle,
   Monitor,
   MoreHorizontal,
   Network,
@@ -294,9 +297,13 @@ type Session = {
   canTransfer?: boolean;
   backendSessionId?: string;
   status: 'connecting' | 'connected' | 'failed' | 'closed' | 'placeholder';
-  output: string;
+  terminalFrame?: WormholeSshTerminalFrame;
   error?: string;
   fingerprint?: string;
+  hostKeyMismatch?: {
+    expected: string;
+    received: string;
+  };
   rdpStatus?: RdpUiStatus;
   rdpBackend?: 'activex' | 'freerdp';
   rdpError?: string;
@@ -331,16 +338,6 @@ function newSessionToken(): string {
     : `ssh-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function decodeTerminalData(value: string, decoder: TextDecoder, stream: boolean): string {
-  try {
-    const binary = atob(value);
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    return decoder.decode(bytes, { stream });
-  } catch {
-    return '';
-  }
-}
-
 function encodeTerminalData(value: string): string {
   const bytes = new TextEncoder().encode(value);
   let binary = '';
@@ -348,9 +345,52 @@ function encodeTerminalData(value: string): string {
   return btoa(binary);
 }
 
-function appendTerminalOutput(current: string, next: string): string {
-  const combined = current + next;
-  return combined.length > 256_000 ? combined.slice(-256_000) : combined;
+function createBlankTerminalCells(columns: number, rows: number): WormholeSshTerminalCell[] {
+  return Array.from({ length: columns * rows }, () => ({
+    character: ' ',
+    foreground: 0xff80,
+    background: 0xff81,
+  }));
+}
+
+function applySshTerminalFrame(
+  previous: WormholeSshTerminalFrame | undefined,
+  incoming: WormholeSshTerminalFrame,
+): WormholeSshTerminalFrame {
+  const cellCount = incoming.columns * incoming.rows;
+  const hasMatchingPrevious =
+    previous &&
+    previous.columns === incoming.columns &&
+    previous.rows === incoming.rows &&
+    previous.cells?.length === cellCount;
+  const cells =
+    incoming.full && incoming.cells?.length === cellCount
+      ? incoming.cells.slice()
+      : hasMatchingPrevious
+        ? previous.cells!.slice()
+        : createBlankTerminalCells(incoming.columns, incoming.rows);
+
+  for (const change of incoming.changes) {
+    if (change.index < 0 || change.index >= cells.length) continue;
+    cells[change.index] = {
+      character: change.character,
+      foreground: change.foreground,
+      background: change.background,
+    };
+  }
+
+  const sameViewport = previous?.columns === incoming.columns && previous.rows === incoming.rows;
+  let scrollback: string[];
+  if (incoming.scrollbackReset) {
+    scrollback = incoming.scrollback?.slice(-terminalMaxScrollbackLines) ?? [];
+  } else if (sameViewport) {
+    scrollback = incoming.scrollback?.length
+      ? [...(previous?.scrollback ?? []), ...incoming.scrollback].slice(-terminalMaxScrollbackLines)
+      : (previous?.scrollback ?? []);
+  } else {
+    scrollback = incoming.scrollback?.slice(-terminalMaxScrollbackLines) ?? [];
+  }
+  return { ...incoming, full: true, cells, scrollback };
 }
 
 const navItems: Array<{ id: NavItem; label: string; hint: string }> = [
@@ -830,8 +870,6 @@ function App() {
     id: string;
     placement: DropPlacement;
   } | null>(null);
-  const terminalDecoders = useRef(new Map<string, TextDecoder>());
-
   const visibleTree = useMemo(
     () => filterTree(tree, searchText.trim().toLowerCase()),
     [searchText, tree],
@@ -972,21 +1010,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const decoders = terminalDecoders.current;
     const unsubscribe = window.wormhole?.onSshEvent((event) => {
-      let output = '';
-      if (event.type === 'connected') {
-        decoders.set(event.sessionId, new TextDecoder());
-      } else if (event.type === 'data') {
-        const decoder = decoders.get(event.sessionId) ?? new TextDecoder();
-        decoders.set(event.sessionId, decoder);
-        output = decodeTerminalData(event.data, decoder, true);
-      } else if (event.type === 'closed') {
-        const decoder = decoders.get(event.sessionId);
-        if (decoder) output = decoder.decode();
-        decoders.delete(event.sessionId);
-      }
-
       setSessions((current) =>
         current.map((session) => {
           if (session.backendSessionId !== event.sessionId) return session;
@@ -996,27 +1020,31 @@ function App() {
               status: 'connected',
               host: event.host,
               fingerprint: event.fingerprint,
+              hostKeyMismatch: undefined,
               error: undefined,
             };
           }
-          if (event.type === 'data') {
+          if (event.type === 'screen') {
+            if (session.status !== 'connected') return session;
             return {
               ...session,
-              output: appendTerminalOutput(session.output, output),
+              terminalFrame: applySshTerminalFrame(session.terminalFrame, event.frame),
             };
           }
           if (event.type === 'error') {
             return {
               ...session,
               status: 'failed',
-              output: appendTerminalOutput(session.output, output),
+              hostKeyMismatch:
+                event.hostKeyExpected && event.hostKeyReceived
+                  ? { expected: event.hostKeyExpected, received: event.hostKeyReceived }
+                  : undefined,
               error: event.error,
             };
           }
           return {
             ...session,
             status: 'closed',
-            output: appendTerminalOutput(session.output, output),
           };
         }),
       );
@@ -1024,7 +1052,6 @@ function App() {
 
     return () => {
       unsubscribe?.();
-      decoders.clear();
     };
   }, []);
 
@@ -1383,7 +1410,6 @@ function App() {
       canTransfer: node.protocol === 'ssh',
       backendSessionId,
       status: node.protocol === 'ssh' ? 'connecting' : 'placeholder',
-      output: '',
       rdpStatus: node.protocol === 'rdp' ? 'idle' : undefined,
     };
 
@@ -1437,8 +1463,9 @@ function App() {
                 ...session,
                 backendSessionId,
                 status: 'connecting',
-                output: '',
+                terminalFrame: undefined,
                 error: undefined,
+                hostKeyMismatch: undefined,
               }
             : session,
         ),
@@ -1462,8 +1489,9 @@ function App() {
       title: `${source.title} (copy)`,
       backendSessionId: source.protocol === 'ssh' ? newSessionToken() : undefined,
       status: source.protocol === 'ssh' ? 'connecting' : 'placeholder',
-      output: '',
+      terminalFrame: undefined,
       error: undefined,
+      hostKeyMismatch: undefined,
       rdpStatus: source.protocol === 'rdp' ? 'idle' : source.rdpStatus,
       rdpError: undefined,
     };
@@ -1511,6 +1539,35 @@ function App() {
           ),
         );
       });
+  }
+
+  async function trustSshHostKey(
+    sessionId: string,
+    mismatch: NonNullable<Session['hostKeyMismatch']>,
+  ) {
+    const session = sessions.find((candidate) => candidate.id === sessionId);
+    if (!session?.nodeId) return;
+    try {
+      if (!window.wormhole) throw new Error('The native SSH bridge is unavailable.');
+      await window.wormhole.trustSshHostKey({
+        nodeId: session.nodeId,
+        expected: mismatch.expected,
+        received: mismatch.received,
+      });
+      reconnectSession(sessionId);
+    } catch (error: unknown) {
+      setSessions((current) =>
+        current.map((candidate) =>
+          candidate.id === sessionId
+            ? {
+                ...candidate,
+                error: error instanceof Error ? error.message : String(error),
+                hostKeyMismatch: mismatch,
+              }
+            : candidate,
+        ),
+      );
+    }
   }
 
   function openQuickConnect() {
@@ -1570,7 +1627,6 @@ function App() {
         host,
         canTransfer: quickConnectForm.protocol === 'ssh',
         status: 'placeholder',
-        output: '',
         error:
           quickConnectForm.protocol === 'ssh'
             ? 'Quick Connect needs a saved SSH credential before it can connect.'
@@ -1620,7 +1676,7 @@ function App() {
                 nodeId: editingId,
                 backendSessionId,
                 status: newConnectionForm.protocol === 'ssh' ? 'connecting' : 'placeholder',
-                output: '',
+                terminalFrame: undefined,
                 error: undefined,
               }
             : session,
@@ -2086,6 +2142,8 @@ function App() {
                   onRetryRdp={retryRdpSession}
                   onSelectSession={setSelectedSessionId}
                   onSshInput={sendSshInput}
+                  onTrustSshHostKey={trustSshHostKey}
+                  isAuthorized={authGate === 'unlocked'}
                   selectedSession={selectedSession}
                   sessions={sessions}
                 />
@@ -2679,21 +2737,239 @@ function App() {
   );
 }
 
+const terminalFontSize = 13;
+const terminalFontFamily = '"Cascadia Mono", "Consolas", monospace';
+const terminalFallbackCellWidth = 8;
+const terminalLineHeight = 18;
+const terminalMaxScrollbackLines = 5000;
+const terminalScrollbackChunkSize = 128;
+const terminalDefaultForeground = 0xff80;
+const terminalDefaultBackground = 0xff81;
+const terminalAnsiPalette = [
+  '#1d2021',
+  '#cc241d',
+  '#98971a',
+  '#d79921',
+  '#458588',
+  '#b16286',
+  '#689d6a',
+  '#a89984',
+  '#928374',
+  '#fb4934',
+  '#b8bb26',
+  '#fabd2f',
+  '#83a598',
+  '#d3869b',
+  '#8ec07c',
+  '#ebdbb2',
+];
+
+function terminalColor(value: number, fallback: string): string {
+  if (value === terminalDefaultForeground || value === terminalDefaultBackground) return fallback;
+  if (value < 16) return terminalAnsiPalette[value] ?? fallback;
+  if (value < 232) {
+    const color = value - 16;
+    const red = Math.floor(color / 36);
+    const green = Math.floor((color % 36) / 6);
+    const blue = color % 6;
+    const channel = (component: number) => (component === 0 ? 0 : 55 + component * 40);
+    return `rgb(${channel(red)} ${channel(green)} ${channel(blue)})`;
+  }
+  if (value < 256) {
+    const gray = 8 + (value - 232) * 10;
+    return `rgb(${gray} ${gray} ${gray})`;
+  }
+  return fallback;
+}
+
+function measureTerminalCellWidth(): number {
+  if (typeof document === 'undefined') return terminalFallbackCellWidth;
+  const canvas = document.createElement('canvas');
+  const context = canvas.getContext('2d');
+  if (!context) return terminalFallbackCellWidth;
+  context.font = `${terminalFontSize}px ${terminalFontFamily}`;
+  const width = context.measureText('0').width;
+  return Number.isFinite(width) && width > 0 ? width : terminalFallbackCellWidth;
+}
+
+type TerminalTextRun = {
+  text: string;
+  foreground: string;
+  background: string;
+  cursor: boolean;
+  cellCount: number;
+};
+
+function terminalTextRuns(frame: WormholeSshTerminalFrame, row: number): TerminalTextRun[] {
+  const runs: TerminalTextRun[] = [];
+  const offset = row * frame.columns;
+  for (let column = 0; column < frame.columns; column++) {
+    const cell = frame.cells?.[offset + column];
+    if (!cell) continue;
+    const cursor = frame.cursorVisible && frame.cursorX === column && frame.cursorY === row;
+    const foreground = cursor
+      ? terminalColor(cell.background, '#090909')
+      : terminalColor(cell.foreground, '#e5e7eb');
+    const background = cursor ? '#e5e7eb' : terminalColor(cell.background, '#090909');
+    const previous = runs[runs.length - 1];
+    if (
+      previous &&
+      previous.foreground === foreground &&
+      previous.background === background &&
+      previous.cursor === cursor
+    ) {
+      previous.text += cell.character || ' ';
+      previous.cellCount += 1;
+    } else {
+      runs.push({ text: cell.character || ' ', foreground, background, cursor, cellCount: 1 });
+    }
+  }
+  return runs;
+}
+
+const TerminalScrollback = memo(function TerminalScrollback({ lines }: { lines?: string[] }) {
+  if (!lines?.length) return null;
+
+  const chunks = [];
+  for (let start = 0; start < lines.length; start += terminalScrollbackChunkSize) {
+    const chunk = lines
+      .slice(start, start + terminalScrollbackChunkSize)
+      .map((line) => line || ' ');
+    chunks.push(
+      <div
+        className="terminal-scrollback-chunk whitespace-pre"
+        key={start}
+        style={{ height: `${chunk.length * terminalLineHeight}px` }}
+      >
+        {chunk.join('\n')}
+      </div>,
+    );
+  }
+
+  return (
+    <div aria-label="SSH terminal scrollback" className="terminal-scrollback">
+      {chunks}
+    </div>
+  );
+});
+
+function TerminalTextGrid({ frame }: { frame?: WormholeSshTerminalFrame }) {
+  if (!frame?.cells) return null;
+  return (
+    <div
+      className="min-h-full min-w-max select-text"
+      style={{
+        fontFamily: terminalFontFamily,
+        fontSize: `${terminalFontSize}px`,
+        fontSynthesis: 'none',
+        lineHeight: `${terminalLineHeight}px`,
+        textRendering: 'geometricPrecision',
+        fontVariantLigatures: 'none',
+      }}
+    >
+      <TerminalScrollback lines={frame.scrollback} />
+      {Array.from({ length: frame.rows }, (_, row) => (
+        <div className="flex h-[18px] min-w-max whitespace-pre" key={row}>
+          {terminalTextRuns(frame, row).map((run, index) => (
+            <span
+              className={`block flex-none overflow-hidden ${run.cursor ? 'terminal-cursor' : ''}`}
+              key={`${row}-${index}`}
+              style={{
+                backgroundColor: run.background,
+                color: run.foreground,
+                height: `${terminalLineHeight}px`,
+                width: `${run.cellCount}ch`,
+              }}
+            >
+              {run.text}
+            </span>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function terminalCsiWithModifier(final: string, event: React.KeyboardEvent, appCursor: boolean) {
+  const modifier = 1 + (event.shiftKey ? 1 : 0) + (event.altKey ? 2 : 0) + (event.ctrlKey ? 4 : 0);
+  if (modifier === 1 && appCursor) return `\u001bO${final}`;
+  if (modifier === 1) return `\u001b[${final}`;
+  return `\u001b[1;${modifier}${final}`;
+}
+
+function terminalKeyData(event: React.KeyboardEvent, appCursor: boolean): string | undefined {
+  if (event.nativeEvent.isComposing || event.metaKey) return undefined;
+  const key = event.key;
+  if (event.ctrlKey && !event.altKey) {
+    if (key === ' ') return '\u0000';
+    if (key.length === 1) {
+      const code = key.toUpperCase().charCodeAt(0);
+      if (code >= 65 && code <= 90) return String.fromCharCode(code - 64);
+      return (
+        {
+          '@': '\u0000',
+          '[': '\u001b',
+          '\\': '\u001c',
+          ']': '\u001d',
+          '^': '\u001e',
+          _: '\u001f',
+        } as Record<string, string>
+      )[key];
+    }
+  }
+
+  if (key === 'Enter') return '\r';
+  if (key === 'Backspace') return '\u007f';
+  if (key === 'Tab') return event.shiftKey ? '\u001b[Z' : '\t';
+  if (key === 'Escape') return '\u001b';
+  if (key === 'ArrowUp') return terminalCsiWithModifier('A', event, appCursor);
+  if (key === 'ArrowDown') return terminalCsiWithModifier('B', event, appCursor);
+  if (key === 'ArrowRight') return terminalCsiWithModifier('C', event, appCursor);
+  if (key === 'ArrowLeft') return terminalCsiWithModifier('D', event, appCursor);
+  if (key === 'Home') return terminalCsiWithModifier('H', event, appCursor);
+  if (key === 'End') return terminalCsiWithModifier('F', event, appCursor);
+  if (key === 'Insert') return '\u001b[2~';
+  if (key === 'Delete') return '\u001b[3~';
+  if (key === 'PageUp') return '\u001b[5~';
+  if (key === 'PageDown') return '\u001b[6~';
+  if (key === 'F1') return '\u001bOP';
+  if (key === 'F2') return '\u001bOQ';
+  if (key === 'F3') return '\u001bOR';
+  if (key === 'F4') return '\u001bOS';
+  if (key === 'F5') return '\u001b[15~';
+  if (key === 'F6') return '\u001b[17~';
+  if (key === 'F7') return '\u001b[18~';
+  if (key === 'F8') return '\u001b[19~';
+  if (key === 'F9') return '\u001b[20~';
+  if (key === 'F10') return '\u001b[21~';
+  if (key === 'F11') return '\u001b[23~';
+  if (key === 'F12') return '\u001b[24~';
+  if (key.length === 1) return event.altKey ? `\u001b${key}` : key;
+  return undefined;
+}
+
 function SshTerminalSurface({
   session,
+  isActive,
   onInput,
+  onReconnect,
+  onTrustHostKey,
 }: {
   session: Session;
+  isActive: boolean;
   onInput: (sessionId: string, value: string) => void;
+  onReconnect: (sessionId: string) => void;
+  onTrustHostKey: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
 }) {
-  const [command, setCommand] = useState('');
   const surfaceRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const resizeSignatureRef = useRef('');
+  const stickToBottomRef = useRef(true);
 
   useEffect(() => {
     const surface = surfaceRef.current;
     const backendSessionId = session.backendSessionId;
     if (
+      !isActive ||
       !surface ||
       !backendSessionId ||
       session.status !== 'connected' ||
@@ -2701,99 +2977,208 @@ function SshTerminalSurface({
     )
       return;
 
+    resizeSignatureRef.current = '';
+    let retryFrame: number | undefined;
     const resize = () => {
-      const columns = Math.max(1, Math.floor(surface.clientWidth / 7.2));
-      const rows = Math.max(1, Math.floor((surface.clientHeight - 72) / 17));
-      const api = window.wormhole;
-      if (!api) return;
-      void api.resizeSshSession(backendSessionId, columns, rows).catch(() => {
+      const cellWidth = measureTerminalCellWidth();
+      if (surface.clientWidth < cellWidth || surface.clientHeight < terminalLineHeight) {
+        if (retryFrame === undefined) {
+          retryFrame = requestAnimationFrame(() => {
+            retryFrame = undefined;
+            resize();
+          });
+        }
+        return;
+      }
+      const columns = Math.max(1, Math.floor(surface.clientWidth / cellWidth));
+      const rows = Math.max(1, Math.floor(surface.clientHeight / terminalLineHeight));
+      const signature = `${columns}x${rows}`;
+      if (signature === resizeSignatureRef.current) return;
+      resizeSignatureRef.current = signature;
+      void window.wormhole?.resizeSshSession(backendSessionId, columns, rows).catch(() => {
         // A resize can race with a remote close; the closed event owns the visible session state.
       });
     };
     const observer = new ResizeObserver(resize);
     observer.observe(surface);
     resize();
-    return () => observer.disconnect();
+    return () => {
+      observer.disconnect();
+      if (retryFrame !== undefined) cancelAnimationFrame(retryFrame);
+    };
+  }, [isActive, session.backendSessionId, session.status]);
+
+  useEffect(() => {
+    stickToBottomRef.current = true;
   }, [session.backendSessionId, session.status]);
 
-  function submitCommand() {
-    if (!command || session.status !== 'connected') return;
-    onInput(session.id, `${command}\r`);
-    setCommand('');
+  useEffect(() => {
+    if (!isActive || session.status !== 'connected') return;
+    const surface = surfaceRef.current;
+    if (!surface || !stickToBottomRef.current) return;
+    surface.scrollTop = surface.scrollHeight;
+  }, [isActive, session.backendSessionId, session.status, session.terminalFrame?.sequence]);
+
+  useEffect(() => {
+    if (!isActive || session.status !== 'connected') return;
+    const surface = surfaceRef.current;
+    if (!surface) return;
+    const focus = () => surface.focus({ preventScroll: true });
+    const frame = requestAnimationFrame(focus);
+    return () => cancelAnimationFrame(frame);
+  }, [isActive, session.backendSessionId, session.status]);
+
+  const isConnected = session.status === 'connected';
+  if (!isConnected) {
+    const isConnecting = session.status === 'connecting';
+    const isFailed = session.status === 'failed';
+    const hostKeyMismatch = isFailed ? session.hostKeyMismatch : undefined;
+    const title = isConnecting
+      ? 'Connecting to SSH'
+      : isFailed
+        ? 'SSH connection failed'
+        : 'SSH session closed';
+    const message = hostKeyMismatch
+      ? 'The server identity changed. Verify the new fingerprint before trusting it.'
+      : session.error ||
+        (isConnecting
+          ? 'Opening a secure shell session.'
+          : 'The remote host closed the connection.');
+
+    return (
+      <div
+        aria-label="SSH connection state"
+        className="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-[#090909] px-6 py-10 text-zinc-100"
+        ref={surfaceRef}
+      >
+        <div className="flex w-full max-w-2xl flex-col items-center text-center">
+          <div
+            className={`mb-5 grid size-14 place-items-center rounded-full border ${
+              isFailed
+                ? 'border-red-400/20 bg-red-400/10 text-red-300'
+                : 'border-white/10 bg-white/[0.06] text-zinc-300'
+            }`}
+          >
+            {isConnecting ? (
+              <LoaderCircle className="size-6 animate-spin" />
+            ) : isFailed ? (
+              <AlertCircle className="size-6" />
+            ) : (
+              <Terminal className="size-6" />
+            )}
+          </div>
+          <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-500">
+            Secure shell
+          </p>
+          <h3 className="mt-2 text-sm font-semibold text-zinc-100">{title}</h3>
+          <p className="mt-2 max-w-xl break-words text-sm leading-relaxed text-zinc-400">
+            {message}
+          </p>
+          <p className="mt-3 max-w-xl truncate font-mono text-[10px] text-zinc-600">
+            {session.host || 'inherited target'}
+          </p>
+          {hostKeyMismatch ? (
+            <div className="mt-5 w-full max-w-xl rounded-lg border border-amber-400/20 bg-amber-400/[0.06] p-4 text-left">
+              <p className="text-xs font-semibold text-amber-200">Host key changed</p>
+              <p className="mt-1 text-[11px] leading-relaxed text-amber-100/65">
+                Only trust this key if you verified the server was rebuilt, rekeyed, or moved to a
+                new host.
+              </p>
+              <div className="mt-3 grid gap-2 font-mono text-[10px]">
+                <div className="grid gap-1 sm:grid-cols-[5rem_minmax(0,1fr)] sm:items-start sm:gap-3">
+                  <span className="text-zinc-500">Saved</span>
+                  <code className="break-all text-zinc-300">{hostKeyMismatch.expected}</code>
+                </div>
+                <div className="grid gap-1 sm:grid-cols-[5rem_minmax(0,1fr)] sm:items-start sm:gap-3">
+                  <span className="text-amber-300/70">Presented</span>
+                  <code className="break-all text-amber-100">{hostKeyMismatch.received}</code>
+                </div>
+              </div>
+              <div className="mt-4 flex justify-end">
+                <Button
+                  onClick={() => onTrustHostKey(session.id, hostKeyMismatch)}
+                  size="sm"
+                  variant="secondary"
+                >
+                  <RefreshCcw data-icon="inline-start" />
+                  Trust new key & reconnect
+                </Button>
+              </div>
+            </div>
+          ) : isConnecting ? (
+            <div className="mt-6 flex items-center gap-2 text-[10px] text-zinc-500">
+              <span className="size-1.5 animate-pulse rounded-full bg-amber-400" />
+              Negotiating secure session
+            </div>
+          ) : (
+            <Button
+              className="mt-6"
+              onClick={() => onReconnect(session.id)}
+              size="sm"
+              variant="secondary"
+            >
+              <RefreshCcw data-icon="inline-start" />
+              Reconnect
+            </Button>
+          )}
+        </div>
+      </div>
+    );
   }
 
   return (
     <div
-      className="flex min-h-0 flex-1 flex-col bg-[#090909] text-zinc-100"
-      onClick={() => inputRef.current?.focus()}
+      aria-label="Live SSH terminal"
+      className="terminal-scrollbar h-full min-h-0 min-w-0 flex-1 cursor-text overflow-x-auto overflow-y-auto overscroll-contain bg-[#090909] text-[#e5e7eb] outline-none"
+      onClick={(event) => event.currentTarget.focus({ preventScroll: true })}
+      onKeyDown={(event) => {
+        const data = terminalKeyData(event, session.terminalFrame?.applicationCursor ?? false);
+        if (data === undefined) return;
+        event.preventDefault();
+        onInput(session.id, data);
+      }}
+      onPaste={(event) => {
+        const text = event.clipboardData.getData('text');
+        if (!text) return;
+        event.preventDefault();
+        onInput(session.id, text);
+      }}
+      onCompositionEnd={(event) => {
+        if (event.data) onInput(session.id, event.data);
+      }}
+      onWheel={(event) => {
+        const surface = event.currentTarget;
+        const maxScrollTop = surface.scrollHeight - surface.clientHeight;
+        if (maxScrollTop <= 0 || event.deltaY === 0) return;
+
+        const deltaY =
+          event.deltaMode === 1
+            ? event.deltaY * terminalLineHeight
+            : event.deltaMode === 2
+              ? event.deltaY * surface.clientHeight
+              : event.deltaY;
+        const nextScrollTop = Math.min(maxScrollTop, Math.max(0, surface.scrollTop + deltaY));
+        if (nextScrollTop === surface.scrollTop) return;
+        event.preventDefault();
+        surface.scrollTop = nextScrollTop;
+      }}
+      onScroll={(event) => {
+        const surface = event.currentTarget;
+        stickToBottomRef.current =
+          surface.scrollHeight - surface.scrollTop - surface.clientHeight <= terminalLineHeight;
+      }}
       ref={surfaceRef}
+      role="application"
+      style={{ overflowAnchor: 'none', scrollbarGutter: 'stable' }}
+      tabIndex={0}
     >
-      <div className="flex h-8 shrink-0 items-center gap-2 border-b border-white/10 px-4 font-mono text-[10px] text-zinc-400">
-        <span
-          className={`size-1.5 rounded-full ${
-            session.status === 'connected'
-              ? 'bg-emerald-400'
-              : session.status === 'connecting'
-                ? 'animate-pulse bg-amber-400'
-                : 'bg-red-400'
-          }`}
-        />
-        <span>{session.host}</span>
-        <span className="text-zinc-600">·</span>
-        <span>{session.status}</span>
-        {session.fingerprint ? (
-          <span className="ml-auto truncate text-zinc-600" title={session.fingerprint}>
-            {session.fingerprint}
-          </span>
-        ) : null}
-      </div>
-      <pre className="min-h-0 flex-1 overflow-auto whitespace-pre-wrap px-4 py-3 font-mono text-[12px] leading-relaxed">
-        {session.output ||
-          (session.status === 'connecting'
-            ? 'Connecting to SSH server…'
-            : session.error || (session.status === 'closed' ? 'SSH session closed.' : ''))}
-      </pre>
-      <form
-        className="flex shrink-0 items-end gap-2 border-t border-white/10 p-3"
-        onSubmit={(event) => {
-          event.preventDefault();
-          submitCommand();
-        }}
-      >
-        <span className="pb-2 font-mono text-xs text-emerald-400">$</span>
-        <Textarea
-          aria-label="SSH terminal input"
-          className="min-h-9 resize-none border-white/10 bg-white/5 font-mono text-xs text-zinc-100 placeholder:text-zinc-600 focus-visible:ring-white/20"
-          disabled={session.status !== 'connected'}
-          onChange={(event) => setCommand(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.ctrlKey && event.key.toLowerCase() === 'c') {
-              event.preventDefault();
-              onInput(session.id, '\u0003');
-              setCommand('');
-            } else if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault();
-              submitCommand();
-            }
-          }}
-          placeholder={
-            session.status === 'connected'
-              ? 'Type a command and press Enter'
-              : 'Terminal unavailable'
-          }
-          ref={inputRef}
-          rows={1}
-          value={command}
-        />
-        <Button disabled={session.status !== 'connected' || !command} size="sm" type="submit">
-          Send
-        </Button>
-      </form>
+      <TerminalTextGrid frame={session.terminalFrame} />
     </div>
   );
 }
 
 function SessionsPage({
+  isAuthorized,
   sessions,
   selectedSession,
   onCloseSession,
@@ -2804,8 +3189,10 @@ function SessionsPage({
   onOpenQuickConnect,
   onReconnectSession,
   onSshInput,
+  onTrustSshHostKey,
   onRetryRdp,
 }: {
+  isAuthorized: boolean;
   sessions: Session[];
   selectedSession?: Session;
   onCloseSession: (id: string) => void;
@@ -2816,6 +3203,7 @@ function SessionsPage({
   onOpenQuickConnect: () => void;
   onReconnectSession: (id: string) => void;
   onSshInput: (sessionId: string, value: string) => void;
+  onTrustSshHostKey: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
   onRetryRdp: (id: string) => void;
 }) {
   if (!selectedSession || sessions.length === 0) {
@@ -2904,11 +3292,19 @@ function SessionsPage({
             value={session.id}
           >
             {session.protocol === 'ssh' ? (
-              <SshTerminalSurface onInput={onSshInput} session={session} />
+              <SshTerminalSurface
+                isActive={session.id === selectedSession.id}
+                onInput={onSshInput}
+                onReconnect={onReconnectSession}
+                onTrustHostKey={onTrustSshHostKey}
+                session={session}
+              />
             ) : session.protocol === 'rdp' ? (
               <RdpSurface
                 backend={session.rdpBackend}
                 error={session.rdpError}
+                isActive={session.id === selectedSession.id}
+                isAuthorized={isAuthorized}
                 onConnect={() => onConnectRdp(session.id)}
                 onRetry={() => onRetryRdp(session.id)}
                 sessionId={session.id}

@@ -9,6 +9,8 @@ The executable accepts:
 ```text
 wormhole-backend-x64.exe --operation workspace --database <path>
 wormhole-backend-x64.exe --operation migrate --database <path> --credential-reader <path>
+wormhole-backend-x64.exe --operation ssh --database <path> --electron-user-data <path>
+wormhole-backend-x64.exe --operation ssh-trust-host-key --database <path> < request.json
 wormhole-backend-x64.exe --operation auth-status --database <path>
 wormhole-backend-x64.exe --operation auth-verify --database <path> < request.json
 wormhole-backend-x64.exe --operation auth-set-secret --database <path> < request.json
@@ -21,6 +23,12 @@ wormhole-backend-x64.exe --operation rdp --database <path> [--rdp-host <path>] [
 `windows-credential-manager-to-sqlite-v1` in `ElectronMigrations`. It copies
 legacy values without deleting the Credential Manager source. `workspace` only
 returns connection, credential, and tunnel metadata; it never returns secrets.
+
+`ssh` keeps a native SSH shell alive over a JSON-lines stdio channel. It resolves
+inherited credentials, owns the PTY and VT/ANSI emulation, and emits screen
+frames plus lifecycle events; the TypeScript renderer only handles keyboard and
+paste input and paints those frames. `ssh-trust-host-key` replaces a saved
+fingerprint only when the expected fingerprint still matches the database.
 
 The `auth-*` operations own app authentication natively. They intentionally use
 the same `%LOCALAPPDATA%\Wormhole\settings.json` fields and raw DPAPI document

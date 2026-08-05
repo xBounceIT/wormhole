@@ -105,8 +105,9 @@ type tunnelRow struct {
 }
 
 func main() {
-	operation := flag.String("operation", "workspace", "backend operation: workspace, migrate, ssh, serve, rdp, or auth-*")
+	operation := flag.String("operation", "workspace", "backend operation: workspace, migrate, ssh, ssh-trust-host-key, serve, rdp, or auth-*")
 	databasePath := flag.String("database", "", "path to the Wormhole SQLite database")
+	electronUserDataPath := flag.String("electron-user-data", "", "path to the Electron user-data directory")
 	credentialReader := flag.String("credential-reader", "", "path to the Windows Credential Manager reader")
 	rdpHost := flag.String("rdp-host", "", "path to the Windows ActiveX RDP host")
 	freerdpPath := flag.String("freerdp", "", "path to the FreeRDP client")
@@ -118,7 +119,7 @@ func main() {
 		return
 	}
 	if *operation == "ssh" {
-		if err := serveSSH(*databasePath, os.Stdin, os.Stdout); err != nil {
+		if err := serveSSH(*databasePath, os.Stdin, os.Stdout, *electronUserDataPath); err != nil {
 			writeError(err.Error())
 			os.Exit(1)
 		}
@@ -158,8 +159,17 @@ func main() {
 		result = verifyWindowsHello()
 	case "auth-system-idle":
 		result = map[string]int64{"seconds": systemIdleSeconds()}
+	case "ssh-trust-host-key":
+		var request sshHostKeyTrustRequest
+		err = decodeInput(&request)
+		if err == nil {
+			err = trustSSHFingerprint(*databasePath, request)
+			if err == nil {
+				result = map[string]bool{"updated": true}
+			}
+		}
 	case "serve":
-		if err := serveBackend(*databasePath); err != nil {
+		if err := serveBackend(*databasePath, *electronUserDataPath); err != nil {
 			writeError(err.Error())
 			os.Exit(1)
 		}

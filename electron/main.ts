@@ -36,7 +36,8 @@ type BackendOperation =
   | 'auth-update-settings'
   | 'auth-hello-status'
   | 'auth-hello-verify'
-  | 'auth-system-idle';
+  | 'auth-system-idle'
+  | 'ssh-trust-host-key';
 type VncAction = 'vnc.connect' | 'vnc.disconnect' | 'vnc.pointer' | 'vnc.key';
 type VncCommand = {
   action: VncAction;
@@ -93,6 +94,32 @@ type SshConnectedResponse = {
   fingerprint: string;
 };
 
+type SshTerminalCell = {
+  character: string;
+  foreground: number;
+  background: number;
+};
+
+type SshTerminalCellChange = SshTerminalCell & {
+  index: number;
+};
+
+type SshTerminalFrame = {
+  columns: number;
+  rows: number;
+  full: boolean;
+  cells?: SshTerminalCell[];
+  changes: SshTerminalCellChange[];
+  scrollbackReset: boolean;
+  scrollback?: string[];
+  cursorX: number;
+  cursorY: number;
+  cursorVisible: boolean;
+  applicationCursor: boolean;
+  title?: string;
+  sequence: number;
+};
+
 type SshBackendEvent =
   | {
       type: 'connected';
@@ -102,9 +129,15 @@ type SshBackendEvent =
       username: string;
       fingerprint: string;
     }
-  | { type: 'data'; sessionId: string; data: string }
+  | { type: 'screen'; sessionId: string; frame: SshTerminalFrame }
   | { type: 'closed'; sessionId: string }
-  | { type: 'error'; sessionId: string; error: string };
+  | {
+      type: 'error';
+      sessionId: string;
+      error: string;
+      hostKeyExpected?: string;
+      hostKeyReceived?: string;
+    };
 
 type SshOpenRequest = {
   sessionId: string;
@@ -113,8 +146,17 @@ type SshOpenRequest = {
   rows: number;
 };
 
+type SshHostKeyTrustRequest = {
+  nodeId: string;
+  expected: string;
+  received: string;
+};
+
 const sshMaxSessionIdLength = 128;
 const sshMaxInputLength = 1_500_000;
+const sshMaxTerminalCells = 500 * 500;
+const sshMaxTerminalScrollbackLines = 5000;
+const sshMaxTerminalScrollbackLineLength = 2048;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -149,6 +191,131 @@ function isSshInput(value: unknown): value is string {
   return typeof value === 'string' && value.length <= sshMaxInputLength;
 }
 
+function isSshFingerprint(value: unknown): value is string {
+  return typeof value === 'string' && /^SHA256:[A-Za-z0-9+/]{43}$/.test(value);
+}
+
+function isSshHostKeyTrustRequest(value: unknown): value is SshHostKeyTrustRequest {
+  return (
+    isRecord(value) &&
+    isSshSessionId(value.nodeId) &&
+    isSshFingerprint(value.expected) &&
+    isSshFingerprint(value.received) &&
+    value.expected !== value.received
+  );
+}
+
+function isSshTerminalCell(value: unknown): value is SshTerminalCell {
+  return (
+    isRecord(value) &&
+    typeof value.character === 'string' &&
+    value.character.length <= 8 &&
+    typeof value.foreground === 'number' &&
+    Number.isInteger(value.foreground) &&
+    value.foreground >= 0 &&
+    value.foreground <= 0xffff &&
+    typeof value.background === 'number' &&
+    Number.isInteger(value.background) &&
+    value.background >= 0 &&
+    value.background <= 0xffff
+  );
+}
+
+function parseSshTerminalFrame(value: unknown): SshTerminalFrame | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.columns !== 'number' ||
+    !Number.isInteger(value.columns) ||
+    value.columns < 1 ||
+    value.columns > 500 ||
+    typeof value.rows !== 'number' ||
+    !Number.isInteger(value.rows) ||
+    value.rows < 1 ||
+    value.rows > 500 ||
+    (value.full !== undefined && typeof value.full !== 'boolean') ||
+    (value.scrollback_reset !== undefined && typeof value.scrollback_reset !== 'boolean') ||
+    typeof value.cursor_x !== 'number' ||
+    !Number.isInteger(value.cursor_x) ||
+    value.cursor_x < 0 ||
+    value.cursor_x >= value.columns ||
+    typeof value.cursor_y !== 'number' ||
+    !Number.isInteger(value.cursor_y) ||
+    value.cursor_y < 0 ||
+    value.cursor_y >= value.rows ||
+    typeof value.cursor_visible !== 'boolean' ||
+    typeof value.application_cursor !== 'boolean' ||
+    typeof value.sequence !== 'number' ||
+    !Number.isSafeInteger(value.sequence) ||
+    value.sequence < 1
+  ) {
+    return undefined;
+  }
+
+  const cellCount = value.columns * value.rows;
+  let cells: SshTerminalCell[] | undefined;
+  if (value.cells !== undefined) {
+    if (
+      !Array.isArray(value.cells) ||
+      value.cells.length > sshMaxTerminalCells ||
+      !value.cells.every(isSshTerminalCell)
+    ) {
+      return undefined;
+    }
+    cells = value.cells;
+  }
+  const full = value.full === true;
+  if (full && (!cells || cells.length !== cellCount)) return undefined;
+
+  const changes: SshTerminalCellChange[] = [];
+  if (value.changes !== undefined) {
+    if (!Array.isArray(value.changes) || value.changes.length > cellCount) return undefined;
+    for (const change of value.changes) {
+      const index = isRecord(change) ? change.index : undefined;
+      if (
+        !isRecord(change) ||
+        typeof index !== 'number' ||
+        !Number.isInteger(index) ||
+        index < 0 ||
+        index >= cellCount ||
+        !isSshTerminalCell(change)
+      ) {
+        return undefined;
+      }
+      changes.push({ ...change, index });
+    }
+  }
+
+  let scrollback: string[] | undefined;
+  if (value.scrollback !== undefined) {
+    if (
+      !Array.isArray(value.scrollback) ||
+      value.scrollback.length > sshMaxTerminalScrollbackLines ||
+      !value.scrollback.every(
+        (line) => typeof line === 'string' && line.length <= sshMaxTerminalScrollbackLineLength,
+      )
+    ) {
+      return undefined;
+    }
+    scrollback = value.scrollback.slice();
+  }
+
+  return {
+    columns: value.columns,
+    rows: value.rows,
+    full,
+    cells,
+    changes,
+    scrollbackReset: value.scrollback_reset === true,
+    scrollback,
+    cursorX: value.cursor_x,
+    cursorY: value.cursor_y,
+    cursorVisible: value.cursor_visible,
+    applicationCursor: value.application_cursor,
+    title: typeof value.title === 'string' ? value.title.slice(0, 2048) : undefined,
+    sequence: value.sequence,
+  };
+}
+
 function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
   let value: unknown;
   try {
@@ -179,14 +346,27 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
       fingerprint: value.fingerprint,
     };
   }
-  if (value.type === 'data' && typeof value.data === 'string') {
-    return { type: 'data', sessionId: value.session_id, data: value.data };
+  if (value.type === 'screen') {
+    const frame = parseSshTerminalFrame(value.frame);
+    return frame ? { type: 'screen', sessionId: value.session_id, frame } : undefined;
   }
   if (value.type === 'closed') {
     return { type: 'closed', sessionId: value.session_id };
   }
   if (value.type === 'error' && typeof value.error === 'string') {
-    return { type: 'error', sessionId: value.session_id, error: value.error };
+    const hostKeyExpected = isSshFingerprint(value.host_key_expected)
+      ? value.host_key_expected
+      : undefined;
+    const hostKeyReceived = isSshFingerprint(value.host_key_received)
+      ? value.host_key_received
+      : undefined;
+    return {
+      type: 'error',
+      sessionId: value.session_id,
+      error: value.error,
+      hostKeyExpected,
+      hostKeyReceived,
+    };
   }
   return undefined;
 }
@@ -253,7 +433,14 @@ class NativeBackendProcess {
       let settled = false;
       const child = spawn(
         backendPath(),
-        ['--operation', 'serve', '--database', wormholeDatabasePath()],
+        [
+          '--operation',
+          'serve',
+          '--database',
+          wormholeDatabasePath(),
+          '--electron-user-data',
+          electronUserDataPath(),
+        ],
         { windowsHide: true, stdio: ['pipe', 'pipe', 'ignore'] },
       );
       this.child = child;
@@ -417,6 +604,10 @@ function wormholeDatabasePath(): string {
   return path.join(app.getPath('userData'), wormholeDataDirectoryName, 'wormhole.db');
 }
 
+function electronUserDataPath(): string {
+  return app.getPath('userData');
+}
+
 function findBundledExecutable(name: string): string | undefined {
   const candidates = [
     path.join(process.resourcesPath, name),
@@ -448,7 +639,14 @@ function credentialReaderPath(): string | undefined {
 }
 
 async function runBackend<T>(operation: BackendOperation, request?: unknown): Promise<T> {
-  const args = ['--operation', operation, '--database', wormholeDatabasePath()];
+  const args = [
+    '--operation',
+    operation,
+    '--database',
+    wormholeDatabasePath(),
+    '--electron-user-data',
+    electronUserDataPath(),
+  ];
   if (operation === 'migrate') {
     const reader = credentialReaderPath();
     if (reader) args.push('--credential-reader', reader);
@@ -600,6 +798,17 @@ class NativeSshBackend {
     }
   }
 
+  requestSnapshots(): void {
+    if (!authSession.isAccessAllowed || !this.child || this.child.killed) return;
+    for (const sessionId of this.activeSessions) {
+      try {
+        this.write({ type: 'snapshot', session_id: sessionId });
+      } catch {
+        return;
+      }
+    }
+  }
+
   dispose(): void {
     for (const waiter of this.openWaiters.values()) {
       clearTimeout(waiter.timeout);
@@ -624,7 +833,14 @@ class NativeSshBackend {
 
     const child = spawn(
       backendPath(),
-      ['--operation', 'ssh', '--database', wormholeDatabasePath()],
+      [
+        '--operation',
+        'ssh',
+        '--database',
+        wormholeDatabasePath(),
+        '--electron-user-data',
+        electronUserDataPath(),
+      ],
       { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] },
     );
     this.child = child;
@@ -694,9 +910,9 @@ class NativeSshBackend {
   }
 
   private broadcast(event: SshBackendEvent): void {
-    // Lifecycle notifications let the locked renderer settle pending tabs, but terminal bytes
+    // Lifecycle notifications let the locked renderer settle pending tabs, but terminal frames
     // must never cross the native authentication boundary until the session is unlocked again.
-    if (event.type === 'data' && !authSession.isAccessAllowed) return;
+    if (event.type === 'screen' && !authSession.isAccessAllowed) return;
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed()) window.webContents.send('ssh:event', event);
     }
@@ -821,11 +1037,18 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     });
   });
 
-  ipcMain.handle('auth:lock', async () => {
+  ipcMain.handle('auth:lock', async (event) => {
     if (process.platform !== 'win32') return;
     return serializeAuthOperation(async () => {
       await ensureAuthSession();
       authSession.lock();
+      const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+      if (!ownerWindow || ownerWindow.isDestroyed()) return;
+      try {
+        await rdpClient?.hideAll(nativeWindowHandle(ownerWindow));
+      } catch {
+        // Authentication remains locked even if a native RDP surface has already exited.
+      }
     });
   });
 
@@ -870,6 +1093,15 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       connection = sshBackend.open(request);
     });
     return connection!;
+  });
+  ipcMain.handle('ssh:trust-host-key', async (_event, request: unknown) => {
+    if (!isSshHostKeyTrustRequest(request)) {
+      throw new Error('SSH host-key trust request is invalid.');
+    }
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      return runBackend('ssh-trust-host-key', request);
+    });
   });
   ipcMain.handle('ssh:input', async (_event, sessionId: unknown, data: unknown) => {
     if (!isSshSessionId(sessionId) || !isSshInput(data)) {
@@ -936,9 +1168,12 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
 
-    const client = getRdpClient();
-    const bounds = toScreenBounds(ownerWindow, request.bounds);
-    return client.start(request, nativeWindowHandle(ownerWindow), bounds);
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      const client = getRdpClient();
+      const bounds = toScreenBounds(ownerWindow, request.bounds);
+      return client.start(request, nativeWindowHandle(ownerWindow), bounds);
+    });
   });
 
   ipcMain.handle('rdp:resize', async (event, value: unknown) => {
@@ -946,9 +1181,12 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
 
-    const client = getRdpClient();
-    const bounds = request.bounds ? toScreenBounds(ownerWindow, request.bounds) : undefined;
-    return client.resize({ ...request, bounds }, nativeWindowHandle(ownerWindow));
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      const client = getRdpClient();
+      const bounds = request.bounds ? toScreenBounds(ownerWindow, request.bounds) : undefined;
+      return client.resize({ ...request, bounds }, nativeWindowHandle(ownerWindow));
+    });
   });
 
   ipcMain.handle('rdp:command', async (event, value: unknown) => {
@@ -965,12 +1203,13 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
     const bounds = request.bounds ? toScreenBounds(ownerWindow, request.bounds) : undefined;
-    return getRdpClient().command(
-      operation,
-      request.sessionId,
-      nativeWindowHandle(ownerWindow),
-      bounds,
-    );
+    const command = () =>
+      getRdpClient().command(operation, request.sessionId, nativeWindowHandle(ownerWindow), bounds);
+    if (operation === 'hide' || operation === 'disconnect') return command();
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      return command();
+    });
   });
 }
 
@@ -1143,6 +1382,7 @@ function createWindow() {
       // A renderer reload creates a fresh UI process context. Do not let a previous renderer's
       // native unlock survive into the new context before it proves possession of the secret.
       authSession.lock();
+      await rdpClient?.dispose();
     }).catch((error) => {
       console.error('[Wormhole] Could not reset native authentication for the renderer.', error);
     });
@@ -1160,6 +1400,7 @@ function createWindow() {
 }
 
 const sshBackend = new NativeSshBackend();
+authSession.onUnlocked(() => sshBackend.requestSnapshots());
 
 app.whenReady().then(async () => {
   registerIpcHandlers(sshBackend);

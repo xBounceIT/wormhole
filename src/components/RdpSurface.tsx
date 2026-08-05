@@ -7,6 +7,8 @@ export type { RdpUiStatus } from '../rdp-state';
 
 type RdpSurfaceProps = {
   sessionId: string;
+  isActive: boolean;
+  isAuthorized: boolean;
   status: RdpUiStatus;
   backend?: 'activex' | 'freerdp';
   error?: string;
@@ -16,6 +18,8 @@ type RdpSurfaceProps = {
 
 export function RdpSurface({
   sessionId,
+  isActive,
+  isAuthorized,
   status,
   backend,
   error,
@@ -23,20 +27,35 @@ export function RdpSurface({
   onRetry,
 }: RdpSurfaceProps) {
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const nativeSurfaceVisible = useRef(false);
 
   useEffect(() => {
     const surface = surfaceRef.current;
-    if (!surface) return;
+    const api = window.wormhole;
+
+    const hideNativeSurface = () => {
+      if (!nativeSurfaceVisible.current) return;
+      nativeSurfaceVisible.current = false;
+      void api?.commandRdpSession({ sessionId, operation: 'hide' }).catch(() => undefined);
+    };
+
+    if (!surface || !isActive || !isAuthorized || status !== 'connected') {
+      hideNativeSurface();
+      return;
+    }
 
     const reportBounds = () => {
       const rect = surface.getBoundingClientRect();
       if (rect.width < 1 || rect.height < 1) return;
-      void window.wormhole
+      const bounds = { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
+      void api
         ?.resizeRdpSession({
           sessionId,
-          bounds: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
+          bounds,
         })
         .catch(() => undefined);
+      nativeSurfaceVisible.current = true;
+      void api?.commandRdpSession({ sessionId, operation: 'show', bounds }).catch(() => undefined);
     };
 
     reportBounds();
@@ -47,25 +66,9 @@ export function RdpSurface({
     return () => {
       observer.disconnect();
       window.removeEventListener('resize', reportBounds);
-      void window.wormhole
-        ?.commandRdpSession({ sessionId, operation: 'hide' })
-        .catch(() => undefined);
+      hideNativeSurface();
     };
-  }, [sessionId]);
-
-  useEffect(() => {
-    if (status !== 'connected') return;
-    const surface = surfaceRef.current;
-    if (!surface) return;
-    const rect = surface.getBoundingClientRect();
-    void window.wormhole
-      ?.commandRdpSession({
-        sessionId,
-        operation: 'show',
-        bounds: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
-      })
-      .catch(() => undefined);
-  }, [sessionId, status]);
+  }, [isActive, isAuthorized, sessionId, status]);
 
   const isConnected = status === 'connected';
   const isStarting = status === 'starting';
