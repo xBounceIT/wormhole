@@ -15,18 +15,7 @@ import (
 func TestDecryptElectronSafeStoragePayload(t *testing.T) {
 	const expected = "legacy-safe-storage-secret"
 	key := []byte("01234567890123456789012345678901")
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nonce := []byte("123456789012")
-	envelope := append([]byte(electronSafeStoragePrefix), nonce...)
-	envelope = append(envelope, gcm.Seal(nil, nonce, []byte(expected), nil)...)
-	encoded := base64.StdEncoding.EncodeToString(envelope)
+	encoded := writeElectronSafeStorageFixture(t, t.TempDir(), expected, key)
 
 	actual, err := decryptElectronSafeStoragePayload(encoded, key)
 	if err != nil {
@@ -40,6 +29,22 @@ func TestDecryptElectronSafeStoragePayload(t *testing.T) {
 func TestUnprotectStoredSecretReadsElectronSafeStorageKey(t *testing.T) {
 	const expected = "legacy-safe-storage-secret"
 	key := []byte("01234567890123456789012345678901")
+	userDataPath := t.TempDir()
+	encoded := writeElectronSafeStorageFixture(t, userDataPath, expected, key)
+
+	actual, err := unprotectStoredSecret("credential-id", encoded, electronSafeStorageSecretEncoding, userDataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(actual) != expected {
+		t.Fatalf("unexpected decrypted secret: %q", actual)
+	}
+}
+
+// writeElectronSafeStorageFixture writes a Local State file whose DPAPI-wrapped os_crypt key
+// decrypts to key, and returns a base64 Electron-safeStorage payload that decrypts to plaintext.
+func writeElectronSafeStorageFixture(t *testing.T, userDataPath, plaintext string, key []byte) string {
+	t.Helper()
 	protectedKey, err := protectDpapi(key, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -51,7 +56,6 @@ func TestUnprotectStoredSecretReadsElectronSafeStorageKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	userDataPath := t.TempDir()
 	if err := os.WriteFile(filepath.Join(userDataPath, "Local State"), state, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -66,14 +70,6 @@ func TestUnprotectStoredSecretReadsElectronSafeStorageKey(t *testing.T) {
 	}
 	nonce := []byte("123456789012")
 	envelope := append([]byte(electronSafeStoragePrefix), nonce...)
-	envelope = append(envelope, gcm.Seal(nil, nonce, []byte(expected), nil)...)
-	encoded := base64.StdEncoding.EncodeToString(envelope)
-
-	actual, err := unprotectStoredSecret("credential-id", encoded, electronSafeStorageSecretEncoding, userDataPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(actual) != expected {
-		t.Fatalf("unexpected decrypted secret: %q", actual)
-	}
+	envelope = append(envelope, gcm.Seal(nil, nonce, []byte(plaintext), nil)...)
+	return base64.StdEncoding.EncodeToString(envelope)
 }

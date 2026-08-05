@@ -239,9 +239,9 @@ func (controller *mcpController) getOrCreateToken() (string, error) {
 		normalizeID(mcpTokenCredentialID),
 	).Scan(&encoded, &encoding)
 	if err == nil {
-		secret, decodeErr := unprotectStoredSecret(encoded, encoding, controller.server.electronUserDataPath)
+		secret, decodeErr := unprotectStoredSecret(mcpTokenCredentialID, encoded, encoding, controller.server.electronUserDataPath)
 		if decodeErr != nil {
-			return "", errors.New("stored MCP token could not be decrypted")
+			return "", fmt.Errorf("stored MCP token could not be decrypted: %w", decodeErr)
 		}
 		defer clearBytes(secret)
 		if len(secret) > 0 && len(secret) <= 4096 {

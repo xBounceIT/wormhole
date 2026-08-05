@@ -48,6 +48,74 @@ func TestMcpAuthorizationRequiresExactBearerToken(t *testing.T) {
 	}
 }
 
+func TestMcpGetOrCreateTokenReadsStoredToken(t *testing.T) {
+	if !isWindowsRuntime() {
+		t.Skip("Windows DPAPI is Windows-only")
+	}
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+
+	// First process: no token row exists yet, so a fresh token is generated and persisted.
+	first := newMcpController(&sshServer{databasePath: databasePath})
+	created, err := first.getOrCreateToken()
+	if err != nil {
+		t.Fatalf("first getOrCreateToken: %v", err)
+	}
+	if created == "" {
+		t.Fatal("first getOrCreateToken returned an empty token")
+	}
+
+	// Second process: the row already exists and must decrypt to the same token instead of
+	// failing or silently replacing the stored value.
+	second := newMcpController(&sshServer{databasePath: databasePath})
+	read, err := second.getOrCreateToken()
+	if err != nil {
+		t.Fatalf("getOrCreateToken could not read the stored token: %v", err)
+	}
+	if read != created {
+		t.Fatalf("stored token round-trip mismatch: got %q want %q", read, created)
+	}
+}
+
+func TestMcpGetOrCreateTokenDoesNotReplaceUndecryptableToken(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := ensureMigrationSchema(database); err != nil {
+		t.Fatal(err)
+	}
+	const corrupt = "this-is-not-valid-base64!!!"
+	_, err = database.Exec(`
+INSERT INTO CredentialSecrets (Id, Secret, Encoding, UpdatedAt)
+VALUES (?, ?, ?, ?);`,
+		normalizeID(mcpTokenCredentialID),
+		corrupt,
+		protectedSecretEncoding,
+		time.Now().UTC().Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	controller := newMcpController(&sshServer{databasePath: databasePath})
+	if _, err := controller.getOrCreateToken(); err == nil {
+		t.Fatal("an undecryptable stored token must fail instead of being silently replaced")
+	}
+
+	var stored string
+	if err := database.QueryRow(
+		"SELECT Secret FROM CredentialSecrets WHERE lower(Id) = ?;",
+		normalizeID(mcpTokenCredentialID),
+	).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored != corrupt {
+		t.Fatalf("undecryptable token was replaced: got %q", stored)
+	}
+}
+
 func TestMcpSettingsPreserveExistingSettings(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	settingsPath := filepath.Join(filepath.Dir(databasePath), authSettingsFilename)
