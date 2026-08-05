@@ -3052,11 +3052,18 @@ function valueAsRecord(value: unknown): Record<string, any> {
 
 function createWindow() {
   const window = new BrowserWindow({
+    // Keep the window hidden until the renderer has painted its first frame
+    // (ready-to-show). Showing it earlier flashes unpainted frames — black
+    // (backgroundColor) then the light default page — before the UI appears.
+    show: false,
     width: 1440,
     height: 900,
     minWidth: 980,
     minHeight: 640,
-    backgroundColor: '#000000',
+    // Matches the renderer's dark theme background (--background in index.css,
+    // oklch(0.145 0 0) ~ #0a0a0a) so a not-yet-painted frame during a resize
+    // never flashes white.
+    backgroundColor: '#0a0a0a',
     icon: path.join(__dirname, '..', 'Assets', 'Wormhole.ico'),
     title: 'Wormhole',
     titleBarStyle: 'hidden',
@@ -3075,6 +3082,16 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
     },
   });
+
+  // Safety net: if the first paint never arrives (failed page load, hung dev
+  // server), show the window anyway so the app is never left invisible.
+  let showFallbackTimer: NodeJS.Timeout | undefined;
+  const showWindow = () => {
+    if (showFallbackTimer) clearTimeout(showFallbackTimer);
+    if (!window.isDestroyed()) window.show();
+  };
+  window.once('ready-to-show', showWindow);
+  showFallbackTimer = setTimeout(showWindow, 10_000);
 
   window.webContents.on('did-start-loading', () => {
     webSurfaces.closeForWindow(window);

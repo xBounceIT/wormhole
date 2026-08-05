@@ -150,6 +150,15 @@ import { getTreeRowGeometry } from './tree-layout';
 import { VncSurface } from './components/VncSurface';
 import { RdpSurface, type RdpUiStatus } from './components/RdpSurface';
 import { WebSurface } from './components/WebSurface';
+import {
+  applyTheme,
+  getInitialTheme,
+  getSystemTheme,
+  isTheme,
+  themeStorageKey,
+  type ResolvedTheme,
+  type Theme,
+} from './theme';
 import { applyRdpBackendEvent } from './rdp-state';
 import { formatSftpDate, formatSftpSize } from './sftp-format';
 import { hasSftpDragPayload, sftpDragDataType } from './sftp-dnd';
@@ -158,8 +167,6 @@ import { WebSessionAttemptTracker } from '../electron/web-session-attempt';
 type Protocol = 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
 type AutoSudoMode = 'inherit' | 'on' | 'off';
 type NavItem = 'sessions' | 'credentials' | 'tunnels' | 'settings';
-type Theme = 'system' | 'light' | 'dark';
-type ResolvedTheme = Exclude<Theme, 'system'>;
 type AuthPromptKind = 'lock' | 'confirmation';
 
 type SerialSettings = {
@@ -215,25 +222,6 @@ type AuthPromptRequest = {
   reason: string;
   autoWindowsHello: boolean;
 };
-
-const themeStorageKey = 'wormhole-theme';
-
-function isTheme(value: string | null): value is Theme {
-  return value === 'system' || value === 'light' || value === 'dark';
-}
-
-function getInitialTheme(): Theme {
-  if (typeof window === 'undefined') return 'dark';
-
-  const storedTheme = window.localStorage.getItem(themeStorageKey);
-  return isTheme(storedTheme) ? storedTheme : 'dark';
-}
-
-function getSystemTheme(): ResolvedTheme {
-  if (typeof window === 'undefined') return 'light';
-
-  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-}
 
 type TreeNode = {
   id: string;
@@ -1129,9 +1117,7 @@ function App() {
   const resolvedTheme = theme === 'system' ? systemTheme : theme;
 
   useLayoutEffect(() => {
-    const root = document.documentElement;
-    root.classList.toggle('dark', resolvedTheme === 'dark');
-    root.style.colorScheme = resolvedTheme;
+    applyTheme(resolvedTheme);
   }, [resolvedTheme]);
 
   useEffect(() => {
