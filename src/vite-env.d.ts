@@ -84,6 +84,8 @@ interface WormholeWorkspaceNode {
   serialStopBits?: number;
   serialParity?: number;
   serialFlowControl?: number;
+  sshAutoSudo?: boolean;
+  persisted?: boolean;
   children?: WormholeWorkspaceNode[];
 }
 
@@ -155,6 +157,21 @@ interface WormholeSshTerminalFrame {
   sequence: number;
 }
 
+interface WormholeSftpEntry {
+  name: string;
+  fullPath: string;
+  isDirectory: boolean;
+  isSymbolicLink: boolean;
+  size: number;
+  lastModifiedUtc?: string;
+}
+
+interface WormholeSftpQuickPath {
+  displayName: string;
+  path: string;
+  isSeparator: boolean;
+}
+
 type WormholeSshEvent =
   | ({ type: 'connected' } & WormholeSshConnected)
   | { type: 'screen'; sessionId: string; frame: WormholeSshTerminalFrame }
@@ -165,6 +182,75 @@ type WormholeSshEvent =
       error: string;
       hostKeyExpected?: string;
       hostKeyReceived?: string;
+    }
+  | { type: 'sftp.opening' | 'sftp.closed'; sessionId: string; requestId?: string }
+  | {
+      type: 'sftp.ready';
+      sessionId: string;
+      path: string;
+      entries: WormholeSftpEntry[];
+      truncated: boolean;
+      requestId?: string;
+    }
+  | { type: 'sftp.error'; sessionId: string; error: string; path?: string; requestId?: string }
+  | {
+      type: 'sftp.local.ready';
+      sessionId: string;
+      requestId: string;
+      pane: 'local';
+      path: string;
+      entries: WormholeSftpEntry[];
+      truncated: boolean;
+      quickPaths?: WormholeSftpQuickPath[];
+    }
+  | {
+      type: 'sftp.local.error';
+      sessionId: string;
+      requestId: string;
+      pane: 'local';
+      path?: string;
+      error: string;
+    }
+  | {
+      type: 'sftp.operation';
+      sessionId: string;
+      requestId: string;
+      pane: 'local' | 'remote';
+      operation: 'mkdir' | 'file' | 'delete' | 'rename' | 'open';
+      path: string;
+      error?: string;
+    }
+  | {
+      type: 'sftp.conflict';
+      sessionId: string;
+      transferId: string;
+      itemId: string;
+      direction: 'local-to-remote' | 'remote-to-local' | 'local-to-local';
+      displayName: string;
+      path: string;
+      incomingSize: number;
+      existingSize: number;
+      existingIsDirectory: boolean;
+    }
+  | {
+      type: 'sftp.transfer';
+      sessionId: string;
+      transferId: string;
+      itemId?: string;
+      transferState:
+        | 'running'
+        | 'progress'
+        | 'completed'
+        | 'failed'
+        | 'cancelled'
+        | 'batch-failed'
+        | 'batch-completed'
+        | 'batch-cancelled';
+      direction?: 'local-to-remote' | 'remote-to-local' | 'local-to-local';
+      displayName?: string;
+      expectedBytes?: number;
+      bytesTransferred?: number;
+      error?: string;
     };
 
 type WormholeSerialEvent =
@@ -255,6 +341,10 @@ interface WormholeBackendEvent {
 interface Window {
   wormhole?: {
     loadWorkspace(): Promise<WormholeWorkspaceSnapshot>;
+    updateWorkspaceNodeSshSettings(request: {
+      nodeId: string;
+      sshAutoSudo: boolean | null;
+    }): Promise<{ updated: boolean }>;
     openSshSession(request: {
       sessionId: string;
       nodeId: string;
@@ -268,6 +358,42 @@ interface Window {
     }): Promise<{ updated: boolean }>;
     sendSshInput(sessionId: string, data: string): Promise<void>;
     resizeSshSession(sessionId: string, columns: number, rows: number): Promise<void>;
+    openSftpBrowser(sessionId: string, requestId?: string): Promise<void>;
+    listSftpDirectory(sessionId: string, path: string, requestId?: string): Promise<void>;
+    listLocalSftpDirectory(sessionId: string, path: string, requestId: string): Promise<void>;
+    operateSftp(
+      sessionId: string,
+      request: {
+        requestId: string;
+        pane: 'local' | 'remote';
+        operation: 'mkdir' | 'file' | 'delete' | 'rename' | 'open';
+        path: string;
+        destinationPath?: string;
+      },
+    ): Promise<void>;
+    startSftpTransfer(
+      sessionId: string,
+      request: {
+        transferId: string;
+        direction: 'local-to-remote' | 'remote-to-local' | 'local-to-local';
+        destinationPath: string;
+        items: Array<{
+          sourcePath: string;
+          name: string;
+          isDirectory: boolean;
+          size: number;
+        }>;
+      },
+    ): Promise<void>;
+    decideSftpConflict(
+      sessionId: string,
+      transferId: string,
+      itemId: string,
+      decision: 'overwrite' | 'skip',
+      applyToAll: boolean,
+    ): Promise<void>;
+    cancelSftpTransfer(sessionId: string, transferId: string, itemId?: string): Promise<void>;
+    closeSftpBrowser(sessionId: string): Promise<void>;
     closeSshSession(sessionId: string): Promise<void>;
     onSshEvent(listener: (event: WormholeSshEvent) => void): () => void;
     openSerialSession(request: {

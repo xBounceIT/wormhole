@@ -64,6 +64,13 @@ type treeNode struct {
 	SerialParity      *int        `json:"serialParity,omitempty"`
 	SerialFlowControl *int        `json:"serialFlowControl,omitempty"`
 	Children          []*treeNode `json:"children,omitempty"`
+	SshAutoSudo       *bool       `json:"sshAutoSudo,omitempty"`
+	Persisted         bool        `json:"persisted,omitempty"`
+}
+
+type workspaceNodeSshSettingsRequest struct {
+	NodeID      string `json:"nodeId"`
+	SshAutoSudo *bool  `json:"sshAutoSudo"`
 }
 
 type credentialRecord struct {
@@ -83,14 +90,15 @@ type tunnelRecord struct {
 }
 
 type nodeRow struct {
-	ID        string
-	ParentID  sql.NullString
-	Name      string
-	Kind      int64
-	SortOrder int64
-	Protocol  sql.NullInt64
-	Host      sql.NullString
-	Port      sql.NullInt64
+	ID          string
+	ParentID    sql.NullString
+	Name        string
+	Kind        int64
+	SortOrder   int64
+	Protocol    sql.NullInt64
+	Host        sql.NullString
+	Port        sql.NullInt64
+	SshAutoSudo sql.NullInt64
 }
 
 type credentialRow struct {
@@ -143,6 +151,15 @@ func main() {
 	switch *operation {
 	case "workspace":
 		result, err = loadWorkspace(*databasePath)
+	case "workspace-update-node":
+		var request workspaceNodeSshSettingsRequest
+		err = decodeInput(&request)
+		if err == nil {
+			err = updateWorkspaceNodeSshSettings(*databasePath, request)
+			if err == nil {
+				result = map[string]bool{"updated": true}
+			}
+		}
 	case "migrate":
 		result, err = migrateCredentials(*databasePath, *credentialReader)
 	case "auth-status":
@@ -611,8 +628,12 @@ func loadTree(database *sql.DB) ([]*treeNode, error) {
 	if _, ok := columns["Port"]; ok {
 		portExpression = "Port"
 	}
+	sshAutoSudoExpression := "NULL"
+	if _, ok := columns["SshAutoSudo"]; ok {
+		sshAutoSudoExpression = "SshAutoSudo"
+	}
 	rows, err := database.Query(`
-SELECT Id, ParentId, Name, Kind, SortOrder, Protocol, Host, ` + portExpression + ` AS Port
+SELECT Id, ParentId, Name, Kind, SortOrder, Protocol, Host, ` + portExpression + ` AS Port, ` + sshAutoSudoExpression + ` AS SshAutoSudo
 FROM Nodes
 ORDER BY SortOrder, Name, Id;`)
 	if err != nil {
@@ -627,10 +648,14 @@ ORDER BY SortOrder, Name, Id;`)
 	protocolByID := map[string]sql.NullInt64{}
 	for rows.Next() {
 		var row nodeRow
-		if err := rows.Scan(&row.ID, &row.ParentID, &row.Name, &row.Kind, &row.SortOrder, &row.Protocol, &row.Host, &row.Port); err != nil {
+		if err := rows.Scan(&row.ID, &row.ParentID, &row.Name, &row.Kind, &row.SortOrder, &row.Protocol, &row.Host, &row.Port, &row.SshAutoSudo); err != nil {
 			return nil, fmt.Errorf("cannot read a connection: %w", err)
 		}
-		node := &treeNode{ID: strings.TrimSpace(row.ID), Name: row.Name}
+		node := &treeNode{ID: strings.TrimSpace(row.ID), Name: row.Name, Persisted: true}
+		if row.SshAutoSudo.Valid {
+			value := row.SshAutoSudo.Int64 != 0
+			node.SshAutoSudo = &value
+		}
 		if row.Kind == 0 {
 			node.Kind = "folder"
 		} else {
@@ -714,6 +739,69 @@ ORDER BY SortOrder, Name, Id;`)
 		parent.Children = append(parent.Children, node)
 	}
 	return roots, nil
+}
+
+func updateWorkspaceNodeSshSettings(databasePath string, request workspaceNodeSshSettingsRequest) error {
+	nodeID := strings.TrimSpace(request.NodeID)
+	if nodeID == "" || len(nodeID) > 128 {
+		return errors.New("workspace node id is invalid")
+	}
+
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+
+	exists, err := tableExists(database, "Nodes")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return errors.New("Wormhole database has no connections")
+	}
+	columns, err := tableColumns(database, "Nodes")
+	if err != nil {
+		return err
+	}
+	if _, ok := columns["SshAutoSudo"]; !ok {
+		return errors.New("Wormhole database schema is missing the SSH auto-sudo migration")
+	}
+
+	var value any
+	if request.SshAutoSudo != nil {
+		if *request.SshAutoSudo {
+			value = int64(1)
+		} else {
+			value = int64(0)
+		}
+	}
+	result, err := database.Exec(
+		"UPDATE Nodes SET SshAutoSudo = ?, UpdatedAt = ? WHERE lower(Id) = ?;",
+		value,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		normalizeID(nodeID),
+	)
+	if err != nil {
+		return fmt.Errorf("could not update SSH auto-sudo setting: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected > 0 {
+		return nil
+	}
+
+	var present int
+	err = database.QueryRow(
+		"SELECT 1 FROM Nodes WHERE lower(Id) = ? LIMIT 1;",
+		normalizeID(nodeID),
+	).Scan(&present)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errors.New("workspace node was not found")
+	}
+	return err
 }
 
 func loadCredentials(database *sql.DB) ([]credentialRecord, error) {

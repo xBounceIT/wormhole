@@ -3,36 +3,57 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
+	"os"
+	pathpkg "path"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 )
 
 const (
-	sshConnectTimeout     = 15 * time.Second
-	sshKeepAliveInterval  = 30 * time.Second
-	sshOutputDrainTimeout = 2 * time.Second
-	sshInputMaxBytes      = 1024 * 1024
-	sshInputQueueCapacity = 16
-	sshOutputChunk        = 16 * 1024
-	sshMaxColumns         = 500
-	sshMaxRows            = 500
+	sshConnectTimeout                 = 15 * time.Second
+	sshKeepAliveInterval              = 30 * time.Second
+	sshOutputDrainTimeout             = 2 * time.Second
+	sshInputMaxBytes                  = 1024 * 1024
+	sshInputQueueCapacity             = 16
+	sshOutputChunk                    = 16 * 1024
+	sshMaxColumns                     = 500
+	sshMaxRows                        = 500
+	sshAutoSudoTimeout                = 10 * time.Second
+	sshAutoSudoTailBytes              = 512
+	sshAutoSudoPromptBytes            = 16
+	sshSftpMaxPathBytes               = 16 * 1024
+	sshSftpMaxNameBytes               = 4 * 1024
+	sshSftpMaxEntryCount              = 4096
+	sshSftpListTimeout                = 30 * time.Second
+	sshSftpMaxSafeSize          int64 = 1<<53 - 1
+	sshSftpMaxTransferItems           = 256
+	sshSftpMaxTransferPlanCount       = 4096
+	sshSftpTransferBuffer             = 128 * 1024
 )
 
 var (
 	errSSHSessionClosed          = errors.New("SSH session is closed")
 	errSSHInputFull              = errors.New("SSH input queue is full")
 	errSSHHostFingerprintChanged = errors.New("SSH host fingerprint changed while connecting")
+	errSSHSftpClosed             = errors.New("SFTP browser is closed")
+	errSSHSftpOpening            = errors.New("SFTP browser is opening")
 )
 
 type sshHostKeyMismatchError struct {
@@ -49,25 +70,69 @@ func (err *sshHostKeyMismatchError) Error() string {
 }
 
 type sshWireCommand struct {
-	Type      string `json:"type"`
-	SessionID string `json:"session_id"`
-	NodeID    string `json:"node_id"`
-	Data      string `json:"data"`
-	Columns   uint32 `json:"columns"`
-	Rows      uint32 `json:"rows"`
+	Type            string                `json:"type"`
+	SessionID       string                `json:"session_id"`
+	NodeID          string                `json:"node_id"`
+	Data            string                `json:"data"`
+	Path            string                `json:"path"`
+	DestinationPath string                `json:"destination_path"`
+	RequestID       string                `json:"request_id"`
+	Pane            string                `json:"pane"`
+	Operation       string                `json:"operation"`
+	TransferID      string                `json:"transfer_id"`
+	ItemID          string                `json:"item_id"`
+	Direction       string                `json:"direction"`
+	Decision        string                `json:"decision"`
+	ApplyToAll      bool                  `json:"apply_to_all"`
+	Items           []sshSftpTransferItem `json:"items"`
+	Columns         uint32                `json:"columns"`
+	Rows            uint32                `json:"rows"`
 }
 
 type sshWireEvent struct {
-	Type            string            `json:"type"`
-	SessionID       string            `json:"session_id"`
-	Frame           *sshTerminalFrame `json:"frame,omitempty"`
-	Host            string            `json:"host,omitempty"`
-	Port            int               `json:"port,omitempty"`
-	Username        string            `json:"username,omitempty"`
-	Fingerprint     string            `json:"fingerprint,omitempty"`
-	Error           string            `json:"error,omitempty"`
-	HostKeyExpected string            `json:"host_key_expected,omitempty"`
-	HostKeyReceived string            `json:"host_key_received,omitempty"`
+	Type                string             `json:"type"`
+	SessionID           string             `json:"session_id"`
+	Frame               *sshTerminalFrame  `json:"frame,omitempty"`
+	Host                string             `json:"host,omitempty"`
+	Port                int                `json:"port,omitempty"`
+	Username            string             `json:"username,omitempty"`
+	Fingerprint         string             `json:"fingerprint,omitempty"`
+	Error               string             `json:"error,omitempty"`
+	HostKeyExpected     string             `json:"host_key_expected,omitempty"`
+	HostKeyReceived     string             `json:"host_key_received,omitempty"`
+	Path                string             `json:"path,omitempty"`
+	Entries             []sshSftpEntry     `json:"entries"`
+	QuickPaths          []sshSftpQuickPath `json:"quick_paths,omitempty"`
+	Truncated           bool               `json:"truncated"`
+	RequestID           string             `json:"request_id,omitempty"`
+	Pane                string             `json:"pane,omitempty"`
+	Operation           string             `json:"operation,omitempty"`
+	TransferID          string             `json:"transfer_id,omitempty"`
+	ItemID              string             `json:"item_id,omitempty"`
+	TransferState       string             `json:"transfer_state,omitempty"`
+	Direction           string             `json:"direction,omitempty"`
+	DisplayName         string             `json:"display_name,omitempty"`
+	ExpectedBytes       int64              `json:"expected_bytes,omitempty"`
+	BytesTransferred    int64              `json:"bytes_transferred,omitempty"`
+	IncomingSize        int64              `json:"incoming_size,omitempty"`
+	ExistingSize        int64              `json:"existing_size,omitempty"`
+	ExistingIsDirectory bool               `json:"existing_is_directory,omitempty"`
+}
+
+type sshSftpEntry struct {
+	Name            string `json:"name"`
+	FullPath        string `json:"full_path"`
+	IsDirectory     bool   `json:"is_directory"`
+	IsSymbolicLink  bool   `json:"is_symbolic_link"`
+	Size            int64  `json:"size"`
+	LastModifiedUTC string `json:"last_modified_utc,omitempty"`
+}
+
+type sshSftpTransferItem struct {
+	SourcePath  string `json:"source_path"`
+	Name        string `json:"name"`
+	IsDirectory bool   `json:"is_directory"`
+	Size        int64  `json:"size"`
 }
 
 type sshHostKeyTrustRequest struct {
@@ -90,6 +155,7 @@ type sshNodeRow struct {
 	UseInlinePassword    sql.NullInt64
 	KnownHostFingerprint sql.NullString
 	TunnelEnabled        sql.NullInt64
+	SshAutoSudo          sql.NullInt64
 }
 
 type sshNode struct {
@@ -106,6 +172,7 @@ type sshNode struct {
 	useInlinePassword    bool
 	knownHostFingerprint string
 	tunnelEnabled        *bool
+	autoSudo             *bool
 }
 
 type sshTarget struct {
@@ -117,6 +184,7 @@ type sshTarget struct {
 	privateKey           []byte
 	keyPassphrase        string
 	knownHostFingerprint string
+	autoSudo             bool
 }
 
 type sshCredentialRow struct {
@@ -135,6 +203,15 @@ type sshNativeSession struct {
 	stderr   io.Reader
 	server   *sshServer
 	terminal *sshTerminalEmulator
+	autoSudo *sshAutoSudoDriver
+
+	sftpMu         sync.Mutex
+	sftpListMu     sync.Mutex
+	sftpClient     *sftp.Client
+	sftpOpening    bool
+	sftpClosed     bool
+	sftpGeneration uint64
+	sftpListSeq    uint64
 
 	inputQueue       chan []byte
 	done             chan struct{}
@@ -154,6 +231,80 @@ type sshServer struct {
 	mu       sync.Mutex
 	sessions map[string]*sshNativeSession
 	pending  map[string]context.CancelFunc
+
+	transferMu sync.Mutex
+	transfers  map[string]*sshSftpTransfer
+	transferWG sync.WaitGroup
+}
+
+type sshSftpTransfer struct {
+	id        string
+	sessionID string
+	cancel    context.CancelFunc
+	decisions chan sshSftpTransferDecision
+
+	itemMu         sync.Mutex
+	itemCancels    map[string]context.CancelFunc
+	cancelledItems map[string]struct{}
+}
+
+type sshSftpTransferDecision struct {
+	itemID   string
+	decision string
+	applyAll bool
+}
+
+func awaitSftpTransferDecision(
+	ctx context.Context,
+	decisions <-chan sshSftpTransferDecision,
+	itemID string,
+) (sshSftpTransferDecision, error) {
+	for {
+		select {
+		case decision := <-decisions:
+			if decision.itemID == itemID {
+				return decision, nil
+			}
+		case <-ctx.Done():
+			return sshSftpTransferDecision{}, ctx.Err()
+		}
+	}
+}
+
+func (transfer *sshSftpTransfer) startItem(parent context.Context, itemID string) context.Context {
+	itemContext, cancel := context.WithCancel(parent)
+	transfer.itemMu.Lock()
+	if _, cancelled := transfer.cancelledItems[itemID]; cancelled {
+		cancel()
+	} else {
+		transfer.itemCancels[itemID] = cancel
+	}
+	transfer.itemMu.Unlock()
+	return itemContext
+}
+
+func (transfer *sshSftpTransfer) finishItem(itemID string) {
+	transfer.itemMu.Lock()
+	delete(transfer.itemCancels, itemID)
+	transfer.itemMu.Unlock()
+}
+
+func (transfer *sshSftpTransfer) cancelItem(itemID string) {
+	transfer.itemMu.Lock()
+	transfer.cancelledItems[itemID] = struct{}{}
+	cancel := transfer.itemCancels[itemID]
+	transfer.itemMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+type sshSftpTransferPlan struct {
+	sourcePath      string
+	destinationPath string
+	displayName     string
+	incomingSize    int64
+	isDirectory     bool
 }
 
 type sshEventWriter struct {
@@ -178,6 +329,7 @@ func serveSSH(databasePath string, input io.Reader, output io.Writer, electronUs
 		output:               &sshEventWriter{encoder: json.NewEncoder(output)},
 		sessions:             make(map[string]*sshNativeSession),
 		pending:              make(map[string]context.CancelFunc),
+		transfers:            make(map[string]*sshSftpTransfer),
 	}
 
 	scanner := bufio.NewScanner(input)
@@ -214,10 +366,37 @@ func (server *sshServer) handle(command sshWireCommand) {
 		server.resize(command)
 	case "snapshot":
 		server.snapshot(command)
+	case "sftp-open":
+		server.sftpOpen(command)
+	case "sftp-list":
+		server.sftpList(command)
+	case "sftp-local-list":
+		server.sftpLocalList(command)
+	case "sftp-operation":
+		server.sftpOperation(command)
+	case "sftp-transfer":
+		server.sftpTransfer(command)
+	case "sftp-transfer-decision":
+		server.sftpTransferDecision(command)
+	case "sftp-transfer-cancel":
+		server.sftpTransferCancel(command)
+	case "sftp-close":
+		server.sftpClose(command)
+	case "auto-sudo-cancel":
+		server.cancelAutoSudo(command)
 	case "close":
 		server.close(command.SessionID)
 	default:
 		server.writeError(command.SessionID, "unsupported SSH command")
+	}
+}
+
+func (server *sshServer) cancelAutoSudo(command sshWireCommand) {
+	server.mu.Lock()
+	native := server.sessions[command.SessionID]
+	server.mu.Unlock()
+	if native != nil {
+		native.cancelAutoSudo()
 	}
 }
 
@@ -344,6 +523,149 @@ func (server *sshServer) snapshot(command sshWireCommand) {
 	native.snapshot()
 }
 
+func (server *sshServer) sftpOpen(command sshWireCommand) {
+	native := server.session(command.SessionID)
+	if native == nil {
+		server.writeSftpRequestError(command.SessionID, command.RequestID, errSSHSessionClosed.Error())
+		return
+	}
+	native.startSftpOpen(command.RequestID)
+}
+
+func (server *sshServer) sftpList(command sshWireCommand) {
+	native := server.session(command.SessionID)
+	if native == nil {
+		server.writeSftpRequestError(command.SessionID, command.RequestID, errSSHSessionClosed.Error())
+		return
+	}
+	native.startSftpList(command.Path, 0, command.RequestID)
+}
+
+func (server *sshServer) sftpLocalList(command sshWireCommand) {
+	native := server.session(command.SessionID)
+	if native == nil {
+		server.writeSftpLocalError(command.SessionID, command.RequestID, command.Path, errSSHSessionClosed)
+		return
+	}
+	native.startLocalList(command.Path, command.RequestID)
+}
+
+func (server *sshServer) sftpOperation(command sshWireCommand) {
+	native := server.session(command.SessionID)
+	if native == nil {
+		server.writeSftpOperationError(command, errSSHSessionClosed)
+		return
+	}
+	native.startSftpOperation(command)
+}
+
+func (server *sshServer) sftpTransfer(command sshWireCommand) {
+	native := server.session(command.SessionID)
+	if native == nil {
+		server.writeTransferBatchError(command, errSSHSftpClosed)
+		return
+	}
+	if err := validateSftpTransferCommand(command); err != nil {
+		server.writeTransferBatchError(command, err)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	transfer := &sshSftpTransfer{
+		id:             command.TransferID,
+		sessionID:      command.SessionID,
+		cancel:         cancel,
+		decisions:      make(chan sshSftpTransferDecision, 1),
+		itemCancels:    make(map[string]context.CancelFunc),
+		cancelledItems: make(map[string]struct{}),
+	}
+	server.transferMu.Lock()
+	if _, exists := server.transfers[transfer.id]; exists {
+		server.transferMu.Unlock()
+		cancel()
+		server.writeTransferBatchError(command, errors.New("SFTP transfer is already running"))
+		return
+	}
+	server.transfers[transfer.id] = transfer
+	server.transferMu.Unlock()
+
+	server.transferWG.Add(1)
+	go func() {
+		defer server.transferWG.Done()
+		defer func() {
+			server.transferMu.Lock()
+			delete(server.transfers, transfer.id)
+			server.transferMu.Unlock()
+		}()
+		server.runSftpTransfer(native, command, transfer, ctx)
+	}()
+}
+
+func (server *sshServer) sftpTransferDecision(command sshWireCommand) {
+	if (command.Decision != "overwrite" && command.Decision != "skip") || command.ItemID == "" {
+		return
+	}
+	server.transferMu.Lock()
+	transfer := server.transfers[command.TransferID]
+	server.transferMu.Unlock()
+	if transfer == nil || transfer.sessionID != command.SessionID {
+		return
+	}
+	select {
+	case transfer.decisions <- sshSftpTransferDecision{
+		itemID:   command.ItemID,
+		decision: command.Decision,
+		applyAll: command.ApplyToAll,
+	}:
+	default:
+		// A decision that arrives after cancellation or after the conflict was already
+		// resolved is stale and must not affect a later conflict.
+	}
+}
+
+func (server *sshServer) sftpTransferCancel(command sshWireCommand) {
+	server.transferMu.Lock()
+	transfer := server.transfers[command.TransferID]
+	server.transferMu.Unlock()
+	if transfer != nil && transfer.sessionID == command.SessionID {
+		if command.ItemID == "" {
+			transfer.cancel()
+		} else {
+			transfer.cancelItem(command.ItemID)
+		}
+	}
+}
+
+func (server *sshServer) cancelTransfersForSession(sessionID string) {
+	server.transferMu.Lock()
+	transfers := make([]*sshSftpTransfer, 0)
+	for _, transfer := range server.transfers {
+		if transfer.sessionID == sessionID {
+			transfers = append(transfers, transfer)
+		}
+	}
+	server.transferMu.Unlock()
+	for _, transfer := range transfers {
+		transfer.cancel()
+	}
+}
+
+func (server *sshServer) sftpClose(command sshWireCommand) {
+	native := server.session(command.SessionID)
+	if native == nil {
+		server.writeSftpError(command.SessionID, errSSHSessionClosed.Error())
+		return
+	}
+	server.cancelTransfersForSession(command.SessionID)
+	native.closeSftp(true)
+}
+
+func (server *sshServer) session(sessionID string) *sshNativeSession {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	return server.sessions[sessionID]
+}
+
 func (server *sshServer) close(sessionID string) {
 	server.mu.Lock()
 	cancel := server.pending[sessionID]
@@ -354,6 +676,7 @@ func (server *sshServer) close(sessionID string) {
 	if cancel != nil {
 		cancel()
 	}
+	server.cancelTransfersForSession(sessionID)
 	if native != nil {
 		native.close(true)
 	}
@@ -423,13 +746,48 @@ func (server *sshServer) shutdown() {
 	for _, cancel := range pending {
 		cancel()
 	}
+	server.cancelAllTransfers()
 	for _, native := range sessions {
 		native.close(false)
+	}
+	server.transferWG.Wait()
+}
+
+func (server *sshServer) cancelAllTransfers() {
+	server.transferMu.Lock()
+	transfers := make([]*sshSftpTransfer, 0, len(server.transfers))
+	for _, transfer := range server.transfers {
+		transfers = append(transfers, transfer)
+	}
+	server.transferMu.Unlock()
+	for _, transfer := range transfers {
+		transfer.cancel()
 	}
 }
 
 func (server *sshServer) writeError(sessionID, message string) {
 	server.output.write(sshWireEvent{Type: "error", SessionID: sessionID, Error: message})
+}
+
+func (server *sshServer) writeSftpError(sessionID, message string, path ...string) {
+	event := sshWireEvent{Type: "sftp.error", SessionID: sessionID, Error: message}
+	if len(path) > 0 {
+		event.Path = path[0]
+	}
+	server.output.write(event)
+}
+
+func (server *sshServer) writeSftpRequestError(sessionID, requestID, message string, path ...string) {
+	event := sshWireEvent{
+		Type:      "sftp.error",
+		SessionID: sessionID,
+		RequestID: requestID,
+		Error:     message,
+	}
+	if len(path) > 0 {
+		event.Path = path[0]
+	}
+	server.output.write(event)
 }
 
 func (native *sshNativeSession) start() {
@@ -455,6 +813,9 @@ func (native *sshNativeSession) start() {
 		native.close(true)
 	}()
 	native.lifecycleMu.Unlock()
+	if native.autoSudo != nil {
+		native.autoSudo.start()
+	}
 }
 
 func (native *sshNativeSession) keepAlive() {
@@ -510,6 +871,9 @@ func (native *sshNativeSession) publishTerminalData(data []byte) {
 	if native.isClosed() {
 		return
 	}
+	if native.autoSudo != nil {
+		native.autoSudo.observe(data)
+	}
 	frame, changed, err := native.terminal.write(data)
 	if err != nil {
 		native.server.writeError(native.id, fmt.Sprintf("SSH terminal emulation failed: %v", err))
@@ -556,6 +920,25 @@ func (native *sshNativeSession) write(data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
+	if native.isClosed() {
+		return errSSHSessionClosed
+	}
+	if native.autoSudo != nil {
+		handled, err := native.autoSudo.queueUserInput(data)
+		if handled {
+			return err
+		}
+	}
+	return native.writeRaw(data)
+}
+
+func (native *sshNativeSession) writeRaw(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	if native.isClosed() {
+		return errSSHSessionClosed
+	}
 	if native.inputQueue == nil || native.done == nil {
 		_, err := native.stdin.Write(data)
 		return err
@@ -597,13 +980,19 @@ func (native *sshNativeSession) resize(columns, rows uint32) error {
 
 func (native *sshNativeSession) close(notify bool) {
 	native.closeOnce.Do(func() {
-		native.terminalOutputMu.Lock()
-		defer native.terminalOutputMu.Unlock()
 		native.lifecycleMu.Lock()
 		native.closed = true
 		native.lifecycleMu.Unlock()
 		if native.done != nil {
 			close(native.done)
+		}
+		native.closeSftp(false)
+		native.terminalOutputMu.Lock()
+		defer native.terminalOutputMu.Unlock()
+		// publishTerminalData holds terminalOutputMu before it touches the Auto Sudo driver.
+		// Keep shutdown in that same order so disconnect cannot deadlock with prompt detection.
+		if native.autoSudo != nil {
+			native.autoSudo.dispose()
 		}
 		if native.stdin != nil {
 			_ = native.stdin.Close()
@@ -623,6 +1012,12 @@ func (native *sshNativeSession) close(notify bool) {
 	})
 }
 
+func (native *sshNativeSession) cancelAutoSudo() {
+	if native.autoSudo != nil {
+		native.autoSudo.dispose()
+	}
+}
+
 func (native *sshNativeSession) isClosed() bool {
 	native.lifecycleMu.Lock()
 	defer native.lifecycleMu.Unlock()
@@ -637,6 +1032,9 @@ func (native *sshNativeSession) startInputPump() {
 		for {
 			select {
 			case data := <-native.inputQueue:
+				if native.isClosed() {
+					return
+				}
 				if _, err := native.stdin.Write(data); err != nil {
 					native.close(native.server != nil)
 					return
@@ -646,6 +1044,1324 @@ func (native *sshNativeSession) startInputPump() {
 			}
 		}
 	}()
+}
+
+type sshAutoSudoState uint8
+
+const (
+	sshAutoSudoWaitingForShell sshAutoSudoState = iota
+	sshAutoSudoWaitingForPassword
+	sshAutoSudoDone
+)
+
+// sshAutoSudoDriver intentionally lives in the Go backend. The renderer must never receive the
+// saved login password, and the password is only queued after sudo emits a per-invocation prompt
+// marker. A nonce avoids treating a login banner or shell output that merely mentions "password:"
+// as permission to send the secret. If sudo is configured as NOPASSWD (or a cached timestamp skips
+// the prompt), the timeout clears the password without sending it into the root shell.
+type sshAutoSudoDriver struct {
+	session  *sshNativeSession
+	password string
+	prompt   string
+
+	mu           sync.Mutex
+	state        sshAutoSudoState
+	tail         []byte
+	pendingInput []byte
+	timeout      *time.Timer
+}
+
+func newSSHAutoSudoDriver(session *sshNativeSession, password string) *sshAutoSudoDriver {
+	// A line-oriented sudo prompt cannot safely carry a password containing a newline. Refuse to
+	// automate such a credential rather than risk turning the suffix into a shell command.
+	if password == "" || strings.ContainsAny(password, "\r\n") {
+		return nil
+	}
+	var nonce [sshAutoSudoPromptBytes]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		// Auto sudo is optional; if the nonce cannot be generated, keep the secret out of the shell.
+		return nil
+	}
+	return &sshAutoSudoDriver{
+		session:  session,
+		password: password,
+		prompt:   "__wormhole_sudo_" + hex.EncodeToString(nonce[:]) + "__:",
+		state:    sshAutoSudoWaitingForShell,
+		tail:     make([]byte, 0, sshAutoSudoTailBytes),
+	}
+}
+
+func (driver *sshAutoSudoDriver) start() {
+	driver.mu.Lock()
+	defer driver.mu.Unlock()
+	driver.startLocked()
+}
+
+func (driver *sshAutoSudoDriver) startLocked() {
+	if driver.state != sshAutoSudoWaitingForShell {
+		return
+	}
+	driver.state = sshAutoSudoWaitingForPassword
+	driver.timeout = time.AfterFunc(sshAutoSudoTimeout, driver.onTimeout)
+	command := fmt.Sprintf("sudo -S -p '%s' su\r", driver.prompt)
+	if err := driver.session.writeRaw([]byte(command)); err != nil {
+		driver.finishLocked(nil)
+	}
+}
+
+func (driver *sshAutoSudoDriver) queueUserInput(data []byte) (bool, error) {
+	driver.mu.Lock()
+	defer driver.mu.Unlock()
+	if driver.state == sshAutoSudoDone {
+		return false, nil
+	}
+	if len(driver.pendingInput)+len(data) > sshInputMaxBytes {
+		return true, errSSHInputFull
+	}
+	driver.pendingInput = append(driver.pendingInput, data...)
+	return true, nil
+}
+
+func (driver *sshAutoSudoDriver) observe(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+
+	driver.mu.Lock()
+	defer driver.mu.Unlock()
+	switch driver.state {
+	case sshAutoSudoWaitingForShell:
+		driver.startLocked()
+	case sshAutoSudoWaitingForPassword:
+		driver.tail = append(driver.tail, data...)
+		if len(driver.tail) > sshAutoSudoTailBytes {
+			driver.tail = driver.tail[len(driver.tail)-sshAutoSudoTailBytes:]
+		}
+		if hasSSHSudoPasswordPrompt(driver.tail, driver.prompt) {
+			passwordInput := append([]byte(driver.password), '\r')
+			driver.finishLocked(passwordInput)
+			clear(passwordInput)
+		}
+	}
+}
+
+func hasSSHSudoPasswordPrompt(tail []byte, prompt string) bool {
+	trimmed := strings.TrimRight(string(tail), " \t\r\n")
+	lineStart := strings.LastIndexAny(trimmed, "\r\n")
+	return trimmed[lineStart+1:] == prompt
+}
+
+func (driver *sshAutoSudoDriver) onTimeout() {
+	driver.mu.Lock()
+	if driver.state == sshAutoSudoWaitingForPassword {
+		driver.finishLocked(nil)
+	}
+	driver.mu.Unlock()
+}
+
+func (driver *sshAutoSudoDriver) finishLocked(priorityInput []byte) {
+	driver.state = sshAutoSudoDone
+	if driver.timeout != nil {
+		driver.timeout.Stop()
+		driver.timeout = nil
+	}
+	pendingInput := driver.pendingInput
+	driver.pendingInput = nil
+	driver.password = ""
+	driver.tail = driver.tail[:0]
+	if len(priorityInput) > 0 {
+		_ = driver.session.writeRaw(priorityInput)
+	}
+	if len(pendingInput) > 0 {
+		_ = driver.session.writeRaw(pendingInput)
+	}
+	clear(pendingInput)
+}
+
+func (driver *sshAutoSudoDriver) dispose() {
+	driver.mu.Lock()
+	driver.finishLocked(nil)
+	driver.mu.Unlock()
+}
+
+func (native *sshNativeSession) startSftpOpen(requestID string) {
+	if native.server == nil {
+		return
+	}
+
+	native.sftpMu.Lock()
+	if native.isClosed() {
+		native.sftpMu.Unlock()
+		native.server.writeSftpRequestError(native.id, requestID, errSSHSessionClosed.Error())
+		return
+	}
+	if native.sftpOpening {
+		native.sftpMu.Unlock()
+		native.server.writeSftpRequestError(native.id, requestID, errSSHSftpOpening.Error())
+		return
+	}
+
+	native.sftpClosed = false
+	native.sftpGeneration++
+	generation := native.sftpGeneration
+	clientReady := native.sftpClient != nil
+	if !clientReady {
+		native.sftpOpening = true
+	}
+	native.sftpMu.Unlock()
+
+	// Reserve the generation before launching network work. A close command can therefore
+	// invalidate this open even if the goroutine has not started yet.
+	native.server.output.write(sshWireEvent{
+		Type:      "sftp.opening",
+		SessionID: native.id,
+		RequestID: requestID,
+	})
+	if clientReady {
+		// Opening is idempotent after an initial directory-list failure. The client may be healthy
+		// even when the first ReadDir failed, so retry the listing instead of another SSH channel.
+		native.startSftpListWithGeneration("", generation, requestID)
+		return
+	}
+	go native.openSftp(generation, requestID)
+}
+
+func (native *sshNativeSession) openSftp(generation uint64, requestID string) {
+	client, err := sftp.NewClient(native.client)
+	if err != nil {
+		native.sftpMu.Lock()
+		current := native.sftpGeneration == generation
+		if current {
+			native.sftpOpening = false
+		}
+		native.sftpMu.Unlock()
+		if !current || native.isClosed() {
+			return
+		}
+		native.server.writeSftpRequestError(
+			native.id,
+			requestID,
+			fmt.Sprintf("could not open SFTP: %v", err),
+		)
+		return
+	}
+
+	native.sftpMu.Lock()
+	current := native.sftpGeneration == generation
+	closed := native.sftpClosed || native.isClosed()
+	if current && !closed {
+		native.sftpClient = client
+	}
+	if current {
+		native.sftpOpening = false
+	}
+	native.sftpMu.Unlock()
+	if !current || closed {
+		_ = client.Close()
+		return
+	}
+
+	native.startSftpListWithGeneration("", generation, requestID)
+}
+
+func (native *sshNativeSession) startSftpList(requestedPath string, generation uint64, requestID string) {
+	path, err := normalizeSftpPath(requestedPath)
+	if err != nil {
+		native.server.writeSftpRequestError(native.id, requestID, err.Error(), requestedPath)
+		return
+	}
+	native.startSftpListWithGeneration(path, generation, requestID)
+}
+
+func (native *sshNativeSession) startSftpListWithGeneration(requestedPath string, generation uint64, requestID string) {
+	native.sftpMu.Lock()
+	client := native.sftpClient
+	currentGeneration := native.sftpGeneration
+	if generation == 0 {
+		generation = currentGeneration
+	}
+	if generation != currentGeneration || client == nil || native.sftpClosed || native.isClosed() {
+		native.sftpMu.Unlock()
+		native.server.writeSftpRequestError(native.id, requestID, errSSHSftpClosed.Error(), requestedPath)
+		return
+	}
+	native.sftpListSeq++
+	sequence := native.sftpListSeq
+	native.sftpMu.Unlock()
+
+	go native.listSftp(requestedPath, generation, sequence, requestID)
+}
+
+func (native *sshNativeSession) listSftp(requestedPath string, generation, sequence uint64, requestID string) {
+	// pkg/sftp supports concurrent clients, but serializing directory reads keeps this browser's
+	// request order deterministic while allowing closeSftp to interrupt an in-flight read.
+	native.sftpListMu.Lock()
+	defer native.sftpListMu.Unlock()
+
+	native.sftpMu.Lock()
+	client := native.sftpClient
+	current := generation == native.sftpGeneration && sequence == native.sftpListSeq && !native.sftpClosed
+	native.sftpMu.Unlock()
+	if !current || client == nil || native.isClosed() {
+		return
+	}
+
+	resolvedPath, entries, truncated, err := readSftpDirectory(client, requestedPath)
+	if err != nil {
+		native.sftpMu.Lock()
+		current = generation == native.sftpGeneration && sequence == native.sftpListSeq && !native.sftpClosed
+		native.sftpMu.Unlock()
+		if !current || native.isClosed() {
+			return
+		}
+		native.server.writeSftpRequestError(
+			native.id,
+			requestID,
+			fmt.Sprintf("could not list SFTP directory: %v", err),
+			requestedPath,
+		)
+		return
+	}
+
+	native.sftpMu.Lock()
+	current = generation == native.sftpGeneration && sequence == native.sftpListSeq && !native.sftpClosed
+	native.sftpMu.Unlock()
+	if !current || native.isClosed() {
+		return
+	}
+	native.server.output.write(sshWireEvent{
+		Type:      "sftp.ready",
+		SessionID: native.id,
+		Path:      resolvedPath,
+		Entries:   entries,
+		Truncated: truncated,
+		RequestID: requestID,
+	})
+}
+
+func (native *sshNativeSession) closeSftp(notify bool) {
+	native.sftpMu.Lock()
+	native.sftpGeneration++
+	native.sftpListSeq++
+	native.sftpClosed = true
+	native.sftpOpening = false
+	client := native.sftpClient
+	native.sftpClient = nil
+	native.sftpMu.Unlock()
+	if client != nil {
+		_ = client.Close()
+	}
+	if notify && native.server != nil && !native.isClosed() {
+		native.server.output.write(sshWireEvent{Type: "sftp.closed", SessionID: native.id})
+	}
+}
+
+func (native *sshNativeSession) startLocalList(requestedPath, requestID string) {
+	path, err := normalizeLocalPath(requestedPath)
+	if err != nil {
+		native.writeLocalSftpError(requestID, requestedPath, err)
+		return
+	}
+	go func() {
+		quickPaths := buildLocalQuickPaths()
+		entries, truncated, err := readLocalDirectory(path)
+		if err != nil {
+			native.writeLocalSftpError(requestID, path, err)
+			return
+		}
+		if native.isClosed() || native.server == nil {
+			return
+		}
+		native.server.output.write(sshWireEvent{
+			Type:       "sftp.local.ready",
+			SessionID:  native.id,
+			RequestID:  requestID,
+			Pane:       "local",
+			Path:       path,
+			QuickPaths: quickPaths,
+			Entries:    entries,
+			Truncated:  truncated,
+		})
+	}()
+}
+
+func (server *sshServer) writeSftpLocalError(sessionID, requestID, path string, err error) {
+	server.output.write(sshWireEvent{
+		Type:      "sftp.local.error",
+		SessionID: sessionID,
+		RequestID: requestID,
+		Pane:      "local",
+		Path:      path,
+		Error:     safeSftpError(err),
+	})
+}
+
+func (server *sshServer) writeSftpOperationError(command sshWireCommand, err error) {
+	server.output.write(sshWireEvent{
+		Type:      "sftp.operation",
+		SessionID: command.SessionID,
+		RequestID: command.RequestID,
+		Pane:      command.Pane,
+		Operation: command.Operation,
+		Path:      command.Path,
+		Error:     safeSftpError(err),
+	})
+}
+
+func (native *sshNativeSession) writeLocalSftpError(requestID, path string, err error) {
+	if native.server == nil || native.isClosed() {
+		return
+	}
+	native.server.output.write(sshWireEvent{
+		Type:      "sftp.local.error",
+		SessionID: native.id,
+		RequestID: requestID,
+		Pane:      "local",
+		Path:      path,
+		Error:     safeSftpError(err),
+	})
+}
+
+func (native *sshNativeSession) startSftpOperation(command sshWireCommand) {
+	go func() {
+		err := native.runSftpOperation(command)
+		if native.server == nil || native.isClosed() {
+			return
+		}
+		event := sshWireEvent{
+			Type:      "sftp.operation",
+			SessionID: native.id,
+			RequestID: command.RequestID,
+			Pane:      command.Pane,
+			Operation: command.Operation,
+			Path:      command.Path,
+		}
+		if err != nil {
+			event.Error = safeSftpError(err)
+		}
+		native.server.output.write(event)
+	}()
+}
+
+func (native *sshNativeSession) runSftpOperation(command sshWireCommand) error {
+	if command.Pane != "local" && command.Pane != "remote" {
+		return errors.New("SFTP pane is invalid")
+	}
+	if command.Operation != "mkdir" && command.Operation != "file" &&
+		command.Operation != "delete" && command.Operation != "rename" && command.Operation != "open" {
+		return errors.New("SFTP operation is invalid")
+	}
+	if command.Pane == "remote" && command.Operation == "open" {
+		return errors.New("remote files cannot be opened locally")
+	}
+	if command.Pane == "local" {
+		path, err := normalizeLocalPath(command.Path)
+		if err != nil {
+			return err
+		}
+		if isLocalPathRoot(path) && (command.Operation == "delete" || command.Operation == "rename") {
+			return errors.New("cannot modify the local filesystem root")
+		}
+		if command.Operation == "rename" {
+			destination, err := normalizeLocalPath(command.DestinationPath)
+			if err != nil {
+				return err
+			}
+			if isLocalPathRoot(destination) {
+				return errors.New("cannot rename to the local filesystem root")
+			}
+			return os.Rename(path, destination)
+		}
+		switch command.Operation {
+		case "mkdir":
+			return os.MkdirAll(path, 0o755)
+		case "file":
+			file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+			if err != nil {
+				return err
+			}
+			return file.Close()
+		case "delete":
+			return os.RemoveAll(path)
+		case "open":
+			return openLocalPath(path)
+		default:
+			return errors.New("SFTP operation is invalid")
+		}
+	}
+
+	path, err := normalizeSftpPath(command.Path)
+	if err != nil || path == "" {
+		if err != nil {
+			return err
+		}
+		return errors.New("SFTP path is required")
+	}
+	if path == "/" && (command.Operation == "delete" || command.Operation == "rename") {
+		return errors.New("cannot modify the remote filesystem root")
+	}
+	return native.withSftpClient(func(client *sftp.Client) error {
+		switch command.Operation {
+		case "mkdir":
+			return client.MkdirAll(path)
+		case "file":
+			file, err := client.Create(path)
+			if err != nil {
+				return err
+			}
+			return file.Close()
+		case "delete":
+			return removeRemotePath(client, path)
+		case "rename":
+			destination, err := normalizeSftpPath(command.DestinationPath)
+			if err != nil || destination == "" {
+				if err != nil {
+					return err
+				}
+				return errors.New("SFTP destination path is required")
+			}
+			if destination == "/" {
+				return errors.New("cannot rename to the remote filesystem root")
+			}
+			return client.Rename(path, destination)
+		default:
+			return errors.New("SFTP operation is invalid")
+		}
+	})
+}
+
+func isLocalPathRoot(path string) bool {
+	clean := filepath.Clean(path)
+	return filepath.Dir(clean) == clean
+}
+
+func (native *sshNativeSession) withSftpClient(action func(*sftp.Client) error) error {
+	native.sftpListMu.Lock()
+	defer native.sftpListMu.Unlock()
+	native.sftpMu.Lock()
+	client := native.sftpClient
+	closed := native.sftpClosed || native.isClosed()
+	native.sftpMu.Unlock()
+	if client == nil || closed {
+		return errSSHSftpClosed
+	}
+	return action(client)
+}
+
+func normalizeLocalPath(value string) (string, error) {
+	if len([]byte(value)) > sshSftpMaxPathBytes {
+		return "", errors.New("local path is too long")
+	}
+	if strings.ContainsRune(value, '\x00') {
+		return "", errors.New("local path is invalid")
+	}
+	if value == "" {
+		home, err := os.UserHomeDir()
+		if err != nil || home == "" {
+			return "", errors.New("could not determine the local home directory")
+		}
+		value = home
+	}
+	if !filepath.IsAbs(value) {
+		return "", errors.New("local path must be absolute")
+	}
+	return filepath.Clean(value), nil
+}
+
+func readLocalDirectory(path string) ([]sshSftpEntry, bool, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return nil, false, err
+	}
+	truncated := len(entries) > sshSftpMaxEntryCount
+	if truncated {
+		entries = entries[:sshSftpMaxEntryCount]
+	}
+	result := make([]sshSftpEntry, 0, len(entries))
+	for _, entry := range entries {
+		name := entry.Name()
+		if !isSafeSftpName(name) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		fullPath := filepath.Join(path, name)
+		if len([]byte(fullPath)) > sshSftpMaxPathBytes {
+			truncated = true
+			continue
+		}
+		size := int64(0)
+		if !info.IsDir() {
+			size = info.Size()
+			if size < 0 {
+				size = 0
+			} else if size > sshSftpMaxSafeSize {
+				size = sshSftpMaxSafeSize
+			}
+		}
+		lastModified := ""
+		if !info.ModTime().IsZero() {
+			lastModified = info.ModTime().UTC().Format(time.RFC3339Nano)
+		}
+		result = append(result, sshSftpEntry{
+			Name:            name,
+			FullPath:        fullPath,
+			IsDirectory:     info.IsDir(),
+			IsSymbolicLink:  entry.Type()&os.ModeSymlink != 0,
+			Size:            size,
+			LastModifiedUTC: lastModified,
+		})
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].IsDirectory != result[j].IsDirectory {
+			return result[i].IsDirectory
+		}
+		return strings.ToLower(result[i].Name) < strings.ToLower(result[j].Name)
+	})
+	return result, truncated, nil
+}
+
+func openLocalPath(path string) error {
+	return openLocalPathWithShell(path)
+}
+
+func removeRemotePath(client *sftp.Client, path string) error {
+	info, err := client.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return client.Remove(path)
+	}
+	entries, err := client.ReadDir(path)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !isSafeSftpName(name) {
+			continue
+		}
+		if err := removeRemotePath(client, pathpkg.Join(path, name)); err != nil {
+			return err
+		}
+	}
+	return client.RemoveDirectory(path)
+}
+
+func validateSftpTransferCommand(command sshWireCommand) error {
+	if command.TransferID == "" || len(command.TransferID) > 128 {
+		return errors.New("SFTP transfer id is invalid")
+	}
+	if command.Direction != "local-to-remote" && command.Direction != "remote-to-local" && command.Direction != "local-to-local" {
+		return errors.New("SFTP transfer direction is invalid")
+	}
+	if len(command.Items) == 0 || len(command.Items) > sshSftpMaxTransferItems {
+		return errors.New("SFTP transfer item count is invalid")
+	}
+	if command.DestinationPath == "" {
+		return errors.New("SFTP transfer destination is required")
+	}
+	if command.Direction == "local-to-remote" {
+		if _, err := normalizeSftpPath(command.DestinationPath); err != nil {
+			return err
+		}
+	} else if _, err := normalizeLocalPath(command.DestinationPath); err != nil {
+		return err
+	}
+	for _, item := range command.Items {
+		if !isSafeTransferName(item.Name) {
+			return errors.New("SFTP transfer item name is invalid")
+		}
+		if item.SourcePath == "" {
+			return errors.New("SFTP transfer source is required")
+		}
+		if item.Size < 0 {
+			return errors.New("SFTP transfer size is invalid")
+		}
+		if command.Direction == "remote-to-local" {
+			if _, err := normalizeSftpPath(item.SourcePath); err != nil {
+				return err
+			}
+		} else if _, err := normalizeLocalPath(item.SourcePath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func isSafeTransferName(name string) bool {
+	if name == "" || name == "." || name == ".." || len([]byte(name)) > sshSftpMaxNameBytes {
+		return false
+	}
+	return !strings.ContainsAny(name, "/\\:\x00")
+}
+
+func (server *sshServer) writeTransferBatchError(command sshWireCommand, err error) {
+	server.output.write(sshWireEvent{
+		Type:          "sftp.transfer",
+		SessionID:     command.SessionID,
+		TransferID:    command.TransferID,
+		TransferState: "batch-failed",
+		Direction:     command.Direction,
+		Error:         safeSftpError(err),
+	})
+}
+
+func (server *sshServer) writeTransferBatchTerminal(command sshWireCommand, state string) {
+	server.output.write(sshWireEvent{
+		Type:          "sftp.transfer",
+		SessionID:     command.SessionID,
+		TransferID:    command.TransferID,
+		TransferState: state,
+		Direction:     command.Direction,
+	})
+}
+
+func (server *sshServer) writeTransferEvent(command sshWireCommand, itemID, state, displayName string, expected, transferred int64, err error) {
+	event := sshWireEvent{
+		Type:             "sftp.transfer",
+		SessionID:        command.SessionID,
+		TransferID:       command.TransferID,
+		ItemID:           itemID,
+		TransferState:    state,
+		Direction:        command.Direction,
+		DisplayName:      displayName,
+		ExpectedBytes:    expected,
+		BytesTransferred: transferred,
+	}
+	if err != nil {
+		event.Error = safeSftpError(err)
+	}
+	server.output.write(event)
+}
+
+func (server *sshServer) runSftpTransfer(native *sshNativeSession, command sshWireCommand, transfer *sshSftpTransfer, ctx context.Context) {
+	var client *sftp.Client
+	remote := command.Direction != "local-to-local"
+	if remote {
+		native.sftpListMu.Lock()
+		defer native.sftpListMu.Unlock()
+		native.sftpMu.Lock()
+		client = native.sftpClient
+		closed := native.sftpClosed || native.isClosed()
+		native.sftpMu.Unlock()
+		if client == nil || closed {
+			server.writeTransferBatchError(command, errSSHSftpClosed)
+			return
+		}
+	}
+
+	plans, err := buildSftpTransferPlans(client, command, ctx)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			server.writeTransferBatchTerminal(command, "batch-cancelled")
+		} else {
+			server.writeTransferBatchError(command, err)
+		}
+		return
+	}
+
+	var sticky *sshSftpTransferDecision
+	for index, plan := range plans {
+		if err := ctx.Err(); err != nil {
+			server.writeTransferBatchTerminal(command, "batch-cancelled")
+			return
+		}
+		itemID := sftpTransferItemID(index)
+		itemContext := transfer.startItem(ctx, itemID)
+		err := func() error {
+			defer transfer.finishItem(itemID)
+			if err := itemContext.Err(); err != nil {
+				return err
+			}
+			if command.Direction != "local-to-remote" {
+				if err := validateLocalTransferDestinationParents(plan.destinationPath); err != nil {
+					return err
+				}
+			}
+			if plan.isDirectory {
+				if err := removeTransferDestinationSymlink(client, command.Direction, plan.destinationPath); err != nil {
+					return err
+				}
+				return ensureTransferDirectory(client, command.Direction, plan.destinationPath)
+			}
+
+			exists, isDirectory, existingSize, err := transferDestinationInfo(client, command.Direction, plan.destinationPath)
+			if err != nil {
+				return err
+			}
+			decision := "overwrite"
+			if exists {
+				if sticky != nil {
+					decision = sticky.decision
+				} else {
+					server.output.write(sshWireEvent{
+						Type:       "sftp.conflict",
+						SessionID:  command.SessionID,
+						TransferID: command.TransferID,
+						// Item IDs are scoped by TransferID in the renderer. Keeping the index
+						// independent of the caller-supplied transfer ID keeps the wire value
+						// bounded even when a valid transfer ID is near its length limit.
+						ItemID:              itemID,
+						Direction:           command.Direction,
+						DisplayName:         plan.displayName,
+						Path:                plan.destinationPath,
+						IncomingSize:        plan.incomingSize,
+						ExistingSize:        existingSize,
+						ExistingIsDirectory: isDirectory,
+					})
+					chosen, err := awaitSftpTransferDecision(
+						itemContext,
+						transfer.decisions,
+						itemID,
+					)
+					if err != nil {
+						return err
+					}
+					decision = chosen.decision
+					if chosen.applyAll {
+						copy := chosen
+						sticky = &copy
+					}
+				}
+			}
+			if decision == "skip" || itemContext.Err() != nil {
+				return itemContext.Err()
+			}
+
+			if err := ensureTransferParent(client, command.Direction, plan.destinationPath); err != nil {
+				return err
+			}
+			if err := removeTransferDestinationSymlink(client, command.Direction, plan.destinationPath); err != nil {
+				return err
+			}
+			if err := itemContext.Err(); err != nil {
+				return err
+			}
+			server.writeTransferEvent(command, itemID, "running", plan.displayName, plan.incomingSize, 0, nil)
+			var lastTransferred int64
+			err = copyTransferFile(itemContext, client, command.Direction, plan, func(transferred int64) {
+				lastTransferred = transferred
+				server.writeTransferEvent(command, itemID, "progress", plan.displayName, plan.incomingSize, transferred, nil)
+			})
+			if errors.Is(err, context.Canceled) {
+				server.writeTransferEvent(command, itemID, "cancelled", plan.displayName, plan.incomingSize, lastTransferred, nil)
+				return err
+			}
+			if err != nil {
+				server.writeTransferEvent(command, itemID, "failed", plan.displayName, plan.incomingSize, lastTransferred, err)
+				return nil
+			}
+			server.writeTransferEvent(command, itemID, "completed", plan.displayName, plan.incomingSize, plan.incomingSize, nil)
+			return nil
+		}()
+		if errors.Is(err, context.Canceled) {
+			if ctx.Err() != nil {
+				server.writeTransferBatchTerminal(command, "batch-cancelled")
+				return
+			}
+			// A row-level cancellation only skips this plan; later rows in the same
+			// batch remain available, matching the WinUI transfer queue.
+			continue
+		}
+		if err != nil {
+			server.writeTransferBatchError(command, err)
+			return
+		}
+	}
+	server.writeTransferBatchTerminal(command, "batch-completed")
+}
+
+func sftpTransferItemID(index int) string {
+	return fmt.Sprintf("item-%d", index)
+}
+
+func buildSftpTransferPlans(client *sftp.Client, command sshWireCommand, ctx context.Context) ([]sshSftpTransferPlan, error) {
+	plans := make([]sshSftpTransferPlan, 0)
+	for _, item := range command.Items {
+		if command.Direction == "remote-to-local" {
+			if err := appendRemoteTransferPlans(client, command.DestinationPath, item, &plans, ctx); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := appendLocalTransferPlans(command.Direction, command.DestinationPath, item, &plans, ctx); err != nil {
+				return nil, err
+			}
+		}
+		if len(plans) > sshSftpMaxTransferPlanCount {
+			return nil, errors.New("SFTP transfer contains too many files")
+		}
+	}
+	return plans, nil
+}
+
+func appendLocalTransferPlans(direction, destination string, item sshSftpTransferItem, plans *[]sshSftpTransferPlan, ctx context.Context) error {
+	source, err := normalizeLocalPath(item.SourcePath)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(source)
+	if err != nil {
+		return err
+	}
+	isDirectory := isSftpTransferDirectory(info)
+	if direction == "local-to-local" {
+		target := joinTransferDestination(direction, destination, item.Name)
+		if err := validateLocalTransferDestination(source, destination, target, isDirectory); err != nil {
+			return err
+		}
+	}
+	if !isDirectory {
+		*plans = append(*plans, sshSftpTransferPlan{
+			sourcePath:      source,
+			destinationPath: joinTransferDestination(direction, destination, item.Name),
+			displayName:     item.Name,
+			incomingSize:    safeTransferSize(info.Size()),
+		})
+		return nil
+	}
+
+	rootDestination := joinTransferDestination(direction, destination, item.Name)
+	*plans = append(*plans, sshSftpTransferPlan{
+		sourcePath:      source,
+		destinationPath: rootDestination,
+		displayName:     item.Name,
+		isDirectory:     true,
+	})
+	return filepath.WalkDir(source, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if path == source {
+			return nil
+		}
+		if len(*plans) >= sshSftpMaxTransferPlanCount {
+			return errors.New("SFTP transfer contains too many files")
+		}
+		relative, err := filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		relative = filepath.ToSlash(relative)
+		if !isSafeTransferRelativePath(relative) {
+			return fmt.Errorf("local transfer path is unsafe: %s", relative)
+		}
+		displayName := item.Name + "/" + relative
+		*plans = append(*plans, sshSftpTransferPlan{
+			sourcePath:      path,
+			destinationPath: joinTransferDestination(direction, destination, displayName),
+			displayName:     displayName,
+			incomingSize:    localEntrySize(entry),
+			isDirectory:     entry.IsDir(),
+		})
+		return nil
+	})
+}
+
+func validateLocalTransferDestination(source, destination, target string, sourceIsDirectory bool) error {
+	source = filepath.Clean(source)
+	destination = filepath.Clean(destination)
+	target = filepath.Clean(target)
+	if sameLocalPath(source, target) {
+		return errors.New("SFTP source and destination are the same path")
+	}
+	if sourceIsDirectory && (localPathContains(source, destination) || localPathContains(source, target)) {
+		return errors.New("SFTP cannot copy a folder into itself")
+	}
+	return nil
+}
+
+func sameLocalPath(left, right string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
+	}
+	return filepath.Clean(left) == filepath.Clean(right)
+}
+
+func localPathContains(parent, candidate string) bool {
+	parent = filepath.Clean(parent)
+	candidate = filepath.Clean(candidate)
+	if sameLocalPath(parent, candidate) {
+		return true
+	}
+	relative, err := filepath.Rel(parent, candidate)
+	if err != nil || filepath.IsAbs(relative) {
+		return false
+	}
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func validateLocalTransferDestinationParents(path string) error {
+	current := filepath.Dir(filepath.Clean(path))
+	for {
+		info, err := os.Lstat(current)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("SFTP destination contains a symbolic link: %s", current)
+			}
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+
+		parent := filepath.Dir(current)
+		if sameLocalPath(parent, current) {
+			return nil
+		}
+		current = parent
+	}
+}
+
+func appendRemoteTransferPlans(client *sftp.Client, destination string, item sshSftpTransferItem, plans *[]sshSftpTransferPlan, ctx context.Context) error {
+	source, err := normalizeSftpPath(item.SourcePath)
+	if err != nil || source == "" {
+		if err != nil {
+			return err
+		}
+		return errors.New("remote transfer source is required")
+	}
+	info, err := client.Lstat(source)
+	if err != nil {
+		return err
+	}
+	if !isSftpTransferDirectory(info) {
+		*plans = append(*plans, sshSftpTransferPlan{
+			sourcePath:      source,
+			destinationPath: joinTransferDestination("remote-to-local", destination, item.Name),
+			displayName:     item.Name,
+			incomingSize:    safeTransferSize(info.Size()),
+		})
+		return nil
+	}
+
+	*plans = append(*plans, sshSftpTransferPlan{
+		sourcePath:      source,
+		destinationPath: joinTransferDestination("remote-to-local", destination, item.Name),
+		displayName:     item.Name,
+		isDirectory:     true,
+	})
+	return walkRemoteTransferPlans(client, source, destination, item.Name, plans, ctx)
+}
+
+func isSftpTransferDirectory(info os.FileInfo) bool {
+	return info.IsDir() && info.Mode()&os.ModeSymlink == 0
+}
+
+func walkRemoteTransferPlans(client *sftp.Client, source, destination, relativeRoot string, plans *[]sshSftpTransferPlan, ctx context.Context) error {
+	entries, err := client.ReadDirContext(ctx, source)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !isSafeTransferName(entry.Name()) {
+			continue
+		}
+		if len(*plans) >= sshSftpMaxTransferPlanCount {
+			return errors.New("SFTP transfer contains too many files")
+		}
+		relative := relativeRoot + "/" + entry.Name()
+		fullPath := pathpkg.Join(source, entry.Name())
+		*plans = append(*plans, sshSftpTransferPlan{
+			sourcePath:      fullPath,
+			destinationPath: joinTransferDestination("remote-to-local", destination, relative),
+			displayName:     relative,
+			incomingSize:    safeTransferSize(entry.Size()),
+			isDirectory:     entry.IsDir() && entry.Mode()&os.ModeSymlink == 0,
+		})
+		if entry.IsDir() && entry.Mode()&os.ModeSymlink == 0 {
+			if err := walkRemoteTransferPlans(client, fullPath, destination, relative, plans, ctx); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func isSafeTransferRelativePath(value string) bool {
+	if value == "" || strings.HasPrefix(value, "/") || strings.ContainsRune(value, '\x00') {
+		return false
+	}
+	for _, segment := range strings.Split(value, "/") {
+		if !isSafeTransferName(segment) {
+			return false
+		}
+	}
+	return true
+}
+
+func joinTransferDestination(direction, root, relative string) string {
+	if direction == "local-to-remote" {
+		return pathpkg.Join(root, strings.ReplaceAll(relative, "\\", "/"))
+	}
+	return filepath.Join(root, filepath.FromSlash(relative))
+}
+
+func localEntrySize(entry fs.DirEntry) int64 {
+	if entry.IsDir() {
+		return 0
+	}
+	info, err := entry.Info()
+	if err != nil {
+		return 0
+	}
+	return safeTransferSize(info.Size())
+}
+
+func safeTransferSize(size int64) int64 {
+	if size < 0 {
+		return 0
+	}
+	if size > sshSftpMaxSafeSize {
+		return sshSftpMaxSafeSize
+	}
+	return size
+}
+
+func ensureTransferDirectory(client *sftp.Client, direction, path string) error {
+	if direction == "local-to-remote" {
+		return client.MkdirAll(path)
+	}
+	return os.MkdirAll(path, 0o755)
+}
+
+func ensureTransferParent(client *sftp.Client, direction, path string) error {
+	parent := filepath.Dir(path)
+	if direction == "local-to-remote" {
+		parent = pathpkg.Dir(path)
+		return client.MkdirAll(parent)
+	}
+	return os.MkdirAll(parent, 0o755)
+}
+
+func transferDestinationInfo(client *sftp.Client, direction, path string) (bool, bool, int64, error) {
+	var info os.FileInfo
+	var err error
+	if direction == "local-to-remote" {
+		info, err = client.Lstat(path)
+	} else {
+		info, err = os.Lstat(path)
+	}
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, false, 0, nil
+		}
+		return false, false, 0, err
+	}
+	size := int64(0)
+	if !info.IsDir() {
+		size = safeTransferSize(info.Size())
+	}
+	return true, info.IsDir(), size, nil
+}
+
+func removeTransferDestinationSymlink(client *sftp.Client, direction, path string) error {
+	if direction == "local-to-remote" {
+		info, err := client.Lstat(path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return client.Remove(path)
+		}
+		return nil
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return os.Remove(path)
+	}
+	return nil
+}
+
+func copyTransferFile(ctx context.Context, client *sftp.Client, direction string, plan sshSftpTransferPlan, report func(int64)) error {
+	if direction == "local-to-local" && sameLocalPath(plan.sourcePath, plan.destinationPath) {
+		return errors.New("SFTP source and destination are the same file")
+	}
+	var source io.ReadCloser
+	var destination io.WriteCloser
+	var err error
+	switch direction {
+	case "local-to-remote":
+		source, err = os.Open(plan.sourcePath)
+		if err != nil {
+			return err
+		}
+		destination, err = client.OpenFile(plan.destinationPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
+	case "remote-to-local":
+		source, err = client.Open(plan.sourcePath)
+		if err != nil {
+			return err
+		}
+		destination, err = os.OpenFile(plan.destinationPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	case "local-to-local":
+		source, err = os.Open(plan.sourcePath)
+		if err != nil {
+			return err
+		}
+		destination, err = os.OpenFile(plan.destinationPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	default:
+		return errors.New("SFTP transfer direction is invalid")
+	}
+	if err != nil {
+		if source != nil {
+			_ = source.Close()
+		}
+		return err
+	}
+	defer source.Close()
+	defer destination.Close()
+
+	buffer := make([]byte, sshSftpTransferBuffer)
+	var transferred int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		read, readErr := source.Read(buffer)
+		if read > 0 {
+			if err := writeTransferBytes(destination, buffer[:read]); err != nil {
+				return err
+			}
+			transferred += int64(read)
+			report(transferred)
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return nil
+			}
+			return readErr
+		}
+	}
+}
+
+func writeTransferBytes(destination io.Writer, data []byte) error {
+	for len(data) > 0 {
+		written, err := destination.Write(data)
+		if err != nil {
+			return err
+		}
+		if written <= 0 {
+			return io.ErrShortWrite
+		}
+		data = data[written:]
+	}
+	return nil
+}
+
+func normalizeSftpPath(value string) (string, error) {
+	if len([]byte(value)) > sshSftpMaxPathBytes {
+		return "", errors.New("SFTP path is too long")
+	}
+	if value == "" {
+		return "", nil
+	}
+	if strings.ContainsAny(value, "\\\x00") {
+		return "", errors.New("SFTP path is invalid")
+	}
+	if !strings.HasPrefix(value, "/") {
+		return "", errors.New("SFTP path must be absolute")
+	}
+	return pathpkg.Clean(value), nil
+}
+
+func readSftpDirectory(client *sftp.Client, requestedPath string) (string, []sshSftpEntry, bool, error) {
+	path := requestedPath
+	if path == "" {
+		workingDirectory, err := client.Getwd()
+		if err != nil {
+			return "", nil, false, err
+		}
+		path = workingDirectory
+	}
+	path, err := normalizeSftpPath(path)
+	if err != nil {
+		return "", nil, false, err
+	}
+	if path == "" {
+		path = "/"
+	}
+
+	listContext, cancel := context.WithTimeout(context.Background(), sshSftpListTimeout)
+	defer cancel()
+	files, err := client.ReadDirContext(listContext, path)
+	if err != nil {
+		return "", nil, false, err
+	}
+	truncated := len(files) > sshSftpMaxEntryCount
+	if truncated {
+		files = files[:sshSftpMaxEntryCount]
+	}
+	entries := make([]sshSftpEntry, 0, len(files))
+	for _, file := range files {
+		name := file.Name()
+		if !isSafeSftpName(name) {
+			continue
+		}
+		fullPath := path
+		if fullPath == "/" {
+			fullPath += name
+		} else {
+			fullPath += "/" + name
+		}
+		if len([]byte(fullPath)) > sshSftpMaxPathBytes {
+			truncated = true
+			continue
+		}
+		lastModified := ""
+		if !file.ModTime().IsZero() {
+			lastModified = file.ModTime().UTC().Format(time.RFC3339Nano)
+		}
+		size := int64(0)
+		if !file.IsDir() {
+			size = file.Size()
+			if size < 0 {
+				size = 0
+			} else if size > sshSftpMaxSafeSize {
+				size = sshSftpMaxSafeSize
+			}
+		}
+		entries = append(entries, sshSftpEntry{
+			Name:            name,
+			FullPath:        fullPath,
+			IsDirectory:     file.IsDir(),
+			IsSymbolicLink:  file.Mode()&os.ModeSymlink != 0,
+			Size:            size,
+			LastModifiedUTC: lastModified,
+		})
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].IsDirectory != entries[j].IsDirectory {
+			return entries[i].IsDirectory
+		}
+		return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+	})
+	return path, entries, truncated, nil
+}
+
+func isSafeSftpName(name string) bool {
+	if name == "" || name == "." || name == ".." || len([]byte(name)) > sshSftpMaxNameBytes {
+		return false
+	}
+	// Remote names are also used as Windows local destination segments. Reject ':'
+	// to prevent a malicious or unusual POSIX filename from becoming an NTFS
+	// alternate-data-stream path during Remote-to-Local transfer.
+	return !strings.ContainsAny(name, "/\\:\x00")
 }
 
 func openNativeSSH(
@@ -818,6 +2534,9 @@ func dialNativeSSH(
 		inputQueue: make(chan []byte, sshInputQueueCapacity),
 		done:       make(chan struct{}),
 	}
+	if target.autoSudo {
+		native.autoSudo = newSSHAutoSudoDriver(native, target.password)
+	}
 	native.startInputPump()
 	return native, fingerprint, nil
 }
@@ -875,6 +2594,8 @@ func loadSSHTarget(databasePath, nodeID string, electronUserDataPath ...string) 
 	credentialContextPending := false
 	var credentialContextProtocol *int64
 	knownFingerprint := ""
+	autoSudo := false
+	autoSudoSet := false
 	tunnelEnabled := false
 	tunnelSet := false
 	current := root
@@ -907,6 +2628,10 @@ func loadSSHTarget(databasePath, nodeID string, electronUserDataPath ...string) 
 		}
 		if knownFingerprint == "" && strings.TrimSpace(current.knownHostFingerprint) != "" {
 			knownFingerprint = strings.TrimSpace(current.knownHostFingerprint)
+		}
+		if !autoSudoSet && current.autoSudo != nil {
+			autoSudo = *current.autoSudo
+			autoSudoSet = true
 		}
 		if !tunnelSet && current.tunnelEnabled != nil {
 			tunnelEnabled = *current.tunnelEnabled
@@ -968,6 +2693,7 @@ func loadSSHTarget(databasePath, nodeID string, electronUserDataPath ...string) 
 		port:                 int(port),
 		username:             username,
 		knownHostFingerprint: knownFingerprint,
+		autoSudo:             autoSudo,
 	}
 	if root.useInlinePassword {
 		secret, err := readCredentialSecret(database, root.id, electronUserDataPath...)
@@ -1013,7 +2739,8 @@ func loadSSHNodes(database *sql.DB) (map[string]*sshNode, error) {
 		expression("CredentialMode") + ", " +
 		expression("UseInlinePassword") + ", " +
 		expression("SshKnownHostFingerprint") + ", " +
-		expression("TunnelEnabled") + " FROM Nodes n;"
+		expression("TunnelEnabled") + ", " +
+		expression("SshAutoSudo") + " FROM Nodes n;"
 	rows, err := database.Query(query)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read SSH connections: %w", err)
@@ -1037,6 +2764,7 @@ func loadSSHNodes(database *sql.DB) (map[string]*sshNode, error) {
 			&row.UseInlinePassword,
 			&row.KnownHostFingerprint,
 			&row.TunnelEnabled,
+			&row.SshAutoSudo,
 		); err != nil {
 			return nil, fmt.Errorf("cannot read an SSH connection: %w", err)
 		}
@@ -1053,6 +2781,10 @@ func loadSSHNodes(database *sql.DB) (map[string]*sshNode, error) {
 		if row.TunnelEnabled.Valid {
 			value := row.TunnelEnabled.Int64 != 0
 			node.tunnelEnabled = &value
+		}
+		if row.SshAutoSudo.Valid {
+			value := row.SshAutoSudo.Int64 != 0
+			node.autoSudo = &value
 		}
 		if row.ParentID.Valid {
 			node.parentID = normalizeID(row.ParentID.String)
@@ -1406,6 +3138,20 @@ func safeSSHError(err error) string {
 	message := strings.TrimSpace(err.Error())
 	if message == "" {
 		return "SSH connection failed"
+	}
+	return message
+}
+
+func safeSftpError(err error) string {
+	if err == nil {
+		return "SFTP operation failed"
+	}
+	message := strings.TrimSpace(err.Error())
+	if message == "" {
+		return "SFTP operation failed"
+	}
+	if len(message) > 4096 {
+		return message[:4096]
 	}
 	return message
 }

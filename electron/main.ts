@@ -39,6 +39,7 @@ let serialBackend: SerialBackendClient | undefined;
 
 type BackendOperation =
   | 'workspace'
+  | 'workspace-update-node'
   | 'migrate'
   | 'auth-status'
   | 'auth-verify'
@@ -87,6 +88,10 @@ type WorkspaceResponse = {
   tree: unknown[];
   credentials: unknown[];
   tunnels: unknown[];
+};
+type WorkspaceNodeSshSettingsRequest = {
+  nodeId: string;
+  sshAutoSudo: boolean | null;
 };
 type AuthStateResponse = {
   mode: string;
@@ -142,6 +147,49 @@ type SshTerminalFrame = {
   sequence: number;
 };
 
+type SshSftpEntry = {
+  name: string;
+  fullPath: string;
+  isDirectory: boolean;
+  isSymbolicLink: boolean;
+  size: number;
+  lastModifiedUtc?: string;
+};
+
+type SshSftpWireEntry = {
+  name: string;
+  full_path: string;
+  is_directory: boolean;
+  is_symbolic_link: boolean;
+  size: number;
+  last_modified_utc?: string;
+};
+type SshSftpQuickPath = {
+  displayName: string;
+  path: string;
+  isSeparator: boolean;
+};
+
+type SshSftpPane = 'local' | 'remote';
+type SshSftpOperation = 'mkdir' | 'file' | 'delete' | 'rename' | 'open';
+type SshSftpTransferDirection = 'local-to-remote' | 'remote-to-local' | 'local-to-local';
+type SshSftpTransferDecision = 'overwrite' | 'skip';
+type SshSftpTransferState =
+  | 'running'
+  | 'progress'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'batch-failed'
+  | 'batch-completed'
+  | 'batch-cancelled';
+type SshSftpTransferItem = {
+  sourcePath: string;
+  name: string;
+  isDirectory: boolean;
+  size: number;
+};
+
 type SshBackendEvent =
   | {
       type: 'connected';
@@ -159,6 +207,67 @@ type SshBackendEvent =
       error: string;
       hostKeyExpected?: string;
       hostKeyReceived?: string;
+    }
+  | { type: 'sftp.opening' | 'sftp.closed'; sessionId: string; requestId?: string }
+  | {
+      type: 'sftp.ready';
+      sessionId: string;
+      path: string;
+      entries: SshSftpEntry[];
+      truncated: boolean;
+      requestId?: string;
+    }
+  | { type: 'sftp.error'; sessionId: string; error: string; path?: string; requestId?: string }
+  | {
+      type: 'sftp.local.ready';
+      sessionId: string;
+      requestId: string;
+      pane: 'local';
+      path: string;
+      entries: SshSftpEntry[];
+      truncated: boolean;
+      quickPaths?: SshSftpQuickPath[];
+    }
+  | {
+      type: 'sftp.local.error';
+      sessionId: string;
+      requestId: string;
+      pane: 'local';
+      path?: string;
+      error: string;
+    }
+  | {
+      type: 'sftp.operation';
+      sessionId: string;
+      requestId: string;
+      pane: SshSftpPane;
+      operation: SshSftpOperation;
+      path: string;
+      error?: string;
+    }
+  | {
+      type: 'sftp.conflict';
+      sessionId: string;
+      transferId: string;
+      itemId: string;
+      direction: SshSftpTransferDirection;
+      displayName: string;
+      path: string;
+      incomingSize: number;
+      existingSize: number;
+      existingIsDirectory: boolean;
+    }
+  | {
+      type: 'sftp.transfer';
+      sessionId: string;
+      transferId: string;
+      itemId?: string;
+      transferState: SshSftpTransferState;
+      direction?: SshSftpTransferDirection;
+      displayName?: string;
+      expectedBytes?: number;
+      bytesTransferred?: number;
+      error?: string;
     };
 
 type SshOpenRequest = {
@@ -174,11 +283,32 @@ type SshHostKeyTrustRequest = {
   received: string;
 };
 
+type SftpOperationRequest = {
+  requestId: string;
+  pane: SshSftpPane;
+  operation: SshSftpOperation;
+  path: string;
+  destinationPath?: string;
+};
+
+type SftpTransferRequest = {
+  transferId: string;
+  direction: SshSftpTransferDirection;
+  destinationPath: string;
+  items: SshSftpTransferItem[];
+};
+
 const sshMaxSessionIdLength = 128;
 const sshMaxInputLength = 1_500_000;
 const sshMaxTerminalCells = 500 * 500;
 const sshMaxTerminalScrollbackLines = 5000;
 const sshMaxTerminalScrollbackLineLength = 2048;
+const sshMaxSftpPathLength = 16 * 1024;
+const sshMaxSftpEntries = 4096;
+const sshMaxSftpEntryNameLength = 4096;
+const sshMaxSftpErrorLength = 4096;
+const sshMaxSftpQuickPaths = 64;
+const sshMaxSftpQuickPathLabelLength = 256;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -209,8 +339,181 @@ function isSshOpenRequest(value: unknown): value is SshOpenRequest {
   );
 }
 
+function isWorkspaceNodeSshSettingsRequest(
+  value: unknown,
+): value is WorkspaceNodeSshSettingsRequest {
+  return (
+    isRecord(value) &&
+    isSshSessionId(value.nodeId) &&
+    (value.sshAutoSudo === null || typeof value.sshAutoSudo === 'boolean')
+  );
+}
+
 function isSshInput(value: unknown): value is string {
   return typeof value === 'string' && value.length <= sshMaxInputLength;
+}
+
+function isSftpPath(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    Buffer.byteLength(value, 'utf8') <= sshMaxSftpPathLength &&
+    (value.length === 0 || value.startsWith('/')) &&
+    !value.includes('\\') &&
+    !value.includes('\u0000')
+  );
+}
+
+function isLocalSftpPath(value: unknown, allowEmpty = false): value is string {
+  return (
+    typeof value === 'string' &&
+    Buffer.byteLength(value, 'utf8') <= sshMaxSftpPathLength &&
+    (allowEmpty && value.length === 0 ? true : /^(?:[A-Za-z]:[\\/]|\\\\)/.test(value)) &&
+    !value.includes('\u0000')
+  );
+}
+
+function isSftpPane(value: unknown): value is SshSftpPane {
+  return value === 'local' || value === 'remote';
+}
+
+function isSftpOperation(value: unknown): value is SshSftpOperation {
+  return (
+    value === 'mkdir' ||
+    value === 'file' ||
+    value === 'delete' ||
+    value === 'rename' ||
+    value === 'open'
+  );
+}
+
+function isSftpTransferDirection(value: unknown): value is SshSftpTransferDirection {
+  return value === 'local-to-remote' || value === 'remote-to-local' || value === 'local-to-local';
+}
+
+function isSftpTransferDecision(value: unknown): value is SshSftpTransferDecision {
+  return value === 'overwrite' || value === 'skip';
+}
+
+function isSftpRequestId(value: unknown): value is string {
+  return (
+    typeof value === 'string' && value.length > 0 && value.length <= 128 && value.trim() === value
+  );
+}
+
+function isSftpTransferId(value: unknown): value is string {
+  return isSftpRequestId(value);
+}
+
+function isSftpTransferItem(value: unknown): value is SshSftpTransferItem {
+  return (
+    isRecord(value) &&
+    typeof value.sourcePath === 'string' &&
+    value.sourcePath.length > 0 &&
+    Buffer.byteLength(value.sourcePath, 'utf8') <= sshMaxSftpPathLength &&
+    typeof value.name === 'string' &&
+    value.name.length > 0 &&
+    Buffer.byteLength(value.name, 'utf8') <= sshMaxSftpEntryNameLength &&
+    !value.name.includes('/') &&
+    !value.name.includes('\\') &&
+    !value.name.includes(':') &&
+    !value.name.includes('\u0000') &&
+    value.name !== '.' &&
+    value.name !== '..' &&
+    typeof value.isDirectory === 'boolean' &&
+    typeof value.size === 'number' &&
+    Number.isSafeInteger(value.size) &&
+    value.size >= 0
+  );
+}
+
+function isSftpOperationRequest(value: unknown): value is SftpOperationRequest {
+  if (
+    !isRecord(value) ||
+    !isSftpRequestId(value.requestId) ||
+    !isSftpPane(value.pane) ||
+    !isSftpOperation(value.operation) ||
+    typeof value.path !== 'string' ||
+    value.path.length === 0
+  ) {
+    return false;
+  }
+  const pathIsValid = value.pane === 'local' ? isLocalSftpPath(value.path) : isSftpPath(value.path);
+  if (!pathIsValid) return false;
+  if (value.destinationPath !== undefined) {
+    if (typeof value.destinationPath !== 'string' || value.destinationPath.length === 0)
+      return false;
+    if (
+      value.pane === 'local'
+        ? !isLocalSftpPath(value.destinationPath)
+        : !isSftpPath(value.destinationPath)
+    ) {
+      return false;
+    }
+  }
+  return value.operation === 'rename' ? value.destinationPath !== undefined : true;
+}
+
+function isSftpTransferRequest(value: unknown): value is SftpTransferRequest {
+  if (
+    !isRecord(value) ||
+    !isSftpTransferId(value.transferId) ||
+    !isSftpTransferDirection(value.direction) ||
+    !Array.isArray(value.items) ||
+    value.items.length === 0 ||
+    value.items.length > 256 ||
+    !value.items.every(isSftpTransferItem) ||
+    (value.direction === 'local-to-remote'
+      ? !isSftpPath(value.destinationPath)
+      : !isLocalSftpPath(value.destinationPath))
+  ) {
+    return false;
+  }
+  const sourceIsLocal = value.direction !== 'remote-to-local';
+  return value.items.every((item) =>
+    sourceIsLocal ? isLocalSftpPath(item.sourcePath) : isSftpPath(item.sourcePath),
+  );
+}
+
+function isSftpEntry(value: unknown, pane: SshSftpPane = 'remote'): value is SshSftpWireEntry {
+  if (!isRecord(value)) return false;
+  return (
+    typeof value.name === 'string' &&
+    value.name.length > 0 &&
+    Buffer.byteLength(value.name, 'utf8') <= sshMaxSftpEntryNameLength &&
+    !value.name.includes('/') &&
+    !value.name.includes('\\') &&
+    !value.name.includes(':') &&
+    !value.name.includes('\u0000') &&
+    typeof value.full_path === 'string' &&
+    value.full_path.length > 0 &&
+    (pane === 'local' ? isLocalSftpPath(value.full_path) : isSftpPath(value.full_path)) &&
+    typeof value.is_directory === 'boolean' &&
+    typeof value.is_symbolic_link === 'boolean' &&
+    typeof value.size === 'number' &&
+    Number.isSafeInteger(value.size) &&
+    value.size >= 0 &&
+    (value.last_modified_utc === undefined ||
+      (typeof value.last_modified_utc === 'string' && value.last_modified_utc.length <= 128))
+  );
+}
+
+function isSftpQuickPath(value: unknown): value is {
+  display_name: string;
+  path?: string;
+  is_separator?: boolean;
+} {
+  if (
+    !isRecord(value) ||
+    typeof value.display_name !== 'string' ||
+    value.display_name.length > sshMaxSftpQuickPathLabelLength ||
+    (value.is_separator !== undefined && typeof value.is_separator !== 'boolean')
+  ) {
+    return false;
+  }
+  if (value.is_separator === true) {
+    return value.path === undefined || value.path === '';
+  }
+  return isLocalSftpPath(value.path);
 }
 
 function isSshFingerprint(value: unknown): value is string {
@@ -413,6 +716,218 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
   }
   if (value.type === 'closed') {
     return { type: 'closed', sessionId: value.session_id };
+  }
+  if (value.type === 'sftp.opening' || value.type === 'sftp.closed') {
+    if (value.request_id !== undefined && !isSftpRequestId(value.request_id)) {
+      return undefined;
+    }
+    return {
+      type: value.type,
+      sessionId: value.session_id,
+      requestId: isSftpRequestId(value.request_id) ? value.request_id : undefined,
+    };
+  }
+  if (value.type === 'sftp.ready') {
+    if (
+      typeof value.path !== 'string' ||
+      value.path.length === 0 ||
+      !isSftpPath(value.path) ||
+      (value.request_id !== undefined && !isSftpRequestId(value.request_id)) ||
+      !Array.isArray(value.entries) ||
+      value.entries.length > sshMaxSftpEntries ||
+      !value.entries.every((entry) => isSftpEntry(entry)) ||
+      typeof value.truncated !== 'boolean'
+    ) {
+      return undefined;
+    }
+    return {
+      type: 'sftp.ready',
+      sessionId: value.session_id,
+      path: value.path,
+      entries: value.entries.map((entry) => ({
+        name: entry.name,
+        fullPath: entry.full_path,
+        isDirectory: entry.is_directory,
+        isSymbolicLink: entry.is_symbolic_link,
+        size: entry.size,
+        lastModifiedUtc: entry.last_modified_utc,
+      })),
+      truncated: value.truncated,
+      requestId: isSftpRequestId(value.request_id) ? value.request_id : undefined,
+    };
+  }
+  if (value.type === 'sftp.local.ready') {
+    if (
+      !isSftpRequestId(value.request_id) ||
+      value.pane !== 'local' ||
+      !isLocalSftpPath(value.path) ||
+      (value.quick_paths !== undefined &&
+        (!Array.isArray(value.quick_paths) ||
+          value.quick_paths.length > sshMaxSftpQuickPaths ||
+          !value.quick_paths.every(isSftpQuickPath))) ||
+      !Array.isArray(value.entries) ||
+      value.entries.length > sshMaxSftpEntries ||
+      !value.entries.every((entry) => isSftpEntry(entry, 'local')) ||
+      typeof value.truncated !== 'boolean'
+    ) {
+      return undefined;
+    }
+    return {
+      type: 'sftp.local.ready',
+      sessionId: value.session_id,
+      requestId: value.request_id,
+      pane: 'local',
+      path: value.path,
+      entries: value.entries.map((entry) => ({
+        name: entry.name,
+        fullPath: entry.full_path,
+        isDirectory: entry.is_directory,
+        isSymbolicLink: entry.is_symbolic_link,
+        size: entry.size,
+        lastModifiedUtc: entry.last_modified_utc,
+      })),
+      truncated: value.truncated,
+      quickPaths: Array.isArray(value.quick_paths)
+        ? value.quick_paths.map((quickPath) => ({
+            displayName: quickPath.display_name,
+            path: quickPath.path ?? '',
+            isSeparator: quickPath.is_separator === true,
+          }))
+        : [],
+    };
+  }
+  if (value.type === 'sftp.local.error') {
+    if (
+      !isSftpRequestId(value.request_id) ||
+      value.pane !== 'local' ||
+      typeof value.error !== 'string' ||
+      (value.path !== undefined && !isLocalSftpPath(value.path, true))
+    ) {
+      return undefined;
+    }
+    return {
+      type: 'sftp.local.error',
+      sessionId: value.session_id,
+      requestId: value.request_id,
+      pane: 'local',
+      path: value.path,
+      error: value.error.slice(0, sshMaxSftpErrorLength),
+    };
+  }
+  if (value.type === 'sftp.operation') {
+    if (
+      !isSftpRequestId(value.request_id) ||
+      !isSftpPane(value.pane) ||
+      !isSftpOperation(value.operation) ||
+      typeof value.path !== 'string' ||
+      (value.pane === 'local' ? !isLocalSftpPath(value.path) : !isSftpPath(value.path)) ||
+      (value.error !== undefined && typeof value.error !== 'string')
+    ) {
+      return undefined;
+    }
+    return {
+      type: 'sftp.operation',
+      sessionId: value.session_id,
+      requestId: value.request_id,
+      pane: value.pane,
+      operation: value.operation,
+      path: value.path,
+      error:
+        typeof value.error === 'string' ? value.error.slice(0, sshMaxSftpErrorLength) : undefined,
+    };
+  }
+  if (value.type === 'sftp.conflict') {
+    if (
+      !isSftpTransferId(value.transfer_id) ||
+      !isSftpRequestId(value.item_id) ||
+      !isSftpTransferDirection(value.direction) ||
+      typeof value.display_name !== 'string' ||
+      value.display_name.length === 0 ||
+      value.display_name.length > sshMaxSftpEntryNameLength * 2 ||
+      typeof value.path !== 'string' ||
+      (value.direction === 'local-to-remote'
+        ? !isSftpPath(value.path)
+        : !isLocalSftpPath(value.path)) ||
+      typeof value.incoming_size !== 'number' ||
+      !Number.isSafeInteger(value.incoming_size) ||
+      value.incoming_size < 0 ||
+      typeof value.existing_size !== 'number' ||
+      !Number.isSafeInteger(value.existing_size) ||
+      value.existing_size < 0 ||
+      typeof value.existing_is_directory !== 'boolean'
+    ) {
+      return undefined;
+    }
+    return {
+      type: 'sftp.conflict',
+      sessionId: value.session_id,
+      transferId: value.transfer_id,
+      itemId: value.item_id,
+      direction: value.direction,
+      displayName: value.display_name,
+      path: value.path,
+      incomingSize: value.incoming_size,
+      existingSize: value.existing_size,
+      existingIsDirectory: value.existing_is_directory,
+    };
+  }
+  if (value.type === 'sftp.transfer') {
+    const states = [
+      'running',
+      'progress',
+      'completed',
+      'failed',
+      'cancelled',
+      'batch-failed',
+      'batch-completed',
+      'batch-cancelled',
+    ];
+    if (
+      !isSftpTransferId(value.transfer_id) ||
+      typeof value.transfer_state !== 'string' ||
+      !states.includes(value.transfer_state) ||
+      (value.item_id !== undefined && !isSftpRequestId(value.item_id)) ||
+      (value.direction !== undefined && !isSftpTransferDirection(value.direction)) ||
+      (value.display_name !== undefined &&
+        (typeof value.display_name !== 'string' ||
+          value.display_name.length > sshMaxSftpEntryNameLength * 2)) ||
+      (value.expected_bytes !== undefined &&
+        (typeof value.expected_bytes !== 'number' ||
+          !Number.isSafeInteger(value.expected_bytes) ||
+          value.expected_bytes < 0)) ||
+      (value.bytes_transferred !== undefined &&
+        (typeof value.bytes_transferred !== 'number' ||
+          !Number.isSafeInteger(value.bytes_transferred) ||
+          value.bytes_transferred < 0)) ||
+      (value.error !== undefined && typeof value.error !== 'string')
+    ) {
+      return undefined;
+    }
+    return {
+      type: 'sftp.transfer',
+      sessionId: value.session_id,
+      transferId: value.transfer_id,
+      itemId: value.item_id,
+      transferState: value.transfer_state as SshSftpTransferState,
+      direction: value.direction as SshSftpTransferDirection | undefined,
+      displayName: value.display_name,
+      expectedBytes: value.expected_bytes,
+      bytesTransferred: value.bytes_transferred,
+      error:
+        typeof value.error === 'string' ? value.error.slice(0, sshMaxSftpErrorLength) : undefined,
+    };
+  }
+  if (value.type === 'sftp.error' && typeof value.error === 'string') {
+    if (value.request_id !== undefined && !isSftpRequestId(value.request_id)) {
+      return undefined;
+    }
+    return {
+      type: 'sftp.error',
+      sessionId: value.session_id,
+      error: value.error.slice(0, sshMaxSftpErrorLength),
+      path: isSftpPath(value.path) ? value.path : undefined,
+      requestId: isSftpRequestId(value.request_id) ? value.request_id : undefined,
+    };
   }
   if (value.type === 'error' && typeof value.error === 'string') {
     const hostKeyExpected = isSshFingerprint(value.host_key_expected)
@@ -842,6 +1357,109 @@ class NativeSshBackend {
     this.write({ type: 'resize', session_id: sessionId, columns, rows });
   }
 
+  openSftp(sessionId: string, requestId = ''): void {
+    this.write({ type: 'sftp-open', session_id: sessionId, request_id: requestId });
+  }
+
+  listSftp(sessionId: string, path: string, requestId = ''): void {
+    this.write({ type: 'sftp-list', session_id: sessionId, path, request_id: requestId });
+  }
+
+  listLocalSftp(sessionId: string, path: string, requestId: string): void {
+    this.write({
+      type: 'sftp-local-list',
+      session_id: sessionId,
+      path,
+      request_id: requestId,
+    });
+  }
+
+  operateSftp(sessionId: string, request: SftpOperationRequest): void {
+    this.write({
+      type: 'sftp-operation',
+      session_id: sessionId,
+      request_id: request.requestId,
+      pane: request.pane,
+      operation: request.operation,
+      path: request.path,
+      destination_path: request.destinationPath,
+    });
+  }
+
+  startSftpTransfer(sessionId: string, request: SftpTransferRequest): void {
+    this.write({
+      type: 'sftp-transfer',
+      session_id: sessionId,
+      transfer_id: request.transferId,
+      direction: request.direction,
+      destination_path: request.destinationPath,
+      items: request.items.map((item) => ({
+        source_path: item.sourcePath,
+        name: item.name,
+        is_directory: item.isDirectory,
+        size: item.size,
+      })),
+    });
+  }
+
+  decideSftpConflict(
+    sessionId: string,
+    transferId: string,
+    itemId: string,
+    decision: SshSftpTransferDecision,
+    applyToAll: boolean,
+  ): void {
+    this.write({
+      type: 'sftp-transfer-decision',
+      session_id: sessionId,
+      transfer_id: transferId,
+      item_id: itemId,
+      decision,
+      apply_to_all: applyToAll,
+    });
+  }
+
+  cancelSftpTransfer(sessionId: string, transferId: string, itemId?: string): void {
+    this.write({
+      type: 'sftp-transfer-cancel',
+      session_id: sessionId,
+      transfer_id: transferId,
+      item_id: itemId,
+    });
+  }
+
+  closeSftp(sessionId: string): void {
+    this.write({ type: 'sftp-close', session_id: sessionId });
+  }
+
+  closeAllSftp(): void {
+    for (const sessionId of this.activeSessions) {
+      try {
+        this.closeSftp(sessionId);
+      } catch {
+        // A broken pipe for one session must not prevent cleanup commands for the others.
+        continue;
+      }
+    }
+  }
+
+  cancelAutoSudo(): void {
+    for (const sessionId of this.activeSessions) {
+      try {
+        this.write({ type: 'auto-sudo-cancel', session_id: sessionId });
+      } catch {
+        // A broken pipe during lock/reload is already a terminal cleanup state.
+        continue;
+      }
+    }
+
+    // A connection can load its saved password and construct the Go-side Auto Sudo driver before
+    // its connected event reaches this process. Lock/reload must cancel those handshakes too.
+    for (const sessionId of [...this.openWaiters.keys()]) {
+      this.close(sessionId);
+    }
+  }
+
   close(sessionId: string): void {
     const waiter = this.openWaiters.get(sessionId);
     if (waiter) {
@@ -973,7 +1591,12 @@ class NativeSshBackend {
   private broadcast(event: SshBackendEvent): void {
     // Lifecycle notifications let the locked renderer settle pending tabs, but terminal frames
     // must never cross the native authentication boundary until the session is unlocked again.
-    if (event.type === 'screen' && !authSession.isAccessAllowed) return;
+    if (
+      (event.type === 'screen' || event.type.startsWith('sftp.')) &&
+      !authSession.isAccessAllowed
+    ) {
+      return;
+    }
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed()) window.webContents.send('ssh:event', event);
     }
@@ -1048,6 +1671,18 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     });
   });
 
+  ipcMain.handle('workspace:update-node-ssh-settings', async (_event, request: unknown) => {
+    if (!isWorkspaceNodeSshSettingsRequest(request)) {
+      throw new Error('Workspace node settings are invalid.');
+    }
+    if (process.platform !== 'win32') return { updated: false };
+    return serializeAuthOperation(async () => {
+      await ensureAuthSession();
+      authSession.requireUnlocked();
+      return runBackend<{ updated: boolean }>('workspace-update-node', request);
+    });
+  });
+
   ipcMain.handle('auth:status', async () => {
     if (process.platform !== 'win32') {
       return {
@@ -1103,6 +1738,8 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     return serializeAuthOperation(async () => {
       await ensureAuthSession();
       authSession.lock();
+      sshBackend.cancelAutoSudo();
+      sshBackend.closeAllSftp();
       const ownerWindow = BrowserWindow.fromWebContents(event.sender);
       if (!ownerWindow || ownerWindow.isDestroyed()) return;
       try {
@@ -1195,6 +1832,116 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       });
     },
   );
+  ipcMain.handle('ssh:sftp-open', async (_event, sessionId: unknown, requestId: unknown) => {
+    if (!isSshSessionId(sessionId) || (requestId !== undefined && !isSftpRequestId(requestId))) {
+      throw new Error('SFTP open request is invalid.');
+    }
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      sshBackend.openSftp(sessionId, typeof requestId === 'string' ? requestId : '');
+    });
+  });
+  ipcMain.handle(
+    'ssh:sftp-list',
+    async (_event, sessionId: unknown, path: unknown, requestId: unknown) => {
+      if (
+        !isSshSessionId(sessionId) ||
+        !isSftpPath(path) ||
+        (requestId !== undefined && !isSftpRequestId(requestId))
+      ) {
+        throw new Error('SFTP list request is invalid.');
+      }
+      return serializeAuthOperation(async () => {
+        await requireNativeAuth();
+        sshBackend.listSftp(sessionId, path, typeof requestId === 'string' ? requestId : '');
+      });
+    },
+  );
+  ipcMain.handle(
+    'ssh:sftp-local-list',
+    async (_event, sessionId: unknown, path: unknown, requestId: unknown) => {
+      if (
+        !isSshSessionId(sessionId) ||
+        !isLocalSftpPath(path, true) ||
+        !isSftpRequestId(requestId)
+      ) {
+        throw new Error('Local SFTP list request is invalid.');
+      }
+      return serializeAuthOperation(async () => {
+        await requireNativeAuth();
+        sshBackend.listLocalSftp(sessionId, path, requestId);
+      });
+    },
+  );
+  ipcMain.handle('ssh:sftp-operation', async (_event, sessionId: unknown, request: unknown) => {
+    if (!isSshSessionId(sessionId) || !isSftpOperationRequest(request)) {
+      throw new Error('SFTP operation request is invalid.');
+    }
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      sshBackend.operateSftp(sessionId, request);
+    });
+  });
+  ipcMain.handle('ssh:sftp-transfer', async (_event, sessionId: unknown, request: unknown) => {
+    if (!isSshSessionId(sessionId) || !isSftpTransferRequest(request)) {
+      throw new Error('SFTP transfer request is invalid.');
+    }
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      sshBackend.startSftpTransfer(sessionId, request);
+    });
+  });
+  ipcMain.handle(
+    'ssh:sftp-transfer-decision',
+    async (
+      _event,
+      sessionId: unknown,
+      transferId: unknown,
+      itemId: unknown,
+      decision: unknown,
+      applyToAll: unknown,
+    ) => {
+      if (
+        !isSshSessionId(sessionId) ||
+        !isSftpTransferId(transferId) ||
+        !isSftpRequestId(itemId) ||
+        !isSftpTransferDecision(decision) ||
+        typeof applyToAll !== 'boolean'
+      ) {
+        throw new Error('SFTP transfer decision is invalid.');
+      }
+      return serializeAuthOperation(async () => {
+        await requireNativeAuth();
+        sshBackend.decideSftpConflict(sessionId, transferId, itemId, decision, applyToAll);
+      });
+    },
+  );
+  ipcMain.handle(
+    'ssh:sftp-transfer-cancel',
+    async (_event, sessionId: unknown, transferId: unknown, itemId: unknown) => {
+      if (
+        !isSshSessionId(sessionId) ||
+        !isSftpTransferId(transferId) ||
+        (itemId !== undefined && !isSftpRequestId(itemId))
+      ) {
+        throw new Error('SFTP transfer cancellation is invalid.');
+      }
+      return serializeAuthOperation(async () => {
+        await requireNativeAuth();
+        sshBackend.cancelSftpTransfer(
+          sessionId,
+          transferId,
+          typeof itemId === 'string' ? itemId : undefined,
+        );
+      });
+    },
+  );
+  ipcMain.handle('ssh:sftp-close', async (_event, sessionId: unknown) => {
+    if (!isSshSessionId(sessionId)) throw new Error('SFTP close request is invalid.');
+    return serializeAuthOperation(async () => {
+      sshBackend.closeSftp(sessionId);
+    });
+  });
   ipcMain.handle('ssh:close', async (_event, sessionId: unknown) => {
     if (!isSshSessionId(sessionId)) throw new Error('SSH close request is invalid.');
     sshBackend.close(sessionId);
@@ -1511,6 +2258,8 @@ function createWindow() {
       // A renderer reload creates a fresh UI process context. Do not let a previous renderer's
       // native unlock survive into the new context before it proves possession of the secret.
       authSession.lock();
+      sshBackend.cancelAutoSudo();
+      sshBackend.closeAllSftp();
       await rdpClient?.dispose();
     }).catch((error) => {
       console.error('[Wormhole] Could not reset native authentication for the renderer.', error);

@@ -10,11 +10,36 @@ import {
   type CSSProperties,
   type DragEvent,
   type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type MouseEvent,
   type ReactNode,
 } from 'react';
 import wormholeIcon from '../Assets/Wormhole.png';
 import {
+  parentLocalSftpPath,
+  parentSftpPath,
+  isSftpTransferTerminal,
+  shouldApplySftpClosed,
+  shouldApplySftpError,
+  shouldApplySftpFailure,
+  shouldApplySftpReady,
+  shouldFinishSftpClose,
+  nextSftpOperationRefreshRequests,
+  compareSftpEntries,
+  pruneSftpSelection,
+  removeSftpTransferRow,
+  settleSftpTransferRows,
+  sftpTransferItemKey,
+  updateSftpTransferError,
+  type SftpBrowserState,
+  type SftpConflict,
+  type SftpPaneState,
+  type SftpSortColumn,
+  type SftpTransferRow,
+} from './sftp-state';
+import {
   AlertCircle,
+  ArrowUp,
   ArrowRightLeft,
   ChevronDown,
   ChevronRight,
@@ -22,6 +47,8 @@ import {
   Check,
   Copy,
   Download,
+  File,
+  FilePlus2,
   Folder,
   FolderOpen,
   FolderPlus,
@@ -40,6 +67,7 @@ import {
   Search,
   Settings2,
   Terminal,
+  Trash2,
   Upload,
   Wifi,
   X,
@@ -78,6 +106,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { Input } from '@/components/ui/input';
@@ -114,8 +143,11 @@ import { getTreeRowGeometry } from './tree-layout';
 import { VncSurface } from './components/VncSurface';
 import { RdpSurface, type RdpUiStatus } from './components/RdpSurface';
 import { applyRdpBackendEvent } from './rdp-state';
+import { formatSftpDate, formatSftpSize } from './sftp-format';
+import { hasSftpDragPayload, sftpDragDataType } from './sftp-dnd';
 
 type Protocol = 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+type AutoSudoMode = 'inherit' | 'on' | 'off';
 type NavItem = 'sessions' | 'credentials' | 'tunnels' | 'settings';
 type Theme = 'system' | 'light' | 'dark';
 type ResolvedTheme = Exclude<Theme, 'system'>;
@@ -206,8 +238,18 @@ type TreeNode = {
   serialStopBits?: number;
   serialParity?: number;
   serialFlowControl?: number;
+  sshAutoSudo?: boolean | null;
+  persisted?: boolean;
   children?: TreeNode[];
 };
+
+function autoSudoModeFor(value: boolean | null | undefined): AutoSudoMode {
+  return value === true ? 'on' : value === false ? 'off' : 'inherit';
+}
+
+function autoSudoValueFor(mode: AutoSudoMode): boolean | null {
+  return mode === 'on' ? true : mode === 'off' ? false : null;
+}
 
 type DropPlacement = 'inside' | 'before' | 'after';
 
@@ -352,6 +394,7 @@ type Session = {
   status: 'connecting' | 'connected' | 'failed' | 'closed' | 'placeholder';
   terminalFrame?: WormholeSshTerminalFrame;
   serialSettings?: SerialSettings;
+  sftp?: SftpBrowserState;
   error?: string;
   fingerprint?: string;
   hostKeyMismatch?: {
@@ -537,6 +580,7 @@ function updateConnectionInTree(
     host: string;
     protocol: Protocol;
     serialSettings?: SerialSettings;
+    sshAutoSudo: boolean | null;
   },
 ): TreeNode[] {
   let editedConnection: TreeNode | undefined;
@@ -571,6 +615,19 @@ function updateConnectionInTree(
   return insertIntoTreeFolder(remaining, folderId, [editedConnection]);
 }
 
+function updateFolderInTree(
+  nodes: TreeNode[],
+  folderId: string,
+  update: { name: string; sshAutoSudo: boolean | null },
+): TreeNode[] {
+  return nodes.map((node) => {
+    if (node.id === folderId) return { ...node, ...update };
+    return node.children
+      ? { ...node, children: updateFolderInTree(node.children, folderId, update) }
+      : node;
+  });
+}
+
 type IconButtonProps = Omit<ComponentProps<typeof Button>, 'children' | 'size'> & {
   label: string;
   children: ReactNode;
@@ -586,6 +643,48 @@ function IconButton({ label, children, className, ...props }: IconButtonProps) {
       </TooltipTrigger>
       <TooltipContent side="bottom">{label}</TooltipContent>
     </Tooltip>
+  );
+}
+
+function AutoSudoField({
+  id,
+  mode,
+  onChange,
+  scope,
+}: {
+  id: string;
+  mode: AutoSudoMode;
+  onChange: (mode: AutoSudoMode) => void;
+  scope: 'connection' | 'folder';
+}) {
+  const isFolder = scope === 'folder';
+  const inheritLabel = isFolder ? 'Inherit from parent' : 'Inherit from folder';
+  const description =
+    mode === 'on'
+      ? isFolder
+        ? 'SSH descendants that inherit this setting run “sudo su” on connect and send the saved password only at the sudo prompt.'
+        : 'Runs “sudo su” on connect and sends the saved password only at the sudo prompt. If sudo does not prompt, nothing is sent.'
+      : mode === 'off'
+        ? 'Never runs sudo automatically on connect.'
+        : isFolder
+          ? 'SSH descendants that inherit this setting follow the parent folder.'
+          : 'Follows the parent folder’s Auto sudo setting.';
+
+  return (
+    <div className="grid gap-2 rounded-lg border border-border/70 bg-background/40 p-3">
+      <Label htmlFor={id}>{isFolder ? 'Auto sudo default (SSH)' : 'Auto sudo (SSH)'}</Label>
+      <Select onValueChange={(value) => onChange(value as AutoSudoMode)} value={mode}>
+        <SelectTrigger className="w-full sm:max-w-[280px]" id={id}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="inherit">{inheritLabel}</SelectItem>
+          <SelectItem value="on">On</SelectItem>
+          <SelectItem value="off">Off</SelectItem>
+        </SelectContent>
+      </Select>
+      <p className="text-[11px] leading-relaxed text-muted-foreground">{description}</p>
+    </div>
   );
 }
 
@@ -668,10 +767,10 @@ function SessionTabContextMenu({
           <RefreshCcw />
           Reconnect
         </ContextMenuItem>
-        {session.canTransfer ? (
+        {session.canTransfer && session.status === 'connected' ? (
           <ContextMenuItem onSelect={onFileTransfer}>
             <ArrowRightLeft />
-            File transfer
+            SFTP browser
           </ContextMenuItem>
         ) : null}
         <ContextMenuSeparator />
@@ -928,11 +1027,20 @@ function App() {
   });
   const [newConnectionOpen, setNewConnectionOpen] = useState(false);
   const [editingConnectionId, setEditingConnectionId] = useState<string | null>(null);
+  const [folderDetailsOpen, setFolderDetailsOpen] = useState(false);
+  const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
+  const [folderDetailsForm, setFolderDetailsForm] = useState({
+    name: '',
+    sshAutoSudo: 'inherit' as AutoSudoMode,
+  });
+  const [editorError, setEditorError] = useState('');
+  const [editorBusy, setEditorBusy] = useState(false);
   const [newConnectionForm, setNewConnectionForm] = useState({
     name: '',
     host: '',
     protocol: 'ssh' as Protocol,
     folder: '',
+    sshAutoSudo: 'inherit' as AutoSudoMode,
     serial: { ...defaultSerialSettings },
   });
   const [newFolderOpen, setNewFolderOpen] = useState(false);
@@ -944,6 +1052,17 @@ function App() {
     id: string;
     placement: DropPlacement;
   } | null>(null);
+  const sftpRequestSequence = useRef(0);
+  const sftpRequestIds = useRef(new Map<string, number>());
+  const sftpPaneRequestSequence = useRef(0);
+  const sftpCancelRequests = useRef(new Set<string>());
+  const sftpRefreshHandlers = useRef<
+    | {
+        local: (sessionId: string, path: string) => void;
+        remote: (sessionId: string, path: string) => void;
+      }
+    | undefined
+  >(undefined);
   const visibleTree = useMemo(
     () => filterTree(tree, searchText.trim().toLowerCase()),
     [searchText, tree],
@@ -1105,10 +1224,308 @@ function App() {
               terminalFrame: applySshTerminalFrame(session.terminalFrame, event.frame),
             };
           }
+          if (event.type === 'sftp.opening') {
+            const requestMatches =
+              event.requestId === undefined
+                ? session.sftp?.requestId === undefined
+                : session.sftp?.requestId === event.requestId;
+            if (!session.sftp || session.sftp.status === 'closing' || !requestMatches) {
+              return session;
+            }
+            return {
+              ...session,
+              sftp: {
+                ...session.sftp,
+                status: 'opening',
+                path: session.sftp?.path ?? '',
+                entries: session.sftp?.entries ?? [],
+                truncated: false,
+                error: undefined,
+                requestId: event.requestId ?? session.sftp.requestId,
+              },
+            };
+          }
+          if (event.type === 'sftp.ready') {
+            if (!session.sftp || !shouldApplySftpReady(session.sftp, event.path, event.requestId)) {
+              return session;
+            }
+            return {
+              ...session,
+              sftp: {
+                ...session.sftp,
+                status: 'ready',
+                path: event.path,
+                previousPath: undefined,
+                entries: event.entries,
+                truncated: event.truncated,
+                error: undefined,
+                requestId: event.requestId ?? session.sftp.requestId,
+              },
+            };
+          }
+          if (event.type === 'sftp.error') {
+            if (session.sftp?.status === 'closing') {
+              return { ...session, sftp: undefined };
+            }
+            if (!session.sftp || !shouldApplySftpError(session.sftp, event.path, event.requestId)) {
+              return session;
+            }
+            return {
+              ...session,
+              sftp: {
+                ...session.sftp,
+                status: 'failed',
+                path: session.sftp.previousPath ?? session.sftp.path,
+                previousPath: undefined,
+                entries: session.sftp?.entries ?? [],
+                truncated: session.sftp?.truncated ?? false,
+                error: event.error,
+              },
+            };
+          }
+          if (event.type === 'sftp.local.ready') {
+            if (!session.sftp || session.sftp.status === 'closing') return session;
+            if (session.sftp.local?.requestId && session.sftp.local.requestId !== event.requestId) {
+              return session;
+            }
+            return {
+              ...session,
+              sftp: {
+                ...session.sftp,
+                local: {
+                  status: 'ready',
+                  path: event.path,
+                  previousPath: undefined,
+                  entries: event.entries,
+                  truncated: event.truncated,
+                  quickPaths: event.quickPaths ?? session.sftp.local?.quickPaths,
+                  requestId: event.requestId,
+                },
+              },
+            };
+          }
+          if (event.type === 'sftp.local.error') {
+            if (!session.sftp || session.sftp.status === 'closing') return session;
+            if (session.sftp.local?.requestId && session.sftp.local.requestId !== event.requestId) {
+              return session;
+            }
+            const local = session.sftp.local ?? {
+              status: 'opening' as const,
+              path: event.path ?? '',
+              entries: [],
+              truncated: false,
+            };
+            return {
+              ...session,
+              sftp: {
+                ...session.sftp,
+                local: {
+                  ...local,
+                  status: 'failed',
+                  path: local.previousPath ?? local.path,
+                  previousPath: undefined,
+                  error: event.error,
+                  requestId: event.requestId,
+                },
+              },
+            };
+          }
+          if (event.type === 'sftp.operation') {
+            if (
+              !session.sftp ||
+              session.sftp.status === 'closing' ||
+              !session.sftp.knownOperationIds?.[event.requestId]
+            ) {
+              return session;
+            }
+            const knownOperationIds = { ...(session.sftp.knownOperationIds ?? {}) };
+            delete knownOperationIds[event.requestId];
+            const currentPane: SftpPaneState =
+              event.pane === 'local'
+                ? (session.sftp.local ?? {
+                    status: 'ready',
+                    path: '',
+                    entries: [],
+                    truncated: false,
+                  })
+                : {
+                    status: session.sftp.status === 'failed' ? 'failed' : 'ready',
+                    path: session.sftp.path,
+                    entries: session.sftp.entries,
+                    truncated: session.sftp.truncated,
+                    error: session.sftp.error,
+                  };
+            const nextPane = {
+              ...currentPane,
+              status: event.error ? ('failed' as const) : ('ready' as const),
+              error: event.error,
+            };
+            return {
+              ...session,
+              sftp: {
+                ...session.sftp,
+                ...(event.pane === 'local'
+                  ? { local: nextPane }
+                  : {
+                      status: event.error ? ('failed' as const) : ('ready' as const),
+                      error: event.error,
+                    }),
+                knownOperationIds,
+                refreshRequests: nextSftpOperationRefreshRequests(session.sftp.refreshRequests, {
+                  id: event.requestId,
+                  pane: event.pane,
+                  path: currentPane.path,
+                  error: event.error,
+                }),
+              },
+            };
+          }
+          if (event.type === 'sftp.conflict') {
+            if (
+              !session.sftp ||
+              session.sftp.status === 'closing' ||
+              !session.sftp.knownTransferIds?.[event.transferId]
+            ) {
+              return session;
+            }
+            const conflict: SftpConflict = {
+              transferId: event.transferId,
+              itemId: event.itemId,
+              direction: event.direction,
+              displayName: event.displayName,
+              path: event.path,
+              incomingSize: event.incomingSize,
+              existingSize: event.existingSize,
+              existingIsDirectory: event.existingIsDirectory,
+            };
+            return { ...session, sftp: { ...session.sftp, conflict } };
+          }
+          if (event.type === 'sftp.transfer') {
+            if (
+              event.transferState === 'batch-failed' ||
+              event.transferState === 'batch-completed' ||
+              event.transferState === 'batch-cancelled'
+            ) {
+              clearSftpCancelRequestsForTransfer(sftpCancelRequests.current, event.transferId);
+            }
+            if (
+              event.itemId &&
+              sftpCancelRequests.current.has(sftpTransferItemKey(event.transferId, event.itemId))
+            ) {
+              if (
+                event.transferState === 'completed' ||
+                event.transferState === 'failed' ||
+                event.transferState === 'cancelled'
+              ) {
+                sftpCancelRequests.current.delete(
+                  sftpTransferItemKey(event.transferId, event.itemId),
+                );
+              }
+              return session;
+            }
+            if (
+              !session.sftp ||
+              session.sftp.status === 'closing' ||
+              !session.sftp.knownTransferIds?.[event.transferId]
+            ) {
+              return session;
+            }
+            if (event.transferState === 'batch-failed') {
+              const knownTransferIds = { ...(session.sftp.knownTransferIds ?? {}) };
+              delete knownTransferIds[event.transferId];
+              return {
+                ...session,
+                sftp: {
+                  ...session.sftp,
+                  knownTransferIds,
+                  ...updateSftpTransferError(session.sftp, event.transferId, event.error),
+                  conflict:
+                    session.sftp.conflict?.transferId === event.transferId
+                      ? undefined
+                      : session.sftp.conflict,
+                  transfers: settleSftpTransferRows(
+                    session.sftp.transfers ?? [],
+                    event.transferId,
+                    'failed',
+                    event.error,
+                  ),
+                },
+              } as Session;
+            }
+            if (
+              event.transferState === 'batch-completed' ||
+              event.transferState === 'batch-cancelled'
+            ) {
+              const knownTransferIds = { ...(session.sftp.knownTransferIds ?? {}) };
+              delete knownTransferIds[event.transferId];
+              return {
+                ...session,
+                sftp: {
+                  ...session.sftp,
+                  knownTransferIds,
+                  ...updateSftpTransferError(session.sftp, event.transferId),
+                  conflict:
+                    session.sftp.conflict?.transferId === event.transferId
+                      ? undefined
+                      : session.sftp.conflict,
+                  transfers:
+                    event.transferState === 'batch-cancelled'
+                      ? settleSftpTransferRows(
+                          session.sftp.transfers ?? [],
+                          event.transferId,
+                          'cancelled',
+                        )
+                      : session.sftp.transfers,
+                },
+              } as Session;
+            }
+            if (!event.itemId || !event.direction || !event.displayName) return session;
+            const transfers = [...(session.sftp.transfers ?? [])];
+            const index = transfers.findIndex(
+              (transfer) =>
+                transfer.transferId === event.transferId && transfer.itemId === event.itemId,
+            );
+            const previous = index >= 0 ? transfers[index] : undefined;
+            const nextTransfer: SftpTransferRow = {
+              transferId: event.transferId,
+              itemId: event.itemId,
+              direction: event.direction,
+              displayName: event.displayName,
+              expectedBytes: event.expectedBytes ?? previous?.expectedBytes ?? 0,
+              bytesTransferred: event.bytesTransferred ?? previous?.bytesTransferred ?? 0,
+              state:
+                event.transferState === 'progress'
+                  ? 'progress'
+                  : event.transferState === 'running'
+                    ? 'running'
+                    : event.transferState,
+              error: event.error,
+            };
+            if (index >= 0) transfers[index] = nextTransfer;
+            else transfers.push(nextTransfer);
+            return {
+              ...session,
+              sftp: {
+                ...session.sftp,
+                transfers,
+                ...updateSftpTransferError(session.sftp, event.transferId),
+                conflict:
+                  session.sftp.conflict?.transferId === event.transferId &&
+                  session.sftp.conflict.itemId === event.itemId &&
+                  event.transferState !== 'failed'
+                    ? undefined
+                    : session.sftp.conflict,
+              },
+            } as Session;
+          }
+          if (event.type === 'sftp.closed') {
+            return shouldApplySftpClosed(session.sftp) ? { ...session, sftp: undefined } : session;
+          }
           if (event.type === 'error') {
             return {
               ...session,
               status: 'failed',
+              sftp: undefined,
               hostKeyMismatch:
                 event.hostKeyExpected && event.hostKeyReceived
                   ? { expected: event.hostKeyExpected, received: event.hostKeyReceived }
@@ -1119,6 +1536,7 @@ function App() {
           return {
             ...session,
             status: 'closed',
+            sftp: undefined,
           };
         }),
       );
@@ -1207,11 +1625,20 @@ function App() {
 
   useEffect(() => {
     if (authGate === 'unlocked') return;
+    sftpRequestIds.current.clear();
+    sftpCancelRequests.current.clear();
     setQuickConnectOpen(false);
     setNewConnectionOpen(false);
+    setFolderDetailsOpen(false);
     setNewFolderOpen(false);
     setEditingConnectionId(null);
+    setEditingFolderId(null);
     setNewFolderParentId(null);
+    setEditorError('');
+    setSessions((current) => {
+      if (!current.some((session) => session.sftp)) return current;
+      return current.map((session) => ({ ...session, sftp: undefined }));
+    });
   }, [authGate]);
 
   useEffect(() => {
@@ -1596,6 +2023,8 @@ function App() {
     const index = sessions.findIndex((session) => session.id === id);
     const nextSessions = sessions.filter((session) => session.id !== id);
     setSessions(nextSessions);
+    sftpRequestIds.current.delete(id);
+    clearSftpCancelRequestsForBrowser(sftpCancelRequests.current, closing?.sftp);
 
     if (closing?.backendSessionId) {
       if (closing.protocol === 'serial') {
@@ -1627,6 +2056,7 @@ function App() {
         void window.wormhole?.closeSshSession(source.backendSessionId);
       }
     }
+    clearSftpCancelRequestsForBrowser(sftpCancelRequests.current, source.sftp);
     if (source.nodeId && source.protocol === 'ssh') {
       const backendSessionId = newSessionToken();
       setSessions((current) =>
@@ -1637,6 +2067,7 @@ function App() {
                 backendSessionId,
                 status: 'connecting',
                 terminalFrame: undefined,
+                sftp: undefined,
                 error: undefined,
                 hostKeyMismatch: undefined,
               }
@@ -1687,6 +2118,7 @@ function App() {
       status:
         source.protocol === 'ssh' || source.protocol === 'serial' ? 'connecting' : 'placeholder',
       terminalFrame: undefined,
+      sftp: undefined,
       error: undefined,
       hostKeyMismatch: undefined,
       rdpStatus: source.protocol === 'rdp' ? 'idle' : source.rdpStatus,
@@ -1726,23 +2158,744 @@ function App() {
   }
 
   function openFileTransfer(id: string) {
+    const session = sessions.find((candidate) => candidate.id === id);
+    if (
+      !session ||
+      session.protocol !== 'ssh' ||
+      !session.backendSessionId ||
+      session.status !== 'connected'
+    ) {
+      return;
+    }
     setSelectedSessionId(id);
     setActivePage('sessions');
+    if (session.sftp) return;
+    const requestId = nextSftpRequestId(id);
+    const localRequestId = nextSftpPaneRequestId();
+    const remoteRequestId = `sftp-remote-${requestId}`;
+
+    setSessions((current) =>
+      current.map((candidate) =>
+        candidate.id === id
+          ? {
+              ...candidate,
+              sftp: {
+                status: 'opening',
+                path: '',
+                entries: [],
+                truncated: false,
+                requestId: remoteRequestId,
+                local: {
+                  status: 'opening',
+                  path: '',
+                  entries: [],
+                  truncated: false,
+                  requestId: localRequestId,
+                },
+                transfers: [],
+                transferError: undefined,
+                transferErrorTransferId: undefined,
+                conflict: undefined,
+                knownTransferIds: {},
+                knownOperationIds: {},
+              },
+            }
+          : candidate,
+      ),
+    );
+    const api = window.wormhole;
+    if (!api) {
+      setSftpFailure(id, requestId, 'The native SFTP bridge is unavailable.');
+      return;
+    }
+    void api.openSftpBrowser(session.backendSessionId, remoteRequestId).catch((error: unknown) => {
+      setSftpFailure(id, requestId, error instanceof Error ? error.message : String(error));
+    });
+    void api
+      .listLocalSftpDirectory(session.backendSessionId, '', localRequestId)
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setSessions((current) =>
+          current.map((candidate) => {
+            if (candidate.id !== id || !candidate.sftp || candidate.sftp.status === 'closing') {
+              return candidate;
+            }
+            const local = candidate.sftp.local;
+            if (local?.requestId !== localRequestId) return candidate;
+            return {
+              ...candidate,
+              sftp: {
+                ...candidate.sftp,
+                local: { ...local, status: 'failed', error: message },
+              },
+            };
+          }),
+        );
+      });
   }
+
+  function nextSftpRequestId(sessionId: string): number {
+    const requestId = ++sftpRequestSequence.current;
+    sftpRequestIds.current.set(sessionId, requestId);
+    return requestId;
+  }
+
+  function nextSftpPaneRequestId(): string {
+    return `sftp-pane-${++sftpPaneRequestSequence.current}`;
+  }
+
+  function setSftpFailure(sessionId: string, requestId: number, error: string) {
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === sessionId &&
+        shouldApplySftpFailure(session.sftp, requestId, sftpRequestIds.current.get(sessionId))
+          ? {
+              ...session,
+              sftp: {
+                ...session.sftp,
+                status: 'failed',
+                path: session.sftp.previousPath ?? session.sftp.path,
+                previousPath: undefined,
+                entries: session.sftp?.entries ?? [],
+                truncated: session.sftp?.truncated ?? false,
+                error,
+              },
+            }
+          : session,
+      ),
+    );
+  }
+
+  function closeSftpBrowser(id: string) {
+    const session = sessions.find((candidate) => candidate.id === id);
+    if (!session?.backendSessionId) return;
+    clearSftpCancelRequestsForBrowser(sftpCancelRequests.current, session.sftp);
+    const requestId = nextSftpRequestId(id);
+    setSessions((current) =>
+      current.map((candidate) =>
+        candidate.id === id && candidate.sftp
+          ? { ...candidate, sftp: { ...candidate.sftp, status: 'closing', error: undefined } }
+          : candidate,
+      ),
+    );
+    const api = window.wormhole;
+    if (!api) {
+      setSessions((current) =>
+        current.map((candidate) =>
+          candidate.id === id &&
+          shouldFinishSftpClose(candidate.sftp, requestId, sftpRequestIds.current.get(id))
+            ? { ...candidate, sftp: undefined }
+            : candidate,
+        ),
+      );
+      return;
+    }
+    void api.closeSftpBrowser(session.backendSessionId).catch(() => {
+      setSessions((current) =>
+        current.map((candidate) =>
+          candidate.id === id &&
+          shouldFinishSftpClose(candidate.sftp, requestId, sftpRequestIds.current.get(id))
+            ? { ...candidate, sftp: undefined }
+            : candidate,
+        ),
+      );
+    });
+  }
+
+  function requestSftpDirectory(sessionId: string, path: string) {
+    const session = sessions.find((candidate) => candidate.id === sessionId);
+    if (
+      !session?.backendSessionId ||
+      session.protocol !== 'ssh' ||
+      !session.sftp ||
+      session.sftp.status === 'closing'
+    ) {
+      return;
+    }
+    const requestId = nextSftpRequestId(sessionId);
+    const wireRequestId = `sftp-remote-${requestId}`;
+    setSessions((current) =>
+      current.map((candidate) =>
+        candidate.id === sessionId
+          ? {
+              ...candidate,
+              sftp: {
+                ...candidate.sftp!,
+                status: 'opening',
+                error: undefined,
+                previousPath: candidate.sftp!.previousPath ?? candidate.sftp!.path,
+                path,
+                requestId: wireRequestId,
+              },
+            }
+          : candidate,
+      ),
+    );
+    const api = window.wormhole;
+    if (!api) {
+      setSftpFailure(sessionId, requestId, 'The native SFTP bridge is unavailable.');
+      return;
+    }
+    void api
+      .listSftpDirectory(session.backendSessionId, path, wireRequestId)
+      .catch((error: unknown) => {
+        setSftpFailure(
+          sessionId,
+          requestId,
+          error instanceof Error ? error.message : String(error),
+        );
+      });
+  }
+
+  function refreshSftpBrowser(id: string) {
+    const session = sessions.find((candidate) => candidate.id === id);
+    if (!session?.sftp || session.sftp.status === 'closing') return;
+    if (!session.sftp.path) {
+      const requestId = nextSftpRequestId(id);
+      const remoteRequestId = `sftp-remote-${requestId}`;
+      setSessions((current) =>
+        current.map((candidate) =>
+          candidate.id === id
+            ? {
+                ...candidate,
+                sftp: {
+                  ...candidate.sftp!,
+                  status: 'opening',
+                  error: undefined,
+                  requestId: remoteRequestId,
+                },
+              }
+            : candidate,
+        ),
+      );
+      const api = window.wormhole;
+      if (!api || !session.backendSessionId) {
+        setSftpFailure(id, requestId, 'The native SFTP bridge is unavailable.');
+        return;
+      }
+      void api
+        .openSftpBrowser(session.backendSessionId, remoteRequestId)
+        .catch((error: unknown) => {
+          setSftpFailure(id, requestId, error instanceof Error ? error.message : String(error));
+        });
+      return;
+    }
+    requestSftpDirectory(id, session.sftp.path);
+  }
+
+  function requestLocalSftpDirectory(sessionId: string, path: string) {
+    const session = sessions.find((candidate) => candidate.id === sessionId);
+    if (
+      !session?.backendSessionId ||
+      session.protocol !== 'ssh' ||
+      !session.sftp ||
+      session.sftp.status === 'closing'
+    ) {
+      return;
+    }
+    const requestId = nextSftpPaneRequestId();
+    setSessions((current) =>
+      current.map((candidate) => {
+        if (candidate.id !== sessionId || !candidate.sftp) return candidate;
+        const local = candidate.sftp.local ?? {
+          status: 'ready' as const,
+          path,
+          entries: [],
+          truncated: false,
+        };
+        return {
+          ...candidate,
+          sftp: {
+            ...candidate.sftp,
+            local: {
+              ...local,
+              status: 'opening',
+              previousPath: local.previousPath ?? local.path,
+              path,
+              error: undefined,
+              requestId,
+            },
+          },
+        };
+      }),
+    );
+    const api = window.wormhole;
+    if (!api) {
+      setSessions((current) =>
+        current.map((candidate) =>
+          candidate.id === sessionId && candidate.sftp?.local?.requestId === requestId
+            ? {
+                ...candidate,
+                sftp: {
+                  ...candidate.sftp,
+                  local: {
+                    ...candidate.sftp.local,
+                    status: 'failed',
+                    path: candidate.sftp.local.previousPath ?? candidate.sftp.local.path,
+                    previousPath: undefined,
+                    error: 'The native SFTP bridge is unavailable.',
+                  },
+                },
+              }
+            : candidate,
+        ),
+      );
+      return;
+    }
+    void api
+      .listLocalSftpDirectory(session.backendSessionId, path, requestId)
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setSessions((current) =>
+          current.map((candidate) =>
+            candidate.id === sessionId && candidate.sftp?.local?.requestId === requestId
+              ? {
+                  ...candidate,
+                  sftp: {
+                    ...candidate.sftp,
+                    local: {
+                      ...candidate.sftp.local,
+                      status: 'failed',
+                      path: candidate.sftp.local.previousPath ?? candidate.sftp.local.path,
+                      previousPath: undefined,
+                      error: message,
+                    },
+                  },
+                }
+              : candidate,
+          ),
+        );
+      });
+  }
+
+  function operateSftp(
+    sessionId: string,
+    pane: 'local' | 'remote',
+    operation: 'mkdir' | 'file' | 'delete' | 'rename' | 'open',
+    path: string,
+    destinationPath?: string,
+  ) {
+    const session = sessions.find((candidate) => candidate.id === sessionId);
+    if (!session?.backendSessionId || !session.sftp || session.sftp.status === 'closing') return;
+    const requestId = nextSftpPaneRequestId();
+    setSessions((current) =>
+      current.map((candidate) =>
+        candidate.id === sessionId && candidate.sftp
+          ? {
+              ...candidate,
+              sftp: {
+                ...candidate.sftp,
+                knownOperationIds: {
+                  ...(candidate.sftp.knownOperationIds ?? {}),
+                  [requestId]: true,
+                },
+              },
+            }
+          : candidate,
+      ),
+    );
+    const api = window.wormhole;
+    if (!api) {
+      setSessions((current) =>
+        current.map((candidate) => {
+          if (candidate.id !== sessionId || !candidate.sftp) return candidate;
+          const knownOperationIds = { ...(candidate.sftp.knownOperationIds ?? {}) };
+          delete knownOperationIds[requestId];
+          if (pane === 'local') {
+            const local = candidate.sftp.local ?? {
+              status: 'ready' as const,
+              path: '',
+              entries: [],
+              truncated: false,
+            };
+            return {
+              ...candidate,
+              sftp: {
+                ...candidate.sftp,
+                knownOperationIds,
+                local: {
+                  ...local,
+                  status: 'failed',
+                  error: 'The native SFTP bridge is unavailable.',
+                },
+              },
+            };
+          }
+          return {
+            ...candidate,
+            sftp: {
+              ...candidate.sftp,
+              knownOperationIds,
+              status: 'failed',
+              error: 'The native SFTP bridge is unavailable.',
+            },
+          };
+        }),
+      );
+      return;
+    }
+    void api
+      .operateSftp(session.backendSessionId, {
+        requestId,
+        pane,
+        operation,
+        path,
+        destinationPath,
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setSessions((current) =>
+          current.map((candidate) => {
+            if (
+              candidate.id !== sessionId ||
+              !candidate.sftp ||
+              !candidate.sftp.knownOperationIds?.[requestId]
+            ) {
+              return candidate;
+            }
+            const knownOperationIds = { ...(candidate.sftp.knownOperationIds ?? {}) };
+            delete knownOperationIds[requestId];
+            if (pane === 'local') {
+              const local = candidate.sftp.local ?? {
+                status: 'ready' as const,
+                path: '',
+                entries: [],
+                truncated: false,
+              };
+              return {
+                ...candidate,
+                sftp: {
+                  ...candidate.sftp,
+                  knownOperationIds,
+                  local: { ...local, status: 'failed', error: message },
+                },
+              };
+            }
+            return {
+              ...candidate,
+              sftp: { ...candidate.sftp, knownOperationIds, status: 'failed', error: message },
+            };
+          }),
+        );
+      });
+  }
+
+  function startSftpTransfer(
+    sessionId: string,
+    direction: 'local-to-remote' | 'remote-to-local' | 'local-to-local',
+    destinationPath: string,
+    items: Array<{
+      sourcePath: string;
+      name: string;
+      isDirectory: boolean;
+      size: number;
+    }>,
+  ) {
+    const session = sessions.find((candidate) => candidate.id === sessionId);
+    if (!session?.backendSessionId || !session.sftp || session.sftp.status === 'closing') return;
+    const transferId = `sftp-transfer-${++sftpPaneRequestSequence.current}`;
+    setSessions((current) =>
+      current.map((candidate) =>
+        candidate.id === sessionId && candidate.sftp
+          ? {
+              ...candidate,
+              sftp: {
+                ...candidate.sftp,
+                knownTransferIds: {
+                  ...(candidate.sftp.knownTransferIds ?? {}),
+                  [transferId]: true,
+                },
+              },
+            }
+          : candidate,
+      ),
+    );
+    const api = window.wormhole;
+    if (!api) {
+      setSessions((current) =>
+        current.map((candidate) => {
+          if (candidate.id !== sessionId || !candidate.sftp) return candidate;
+          const knownTransferIds = { ...(candidate.sftp.knownTransferIds ?? {}) };
+          delete knownTransferIds[transferId];
+          return {
+            ...candidate,
+            sftp: {
+              ...candidate.sftp,
+              knownTransferIds,
+              transferErrorTransferId: transferId,
+              transferError: 'The native SFTP bridge is unavailable.',
+            },
+          };
+        }),
+      );
+      return;
+    }
+    void api
+      .startSftpTransfer(session.backendSessionId, {
+        transferId,
+        direction,
+        destinationPath,
+        items,
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setSessions((current) =>
+          current.map((candidate) => {
+            if (
+              candidate.id !== sessionId ||
+              !candidate.sftp ||
+              !candidate.sftp.knownTransferIds?.[transferId]
+            ) {
+              return candidate;
+            }
+            const knownTransferIds = { ...(candidate.sftp.knownTransferIds ?? {}) };
+            delete knownTransferIds[transferId];
+            return {
+              ...candidate,
+              sftp: {
+                ...candidate.sftp,
+                knownTransferIds,
+                transferErrorTransferId: transferId,
+                transferError: message,
+              },
+            };
+          }),
+        );
+      });
+  }
+
+  function decideSftpConflict(
+    sessionId: string,
+    transferId: string,
+    itemId: string,
+    decision: 'overwrite' | 'skip',
+    applyToAll: boolean,
+  ) {
+    const session = sessions.find((candidate) => candidate.id === sessionId);
+    if (!session?.backendSessionId) return;
+    const conflict = session.sftp?.conflict;
+    if (!conflict || conflict.transferId !== transferId || conflict.itemId !== itemId) {
+      return;
+    }
+    setSessions((current) =>
+      current.map((candidate) =>
+        candidate.id === sessionId &&
+        candidate.sftp &&
+        candidate.sftp.conflict?.transferId === transferId &&
+        candidate.sftp.conflict.itemId === itemId
+          ? { ...candidate, sftp: { ...candidate.sftp, conflict: undefined } }
+          : candidate,
+      ),
+    );
+    const api = window.wormhole;
+    if (!api) {
+      setSessions((current) =>
+        current.map((candidate) =>
+          candidate.id === sessionId && candidate.sftp
+            ? {
+                ...candidate,
+                sftp: {
+                  ...candidate.sftp,
+                  conflict: candidate.sftp.conflict ?? conflict,
+                  transferError: 'The native SFTP bridge is unavailable.',
+                  transferErrorTransferId: transferId,
+                },
+              }
+            : candidate,
+        ),
+      );
+      return;
+    }
+    void api
+      .decideSftpConflict(session.backendSessionId, transferId, itemId, decision, applyToAll)
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setSessions((current) =>
+          current.map((candidate) => {
+            if (
+              candidate.id !== sessionId ||
+              !candidate.sftp ||
+              !candidate.sftp.knownTransferIds?.[transferId]
+            ) {
+              return candidate;
+            }
+            return {
+              ...candidate,
+              sftp: {
+                ...candidate.sftp,
+                conflict: candidate.sftp.conflict ?? conflict,
+                transferError: message,
+                transferErrorTransferId: transferId,
+              },
+            };
+          }),
+        );
+      });
+  }
+
+  function cancelSftpTransfer(sessionId: string, transferId: string, itemId: string) {
+    const session = sessions.find((candidate) => candidate.id === sessionId);
+    if (!session?.backendSessionId) return;
+    const cancelledTransfer = (session.sftp?.transfers ?? []).find(
+      (transfer) => transfer.transferId === transferId && transfer.itemId === itemId,
+    );
+    if (!cancelledTransfer) return;
+    const cancelKey = sftpTransferItemKey(transferId, itemId);
+    sftpCancelRequests.current.add(cancelKey);
+    setSessions((current) =>
+      current.map((candidate) =>
+        candidate.id === sessionId && candidate.sftp
+          ? {
+              ...candidate,
+              sftp: {
+                ...candidate.sftp,
+                transfers: removeSftpTransferRow(
+                  candidate.sftp.transfers ?? [],
+                  transferId,
+                  itemId,
+                ),
+              },
+            }
+          : candidate,
+      ),
+    );
+    const api = window.wormhole;
+    if (!api) {
+      sftpCancelRequests.current.delete(cancelKey);
+      setSessions((current) =>
+        current.map((candidate) => {
+          if (candidate.id !== sessionId || !candidate.sftp) return candidate;
+          const transfers = candidate.sftp.transfers ?? [];
+          return {
+            ...candidate,
+            sftp: {
+              ...candidate.sftp,
+              transfers: transfers.some(
+                (transfer) => transfer.transferId === transferId && transfer.itemId === itemId,
+              )
+                ? transfers
+                : [...transfers, cancelledTransfer],
+              transferError: 'The native SFTP bridge is unavailable.',
+              transferErrorTransferId: transferId,
+            },
+          };
+        }),
+      );
+      return;
+    }
+    void api
+      .cancelSftpTransfer(session.backendSessionId, transferId, itemId)
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!sftpCancelRequests.current.has(cancelKey)) return;
+        sftpCancelRequests.current.delete(cancelKey);
+        setSessions((current) =>
+          current.map((candidate) => {
+            if (candidate.id !== sessionId || !candidate.sftp) return candidate;
+            const transfers = candidate.sftp.transfers ?? [];
+            return {
+              ...candidate,
+              sftp: {
+                ...candidate.sftp,
+                transfers: transfers.some(
+                  (transfer) => transfer.transferId === transferId && transfer.itemId === itemId,
+                )
+                  ? transfers
+                  : [...transfers, cancelledTransfer],
+                transferError: message,
+                transferErrorTransferId: transferId,
+              },
+            };
+          }),
+        );
+      });
+  }
+
+  function removeSftpTransfer(sessionId: string, transferId: string, itemId: string) {
+    setSessions((current) =>
+      current.map((candidate) => {
+        if (candidate.id !== sessionId || !candidate.sftp) return candidate;
+        return {
+          ...candidate,
+          sftp: {
+            ...candidate.sftp,
+            transfers: (candidate.sftp.transfers ?? []).filter(
+              (transfer) => transfer.transferId !== transferId || transfer.itemId !== itemId,
+            ),
+          },
+        };
+      }),
+    );
+  }
+
+  function clearSftpTransferError(sessionId: string) {
+    setSessions((current) =>
+      current.map((candidate) =>
+        candidate.id === sessionId && candidate.sftp
+          ? {
+              ...candidate,
+              sftp: {
+                ...candidate.sftp,
+                transferError: undefined,
+                transferErrorTransferId: undefined,
+              },
+            }
+          : candidate,
+      ),
+    );
+  }
+
+  sftpRefreshHandlers.current = {
+    local: requestLocalSftpDirectory,
+    remote: requestSftpDirectory,
+  };
+
+  useEffect(() => {
+    const pending = sessions.find((session) => {
+      const requests = session.sftp?.refreshRequests;
+      return requests && (requests.local !== undefined || requests.remote !== undefined);
+    });
+    const requests = pending?.sftp?.refreshRequests;
+    const request = requests?.local ?? requests?.remote;
+    if (!pending || !request) return;
+
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === pending.id &&
+        session.sftp?.refreshRequests?.[request.pane]?.id === request.id
+          ? {
+              ...session,
+              sftp: {
+                ...session.sftp,
+                refreshRequests: {
+                  ...session.sftp.refreshRequests,
+                  [request.pane]: undefined,
+                },
+              },
+            }
+          : session,
+      ),
+    );
+    const refresh = sftpRefreshHandlers.current;
+    if (request.pane === 'local') refresh?.local(pending.id, request.path);
+    else refresh?.remote(pending.id, request.path);
+  }, [sessions]);
 
   function sendSshInput(sessionId: string, value: string) {
     const session = sessions.find((candidate) => candidate.id === sessionId);
     if (!session?.backendSessionId || session.status !== 'connected') return;
+    const backendSessionId = session.backendSessionId;
 
     void window.wormhole
-      ?.sendSshInput(session.backendSessionId, encodeTerminalData(value))
+      ?.sendSshInput(backendSessionId, encodeTerminalData(value))
       .catch((error: unknown) => {
         setSessions((current) =>
           current.map((candidate) =>
-            candidate.id === sessionId
+            candidate.id === sessionId && candidate.backendSessionId === backendSessionId
               ? {
                   ...candidate,
                   status: 'failed',
+                  sftp: undefined,
                   error: error instanceof Error ? error.message : String(error),
                 }
               : candidate,
@@ -1819,11 +2972,13 @@ function App() {
 
   function openNewConnection(folderId?: string) {
     setEditingConnectionId(null);
+    setEditorError('');
     setNewConnectionForm({
       name: '',
       host: '',
       protocol: 'ssh',
       folder: folderId ?? getCreationFolderId() ?? folders[0]?.id ?? '',
+      sshAutoSudo: 'inherit',
       serial: { ...defaultSerialSettings },
     });
     setNewConnectionOpen(true);
@@ -1834,19 +2989,66 @@ function App() {
 
     setSelectedNodeId(node.id);
     setEditingConnectionId(node.id);
+    setEditorError('');
     setNewConnectionForm({
       name: node.name,
       host: node.host ?? '',
       protocol: node.protocol,
       folder: findParentFolderId(tree, node.id) ?? folders[0]?.id ?? '',
+      sshAutoSudo: autoSudoModeFor(node.sshAutoSudo),
       serial: serialSettingsFromNode(node),
     });
     setNewConnectionOpen(true);
   }
 
+  function openEditFolder(node: TreeNode) {
+    if (node.kind !== 'folder') return;
+
+    setSelectedNodeId(node.id);
+    setEditingFolderId(node.id);
+    setEditorError('');
+    setFolderDetailsForm({
+      name: node.name,
+      sshAutoSudo: autoSudoModeFor(node.sshAutoSudo),
+    });
+    setFolderDetailsOpen(true);
+  }
+
+  function openEditNode(node: TreeNode) {
+    if (node.kind === 'folder') {
+      openEditFolder(node);
+    } else {
+      openEditConnection(node);
+    }
+  }
+
+  async function persistNodeSshAutoSudo(nodeId: string, mode: AutoSudoMode): Promise<boolean> {
+    if (!window.wormhole) {
+      setEditorError('The native workspace bridge is unavailable.');
+      return false;
+    }
+    try {
+      const result = await window.wormhole.updateWorkspaceNodeSshSettings({
+        nodeId,
+        sshAutoSudo: autoSudoValueFor(mode),
+      });
+      if (!result.updated) {
+        setEditorError('The workspace did not save the Auto sudo setting.');
+        return false;
+      }
+      return true;
+    } catch (error: unknown) {
+      setEditorError(
+        error instanceof Error ? error.message : 'Could not save the Auto sudo setting.',
+      );
+      return false;
+    }
+  }
+
   function openNewFolder(parentFolderId?: string) {
     setNewFolderName('');
     setNewFolderParentId(parentFolderId ?? getCreationFolderId() ?? null);
+    setEditorError('');
     setNewFolderOpen(true);
   }
 
@@ -1888,104 +3090,154 @@ function App() {
     }
   }
 
-  function submitNewConnection(event: FormEvent<HTMLFormElement>) {
+  async function submitNewConnection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (editorBusy) return;
     const name = newConnectionForm.name.trim();
     const host = newConnectionForm.host.trim();
     const editingId = editingConnectionId;
+    setEditorBusy(true);
+    setEditorError('');
 
-    if (editingId) {
-      const editedSessionId = `session-${editingId}`;
-      const editedSession = sessions.find((session) => session.id === editedSessionId);
-      if (editedSession?.backendSessionId) {
-        if (editedSession.protocol === 'serial') {
-          void window.wormhole?.closeSerialSession(editedSession.backendSessionId);
-        } else {
-          void window.wormhole?.closeSshSession(editedSession.backendSessionId);
+    try {
+      const connectionAutoSudo =
+        newConnectionForm.protocol === 'ssh' ? newConnectionForm.sshAutoSudo : 'inherit';
+      if (editingId) {
+        const editedNode = findTreeNode(tree, editingId);
+        if (
+          editedNode?.persisted &&
+          !(await persistNodeSshAutoSudo(editingId, connectionAutoSudo))
+        ) {
+          return;
         }
-      }
-      const backendSessionId =
-        editedSession &&
-        (newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'serial')
-          ? newSessionToken()
-          : undefined;
-      setTree((current) =>
-        updateConnectionInTree(current, editingId, newConnectionForm.folder, {
+        const editedSessionId = `session-${editingId}`;
+        const editedSession = sessions.find((session) => session.id === editedSessionId);
+        if (editedSession?.backendSessionId) {
+          if (editedSession.protocol === 'serial') {
+            void window.wormhole?.closeSerialSession(editedSession.backendSessionId);
+          } else {
+            void window.wormhole?.closeSshSession(editedSession.backendSessionId);
+          }
+        }
+        clearSftpCancelRequestsForBrowser(sftpCancelRequests.current, editedSession?.sftp);
+        const backendSessionId =
+          editedSession &&
+          (newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'serial')
+            ? newSessionToken()
+            : undefined;
+        setTree((current) =>
+          updateConnectionInTree(current, editingId, newConnectionForm.folder, {
+            name,
+            host,
+            protocol: newConnectionForm.protocol,
+            sshAutoSudo: autoSudoValueFor(connectionAutoSudo),
+            serialSettings:
+              newConnectionForm.protocol === 'serial' ? newConnectionForm.serial : undefined,
+          }),
+        );
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === editedSessionId
+              ? {
+                  ...session,
+                  title: name,
+                  host,
+                  protocol: newConnectionForm.protocol,
+                  canTransfer: newConnectionForm.protocol === 'ssh',
+                  nodeId: editingId,
+                  backendSessionId,
+                  status:
+                    newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'serial'
+                      ? 'connecting'
+                      : 'placeholder',
+                  terminalFrame: undefined,
+                  sftp: undefined,
+                  error: undefined,
+                  serialSettings:
+                    newConnectionForm.protocol === 'serial'
+                      ? { ...newConnectionForm.serial }
+                      : undefined,
+                }
+              : session,
+          ),
+        );
+        if (backendSessionId && newConnectionForm.protocol === 'ssh') {
+          startSshSession(backendSessionId, editingId);
+        }
+        if (backendSessionId && newConnectionForm.protocol === 'serial') {
+          startSerialSession(
+            backendSessionId,
+            savedSerialNodeId(editingId),
+            host,
+            newConnectionForm.serial,
+          );
+        }
+      } else {
+        const id = `connection-${Date.now()}`;
+        const connection: TreeNode = {
+          id,
           name,
-          host,
+          kind: 'connection',
           protocol: newConnectionForm.protocol,
-          serialSettings:
-            newConnectionForm.protocol === 'serial' ? newConnectionForm.serial : undefined,
+          host,
+          sshAutoSudo: autoSudoValueFor(connectionAutoSudo),
+          ...(newConnectionForm.protocol === 'serial'
+            ? {
+                serialBaudRate: newConnectionForm.serial.baudRate,
+                serialDataBits: newConnectionForm.serial.dataBits,
+                serialStopBits: newConnectionForm.serial.stopBits,
+                serialParity: newConnectionForm.serial.parity,
+                serialFlowControl: newConnectionForm.serial.flowControl,
+              }
+            : {}),
+        };
+
+        setTree((current) =>
+          newConnectionForm.folder
+            ? insertIntoTreeFolder(current, newConnectionForm.folder, [connection])
+            : [...current, connection],
+        );
+        setSelectedNodeId(id);
+      }
+
+      if (newConnectionForm.folder) {
+        setExpanded((current) => new Set(current).add(newConnectionForm.folder));
+      }
+      setEditingConnectionId(null);
+      setNewConnectionOpen(false);
+    } finally {
+      setEditorBusy(false);
+    }
+  }
+
+  async function submitFolderDetails(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (editorBusy || !editingFolderId) return;
+    const name = folderDetailsForm.name.trim();
+    if (!name) return;
+
+    setEditorBusy(true);
+    setEditorError('');
+    try {
+      const folder = findTreeNode(tree, editingFolderId);
+      if (!folder) return;
+      if (
+        folder.persisted &&
+        !(await persistNodeSshAutoSudo(editingFolderId, folderDetailsForm.sshAutoSudo))
+      ) {
+        return;
+      }
+      setTree((current) =>
+        updateFolderInTree(current, editingFolderId, {
+          name,
+          sshAutoSudo: autoSudoValueFor(folderDetailsForm.sshAutoSudo),
         }),
       );
-      setSessions((current) =>
-        current.map((session) =>
-          session.id === editedSessionId
-            ? {
-                ...session,
-                title: name,
-                host,
-                protocol: newConnectionForm.protocol,
-                canTransfer: newConnectionForm.protocol === 'ssh',
-                nodeId: editingId,
-                backendSessionId,
-                status:
-                  newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'serial'
-                    ? 'connecting'
-                    : 'placeholder',
-                terminalFrame: undefined,
-                error: undefined,
-                serialSettings:
-                  newConnectionForm.protocol === 'serial'
-                    ? { ...newConnectionForm.serial }
-                    : undefined,
-              }
-            : session,
-        ),
-      );
-      if (backendSessionId && newConnectionForm.protocol === 'ssh') {
-        startSshSession(backendSessionId, editingId);
-      }
-      if (backendSessionId && newConnectionForm.protocol === 'serial') {
-        startSerialSession(
-          backendSessionId,
-          savedSerialNodeId(editingId),
-          host,
-          newConnectionForm.serial,
-        );
-      }
-    } else {
-      const id = `connection-${Date.now()}`;
-      const connection: TreeNode = {
-        id,
-        name,
-        kind: 'connection',
-        protocol: newConnectionForm.protocol,
-        host,
-        ...(newConnectionForm.protocol === 'serial'
-          ? {
-              serialBaudRate: newConnectionForm.serial.baudRate,
-              serialDataBits: newConnectionForm.serial.dataBits,
-              serialStopBits: newConnectionForm.serial.stopBits,
-              serialParity: newConnectionForm.serial.parity,
-              serialFlowControl: newConnectionForm.serial.flowControl,
-            }
-          : {}),
-      };
-
-      setTree((current) =>
-        newConnectionForm.folder
-          ? insertIntoTreeFolder(current, newConnectionForm.folder, [connection])
-          : [...current, connection],
-      );
-      setSelectedNodeId(id);
+      setFolderDetailsOpen(false);
+      setEditingFolderId(null);
+    } finally {
+      setEditorBusy(false);
     }
-
-    if (newConnectionForm.folder) {
-      setExpanded((current) => new Set(current).add(newConnectionForm.folder));
-    }
-    setEditingConnectionId(null);
-    setNewConnectionOpen(false);
   }
 
   function submitNewFolder(event: FormEvent<HTMLFormElement>) {
@@ -2136,7 +3388,7 @@ function App() {
           <NodeContextMenu
             key={node.id}
             node={node}
-            onEdit={() => openEditConnection(node)}
+            onEdit={() => openEditNode(node)}
             onNewConnection={() => openNewConnection(creationFolderId)}
             onNewFolder={() => openNewFolder(creationFolderId)}
           >
@@ -2167,7 +3419,7 @@ function App() {
           {treeVerticalGuide}
           <NodeContextMenu
             node={node}
-            onEdit={() => openEditConnection(node)}
+            onEdit={() => openEditNode(node)}
             onNewConnection={() => openNewConnection(creationFolderId)}
             onNewFolder={() => openNewFolder(creationFolderId)}
           >
@@ -2272,8 +3524,8 @@ function App() {
           </div>
         </header>
 
-        <ResizablePanelGroup className="min-h-0 flex-1" orientation="horizontal">
-          <ResizablePanel defaultSize="24%" maxSize="36%" minSize="18%">
+        <ResizablePanelGroup className="h-full min-h-0 flex-1" orientation="horizontal">
+          <ResizablePanel className="min-h-0" defaultSize="24%" maxSize="36%" minSize="18%">
             <SidebarProvider
               className="h-full min-h-0"
               style={{ '--sidebar-width': '100%' } as CSSProperties}
@@ -2409,19 +3661,29 @@ function App() {
             </SidebarProvider>
           </ResizablePanel>
           <ResizableHandle withHandle />
-          <ResizablePanel minSize="54%">
+          <ResizablePanel className="min-h-0" minSize="54%">
             <SidebarInset className="h-full min-h-0 min-w-0 rounded-none bg-background">
               {activePage === 'sessions' ? (
                 <SessionsPage
                   onCloseSession={closeSession}
                   onConnectRdp={requestRdpCredentials}
                   onDuplicateSession={duplicateSession}
+                  onCloseSftpBrowser={closeSftpBrowser}
                   onOpenFileTransfer={openFileTransfer}
                   onOpenQuickConnect={openQuickConnect}
                   onReconnectSession={reconnectSession}
                   onRetryRdp={retryRdpSession}
                   onSelectSession={setSelectedSessionId}
                   onSerialInput={sendSerialInput}
+                  onSftpLocalNavigate={requestLocalSftpDirectory}
+                  onSftpOperation={operateSftp}
+                  onSftpTransfer={startSftpTransfer}
+                  onSftpConflict={decideSftpConflict}
+                  onSftpTransferCancel={cancelSftpTransfer}
+                  onSftpTransferErrorClear={clearSftpTransferError}
+                  onSftpTransferRemove={removeSftpTransfer}
+                  onSftpNavigate={requestSftpDirectory}
+                  onSftpRefresh={refreshSftpBrowser}
                   onSshInput={sendSshInput}
                   onTrustSshHostKey={trustSshHostKey}
                   isAuthorized={authGate === 'unlocked'}
@@ -2624,7 +3886,10 @@ function App() {
         <Dialog
           onOpenChange={(open) => {
             setNewConnectionOpen(open);
-            if (!open) setEditingConnectionId(null);
+            if (!open) {
+              setEditingConnectionId(null);
+              setEditorError('');
+            }
           }}
           open={newConnectionOpen}
         >
@@ -2781,6 +4046,17 @@ function App() {
                         </SelectContent>
                       </Select>
                     </div>
+
+                    {newConnectionForm.protocol === 'ssh' ? (
+                      <AutoSudoField
+                        id="connection-auto-sudo"
+                        mode={newConnectionForm.sshAutoSudo}
+                        onChange={(sshAutoSudo) =>
+                          setNewConnectionForm((form) => ({ ...form, sshAutoSudo }))
+                        }
+                        scope="connection"
+                      />
+                    ) : null}
 
                     {newConnectionForm.protocol === 'https' ? (
                       <label className="flex items-center gap-2 text-xs">
@@ -3047,8 +4323,10 @@ function App() {
                   </>
                 ) : null}
               </Tabs>
+              {editorError ? <p className="text-[11px] text-destructive">{editorError}</p> : null}
               <DialogFooter>
                 <Button
+                  disabled={editorBusy}
                   onClick={() => {
                     setNewConnectionOpen(false);
                     setEditingConnectionId(null);
@@ -3058,13 +4336,74 @@ function App() {
                 >
                   Cancel
                 </Button>
-                <Button type="submit">
+                <Button disabled={editorBusy} type="submit">
                   {editingConnectionId ? (
                     <Check data-icon="inline-start" />
                   ) : (
                     <Plus data-icon="inline-start" />
                   )}
-                  {editingConnectionId ? 'Save changes' : 'Save connection'}
+                  {editorBusy
+                    ? 'Saving…'
+                    : editingConnectionId
+                      ? 'Save changes'
+                      : 'Save connection'}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog
+          onOpenChange={(open) => {
+            setFolderDetailsOpen(open);
+            if (!open) {
+              setEditingFolderId(null);
+              setEditorError('');
+            }
+          }}
+          open={folderDetailsOpen}
+        >
+          <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-xl">
+            <DialogHeader>
+              <DialogTitle>Folder details</DialogTitle>
+              <DialogDescription>
+                Set defaults inherited by SSH connections inside this folder.
+              </DialogDescription>
+            </DialogHeader>
+            <form className="grid gap-4" onSubmit={submitFolderDetails}>
+              <div className="grid gap-2">
+                <Label htmlFor="folder-details-name">Folder name</Label>
+                <Input
+                  autoFocus
+                  id="folder-details-name"
+                  onChange={(event) =>
+                    setFolderDetailsForm((form) => ({ ...form, name: event.target.value }))
+                  }
+                  required
+                  value={folderDetailsForm.name}
+                />
+              </div>
+              <AutoSudoField
+                id="folder-auto-sudo"
+                mode={folderDetailsForm.sshAutoSudo}
+                onChange={(sshAutoSudo) =>
+                  setFolderDetailsForm((form) => ({ ...form, sshAutoSudo }))
+                }
+                scope="folder"
+              />
+              {editorError ? <p className="text-[11px] text-destructive">{editorError}</p> : null}
+              <DialogFooter>
+                <Button
+                  disabled={editorBusy}
+                  onClick={() => setFolderDetailsOpen(false)}
+                  type="button"
+                  variant="ghost"
+                >
+                  Cancel
+                </Button>
+                <Button disabled={editorBusy} type="submit">
+                  <Check data-icon="inline-start" />
+                  {editorBusy ? 'Saving…' : 'Save changes'}
                 </Button>
               </DialogFooter>
             </form>
@@ -3588,7 +4927,7 @@ function SshTerminalSurface({
     return (
       <div
         aria-label={isSerial ? 'Serial connection state' : 'SSH connection state'}
-        className="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-[#090909] px-6 py-10 text-zinc-100"
+        className="flex h-full min-h-0 min-w-0 flex-1 items-center justify-center overflow-auto bg-[#090909] px-6 py-10 text-zinc-100"
         ref={surfaceRef}
       >
         <div className="flex w-full max-w-2xl flex-col items-center text-center">
@@ -3700,6 +5039,1033 @@ function SshTerminalSurface({
   );
 }
 
+type SftpPaneKind = 'local' | 'remote';
+type SftpOperation = 'mkdir' | 'file' | 'delete' | 'rename' | 'open';
+type SftpTransferDirection = 'local-to-remote' | 'remote-to-local' | 'local-to-local';
+type SftpTransferItem = {
+  sourcePath: string;
+  name: string;
+  isDirectory: boolean;
+  size: number;
+};
+type SftpDragPayload = {
+  sourcePane: SftpPaneKind;
+  items: SftpTransferItem[];
+  external: boolean;
+};
+
+function clearSftpCancelRequestsForTransfer(requests: Set<string>, transferId: string) {
+  const prefix = `${transferId}\u0000`;
+  for (const request of requests) {
+    if (request.startsWith(prefix)) requests.delete(request);
+  }
+}
+
+function clearSftpCancelRequestsForBrowser(
+  requests: Set<string>,
+  browser: Pick<SftpBrowserState, 'knownTransferIds'> | undefined,
+) {
+  for (const transferId of Object.keys(browser?.knownTransferIds ?? {})) {
+    clearSftpCancelRequestsForTransfer(requests, transferId);
+  }
+}
+
+function isSftpPaneRoot(pane: SftpPaneKind, path: string): boolean {
+  if (pane === 'remote') return !path || path === '/';
+  const normalized = path.replaceAll('/', '\\').replace(/[\\]+$/, '');
+  return (
+    !path ||
+    /^[A-Za-z]:$/.test(normalized) ||
+    /^\\\\[^\\]+\\[^\\]+$/.test(normalized) ||
+    parentLocalSftpPath(path) === path
+  );
+}
+
+function joinSftpPanePath(pane: SftpPaneKind, parent: string, name: string): string {
+  if (pane === 'remote') return parent === '/' ? `/${name}` : `${parent}/${name}`;
+  const separator = parent.includes('\\') ? '\\' : '/';
+  return parent.endsWith('\\') || parent.endsWith('/')
+    ? `${parent}${name}`
+    : `${parent}${separator}${name}`;
+}
+
+function parseSftpDragPayload(data: DataTransfer): SftpDragPayload | undefined {
+  const encoded = data.getData(sftpDragDataType);
+  if (encoded) {
+    try {
+      const parsed: unknown = JSON.parse(encoded);
+      if (
+        parsed &&
+        typeof parsed === 'object' &&
+        'sourcePane' in parsed &&
+        (parsed.sourcePane === 'local' || parsed.sourcePane === 'remote') &&
+        'items' in parsed &&
+        Array.isArray(parsed.items)
+      ) {
+        const items = parsed.items.filter(
+          (item): item is SftpTransferItem =>
+            item &&
+            typeof item === 'object' &&
+            typeof item.sourcePath === 'string' &&
+            typeof item.name === 'string' &&
+            typeof item.isDirectory === 'boolean' &&
+            typeof item.size === 'number' &&
+            Number.isSafeInteger(item.size) &&
+            item.size >= 0,
+        );
+        if (items.length > 0) {
+          return { sourcePane: parsed.sourcePane, items, external: false };
+        }
+      }
+    } catch {
+      return undefined;
+    }
+  }
+
+  if (data.files.length === 0) return undefined;
+  const items = Array.from(data.files)
+    .map((file) => {
+      const candidate = file as File & { path?: string };
+      const transferItem = Array.from(data.items).find(
+        (item) => item.getAsFile()?.name === file.name,
+      ) as
+        | (DataTransferItem & {
+            webkitGetAsEntry?: () => { isDirectory?: boolean } | null;
+          })
+        | undefined;
+      const fileSystemEntry = transferItem?.webkitGetAsEntry?.();
+      return {
+        sourcePath: candidate.path || file.name,
+        name: file.name,
+        isDirectory: fileSystemEntry?.isDirectory === true,
+        size: file.size,
+      } satisfies SftpTransferItem;
+    })
+    .filter((item) => item.sourcePath.length > 0);
+  return items.length > 0 ? { sourcePane: 'local', items, external: true } : undefined;
+}
+
+function normalizeLocalDropPath(value: string): string {
+  const normalized = value.replaceAll('/', '\\');
+  if (/^[A-Za-z]:\\$/.test(normalized)) return normalized;
+  return normalized.replace(/[\\]+$/, '');
+}
+
+function localDropPathContains(parent: string, candidate: string): boolean {
+  const normalizedParent = normalizeLocalDropPath(parent).toLowerCase();
+  const normalizedCandidate = normalizeLocalDropPath(candidate).toLowerCase();
+  if (normalizedParent === normalizedCandidate) return true;
+  const prefix = normalizedParent.endsWith('\\') ? normalizedParent : `${normalizedParent}\\`;
+  return normalizedCandidate.startsWith(prefix);
+}
+
+function isInvalidLocalDropDestination(destination: string, items: SftpTransferItem[]): boolean {
+  if (!/^(?:[A-Za-z]:[\\/]|\\\\)/.test(destination)) return false;
+  for (const item of items) {
+    if (!/^(?:[A-Za-z]:[\\/]|\\\\)/.test(item.sourcePath)) continue;
+    const target = joinSftpPanePath('local', destination, item.name);
+    if (localDropPathContains(item.sourcePath, target)) return true;
+    if (item.isDirectory && localDropPathContains(item.sourcePath, destination)) return true;
+  }
+  return false;
+}
+
+function isValidSftpNameInput(name: string): boolean {
+  return (
+    name.length > 0 &&
+    name !== '.' &&
+    name !== '..' &&
+    !name.includes('/') &&
+    !name.includes('\\') &&
+    !name.includes(':') &&
+    !name.includes(String.fromCharCode(0))
+  );
+}
+
+function SftpFilePane({
+  pane,
+  state,
+  onNavigate,
+  onRefresh,
+  onOperation,
+  onTransfer,
+}: {
+  pane: SftpPaneKind;
+  state: SftpPaneState;
+  onNavigate: (path: string) => void;
+  onRefresh: () => void;
+  onOperation: (operation: SftpOperation, path: string, destinationPath?: string) => void;
+  onTransfer: (payload: SftpDragPayload, destinationPath: string) => void;
+}) {
+  const [search, setSearch] = useState('');
+  const [sortColumn, setSortColumn] = useState<SftpSortColumn>('name');
+  const [ascending, setAscending] = useState(true);
+  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
+  const [editingPath, setEditingPath] = useState<string>();
+  const [editingName, setEditingName] = useState('');
+  const [prompt, setPrompt] = useState<'folder' | 'file'>();
+  const [promptValue, setPromptValue] = useState('');
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [dropPath, setDropPath] = useState<string>();
+  const [pathDraft, setPathDraft] = useState(state.path);
+  const renameCommitPath = useRef<string | undefined>(undefined);
+  const selectionAnchorPath = useRef<string | undefined>(undefined);
+
+  useEffect(() => {
+    setSelectedPaths((current) => {
+      const available = new Set(state.entries.map((entry) => entry.fullPath));
+      return pruneSftpSelection(current, available);
+    });
+    setPathDraft(state.path);
+  }, [state.entries, state.path]);
+
+  const normalizedSearch = search.trim().toLocaleLowerCase();
+  const visibleEntries = useMemo(() => {
+    const filtered = state.entries.filter((entry) =>
+      entry.name.toLocaleLowerCase().includes(normalizedSearch),
+    );
+    return filtered.sort((left, right) => compareSftpEntries(left, right, sortColumn, ascending));
+  }, [ascending, normalizedSearch, sortColumn, state.entries]);
+
+  useEffect(() => {
+    setSelectedPaths((current) =>
+      pruneSftpSelection(current, new Set(visibleEntries.map((entry) => entry.fullPath))),
+    );
+  }, [visibleEntries]);
+
+  const selectedEntries = visibleEntries.filter((entry) => selectedPaths.has(entry.fullPath));
+  const busy = state.status === 'opening';
+  const root = isSftpPaneRoot(pane, state.path);
+
+  function changeSort(column: SftpSortColumn) {
+    if (sortColumn === column) setAscending((current) => !current);
+    else {
+      setSortColumn(column);
+      setAscending(true);
+    }
+  }
+
+  function toggleSelection(entry: WormholeSftpEntry, event: MouseEvent) {
+    setSelectedPaths((current) => {
+      const next = new Set(current);
+      if (event.shiftKey && selectedEntries.length > 0) {
+        const anchorPath = selectionAnchorPath.current ?? selectedEntries[0].fullPath;
+        const anchor = visibleEntries.findIndex((candidate) => candidate.fullPath === anchorPath);
+        const target = visibleEntries.findIndex(
+          (candidate) => candidate.fullPath === entry.fullPath,
+        );
+        if (anchor >= 0 && target >= 0) {
+          const [from, to] = anchor < target ? [anchor, target] : [target, anchor];
+          for (const candidate of visibleEntries.slice(from, to + 1)) next.add(candidate.fullPath);
+          return next;
+        }
+      }
+      if (event.ctrlKey || event.metaKey) {
+        if (next.has(entry.fullPath)) next.delete(entry.fullPath);
+        else next.add(entry.fullPath);
+      } else {
+        next.clear();
+        next.add(entry.fullPath);
+      }
+      if (!event.shiftKey) selectionAnchorPath.current = entry.fullPath;
+      return next;
+    });
+  }
+
+  function moveKeyboardSelection(entry: WormholeSftpEntry, event: ReactKeyboardEvent) {
+    const currentIndex = visibleEntries.findIndex(
+      (candidate) => candidate.fullPath === entry.fullPath,
+    );
+    if (currentIndex < 0) return;
+    const targetIndex =
+      event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? visibleEntries.length - 1
+          : Math.min(
+              visibleEntries.length - 1,
+              Math.max(0, currentIndex + (event.key === 'ArrowUp' ? -1 : 1)),
+            );
+    if (targetIndex === currentIndex) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const target = visibleEntries[targetIndex];
+    if (event.shiftKey) {
+      const anchorPath = selectionAnchorPath.current ?? entry.fullPath;
+      const anchorIndex = visibleEntries.findIndex(
+        (candidate) => candidate.fullPath === anchorPath,
+      );
+      if (anchorIndex >= 0) {
+        const [from, to] =
+          anchorIndex < targetIndex ? [anchorIndex, targetIndex] : [targetIndex, anchorIndex];
+        setSelectedPaths(
+          new Set(visibleEntries.slice(from, to + 1).map((candidate) => candidate.fullPath)),
+        );
+      }
+    } else if (!event.ctrlKey && !event.metaKey) {
+      selectionAnchorPath.current = target.fullPath;
+      setSelectedPaths(new Set([target.fullPath]));
+    }
+    document
+      .querySelector<HTMLElement>(`[data-sftp-pane="${pane}"][data-sftp-index="${targetIndex}"]`)
+      ?.focus();
+  }
+
+  function beginRename(entry: WormholeSftpEntry) {
+    renameCommitPath.current = undefined;
+    setEditingPath(entry.fullPath);
+    setEditingName(entry.name);
+  }
+
+  function commitRename() {
+    if (!editingPath) return;
+    if (renameCommitPath.current === editingPath) return;
+    renameCommitPath.current = editingPath;
+    const name = editingName.trim();
+    if (!isValidSftpNameInput(name)) {
+      setEditingPath(undefined);
+      return;
+    }
+    const parent =
+      pane === 'remote' ? parentSftpPath(editingPath) : parentLocalSftpPath(editingPath);
+    onOperation('rename', editingPath, joinSftpPanePath(pane, parent, name));
+    setEditingPath(undefined);
+  }
+
+  function submitPrompt() {
+    const name = promptValue.trim();
+    if (!prompt || !isValidSftpNameInput(name)) return;
+    onOperation(prompt === 'folder' ? 'mkdir' : 'file', joinSftpPanePath(pane, state.path, name));
+    setPrompt(undefined);
+    setPromptValue('');
+  }
+
+  function deleteSelected() {
+    for (const entry of selectedEntries) onOperation('delete', entry.fullPath);
+    setSelectedPaths(new Set());
+    setConfirmDelete(false);
+  }
+
+  function setDragState(event: DragEvent<HTMLElement>, path?: string) {
+    if (!hasSftpDragPayload(event.dataTransfer.types)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    setDropPath(path ?? state.path);
+  }
+
+  function handleDrop(event: DragEvent<HTMLElement>, path?: string) {
+    event.preventDefault();
+    event.stopPropagation();
+    setDropPath(undefined);
+    const payload = parseSftpDragPayload(event.dataTransfer);
+    if (payload) onTransfer(payload, path ?? state.path);
+  }
+
+  return (
+    <section
+      aria-label={`${pane === 'local' ? 'Local' : 'Remote'} files`}
+      className={`relative flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-hidden ${
+        dropPath === state.path ? 'rounded-md bg-primary/5 ring-1 ring-primary/70' : ''
+      }`}
+      onDragLeave={() => setDropPath(undefined)}
+      onDragOver={(event) => setDragState(event)}
+      onKeyDown={(event) => {
+        if (
+          event.target instanceof HTMLInputElement ||
+          event.target instanceof HTMLTextAreaElement
+        ) {
+          return;
+        }
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'a') {
+          event.preventDefault();
+          setSelectedPaths(new Set(visibleEntries.map((entry) => entry.fullPath)));
+          selectionAnchorPath.current = visibleEntries[0]?.fullPath;
+        } else if (event.key === 'Delete' && selectedEntries.length > 0) {
+          event.preventDefault();
+          setConfirmDelete(true);
+        } else if (event.key === 'Escape') {
+          setSelectedPaths(new Set());
+          selectionAnchorPath.current = undefined;
+        } else if (event.key === 'F2' && selectedEntries.length === 1) {
+          event.preventDefault();
+          beginRename(selectedEntries[0]);
+        }
+      }}
+      onDrop={(event) => handleDrop(event)}
+      tabIndex={-1}
+    >
+      <div className="flex shrink-0 items-center">
+        <span className="text-sm font-semibold text-foreground">
+          {pane === 'local' ? 'Local' : 'Remote'}
+        </span>
+      </div>
+
+      <div className="flex shrink-0 items-center gap-1">
+        <IconButton
+          label={`Go up in ${pane} files`}
+          disabled={busy || root}
+          onClick={() =>
+            onNavigate(
+              pane === 'remote' ? parentSftpPath(state.path) : parentLocalSftpPath(state.path),
+            )
+          }
+        >
+          <ArrowUp />
+        </IconButton>
+        <Input
+          aria-label={`${pane === 'local' ? 'Local' : 'Remote'} path`}
+          className="h-8 min-w-0 flex-1 font-mono text-[11px]"
+          disabled={busy}
+          onChange={(event) => setPathDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') onNavigate(pathDraft);
+          }}
+          value={pathDraft}
+        />
+        {pane === 'local' && state.quickPaths && state.quickPaths.length > 0 ? (
+          <DropdownMenu>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <DropdownMenuTrigger asChild>
+                  <Button aria-label="Local quick paths" size="icon-sm" variant="ghost">
+                    <ChevronDown />
+                  </Button>
+                </DropdownMenuTrigger>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">Local quick paths</TooltipContent>
+            </Tooltip>
+            <DropdownMenuContent align="end" className="w-52">
+              {state.quickPaths.map((quickPath, index) =>
+                quickPath.isSeparator ? (
+                  <DropdownMenuSeparator key={`separator-${index}`} />
+                ) : (
+                  <DropdownMenuItem
+                    key={`${quickPath.path}:${index}`}
+                    onSelect={() => onNavigate(quickPath.path)}
+                  >
+                    {quickPath.displayName}
+                  </DropdownMenuItem>
+                ),
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
+      </div>
+
+      <div className="flex shrink-0 flex-wrap items-center gap-1">
+        <IconButton disabled={busy} label="Refresh" onClick={onRefresh}>
+          <RefreshCcw className={busy ? 'animate-spin' : undefined} />
+        </IconButton>
+        <IconButton
+          label="New folder"
+          disabled={busy || !state.path}
+          onClick={() => {
+            setPrompt('folder');
+            setPromptValue('');
+          }}
+        >
+          <FolderPlus />
+        </IconButton>
+        <IconButton
+          label="New file"
+          disabled={busy || !state.path}
+          onClick={() => {
+            setPrompt('file');
+            setPromptValue('');
+          }}
+        >
+          <FilePlus2 />
+        </IconButton>
+        <IconButton
+          label="Delete selected"
+          disabled={busy || selectedEntries.length === 0}
+          onClick={() => setConfirmDelete(true)}
+        >
+          <Trash2 />
+        </IconButton>
+        {busy ? <LoaderCircle className="ml-2 size-4 animate-spin text-muted-foreground" /> : null}
+        <div className="ml-auto min-w-36 flex-1 sm:max-w-56">
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              aria-label={`Search ${pane} folder`}
+              className="h-8 pl-7 text-[11px]"
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search this folder"
+              value={search}
+            />
+          </div>
+        </div>
+      </div>
+
+      <div
+        className="min-h-0 flex-1 overflow-auto rounded-sm border border-border"
+        onDragOver={(event) => setDragState(event)}
+        onDrop={(event) => handleDrop(event)}
+      >
+        <div className="min-w-0">
+          <div className="grid min-h-[34px] grid-cols-[1.5rem_minmax(0,1fr)_5.25rem_7.75rem] gap-x-2.5 border-b border-border bg-muted/20 px-[22px] py-2 font-mono text-[9px] uppercase tracking-[0.12em] text-muted-foreground">
+            <span aria-hidden="true" />
+            {(['name', 'size', 'modified'] as SftpSortColumn[]).map((column) => (
+              <Tooltip key={column}>
+                <TooltipTrigger asChild>
+                  <button
+                    className={`flex items-center gap-1 hover:text-foreground ${column === 'size' ? 'justify-end text-right' : 'text-left'}`}
+                    onClick={() => changeSort(column)}
+                    type="button"
+                  >
+                    {column === 'name' ? 'Name' : column === 'size' ? 'Size' : 'Modified'}
+                    {sortColumn === column ? (
+                      ascending ? (
+                        <ChevronUp className="size-3" />
+                      ) : (
+                        <ChevronDown className="size-3" />
+                      )
+                    ) : null}
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="top">
+                  Sort by {column === 'name' ? 'name' : column === 'size' ? 'size' : 'modified'}
+                </TooltipContent>
+              </Tooltip>
+            ))}
+          </div>
+          {visibleEntries.length > 0 ? (
+            <div className="divide-y divide-border/50">
+              {visibleEntries.map((entry) => {
+                const selected = selectedPaths.has(entry.fullPath);
+                const isEditing = editingPath === entry.fullPath;
+                return (
+                  <ContextMenu key={entry.fullPath}>
+                    <ContextMenuTrigger asChild>
+                      <div
+                        aria-selected={selected}
+                        className={`grid grid-cols-[1.5rem_minmax(0,1fr)_5.25rem_7.75rem] items-center gap-x-2.5 px-[22px] py-[3px] text-xs outline-none transition-colors ${
+                          selected ? 'bg-primary/15 text-foreground' : 'hover:bg-muted/30'
+                        } ${dropPath === entry.fullPath ? 'ring-1 ring-inset ring-primary' : ''}`}
+                        draggable={!busy && !isEditing}
+                        data-sftp-index={visibleEntries.indexOf(entry)}
+                        data-sftp-pane={pane}
+                        onClick={(event) => toggleSelection(entry, event)}
+                        onDoubleClick={() => {
+                          if (busy) return;
+                          if (entry.isDirectory) onNavigate(entry.fullPath);
+                          else if (pane === 'local') onOperation('open', entry.fullPath);
+                        }}
+                        onDragEnd={() => setDropPath(undefined)}
+                        onDragOver={(event) => {
+                          if (!entry.isDirectory) return;
+                          event.stopPropagation();
+                          setDragState(event, entry.fullPath);
+                        }}
+                        onDragStart={(event) => {
+                          const entries =
+                            selected && selectedEntries.length > 0 ? selectedEntries : [entry];
+                          const payload: SftpDragPayload = {
+                            sourcePane: pane,
+                            items: entries.map((candidate) => ({
+                              sourcePath: candidate.fullPath,
+                              name: candidate.name,
+                              isDirectory: candidate.isDirectory,
+                              size: candidate.size,
+                            })),
+                            external: false,
+                          };
+                          event.dataTransfer.effectAllowed = 'copy';
+                          event.dataTransfer.setData(sftpDragDataType, JSON.stringify(payload));
+                        }}
+                        onContextMenu={() => {
+                          if (!selected) {
+                            setSelectedPaths(new Set([entry.fullPath]));
+                            selectionAnchorPath.current = entry.fullPath;
+                          }
+                        }}
+                        onDrop={(event) =>
+                          handleDrop(event, entry.isDirectory ? entry.fullPath : state.path)
+                        }
+                        onKeyDown={(event) => {
+                          if (
+                            !busy &&
+                            (event.key === 'ArrowUp' ||
+                              event.key === 'ArrowDown' ||
+                              event.key === 'Home' ||
+                              event.key === 'End')
+                          ) {
+                            moveKeyboardSelection(entry, event);
+                            return;
+                          }
+                          if (
+                            !busy &&
+                            entry.isDirectory &&
+                            (event.key === 'Enter' || event.key === ' ')
+                          ) {
+                            event.preventDefault();
+                            onNavigate(entry.fullPath);
+                          }
+                        }}
+                        role="option"
+                        tabIndex={0}
+                      >
+                        <span className="flex items-center justify-center">
+                          {entry.isDirectory ? (
+                            <FolderOpen className="size-4 shrink-0 text-amber-400" />
+                          ) : (
+                            <File className="size-4 shrink-0 text-muted-foreground" />
+                          )}
+                        </span>
+                        <span className="flex min-w-0 items-center">
+                          {isEditing ? (
+                            <Input
+                              autoFocus
+                              className="h-7 min-w-0 flex-1 text-xs"
+                              onBlur={commitRename}
+                              onChange={(event) => setEditingName(event.target.value)}
+                              onFocus={(event) => event.currentTarget.select()}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Enter') commitRename();
+                                if (event.key === 'Escape') {
+                                  renameCommitPath.current = editingPath;
+                                  setEditingPath(undefined);
+                                }
+                              }}
+                              value={editingName}
+                            />
+                          ) : (
+                            <span className="truncate text-foreground">{entry.name}</span>
+                          )}
+                        </span>
+                        <span className="text-right text-muted-foreground">
+                          {entry.isDirectory ? '' : formatSftpSize(entry.size)}
+                        </span>
+                        <span className="truncate text-muted-foreground">
+                          {formatSftpDate(entry.lastModifiedUtc)}
+                        </span>
+                      </div>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent className="w-44">
+                      {entry.isDirectory || pane === 'local' ? (
+                        <ContextMenuItem
+                          onSelect={() =>
+                            entry.isDirectory
+                              ? onNavigate(entry.fullPath)
+                              : onOperation('open', entry.fullPath)
+                          }
+                        >
+                          {entry.isDirectory ? <FolderOpen /> : <File />}
+                          Open
+                        </ContextMenuItem>
+                      ) : null}
+                      <ContextMenuItem onSelect={() => beginRename(entry)}>
+                        <Pencil />
+                        Rename
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      <ContextMenuItem
+                        onSelect={() => {
+                          if (!selectedPaths.has(entry.fullPath)) {
+                            setSelectedPaths(new Set([entry.fullPath]));
+                          }
+                          setConfirmDelete(true);
+                        }}
+                        variant="destructive"
+                      >
+                        <Trash2 />
+                        Delete
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
+                );
+              })}
+            </div>
+          ) : state.entries.length > 0 && normalizedSearch ? (
+            <div className="p-8 text-center text-xs text-muted-foreground">
+              No files match your search
+            </div>
+          ) : null}
+          {state.truncated ? (
+            <p className="border-t border-border px-3 py-2 text-[10px] text-muted-foreground">
+              Only the first 4,096 entries are shown.
+            </p>
+          ) : null}
+        </div>
+      </div>
+
+      {state.error ? (
+        <p className="shrink-0 pt-2 text-[11px] text-destructive">{state.error}</p>
+      ) : null}
+
+      {prompt ? (
+        <div className="absolute inset-0 z-20 grid place-items-center bg-background/75 p-4 backdrop-blur-[1px]">
+          <form
+            className="w-full max-w-xs rounded-lg border border-border bg-card p-4 shadow-xl"
+            onSubmit={(event) => {
+              event.preventDefault();
+              submitPrompt();
+            }}
+          >
+            <p className="text-sm font-semibold">New {prompt === 'folder' ? 'folder' : 'file'}</p>
+            <p className="mt-1 text-xs text-muted-foreground">Create it in {state.path}</p>
+            <Input
+              autoFocus
+              className="mt-3"
+              onChange={(event) => setPromptValue(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') setPrompt(undefined);
+              }}
+              placeholder="Name"
+              value={promptValue}
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <Button onClick={() => setPrompt(undefined)} size="sm" type="button" variant="ghost">
+                Cancel
+              </Button>
+              <Button disabled={!promptValue.trim()} size="sm" type="submit">
+                Create
+              </Button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+      {confirmDelete ? (
+        <div className="absolute inset-0 z-20 grid place-items-center bg-background/75 p-4 backdrop-blur-[1px]">
+          <div className="w-full max-w-xs rounded-lg border border-border bg-card p-4 shadow-xl">
+            <p className="text-sm font-semibold">Delete selected items?</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {selectedEntries.length} item(s) will be permanently removed.
+            </p>
+            <div className="mt-4 flex justify-end gap-2">
+              <Button onClick={() => setConfirmDelete(false)} size="sm" variant="ghost">
+                Cancel
+              </Button>
+              <Button onClick={deleteSelected} size="sm" variant="destructive">
+                Delete
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function SftpTransferQueue({
+  transfers,
+  error,
+  onClearError,
+  onCancel,
+  onRemove,
+}: {
+  transfers: SftpTransferRow[];
+  error?: string;
+  onClearError: () => void;
+  onCancel: (transferId: string, itemId: string) => void;
+  onRemove: (transferId: string, itemId: string) => void;
+}) {
+  return (
+    <section
+      aria-label="SFTP transfers"
+      className="shrink-0 rounded-lg border border-border bg-card/30"
+    >
+      <div className="flex items-center justify-between border-b border-border px-3 py-2">
+        <span className="font-mono text-[10px] uppercase tracking-[0.14em] text-foreground">
+          Transfers
+        </span>
+        {transfers.length > 0 ? (
+          <span className="text-[10px] text-muted-foreground">{transfers.length} item(s)</span>
+        ) : null}
+      </div>
+      {error ? (
+        <div className="flex items-start gap-2 border-b border-destructive/20 bg-destructive/5 px-3 py-2 text-[11px] text-destructive">
+          <p className="min-w-0 flex-1">{error}</p>
+          <IconButton label="Dismiss transfer error" onClick={onClearError}>
+            <X />
+          </IconButton>
+        </div>
+      ) : null}
+      {transfers.length > 0 ? (
+        <div className="max-h-32 divide-y divide-border/50 overflow-auto">
+          {transfers.map((transfer) => {
+            const terminal = isSftpTransferTerminal(transfer.state);
+            const percentage =
+              transfer.expectedBytes > 0
+                ? Math.min(100, (transfer.bytesTransferred / transfer.expectedBytes) * 100)
+                : terminal
+                  ? 100
+                  : 0;
+            return (
+              <div
+                className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 px-3 py-2"
+                key={`${transfer.transferId}:${transfer.itemId}`}
+              >
+                {terminal ? (
+                  transfer.state === 'completed' ? (
+                    <Check className="size-3.5 text-emerald-400" />
+                  ) : transfer.state === 'cancelled' ? (
+                    <X className="size-3.5 text-muted-foreground" />
+                  ) : (
+                    <AlertCircle className="size-3.5 text-destructive" />
+                  )
+                ) : transfer.direction === 'remote-to-local' ? (
+                  <Download className="size-3.5 text-muted-foreground" />
+                ) : (
+                  <Upload className="size-3.5 text-muted-foreground" />
+                )}
+                <div className="min-w-0">
+                  <div className="flex items-center justify-between gap-2 text-xs">
+                    <span className="truncate">{transfer.displayName}</span>
+                    <span className="shrink-0 text-[10px] text-muted-foreground">
+                      {transfer.state === 'failed'
+                        ? 'Failed'
+                        : transfer.state === 'cancelled'
+                          ? 'Cancelled'
+                          : transfer.state === 'completed'
+                            ? 'Done'
+                            : `${Math.round(percentage)}%`}
+                    </span>
+                  </div>
+                  <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
+                    <div
+                      className={`h-full rounded-full transition-[width] ${transfer.state === 'failed' ? 'bg-destructive' : transfer.state === 'cancelled' ? 'bg-muted-foreground' : 'bg-primary'}`}
+                      style={{ width: `${percentage}%` }}
+                    />
+                  </div>
+                  {transfer.error ? (
+                    <p className="mt-1 truncate text-[10px] text-destructive">{transfer.error}</p>
+                  ) : null}
+                </div>
+                <IconButton
+                  label={
+                    terminal ? `Remove ${transfer.displayName}` : `Cancel ${transfer.displayName}`
+                  }
+                  onClick={() =>
+                    terminal
+                      ? onRemove(transfer.transferId, transfer.itemId)
+                      : onCancel(transfer.transferId, transfer.itemId)
+                  }
+                >
+                  <X />
+                </IconButton>
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="px-3 py-3 text-[11px] text-muted-foreground">No active transfers.</p>
+      )}
+    </section>
+  );
+}
+
+function SftpConflictOverlay({
+  conflict,
+  onDecision,
+  onCancel,
+}: {
+  conflict: SftpConflict;
+  onDecision: (decision: 'overwrite' | 'skip', applyToAll: boolean) => void;
+  onCancel: () => void;
+}) {
+  const [applyToAll, setApplyToAll] = useState(false);
+  useEffect(() => setApplyToAll(false), [conflict.itemId, conflict.transferId]);
+  return (
+    <div
+      className="absolute inset-0 z-40 grid place-items-center bg-background/80 p-6 backdrop-blur-sm"
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          onDecision('skip', applyToAll);
+        } else if (event.key === 'Escape') {
+          event.preventDefault();
+          onCancel();
+        }
+      }}
+      tabIndex={-1}
+    >
+      <div className="w-full max-w-md rounded-xl border border-border bg-card p-5 shadow-2xl">
+        <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-muted-foreground">
+          File exists
+        </p>
+        <h3 className="mt-2 text-base font-semibold">Replace or skip this item?</h3>
+        <p className="mt-2 break-words text-sm text-foreground">{conflict.displayName}</p>
+        <p className="mt-1 break-all text-xs text-muted-foreground">{conflict.path}</p>
+        <div className="mt-4 grid grid-cols-2 gap-2 text-xs text-muted-foreground">
+          <span>Incoming: {formatSftpSize(conflict.incomingSize)}</span>
+          <span>
+            Existing:{' '}
+            {conflict.existingIsDirectory ? 'Folder' : formatSftpSize(conflict.existingSize)}
+          </span>
+        </div>
+        <label className="mt-4 flex items-center gap-2 text-xs text-muted-foreground">
+          <Checkbox
+            checked={applyToAll}
+            onCheckedChange={(checked) => setApplyToAll(checked === true)}
+          />
+          Apply to remaining conflicts
+        </label>
+        <div className="mt-5 flex justify-end gap-2">
+          <Button onClick={() => onDecision('overwrite', applyToAll)} size="sm" variant="outline">
+            Overwrite
+          </Button>
+          <Button autoFocus onClick={() => onDecision('skip', applyToAll)} size="sm">
+            Skip
+          </Button>
+          <Button onClick={onCancel} size="sm" variant="ghost">
+            Cancel
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SftpBrowserSurface({
+  session,
+  onClose,
+  onNavigate,
+  onLocalNavigate,
+  onRefresh,
+  onOperation,
+  onTransfer,
+  onConflict,
+  onTransferCancel,
+  onTransferErrorClear,
+  onTransferRemove,
+}: {
+  session: Session;
+  onClose: () => void;
+  onNavigate: (path: string) => void;
+  onLocalNavigate: (path: string) => void;
+  onRefresh: (pane: SftpPaneKind) => void;
+  onOperation: (
+    pane: SftpPaneKind,
+    operation: SftpOperation,
+    path: string,
+    destinationPath?: string,
+  ) => void;
+  onTransfer: (
+    direction: SftpTransferDirection,
+    destinationPath: string,
+    items: SftpTransferItem[],
+  ) => void;
+  onConflict: (
+    transferId: string,
+    itemId: string,
+    decision: 'overwrite' | 'skip',
+    applyToAll: boolean,
+  ) => void;
+  onTransferCancel: (transferId: string, itemId: string) => void;
+  onTransferErrorClear: () => void;
+  onTransferRemove: (transferId: string, itemId: string) => void;
+}) {
+  const browser = session.sftp!;
+  const local: SftpPaneState = browser.local ?? {
+    status: 'opening',
+    path: '',
+    entries: [],
+    truncated: false,
+  };
+  const remote: SftpPaneState = {
+    status:
+      browser.status === 'failed' ? 'failed' : browser.status === 'opening' ? 'opening' : 'ready',
+    path: browser.path,
+    entries: browser.entries,
+    truncated: browser.truncated,
+    error: browser.error,
+  };
+  const closing = browser.status === 'closing';
+
+  function handleDrop(targetPane: SftpPaneKind, targetPath: string, payload: SftpDragPayload) {
+    if (payload.sourcePane === targetPane && !payload.external) return;
+    if (
+      targetPane === 'local' &&
+      payload.sourcePane === 'local' &&
+      isInvalidLocalDropDestination(targetPath, payload.items)
+    ) {
+      return;
+    }
+    if (payload.sourcePane === 'local' && targetPane === 'remote') {
+      onTransfer('local-to-remote', targetPath, payload.items);
+    } else if (payload.sourcePane === 'remote' && targetPane === 'local') {
+      onTransfer('remote-to-local', targetPath, payload.items);
+    } else if (payload.sourcePane === 'local' && targetPane === 'local') {
+      onTransfer('local-to-local', targetPath, payload.items);
+    }
+  }
+
+  return (
+    <div
+      aria-label="SFTP browser"
+      className="relative flex h-full min-h-0 flex-col gap-3 overflow-hidden bg-background"
+    >
+      <div className="flex shrink-0 items-center gap-2">
+        <ArrowRightLeft className="size-4 shrink-0 text-primary" />
+        <DialogTitle className="truncate text-sm font-semibold">{session.title}</DialogTitle>
+        <DialogDescription className="truncate text-xs text-muted-foreground">
+          {session.host || 'SSH'}
+        </DialogDescription>
+      </div>
+
+      {closing ? (
+        <div className="absolute inset-0 z-30 grid place-items-center bg-background/80 text-sm text-muted-foreground backdrop-blur-sm">
+          <LoaderCircle className="mr-2 size-4 animate-spin" />
+          Closing SFTP browser…
+        </div>
+      ) : null}
+
+      <div className="grid min-h-0 flex-1 grid-cols-2 gap-4 overflow-hidden">
+        <SftpFilePane
+          onNavigate={onLocalNavigate}
+          onOperation={(operation, path, destinationPath) =>
+            onOperation('local', operation, path, destinationPath)
+          }
+          onRefresh={() => onRefresh('local')}
+          onTransfer={(payload, destinationPath) => handleDrop('local', destinationPath, payload)}
+          pane="local"
+          state={local}
+        />
+        <SftpFilePane
+          onNavigate={onNavigate}
+          onOperation={(operation, path, destinationPath) =>
+            onOperation('remote', operation, path, destinationPath)
+          }
+          onRefresh={() => onRefresh('remote')}
+          onTransfer={(payload, destinationPath) => handleDrop('remote', destinationPath, payload)}
+          pane="remote"
+          state={remote}
+        />
+      </div>
+
+      {(browser.transfers?.length ?? 0) > 0 || browser.transferError ? (
+        <SftpTransferQueue
+          error={browser.transferError}
+          onCancel={onTransferCancel}
+          onClearError={onTransferErrorClear}
+          onRemove={onTransferRemove}
+          transfers={browser.transfers ?? []}
+        />
+      ) : null}
+
+      <div className="flex shrink-0 justify-end">
+        <Button disabled={closing} onClick={onClose} size="sm">
+          Close
+        </Button>
+      </div>
+
+      {browser.conflict ? (
+        <SftpConflictOverlay
+          conflict={browser.conflict}
+          onCancel={() =>
+            onConflict(browser.conflict!.transferId, browser.conflict!.itemId, 'skip', false)
+          }
+          onDecision={(decision, applyToAll) =>
+            onConflict(browser.conflict!.transferId, browser.conflict!.itemId, decision, applyToAll)
+          }
+        />
+      ) : null}
+    </div>
+  );
+}
+
 function SessionsPage({
   isAuthorized,
   sessions,
@@ -3707,10 +6073,20 @@ function SessionsPage({
   onCloseSession,
   onConnectRdp,
   onDuplicateSession,
+  onCloseSftpBrowser,
   onOpenFileTransfer,
   onSelectSession,
   onOpenQuickConnect,
   onReconnectSession,
+  onSftpLocalNavigate,
+  onSftpOperation,
+  onSftpTransfer,
+  onSftpConflict,
+  onSftpTransferCancel,
+  onSftpTransferErrorClear,
+  onSftpTransferRemove,
+  onSftpNavigate,
+  onSftpRefresh,
   onSshInput,
   onSerialInput,
   onTrustSshHostKey,
@@ -3722,10 +6098,37 @@ function SessionsPage({
   onCloseSession: (id: string) => void;
   onConnectRdp: (id: string) => void;
   onDuplicateSession: (id: string) => void;
+  onCloseSftpBrowser: (id: string) => void;
   onOpenFileTransfer: (id: string) => void;
   onSelectSession: (id: string) => void;
   onOpenQuickConnect: () => void;
   onReconnectSession: (id: string) => void;
+  onSftpLocalNavigate: (sessionId: string, path: string) => void;
+  onSftpOperation: (
+    sessionId: string,
+    pane: SftpPaneKind,
+    operation: SftpOperation,
+    path: string,
+    destinationPath?: string,
+  ) => void;
+  onSftpTransfer: (
+    sessionId: string,
+    direction: SftpTransferDirection,
+    destinationPath: string,
+    items: SftpTransferItem[],
+  ) => void;
+  onSftpConflict: (
+    sessionId: string,
+    transferId: string,
+    itemId: string,
+    decision: 'overwrite' | 'skip',
+    applyToAll: boolean,
+  ) => void;
+  onSftpTransferCancel: (sessionId: string, transferId: string, itemId: string) => void;
+  onSftpTransferErrorClear: (sessionId: string) => void;
+  onSftpTransferRemove: (sessionId: string, transferId: string, itemId: string) => void;
+  onSftpNavigate: (sessionId: string, path: string) => void;
+  onSftpRefresh: (id: string) => void;
   onSshInput: (sessionId: string, value: string) => void;
   onSerialInput: (sessionId: string, value: string) => void;
   onTrustSshHostKey: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
@@ -3753,9 +6156,9 @@ function SessionsPage({
   }
 
   return (
-    <section className="flex h-full min-h-0 flex-col">
+    <section className="flex h-full min-h-0 min-w-0 flex-col">
       <Tabs
-        className="flex min-h-0 flex-1 flex-col gap-0"
+        className="flex h-full min-h-0 flex-1 flex-col gap-0"
         onValueChange={onSelectSession}
         value={selectedSession.id}
       >
@@ -3788,9 +6191,9 @@ function SessionsPage({
                     </span>
                   </TabsTrigger>
                   <div className="absolute right-1.5 top-1/2 z-20 flex -translate-y-1/2 items-center gap-0.5 bg-transparent">
-                    {session.canTransfer ? (
+                    {session.canTransfer && session.status === 'connected' ? (
                       <IconButton
-                        label={`Open file transfer for ${session.title}`}
+                        label={`Open SFTP browser for ${session.title}`}
                         onClick={() => onOpenFileTransfer(session.id)}
                       >
                         <ArrowRightLeft />
@@ -3811,19 +6214,62 @@ function SessionsPage({
         </div>
         {sessions.map((session) => (
           <TabsContent
-            className="flex min-h-0 flex-1 flex-col"
+            className="flex h-full min-h-0 flex-1 flex-col"
             forceMount
             key={session.id}
             value={session.id}
           >
             {session.protocol === 'ssh' ? (
-              <SshTerminalSurface
-                isActive={session.id === selectedSession.id}
-                onInput={onSshInput}
-                onReconnect={onReconnectSession}
-                onTrustHostKey={onTrustSshHostKey}
-                session={session}
-              />
+              <>
+                <SshTerminalSurface
+                  isActive={session.id === selectedSession.id}
+                  onInput={onSshInput}
+                  onReconnect={onReconnectSession}
+                  onTrustHostKey={onTrustSshHostKey}
+                  session={session}
+                />
+                {session.sftp && session.id === selectedSession.id ? (
+                  <Dialog
+                    onOpenChange={(open) => {
+                      if (!open) onCloseSftpBrowser(session.id);
+                    }}
+                    open
+                  >
+                    <DialogContent
+                      className="flex h-[88vh] max-h-[900px] min-h-[560px] w-[92vw] max-w-[1720px] flex-col overflow-hidden border-border/80 bg-background p-5 sm:max-w-none"
+                      showCloseButton={false}
+                    >
+                      <SftpBrowserSurface
+                        onClose={() => onCloseSftpBrowser(session.id)}
+                        onConflict={(transferId, itemId, decision, applyToAll) =>
+                          onSftpConflict(session.id, transferId, itemId, decision, applyToAll)
+                        }
+                        onLocalNavigate={(path) => onSftpLocalNavigate(session.id, path)}
+                        onNavigate={(path) => onSftpNavigate(session.id, path)}
+                        onOperation={(pane, operation, path, destinationPath) =>
+                          onSftpOperation(session.id, pane, operation, path, destinationPath)
+                        }
+                        onRefresh={(pane) =>
+                          pane === 'local'
+                            ? onSftpLocalNavigate(session.id, session.sftp?.local?.path ?? '')
+                            : onSftpRefresh(session.id)
+                        }
+                        onTransfer={(direction, destinationPath, items) =>
+                          onSftpTransfer(session.id, direction, destinationPath, items)
+                        }
+                        onTransferCancel={(transferId, itemId) =>
+                          onSftpTransferCancel(session.id, transferId, itemId)
+                        }
+                        onTransferErrorClear={() => onSftpTransferErrorClear(session.id)}
+                        onTransferRemove={(transferId, itemId) =>
+                          onSftpTransferRemove(session.id, transferId, itemId)
+                        }
+                        session={session}
+                      />
+                    </DialogContent>
+                  </Dialog>
+                ) : null}
+              </>
             ) : session.protocol === 'serial' ? (
               <SshTerminalSurface
                 isActive={session.id === selectedSession.id}

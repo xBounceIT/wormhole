@@ -84,6 +84,125 @@ INSERT INTO TunnelConfigs (Id, Name, Kind) VALUES
 	}
 }
 
+func TestWorkspaceNodeSshAutoSudoSettingsRoundTrip(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    ParentId TEXT NULL,
+    Name TEXT NOT NULL,
+    Kind INTEGER NOT NULL,
+    SortOrder INTEGER NOT NULL DEFAULT 0,
+    Protocol INTEGER NULL,
+    Host TEXT NULL,
+    SshAutoSudo INTEGER NULL,
+    UpdatedAt TEXT NOT NULL
+);
+INSERT INTO Nodes (Id, ParentId, Name, Kind, SortOrder, Protocol, Host, SshAutoSudo, UpdatedAt) VALUES
+    ('folder', NULL, 'SSH defaults', 0, 0, NULL, NULL, 1, 'now'),
+    ('leaf', 'folder', 'SSH connection', 1, 0, 0, 'ssh.example', NULL, 'now'),
+    ('off', 'folder', 'Disabled SSH connection', 1, 1, 0, 'off.example', 0, 'now');
+`)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	workspace, err := loadWorkspace(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workspace.Tree) != 1 || len(workspace.Tree[0].Children) != 2 {
+		t.Fatalf("unexpected workspace tree: %#v", workspace.Tree)
+	}
+	if workspace.Tree[0].SshAutoSudo == nil || !*workspace.Tree[0].SshAutoSudo || !workspace.Tree[0].Persisted {
+		t.Fatalf("folder auto-sudo override was not loaded: %#v", workspace.Tree[0])
+	}
+	if workspace.Tree[0].Children[1].SshAutoSudo == nil || *workspace.Tree[0].Children[1].SshAutoSudo || !workspace.Tree[0].Children[1].Persisted {
+		t.Fatalf("explicit connection auto-sudo off was not loaded: %#v", workspace.Tree[0].Children[1])
+	}
+
+	enabled := true
+	if err := updateWorkspaceNodeSshSettings(databasePath, workspaceNodeSshSettingsRequest{
+		NodeID:      "leaf",
+		SshAutoSudo: &enabled,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err = loadWorkspace(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workspace.Tree[0].Children[0].SshAutoSudo == nil || !*workspace.Tree[0].Children[0].SshAutoSudo {
+		t.Fatalf("connection auto-sudo override was not saved: %#v", workspace.Tree[0].Children[0])
+	}
+
+	if err := updateWorkspaceNodeSshSettings(databasePath, workspaceNodeSshSettingsRequest{
+		NodeID:      "leaf",
+		SshAutoSudo: nil,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err = loadWorkspace(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workspace.Tree[0].Children[0].SshAutoSudo != nil {
+		t.Fatalf("inherit should clear the connection override: %#v", workspace.Tree[0].Children[0])
+	}
+}
+
+func TestWorkspaceNodeSshAutoSudoUpdateRequiresMigration(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    Name TEXT NOT NULL,
+    Kind INTEGER NOT NULL,
+    UpdatedAt TEXT NOT NULL
+);
+INSERT INTO Nodes (Id, Name, Kind, UpdatedAt) VALUES ('leaf', 'SSH connection', 1, 'now');
+`)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	enabled := true
+	err = updateWorkspaceNodeSshSettings(databasePath, workspaceNodeSshSettingsRequest{
+		NodeID:      "leaf",
+		SshAutoSudo: &enabled,
+	})
+	if err == nil || err.Error() != "Wormhole database schema is missing the SSH auto-sudo migration" {
+		t.Fatalf("expected a migration error, got %v", err)
+	}
+
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var columnCount int
+	if err := database.QueryRow(
+		"SELECT COUNT(*) FROM pragma_table_info('Nodes') WHERE name = 'SshAutoSudo';",
+	).Scan(&columnCount); err != nil {
+		t.Fatal(err)
+	}
+	if columnCount != 0 {
+		t.Fatalf("auto-sudo write should not mutate the schema: %d columns found", columnCount)
+	}
+}
+
 func TestLoadWorkspaceReturnsEmptyForMissingDatabase(t *testing.T) {
 	workspace, err := loadWorkspace(filepath.Join(t.TempDir(), "missing.db"))
 	if err != nil {
