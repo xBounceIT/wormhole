@@ -77,6 +77,7 @@ type sshWireCommand struct {
 	Path            string                `json:"path"`
 	DestinationPath string                `json:"destination_path"`
 	RequestID       string                `json:"request_id"`
+	ApprovalID      string                `json:"approval_id"`
 	Pane            string                `json:"pane"`
 	Operation       string                `json:"operation"`
 	TransferID      string                `json:"transfer_id"`
@@ -87,24 +88,30 @@ type sshWireCommand struct {
 	Items           []sshSftpTransferItem `json:"items"`
 	Columns         uint32                `json:"columns"`
 	Rows            uint32                `json:"rows"`
+	Port            int                   `json:"port"`
+	Approved        bool                  `json:"approved"`
 }
 
 type sshWireEvent struct {
 	Type                string             `json:"type"`
+	RequestID           string             `json:"request_id,omitempty"`
 	SessionID           string             `json:"session_id"`
 	Frame               *sshTerminalFrame  `json:"frame,omitempty"`
 	Host                string             `json:"host,omitempty"`
 	Port                int                `json:"port,omitempty"`
 	Username            string             `json:"username,omitempty"`
+	Title               string             `json:"title,omitempty"`
+	Tool                string             `json:"tool,omitempty"`
 	Fingerprint         string             `json:"fingerprint,omitempty"`
 	Error               string             `json:"error,omitempty"`
+	McpStatus           *mcpStatusResponse `json:"mcp_status,omitempty"`
+	Token               string             `json:"token,omitempty"`
 	HostKeyExpected     string             `json:"host_key_expected,omitempty"`
 	HostKeyReceived     string             `json:"host_key_received,omitempty"`
 	Path                string             `json:"path,omitempty"`
 	Entries             []sshSftpEntry     `json:"entries"`
 	QuickPaths          []sshSftpQuickPath `json:"quick_paths,omitempty"`
 	Truncated           bool               `json:"truncated"`
-	RequestID           string             `json:"request_id,omitempty"`
 	Pane                string             `json:"pane,omitempty"`
 	Operation           string             `json:"operation,omitempty"`
 	TransferID          string             `json:"transfer_id,omitempty"`
@@ -177,6 +184,7 @@ type sshNode struct {
 
 type sshTarget struct {
 	nodeID               string
+	title                string
 	host                 string
 	port                 int
 	username             string
@@ -195,15 +203,20 @@ type sshCredentialRow struct {
 }
 
 type sshNativeSession struct {
-	id       string
-	client   *ssh.Client
-	session  *ssh.Session
-	stdin    io.WriteCloser
-	stdout   io.Reader
-	stderr   io.Reader
-	server   *sshServer
-	terminal *sshTerminalEmulator
-	autoSudo *sshAutoSudoDriver
+	id               string
+	client           *ssh.Client
+	session          *ssh.Session
+	stdin            io.WriteCloser
+	stdout           io.Reader
+	stderr           io.Reader
+	server           *sshServer
+	terminal         *sshTerminalEmulator
+	autoSudo         *sshAutoSudoDriver
+	mcpSession       mcpSessionInfo
+	mcpReplay        *mcpReplayBuffer
+	mcpCommandReplay *mcpReplayBuffer
+	mcpCommandGateMu sync.Mutex
+	mcpCommandGate   chan struct{}
 
 	sftpMu         sync.Mutex
 	sftpListMu     sync.Mutex
@@ -213,20 +226,23 @@ type sshNativeSession struct {
 	sftpGeneration uint64
 	sftpListSeq    uint64
 
-	inputQueue       chan []byte
-	done             chan struct{}
-	outputWG         sync.WaitGroup
-	lifecycleMu      sync.Mutex
-	terminalOutputMu sync.Mutex
-	started          bool
-	closed           bool
-	closeOnce        sync.Once
+	inputQueue        chan []byte
+	done              chan struct{}
+	outputWG          sync.WaitGroup
+	lifecycleMu       sync.Mutex
+	terminalOutputMu  sync.Mutex
+	mcpPresentationMu sync.Mutex
+	mcpPresentation   *mcpCommandPresentationFilter
+	started           bool
+	closed            bool
+	closeOnce         sync.Once
 }
 
 type sshServer struct {
 	databasePath         string
 	electronUserDataPath string
 	output               *sshEventWriter
+	mcp                  *mcpController
 
 	mu       sync.Mutex
 	sessions map[string]*sshNativeSession
@@ -331,6 +347,7 @@ func serveSSH(databasePath string, input io.Reader, output io.Writer, electronUs
 		pending:              make(map[string]context.CancelFunc),
 		transfers:            make(map[string]*sshSftpTransfer),
 	}
+	server.mcp = newMcpController(server)
 
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 4096), 2*1024*1024)
@@ -351,6 +368,10 @@ func serveSSH(databasePath string, input io.Reader, output io.Writer, electronUs
 
 func (server *sshServer) handle(command sshWireCommand) {
 	command.Type = strings.ToLower(strings.TrimSpace(command.Type))
+	if strings.HasPrefix(command.Type, "mcp.") {
+		server.handleMcp(command)
+		return
+	}
 	command.SessionID = strings.TrimSpace(command.SessionID)
 	if command.SessionID == "" || len(command.SessionID) > 128 {
 		server.writeError(command.SessionID, "SSH session id is invalid")
@@ -453,6 +474,14 @@ func (server *sshServer) open(command sshWireCommand) {
 
 		native.id = command.SessionID
 		native.server = server
+		native.mcpSession = mcpSessionInfo{
+			ID:       command.SessionID,
+			Host:     target.host,
+			Port:     target.port,
+			Username: target.username,
+			Title:    target.title,
+			Status:   "connected",
+		}
 		if !server.promote(command.SessionID, native) {
 			native.close(false)
 			return
@@ -730,6 +759,9 @@ func (server *sshServer) isActive(native *sshNativeSession) bool {
 }
 
 func (server *sshServer) shutdown() {
+	if server.mcp != nil {
+		_ = server.mcp.stop(false)
+	}
 	server.mu.Lock()
 	pending := make([]context.CancelFunc, 0, len(server.pending))
 	for sessionID, cancel := range server.pending {
@@ -874,6 +906,16 @@ func (native *sshNativeSession) publishTerminalData(data []byte) {
 	if native.autoSudo != nil {
 		native.autoSudo.observe(data)
 	}
+	native.mcpCommandReplay.append(data)
+	visible := native.filterMcpPresentationLocked(data)
+	if len(visible) == 0 {
+		return
+	}
+	native.publishVisibleTerminalDataLocked(visible)
+}
+
+func (native *sshNativeSession) publishVisibleTerminalDataLocked(data []byte) {
+	native.mcpReplay.append(data)
 	frame, changed, err := native.terminal.write(data)
 	if err != nil {
 		native.server.writeError(native.id, fmt.Sprintf("SSH terminal emulation failed: %v", err))
@@ -882,6 +924,71 @@ func (native *sshNativeSession) publishTerminalData(data []byte) {
 	if changed {
 		native.publishTerminalFrameLocked(frame)
 	}
+}
+
+func (native *sshNativeSession) beginMcpCommandPresentation(
+	command string,
+	payload []byte,
+	startMarker []byte,
+	endMarkerPrefix []byte,
+) {
+	if native == nil {
+		return
+	}
+	native.terminalOutputMu.Lock()
+	defer native.terminalOutputMu.Unlock()
+	if native.isClosed() {
+		return
+	}
+	native.mcpPresentationMu.Lock()
+	defer native.mcpPresentationMu.Unlock()
+	native.mcpPresentation = newMcpCommandPresentationFilter(command, payload, startMarker, endMarkerPrefix)
+}
+
+func (native *sshNativeSession) clearMcpCommandPresentation() {
+	if native == nil {
+		return
+	}
+	native.terminalOutputMu.Lock()
+	defer native.terminalOutputMu.Unlock()
+	if native.isClosed() {
+		native.clearMcpCommandPresentationLocked()
+		return
+	}
+	pending := native.drainAndClearMcpCommandPresentationLocked()
+	if len(pending) > 0 && native.server != nil && native.terminal != nil {
+		native.publishVisibleTerminalDataLocked(pending)
+	}
+}
+
+func (native *sshNativeSession) filterMcpPresentationLocked(data []byte) []byte {
+	native.mcpPresentationMu.Lock()
+	defer native.mcpPresentationMu.Unlock()
+	if native.mcpPresentation == nil {
+		return data
+	}
+	visible := native.mcpPresentation.filter(data)
+	if native.mcpPresentation.complete {
+		native.mcpPresentation = nil
+	}
+	return visible
+}
+
+func (native *sshNativeSession) drainAndClearMcpCommandPresentationLocked() []byte {
+	native.mcpPresentationMu.Lock()
+	defer native.mcpPresentationMu.Unlock()
+	if native.mcpPresentation == nil {
+		return nil
+	}
+	pending := native.mcpPresentation.drainPending()
+	native.mcpPresentation = nil
+	return pending
+}
+
+func (native *sshNativeSession) clearMcpCommandPresentationLocked() {
+	native.mcpPresentationMu.Lock()
+	defer native.mcpPresentationMu.Unlock()
+	native.mcpPresentation = nil
 }
 
 func (native *sshNativeSession) publishTerminalFrame(frame *sshTerminalFrame) {
@@ -980,9 +1087,16 @@ func (native *sshNativeSession) resize(columns, rows uint32) error {
 
 func (native *sshNativeSession) close(notify bool) {
 	native.closeOnce.Do(func() {
+		native.terminalOutputMu.Lock()
+		if pending := native.drainAndClearMcpCommandPresentationLocked(); len(pending) > 0 &&
+			native.server != nil &&
+			native.terminal != nil {
+			native.publishVisibleTerminalDataLocked(pending)
+		}
 		native.lifecycleMu.Lock()
 		native.closed = true
 		native.lifecycleMu.Unlock()
+		native.terminalOutputMu.Unlock()
 		if native.done != nil {
 			close(native.done)
 		}
@@ -1005,6 +1119,9 @@ func (native *sshNativeSession) close(notify bool) {
 		}
 		if native.server != nil {
 			native.server.remove(native)
+			if native.server.mcp != nil {
+				native.server.mcp.forgetSession(native.id)
+			}
 			if notify {
 				native.server.output.write(sshWireEvent{Type: "closed", SessionID: native.id})
 			}
@@ -2524,15 +2641,17 @@ func dialNativeSSH(
 		return nil, "", fmt.Errorf("could not create the SSH terminal emulator: %w", err)
 	}
 	native := &sshNativeSession{
-		id:         "",
-		client:     client,
-		session:    session,
-		stdin:      stdin,
-		stdout:     stdout,
-		stderr:     stderr,
-		terminal:   terminal,
-		inputQueue: make(chan []byte, sshInputQueueCapacity),
-		done:       make(chan struct{}),
+		id:               "",
+		client:           client,
+		session:          session,
+		stdin:            stdin,
+		stdout:           stdout,
+		stderr:           stderr,
+		terminal:         terminal,
+		mcpReplay:        newMcpReplayBuffer(mcpReplayCapacity),
+		mcpCommandReplay: newMcpReplayBuffer(mcpReplayCapacity),
+		inputQueue:       make(chan []byte, sshInputQueueCapacity),
+		done:             make(chan struct{}),
 	}
 	if target.autoSudo {
 		native.autoSudo = newSSHAutoSudoDriver(native, target.password)
@@ -2689,6 +2808,7 @@ func loadSSHTarget(databasePath, nodeID string, electronUserDataPath ...string) 
 
 	target := sshTarget{
 		nodeID:               root.id,
+		title:                root.name,
 		host:                 host,
 		port:                 int(port),
 		username:             username,

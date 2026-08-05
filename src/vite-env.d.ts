@@ -338,6 +338,24 @@ interface WormholeBackendEvent {
   image?: string;
 }
 
+interface WormholeMcpStatus {
+  enabled: boolean;
+  running: boolean;
+  port: number;
+  endpoint: string;
+}
+
+interface WormholeMcpApproval {
+  type: 'mcp.approval';
+  requestId: string;
+  sessionId: string;
+  host: string;
+  port: number;
+  username: string;
+  title: string;
+  tool: string;
+}
+
 interface Window {
   wormhole?: {
     loadWorkspace(): Promise<WormholeWorkspaceSnapshot>;
@@ -430,6 +448,14 @@ interface Window {
     checkWindowsHello(): Promise<WormholeHelloStatus>;
     verifyWindowsHello(): Promise<WormholeAuthVerification>;
     getSystemIdleSeconds(): Promise<{ seconds: number }>;
+    mcpStatus(): Promise<WormholeMcpStatus>;
+    startMcp(port: number): Promise<WormholeMcpStatus>;
+    stopMcp(): Promise<WormholeMcpStatus>;
+    setMcpPort(port: number): Promise<WormholeMcpStatus>;
+    getMcpToken(): Promise<string>;
+    regenerateMcpToken(): Promise<string>;
+    respondMcpApproval(requestId: string, approved: boolean): Promise<void>;
+    onMcpApproval(listener: (event: WormholeMcpApproval) => void): () => void;
     sendVncCommand(command: WormholeVncCommand): Promise<WormholeBackendResponse>;
     onBackendEvent(listener: (event: WormholeBackendEvent) => void): () => void;
     startRdpSession(request: {

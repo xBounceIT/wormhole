@@ -298,6 +298,32 @@ type SftpTransferRequest = {
   items: SshSftpTransferItem[];
 };
 
+type McpStatusResponse = {
+  enabled: boolean;
+  running: boolean;
+  port: number;
+  endpoint: string;
+};
+
+type McpControlResponse = {
+  type: 'mcp.response';
+  requestId: string;
+  status?: McpStatusResponse;
+  token?: string;
+  error?: string;
+};
+
+type McpApprovalEvent = {
+  type: 'mcp.approval';
+  requestId: string;
+  sessionId: string;
+  host: string;
+  port: number;
+  username: string;
+  title: string;
+  tool: string;
+};
+
 const sshMaxSessionIdLength = 128;
 const sshMaxInputLength = 1_500_000;
 const sshMaxTerminalCells = 500 * 500;
@@ -947,6 +973,77 @@ function parseSshBackendEvent(line: string): SshBackendEvent | undefined {
   return undefined;
 }
 
+function parseMcpBackendMessage(line: string): McpControlResponse | McpApprovalEvent | undefined {
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    return undefined;
+  }
+  if (!isRecord(value) || typeof value.type !== 'string') return undefined;
+
+  if (value.type === 'mcp.response' && typeof value.request_id === 'string') {
+    const response: McpControlResponse = {
+      type: 'mcp.response',
+      requestId: value.request_id,
+      error: typeof value.error === 'string' ? value.error : undefined,
+      token: typeof value.token === 'string' ? value.token : undefined,
+    };
+    const rawStatus = value.mcp_status;
+    if (isRecord(rawStatus)) {
+      if (
+        typeof rawStatus.enabled !== 'boolean' ||
+        typeof rawStatus.running !== 'boolean' ||
+        typeof rawStatus.port !== 'number' ||
+        !Number.isInteger(rawStatus.port) ||
+        rawStatus.port < 1 ||
+        rawStatus.port > 65535 ||
+        typeof rawStatus.endpoint !== 'string' ||
+        rawStatus.endpoint.length > 512
+      ) {
+        return undefined;
+      }
+      response.status = {
+        enabled: rawStatus.enabled,
+        running: rawStatus.running,
+        port: rawStatus.port,
+        endpoint: rawStatus.endpoint,
+      };
+    }
+    return response;
+  }
+
+  if (
+    value.type === 'mcp.approval' &&
+    typeof value.request_id === 'string' &&
+    isSshSessionId(value.session_id) &&
+    typeof value.host === 'string' &&
+    value.host.length <= 1024 &&
+    typeof value.port === 'number' &&
+    Number.isInteger(value.port) &&
+    value.port > 0 &&
+    value.port <= 65535 &&
+    typeof value.username === 'string' &&
+    value.username.length <= 1024 &&
+    typeof value.title === 'string' &&
+    value.title.length <= 2048 &&
+    typeof value.tool === 'string' &&
+    value.tool.length <= 128
+  ) {
+    return {
+      type: 'mcp.approval',
+      requestId: value.request_id,
+      sessionId: value.session_id,
+      host: value.host,
+      port: value.port,
+      username: value.username,
+      title: value.title,
+      tool: value.tool,
+    };
+  }
+  return undefined;
+}
+
 class NativeBackendProcess {
   private child: ReturnType<typeof spawn> | undefined;
   private startPromise: Promise<void> | undefined;
@@ -1304,11 +1401,20 @@ async function runBackend<T>(operation: BackendOperation, request?: unknown): Pr
 class NativeSshBackend {
   private child: ChildProcessWithoutNullStreams | undefined;
   private lineReader: Interface | undefined;
+  private controlSequence = 0;
   private readonly activeSessions = new Set<string>();
   private readonly openWaiters = new Map<
     string,
     {
       resolve: (response: SshConnectedResponse) => void;
+      reject: (error: Error) => void;
+      timeout: NodeJS.Timeout;
+    }
+  >();
+  private readonly controlWaiters = new Map<
+    string,
+    {
+      resolve: (response: McpControlResponse) => void;
       reject: (error: Error) => void;
       timeout: NodeJS.Timeout;
     }
@@ -1488,12 +1594,71 @@ class NativeSshBackend {
     }
   }
 
+  async mcpStatus(): Promise<McpStatusResponse> {
+    const response = await this.sendMcpControl({ type: 'mcp.status' });
+    if (!response.status) throw new Error('Native MCP backend returned no status.');
+    return response.status;
+  }
+
+  async startMcp(port: number): Promise<McpStatusResponse> {
+    const response = await this.sendMcpControl({ type: 'mcp.start', port });
+    if (!response.status) throw new Error('Native MCP backend returned no status.');
+    return response.status;
+  }
+
+  async stopMcp(): Promise<McpStatusResponse> {
+    const response = await this.sendMcpControl({ type: 'mcp.stop' });
+    if (!response.status) throw new Error('Native MCP backend returned no status.');
+    return response.status;
+  }
+
+  async setMcpPort(port: number): Promise<McpStatusResponse> {
+    const response = await this.sendMcpControl({ type: 'mcp.set-port', port });
+    if (!response.status) throw new Error('Native MCP backend returned no status.');
+    return response.status;
+  }
+
+  async getMcpToken(): Promise<string> {
+    const response = await this.sendMcpControl({ type: 'mcp.get-token' });
+    if (!response.token) throw new Error('Native MCP backend returned no token.');
+    return response.token;
+  }
+
+  async regenerateMcpToken(): Promise<string> {
+    const response = await this.sendMcpControl({ type: 'mcp.regenerate-token' });
+    if (!response.token) throw new Error('Native MCP backend returned no token.');
+    return response.token;
+  }
+
+  async respondMcpApproval(approvalId: string, approved: boolean): Promise<void> {
+    await this.sendMcpControl({ type: 'mcp.approve', approval_id: approvalId, approved });
+  }
+
+  async setMcpLocked(locked: boolean): Promise<void> {
+    if (!this.child || this.child.killed) return;
+    await this.sendMcpControl({ type: locked ? 'mcp.lock' : 'mcp.unlock' });
+  }
+
+  async syncMcpAfterUnlock(): Promise<void> {
+    let startError: unknown;
+    try {
+      const status = await this.mcpStatus();
+      if (status.enabled && !status.running) await this.startMcp(status.port);
+    } catch (error) {
+      startError = error;
+    }
+    await this.setMcpLocked(false);
+    if (startError instanceof Error) throw startError;
+    if (startError !== undefined) throw new Error(String(startError));
+  }
+
   dispose(): void {
     for (const waiter of this.openWaiters.values()) {
       clearTimeout(waiter.timeout);
       waiter.reject(new Error('SSH backend stopped.'));
     }
     this.openWaiters.clear();
+    this.failControlWaiters(new Error('Native SSH backend stopped.'));
     this.activeSessions.clear();
     this.lineReader?.close();
     this.lineReader = undefined;
@@ -1530,7 +1695,9 @@ class NativeSshBackend {
     });
     child.stdin.on('error', (error) => {
       if (this.child !== child) return;
-      this.failOpenWaiters(new Error(`Native SSH backend input failed: ${error.message}`));
+      const failure = new Error(`Native SSH backend input failed: ${error.message}`);
+      this.failOpenWaiters(failure);
+      this.failControlWaiters(failure);
     });
     child.stderr.on('data', () => {
       // The backend deliberately keeps protocol events on stdout. Drain stderr so a native
@@ -1538,7 +1705,9 @@ class NativeSshBackend {
     });
     child.on('error', (error) => {
       if (this.child !== child) return;
-      this.failOpenWaiters(new Error(`Native SSH backend failed: ${error.message}`));
+      const failure = new Error(`Native SSH backend failed: ${error.message}`);
+      this.failOpenWaiters(failure);
+      this.failControlWaiters(failure);
     });
     child.on('exit', () => {
       lineReader.close();
@@ -1550,7 +1719,9 @@ class NativeSshBackend {
       for (const sessionId of closedSessions) {
         this.broadcast({ type: 'closed', sessionId });
       }
-      this.failOpenWaiters(new Error('Native SSH backend stopped.'));
+      const failure = new Error('Native SSH backend stopped.');
+      this.failOpenWaiters(failure);
+      this.failControlWaiters(failure);
     });
   }
 
@@ -1562,7 +1733,50 @@ class NativeSshBackend {
     child.stdin.write(`${JSON.stringify(command)}\n`, 'utf8');
   }
 
+  private async sendMcpControl(command: Record<string, unknown>): Promise<McpControlResponse> {
+    this.ensureStarted();
+    const requestId = `electron-mcp-${++this.controlSequence}`;
+    const response = new Promise<McpControlResponse>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        const waiter = this.controlWaiters.get(requestId);
+        if (!waiter || waiter.timeout !== timeout) return;
+        this.controlWaiters.delete(requestId);
+        reject(new Error('Native MCP backend command timed out.'));
+      }, backendTimeoutMs);
+      this.controlWaiters.set(requestId, { resolve, reject, timeout });
+    });
+    try {
+      this.write({ ...command, request_id: requestId });
+    } catch (error) {
+      const waiter = this.controlWaiters.get(requestId);
+      if (waiter) {
+        this.controlWaiters.delete(requestId);
+        clearTimeout(waiter.timeout);
+        waiter.reject(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+    const result = await response;
+    if (result.error) throw new Error(result.error);
+    return result;
+  }
+
   private handleLine(line: string): void {
+    const mcpMessage = parseMcpBackendMessage(line);
+    if (mcpMessage?.type === 'mcp.response') {
+      const waiter = this.controlWaiters.get(mcpMessage.requestId);
+      if (!waiter) return;
+      this.controlWaiters.delete(mcpMessage.requestId);
+      clearTimeout(waiter.timeout);
+      waiter.resolve(mcpMessage);
+      return;
+    }
+    if (mcpMessage?.type === 'mcp.approval') {
+      if (!authSession.isAccessAllowed) return;
+      for (const window of BrowserWindow.getAllWindows()) {
+        if (!window.isDestroyed()) window.webContents.send('mcp:approval', mcpMessage);
+      }
+      return;
+    }
     const event = parseSshBackendEvent(line);
     if (!event) return;
 
@@ -1609,6 +1823,14 @@ class NativeSshBackend {
     }
     this.openWaiters.clear();
   }
+
+  private failControlWaiters(error: Error): void {
+    for (const waiter of this.controlWaiters.values()) {
+      clearTimeout(waiter.timeout);
+      waiter.reject(error);
+    }
+    this.controlWaiters.clear();
+  }
 }
 
 function serializeAuthOperation<T>(operation: () => Promise<T>): Promise<T> {
@@ -1638,6 +1860,28 @@ async function requireNativeAuth(): Promise<void> {
   if (process.platform !== 'win32') return;
   await ensureAuthSession();
   authSession.requireUnlocked();
+}
+
+const defaultMcpStatus: McpStatusResponse = {
+  enabled: false,
+  running: false,
+  port: 8765,
+  endpoint: 'http://127.0.0.1:8765/mcp',
+};
+
+function parseMcpPort(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 65535) {
+    throw new Error('MCP port must be an integer between 1 and 65535.');
+  }
+  return value;
+}
+
+function parseMcpApproval(value: unknown): { requestId: string; approved: boolean } {
+  if (!isRecord(value)) throw new Error('MCP approval request is invalid.');
+  const requestId = typeof value.requestId === 'string' ? value.requestId.trim() : '';
+  if (!requestId || requestId.length > 128) throw new Error('MCP approval request is invalid.');
+  if (typeof value.approved !== 'boolean') throw new Error('MCP approval decision is invalid.');
+  return { requestId, approved: value.approved };
 }
 
 async function runFirstLaunchMigrations(): Promise<void> {
@@ -1740,6 +1984,11 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       authSession.lock();
       sshBackend.cancelAutoSudo();
       sshBackend.closeAllSftp();
+      try {
+        await sshBackend.setMcpLocked(true);
+      } catch {
+        // The native process may already have exited; the Electron auth session is still locked.
+      }
       const ownerWindow = BrowserWindow.fromWebContents(event.sender);
       if (!ownerWindow || ownerWindow.isDestroyed()) return;
       try {
@@ -1779,6 +2028,58 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   ipcMain.handle('auth:system-idle', async () => {
     if (process.platform !== 'win32') return { seconds: 0 };
     return runBackend('auth-system-idle');
+  });
+  ipcMain.handle('mcp:status', async () => {
+    if (process.platform !== 'win32') return defaultMcpStatus;
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      return sshBackend.mcpStatus();
+    });
+  });
+  ipcMain.handle('mcp:start', async (_event, port: unknown) => {
+    if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
+    const parsedPort = parseMcpPort(port);
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      return sshBackend.startMcp(parsedPort);
+    });
+  });
+  ipcMain.handle('mcp:stop', async () => {
+    if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      return sshBackend.stopMcp();
+    });
+  });
+  ipcMain.handle('mcp:set-port', async (_event, port: unknown) => {
+    if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
+    const parsedPort = parseMcpPort(port);
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      return sshBackend.setMcpPort(parsedPort);
+    });
+  });
+  ipcMain.handle('mcp:get-token', async () => {
+    if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      return sshBackend.getMcpToken();
+    });
+  });
+  ipcMain.handle('mcp:regenerate-token', async () => {
+    if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      return sshBackend.regenerateMcpToken();
+    });
+  });
+  ipcMain.handle('mcp:approval', async (_event, value: unknown) => {
+    if (process.platform !== 'win32') throw new Error('MCP is available on Windows builds.');
+    const approval = parseMcpApproval(value);
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      await sshBackend.respondMcpApproval(approval.requestId, approval.approved);
+    });
   });
   ipcMain.handle('ssh:open', async (_event, request: unknown) => {
     if (!isSshOpenRequest(request)) throw new Error('SSH open request is invalid.');
@@ -2260,6 +2561,11 @@ function createWindow() {
       authSession.lock();
       sshBackend.cancelAutoSudo();
       sshBackend.closeAllSftp();
+      try {
+        await sshBackend.setMcpLocked(true);
+      } catch {
+        // The MCP process is allowed to exit while the renderer is being re-authenticated.
+      }
       await rdpClient?.dispose();
     }).catch((error) => {
       console.error('[Wormhole] Could not reset native authentication for the renderer.', error);
@@ -2281,6 +2587,10 @@ const sshBackend = new NativeSshBackend();
 authSession.onUnlocked(() => {
   sshBackend.requestSnapshots();
   serialBackend?.requestSnapshots();
+  serialBackend?.requestSnapshots();
+  void sshBackend.syncMcpAfterUnlock().catch((error) => {
+    console.error('[Wormhole] Could not synchronize the native MCP server after unlock.', error);
+  });
 });
 
 app.whenReady().then(async () => {

@@ -1000,6 +1000,7 @@ function App() {
   const [authRetry, setAuthRetry] = useState(0);
   const [lockReason, setLockReason] = useState('Unlock Wormhole to continue.');
   const [authPrompt, setAuthPrompt] = useState<AuthPromptRequest | null>(null);
+  const [mcpApprovals, setMcpApprovals] = useState<WormholeMcpApproval[]>([]);
   const authPromptResolver = useRef<((succeeded: boolean) => void) | null>(null);
   const idleCheckInFlight = useRef(false);
   const lastActivityAt = useRef(Date.now());
@@ -1186,6 +1187,18 @@ function App() {
     authPromptResolver.current?.(succeeded);
     authPromptResolver.current = null;
     setAuthPrompt(null);
+  }
+
+  async function resolveMcpApproval(approved: boolean) {
+    const approval = mcpApprovals[0];
+    if (!approval || !window.wormhole) return;
+    try {
+      await window.wormhole.respondMcpApproval(approval.requestId, approved);
+    } catch {
+      // A lock or disconnected SSH session can invalidate the prompt before the user clicks it.
+    } finally {
+      setMcpApprovals((current) => current.filter((item) => item.requestId !== approval.requestId));
+    }
   }
 
   useEffect(() => {
@@ -1582,7 +1595,17 @@ function App() {
       );
     });
 
-    return () => unsubscribe?.();
+    const unsubscribeMcp = window.wormhole?.onMcpApproval((approval) => {
+      setMcpApprovals((current) =>
+        current.some((pending) => pending.requestId === approval.requestId)
+          ? current
+          : [...current, approval],
+      );
+    });
+    return () => {
+      unsubscribe?.();
+      unsubscribeMcp?.();
+    };
   }, []);
 
   useEffect(() => {
@@ -1639,6 +1662,7 @@ function App() {
       if (!current.some((session) => session.sftp)) return current;
       return current.map((session) => ({ ...session, sftp: undefined }));
     });
+    setMcpApprovals([]);
   }, [authGate]);
 
   useEffect(() => {
@@ -3499,6 +3523,49 @@ function App() {
           state={authState}
         />
       ) : null}
+      <Dialog
+        onOpenChange={(open) => {
+          if (!open) void resolveMcpApproval(false);
+        }}
+        open={mcpApprovals.length > 0}
+      >
+        <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Allow AI agent control?</DialogTitle>
+            <DialogDescription>
+              An MCP client is requesting access to one of Wormhole&apos;s live SSH sessions.
+            </DialogDescription>
+          </DialogHeader>
+          {mcpApprovals[0] ? (
+            <div className="space-y-3 rounded-lg border border-border/70 bg-muted/20 p-3 text-xs">
+              <div className="flex items-start gap-2">
+                <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-400" />
+                <div className="min-w-0 space-y-1">
+                  <p className="font-medium">{mcpApprovals[0].title || 'SSH session'}</p>
+                  <p className="break-all text-muted-foreground">
+                    {mcpApprovals[0].username}@{mcpApprovals[0].host}:{mcpApprovals[0].port}
+                  </p>
+                  <p className="text-muted-foreground">
+                    Requested tool: <span className="font-mono">{mcpApprovals[0].tool}</span>
+                  </p>
+                </div>
+              </div>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                Allowing this request grants the MCP client access to this session for the rest of
+                the session&apos;s lifetime. MCP tools can run only while Wormhole is unlocked.
+              </p>
+            </div>
+          ) : null}
+          <DialogFooter>
+            <Button onClick={() => void resolveMcpApproval(false)} type="button" variant="ghost">
+              Deny
+            </Button>
+            <Button onClick={() => void resolveMcpApproval(true)} type="button">
+              Allow
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <div
         aria-hidden={authGate !== 'unlocked'}
         className="flex h-full min-w-[960px] flex-col bg-background font-sans text-foreground"
@@ -6631,6 +6698,97 @@ function SettingsTabPanel({ value, children }: { value: string; children: ReactN
   );
 }
 
+type McpClient = 'claude-code' | 'claude-desktop' | 'codex';
+
+const mcpTokenPlaceholder = '<bearer-token — click Reveal or Copy config>';
+
+function buildMcpConfig(client: McpClient, endpoint: string, token: string): string {
+  if (client === 'codex') {
+    const escapeToml = (value: string) => value.replaceAll('\\', '\\\\').replaceAll('"', '\\"');
+    return (
+      '[mcp_servers.wormhole]\n' +
+      `url = "${escapeToml(endpoint)}"\n` +
+      `http_headers = { Authorization = "${escapeToml(`Bearer ${token}`)}" }\n`
+    );
+  }
+
+  if (client === 'claude-desktop') {
+    return JSON.stringify(
+      {
+        mcpServers: {
+          wormhole: {
+            command: 'cmd',
+            args: [
+              '/c',
+              'npx',
+              'mcp-remote@latest',
+              endpoint,
+              '--header',
+              'Authorization:${WORMHOLE_MCP_TOKEN}',
+            ],
+            env: { WORMHOLE_MCP_TOKEN: `Bearer ${token}` },
+          },
+        },
+      },
+      null,
+      2,
+    );
+  }
+
+  return JSON.stringify(
+    {
+      mcpServers: {
+        wormhole: {
+          type: 'http',
+          url: endpoint,
+          headers: { Authorization: `Bearer ${token}` },
+        },
+      },
+    },
+    null,
+    2,
+  );
+}
+
+function mcpClientCopyDetails(client: McpClient): { label: string; caption: string } {
+  switch (client) {
+    case 'claude-desktop':
+      return {
+        label: 'Claude Desktop config (claude_desktop_config.json)',
+        caption:
+          'Claude Desktop launches stdio servers, so this bridges through mcp-remote (requires Node.js / npx).',
+      };
+    case 'codex':
+      return {
+        label: 'Codex config (~/.codex/config.toml)',
+        caption:
+          'Codex speaks Streamable HTTP directly. Add this to ~/.codex/config.toml — it is TOML, not JSON.',
+      };
+    default:
+      return {
+        label: 'Claude Code config (.mcp.json)',
+        caption:
+          'Claude Code speaks Streamable HTTP directly. Add this to .mcp.json (project) or ~/.claude.json.',
+      };
+  }
+}
+
+async function copyTextToClipboard(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.style.position = 'fixed';
+  textarea.style.opacity = '0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  const copied = document.execCommand('copy');
+  textarea.remove();
+  if (!copied) throw new Error('Clipboard access is unavailable.');
+}
+
 function authSecretLabel(method: WormholeAuthFallback): string {
   return method === 'pin' ? 'PIN' : 'password';
 }
@@ -6793,9 +6951,14 @@ function SettingsPage({
   const [browserExtensionEnabled, setBrowserExtensionEnabled] = useState(false);
   const [autoCheckUpdates, setAutoCheckUpdates] = useState(true);
   const [retentionDays, setRetentionDays] = useState('14');
-  const [mcpEnabled, setMcpEnabled] = useState(false);
+  const [mcpState, setMcpState] = useState<WormholeMcpStatus | null>(null);
   const [mcpPort, setMcpPort] = useState('8765');
-  const [mcpClient, setMcpClient] = useState('codex');
+  const [mcpToken, setMcpToken] = useState('');
+  const [mcpTokenRevealed, setMcpTokenRevealed] = useState(false);
+  const [mcpClient, setMcpClient] = useState<McpClient>('codex');
+  const [mcpBusy, setMcpBusy] = useState(false);
+  const [mcpError, setMcpError] = useState('');
+  const [mcpMessage, setMcpMessage] = useState('');
 
   useEffect(() => {
     if (authGate === 'unlocked') return;
@@ -6809,6 +6972,31 @@ function SettingsPage({
     setHelloFallback(authState.fallback);
     setIdleTimeout(authState.idleTimeoutMinutes);
   }, [authState]);
+
+  useEffect(() => {
+    if (authGate !== 'unlocked' || !window.wormhole) {
+      setMcpState(null);
+      setMcpToken('');
+      setMcpTokenRevealed(false);
+      return;
+    }
+    let active = true;
+    void window.wormhole
+      .mcpStatus()
+      .then((status) => {
+        if (!active) return;
+        setMcpState(status);
+        setMcpPort(String(status.port));
+        setMcpError('');
+      })
+      .catch((error) => {
+        if (!active) return;
+        setMcpError(errorMessage(error));
+      });
+    return () => {
+      active = false;
+    };
+  }, [authGate]);
 
   useEffect(() => {
     if (!authState || authState.mode !== 'windowsHello' || !window.wormhole) {
@@ -7046,11 +7234,152 @@ function SettingsPage({
     }
   }
 
+  async function handleMcpToggle(enabled: boolean) {
+    if (mcpBusy || !window.wormhole) return;
+    const port = Number(mcpPort);
+    if (enabled && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+      setMcpError('MCP port must be an integer between 1 and 65535.');
+      return;
+    }
+    setMcpBusy(true);
+    setMcpError('');
+    setMcpMessage('');
+    try {
+      const nextState = enabled
+        ? await window.wormhole.startMcp(port)
+        : await window.wormhole.stopMcp();
+      setMcpState(nextState);
+      setMcpPort(String(nextState.port));
+      setMcpMessage(enabled ? 'MCP server started.' : 'MCP server stopped.');
+    } catch (error) {
+      setMcpError(errorMessage(error));
+    } finally {
+      setMcpBusy(false);
+    }
+  }
+
+  async function commitMcpPort() {
+    if (mcpBusy || mcpState?.running || !window.wormhole) return;
+    const port = Number(mcpPort);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      setMcpPort(String(mcpState?.port ?? 8765));
+      setMcpError('MCP port must be an integer between 1 and 65535.');
+      return;
+    }
+    if (port === mcpState?.port) return;
+    setMcpBusy(true);
+    setMcpError('');
+    setMcpMessage('');
+    try {
+      const nextState = await window.wormhole.setMcpPort(port);
+      setMcpState(nextState);
+      setMcpPort(String(nextState.port));
+      setMcpMessage('MCP port saved.');
+    } catch (error) {
+      setMcpPort(String(mcpState?.port ?? 8765));
+      setMcpError(errorMessage(error));
+    } finally {
+      setMcpBusy(false);
+    }
+  }
+
+  async function revealMcpToken() {
+    if (mcpBusy || !window.wormhole) return;
+    if (mcpTokenRevealed) {
+      setMcpToken('');
+      setMcpTokenRevealed(false);
+      return;
+    }
+    setMcpBusy(true);
+    setMcpError('');
+    try {
+      setMcpToken(await window.wormhole.getMcpToken());
+      setMcpTokenRevealed(true);
+    } catch (error) {
+      setMcpError(errorMessage(error));
+    } finally {
+      setMcpBusy(false);
+    }
+  }
+
+  async function copyMcpToken() {
+    if (mcpBusy || !window.wormhole) return;
+    setMcpBusy(true);
+    setMcpError('');
+    try {
+      const token = mcpToken || (await window.wormhole.getMcpToken());
+      await copyTextToClipboard(token);
+      setMcpMessage('Bearer token copied.');
+    } catch (error) {
+      setMcpError(errorMessage(error));
+    } finally {
+      setMcpBusy(false);
+    }
+  }
+
+  async function regenerateMcpToken() {
+    if (mcpBusy || !window.wormhole) return;
+    if (
+      !window.confirm(
+        'Regenerate the MCP token? Clients using the current token will stop working until you update them.',
+      )
+    ) {
+      return;
+    }
+    setMcpBusy(true);
+    setMcpError('');
+    setMcpMessage('');
+    try {
+      setMcpToken(await window.wormhole.regenerateMcpToken());
+      setMcpTokenRevealed(true);
+      setMcpMessage('MCP token regenerated. Update connected clients.');
+    } catch (error) {
+      setMcpError(errorMessage(error));
+    } finally {
+      setMcpBusy(false);
+    }
+  }
+
+  async function copyMcpEndpoint() {
+    if (mcpBusy) return;
+    setMcpError('');
+    try {
+      await copyTextToClipboard(mcpState?.endpoint ?? `http://127.0.0.1:${mcpPort}/mcp`);
+      setMcpMessage('MCP endpoint copied.');
+    } catch (error) {
+      setMcpError(errorMessage(error));
+    }
+  }
+
+  async function copyMcpConfig() {
+    if (mcpBusy || !window.wormhole) return;
+    setMcpBusy(true);
+    setMcpError('');
+    try {
+      const token = await window.wormhole.getMcpToken();
+      await copyTextToClipboard(buildMcpConfig(mcpClient, mcpEndpoint, token));
+      setMcpMessage('MCP client configuration copied with the current bearer token.');
+    } catch (error) {
+      setMcpError(errorMessage(error));
+    } finally {
+      setMcpBusy(false);
+    }
+  }
+
   const selectedSecretMethod: WormholeAuthFallback | null =
     authMethod === 'disabled' ? null : authMethod === 'windowsHello' ? helloFallback : authMethod;
   const selectedSecretExists = selectedSecretMethod
     ? authStateHasSecret(authState, selectedSecretMethod)
     : false;
+  const mcpEnabled = mcpState?.enabled ?? false;
+  const mcpRunning = mcpState?.running ?? false;
+  const mcpEndpoint = mcpState?.endpoint ?? `http://127.0.0.1:${mcpPort || 8765}/mcp`;
+  const mcpConfig = buildMcpConfig(
+    mcpClient,
+    mcpEndpoint,
+    mcpTokenRevealed && mcpToken ? mcpToken : mcpTokenPlaceholder,
+  );
+  const mcpConfigDetails = mcpClientCopyDetails(mcpClient);
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden p-6">
@@ -7452,21 +7781,34 @@ function SettingsPage({
               checked={mcpEnabled}
               description="Start the localhost MCP server for this app session."
               label="Enable MCP server"
-              onCheckedChange={setMcpEnabled}
+              onCheckedChange={(checked) => void handleMcpToggle(checked)}
             />
             <div className="grid max-w-52 gap-2">
               <Label htmlFor="settings-mcp-port">Port</Label>
               <Input
-                disabled={mcpEnabled}
+                disabled={mcpBusy || mcpRunning}
                 id="settings-mcp-port"
+                onBlur={() => void commitMcpPort()}
+                onChange={(event) => setMcpPort(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    void commitMcpPort();
+                  }
+                }}
                 max="65535"
                 min="1"
-                onChange={(event) => setMcpPort(event.target.value)}
                 type="number"
                 value={mcpPort}
               />
             </div>
-            <p className="text-[11px] text-muted-foreground">MCP server is stopped.</p>
+            <p className="text-[11px] text-muted-foreground">
+              {mcpRunning
+                ? `Running — connect an MCP client to ${mcpEndpoint}`
+                : mcpEnabled
+                  ? 'MCP server is enabled and will start when the native backend is available.'
+                  : 'Stopped'}
+            </p>
             <div className="grid gap-2">
               <Label htmlFor="settings-mcp-endpoint">Endpoint</Label>
               <div className="flex gap-2">
@@ -7474,9 +7816,16 @@ function SettingsPage({
                   className="min-w-0"
                   id="settings-mcp-endpoint"
                   readOnly
-                  value={`http://127.0.0.1:${mcpPort}/mcp`}
+                  value={mcpEndpoint}
                 />
-                <Button className="shrink-0" size="sm" variant="outline">
+                <Button
+                  className="shrink-0"
+                  disabled={mcpBusy}
+                  onClick={() => void copyMcpEndpoint()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
                   Copy
                 </Button>
               </div>
@@ -7489,22 +7838,41 @@ function SettingsPage({
                   id="settings-mcp-token"
                   placeholder="•••••••• (hidden — click Reveal)"
                   readOnly
-                  type="password"
+                  type={mcpTokenRevealed ? 'text' : 'password'}
+                  value={mcpTokenRevealed ? mcpToken : ''}
                 />
-                <Button size="sm" variant="outline">
-                  Reveal / hide
+                <Button
+                  disabled={mcpBusy}
+                  onClick={() => void revealMcpToken()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  {mcpTokenRevealed ? 'Hide' : 'Reveal'}
                 </Button>
-                <Button size="sm" variant="outline">
+                <Button
+                  disabled={mcpBusy}
+                  onClick={() => void copyMcpToken()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
                   Copy
                 </Button>
-                <Button size="sm" variant="outline">
+                <Button
+                  disabled={mcpBusy}
+                  onClick={() => void regenerateMcpToken()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
                   Regenerate
                 </Button>
               </div>
             </div>
             <div className="grid max-w-60 gap-2">
               <Label htmlFor="settings-mcp-client">Client</Label>
-              <Select onValueChange={setMcpClient} value={mcpClient}>
+              <Select onValueChange={(value) => setMcpClient(value as McpClient)} value={mcpClient}>
                 <SelectTrigger id="settings-mcp-client" className="w-full">
                   <SelectValue />
                 </SelectTrigger>
@@ -7516,22 +7884,33 @@ function SettingsPage({
               </Select>
             </div>
             <p className="text-[11px] leading-relaxed text-muted-foreground">
-              Choose a client to generate its local MCP configuration.
+              {mcpConfigDetails.caption}
+            </p>
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              Reveal the token first to include it in the preview, or use Copy config to copy a
+              ready-to-paste configuration with the current token.
             </p>
             <div className="grid gap-2">
-              <Label htmlFor="settings-mcp-config">Codex configuration</Label>
+              <Label htmlFor="settings-mcp-config">{mcpConfigDetails.label}</Label>
               <Textarea
                 className="min-h-48 resize-none font-mono text-[11px]"
                 id="settings-mcp-config"
                 readOnly
-                value={
-                  '{\n  "mcpServers": {\n    "wormhole": {\n      "url": "http://127.0.0.1:8765/mcp"\n    }\n  }\n}'
-                }
+                value={mcpConfig}
               />
-              <Button className="w-fit" size="sm" variant="outline">
+              <Button
+                className="w-fit"
+                disabled={mcpBusy}
+                onClick={() => void copyMcpConfig()}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
                 Copy config
               </Button>
             </div>
+            {mcpError ? <p className="text-[11px] text-destructive">{mcpError}</p> : null}
+            {mcpMessage ? <p className="text-[11px] text-emerald-400">{mcpMessage}</p> : null}
           </SettingsSection>
         </SettingsTabPanel>
       </Tabs>

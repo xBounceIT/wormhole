@@ -240,6 +240,32 @@ contextBridge.exposeInMainWorld('wormhole', {
   checkWindowsHello: () => ipcRenderer.invoke('auth:hello-status'),
   verifyWindowsHello: () => ipcRenderer.invoke('auth:hello-verify'),
   getSystemIdleSeconds: () => ipcRenderer.invoke('auth:system-idle'),
+  mcpStatus: () => ipcRenderer.invoke('mcp:status'),
+  startMcp: (port: number) => ipcRenderer.invoke('mcp:start', port),
+  stopMcp: () => ipcRenderer.invoke('mcp:stop'),
+  setMcpPort: (port: number) => ipcRenderer.invoke('mcp:set-port', port),
+  getMcpToken: () => ipcRenderer.invoke('mcp:get-token'),
+  regenerateMcpToken: () => ipcRenderer.invoke('mcp:regenerate-token'),
+  respondMcpApproval: (requestId: string, approved: boolean) =>
+    ipcRenderer.invoke('mcp:approval', { requestId, approved }),
+  onMcpApproval: (
+    listener: (event: {
+      type: 'mcp.approval';
+      requestId: string;
+      sessionId: string;
+      host: string;
+      port: number;
+      username: string;
+      title: string;
+      tool: string;
+    }) => void,
+  ) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
+      listener(value as Parameters<typeof listener>[0]);
+    };
+    ipcRenderer.on('mcp:approval', handler);
+    return () => ipcRenderer.removeListener('mcp:approval', handler);
+  },
   sendVncCommand: (command: unknown) => ipcRenderer.invoke('vnc:command', command),
   onBackendEvent: (listener: (event: unknown) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, payload: unknown) => listener(payload);
