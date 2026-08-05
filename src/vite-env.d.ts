@@ -79,6 +79,7 @@ interface WormholeWorkspaceNode {
   protocol?: WormholeProtocol;
   host?: string;
   port?: number;
+  httpIgnoreCertErrors?: boolean;
   serialBaudRate?: number;
   serialDataBits?: number;
   serialStopBits?: number;
@@ -109,6 +110,24 @@ interface WormholeWorkspaceSnapshot {
   tree: WormholeWorkspaceNode[];
   credentials: WormholeWorkspaceCredential[];
   tunnels: WormholeWorkspaceTunnel[];
+}
+
+interface WormholeWebTarget {
+  url: string;
+  protocol: 'http' | 'https';
+  host: string;
+  port: number;
+  ignoreCertErrors: boolean;
+}
+
+interface WormholeWebEvent {
+  type: 'connected' | 'failed' | 'navigation';
+  sessionId: string;
+  attempt: number;
+  url: string;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  error?: string;
 }
 
 interface WormholeSshConnected {
@@ -363,6 +382,32 @@ interface Window {
       nodeId: string;
       sshAutoSudo: boolean | null;
     }): Promise<{ updated: boolean }>;
+    updateWorkspaceNodeWebSettings(request: {
+      nodeId: string;
+      httpIgnoreCertErrors: boolean | null;
+    }): Promise<{ updated: boolean }>;
+    openWebSession(request: {
+      sessionId: string;
+      attempt: number;
+      nodeId?: string;
+      address?: string;
+      protocol?: 'http' | 'https';
+      ignoreCertErrors?: boolean;
+    }): Promise<WormholeWebTarget>;
+    setWebSessionBounds(request: {
+      sessionId: string;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      visible: boolean;
+    }): Promise<void>;
+    commandWebSession(request: {
+      sessionId: string;
+      operation: 'back' | 'forward' | 'reload';
+    }): Promise<void>;
+    closeWebSession(sessionId: string): Promise<void>;
+    onWebEvent(listener: (event: WormholeWebEvent) => void): () => void;
     openSshSession(request: {
       sessionId: string;
       nodeId: string;

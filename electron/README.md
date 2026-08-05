@@ -50,6 +50,16 @@ decoding, and DPAPI-backed password lookup. An effective VPN route currently
 fails closed until the Electron Go tunnel providers are migrated; it is never
 silently replaced with a direct TCP connection.
 
+Saved HTTP and HTTPS connections use a native Electron Chromium surface, kept
+separate from the React renderer. The Go backend resolves inherited web target
+settings (including the leaf-only HTTPS certificate opt-in) before Electron
+navigates it; connection tabs provide back, forward, and reload controls.
+Normal tabs share only an in-memory Electron-run browser profile. A tab that
+ignores certificate errors receives its own in-memory profile so that approval
+cannot affect another connection. As with SSH and
+VNC, a connection configured for a VPN tunnel fails closed until the Go tunnel
+providers are migrated; Electron never falls back to the host network.
+
 On the first Windows launch, the Electron main process copies legacy local
 Wormhole passwords (saved profiles, inline connection passwords, and the MCP
 token) from Windows Credential Manager into the existing

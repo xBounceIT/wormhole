@@ -142,9 +142,11 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { getTreeRowGeometry } from './tree-layout';
 import { VncSurface } from './components/VncSurface';
 import { RdpSurface, type RdpUiStatus } from './components/RdpSurface';
+import { WebSurface } from './components/WebSurface';
 import { applyRdpBackendEvent } from './rdp-state';
 import { formatSftpDate, formatSftpSize } from './sftp-format';
 import { hasSftpDragPayload, sftpDragDataType } from './sftp-dnd';
+import { WebSessionAttemptTracker } from '../electron/web-session-attempt';
 
 type Protocol = 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
 type AutoSudoMode = 'inherit' | 'on' | 'off';
@@ -238,6 +240,7 @@ type TreeNode = {
   serialStopBits?: number;
   serialParity?: number;
   serialFlowControl?: number;
+  httpIgnoreCertErrors?: boolean;
   sshAutoSudo?: boolean | null;
   persisted?: boolean;
   children?: TreeNode[];
@@ -405,6 +408,11 @@ type Session = {
   rdpBackend?: 'activex' | 'freerdp';
   rdpError?: string;
   rdpProfile?: WormholeRdpProfile;
+  webTargetNodeId?: string;
+  webIgnoreCertErrors?: boolean;
+  webUrl?: string;
+  webCanGoBack?: boolean;
+  webCanGoForward?: boolean;
 };
 
 type RdpCredentials = {
@@ -581,6 +589,7 @@ function updateConnectionInTree(
     protocol: Protocol;
     serialSettings?: SerialSettings;
     sshAutoSudo: boolean | null;
+    httpIgnoreCertErrors?: boolean;
   },
 ): TreeNode[] {
   let editedConnection: TreeNode | undefined;
@@ -1005,6 +1014,7 @@ function App() {
   const idleCheckInFlight = useRef(false);
   const lastActivityAt = useRef(Date.now());
   const workspaceLoaded = useRef(false);
+  const webSessionAttempts = useRef(new WebSessionAttemptTracker());
   const [activePage, setActivePage] = useState<NavItem>('sessions');
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [selectedNodeId, setSelectedNodeId] = useState('');
@@ -1024,6 +1034,7 @@ function App() {
     name: '',
     host: '',
     protocol: 'ssh' as Protocol,
+    httpIgnoreCertErrors: false,
     serial: { ...defaultSerialSettings },
   });
   const [newConnectionOpen, setNewConnectionOpen] = useState(false);
@@ -1042,6 +1053,7 @@ function App() {
     protocol: 'ssh' as Protocol,
     folder: '',
     sshAutoSudo: 'inherit' as AutoSudoMode,
+    httpIgnoreCertErrors: false,
     serial: { ...defaultSerialSettings },
   });
   const [newFolderOpen, setNewFolderOpen] = useState(false);
@@ -1679,6 +1691,40 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const unsubscribe = window.wormhole?.onWebEvent((event) => {
+      setSessions((current) =>
+        current.map((session) => {
+          if (
+            session.id !== event.sessionId ||
+            !webSessionAttempts.current.isCurrent(event.sessionId, event.attempt)
+          ) {
+            return session;
+          }
+          if (event.type === 'failed') {
+            return {
+              ...session,
+              status: 'failed',
+              error: event.error || 'The browser could not open this connection.',
+              webUrl: event.url || session.webUrl,
+              webCanGoBack: event.canGoBack,
+              webCanGoForward: event.canGoForward,
+            };
+          }
+          return {
+            ...session,
+            status: event.type === 'connected' ? 'connected' : session.status,
+            error: undefined,
+            webUrl: event.url || session.webUrl,
+            webCanGoBack: event.canGoBack,
+            webCanGoForward: event.canGoForward,
+          };
+        }),
+      );
+    });
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
     const handleSystemThemeChange = (event: MediaQueryListEvent) => {
       setSystemTheme(event.matches ? 'dark' : 'light');
@@ -1876,6 +1922,75 @@ function App() {
     return nodeId && !nodeId.startsWith('connection-') ? nodeId : undefined;
   }
 
+  function startWebSession(session: Session) {
+    const generation = webSessionAttempts.current.begin(session.id);
+    const api = window.wormhole;
+    if (!api) {
+      setSessions((current) =>
+        webSessionAttempts.current.isCurrent(session.id, generation)
+          ? current.map((candidate) =>
+              candidate.id === session.id
+                ? {
+                    ...candidate,
+                    status: 'failed',
+                    error: 'The native web browser bridge is unavailable.',
+                  }
+                : candidate,
+            )
+          : current,
+      );
+      return;
+    }
+
+    const request = session.webTargetNodeId
+      ? { sessionId: session.id, attempt: generation, nodeId: session.webTargetNodeId }
+      : {
+          sessionId: session.id,
+          attempt: generation,
+          address: session.host,
+          protocol: session.protocol as 'http' | 'https',
+          ignoreCertErrors: session.webIgnoreCertErrors === true,
+        };
+
+    void api.openWebSession(request).then(
+      (target) => {
+        setSessions((current) =>
+          webSessionAttempts.current.isCurrent(session.id, generation)
+            ? current.map((candidate) =>
+                candidate.id === session.id
+                  ? {
+                      ...candidate,
+                      webUrl: target.url,
+                      webIgnoreCertErrors: target.ignoreCertErrors,
+                    }
+                  : candidate,
+              )
+            : current,
+        );
+      },
+      (error: unknown) => {
+        setSessions((current) =>
+          webSessionAttempts.current.isCurrent(session.id, generation)
+            ? current.map((candidate) =>
+                candidate.id === session.id
+                  ? {
+                      ...candidate,
+                      status: 'failed',
+                      error: error instanceof Error ? error.message : String(error),
+                    }
+                  : candidate,
+              )
+            : current,
+        );
+      },
+    );
+  }
+
+  async function closeWebSession(sessionId: string): Promise<void> {
+    webSessionAttempts.current.cancel(sessionId);
+    await window.wormhole?.closeWebSession(sessionId);
+  }
+
   function defaultRdpProfile(session: Session, credentials?: RdpCredentials): WormholeRdpProfile {
     return {
       nodeId: session.nodeId,
@@ -2014,9 +2129,20 @@ function App() {
       port: node.port,
       canTransfer: node.protocol === 'ssh',
       backendSessionId,
-      status: node.protocol === 'ssh' || node.protocol === 'serial' ? 'connecting' : 'placeholder',
+      status:
+        node.protocol === 'ssh' ||
+        node.protocol === 'serial' ||
+        node.protocol === 'http' ||
+        node.protocol === 'https'
+          ? 'connecting'
+          : 'placeholder',
       serialSettings,
       rdpStatus: node.protocol === 'rdp' ? 'idle' : undefined,
+      webTargetNodeId:
+        (node.protocol === 'http' || node.protocol === 'https') && node.persisted
+          ? node.id
+          : undefined,
+      webIgnoreCertErrors: node.protocol === 'https' && node.httpIgnoreCertErrors === true,
     };
 
     setSessions((current) => [...current, session]);
@@ -2035,6 +2161,7 @@ function App() {
       setRdpCredentialForm({ username: '', domain: '', password: '' });
       setRdpCredentialPrompt(session.id);
     }
+    if (session.protocol === 'http' || session.protocol === 'https') startWebSession(session);
   }
 
   function closeSession(id: string) {
@@ -2043,6 +2170,9 @@ function App() {
       void window.wormhole
         ?.commandRdpSession({ sessionId: id, operation: 'disconnect' })
         .catch(() => undefined);
+    }
+    if (closing?.protocol === 'http' || closing?.protocol === 'https') {
+      void closeWebSession(closing.id).catch(() => undefined);
     }
     const index = sessions.findIndex((session) => session.id === id);
     const nextSessions = sessions.filter((session) => session.id !== id);
@@ -2079,6 +2209,19 @@ function App() {
       } else {
         void window.wormhole?.closeSshSession(source.backendSessionId);
       }
+    }
+    if (source.protocol === 'http' || source.protocol === 'https') {
+      const restarted: Session = {
+        ...source,
+        status: 'connecting',
+        error: undefined,
+        webCanGoBack: false,
+        webCanGoForward: false,
+      };
+      setSessions((current) => current.map((session) => (session.id === id ? restarted : session)));
+      void closeWebSession(source.id)
+        .catch(() => undefined)
+        .finally(() => startWebSession(restarted));
     }
     clearSftpCancelRequestsForBrowser(sftpCancelRequests.current, source.sftp);
     if (source.nodeId && source.protocol === 'ssh') {
@@ -2983,6 +3126,7 @@ function App() {
       name: '',
       host: '',
       protocol: 'ssh',
+      httpIgnoreCertErrors: false,
       serial: { ...defaultSerialSettings },
     });
     setQuickConnectOpen(true);
@@ -3003,6 +3147,7 @@ function App() {
       protocol: 'ssh',
       folder: folderId ?? getCreationFolderId() ?? folders[0]?.id ?? '',
       sshAutoSudo: 'inherit',
+      httpIgnoreCertErrors: false,
       serial: { ...defaultSerialSettings },
     });
     setNewConnectionOpen(true);
@@ -3020,6 +3165,7 @@ function App() {
       protocol: node.protocol,
       folder: findParentFolderId(tree, node.id) ?? folders[0]?.id ?? '',
       sshAutoSudo: autoSudoModeFor(node.sshAutoSudo),
+      httpIgnoreCertErrors: node.httpIgnoreCertErrors === true,
       serial: serialSettingsFromNode(node),
     });
     setNewConnectionOpen(true);
@@ -3069,6 +3215,32 @@ function App() {
     }
   }
 
+  async function persistNodeHttpIgnoreCertErrors(
+    nodeId: string,
+    value: boolean | null,
+  ): Promise<boolean> {
+    if (!window.wormhole) {
+      setEditorError('The native workspace bridge is unavailable.');
+      return false;
+    }
+    try {
+      const result = await window.wormhole.updateWorkspaceNodeWebSettings({
+        nodeId,
+        httpIgnoreCertErrors: value,
+      });
+      if (!result.updated) {
+        setEditorError('The workspace did not save the certificate setting.');
+        return false;
+      }
+      return true;
+    } catch (error: unknown) {
+      setEditorError(
+        error instanceof Error ? error.message : 'Could not save the certificate setting.',
+      );
+      return false;
+    }
+  }
+
   function openNewFolder(parentFolderId?: string) {
     setNewFolderName('');
     setNewFolderParentId(parentFolderId ?? getCreationFolderId() ?? null);
@@ -3083,25 +3255,30 @@ function App() {
     const id = `session-quick-${Date.now()}`;
     const backendSessionId = quickConnectForm.protocol === 'serial' ? newSessionToken() : undefined;
 
-    setSessions((current) => [
-      ...current,
-      {
-        id,
-        title: name,
-        protocol: quickConnectForm.protocol,
-        host,
-        canTransfer: quickConnectForm.protocol === 'ssh',
-        backendSessionId,
-        status: quickConnectForm.protocol === 'serial' ? 'connecting' : 'placeholder',
-        serialSettings:
-          quickConnectForm.protocol === 'serial' ? { ...quickConnectForm.serial } : undefined,
-        error:
-          quickConnectForm.protocol === 'ssh'
-            ? 'Quick Connect needs a saved SSH credential before it can connect.'
-            : undefined,
-        rdpStatus: quickConnectForm.protocol === 'rdp' ? 'idle' : undefined,
-      },
-    ]);
+    const session: Session = {
+      id,
+      title: name,
+      protocol: quickConnectForm.protocol,
+      host,
+      canTransfer: quickConnectForm.protocol === 'ssh',
+      backendSessionId,
+      status:
+        quickConnectForm.protocol === 'serial' ||
+        quickConnectForm.protocol === 'http' ||
+        quickConnectForm.protocol === 'https'
+          ? 'connecting'
+          : 'placeholder',
+      serialSettings:
+        quickConnectForm.protocol === 'serial' ? { ...quickConnectForm.serial } : undefined,
+      error:
+        quickConnectForm.protocol === 'ssh'
+          ? 'Quick Connect needs a saved SSH credential before it can connect.'
+          : undefined,
+      rdpStatus: quickConnectForm.protocol === 'rdp' ? 'idle' : undefined,
+      webIgnoreCertErrors:
+        quickConnectForm.protocol === 'https' && quickConnectForm.httpIgnoreCertErrors,
+    };
+    setSessions((current) => [...current, session]);
     setSelectedSessionId(id);
     setActivePage('sessions');
     setQuickConnectOpen(false);
@@ -3111,6 +3288,9 @@ function App() {
     if (quickConnectForm.protocol === 'rdp') {
       setRdpCredentialForm({ username: '', domain: '', password: '' });
       setRdpCredentialPrompt(id);
+    }
+    if (quickConnectForm.protocol === 'http' || quickConnectForm.protocol === 'https') {
+      startWebSession(session);
     }
   }
 
@@ -3134,6 +3314,21 @@ function App() {
         ) {
           return;
         }
+        const editsWebConnection =
+          editedNode?.protocol === 'http' ||
+          editedNode?.protocol === 'https' ||
+          newConnectionForm.protocol === 'http' ||
+          newConnectionForm.protocol === 'https';
+        if (
+          editedNode?.persisted &&
+          editsWebConnection &&
+          !(await persistNodeHttpIgnoreCertErrors(
+            editingId,
+            newConnectionForm.protocol === 'https' ? newConnectionForm.httpIgnoreCertErrors : null,
+          ))
+        ) {
+          return;
+        }
         const editedSessionId = `session-${editingId}`;
         const editedSession = sessions.find((session) => session.id === editedSessionId);
         if (editedSession?.backendSessionId) {
@@ -3142,6 +3337,9 @@ function App() {
           } else {
             void window.wormhole?.closeSshSession(editedSession.backendSessionId);
           }
+        }
+        if (editedSession?.protocol === 'http' || editedSession?.protocol === 'https') {
+          await closeWebSession(editedSession.id).catch(() => undefined);
         }
         clearSftpCancelRequestsForBrowser(sftpCancelRequests.current, editedSession?.sftp);
         const backendSessionId =
@@ -3155,6 +3353,10 @@ function App() {
             host,
             protocol: newConnectionForm.protocol,
             sshAutoSudo: autoSudoValueFor(connectionAutoSudo),
+            httpIgnoreCertErrors:
+              newConnectionForm.protocol === 'https'
+                ? newConnectionForm.httpIgnoreCertErrors
+                : undefined,
             serialSettings:
               newConnectionForm.protocol === 'serial' ? newConnectionForm.serial : undefined,
           }),
@@ -3171,7 +3373,10 @@ function App() {
                   nodeId: editingId,
                   backendSessionId,
                   status:
-                    newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'serial'
+                    newConnectionForm.protocol === 'ssh' ||
+                    newConnectionForm.protocol === 'serial' ||
+                    newConnectionForm.protocol === 'http' ||
+                    newConnectionForm.protocol === 'https'
                       ? 'connecting'
                       : 'placeholder',
                   terminalFrame: undefined,
@@ -3180,6 +3385,16 @@ function App() {
                   serialSettings:
                     newConnectionForm.protocol === 'serial'
                       ? { ...newConnectionForm.serial }
+                      : undefined,
+                  webTargetNodeId:
+                    (newConnectionForm.protocol === 'http' ||
+                      newConnectionForm.protocol === 'https') &&
+                    editedNode?.persisted
+                      ? editingId
+                      : undefined,
+                  webIgnoreCertErrors:
+                    newConnectionForm.protocol === 'https'
+                      ? newConnectionForm.httpIgnoreCertErrors
                       : undefined,
                 }
               : session,
@@ -3196,6 +3411,23 @@ function App() {
             newConnectionForm.serial,
           );
         }
+        if (
+          editedSession &&
+          (newConnectionForm.protocol === 'http' || newConnectionForm.protocol === 'https')
+        ) {
+          startWebSession({
+            ...editedSession,
+            title: name,
+            host,
+            protocol: newConnectionForm.protocol,
+            status: 'connecting',
+            webTargetNodeId: editedNode?.persisted ? editingId : undefined,
+            webIgnoreCertErrors:
+              newConnectionForm.protocol === 'https'
+                ? newConnectionForm.httpIgnoreCertErrors
+                : undefined,
+          });
+        }
       } else {
         const id = `connection-${Date.now()}`;
         const connection: TreeNode = {
@@ -3205,6 +3437,10 @@ function App() {
           protocol: newConnectionForm.protocol,
           host,
           sshAutoSudo: autoSudoValueFor(connectionAutoSudo),
+          httpIgnoreCertErrors:
+            newConnectionForm.protocol === 'https'
+              ? newConnectionForm.httpIgnoreCertErrors
+              : undefined,
           ...(newConnectionForm.protocol === 'serial'
             ? {
                 serialBaudRate: newConnectionForm.serial.baudRate,
@@ -3754,6 +3990,14 @@ function App() {
                   onSshInput={sendSshInput}
                   onTrustSshHostKey={trustSshHostKey}
                   isAuthorized={authGate === 'unlocked'}
+                  isWebSurfaceVisible={
+                    !quickConnectOpen &&
+                    !newConnectionOpen &&
+                    !folderDetailsOpen &&
+                    !newFolderOpen &&
+                    !authPrompt &&
+                    !rdpCredentialPrompt
+                  }
                   selectedSession={selectedSession}
                   sessions={sessions}
                 />
@@ -3805,7 +4049,11 @@ function App() {
                   onChange={(event) =>
                     setQuickConnectForm((form) => ({ ...form, host: event.target.value }))
                   }
-                  placeholder="hostname, IP, or COM port"
+                  placeholder={
+                    quickConnectForm.protocol === 'http' || quickConnectForm.protocol === 'https'
+                      ? '10.0.0.1:8443'
+                      : 'hostname, IP, or COM port'
+                  }
                   required
                   value={quickConnectForm.host}
                 />
@@ -3831,6 +4079,20 @@ function App() {
                   </SelectContent>
                 </Select>
               </div>
+              {quickConnectForm.protocol === 'https' ? (
+                <label className="flex items-center gap-2 text-xs">
+                  <Checkbox
+                    checked={quickConnectForm.httpIgnoreCertErrors}
+                    onCheckedChange={(checked) =>
+                      setQuickConnectForm((form) => ({
+                        ...form,
+                        httpIgnoreCertErrors: checked === true,
+                      }))
+                    }
+                  />
+                  <span>Ignore certificate errors</span>
+                </label>
+              ) : null}
               {quickConnectForm.protocol === 'serial' ? (
                 <div className="grid gap-3 rounded-lg border border-border/70 bg-background/35 p-3 sm:grid-cols-2">
                   <div className="grid gap-2">
@@ -4127,7 +4389,15 @@ function App() {
 
                     {newConnectionForm.protocol === 'https' ? (
                       <label className="flex items-center gap-2 text-xs">
-                        <Checkbox />
+                        <Checkbox
+                          checked={newConnectionForm.httpIgnoreCertErrors}
+                          onCheckedChange={(checked) =>
+                            setNewConnectionForm((form) => ({
+                              ...form,
+                              httpIgnoreCertErrors: checked === true,
+                            }))
+                          }
+                        />
                         <span>Ignore certificate errors</span>
                       </label>
                     ) : null}
@@ -6135,6 +6405,7 @@ function SftpBrowserSurface({
 
 function SessionsPage({
   isAuthorized,
+  isWebSurfaceVisible,
   sessions,
   selectedSession,
   onCloseSession,
@@ -6160,6 +6431,7 @@ function SessionsPage({
   onRetryRdp,
 }: {
   isAuthorized: boolean;
+  isWebSurfaceVisible: boolean;
   sessions: Session[];
   selectedSession?: Session;
   onCloseSession: (id: string) => void;
@@ -6364,6 +6636,13 @@ function SessionsPage({
                   host: session.host,
                   port: session.port,
                 }}
+              />
+            ) : session.protocol === 'http' || session.protocol === 'https' ? (
+              <WebSurface
+                isActive={session.id === selectedSession.id}
+                isAuthorized={isAuthorized && isWebSurfaceVisible}
+                onReconnect={onReconnectSession}
+                session={session}
               />
             ) : (
               <div

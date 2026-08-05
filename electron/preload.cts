@@ -5,6 +5,46 @@ contextBridge.exposeInMainWorld('wormhole', {
   loadWorkspace: () => ipcRenderer.invoke('workspace:load'),
   updateWorkspaceNodeSshSettings: (request: { nodeId: string; sshAutoSudo: boolean | null }) =>
     ipcRenderer.invoke('workspace:update-node-ssh-settings', request),
+  updateWorkspaceNodeWebSettings: (request: {
+    nodeId: string;
+    httpIgnoreCertErrors: boolean | null;
+  }) => ipcRenderer.invoke('workspace:update-node-web-settings', request),
+  openWebSession: (request: {
+    sessionId: string;
+    attempt: number;
+    nodeId?: string;
+    address?: string;
+    protocol?: 'http' | 'https';
+    ignoreCertErrors?: boolean;
+  }) => ipcRenderer.invoke('web:open', request),
+  setWebSessionBounds: (request: {
+    sessionId: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    visible: boolean;
+  }) => ipcRenderer.invoke('web:set-bounds', request),
+  commandWebSession: (request: { sessionId: string; operation: 'back' | 'forward' | 'reload' }) =>
+    ipcRenderer.invoke('web:command', request),
+  closeWebSession: (sessionId: string) => ipcRenderer.invoke('web:close', sessionId),
+  onWebEvent: (
+    listener: (event: {
+      type: 'connected' | 'failed' | 'navigation';
+      sessionId: string;
+      attempt: number;
+      url: string;
+      canGoBack: boolean;
+      canGoForward: boolean;
+      error?: string;
+    }) => void,
+  ) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
+      listener(value as Parameters<typeof listener>[0]);
+    };
+    ipcRenderer.on('web:event', handler);
+    return () => ipcRenderer.removeListener('web:event', handler);
+  },
   openSshSession: (request: { sessionId: string; nodeId: string; columns: number; rows: number }) =>
     ipcRenderer.invoke('ssh:open', request),
   trustSshHostKey: (request: { nodeId: string; expected: string; received: string }) =>

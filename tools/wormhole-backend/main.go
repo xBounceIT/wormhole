@@ -52,25 +52,31 @@ type workspaceSnapshot struct {
 }
 
 type treeNode struct {
-	ID                string      `json:"id"`
-	Name              string      `json:"name"`
-	Kind              string      `json:"kind"`
-	Protocol          string      `json:"protocol,omitempty"`
-	Host              string      `json:"host,omitempty"`
-	Port              int         `json:"port,omitempty"`
-	SerialBaudRate    *int        `json:"serialBaudRate,omitempty"`
-	SerialDataBits    *int        `json:"serialDataBits,omitempty"`
-	SerialStopBits    *int        `json:"serialStopBits,omitempty"`
-	SerialParity      *int        `json:"serialParity,omitempty"`
-	SerialFlowControl *int        `json:"serialFlowControl,omitempty"`
-	Children          []*treeNode `json:"children,omitempty"`
-	SshAutoSudo       *bool       `json:"sshAutoSudo,omitempty"`
-	Persisted         bool        `json:"persisted,omitempty"`
+	ID                   string      `json:"id"`
+	Name                 string      `json:"name"`
+	Kind                 string      `json:"kind"`
+	Protocol             string      `json:"protocol,omitempty"`
+	Host                 string      `json:"host,omitempty"`
+	Port                 int         `json:"port,omitempty"`
+	SerialBaudRate       *int        `json:"serialBaudRate,omitempty"`
+	SerialDataBits       *int        `json:"serialDataBits,omitempty"`
+	SerialStopBits       *int        `json:"serialStopBits,omitempty"`
+	SerialParity         *int        `json:"serialParity,omitempty"`
+	SerialFlowControl    *int        `json:"serialFlowControl,omitempty"`
+	HTTPIgnoreCertErrors *bool       `json:"httpIgnoreCertErrors,omitempty"`
+	Children             []*treeNode `json:"children,omitempty"`
+	SshAutoSudo          *bool       `json:"sshAutoSudo,omitempty"`
+	Persisted            bool        `json:"persisted,omitempty"`
 }
 
 type workspaceNodeSshSettingsRequest struct {
 	NodeID      string `json:"nodeId"`
 	SshAutoSudo *bool  `json:"sshAutoSudo"`
+}
+
+type workspaceNodeWebSettingsRequest struct {
+	NodeID               string `json:"nodeId"`
+	HTTPIgnoreCertErrors *bool  `json:"httpIgnoreCertErrors"`
 }
 
 type credentialRecord struct {
@@ -90,15 +96,16 @@ type tunnelRecord struct {
 }
 
 type nodeRow struct {
-	ID          string
-	ParentID    sql.NullString
-	Name        string
-	Kind        int64
-	SortOrder   int64
-	Protocol    sql.NullInt64
-	Host        sql.NullString
-	Port        sql.NullInt64
-	SshAutoSudo sql.NullInt64
+	ID                   string
+	ParentID             sql.NullString
+	Name                 string
+	Kind                 int64
+	SortOrder            int64
+	Protocol             sql.NullInt64
+	Host                 sql.NullString
+	Port                 sql.NullInt64
+	SshAutoSudo          sql.NullInt64
+	HTTPIgnoreCertErrors sql.NullInt64
 }
 
 type credentialRow struct {
@@ -118,7 +125,7 @@ type tunnelRow struct {
 }
 
 func main() {
-	operation := flag.String("operation", "workspace", "backend operation: workspace, migrate, ssh, serial, ssh-trust-host-key, serve, rdp, or auth-*")
+	operation := flag.String("operation", "workspace", "backend operation: workspace, workspace-update-node, workspace-update-node-web-settings, web-target, migrate, ssh, serial, ssh-trust-host-key, serve, rdp, or auth-*")
 	databasePath := flag.String("database", "", "path to the Wormhole SQLite database")
 	electronUserDataPath := flag.String("electron-user-data", "", "path to the Electron user-data directory")
 	credentialReader := flag.String("credential-reader", "", "path to the Windows Credential Manager reader")
@@ -151,11 +158,26 @@ func main() {
 	switch *operation {
 	case "workspace":
 		result, err = loadWorkspace(*databasePath)
+	case "web-target":
+		var request webTargetRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = resolveWebTarget(*databasePath, request)
+		}
 	case "workspace-update-node":
 		var request workspaceNodeSshSettingsRequest
 		err = decodeInput(&request)
 		if err == nil {
 			err = updateWorkspaceNodeSshSettings(*databasePath, request)
+			if err == nil {
+				result = map[string]bool{"updated": true}
+			}
+		}
+	case "workspace-update-node-web-settings":
+		var request workspaceNodeWebSettingsRequest
+		err = decodeInput(&request)
+		if err == nil {
+			err = updateWorkspaceNodeWebSettings(*databasePath, request)
 			if err == nil {
 				result = map[string]bool{"updated": true}
 			}
@@ -632,8 +654,12 @@ func loadTree(database *sql.DB) ([]*treeNode, error) {
 	if _, ok := columns["SshAutoSudo"]; ok {
 		sshAutoSudoExpression = "SshAutoSudo"
 	}
+	httpIgnoreCertErrorsExpression := "NULL"
+	if _, ok := columns["HttpIgnoreCertErrors"]; ok {
+		httpIgnoreCertErrorsExpression = "HttpIgnoreCertErrors"
+	}
 	rows, err := database.Query(`
-SELECT Id, ParentId, Name, Kind, SortOrder, Protocol, Host, ` + portExpression + ` AS Port, ` + sshAutoSudoExpression + ` AS SshAutoSudo
+SELECT Id, ParentId, Name, Kind, SortOrder, Protocol, Host, ` + portExpression + ` AS Port, ` + sshAutoSudoExpression + ` AS SshAutoSudo, ` + httpIgnoreCertErrorsExpression + ` AS HttpIgnoreCertErrors
 FROM Nodes
 ORDER BY SortOrder, Name, Id;`)
 	if err != nil {
@@ -648,13 +674,17 @@ ORDER BY SortOrder, Name, Id;`)
 	protocolByID := map[string]sql.NullInt64{}
 	for rows.Next() {
 		var row nodeRow
-		if err := rows.Scan(&row.ID, &row.ParentID, &row.Name, &row.Kind, &row.SortOrder, &row.Protocol, &row.Host, &row.Port, &row.SshAutoSudo); err != nil {
+		if err := rows.Scan(&row.ID, &row.ParentID, &row.Name, &row.Kind, &row.SortOrder, &row.Protocol, &row.Host, &row.Port, &row.SshAutoSudo, &row.HTTPIgnoreCertErrors); err != nil {
 			return nil, fmt.Errorf("cannot read a connection: %w", err)
 		}
 		node := &treeNode{ID: strings.TrimSpace(row.ID), Name: row.Name, Persisted: true}
 		if row.SshAutoSudo.Valid {
 			value := row.SshAutoSudo.Int64 != 0
 			node.SshAutoSudo = &value
+		}
+		if row.HTTPIgnoreCertErrors.Valid {
+			value := row.HTTPIgnoreCertErrors.Int64 != 0
+			node.HTTPIgnoreCertErrors = &value
 		}
 		if row.Kind == 0 {
 			node.Kind = "folder"
@@ -802,6 +832,77 @@ func updateWorkspaceNodeSshSettings(databasePath string, request workspaceNodeSs
 		return errors.New("workspace node was not found")
 	}
 	return err
+}
+
+func updateWorkspaceNodeWebSettings(databasePath string, request workspaceNodeWebSettingsRequest) error {
+	nodeID := strings.TrimSpace(request.NodeID)
+	if nodeID == "" || len(nodeID) > 128 {
+		return errors.New("workspace node id is invalid")
+	}
+
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+
+	exists, err := tableExists(database, "Nodes")
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return errors.New("Wormhole database has no connections")
+	}
+	columns, err := tableColumns(database, "Nodes")
+	if err != nil {
+		return err
+	}
+	if _, ok := columns["HttpIgnoreCertErrors"]; !ok {
+		return errors.New("Wormhole database schema is missing the HTTP certificate migration")
+	}
+	if request.HTTPIgnoreCertErrors != nil && *request.HTTPIgnoreCertErrors {
+		nodes, err := loadWebNodes(database)
+		if err != nil {
+			return err
+		}
+		leaf := nodes[normalizeID(nodeID)]
+		if leaf == nil || leaf.Kind != 1 {
+			return errors.New("workspace connection was not found")
+		}
+		protocol, err := resolvedProtocolForWebNode(leaf, nodes)
+		if err != nil {
+			return err
+		}
+		if !protocol.Valid || protocol.Int64 != 4 {
+			return errors.New("certificate errors can only be ignored for an HTTPS connection")
+		}
+	}
+
+	var value any
+	if request.HTTPIgnoreCertErrors != nil {
+		if *request.HTTPIgnoreCertErrors {
+			value = int64(1)
+		} else {
+			value = int64(0)
+		}
+	}
+	result, err := database.Exec(
+		"UPDATE Nodes SET HttpIgnoreCertErrors = ?, UpdatedAt = ? WHERE lower(Id) = ? AND Kind = 1;",
+		value,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		normalizeID(nodeID),
+	)
+	if err != nil {
+		return fmt.Errorf("could not update HTTP certificate setting: %w", err)
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected > 0 {
+		return nil
+	}
+	return errors.New("workspace connection was not found")
 }
 
 func loadCredentials(database *sql.DB) ([]credentialRecord, error) {

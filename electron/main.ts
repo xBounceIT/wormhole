@@ -1,4 +1,11 @@
-import { app, BrowserWindow, ipcMain, screen } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  screen,
+  session as electronSession,
+  WebContentsView,
+} from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -15,6 +22,7 @@ import {
   type SerialConnectedResponse,
   type SerialOpenRequest,
 } from './serial.js';
+import { WebSessionAttemptTracker } from './web-session-attempt.js';
 import type {
   RdpBackendEvent,
   RdpCommandRequest,
@@ -39,7 +47,9 @@ let serialBackend: SerialBackendClient | undefined;
 
 type BackendOperation =
   | 'workspace'
+  | 'web-target'
   | 'workspace-update-node'
+  | 'workspace-update-node-web-settings'
   | 'migrate'
   | 'auth-status'
   | 'auth-verify'
@@ -92,6 +102,37 @@ type WorkspaceResponse = {
 type WorkspaceNodeSshSettingsRequest = {
   nodeId: string;
   sshAutoSudo: boolean | null;
+};
+type WorkspaceNodeWebSettingsRequest = {
+  nodeId: string;
+  httpIgnoreCertErrors: boolean | null;
+};
+type WebTargetResponse = {
+  url: string;
+  protocol: 'http' | 'https';
+  host: string;
+  port: number;
+  ignoreCertErrors: boolean;
+};
+type WebOpenRequest = {
+  sessionId: string;
+  attempt: number;
+  nodeId?: string;
+  address?: string;
+  protocol?: 'http' | 'https';
+  ignoreCertErrors?: boolean;
+};
+type WebBoundsRequest = {
+  sessionId: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  visible: boolean;
+};
+type WebCommandRequest = {
+  sessionId: string;
+  operation: 'back' | 'forward' | 'reload';
 };
 type AuthStateResponse = {
   mode: string;
@@ -346,6 +387,73 @@ function isSshSessionId(value: unknown): value is string {
     value.length > 0 &&
     value.length <= sshMaxSessionIdLength &&
     value.trim() === value
+  );
+}
+
+// Omit the `persist:` prefix so appliance cookies and cache remain available to tabs during this
+// Electron run but are never written to disk after the app closes.
+const webSharedPartition = 'wormhole-web';
+const webMaxUrlLength = 4096;
+const webMaxAddressLength = 4096;
+const webMaxSurfaceCoordinate = 100_000;
+
+function isWebOpenRequest(value: unknown): value is WebOpenRequest {
+  if (
+    !isRecord(value) ||
+    !isSshSessionId(value.sessionId) ||
+    typeof value.attempt !== 'number' ||
+    !Number.isSafeInteger(value.attempt) ||
+    value.attempt < 1
+  ) {
+    return false;
+  }
+  const hasNodeId = value.nodeId !== undefined;
+  const hasDirectTarget = value.address !== undefined || value.protocol !== undefined;
+  if (hasNodeId === hasDirectTarget) return false;
+  if (hasNodeId) {
+    return (
+      isSshSessionId(value.nodeId) &&
+      value.address === undefined &&
+      value.protocol === undefined &&
+      value.ignoreCertErrors === undefined
+    );
+  }
+  if (
+    typeof value.address !== 'string' ||
+    value.address.length === 0 ||
+    value.address.length > webMaxAddressLength ||
+    (value.protocol !== 'http' && value.protocol !== 'https')
+  ) {
+    return false;
+  }
+  return value.ignoreCertErrors === undefined || typeof value.ignoreCertErrors === 'boolean';
+}
+
+function isWebBoundsRequest(value: unknown): value is WebBoundsRequest {
+  if (!isRecord(value) || !isSshSessionId(value.sessionId) || typeof value.visible !== 'boolean') {
+    return false;
+  }
+  for (const field of ['x', 'y', 'width', 'height'] as const) {
+    const coordinate = value[field];
+    if (
+      typeof coordinate !== 'number' ||
+      !Number.isFinite(coordinate) ||
+      coordinate < 0 ||
+      coordinate > webMaxSurfaceCoordinate
+    ) {
+      return false;
+    }
+  }
+  const width = value.width;
+  const height = value.height;
+  return typeof width === 'number' && typeof height === 'number' && width >= 1 && height >= 1;
+}
+
+function isWebCommandRequest(value: unknown): value is WebCommandRequest {
+  return (
+    isRecord(value) &&
+    isSshSessionId(value.sessionId) &&
+    (value.operation === 'back' || value.operation === 'forward' || value.operation === 'reload')
   );
 }
 
@@ -1398,6 +1506,306 @@ async function runBackend<T>(operation: BackendOperation, request?: unknown): Pr
   }
 }
 
+function isWorkspaceNodeWebSettingsRequest(
+  value: unknown,
+): value is WorkspaceNodeWebSettingsRequest {
+  return (
+    isRecord(value) &&
+    isSshSessionId(value.nodeId) &&
+    (value.httpIgnoreCertErrors === null || typeof value.httpIgnoreCertErrors === 'boolean')
+  );
+}
+
+type WebSurfaceRecord = {
+  owner: BrowserWindow;
+  view: WebContentsView;
+  attempt: number;
+  initialNavigationPending: boolean;
+  disposed: boolean;
+};
+
+class WebSurfaceManager {
+  private readonly surfaces = new Map<string, WebSurfaceRecord>();
+  private readonly pendingOpenOwners = new Map<string, BrowserWindow>();
+  private readonly attempts = new WebSessionAttemptTracker();
+  private isolatedPartitionSequence = 0;
+
+  async open(owner: BrowserWindow, request: WebOpenRequest): Promise<WebTargetResponse> {
+    const generation = this.attempts.begin(request.sessionId);
+    this.pendingOpenOwners.set(request.sessionId, owner);
+    this.dispose(request.sessionId);
+    try {
+      const target = await runBackend<WebTargetResponse>('web-target', {
+        nodeId: request.nodeId,
+        address: request.address,
+        protocol: request.protocol,
+        ignoreCertErrors: request.ignoreCertErrors,
+      });
+      if (
+        !this.attempts.isCurrent(request.sessionId, generation) ||
+        this.pendingOpenOwners.get(request.sessionId) !== owner ||
+        owner.isDestroyed()
+      ) {
+        throw new Error('Web session was superseded before its browser could open.');
+      }
+
+      const partition = target.ignoreCertErrors
+        ? `wormhole-web-isolated-${++this.isolatedPartitionSequence}`
+        : webSharedPartition;
+      const browserSession = electronSession.fromPartition(partition, { cache: true });
+      browserSession.setPermissionRequestHandler((_webContents, _permission, callback) =>
+        callback(false),
+      );
+      browserSession.setPermissionCheckHandler(() => false);
+
+      const view = new WebContentsView({
+        webPreferences: {
+          partition,
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+          webSecurity: true,
+          allowRunningInsecureContent: false,
+          devTools: false,
+        },
+      });
+      const record: WebSurfaceRecord = {
+        owner,
+        view,
+        attempt: request.attempt,
+        initialNavigationPending: true,
+        disposed: false,
+      };
+      this.surfaces.set(request.sessionId, record);
+      this.pendingOpenOwners.delete(request.sessionId);
+      owner.contentView.addChildView(view);
+      view.setVisible(false);
+      this.configureWebContents(request.sessionId, record, target);
+      void view.webContents.loadURL(target.url).catch((error: unknown) => {
+        if (!record.disposed && record.initialNavigationPending) {
+          record.initialNavigationPending = false;
+          this.sendEvent(request.sessionId, record, 'failed', {
+            error: describeWebNavigationError(error),
+          });
+        }
+      });
+      return target;
+    } catch (error) {
+      if (
+        this.attempts.isCurrent(request.sessionId, generation) &&
+        this.pendingOpenOwners.get(request.sessionId) === owner
+      ) {
+        this.pendingOpenOwners.delete(request.sessionId);
+      }
+      throw error;
+    }
+  }
+
+  setBounds(owner: BrowserWindow, request: WebBoundsRequest): void {
+    const record = this.surfaces.get(request.sessionId);
+    if (!record || record.owner !== owner || record.disposed) return;
+    record.view.setBounds({
+      x: Math.round(request.x),
+      y: Math.round(request.y),
+      width: Math.round(request.width),
+      height: Math.round(request.height),
+    });
+    record.view.setVisible(request.visible);
+  }
+
+  command(owner: BrowserWindow, request: WebCommandRequest): void {
+    const record = this.surfaces.get(request.sessionId);
+    if (!record || record.owner !== owner || record.disposed) return;
+    const contents = record.view.webContents;
+    if (request.operation === 'back') {
+      if (contents.canGoBack()) contents.goBack();
+    } else if (request.operation === 'forward') {
+      if (contents.canGoForward()) contents.goForward();
+    } else {
+      contents.reload();
+    }
+    this.sendEvent(request.sessionId, record, 'navigation');
+  }
+
+  close(sessionId: string): void {
+    this.attempts.cancel(sessionId);
+    this.pendingOpenOwners.delete(sessionId);
+    this.dispose(sessionId);
+  }
+
+  private dispose(sessionId: string): void {
+    const record = this.surfaces.get(sessionId);
+    if (!record) return;
+    this.surfaces.delete(sessionId);
+    record.disposed = true;
+    try {
+      record.owner.contentView.removeChildView(record.view);
+    } catch {
+      // A window can already be closing while the renderer removes its session.
+    }
+    try {
+      record.view.webContents.close();
+    } catch {
+      // Closing an already-destroyed WebContents is harmless.
+    }
+  }
+
+  closeForOwner(owner: BrowserWindow, sessionId: string): void {
+    const record = this.surfaces.get(sessionId);
+    if (record?.owner === owner || this.pendingOpenOwners.get(sessionId) === owner) {
+      this.close(sessionId);
+    }
+  }
+
+  hideAll(): void {
+    for (const record of this.surfaces.values()) {
+      if (!record.disposed) record.view.setVisible(false);
+    }
+  }
+
+  closeForWindow(owner: BrowserWindow): void {
+    const sessionIds = new Set<string>();
+    for (const [sessionId, record] of this.surfaces) {
+      if (record.owner === owner) sessionIds.add(sessionId);
+    }
+    for (const [sessionId, pendingOwner] of this.pendingOpenOwners) {
+      if (pendingOwner === owner) sessionIds.add(sessionId);
+    }
+    for (const sessionId of sessionIds) this.close(sessionId);
+  }
+
+  closeAll(): void {
+    const sessionIds = new Set([...this.surfaces.keys(), ...this.pendingOpenOwners.keys()]);
+    for (const sessionId of sessionIds) this.close(sessionId);
+  }
+
+  private configureWebContents(
+    sessionId: string,
+    record: WebSurfaceRecord,
+    target: WebTargetResponse,
+  ): void {
+    const contents = record.view.webContents;
+    contents.setWindowOpenHandler(({ url }) => {
+      if (!isAllowedWebNavigation(url)) return { action: 'deny' };
+      void contents.loadURL(url).catch(() => undefined);
+      return { action: 'deny' };
+    });
+    contents.on('will-navigate', (event, url) => {
+      if (!isAllowedWebNavigation(url)) event.preventDefault();
+    });
+    if (target.ignoreCertErrors) {
+      contents.on('certificate-error', (event, _url, _error, _certificate, callback) => {
+        // The opt-in belongs to this isolated WebContents only. A regular tab cannot inherit this
+        // exception through Chromium's shared profile or certificate-decision cache.
+        event.preventDefault();
+        callback(true);
+      });
+    }
+    contents.on('did-navigate', () => this.sendEvent(sessionId, record, 'navigation'));
+    contents.on('did-navigate-in-page', () => this.sendEvent(sessionId, record, 'navigation'));
+    contents.on('did-finish-load', () => {
+      this.sendEvent(
+        sessionId,
+        record,
+        record.initialNavigationPending ? 'connected' : 'navigation',
+      );
+      record.initialNavigationPending = false;
+    });
+    contents.on(
+      'did-fail-load',
+      (
+        _event,
+        errorCode: number,
+        errorDescription: string,
+        _validatedURL: string,
+        isMainFrame: boolean,
+      ) => {
+        // ERR_ABORTED is the normal companion to client-side redirects and must not turn a viable
+        // connection into a failed tab.
+        if (!isMainFrame || errorCode === -3 || record.disposed) return;
+        if (record.initialNavigationPending) {
+          record.initialNavigationPending = false;
+          this.sendEvent(sessionId, record, 'failed', {
+            error: describeWebLoadFailure(errorCode, errorDescription),
+          });
+          return;
+        }
+        this.sendEvent(sessionId, record, 'navigation');
+      },
+    );
+    contents.on('render-process-gone', () => {
+      if (!record.initialNavigationPending || record.disposed) return;
+      record.initialNavigationPending = false;
+      this.sendEvent(sessionId, record, 'failed', {
+        error: 'The browser process stopped unexpectedly.',
+      });
+    });
+  }
+
+  private sendEvent(
+    sessionId: string,
+    record: WebSurfaceRecord,
+    type: 'connected' | 'failed' | 'navigation',
+    values: { error?: string } = {},
+  ): void {
+    if (record.disposed || record.owner.isDestroyed()) return;
+    const contents = record.view.webContents;
+    try {
+      record.owner.webContents.send('web:event', {
+        type,
+        sessionId,
+        attempt: record.attempt,
+        url: contents.getURL().slice(0, webMaxUrlLength),
+        canGoBack: contents.canGoBack(),
+        canGoForward: contents.canGoForward(),
+        error: values.error?.slice(0, 2048),
+      });
+    } catch {
+      // The renderer may be reloading while an in-flight navigation completes.
+    }
+  }
+}
+
+function isAllowedWebNavigation(value: string): boolean {
+  try {
+    const target = new URL(value);
+    return target.protocol === 'http:' || target.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function describeWebNavigationError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message
+    ? `The browser could not start the page: ${message}`
+    : 'The browser could not start the page.';
+}
+
+function describeWebLoadFailure(errorCode: number, description: string): string {
+  switch (errorCode) {
+    case -105:
+      return 'The host name could not be resolved.';
+    case -102:
+      return 'The server is unreachable.';
+    case -118:
+      return 'The connection timed out.';
+    case -101:
+    case -100:
+      return 'The connection was reset.';
+    case -200:
+    case -201:
+    case -202:
+    case -203:
+    case -204:
+      return 'The server certificate could not be validated. If this appliance uses a self-signed certificate, enable “Ignore certificate errors” for this connection.';
+    default:
+      return description ? `Navigation failed (${description}).` : 'Navigation failed.';
+  }
+}
+
+const webSurfaces = new WebSurfaceManager();
+
 class NativeSshBackend {
   private child: ChildProcessWithoutNullStreams | undefined;
   private lineReader: Interface | undefined;
@@ -1989,6 +2397,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       } catch {
         // The native process may already have exited; the Electron auth session is still locked.
       }
+      webSurfaces.hideAll();
       const ownerWindow = BrowserWindow.fromWebContents(event.sender);
       if (!ownerWindow || ownerWindow.isDestroyed()) return;
       try {
@@ -2080,6 +2489,55 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       await requireNativeAuth();
       await sshBackend.respondMcpApproval(approval.requestId, approval.approved);
     });
+  });
+
+  ipcMain.handle('workspace:update-node-web-settings', async (_event, request: unknown) => {
+    if (!isWorkspaceNodeWebSettingsRequest(request)) {
+      throw new Error('Workspace web node settings are invalid.');
+    }
+    if (process.platform !== 'win32') return { updated: false };
+    return serializeAuthOperation(async () => {
+      await ensureAuthSession();
+      authSession.requireUnlocked();
+      return runBackend<{ updated: boolean }>('workspace-update-node-web-settings', request);
+    });
+  });
+  ipcMain.handle('web:open', async (event, request: unknown) => {
+    if (!isWebOpenRequest(request)) throw new Error('Web connection request is invalid.');
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!ownerWindow || ownerWindow.isDestroyed())
+      throw new Error('Web session owner window is unavailable.');
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      return webSurfaces.open(ownerWindow, request);
+    });
+  });
+  ipcMain.handle('web:set-bounds', async (event, request: unknown) => {
+    if (!isWebBoundsRequest(request)) throw new Error('Web surface bounds are invalid.');
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!ownerWindow || ownerWindow.isDestroyed()) return;
+    // Bounds updates are intentionally lightweight, but never make private page contents visible
+    // after the native workspace was locked.
+    if (process.platform === 'win32' && !authSession.isAccessAllowed) {
+      webSurfaces.hideAll();
+      return;
+    }
+    webSurfaces.setBounds(ownerWindow, request);
+  });
+  ipcMain.handle('web:command', async (event, request: unknown) => {
+    if (!isWebCommandRequest(request)) throw new Error('Web browser command is invalid.');
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!ownerWindow || ownerWindow.isDestroyed()) return;
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      webSurfaces.command(ownerWindow, request);
+    });
+  });
+  ipcMain.handle('web:close', async (event, sessionId: unknown) => {
+    if (!isSshSessionId(sessionId)) throw new Error('Web session id is invalid.');
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+    if (!ownerWindow || ownerWindow.isDestroyed()) return;
+    webSurfaces.closeForOwner(ownerWindow, sessionId);
   });
   ipcMain.handle('ssh:open', async (_event, request: unknown) => {
     if (!isSshOpenRequest(request)) throw new Error('SSH open request is invalid.');
@@ -2554,6 +3012,7 @@ function createWindow() {
   });
 
   window.webContents.on('did-start-loading', () => {
+    webSurfaces.closeForWindow(window);
     if (process.platform !== 'win32') return;
     void serializeAuthOperation(async () => {
       // A renderer reload creates a fresh UI process context. Do not let a previous renderer's
@@ -2576,6 +3035,8 @@ function createWindow() {
     console.error(`[Wormhole] Preload failed (${path.basename(preloadPath)}).`, error.message);
   });
 
+  window.once('closed', () => webSurfaces.closeForWindow(window));
+
   if (rendererUrl) {
     void window.loadURL(rendererUrl);
   } else {
@@ -2596,6 +3057,13 @@ authSession.onUnlocked(() => {
 app.whenReady().then(async () => {
   registerIpcHandlers(sshBackend);
   try {
+    // Defense in depth for the in-memory profile: a run starts with no appliance cookies or cache.
+    const browserSession = electronSession.fromPartition(webSharedPartition, { cache: true });
+    await Promise.all([browserSession.clearStorageData(), browserSession.clearCache()]);
+  } catch (error) {
+    console.warn('[Wormhole] Could not clear the browser session at startup.', error);
+  }
+  try {
     await runFirstLaunchMigrations();
   } catch (error) {
     // A failed first attempt remains retryable because no completion marker is written. The app
@@ -2614,6 +3082,7 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  webSurfaces.closeAll();
   nativeBackend?.stop();
   nativeBackend = undefined;
   serialBackend?.dispose();
