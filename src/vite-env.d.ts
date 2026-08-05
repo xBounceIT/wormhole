@@ -122,6 +122,17 @@ interface WormholeSshTerminalCellChange extends WormholeSshTerminalCell {
   index: number;
 }
 
+interface WormholeSshTerminalScrollbackRun {
+  text: string;
+  cells: number;
+  foreground: number;
+  background: number;
+}
+
+interface WormholeSshTerminalScrollbackLine {
+  runs: WormholeSshTerminalScrollbackRun[];
+}
+
 interface WormholeSshTerminalFrame {
   columns: number;
   rows: number;
@@ -129,7 +140,8 @@ interface WormholeSshTerminalFrame {
   cells?: WormholeSshTerminalCell[];
   changes: WormholeSshTerminalCellChange[];
   scrollbackReset: boolean;
-  scrollback?: string[];
+  viewportReset: boolean;
+  scrollback?: WormholeSshTerminalScrollbackLine[];
   cursorX: number;
   cursorY: number;
   cursorVisible: boolean;

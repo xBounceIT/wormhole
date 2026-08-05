@@ -37,6 +37,16 @@ contextBridge.exposeInMainWorld('wormhole', {
           foreground: number;
           background: number;
         }>;
+        scrollbackReset?: boolean;
+        viewportReset?: boolean;
+        scrollback?: Array<{
+          runs: Array<{
+            text: string;
+            cells: number;
+            foreground: number;
+            background: number;
+          }>;
+        }>;
         cursorX: number;
         cursorY: number;
         cursorVisible: boolean;

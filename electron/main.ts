@@ -104,6 +104,17 @@ type SshTerminalCellChange = SshTerminalCell & {
   index: number;
 };
 
+type SshTerminalScrollbackRun = {
+  text: string;
+  cells: number;
+  foreground: number;
+  background: number;
+};
+
+type SshTerminalScrollbackLine = {
+  runs: SshTerminalScrollbackRun[];
+};
+
 type SshTerminalFrame = {
   columns: number;
   rows: number;
@@ -111,7 +122,8 @@ type SshTerminalFrame = {
   cells?: SshTerminalCell[];
   changes: SshTerminalCellChange[];
   scrollbackReset: boolean;
-  scrollback?: string[];
+  viewportReset: boolean;
+  scrollback?: SshTerminalScrollbackLine[];
   cursorX: number;
   cursorY: number;
   cursorVisible: boolean;
@@ -221,6 +233,45 @@ function isSshTerminalCell(value: unknown): value is SshTerminalCell {
   );
 }
 
+function isSshTerminalScrollbackLine(
+  value: unknown,
+  maxCells: number,
+): value is SshTerminalScrollbackLine {
+  if (!isRecord(value) || !Array.isArray(value.runs) || value.runs.length > maxCells) {
+    return false;
+  }
+  let textLength = 0;
+  let cellCount = 0;
+  for (const run of value.runs) {
+    if (
+      !isRecord(run) ||
+      typeof run.text !== 'string' ||
+      run.text.length === 0 ||
+      run.text.length > sshMaxTerminalScrollbackLineLength ||
+      typeof run.cells !== 'number' ||
+      !Number.isInteger(run.cells) ||
+      run.cells < 1 ||
+      run.cells > maxCells ||
+      typeof run.foreground !== 'number' ||
+      !Number.isInteger(run.foreground) ||
+      run.foreground < 0 ||
+      run.foreground > 0xffff ||
+      typeof run.background !== 'number' ||
+      !Number.isInteger(run.background) ||
+      run.background < 0 ||
+      run.background > 0xffff
+    ) {
+      return false;
+    }
+    textLength += run.text.length;
+    cellCount += run.cells;
+    if (textLength > sshMaxTerminalScrollbackLineLength || cellCount > maxCells) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function parseSshTerminalFrame(value: unknown): SshTerminalFrame | undefined {
   if (
     !isRecord(value) ||
@@ -234,6 +285,7 @@ function parseSshTerminalFrame(value: unknown): SshTerminalFrame | undefined {
     value.rows > 500 ||
     (value.full !== undefined && typeof value.full !== 'boolean') ||
     (value.scrollback_reset !== undefined && typeof value.scrollback_reset !== 'boolean') ||
+    (value.viewport_reset !== undefined && typeof value.viewport_reset !== 'boolean') ||
     typeof value.cursor_x !== 'number' ||
     !Number.isInteger(value.cursor_x) ||
     value.cursor_x < 0 ||
@@ -285,14 +337,12 @@ function parseSshTerminalFrame(value: unknown): SshTerminalFrame | undefined {
     }
   }
 
-  let scrollback: string[] | undefined;
+  let scrollback: SshTerminalScrollbackLine[] | undefined;
   if (value.scrollback !== undefined) {
     if (
       !Array.isArray(value.scrollback) ||
       value.scrollback.length > sshMaxTerminalScrollbackLines ||
-      !value.scrollback.every(
-        (line) => typeof line === 'string' && line.length <= sshMaxTerminalScrollbackLineLength,
-      )
+      !value.scrollback.every((line) => isSshTerminalScrollbackLine(line, value.columns as number))
     ) {
       return undefined;
     }
@@ -306,6 +356,7 @@ function parseSshTerminalFrame(value: unknown): SshTerminalFrame | undefined {
     cells,
     changes,
     scrollbackReset: value.scrollback_reset === true,
+    viewportReset: value.viewport_reset === true,
     scrollback,
     cursorX: value.cursor_x,
     cursorY: value.cursor_y,

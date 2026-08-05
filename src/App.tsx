@@ -380,7 +380,7 @@ function applySshTerminalFrame(
   }
 
   const sameViewport = previous?.columns === incoming.columns && previous.rows === incoming.rows;
-  let scrollback: string[];
+  let scrollback: WormholeSshTerminalScrollbackLine[];
   if (incoming.scrollbackReset) {
     scrollback = incoming.scrollback?.slice(-terminalMaxScrollbackLines) ?? [];
   } else if (sameViewport) {
@@ -2130,7 +2130,7 @@ function App() {
           </ResizablePanel>
           <ResizableHandle withHandle />
           <ResizablePanel minSize="54%">
-            <SidebarInset className="min-h-0 min-w-0 rounded-none bg-background">
+            <SidebarInset className="h-full min-h-0 min-w-0 rounded-none bg-background">
               {activePage === 'sessions' ? (
                 <SessionsPage
                   onCloseSession={closeSession}
@@ -2792,6 +2792,22 @@ function measureTerminalCellWidth(): number {
   return Number.isFinite(width) && width > 0 ? width : terminalFallbackCellWidth;
 }
 
+function terminalWheelDelta(
+  surface: HTMLElement,
+  value: number,
+  deltaMode: number,
+  axis: 'x' | 'y',
+): number {
+  if (deltaMode === 1)
+    return value * (axis === 'y' ? terminalLineHeight : terminalFallbackCellWidth);
+  if (deltaMode === 2) return value * (axis === 'y' ? surface.clientHeight : surface.clientWidth);
+  return value;
+}
+
+function terminalIsAtBottom(surface: HTMLElement): boolean {
+  return surface.scrollHeight - surface.scrollTop - surface.clientHeight <= terminalLineHeight;
+}
+
 type TerminalTextRun = {
   text: string;
   foreground: string;
@@ -2827,21 +2843,52 @@ function terminalTextRuns(frame: WormholeSshTerminalFrame, row: number): Termina
   return runs;
 }
 
-const TerminalScrollback = memo(function TerminalScrollback({ lines }: { lines?: string[] }) {
+const TerminalScrollback = memo(function TerminalScrollback({
+  lines,
+}: {
+  lines?: WormholeSshTerminalScrollbackLine[];
+}) {
   if (!lines?.length) return null;
 
   const chunks = [];
   for (let start = 0; start < lines.length; start += terminalScrollbackChunkSize) {
-    const chunk = lines
-      .slice(start, start + terminalScrollbackChunkSize)
-      .map((line) => line || ' ');
+    const chunk = lines.slice(start, start + terminalScrollbackChunkSize);
     chunks.push(
       <div
-        className="terminal-scrollback-chunk whitespace-pre"
+        className="terminal-scrollback-chunk"
         key={start}
         style={{ height: `${chunk.length * terminalLineHeight}px` }}
       >
-        {chunk.join('\n')}
+        {chunk.map((line, index) => {
+          const runs = line.runs.length
+            ? line.runs
+            : [
+                {
+                  text: ' ',
+                  cells: 1,
+                  foreground: terminalDefaultForeground,
+                  background: terminalDefaultBackground,
+                },
+              ];
+          return (
+            <div className="flex h-[18px] min-w-max whitespace-pre" key={start + index}>
+              {runs.map((run, runIndex) => (
+                <span
+                  className="block flex-none overflow-hidden"
+                  key={`${start + index}-${runIndex}`}
+                  style={{
+                    backgroundColor: terminalColor(run.background, '#090909'),
+                    color: terminalColor(run.foreground, '#e5e7eb'),
+                    height: `${terminalLineHeight}px`,
+                    width: `${run.cells}ch`,
+                  }}
+                >
+                  {run.text}
+                </span>
+              ))}
+            </div>
+          );
+        })}
       </div>,
     );
   }
@@ -3015,9 +3062,49 @@ function SshTerminalSurface({
   useEffect(() => {
     if (!isActive || session.status !== 'connected') return;
     const surface = surfaceRef.current;
-    if (!surface || !stickToBottomRef.current) return;
+    if (!surface) return;
+    if (session.terminalFrame?.viewportReset) stickToBottomRef.current = true;
+    if (!stickToBottomRef.current) return;
     surface.scrollTop = surface.scrollHeight;
-  }, [isActive, session.backendSessionId, session.status, session.terminalFrame?.sequence]);
+  }, [
+    isActive,
+    session.backendSessionId,
+    session.status,
+    session.terminalFrame?.viewportReset,
+    session.terminalFrame?.sequence,
+  ]);
+
+  useEffect(() => {
+    if (!isActive || session.status !== 'connected') return;
+    const surface = surfaceRef.current;
+    if (!surface) return;
+
+    const handleWheel = (event: WheelEvent) => {
+      const maxScrollTop = Math.max(0, surface.scrollHeight - surface.clientHeight);
+      const maxScrollLeft = Math.max(0, surface.scrollWidth - surface.clientWidth);
+      const rawDeltaX = terminalWheelDelta(surface, event.deltaX, event.deltaMode, 'x');
+      const rawDeltaY = terminalWheelDelta(surface, event.deltaY, event.deltaMode, 'y');
+      const deltaX = Number.isFinite(rawDeltaX) ? rawDeltaX : 0;
+      const deltaY = Number.isFinite(rawDeltaY) ? rawDeltaY : 0;
+      if ((maxScrollTop <= 0 && maxScrollLeft <= 0) || (deltaX === 0 && deltaY === 0)) return;
+
+      const nextScrollLeft = Math.min(maxScrollLeft, Math.max(0, surface.scrollLeft + deltaX));
+      const nextScrollTop = Math.min(maxScrollTop, Math.max(0, surface.scrollTop + deltaY));
+
+      // Keep the terminal as the scroll owner. This is deliberately a native,
+      // non-passive listener because Chromium can make delegated React wheel
+      // listeners passive, which lets the surrounding layout consume the wheel.
+      event.preventDefault();
+      event.stopPropagation();
+
+      surface.scrollLeft = nextScrollLeft;
+      surface.scrollTop = nextScrollTop;
+      stickToBottomRef.current = terminalIsAtBottom(surface);
+    };
+
+    surface.addEventListener('wheel', handleWheel, { passive: false });
+    return () => surface.removeEventListener('wheel', handleWheel);
+  }, [isActive, session.status]);
 
   useEffect(() => {
     if (!isActive || session.status !== 'connected') return;
@@ -3146,26 +3233,9 @@ function SshTerminalSurface({
       onCompositionEnd={(event) => {
         if (event.data) onInput(session.id, event.data);
       }}
-      onWheel={(event) => {
-        const surface = event.currentTarget;
-        const maxScrollTop = surface.scrollHeight - surface.clientHeight;
-        if (maxScrollTop <= 0 || event.deltaY === 0) return;
-
-        const deltaY =
-          event.deltaMode === 1
-            ? event.deltaY * terminalLineHeight
-            : event.deltaMode === 2
-              ? event.deltaY * surface.clientHeight
-              : event.deltaY;
-        const nextScrollTop = Math.min(maxScrollTop, Math.max(0, surface.scrollTop + deltaY));
-        if (nextScrollTop === surface.scrollTop) return;
-        event.preventDefault();
-        surface.scrollTop = nextScrollTop;
-      }}
       onScroll={(event) => {
         const surface = event.currentTarget;
-        stickToBottomRef.current =
-          surface.scrollHeight - surface.scrollTop - surface.clientHeight <= terminalLineHeight;
+        stickToBottomRef.current = terminalIsAtBottom(surface);
       }}
       ref={surfaceRef}
       role="application"
