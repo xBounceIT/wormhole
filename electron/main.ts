@@ -6,6 +6,15 @@ import { createInterface, type Interface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { AuthSession } from './auth-session.js';
 import { RdpBackendClient } from './rdp.js';
+import {
+  SerialBackendClient,
+  isSerialInput,
+  isSerialOpenRequest,
+  isSerialSessionId,
+  type SerialBackendEvent,
+  type SerialConnectedResponse,
+  type SerialOpenRequest,
+} from './serial.js';
 import type {
   RdpBackendEvent,
   RdpCommandRequest,
@@ -26,6 +35,7 @@ const backendMaxRequestBytes = 64 * 1024;
 const nativeBackendLineLimit = 32 * 1024 * 1024;
 const nativeBackendCommandTimeoutMs = 15_000;
 let rdpClient: RdpBackendClient | undefined;
+let serialBackend: SerialBackendClient | undefined;
 
 type BackendOperation =
   | 'workspace'
@@ -1189,6 +1199,50 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!isSshSessionId(sessionId)) throw new Error('SSH close request is invalid.');
     sshBackend.close(sessionId);
   });
+  ipcMain.handle('serial:open', async (_event, request: unknown) => {
+    if (!isSerialOpenRequest(request)) throw new Error('Serial open request is invalid.');
+    let connection: Promise<SerialConnectedResponse> | undefined;
+    await serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      connection = getSerialBackend().open(request as SerialOpenRequest);
+    });
+    return connection!;
+  });
+  ipcMain.handle('serial:input', async (_event, sessionId: unknown, data: unknown) => {
+    if (!isSerialSessionId(sessionId) || !isSerialInput(data)) {
+      throw new Error('Serial input request is invalid.');
+    }
+    return serializeAuthOperation(async () => {
+      await requireNativeAuth();
+      getSerialBackend().sendInput(sessionId, data);
+    });
+  });
+  ipcMain.handle(
+    'serial:resize',
+    async (_event, sessionId: unknown, columns: unknown, rows: unknown) => {
+      if (
+        !isSerialSessionId(sessionId) ||
+        typeof columns !== 'number' ||
+        !Number.isInteger(columns) ||
+        columns < 0 ||
+        columns > 500 ||
+        typeof rows !== 'number' ||
+        !Number.isInteger(rows) ||
+        rows < 0 ||
+        rows > 500
+      ) {
+        throw new Error('Serial resize request is invalid.');
+      }
+      return serializeAuthOperation(async () => {
+        await requireNativeAuth();
+        getSerialBackend().resize(sessionId, columns, rows);
+      });
+    },
+  );
+  ipcMain.handle('serial:close', async (_event, sessionId: unknown) => {
+    if (!isSerialSessionId(sessionId)) throw new Error('Serial close request is invalid.');
+    getSerialBackend().close(sessionId);
+  });
   ipcMain.handle('vnc:command', async (_event, input: unknown) => {
     if (isQuitting) {
       return { id: '', ok: false, error: 'Native backend is stopping.' };
@@ -1280,6 +1334,30 @@ function getRdpClient(): RdpBackendClient {
     }
   });
   return rdpClient;
+}
+
+function getSerialBackend(): SerialBackendClient {
+  if (serialBackend) return serialBackend;
+
+  const client = new SerialBackendClient({
+    executable: backendPath(),
+    args: [
+      '--operation',
+      'serial',
+      '--database',
+      wormholeDatabasePath(),
+      '--electron-user-data',
+      electronUserDataPath(),
+    ],
+  });
+  client.onEvent((event: SerialBackendEvent) => {
+    if (event.type === 'screen' && !authSession.isAccessAllowed) return;
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send('serial:event', event);
+    }
+  });
+  serialBackend = client;
+  return client;
 }
 
 function nativeWindowHandle(window: BrowserWindow): string {
@@ -1451,7 +1529,10 @@ function createWindow() {
 }
 
 const sshBackend = new NativeSshBackend();
-authSession.onUnlocked(() => sshBackend.requestSnapshots());
+authSession.onUnlocked(() => {
+  sshBackend.requestSnapshots();
+  serialBackend?.requestSnapshots();
+});
 
 app.whenReady().then(async () => {
   registerIpcHandlers(sshBackend);
@@ -1476,6 +1557,8 @@ app.on('before-quit', () => {
   isQuitting = true;
   nativeBackend?.stop();
   nativeBackend = undefined;
+  serialBackend?.dispose();
+  serialBackend = undefined;
 });
 
 app.on('window-all-closed', () => {
@@ -1485,5 +1568,6 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   sshBackend.dispose();
+  serialBackend?.dispose();
   void rdpClient?.dispose();
 });

@@ -121,6 +121,54 @@ type Theme = 'system' | 'light' | 'dark';
 type ResolvedTheme = Exclude<Theme, 'system'>;
 type AuthPromptKind = 'lock' | 'confirmation';
 
+type SerialSettings = {
+  baudRate: number;
+  dataBits: number;
+  stopBits: number;
+  parity: number;
+  flowControl: number;
+};
+
+const defaultSerialSettings: SerialSettings = {
+  baudRate: 9600,
+  dataBits: 8,
+  stopBits: 1,
+  parity: 0,
+  flowControl: 0,
+};
+
+function serialSettingsFromNode(
+  node: Pick<
+    TreeNode,
+    'serialBaudRate' | 'serialDataBits' | 'serialStopBits' | 'serialParity' | 'serialFlowControl'
+  >,
+): SerialSettings {
+  return {
+    baudRate:
+      node.serialBaudRate && node.serialBaudRate > 0
+        ? node.serialBaudRate
+        : defaultSerialSettings.baudRate,
+    dataBits:
+      node.serialDataBits && node.serialDataBits >= 5 && node.serialDataBits <= 8
+        ? node.serialDataBits
+        : defaultSerialSettings.dataBits,
+    stopBits:
+      node.serialStopBits === 1 || node.serialStopBits === 2 || node.serialStopBits === 3
+        ? node.serialStopBits
+        : defaultSerialSettings.stopBits,
+    parity:
+      node.serialParity !== undefined && node.serialParity >= 0 && node.serialParity <= 4
+        ? node.serialParity
+        : defaultSerialSettings.parity,
+    flowControl:
+      node.serialFlowControl !== undefined &&
+      node.serialFlowControl >= 0 &&
+      node.serialFlowControl <= 3
+        ? node.serialFlowControl
+        : defaultSerialSettings.flowControl,
+  };
+}
+
 type AuthPromptRequest = {
   kind: AuthPromptKind;
   reason: string;
@@ -153,6 +201,11 @@ type TreeNode = {
   protocol?: Protocol;
   host?: string;
   port?: number;
+  serialBaudRate?: number;
+  serialDataBits?: number;
+  serialStopBits?: number;
+  serialParity?: number;
+  serialFlowControl?: number;
   children?: TreeNode[];
 };
 
@@ -298,6 +351,7 @@ type Session = {
   backendSessionId?: string;
   status: 'connecting' | 'connected' | 'failed' | 'closed' | 'placeholder';
   terminalFrame?: WormholeSshTerminalFrame;
+  serialSettings?: SerialSettings;
   error?: string;
   fingerprint?: string;
   hostKeyMismatch?: {
@@ -478,14 +532,32 @@ function updateConnectionInTree(
   nodes: TreeNode[],
   connectionId: string,
   folderId: string,
-  update: { name: string; host: string; protocol: Protocol },
+  update: {
+    name: string;
+    host: string;
+    protocol: Protocol;
+    serialSettings?: SerialSettings;
+  },
 ): TreeNode[] {
   let editedConnection: TreeNode | undefined;
 
   function removeConnection(items: TreeNode[]): TreeNode[] {
     return items.flatMap((node) => {
       if (node.id === connectionId) {
-        editedConnection = { ...node, ...update };
+        const { serialSettings, ...baseUpdate } = update;
+        editedConnection = {
+          ...node,
+          ...baseUpdate,
+          ...(serialSettings
+            ? {
+                serialBaudRate: serialSettings.baudRate,
+                serialDataBits: serialSettings.dataBits,
+                serialStopBits: serialSettings.stopBits,
+                serialParity: serialSettings.parity,
+                serialFlowControl: serialSettings.flowControl,
+              }
+            : {}),
+        };
         return [];
       }
 
@@ -852,6 +924,7 @@ function App() {
     name: '',
     host: '',
     protocol: 'ssh' as Protocol,
+    serial: { ...defaultSerialSettings },
   });
   const [newConnectionOpen, setNewConnectionOpen] = useState(false);
   const [editingConnectionId, setEditingConnectionId] = useState<string | null>(null);
@@ -860,6 +933,7 @@ function App() {
     host: '',
     protocol: 'ssh' as Protocol,
     folder: '',
+    serial: { ...defaultSerialSettings },
   });
   const [newFolderOpen, setNewFolderOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
@@ -1053,6 +1127,44 @@ function App() {
     return () => {
       unsubscribe?.();
     };
+  }, []);
+
+  useEffect(() => {
+    const unsubscribe = window.wormhole?.onSerialEvent((event) => {
+      setSessions((current) =>
+        current.map((session) => {
+          if (session.backendSessionId !== event.sessionId) return session;
+          if (event.type === 'connected') {
+            return {
+              ...session,
+              status: 'connected',
+              host: event.portName,
+              serialSettings: {
+                baudRate: event.baudRate,
+                dataBits: event.dataBits,
+                stopBits: event.stopBits,
+                parity: event.parity,
+                flowControl: event.flowControl,
+              },
+              error: undefined,
+            };
+          }
+          if (event.type === 'screen') {
+            if (session.status !== 'connected') return session;
+            return {
+              ...session,
+              terminalFrame: applySshTerminalFrame(session.terminalFrame, event.frame),
+            };
+          }
+          if (event.type === 'error') {
+            return { ...session, status: 'failed', error: event.error };
+          }
+          return { ...session, status: 'closed' };
+        }),
+      );
+    });
+
+    return () => unsubscribe?.();
   }, []);
 
   useEffect(() => {
@@ -1273,6 +1385,46 @@ function App() {
       });
   }
 
+  function startSerialSession(
+    sessionId: string,
+    nodeId: string | undefined,
+    portName: string,
+    settings: SerialSettings,
+  ) {
+    const api = window.wormhole;
+    if (!api) {
+      setSessions((current) =>
+        current.map((session) =>
+          session.backendSessionId === sessionId
+            ? { ...session, status: 'failed', error: 'The native serial bridge is unavailable.' }
+            : session,
+        ),
+      );
+      return;
+    }
+
+    const request = nodeId
+      ? { sessionId, nodeId, columns: 80, rows: 24 }
+      : { sessionId, portName, settings, columns: 80, rows: 24 };
+    void api.openSerialSession(request).catch((error: unknown) => {
+      setSessions((current) =>
+        current.map((session) =>
+          session.backendSessionId === sessionId
+            ? {
+                ...session,
+                status: 'failed',
+                error: error instanceof Error ? error.message : String(error),
+              }
+            : session,
+        ),
+      );
+    });
+  }
+
+  function savedSerialNodeId(nodeId: string | undefined): string | undefined {
+    return nodeId && !nodeId.startsWith('connection-') ? nodeId : undefined;
+  }
+
   function defaultRdpProfile(session: Session, credentials?: RdpCredentials): WormholeRdpProfile {
     return {
       nodeId: session.nodeId,
@@ -1399,7 +1551,9 @@ function App() {
       return;
     }
 
-    const backendSessionId = node.protocol === 'ssh' ? newSessionToken() : undefined;
+    const backendSessionId =
+      node.protocol === 'ssh' || node.protocol === 'serial' ? newSessionToken() : undefined;
+    const serialSettings = node.protocol === 'serial' ? serialSettingsFromNode(node) : undefined;
     const session: Session = {
       id: `session-${node.id}`,
       title: node.name,
@@ -1409,14 +1563,23 @@ function App() {
       port: node.port,
       canTransfer: node.protocol === 'ssh',
       backendSessionId,
-      status: node.protocol === 'ssh' ? 'connecting' : 'placeholder',
+      status: node.protocol === 'ssh' || node.protocol === 'serial' ? 'connecting' : 'placeholder',
+      serialSettings,
       rdpStatus: node.protocol === 'rdp' ? 'idle' : undefined,
     };
 
     setSessions((current) => [...current, session]);
     setSelectedSessionId(session.id);
     setActivePage('sessions');
-    if (backendSessionId) startSshSession(backendSessionId, node.id);
+    if (backendSessionId && session.protocol === 'ssh') startSshSession(backendSessionId, node.id);
+    if (backendSessionId && session.protocol === 'serial') {
+      startSerialSession(
+        backendSessionId,
+        savedSerialNodeId(node.id),
+        session.host,
+        serialSettings ?? defaultSerialSettings,
+      );
+    }
     if (session.protocol === 'rdp') {
       setRdpCredentialForm({ username: '', domain: '', password: '' });
       setRdpCredentialPrompt(session.id);
@@ -1435,7 +1598,11 @@ function App() {
     setSessions(nextSessions);
 
     if (closing?.backendSessionId) {
-      void window.wormhole?.closeSshSession(closing.backendSessionId);
+      if (closing.protocol === 'serial') {
+        void window.wormhole?.closeSerialSession(closing.backendSessionId);
+      } else {
+        void window.wormhole?.closeSshSession(closing.backendSessionId);
+      }
     }
 
     if (selectedSessionId === id) {
@@ -1453,7 +1620,13 @@ function App() {
     const source = sessions.find((session) => session.id === id);
     if (!source) return;
 
-    if (source.backendSessionId) void window.wormhole?.closeSshSession(source.backendSessionId);
+    if (source.backendSessionId) {
+      if (source.protocol === 'serial') {
+        void window.wormhole?.closeSerialSession(source.backendSessionId);
+      } else {
+        void window.wormhole?.closeSshSession(source.backendSessionId);
+      }
+    }
     if (source.nodeId && source.protocol === 'ssh') {
       const backendSessionId = newSessionToken();
       setSessions((current) =>
@@ -1472,6 +1645,28 @@ function App() {
       );
       startSshSession(backendSessionId, source.nodeId);
     }
+    if (source.protocol === 'serial') {
+      const backendSessionId = newSessionToken();
+      setSessions((current) =>
+        current.map((session) =>
+          session.id === id
+            ? {
+                ...session,
+                backendSessionId,
+                status: 'connecting',
+                terminalFrame: undefined,
+                error: undefined,
+              }
+            : session,
+        ),
+      );
+      startSerialSession(
+        backendSessionId,
+        savedSerialNodeId(source.nodeId),
+        source.host,
+        source.serialSettings ?? defaultSerialSettings,
+      );
+    }
 
     setSelectedSessionId(id);
     setActivePage('sessions');
@@ -1487,13 +1682,20 @@ function App() {
       ...source,
       id: `session-duplicate-${Date.now()}`,
       title: `${source.title} (copy)`,
-      backendSessionId: source.protocol === 'ssh' ? newSessionToken() : undefined,
-      status: source.protocol === 'ssh' ? 'connecting' : 'placeholder',
+      backendSessionId:
+        source.protocol === 'ssh' || source.protocol === 'serial' ? newSessionToken() : undefined,
+      status:
+        source.protocol === 'ssh' || source.protocol === 'serial' ? 'connecting' : 'placeholder',
       terminalFrame: undefined,
       error: undefined,
       hostKeyMismatch: undefined,
       rdpStatus: source.protocol === 'rdp' ? 'idle' : source.rdpStatus,
       rdpError: undefined,
+      serialSettings: source.serialSettings
+        ? { ...source.serialSettings }
+        : source.protocol === 'serial'
+          ? { ...defaultSerialSettings }
+          : undefined,
     };
     setSessions((current) => {
       const index = current.findIndex((session) => session.id === id);
@@ -1505,8 +1707,16 @@ function App() {
     });
     setSelectedSessionId(duplicate.id);
     setActivePage('sessions');
-    if (duplicate.backendSessionId && duplicate.nodeId) {
+    if (duplicate.backendSessionId && duplicate.nodeId && duplicate.protocol === 'ssh') {
       startSshSession(duplicate.backendSessionId, duplicate.nodeId);
+    }
+    if (duplicate.backendSessionId && duplicate.protocol === 'serial') {
+      startSerialSession(
+        duplicate.backendSessionId,
+        savedSerialNodeId(duplicate.nodeId),
+        duplicate.host,
+        duplicate.serialSettings ?? defaultSerialSettings,
+      );
     }
     if (duplicate.protocol === 'rdp') {
       const existing = rdpCredentials[id];
@@ -1526,6 +1736,27 @@ function App() {
 
     void window.wormhole
       ?.sendSshInput(session.backendSessionId, encodeTerminalData(value))
+      .catch((error: unknown) => {
+        setSessions((current) =>
+          current.map((candidate) =>
+            candidate.id === sessionId
+              ? {
+                  ...candidate,
+                  status: 'failed',
+                  error: error instanceof Error ? error.message : String(error),
+                }
+              : candidate,
+          ),
+        );
+      });
+  }
+
+  function sendSerialInput(sessionId: string, value: string) {
+    const session = sessions.find((candidate) => candidate.id === sessionId);
+    if (!session?.backendSessionId || session.status !== 'connected') return;
+
+    void window.wormhole
+      ?.sendSerialInput(session.backendSessionId, encodeTerminalData(value))
       .catch((error: unknown) => {
         setSessions((current) =>
           current.map((candidate) =>
@@ -1571,7 +1802,12 @@ function App() {
   }
 
   function openQuickConnect() {
-    setQuickConnectForm({ name: '', host: '', protocol: 'ssh' });
+    setQuickConnectForm({
+      name: '',
+      host: '',
+      protocol: 'ssh',
+      serial: { ...defaultSerialSettings },
+    });
     setQuickConnectOpen(true);
   }
 
@@ -1588,6 +1824,7 @@ function App() {
       host: '',
       protocol: 'ssh',
       folder: folderId ?? getCreationFolderId() ?? folders[0]?.id ?? '',
+      serial: { ...defaultSerialSettings },
     });
     setNewConnectionOpen(true);
   }
@@ -1602,6 +1839,7 @@ function App() {
       host: node.host ?? '',
       protocol: node.protocol,
       folder: findParentFolderId(tree, node.id) ?? folders[0]?.id ?? '',
+      serial: serialSettingsFromNode(node),
     });
     setNewConnectionOpen(true);
   }
@@ -1617,6 +1855,7 @@ function App() {
     const name = quickConnectForm.name.trim() || quickConnectForm.host.trim() || 'New connection';
     const host = quickConnectForm.host.trim() || 'localhost';
     const id = `session-quick-${Date.now()}`;
+    const backendSessionId = quickConnectForm.protocol === 'serial' ? newSessionToken() : undefined;
 
     setSessions((current) => [
       ...current,
@@ -1626,7 +1865,10 @@ function App() {
         protocol: quickConnectForm.protocol,
         host,
         canTransfer: quickConnectForm.protocol === 'ssh',
-        status: 'placeholder',
+        backendSessionId,
+        status: quickConnectForm.protocol === 'serial' ? 'connecting' : 'placeholder',
+        serialSettings:
+          quickConnectForm.protocol === 'serial' ? { ...quickConnectForm.serial } : undefined,
         error:
           quickConnectForm.protocol === 'ssh'
             ? 'Quick Connect needs a saved SSH credential before it can connect.'
@@ -1637,6 +1879,9 @@ function App() {
     setSelectedSessionId(id);
     setActivePage('sessions');
     setQuickConnectOpen(false);
+    if (backendSessionId) {
+      startSerialSession(backendSessionId, undefined, host, quickConnectForm.serial);
+    }
     if (quickConnectForm.protocol === 'rdp') {
       setRdpCredentialForm({ username: '', domain: '', password: '' });
       setRdpCredentialPrompt(id);
@@ -1653,15 +1898,24 @@ function App() {
       const editedSessionId = `session-${editingId}`;
       const editedSession = sessions.find((session) => session.id === editedSessionId);
       if (editedSession?.backendSessionId) {
-        void window.wormhole?.closeSshSession(editedSession.backendSessionId);
+        if (editedSession.protocol === 'serial') {
+          void window.wormhole?.closeSerialSession(editedSession.backendSessionId);
+        } else {
+          void window.wormhole?.closeSshSession(editedSession.backendSessionId);
+        }
       }
       const backendSessionId =
-        editedSession && newConnectionForm.protocol === 'ssh' ? newSessionToken() : undefined;
+        editedSession &&
+        (newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'serial')
+          ? newSessionToken()
+          : undefined;
       setTree((current) =>
         updateConnectionInTree(current, editingId, newConnectionForm.folder, {
           name,
           host,
           protocol: newConnectionForm.protocol,
+          serialSettings:
+            newConnectionForm.protocol === 'serial' ? newConnectionForm.serial : undefined,
         }),
       );
       setSessions((current) =>
@@ -1675,14 +1929,31 @@ function App() {
                 canTransfer: newConnectionForm.protocol === 'ssh',
                 nodeId: editingId,
                 backendSessionId,
-                status: newConnectionForm.protocol === 'ssh' ? 'connecting' : 'placeholder',
+                status:
+                  newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'serial'
+                    ? 'connecting'
+                    : 'placeholder',
                 terminalFrame: undefined,
                 error: undefined,
+                serialSettings:
+                  newConnectionForm.protocol === 'serial'
+                    ? { ...newConnectionForm.serial }
+                    : undefined,
               }
             : session,
         ),
       );
-      if (backendSessionId) startSshSession(backendSessionId, editingId);
+      if (backendSessionId && newConnectionForm.protocol === 'ssh') {
+        startSshSession(backendSessionId, editingId);
+      }
+      if (backendSessionId && newConnectionForm.protocol === 'serial') {
+        startSerialSession(
+          backendSessionId,
+          savedSerialNodeId(editingId),
+          host,
+          newConnectionForm.serial,
+        );
+      }
     } else {
       const id = `connection-${Date.now()}`;
       const connection: TreeNode = {
@@ -1691,6 +1962,15 @@ function App() {
         kind: 'connection',
         protocol: newConnectionForm.protocol,
         host,
+        ...(newConnectionForm.protocol === 'serial'
+          ? {
+              serialBaudRate: newConnectionForm.serial.baudRate,
+              serialDataBits: newConnectionForm.serial.dataBits,
+              serialStopBits: newConnectionForm.serial.stopBits,
+              serialParity: newConnectionForm.serial.parity,
+              serialFlowControl: newConnectionForm.serial.flowControl,
+            }
+          : {}),
       };
 
       setTree((current) =>
@@ -2141,6 +2421,7 @@ function App() {
                   onReconnectSession={reconnectSession}
                   onRetryRdp={retryRdpSession}
                   onSelectSession={setSelectedSessionId}
+                  onSerialInput={sendSerialInput}
                   onSshInput={sendSshInput}
                   onTrustSshHostKey={trustSshHostKey}
                   isAuthorized={authGate === 'unlocked'}
@@ -2221,6 +2502,112 @@ function App() {
                   </SelectContent>
                 </Select>
               </div>
+              {quickConnectForm.protocol === 'serial' ? (
+                <div className="grid gap-3 rounded-lg border border-border/70 bg-background/35 p-3 sm:grid-cols-2">
+                  <div className="grid gap-2">
+                    <Label htmlFor="quick-serial-baud">Speed (baud)</Label>
+                    <Input
+                      id="quick-serial-baud"
+                      inputMode="numeric"
+                      onChange={(event) =>
+                        setQuickConnectForm((form) => ({
+                          ...form,
+                          serial: { ...form.serial, baudRate: Number(event.target.value) || 0 },
+                        }))
+                      }
+                      value={String(quickConnectForm.serial.baudRate)}
+                    />
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="quick-serial-data-bits">Data bits</Label>
+                    <Select
+                      onValueChange={(value) =>
+                        setQuickConnectForm((form) => ({
+                          ...form,
+                          serial: { ...form.serial, dataBits: Number(value) },
+                        }))
+                      }
+                      value={String(quickConnectForm.serial.dataBits)}
+                    >
+                      <SelectTrigger id="quick-serial-data-bits">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="5">5</SelectItem>
+                        <SelectItem value="6">6</SelectItem>
+                        <SelectItem value="7">7</SelectItem>
+                        <SelectItem value="8">8</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="quick-serial-stop-bits">Stop bits</Label>
+                    <Select
+                      onValueChange={(value) =>
+                        setQuickConnectForm((form) => ({
+                          ...form,
+                          serial: { ...form.serial, stopBits: Number(value) },
+                        }))
+                      }
+                      value={String(quickConnectForm.serial.stopBits)}
+                    >
+                      <SelectTrigger id="quick-serial-stop-bits">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="1">1</SelectItem>
+                        <SelectItem value="2">2</SelectItem>
+                        <SelectItem value="3">1.5</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="grid gap-2">
+                    <Label htmlFor="quick-serial-parity">Parity</Label>
+                    <Select
+                      onValueChange={(value) =>
+                        setQuickConnectForm((form) => ({
+                          ...form,
+                          serial: { ...form.serial, parity: Number(value) },
+                        }))
+                      }
+                      value={String(quickConnectForm.serial.parity)}
+                    >
+                      <SelectTrigger id="quick-serial-parity">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="0">None</SelectItem>
+                        <SelectItem value="1">Odd</SelectItem>
+                        <SelectItem value="2">Even</SelectItem>
+                        <SelectItem value="3">Mark</SelectItem>
+                        <SelectItem value="4">Space</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="grid gap-2 sm:col-span-2">
+                    <Label htmlFor="quick-serial-flow">Flow control</Label>
+                    <Select
+                      onValueChange={(value) =>
+                        setQuickConnectForm((form) => ({
+                          ...form,
+                          serial: { ...form.serial, flowControl: Number(value) },
+                        }))
+                      }
+                      value={String(quickConnectForm.serial.flowControl)}
+                    >
+                      <SelectTrigger id="quick-serial-flow" className="sm:max-w-[240px]">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="0">None</SelectItem>
+                        <SelectItem value="1">Software (XON/XOFF)</SelectItem>
+                        <SelectItem value="2">Hardware (RTS/CTS)</SelectItem>
+                        <SelectItem value="3">DSR/DTR</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+              ) : null}
               <DialogFooter>
                 <Button onClick={() => setQuickConnectOpen(false)} type="button" variant="ghost">
                   Cancel
@@ -2409,15 +2796,38 @@ function App() {
                     <div className="grid gap-4 sm:grid-cols-2">
                       <div className="grid gap-2">
                         <Label htmlFor="serial-baud">Speed (baud)</Label>
-                        <Input defaultValue="9600" id="serial-baud" inputMode="numeric" />
+                        <Input
+                          id="serial-baud"
+                          inputMode="numeric"
+                          onChange={(event) =>
+                            setNewConnectionForm((form) => ({
+                              ...form,
+                              serial: {
+                                ...form.serial,
+                                baudRate: Number(event.target.value) || 0,
+                              },
+                            }))
+                          }
+                          value={String(newConnectionForm.serial.baudRate)}
+                        />
                       </div>
                       <div className="grid gap-2">
                         <Label htmlFor="serial-data-bits">Data bits</Label>
-                        <Select defaultValue="8">
+                        <Select
+                          onValueChange={(value) =>
+                            setNewConnectionForm((form) => ({
+                              ...form,
+                              serial: { ...form.serial, dataBits: Number(value) },
+                            }))
+                          }
+                          value={String(newConnectionForm.serial.dataBits)}
+                        >
                           <SelectTrigger id="serial-data-bits">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
+                            <SelectItem value="5">5</SelectItem>
+                            <SelectItem value="6">6</SelectItem>
                             <SelectItem value="7">7</SelectItem>
                             <SelectItem value="8">8</SelectItem>
                           </SelectContent>
@@ -2425,39 +2835,67 @@ function App() {
                       </div>
                       <div className="grid gap-2">
                         <Label htmlFor="serial-stop-bits">Stop bits</Label>
-                        <Select defaultValue="1">
+                        <Select
+                          onValueChange={(value) =>
+                            setNewConnectionForm((form) => ({
+                              ...form,
+                              serial: { ...form.serial, stopBits: Number(value) },
+                            }))
+                          }
+                          value={String(newConnectionForm.serial.stopBits)}
+                        >
                           <SelectTrigger id="serial-stop-bits">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
                             <SelectItem value="1">1</SelectItem>
                             <SelectItem value="2">2</SelectItem>
+                            <SelectItem value="3">1.5</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
                       <div className="grid gap-2">
                         <Label htmlFor="serial-parity">Parity</Label>
-                        <Select defaultValue="none">
+                        <Select
+                          onValueChange={(value) =>
+                            setNewConnectionForm((form) => ({
+                              ...form,
+                              serial: { ...form.serial, parity: Number(value) },
+                            }))
+                          }
+                          value={String(newConnectionForm.serial.parity)}
+                        >
                           <SelectTrigger id="serial-parity">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="none">None</SelectItem>
-                            <SelectItem value="even">Even</SelectItem>
-                            <SelectItem value="odd">Odd</SelectItem>
+                            <SelectItem value="0">None</SelectItem>
+                            <SelectItem value="1">Odd</SelectItem>
+                            <SelectItem value="2">Even</SelectItem>
+                            <SelectItem value="3">Mark</SelectItem>
+                            <SelectItem value="4">Space</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
                       <div className="grid gap-2 sm:col-span-2">
                         <Label htmlFor="serial-flow">Flow control</Label>
-                        <Select defaultValue="none">
+                        <Select
+                          onValueChange={(value) =>
+                            setNewConnectionForm((form) => ({
+                              ...form,
+                              serial: { ...form.serial, flowControl: Number(value) },
+                            }))
+                          }
+                          value={String(newConnectionForm.serial.flowControl)}
+                        >
                           <SelectTrigger id="serial-flow" className="sm:max-w-[240px]">
                             <SelectValue />
                           </SelectTrigger>
                           <SelectContent>
-                            <SelectItem value="none">None</SelectItem>
-                            <SelectItem value="hardware">Hardware</SelectItem>
-                            <SelectItem value="software">Software</SelectItem>
+                            <SelectItem value="0">None</SelectItem>
+                            <SelectItem value="1">Software (XON/XOFF)</SelectItem>
+                            <SelectItem value="2">Hardware (RTS/CTS)</SelectItem>
+                            <SelectItem value="3">DSR/DTR</SelectItem>
                           </SelectContent>
                         </Select>
                       </div>
@@ -3001,12 +3439,14 @@ function SshTerminalSurface({
   onInput,
   onReconnect,
   onTrustHostKey,
+  isSerial = false,
 }: {
   session: Session;
   isActive: boolean;
   onInput: (sessionId: string, value: string) => void;
   onReconnect: (sessionId: string) => void;
-  onTrustHostKey: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
+  onTrustHostKey?: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
+  isSerial?: boolean;
 }) {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const resizeSignatureRef = useRef('');
@@ -3042,8 +3482,11 @@ function SshTerminalSurface({
       const signature = `${columns}x${rows}`;
       if (signature === resizeSignatureRef.current) return;
       resizeSignatureRef.current = signature;
-      void window.wormhole?.resizeSshSession(backendSessionId, columns, rows).catch(() => {
-        // A resize can race with a remote close; the closed event owns the visible session state.
+      const resizeRequest = isSerial
+        ? window.wormhole?.resizeSerialSession(backendSessionId, columns, rows)
+        : window.wormhole?.resizeSshSession(backendSessionId, columns, rows);
+      void resizeRequest?.catch(() => {
+        // A resize can race with a close; the closed event owns the visible session state.
       });
     };
     const observer = new ResizeObserver(resize);
@@ -3053,7 +3496,7 @@ function SshTerminalSurface({
       observer.disconnect();
       if (retryFrame !== undefined) cancelAnimationFrame(retryFrame);
     };
-  }, [isActive, session.backendSessionId, session.status]);
+  }, [isActive, isSerial, session.backendSessionId, session.status]);
 
   useEffect(() => {
     stickToBottomRef.current = true;
@@ -3119,22 +3562,32 @@ function SshTerminalSurface({
   if (!isConnected) {
     const isConnecting = session.status === 'connecting';
     const isFailed = session.status === 'failed';
-    const hostKeyMismatch = isFailed ? session.hostKeyMismatch : undefined;
+    const hostKeyMismatch = !isSerial && isFailed ? session.hostKeyMismatch : undefined;
     const title = isConnecting
-      ? 'Connecting to SSH'
+      ? isSerial
+        ? 'Opening serial port'
+        : 'Connecting to SSH'
       : isFailed
-        ? 'SSH connection failed'
-        : 'SSH session closed';
+        ? isSerial
+          ? 'Serial connection failed'
+          : 'SSH connection failed'
+        : isSerial
+          ? 'Serial session closed'
+          : 'SSH session closed';
     const message = hostKeyMismatch
       ? 'The server identity changed. Verify the new fingerprint before trusting it.'
       : session.error ||
         (isConnecting
-          ? 'Opening a secure shell session.'
-          : 'The remote host closed the connection.');
+          ? isSerial
+            ? 'Opening the local serial line.'
+            : 'Opening a secure shell session.'
+          : isSerial
+            ? 'The serial port closed the session.'
+            : 'The remote host closed the connection.');
 
     return (
       <div
-        aria-label="SSH connection state"
+        aria-label={isSerial ? 'Serial connection state' : 'SSH connection state'}
         className="flex min-h-0 flex-1 items-center justify-center overflow-auto bg-[#090909] px-6 py-10 text-zinc-100"
         ref={surfaceRef}
       >
@@ -3155,7 +3608,7 @@ function SshTerminalSurface({
             )}
           </div>
           <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-500">
-            Secure shell
+            {isSerial ? 'Serial terminal' : 'Secure shell'}
           </p>
           <h3 className="mt-2 text-sm font-semibold text-zinc-100">{title}</h3>
           <p className="mt-2 max-w-xl break-words text-sm leading-relaxed text-zinc-400">
@@ -3183,7 +3636,7 @@ function SshTerminalSurface({
               </div>
               <div className="mt-4 flex justify-end">
                 <Button
-                  onClick={() => onTrustHostKey(session.id, hostKeyMismatch)}
+                  onClick={() => onTrustHostKey?.(session.id, hostKeyMismatch)}
                   size="sm"
                   variant="secondary"
                 >
@@ -3195,7 +3648,7 @@ function SshTerminalSurface({
           ) : isConnecting ? (
             <div className="mt-6 flex items-center gap-2 text-[10px] text-zinc-500">
               <span className="size-1.5 animate-pulse rounded-full bg-amber-400" />
-              Negotiating secure session
+              {isSerial ? 'Opening local serial line' : 'Negotiating secure session'}
             </div>
           ) : (
             <Button
@@ -3215,7 +3668,7 @@ function SshTerminalSurface({
 
   return (
     <div
-      aria-label="Live SSH terminal"
+      aria-label={isSerial ? 'Live serial terminal' : 'Live SSH terminal'}
       className="terminal-scrollbar h-full min-h-0 min-w-0 flex-1 cursor-text overflow-x-auto overflow-y-auto overscroll-contain bg-[#090909] text-[#e5e7eb] outline-none"
       onClick={(event) => event.currentTarget.focus({ preventScroll: true })}
       onKeyDown={(event) => {
@@ -3259,6 +3712,7 @@ function SessionsPage({
   onOpenQuickConnect,
   onReconnectSession,
   onSshInput,
+  onSerialInput,
   onTrustSshHostKey,
   onRetryRdp,
 }: {
@@ -3273,6 +3727,7 @@ function SessionsPage({
   onOpenQuickConnect: () => void;
   onReconnectSession: (id: string) => void;
   onSshInput: (sessionId: string, value: string) => void;
+  onSerialInput: (sessionId: string, value: string) => void;
   onTrustSshHostKey: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
   onRetryRdp: (id: string) => void;
 }) {
@@ -3367,6 +3822,14 @@ function SessionsPage({
                 onInput={onSshInput}
                 onReconnect={onReconnectSession}
                 onTrustHostKey={onTrustSshHostKey}
+                session={session}
+              />
+            ) : session.protocol === 'serial' ? (
+              <SshTerminalSurface
+                isActive={session.id === selectedSession.id}
+                isSerial
+                onInput={onSerialInput}
+                onReconnect={onReconnectSession}
                 session={session}
               />
             ) : session.protocol === 'rdp' ? (

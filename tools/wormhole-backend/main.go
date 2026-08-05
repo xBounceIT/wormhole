@@ -52,13 +52,18 @@ type workspaceSnapshot struct {
 }
 
 type treeNode struct {
-	ID       string      `json:"id"`
-	Name     string      `json:"name"`
-	Kind     string      `json:"kind"`
-	Protocol string      `json:"protocol,omitempty"`
-	Host     string      `json:"host,omitempty"`
-	Port     int         `json:"port,omitempty"`
-	Children []*treeNode `json:"children,omitempty"`
+	ID                string      `json:"id"`
+	Name              string      `json:"name"`
+	Kind              string      `json:"kind"`
+	Protocol          string      `json:"protocol,omitempty"`
+	Host              string      `json:"host,omitempty"`
+	Port              int         `json:"port,omitempty"`
+	SerialBaudRate    *int        `json:"serialBaudRate,omitempty"`
+	SerialDataBits    *int        `json:"serialDataBits,omitempty"`
+	SerialStopBits    *int        `json:"serialStopBits,omitempty"`
+	SerialParity      *int        `json:"serialParity,omitempty"`
+	SerialFlowControl *int        `json:"serialFlowControl,omitempty"`
+	Children          []*treeNode `json:"children,omitempty"`
 }
 
 type credentialRecord struct {
@@ -105,7 +110,7 @@ type tunnelRow struct {
 }
 
 func main() {
-	operation := flag.String("operation", "workspace", "backend operation: workspace, migrate, ssh, ssh-trust-host-key, serve, rdp, or auth-*")
+	operation := flag.String("operation", "workspace", "backend operation: workspace, migrate, ssh, serial, ssh-trust-host-key, serve, rdp, or auth-*")
 	databasePath := flag.String("database", "", "path to the Wormhole SQLite database")
 	electronUserDataPath := flag.String("electron-user-data", "", "path to the Electron user-data directory")
 	credentialReader := flag.String("credential-reader", "", "path to the Windows Credential Manager reader")
@@ -120,6 +125,13 @@ func main() {
 	}
 	if *operation == "ssh" {
 		if err := serveSSH(*databasePath, os.Stdin, os.Stdout, *electronUserDataPath); err != nil {
+			writeError(err.Error())
+			os.Exit(1)
+		}
+		return
+	}
+	if *operation == "serial" {
+		if err := serveSerial(*databasePath, os.Stdin, os.Stdout, *electronUserDataPath); err != nil {
 			writeError(err.Error())
 			os.Exit(1)
 		}
@@ -669,6 +681,26 @@ ORDER BY SortOrder, Name, Id;`)
 			currentID = parentID
 		}
 		node.Protocol = protocolName(resolvedProtocol)
+	}
+
+	serialNodes, err := loadSerialNodes(database)
+	if err != nil {
+		return nil, err
+	}
+	for _, node := range all {
+		if node.Kind != "connection" || node.Protocol != "serial" {
+			continue
+		}
+		target, err := resolveSerialTargetFromNodes(serialNodes, node.ID)
+		if err != nil {
+			return nil, err
+		}
+		node.Host = target.PortName
+		node.SerialBaudRate = serialIntPointer(target.BaudRate)
+		node.SerialDataBits = serialIntPointer(target.DataBits)
+		node.SerialStopBits = serialIntPointer(target.StopBits)
+		node.SerialParity = serialIntPointer(target.Parity)
+		node.SerialFlowControl = serialIntPointer(target.FlowControl)
 	}
 
 	roots := make([]*treeNode, 0, len(all))

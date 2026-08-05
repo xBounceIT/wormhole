@@ -10,6 +10,7 @@ The executable accepts:
 wormhole-backend-x64.exe --operation workspace --database <path>
 wormhole-backend-x64.exe --operation migrate --database <path> --credential-reader <path>
 wormhole-backend-x64.exe --operation ssh --database <path> --electron-user-data <path>
+wormhole-backend-x64.exe --operation serial --database <path> --electron-user-data <path>
 wormhole-backend-x64.exe --operation ssh-trust-host-key --database <path> < request.json
 wormhole-backend-x64.exe --operation auth-status --database <path>
 wormhole-backend-x64.exe --operation auth-verify --database <path> < request.json
@@ -29,6 +30,12 @@ inherited credentials, owns the PTY and VT/ANSI emulation, and emits screen
 frames plus lifecycle events; the TypeScript renderer only handles keyboard and
 paste input and paints those frames. `ssh-trust-host-key` replaces a saved
 fingerprint only when the expected fingerprint still matches the database.
+
+`serial` keeps a local serial line alive over the same JSON-lines terminal
+contract. It resolves the inherited baud rate, data bits, stop bits, parity, and
+flow-control settings, opens the port in Go, and owns VT/ANSI emulation. Serial
+sessions are local and credential-less; they never read secrets or route through
+a VPN tunnel.
 
 The `auth-*` operations own app authentication natively. They intentionally use
 the same `%LOCALAPPDATA%\Wormhole\settings.json` fields and raw DPAPI document

@@ -28,12 +28,13 @@
     "test:tree-layout": "node --experimental-strip-types --test tests/tree-layout.test.ts",
     "test:rdp-state": "node --experimental-strip-types --test tests/rdp-state.test.ts",
     "test:rdp-client": "node --experimental-strip-types --test tests/rdp-client.test.ts",
-    "test:electron": "npm run build:electron && npm run test:auth-session && npm run test:tree-layout && npm run test:rdp-state && npm run test:rdp-client && npm run test:backend && npm run test:credential-reader",
+    "test:serial-client": "node --experimental-strip-types --test tests/serial-client.test.ts",
+    "test:electron": "npm run build:electron && npm run test:auth-session && npm run test:tree-layout && npm run test:rdp-state && npm run test:rdp-client && npm run test:serial-client && npm run test:backend && npm run test:credential-reader",
     "start": "electron .",
     "typecheck": "tsc -p tsconfig.json && tsc -p electron/tsconfig.electron.json --noEmit",
-    "lint": "oxlint src electron tests/tree-layout.test.ts tests/rdp-state.test.ts tests/rdp-client.test.ts vite.config.ts",
-    "format": "oxfmt --write src electron tests/tree-layout.test.ts tests/rdp-state.test.ts tests/rdp-client.test.ts vite.config.ts",
-    "format:check": "oxfmt --check src electron tests/tree-layout.test.ts tests/rdp-state.test.ts tests/rdp-client.test.ts vite.config.ts"
+    "lint": "oxlint src electron tests/tree-layout.test.ts tests/rdp-state.test.ts tests/rdp-client.test.ts tests/serial-client.test.ts vite.config.ts",
+    "format": "oxfmt --write src electron tests/tree-layout.test.ts tests/rdp-state.test.ts tests/rdp-client.test.ts tests/serial-client.test.ts vite.config.ts",
+    "format:check": "oxfmt --check src electron tests/tree-layout.test.ts tests/rdp-state.test.ts tests/rdp-client.test.ts tests/serial-client.test.ts vite.config.ts"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",

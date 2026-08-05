@@ -12,6 +12,76 @@ contextBridge.exposeInMainWorld('wormhole', {
   resizeSshSession: (sessionId: string, columns: number, rows: number) =>
     ipcRenderer.invoke('ssh:resize', sessionId, columns, rows),
   closeSshSession: (sessionId: string) => ipcRenderer.invoke('ssh:close', sessionId),
+  openSerialSession: (request: {
+    sessionId: string;
+    nodeId?: string;
+    portName?: string;
+    settings?: {
+      baudRate: number;
+      dataBits: number;
+      stopBits: number;
+      parity: number;
+      flowControl: number;
+    };
+    columns: number;
+    rows: number;
+  }) => ipcRenderer.invoke('serial:open', request),
+  sendSerialInput: (sessionId: string, data: string) =>
+    ipcRenderer.invoke('serial:input', sessionId, data),
+  resizeSerialSession: (sessionId: string, columns: number, rows: number) =>
+    ipcRenderer.invoke('serial:resize', sessionId, columns, rows),
+  closeSerialSession: (sessionId: string) => ipcRenderer.invoke('serial:close', sessionId),
+  onSerialEvent: (
+    listener: (event: {
+      type: 'connected' | 'screen' | 'closed' | 'error';
+      sessionId: string;
+      portName?: string;
+      baudRate?: number;
+      dataBits?: number;
+      stopBits?: number;
+      parity?: number;
+      flowControl?: number;
+      frame?: {
+        columns: number;
+        rows: number;
+        full: boolean;
+        cells?: Array<{
+          character: string;
+          foreground: number;
+          background: number;
+        }>;
+        changes?: Array<{
+          index: number;
+          character: string;
+          foreground: number;
+          background: number;
+        }>;
+        scrollbackReset?: boolean;
+        viewportReset?: boolean;
+        scrollback?: Array<{
+          runs: Array<{
+            text: string;
+            cells: number;
+            foreground: number;
+            background: number;
+          }>;
+        }>;
+        cursorX: number;
+        cursorY: number;
+        cursorVisible: boolean;
+        applicationCursor: boolean;
+        title?: string;
+        sequence: number;
+      };
+      error?: string;
+    }) => void,
+  ) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
+      listener(value as Parameters<typeof listener>[0]);
+    };
+    ipcRenderer.on('serial:event', handler);
+    return () => ipcRenderer.removeListener('serial:event', handler);
+  },
   onSshEvent: (
     listener: (event: {
       type: 'connected' | 'screen' | 'closed' | 'error';

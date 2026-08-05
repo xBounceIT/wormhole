@@ -79,6 +79,11 @@ interface WormholeWorkspaceNode {
   protocol?: WormholeProtocol;
   host?: string;
   port?: number;
+  serialBaudRate?: number;
+  serialDataBits?: number;
+  serialStopBits?: number;
+  serialParity?: number;
+  serialFlowControl?: number;
   children?: WormholeWorkspaceNode[];
 }
 
@@ -161,6 +166,21 @@ type WormholeSshEvent =
       hostKeyExpected?: string;
       hostKeyReceived?: string;
     };
+
+type WormholeSerialEvent =
+  | {
+      type: 'connected';
+      sessionId: string;
+      portName: string;
+      baudRate: number;
+      dataBits: number;
+      stopBits: number;
+      parity: number;
+      flowControl: number;
+    }
+  | { type: 'screen'; sessionId: string; frame: WormholeSshTerminalFrame }
+  | { type: 'closed'; sessionId: string }
+  | { type: 'error'; sessionId: string; error: string };
 type WormholeAuthMode = 'disabled' | 'pin' | 'password' | 'windowsHello';
 type WormholeAuthFallback = 'pin' | 'password';
 
@@ -250,6 +270,32 @@ interface Window {
     resizeSshSession(sessionId: string, columns: number, rows: number): Promise<void>;
     closeSshSession(sessionId: string): Promise<void>;
     onSshEvent(listener: (event: WormholeSshEvent) => void): () => void;
+    openSerialSession(request: {
+      sessionId: string;
+      nodeId?: string;
+      portName?: string;
+      settings?: {
+        baudRate: number;
+        dataBits: number;
+        stopBits: number;
+        parity: number;
+        flowControl: number;
+      };
+      columns: number;
+      rows: number;
+    }): Promise<{
+      sessionId: string;
+      portName: string;
+      baudRate: number;
+      dataBits: number;
+      stopBits: number;
+      parity: number;
+      flowControl: number;
+    }>;
+    sendSerialInput(sessionId: string, data: string): Promise<void>;
+    resizeSerialSession(sessionId: string, columns: number, rows: number): Promise<void>;
+    closeSerialSession(sessionId: string): Promise<void>;
+    onSerialEvent(listener: (event: WormholeSerialEvent) => void): () => void;
     getAuthState(): Promise<WormholeAuthState>;
     verifyAuth(request: WormholeAuthVerificationRequest): Promise<WormholeAuthVerification>;
     setAuthSecret(request: WormholeAuthSecretRequest): Promise<WormholeAuthState>;
