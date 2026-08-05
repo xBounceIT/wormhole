@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 type sshSftpQuickPath struct {
@@ -16,6 +17,27 @@ type localQuickPathCandidate struct {
 	DisplayName string
 	Path        string
 	ProbeExists bool
+}
+
+// localQuickPathCache keeps the shell-folder and drive probes out of normal
+// directory navigation. Some of those paths can be redirected to slow or
+// temporarily unavailable locations, so rebuilding the menu on every local
+// listing makes an otherwise quick navigation feel stalled.
+type localQuickPathCache struct {
+	once  sync.Once
+	paths []sshSftpQuickPath
+	build func() []sshSftpQuickPath
+}
+
+func (cache *localQuickPathCache) get() []sshSftpQuickPath {
+	cache.once.Do(func() {
+		build := cache.build
+		if build == nil {
+			build = buildLocalQuickPaths
+		}
+		cache.paths = build()
+	})
+	return cache.paths
 }
 
 // buildLocalQuickPaths is the backend-owned equivalent of WinUI's

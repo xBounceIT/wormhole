@@ -251,6 +251,8 @@ type sshServer struct {
 	transferMu sync.Mutex
 	transfers  map[string]*sshSftpTransfer
 	transferWG sync.WaitGroup
+
+	localQuickPaths localQuickPathCache
 }
 
 type sshSftpTransfer struct {
@@ -1479,17 +1481,21 @@ func (native *sshNativeSession) startLocalList(requestedPath, requestID string) 
 		native.writeLocalSftpError(requestID, requestedPath, err)
 		return
 	}
+	server := native.server
+	if server == nil {
+		return
+	}
 	go func() {
-		quickPaths := buildLocalQuickPaths()
+		quickPaths := server.localQuickPaths.get()
 		entries, truncated, err := readLocalDirectory(path)
 		if err != nil {
 			native.writeLocalSftpError(requestID, path, err)
 			return
 		}
-		if native.isClosed() || native.server == nil {
+		if native.isClosed() {
 			return
 		}
-		native.server.output.write(sshWireEvent{
+		server.output.write(sshWireEvent{
 			Type:       "sftp.local.ready",
 			SessionID:  native.id,
 			RequestID:  requestID,
@@ -1686,8 +1692,17 @@ func normalizeLocalPath(value string) (string, error) {
 }
 
 func readLocalDirectory(path string) ([]sshSftpEntry, bool, error) {
-	entries, err := os.ReadDir(path)
+	directory, err := os.Open(path)
 	if err != nil {
+		return nil, false, err
+	}
+	defer directory.Close()
+
+	// Read one entry past the renderer limit so very large directories are not
+	// fully enumerated and sorted by os.ReadDir before we discard the excess.
+	// File.ReadDir uses the platform's native directory iterator on every OS.
+	entries, err := directory.ReadDir(sshSftpMaxEntryCount + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, false, err
 	}
 	truncated := len(entries) > sshSftpMaxEntryCount

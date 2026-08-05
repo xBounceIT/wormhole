@@ -24,17 +24,23 @@ import {
   shouldApplySftpFailure,
   shouldApplySftpReady,
   shouldFinishSftpClose,
+  shouldRefreshSftpPane,
   nextSftpOperationRefreshRequests,
+  nextSftpTransferRefreshRequests,
   compareSftpEntries,
   pruneSftpSelection,
   removeSftpTransferRow,
   settleSftpTransferRows,
+  sftpVirtualScrollAnchor,
+  sftpVisibleEntryRange,
   sftpTransferItemKey,
+  sftpVirtualRowHeight,
   updateSftpTransferError,
   type SftpBrowserState,
   type SftpConflict,
   type SftpPaneState,
   type SftpSortColumn,
+  type SftpTransferDestination,
   type SftpTransferRow,
 } from './sftp-state';
 import {
@@ -1455,52 +1461,55 @@ function App() {
             ) {
               return session;
             }
-            if (event.transferState === 'batch-failed') {
-              const knownTransferIds = { ...(session.sftp.knownTransferIds ?? {}) };
-              delete knownTransferIds[event.transferId];
-              return {
-                ...session,
-                sftp: {
-                  ...session.sftp,
-                  knownTransferIds,
-                  ...updateSftpTransferError(session.sftp, event.transferId, event.error),
-                  conflict:
-                    session.sftp.conflict?.transferId === event.transferId
-                      ? undefined
-                      : session.sftp.conflict,
-                  transfers: settleSftpTransferRows(
-                    session.sftp.transfers ?? [],
-                    event.transferId,
-                    'failed',
-                    event.error,
-                  ),
-                },
-              } as Session;
-            }
             if (
+              event.transferState === 'batch-failed' ||
               event.transferState === 'batch-completed' ||
               event.transferState === 'batch-cancelled'
             ) {
               const knownTransferIds = { ...(session.sftp.knownTransferIds ?? {}) };
               delete knownTransferIds[event.transferId];
+              const { [event.transferId]: destination, ...transferDestinations } =
+                session.sftp.transferDestinations ?? {};
+              const currentPath =
+                destination?.pane === 'local' ? session.sftp.local?.path : session.sftp.path;
+              const refreshRequests = nextSftpTransferRefreshRequests(
+                session.sftp.refreshRequests,
+                event.transferId,
+                destination,
+                currentPath,
+              );
               return {
                 ...session,
                 sftp: {
                   ...session.sftp,
                   knownTransferIds,
-                  ...updateSftpTransferError(session.sftp, event.transferId),
+                  transferDestinations:
+                    Object.keys(transferDestinations).length > 0 ? transferDestinations : undefined,
+                  refreshRequests,
+                  ...updateSftpTransferError(
+                    session.sftp,
+                    event.transferId,
+                    event.transferState === 'batch-failed' ? event.error : undefined,
+                  ),
                   conflict:
                     session.sftp.conflict?.transferId === event.transferId
                       ? undefined
                       : session.sftp.conflict,
                   transfers:
-                    event.transferState === 'batch-cancelled'
+                    event.transferState === 'batch-failed'
                       ? settleSftpTransferRows(
                           session.sftp.transfers ?? [],
                           event.transferId,
-                          'cancelled',
+                          'failed',
+                          event.error,
                         )
-                      : session.sftp.transfers,
+                      : event.transferState === 'batch-cancelled'
+                        ? settleSftpTransferRows(
+                            session.sftp.transfers ?? [],
+                            event.transferId,
+                            'cancelled',
+                          )
+                        : session.sftp.transfers,
                 },
               } as Session;
             }
@@ -2761,6 +2770,10 @@ function App() {
     const session = sessions.find((candidate) => candidate.id === sessionId);
     if (!session?.backendSessionId || !session.sftp || session.sftp.status === 'closing') return;
     const transferId = `sftp-transfer-${++sftpPaneRequestSequence.current}`;
+    const destination: SftpTransferDestination = {
+      pane: direction === 'local-to-remote' ? 'remote' : 'local',
+      path: destinationPath,
+    };
     setSessions((current) =>
       current.map((candidate) =>
         candidate.id === sessionId && candidate.sftp
@@ -2771,6 +2784,10 @@ function App() {
                 knownTransferIds: {
                   ...(candidate.sftp.knownTransferIds ?? {}),
                   [transferId]: true,
+                },
+                transferDestinations: {
+                  ...(candidate.sftp.transferDestinations ?? {}),
+                  [transferId]: destination,
                 },
               },
             }
@@ -2784,11 +2801,15 @@ function App() {
           if (candidate.id !== sessionId || !candidate.sftp) return candidate;
           const knownTransferIds = { ...(candidate.sftp.knownTransferIds ?? {}) };
           delete knownTransferIds[transferId];
+          const { [transferId]: _, ...transferDestinations } =
+            candidate.sftp.transferDestinations ?? {};
           return {
             ...candidate,
             sftp: {
               ...candidate.sftp,
               knownTransferIds,
+              transferDestinations:
+                Object.keys(transferDestinations).length > 0 ? transferDestinations : undefined,
               transferErrorTransferId: transferId,
               transferError: 'The native SFTP bridge is unavailable.',
             },
@@ -2817,11 +2838,15 @@ function App() {
             }
             const knownTransferIds = { ...(candidate.sftp.knownTransferIds ?? {}) };
             delete knownTransferIds[transferId];
+            const { [transferId]: _, ...transferDestinations } =
+              candidate.sftp.transferDestinations ?? {};
             return {
               ...candidate,
               sftp: {
                 ...candidate.sftp,
                 knownTransferIds,
+                transferDestinations:
+                  Object.keys(transferDestinations).length > 0 ? transferDestinations : undefined,
                 transferErrorTransferId: transferId,
                 transferError: message,
               },
@@ -3025,6 +3050,7 @@ function App() {
     const requests = pending?.sftp?.refreshRequests;
     const request = requests?.local ?? requests?.remote;
     if (!pending || !request) return;
+    const shouldRefresh = shouldRefreshSftpPane(pending.sftp!, request);
 
     setSessions((current) =>
       current.map((session) =>
@@ -3043,6 +3069,7 @@ function App() {
           : session,
       ),
     );
+    if (!shouldRefresh) return;
     const refresh = sftpRefreshHandlers.current;
     if (request.pane === 'local') refresh?.local(pending.id, request.path);
     else refresh?.remote(pending.id, request.path);
@@ -5014,7 +5041,11 @@ const TerminalScrollback = memo(function TerminalScrollback({
   );
 });
 
-function TerminalTextGrid({ frame }: { frame?: WormholeSshTerminalFrame }) {
+const TerminalTextGrid = memo(function TerminalTextGrid({
+  frame,
+}: {
+  frame?: WormholeSshTerminalFrame;
+}) {
   if (!frame?.cells) return null;
   return (
     <div
@@ -5049,7 +5080,7 @@ function TerminalTextGrid({ frame }: { frame?: WormholeSshTerminalFrame }) {
       ))}
     </div>
   );
-}
+});
 
 function terminalCsiWithModifier(final: string, event: React.KeyboardEvent, appCursor: boolean) {
   const modifier = 1 + (event.shiftKey ? 1 : 0) + (event.altKey ? 2 : 0) + (event.ctrlKey ? 4 : 0);
@@ -5545,8 +5576,19 @@ function SftpFilePane({
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [dropPath, setDropPath] = useState<string>();
   const [pathDraft, setPathDraft] = useState(state.path);
+  const [listViewport, setListViewport] = useState({ height: 0, scrollTop: 0 });
   const renameCommitPath = useRef<string | undefined>(undefined);
   const selectionAnchorPath = useRef<string | undefined>(undefined);
+  const listViewportRef = useRef<HTMLDivElement>(null);
+  const listViewportStateRef = useRef(listViewport);
+
+  const syncListViewport = useCallback((height: number, scrollTop: number) => {
+    const next = { height, scrollTop: sftpVirtualScrollAnchor(scrollTop) };
+    const current = listViewportStateRef.current;
+    if (current.height === next.height && current.scrollTop === next.scrollTop) return;
+    listViewportStateRef.current = next;
+    setListViewport(next);
+  }, []);
 
   useEffect(() => {
     setSelectedPaths((current) => {
@@ -5563,6 +5605,21 @@ function SftpFilePane({
     );
     return filtered.sort((left, right) => compareSftpEntries(left, right, sortColumn, ascending));
   }, [ascending, normalizedSearch, sortColumn, state.entries]);
+  const visibleRange = sftpVisibleEntryRange(
+    visibleEntries.length,
+    listViewport.scrollTop,
+    listViewport.height,
+  );
+
+  useLayoutEffect(() => {
+    const viewport = listViewportRef.current;
+    if (!viewport) return;
+    const syncViewport = () => syncListViewport(viewport.clientHeight, viewport.scrollTop);
+    syncViewport();
+    const observer = new ResizeObserver(syncViewport);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [syncListViewport]);
 
   useEffect(() => {
     setSelectedPaths((current) =>
@@ -5570,7 +5627,17 @@ function SftpFilePane({
     );
   }, [visibleEntries]);
 
-  const selectedEntries = visibleEntries.filter((entry) => selectedPaths.has(entry.fullPath));
+  useEffect(() => {
+    const viewport = listViewportRef.current;
+    if (!viewport) return;
+    viewport.scrollTop = 0;
+    syncListViewport(viewport.clientHeight, 0);
+  }, [normalizedSearch, state.path, syncListViewport]);
+
+  const selectedEntries = useMemo(
+    () => visibleEntries.filter((entry) => selectedPaths.has(entry.fullPath)),
+    [selectedPaths, visibleEntries],
+  );
   const busy = state.status === 'opening';
   const root = isSftpPaneRoot(pane, state.path);
 
@@ -5643,9 +5710,21 @@ function SftpFilePane({
       selectionAnchorPath.current = target.fullPath;
       setSelectedPaths(new Set([target.fullPath]));
     }
-    document
-      .querySelector<HTMLElement>(`[data-sftp-pane="${pane}"][data-sftp-index="${targetIndex}"]`)
-      ?.focus();
+    const viewport = listViewportRef.current;
+    if (viewport) {
+      const rowTop = targetIndex * sftpVirtualRowHeight;
+      const rowBottom = rowTop + sftpVirtualRowHeight;
+      if (rowTop < viewport.scrollTop) viewport.scrollTop = rowTop;
+      else if (rowBottom > viewport.scrollTop + viewport.clientHeight) {
+        viewport.scrollTop = rowBottom - viewport.clientHeight;
+      }
+      syncListViewport(viewport.clientHeight, viewport.scrollTop);
+    }
+    requestAnimationFrame(() => {
+      document
+        .querySelector<HTMLElement>(`[data-sftp-pane="${pane}"][data-sftp-index="${targetIndex}"]`)
+        ?.focus();
+    });
   }
 
   function beginRename(entry: WormholeSftpEntry) {
@@ -5839,6 +5918,11 @@ function SftpFilePane({
         className="min-h-0 flex-1 overflow-auto rounded-sm border border-border"
         onDragOver={(event) => setDragState(event)}
         onDrop={(event) => handleDrop(event)}
+        onScroll={(event) => {
+          const viewport = event.currentTarget;
+          syncListViewport(viewport.clientHeight, viewport.scrollTop);
+        }}
+        ref={listViewportRef}
       >
         <div className="min-w-0">
           <div className="grid min-h-[34px] grid-cols-[1.5rem_minmax(0,1fr)_5.25rem_7.75rem] gap-x-2.5 border-b border-border bg-muted/20 px-[22px] py-2 font-mono text-[9px] uppercase tracking-[0.12em] text-muted-foreground">
@@ -5868,151 +5952,169 @@ function SftpFilePane({
             ))}
           </div>
           {visibleEntries.length > 0 ? (
-            <div className="divide-y divide-border/50">
-              {visibleEntries.map((entry) => {
-                const selected = selectedPaths.has(entry.fullPath);
-                const isEditing = editingPath === entry.fullPath;
-                return (
-                  <ContextMenu key={entry.fullPath}>
-                    <ContextMenuTrigger asChild>
-                      <div
-                        aria-selected={selected}
-                        className={`grid grid-cols-[1.5rem_minmax(0,1fr)_5.25rem_7.75rem] items-center gap-x-2.5 px-[22px] py-[3px] text-xs outline-none transition-colors ${
-                          selected ? 'bg-primary/15 text-foreground' : 'hover:bg-muted/30'
-                        } ${dropPath === entry.fullPath ? 'ring-1 ring-inset ring-primary' : ''}`}
-                        draggable={!busy && !isEditing}
-                        data-sftp-index={visibleEntries.indexOf(entry)}
-                        data-sftp-pane={pane}
-                        onClick={(event) => toggleSelection(entry, event)}
-                        onDoubleClick={() => {
-                          if (busy) return;
-                          if (entry.isDirectory) onNavigate(entry.fullPath);
-                          else if (pane === 'local') onOperation('open', entry.fullPath);
-                        }}
-                        onDragEnd={() => setDropPath(undefined)}
-                        onDragOver={(event) => {
-                          if (!entry.isDirectory) return;
-                          event.stopPropagation();
-                          setDragState(event, entry.fullPath);
-                        }}
-                        onDragStart={(event) => {
-                          const entries =
-                            selected && selectedEntries.length > 0 ? selectedEntries : [entry];
-                          const payload: SftpDragPayload = {
-                            sourcePane: pane,
-                            items: entries.map((candidate) => ({
-                              sourcePath: candidate.fullPath,
-                              name: candidate.name,
-                              isDirectory: candidate.isDirectory,
-                              size: candidate.size,
-                            })),
-                            external: false,
-                          };
-                          event.dataTransfer.effectAllowed = 'copy';
-                          event.dataTransfer.setData(sftpDragDataType, JSON.stringify(payload));
-                        }}
-                        onContextMenu={() => {
-                          if (!selected) {
-                            setSelectedPaths(new Set([entry.fullPath]));
-                            selectionAnchorPath.current = entry.fullPath;
+            <div
+              className="relative"
+              role="listbox"
+              style={{
+                contain: 'layout paint style',
+                height: visibleEntries.length * sftpVirtualRowHeight,
+              }}
+            >
+              <div
+                className="absolute inset-x-0 top-0"
+                style={{
+                  transform: `translateY(${visibleRange.start * sftpVirtualRowHeight}px)`,
+                  willChange: 'transform',
+                }}
+              >
+                {visibleEntries.slice(visibleRange.start, visibleRange.end).map((entry, offset) => {
+                  const entryIndex = visibleRange.start + offset;
+                  const selected = selectedPaths.has(entry.fullPath);
+                  const isEditing = editingPath === entry.fullPath;
+                  return (
+                    <ContextMenu key={entry.fullPath}>
+                      <ContextMenuTrigger asChild>
+                        <div
+                          aria-selected={selected}
+                          aria-posinset={entryIndex + 1}
+                          aria-setsize={visibleEntries.length}
+                          className={`grid h-7 grid-cols-[1.5rem_minmax(0,1fr)_5.25rem_7.75rem] items-center gap-x-2.5 border-b border-border/50 px-[22px] text-xs outline-none transition-colors ${
+                            selected ? 'bg-primary/15 text-foreground' : 'hover:bg-muted/30'
+                          } ${dropPath === entry.fullPath ? 'ring-1 ring-inset ring-primary' : ''}`}
+                          draggable={!busy && !isEditing}
+                          data-sftp-index={entryIndex}
+                          data-sftp-pane={pane}
+                          onClick={(event) => toggleSelection(entry, event)}
+                          onDoubleClick={() => {
+                            if (busy) return;
+                            if (entry.isDirectory) onNavigate(entry.fullPath);
+                            else if (pane === 'local') onOperation('open', entry.fullPath);
+                          }}
+                          onDragEnd={() => setDropPath(undefined)}
+                          onDragOver={(event) => {
+                            if (!entry.isDirectory) return;
+                            event.stopPropagation();
+                            setDragState(event, entry.fullPath);
+                          }}
+                          onDragStart={(event) => {
+                            const entries =
+                              selected && selectedEntries.length > 0 ? selectedEntries : [entry];
+                            const payload: SftpDragPayload = {
+                              sourcePane: pane,
+                              items: entries.map((candidate) => ({
+                                sourcePath: candidate.fullPath,
+                                name: candidate.name,
+                                isDirectory: candidate.isDirectory,
+                                size: candidate.size,
+                              })),
+                              external: false,
+                            };
+                            event.dataTransfer.effectAllowed = 'copy';
+                            event.dataTransfer.setData(sftpDragDataType, JSON.stringify(payload));
+                          }}
+                          onContextMenu={() => {
+                            if (!selected) {
+                              setSelectedPaths(new Set([entry.fullPath]));
+                              selectionAnchorPath.current = entry.fullPath;
+                            }
+                          }}
+                          onDrop={(event) =>
+                            handleDrop(event, entry.isDirectory ? entry.fullPath : state.path)
                           }
-                        }}
-                        onDrop={(event) =>
-                          handleDrop(event, entry.isDirectory ? entry.fullPath : state.path)
-                        }
-                        onKeyDown={(event) => {
-                          if (
-                            !busy &&
-                            (event.key === 'ArrowUp' ||
-                              event.key === 'ArrowDown' ||
-                              event.key === 'Home' ||
-                              event.key === 'End')
-                          ) {
-                            moveKeyboardSelection(entry, event);
-                            return;
-                          }
-                          if (
-                            !busy &&
-                            entry.isDirectory &&
-                            (event.key === 'Enter' || event.key === ' ')
-                          ) {
-                            event.preventDefault();
-                            onNavigate(entry.fullPath);
-                          }
-                        }}
-                        role="option"
-                        tabIndex={0}
-                      >
-                        <span className="flex items-center justify-center">
-                          {entry.isDirectory ? (
-                            <FolderOpen className="size-4 shrink-0 text-amber-400" />
-                          ) : (
-                            <File className="size-4 shrink-0 text-muted-foreground" />
-                          )}
-                        </span>
-                        <span className="flex min-w-0 items-center">
-                          {isEditing ? (
-                            <Input
-                              autoFocus
-                              className="h-7 min-w-0 flex-1 text-xs"
-                              onBlur={commitRename}
-                              onChange={(event) => setEditingName(event.target.value)}
-                              onFocus={(event) => event.currentTarget.select()}
-                              onKeyDown={(event) => {
-                                if (event.key === 'Enter') commitRename();
-                                if (event.key === 'Escape') {
-                                  renameCommitPath.current = editingPath;
-                                  setEditingPath(undefined);
-                                }
-                              }}
-                              value={editingName}
-                            />
-                          ) : (
-                            <span className="truncate text-foreground">{entry.name}</span>
-                          )}
-                        </span>
-                        <span className="text-right text-muted-foreground">
-                          {entry.isDirectory ? '' : formatSftpSize(entry.size)}
-                        </span>
-                        <span className="truncate text-muted-foreground">
-                          {formatSftpDate(entry.lastModifiedUtc)}
-                        </span>
-                      </div>
-                    </ContextMenuTrigger>
-                    <ContextMenuContent className="w-44">
-                      {entry.isDirectory || pane === 'local' ? (
-                        <ContextMenuItem
-                          onSelect={() =>
-                            entry.isDirectory
-                              ? onNavigate(entry.fullPath)
-                              : onOperation('open', entry.fullPath)
-                          }
+                          onKeyDown={(event) => {
+                            if (
+                              !busy &&
+                              (event.key === 'ArrowUp' ||
+                                event.key === 'ArrowDown' ||
+                                event.key === 'Home' ||
+                                event.key === 'End')
+                            ) {
+                              moveKeyboardSelection(entry, event);
+                              return;
+                            }
+                            if (
+                              !busy &&
+                              entry.isDirectory &&
+                              (event.key === 'Enter' || event.key === ' ')
+                            ) {
+                              event.preventDefault();
+                              onNavigate(entry.fullPath);
+                            }
+                          }}
+                          role="option"
+                          tabIndex={0}
                         >
-                          {entry.isDirectory ? <FolderOpen /> : <File />}
-                          Open
+                          <span className="flex items-center justify-center">
+                            {entry.isDirectory ? (
+                              <FolderOpen className="size-4 shrink-0 text-amber-400" />
+                            ) : (
+                              <File className="size-4 shrink-0 text-muted-foreground" />
+                            )}
+                          </span>
+                          <span className="flex min-w-0 items-center">
+                            {isEditing ? (
+                              <Input
+                                autoFocus
+                                className="h-7 min-w-0 flex-1 text-xs"
+                                onBlur={commitRename}
+                                onChange={(event) => setEditingName(event.target.value)}
+                                onFocus={(event) => event.currentTarget.select()}
+                                onKeyDown={(event) => {
+                                  if (event.key === 'Enter') commitRename();
+                                  if (event.key === 'Escape') {
+                                    renameCommitPath.current = editingPath;
+                                    setEditingPath(undefined);
+                                  }
+                                }}
+                                value={editingName}
+                              />
+                            ) : (
+                              <span className="truncate text-foreground">{entry.name}</span>
+                            )}
+                          </span>
+                          <span className="text-right text-muted-foreground">
+                            {entry.isDirectory ? '' : formatSftpSize(entry.size)}
+                          </span>
+                          <span className="truncate text-muted-foreground">
+                            {formatSftpDate(entry.lastModifiedUtc)}
+                          </span>
+                        </div>
+                      </ContextMenuTrigger>
+                      <ContextMenuContent className="w-44">
+                        {entry.isDirectory || pane === 'local' ? (
+                          <ContextMenuItem
+                            onSelect={() =>
+                              entry.isDirectory
+                                ? onNavigate(entry.fullPath)
+                                : onOperation('open', entry.fullPath)
+                            }
+                          >
+                            {entry.isDirectory ? <FolderOpen /> : <File />}
+                            Open
+                          </ContextMenuItem>
+                        ) : null}
+                        <ContextMenuItem onSelect={() => beginRename(entry)}>
+                          <Pencil />
+                          Rename
                         </ContextMenuItem>
-                      ) : null}
-                      <ContextMenuItem onSelect={() => beginRename(entry)}>
-                        <Pencil />
-                        Rename
-                      </ContextMenuItem>
-                      <ContextMenuSeparator />
-                      <ContextMenuItem
-                        onSelect={() => {
-                          if (!selectedPaths.has(entry.fullPath)) {
-                            setSelectedPaths(new Set([entry.fullPath]));
-                          }
-                          setConfirmDelete(true);
-                        }}
-                        variant="destructive"
-                      >
-                        <Trash2 />
-                        Delete
-                      </ContextMenuItem>
-                    </ContextMenuContent>
-                  </ContextMenu>
-                );
-              })}
+                        <ContextMenuSeparator />
+                        <ContextMenuItem
+                          onSelect={() => {
+                            if (!selectedPaths.has(entry.fullPath)) {
+                              setSelectedPaths(new Set([entry.fullPath]));
+                            }
+                            setConfirmDelete(true);
+                          }}
+                          variant="destructive"
+                        >
+                          <Trash2 />
+                          Delete
+                        </ContextMenuItem>
+                      </ContextMenuContent>
+                    </ContextMenu>
+                  );
+                })}
+              </div>
             </div>
           ) : state.entries.length > 0 && normalizedSearch ? (
             <div className="p-8 text-center text-xs text-muted-foreground">

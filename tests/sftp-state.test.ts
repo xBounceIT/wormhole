@@ -5,17 +5,21 @@ import {
   compareSftpEntries,
   isSftpTransferTerminal,
   nextSftpOperationRefreshRequests,
+  nextSftpTransferRefreshRequests,
   parentLocalSftpPath,
   parentSftpPath,
   pruneSftpSelection,
   removeSftpTransferRow,
   settleSftpTransferRows,
+  sftpVirtualScrollAnchor,
+  sftpVisibleEntryRange,
   sftpTransferItemKey,
   shouldApplySftpClosed,
   shouldApplySftpError,
   shouldApplySftpFailure,
   shouldApplySftpReady,
   shouldFinishSftpClose,
+  shouldRefreshSftpPane,
   updateSftpTransferError,
 } from '../src/sftp-state.ts';
 import { hasSftpDragPayload, sftpDragDataType } from '../src/sftp-dnd.ts';
@@ -267,6 +271,58 @@ test('successful SFTP operations retain refresh requests for both panes', () => 
   );
 });
 
+test('completed remote downloads refresh only their visible local destination', () => {
+  const pending = {
+    remote: { id: 'operation-1', pane: 'remote' as const, path: '/home/operator' },
+  };
+  assert.deepEqual(
+    nextSftpTransferRefreshRequests(
+      pending,
+      'transfer-1',
+      { pane: 'local', path: 'C:\\Users\\operator\\Downloads' },
+      'C:\\Users\\operator\\Downloads',
+    ),
+    {
+      remote: { id: 'operation-1', pane: 'remote', path: '/home/operator' },
+      local: {
+        id: 'transfer-1',
+        pane: 'local',
+        path: 'C:\\Users\\operator\\Downloads',
+      },
+    },
+  );
+});
+
+test('completed transfers do not navigate a pane away from its current folder', () => {
+  const pending = { local: { id: 'operation-1', pane: 'local' as const, path: 'C:\\Users' } };
+  assert.strictEqual(
+    nextSftpTransferRefreshRequests(
+      pending,
+      'transfer-1',
+      { pane: 'local', path: 'C:\\Users\\operator\\Downloads' },
+      'C:\\Users',
+    ),
+    pending,
+  );
+});
+
+test('stale SFTP refresh requests do not navigate a pane back to an old folder', () => {
+  assert.equal(
+    shouldRefreshSftpPane(
+      { ...readyState, local: { ...readyState, path: 'C:\\Users\\operator' } },
+      { id: 'transfer-1', pane: 'local', path: 'C:\\Users\\operator\\Downloads' },
+    ),
+    false,
+  );
+  assert.equal(
+    shouldRefreshSftpPane(
+      { ...readyState, local: { ...readyState, path: 'C:\\Users\\operator\\Downloads' } },
+      { id: 'transfer-1', pane: 'local', path: 'C:\\Users\\operator\\Downloads' },
+    ),
+    true,
+  );
+});
+
 test('visible SFTP selection is pruned when a search hides the row', () => {
   const selected = new Set(['C:\\Users\\operator\\report.txt', 'C:\\Users\\operator\\notes.txt']);
   const next = pruneSftpSelection(selected, new Set(['C:\\Users\\operator\\report.txt']));
@@ -281,6 +337,19 @@ test('unchanged SFTP selection preserves its identity', () => {
     pruneSftpSelection(selected, new Set(['C:\\Users\\operator\\report.txt'])),
     selected,
   );
+});
+
+test('SFTP virtual list renders only the viewport and a bounded overscan', () => {
+  assert.deepEqual(sftpVisibleEntryRange(4096, 0, 280), { start: 0, end: 18 });
+  assert.deepEqual(sftpVisibleEntryRange(4096, 2_000, 280), { start: 56, end: 82 });
+  assert.deepEqual(sftpVisibleEntryRange(4, 0, 280), { start: 0, end: 4 });
+});
+
+test('SFTP virtual scrolling keeps one stable render window across several rows', () => {
+  assert.equal(sftpVirtualScrollAnchor(0), 0);
+  assert.equal(sftpVirtualScrollAnchor(223), 0);
+  assert.equal(sftpVirtualScrollAnchor(224), 224);
+  assert.deepEqual(sftpVisibleEntryRange(4096, 224, 280), sftpVisibleEntryRange(4096, 447, 280));
 });
 
 test('SFTP sorting keeps directories first and name ties ascending', () => {

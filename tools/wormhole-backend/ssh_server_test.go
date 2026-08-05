@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -576,6 +577,24 @@ func TestSftpReadyEventKeepsEmptyDirectoryFieldsOnTheWire(t *testing.T) {
 	}
 }
 
+func TestReadLocalDirectoryCapsNativeEnumeration(t *testing.T) {
+	directory := t.TempDir()
+	for index := 0; index <= sshSftpMaxEntryCount; index++ {
+		path := filepath.Join(directory, fmt.Sprintf("entry-%04d", index))
+		if err := os.WriteFile(path, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	entries, truncated, err := readLocalDirectory(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated || len(entries) != sshSftpMaxEntryCount {
+		t.Fatalf("bounded local listing returned %d entries, truncated=%v", len(entries), truncated)
+	}
+}
+
 func TestSftpTransferBatchTerminalEventHasNoStaleItem(t *testing.T) {
 	var output bytes.Buffer
 	server := &sshServer{output: &sshEventWriter{encoder: json.NewEncoder(&output)}}
@@ -790,6 +809,60 @@ func TestBuildLocalQuickPathsFiltersUnreadyDrive(t *testing.T) {
 		if path.Path == driveRoot {
 			t.Fatalf("unready drive was exposed as a quick path: %#v", path)
 		}
+	}
+}
+
+func TestLocalQuickPathCacheBuildsOnlyOnce(t *testing.T) {
+	calls := 0
+	cache := localQuickPathCache{
+		build: func() []sshSftpQuickPath {
+			calls++
+			return []sshSftpQuickPath{{DisplayName: "Home", Path: t.TempDir()}}
+		},
+	}
+
+	first := cache.get()
+	second := cache.get()
+	if calls != 1 {
+		t.Fatalf("quick paths built %d times, want once", calls)
+	}
+	if len(first) != 1 || len(second) != 1 || first[0] != second[0] {
+		t.Fatalf("cached quick paths changed: first=%#v second=%#v", first, second)
+	}
+}
+
+func TestSftpLocalListingUsesQuickPathCache(t *testing.T) {
+	var callsMu sync.Mutex
+	calls := 0
+	server := &sshServer{
+		output: &sshEventWriter{encoder: json.NewEncoder(io.Discard)},
+		localQuickPaths: localQuickPathCache{
+			build: func() []sshSftpQuickPath {
+				callsMu.Lock()
+				defer callsMu.Unlock()
+				calls++
+				return nil
+			},
+		},
+	}
+	native := &sshNativeSession{id: "session", server: server}
+	native.startLocalList(t.TempDir(), "local-1")
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		callsMu.Lock()
+		observed := calls
+		callsMu.Unlock()
+		if observed > 0 {
+			if observed != 1 {
+				t.Fatalf("quick paths built %d times, want once", observed)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("local SFTP listing did not use the quick-path cache")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

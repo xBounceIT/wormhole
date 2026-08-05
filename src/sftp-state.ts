@@ -11,6 +11,29 @@ export type SftpPaneState = {
 
 export type SftpSortColumn = 'name' | 'size' | 'modified';
 
+export const sftpVirtualRowHeight = 28;
+const sftpVirtualWindowRows = 8;
+
+export function sftpVirtualScrollAnchor(scrollTop: number): number {
+  const safeScrollTop = Number.isFinite(scrollTop) ? Math.max(0, scrollTop) : 0;
+  const windowHeight = sftpVirtualRowHeight * sftpVirtualWindowRows;
+  return Math.floor(safeScrollTop / windowHeight) * windowHeight;
+}
+
+export function sftpVisibleEntryRange(
+  entryCount: number,
+  scrollTop: number,
+  viewportHeight: number,
+): { start: number; end: number } {
+  const count = Math.max(0, entryCount);
+  const firstVisible = Math.floor(sftpVirtualScrollAnchor(scrollTop) / sftpVirtualRowHeight);
+  const visibleCount = Math.max(1, Math.ceil(viewportHeight / sftpVirtualRowHeight));
+  return {
+    start: Math.max(0, firstVisible - sftpVirtualWindowRows),
+    end: Math.min(count, firstVisible + visibleCount + sftpVirtualWindowRows),
+  };
+}
+
 function compareSftpValues(left: number, right: number): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
@@ -90,6 +113,31 @@ export function nextSftpOperationRefreshRequests(
   return { ...current, [operation.pane]: operation };
 }
 
+export function nextSftpTransferRefreshRequests(
+  current: SftpRefreshRequests | undefined,
+  transferId: string,
+  destination: SftpTransferDestination | undefined,
+  activePath: string | undefined,
+): SftpRefreshRequests | undefined {
+  if (!destination || activePath !== destination.path) return current;
+  return {
+    ...current,
+    [destination.pane]: {
+      id: transferId,
+      pane: destination.pane,
+      path: activePath,
+    },
+  };
+}
+
+export function shouldRefreshSftpPane(
+  state: Pick<SftpBrowserState, 'path' | 'local'>,
+  request: SftpRefreshRequest,
+): boolean {
+  const activePath = request.pane === 'local' ? state.local?.path : state.path;
+  return activePath === request.path;
+}
+
 export type SftpTransferRow = {
   transferId: string;
   itemId: string;
@@ -112,6 +160,11 @@ export type SftpConflict = {
   existingIsDirectory: boolean;
 };
 
+export type SftpTransferDestination = {
+  pane: 'local' | 'remote';
+  path: string;
+};
+
 export type SftpBrowserState = {
   status: 'opening' | 'ready' | 'failed' | 'closing';
   path: string;
@@ -126,6 +179,7 @@ export type SftpBrowserState = {
   transferError?: string;
   transferErrorTransferId?: string;
   knownTransferIds?: Record<string, true>;
+  transferDestinations?: Record<string, SftpTransferDestination>;
   knownOperationIds?: Record<string, true>;
   refreshRequests?: SftpRefreshRequests;
 };
