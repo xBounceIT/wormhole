@@ -12,17 +12,26 @@ const electronSafeStoragePrefix = "v10"
 
 var errUnsupportedSecretEncoding = errors.New("stored secret uses an unsupported encoding")
 
-func unprotectStoredSecret(encoded, encoding string, electronUserDataPath ...string) ([]byte, error) {
+func unprotectStoredSecret(id, encoded, encoding string, electronUserDataPath ...string) ([]byte, error) {
+	var secret []byte
+	var err error
 	switch strings.TrimSpace(encoding) {
 	case protectedSecretEncoding:
-		return unprotectSecret(encoded)
+		secret, err = unprotectSecret(encoded)
 	case electronSafeStorageSecretEncoding:
 		userDataPath := ""
 		if len(electronUserDataPath) > 0 {
 			userDataPath = electronUserDataPath[0]
 		}
-		return unprotectElectronSafeStorageSecret(encoded, userDataPath)
+		secret, err = unprotectElectronSafeStorageSecret(encoded, userDataPath)
 	default:
-		return nil, errUnsupportedSecretEncoding
+		secret, err = unprotectPlatformCredentialSecret(id, encoded, encoding)
 	}
+	if err != nil {
+		return nil, err
+	}
+	if len(secret) > maxStoredCredentialBytes {
+		return nil, errors.New("stored secret is too large")
+	}
+	return secret, nil
 }

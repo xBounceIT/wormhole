@@ -1222,7 +1222,7 @@ func readStoredSecret(database *sql.DB, id string, electronUserDataPath ...strin
 		return "", false, err
 	}
 	var encoded, encoding string
-	err = database.QueryRow("SELECT Secret, Encoding FROM CredentialSecrets WHERE Id = ?;", normalizeID(id)).Scan(&encoded, &encoding)
+	err = database.QueryRow("SELECT Secret, Encoding FROM CredentialSecrets WHERE lower(Id) = ? LIMIT 1;", normalizeID(id)).Scan(&encoded, &encoding)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, nil
 	}
@@ -1232,7 +1232,7 @@ func readStoredSecret(database *sql.DB, id string, electronUserDataPath ...strin
 	if len(encoded) > maxVncEncodedSecret {
 		return "", false, errors.New("stored VNC secret is too large")
 	}
-	secretBytes, err := unprotectStoredSecret(encoded, encoding, electronUserDataPath...)
+	secretBytes, err := unprotectStoredSecret(id, encoded, encoding, electronUserDataPath...)
 	if errors.Is(err, errUnsupportedSecretEncoding) {
 		return "", false, errors.New("stored secret uses an unsupported encoding")
 	}

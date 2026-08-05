@@ -3,6 +3,23 @@ import type { RdpBackendEvent, RdpCommandRequest, RdpStartRequest } from './rdp-
 
 contextBridge.exposeInMainWorld('wormhole', {
   loadWorkspace: () => ipcRenderer.invoke('workspace:load'),
+  createCredential: (request: {
+    name: string;
+    protocol: 'ssh' | 'rdp' | 'vnc';
+    username: string;
+    domain: string;
+    password: string;
+  }) => ipcRenderer.invoke('workspace:create-credential', request),
+  updateCredential: (request: {
+    id: string;
+    name: string;
+    protocol: 'ssh' | 'rdp' | 'vnc';
+    username: string;
+    domain: string;
+    password: string;
+  }) => ipcRenderer.invoke('workspace:update-credential', request),
+  deleteCredential: (request: { id: string }) =>
+    ipcRenderer.invoke('workspace:delete-credential', request),
   updateWorkspaceNodeSshSettings: (request: { nodeId: string; sshAutoSudo: boolean | null }) =>
     ipcRenderer.invoke('workspace:update-node-ssh-settings', request),
   updateWorkspaceNodeWebSettings: (request: {

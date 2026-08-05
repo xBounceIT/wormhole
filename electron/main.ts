@@ -48,6 +48,9 @@ let serialBackend: SerialBackendClient | undefined;
 type BackendOperation =
   | 'workspace'
   | 'web-target'
+  | 'credential-create'
+  | 'credential-update'
+  | 'credential-delete'
   | 'workspace-update-node'
   | 'workspace-update-node-web-settings'
   | 'migrate'
@@ -96,9 +99,29 @@ type MigrationResponse = {
 };
 type WorkspaceResponse = {
   tree: unknown[];
-  credentials: unknown[];
+  credentials: WorkspaceCredential[];
   tunnels: unknown[];
 };
+type WorkspaceCredential = {
+  id: string;
+  name: string;
+  protocol: CredentialProtocol;
+  username: string;
+  domain?: string;
+  provider: 'Local' | 'Bitwarden';
+  canEdit: boolean;
+  canDelete: boolean;
+};
+type CredentialProtocol = 'ssh' | 'rdp' | 'vnc';
+type CredentialCreateRequest = {
+  name: string;
+  protocol: CredentialProtocol;
+  username: string;
+  domain: string;
+  password: string;
+};
+type CredentialUpdateRequest = CredentialCreateRequest & { id: string };
+type CredentialDeleteRequest = { id: string };
 type WorkspaceNodeSshSettingsRequest = {
   nodeId: string;
   sshAutoSudo: boolean | null;
@@ -376,6 +399,10 @@ const sshMaxSftpEntryNameLength = 4096;
 const sshMaxSftpErrorLength = 4096;
 const sshMaxSftpQuickPaths = 64;
 const sshMaxSftpQuickPathLabelLength = 256;
+const credentialMaxNameLength = 256;
+const credentialMaxUsernameLength = 512;
+const credentialMaxDomainLength = 512;
+const credentialMaxPasswordLength = 4096;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -481,6 +508,47 @@ function isWorkspaceNodeSshSettingsRequest(
     isSshSessionId(value.nodeId) &&
     (value.sshAutoSudo === null || typeof value.sshAutoSudo === 'boolean')
   );
+}
+
+function parseCredentialCreateRequest(value: unknown): CredentialCreateRequest {
+  if (!isRecord(value)) throw new Error('Credential details are invalid.');
+  const name = value.name;
+  const protocol = value.protocol;
+  const username = value.username;
+  const domain = value.domain;
+  const password = value.password;
+  if (
+    typeof name !== 'string' ||
+    name.length > credentialMaxNameLength ||
+    typeof username !== 'string' ||
+    username.length > credentialMaxUsernameLength ||
+    typeof domain !== 'string' ||
+    domain.length > credentialMaxDomainLength ||
+    typeof password !== 'string' ||
+    password.length === 0 ||
+    password.length > credentialMaxPasswordLength ||
+    (protocol !== 'ssh' && protocol !== 'rdp' && protocol !== 'vnc')
+  ) {
+    throw new Error('Credential details are invalid.');
+  }
+  return { name, protocol, username, domain, password };
+}
+
+function parseCredentialUpdateRequest(value: unknown): CredentialUpdateRequest {
+  const request = parseCredentialCreateRequest(value);
+  const id = isRecord(value) ? value.id : undefined;
+  if (typeof id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) {
+    throw new Error('Credential id is invalid.');
+  }
+  return { ...request, id };
+}
+
+function parseCredentialDeleteRequest(value: unknown): CredentialDeleteRequest {
+  const id = isRecord(value) ? value.id : undefined;
+  if (typeof id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) {
+    throw new Error('Credential id is invalid.');
+  }
+  return { id };
 }
 
 function isSshInput(value: unknown): value is string {
@@ -2306,8 +2374,7 @@ async function runFirstLaunchMigrations(): Promise<void> {
 function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   ipcMain.handle('workspace:load', async () => {
     return serializeAuthOperation(async () => {
-      await ensureAuthSession();
-      authSession.requireUnlocked();
+      await requireWorkspaceAuth();
       const workspace = await runBackend<WorkspaceResponse>('workspace');
       console.info(
         `[Wormhole] Workspace loaded: ${workspace.tree.length} roots, ${workspace.credentials.length} credentials, ${workspace.tunnels.length} tunnels.`,
@@ -2321,9 +2388,32 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       throw new Error('Workspace node settings are invalid.');
     }
     return serializeAuthOperation(async () => {
-      await ensureAuthSession();
-      authSession.requireUnlocked();
+      await requireWorkspaceAuth();
       return runBackend<{ updated: boolean }>('workspace-update-node', request);
+    });
+  });
+
+  ipcMain.handle('workspace:create-credential', async (_event, value: unknown) => {
+    const request = parseCredentialCreateRequest(value);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<WorkspaceCredential>('credential-create', request);
+    });
+  });
+
+  ipcMain.handle('workspace:update-credential', async (_event, value: unknown) => {
+    const request = parseCredentialUpdateRequest(value);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<WorkspaceCredential>('credential-update', request);
+    });
+  });
+
+  ipcMain.handle('workspace:delete-credential', async (_event, value: unknown) => {
+    const request = parseCredentialDeleteRequest(value);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ deleted: boolean }>('credential-delete', request);
     });
   });
 

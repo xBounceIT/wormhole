@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -78,6 +79,9 @@ INSERT INTO TunnelConfigs (Id, Name, Kind) VALUES
 	}
 	if len(workspace.Credentials) != 1 || workspace.Credentials[0].Provider != "Bitwarden" {
 		t.Fatalf("unexpected persisted credentials: %#v", workspace.Credentials)
+	}
+	if workspace.Credentials[0].CanEdit || !workspace.Credentials[0].CanDelete {
+		t.Fatalf("unexpected Bitwarden profile capabilities: %#v", workspace.Credentials[0])
 	}
 	if len(workspace.Tunnels) != 1 || workspace.Tunnels[0].Kind != "Cisco Secure Client" {
 		t.Fatalf("unexpected persisted tunnels: %#v", workspace.Tunnels)
@@ -154,6 +158,33 @@ INSERT INTO Nodes (Id, ParentId, Name, Kind, SortOrder, Protocol, Host, SshAutoS
 	}
 	if workspace.Tree[0].Children[0].SshAutoSudo != nil {
 		t.Fatalf("inherit should clear the connection override: %#v", workspace.Tree[0].Children[0])
+	}
+}
+
+func TestWorkspaceDoesNotOfferEditForUnsupportedCredentialProtocol(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCredentialWriteSchema(database); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+INSERT INTO CredentialProfiles (Id, Name, Kind, Protocol, SecretProvider, CreatedAt)
+VALUES ('33333333-3333-4333-8333-333333333333', 'Unexpected HTTP credential', 0, 3, 0, 'now');`); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	workspace, err := loadWorkspace(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workspace.Credentials) != 1 || workspace.Credentials[0].CanEdit || !workspace.Credentials[0].CanDelete {
+		t.Fatalf("unexpected unsupported-protocol capabilities: %#v", workspace.Credentials)
 	}
 }
 
@@ -383,5 +414,401 @@ func TestOpenDatabaseReadOnlyDoesNotCreateMissingFile(t *testing.T) {
 	}
 	if _, err := os.Stat(databasePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("read-only load created a database: %v", err)
+	}
+}
+
+func TestCredentialCrudStoresOnlyProtectedReferences(t *testing.T) {
+	previousStore := credentialSecretStore
+	previousDelete := credentialSecretDelete
+	deleted := make([]string, 0)
+	storeCount := 0
+	credentialSecretStore = func(id, password string) (string, string, error) {
+		if password == "" {
+			t.Fatal("the password should have been validated before storing")
+		}
+		storeCount++
+		return fmt.Sprintf("protected-reference-%s-%d", id, storeCount), "test-protected-v1", nil
+	}
+	credentialSecretDelete = func(id, encoded, encoding string) error {
+		deleted = append(deleted, id+":"+encoded+":"+encoding)
+		return nil
+	}
+	t.Cleanup(func() {
+		credentialSecretStore = previousStore
+		credentialSecretDelete = previousDelete
+	})
+
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name:     "Production SSH",
+		Protocol: "ssh",
+		Username: "operator",
+		Password: "do-not-store-me",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !validCredentialID(created.ID) || created.Protocol != "ssh" || created.Username != "operator" || created.Provider != "Local" {
+		t.Fatalf("unexpected created credential: %#v", created)
+	}
+
+	database, err := openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var storedSecret, encoding string
+	if err := database.QueryRow("SELECT Secret, Encoding FROM CredentialSecrets WHERE Id = ?;", created.ID).Scan(&storedSecret, &encoding); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+	if strings.Contains(storedSecret, "do-not-store-me") || encoding != "test-protected-v1" {
+		t.Fatalf("credential secret was not protected: secret=%q encoding=%q", storedSecret, encoding)
+	}
+
+	updated, err := updateCredential(databasePath, credentialUpdateRequest{
+		ID: created.ID,
+		credentialCreateRequest: credentialCreateRequest{
+			Name: "Production RDP", Protocol: "rdp", Username: "administrator", Domain: "CORP", Password: "new-password",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.ID != created.ID || updated.Protocol != "rdp" || updated.Domain != "CORP" {
+		t.Fatalf("credential update was not returned: %#v", updated)
+	}
+
+	workspace, err := loadWorkspace(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workspace.Credentials) != 1 || workspace.Credentials[0].Name != "Production RDP" || workspace.Credentials[0].Protocol != "rdp" {
+		t.Fatalf("workspace did not return the saved credential: %#v", workspace.Credentials)
+	}
+
+	_, err = createCredential(databasePath, credentialCreateRequest{
+		Name: "Production RDP", Protocol: "vnc", Password: "vnc-password",
+	})
+	if err == nil || err.Error() != "a credential with this name already exists" {
+		t.Fatalf("duplicate credential name should be rejected, got %v", err)
+	}
+
+	if err := deleteCredential(databasePath, credentialDeleteRequest{ID: created.ID}); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err = loadWorkspace(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workspace.Credentials) != 0 {
+		t.Fatalf("credential was not deleted: %#v", workspace.Credentials)
+	}
+	if len(deleted) != 2 || !strings.Contains(deleted[0], created.ID) || !strings.Contains(deleted[1], created.ID) {
+		t.Fatalf("protected credential cleanup was not requested: %#v", deleted)
+	}
+}
+
+func TestCredentialUpdateKeepsPreviousSecretWhenDatabaseWriteFails(t *testing.T) {
+	previousStore := credentialSecretStore
+	previousDelete := credentialSecretDelete
+	deleted := make([]string, 0)
+	storeCount := 0
+	credentialSecretStore = func(id, password string) (string, string, error) {
+		storeCount++
+		return fmt.Sprintf("reference-%d", storeCount), "test-protected-v1", nil
+	}
+	credentialSecretDelete = func(_ string, encoded, _ string) error {
+		deleted = append(deleted, encoded)
+		return nil
+	}
+	t.Cleanup(func() {
+		credentialSecretStore = previousStore
+		credentialSecretDelete = previousDelete
+	})
+
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "SSH", Protocol: "ssh", Username: "operator", Password: "old-password",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+CREATE TRIGGER reject_credential_update
+BEFORE UPDATE ON CredentialProfiles
+BEGIN
+    SELECT RAISE(FAIL, 'simulated write failure');
+END;`); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	_, err = updateCredential(databasePath, credentialUpdateRequest{
+		ID: created.ID,
+		credentialCreateRequest: credentialCreateRequest{
+			Name: "Changed", Protocol: "ssh", Username: "operator", Password: "new-password",
+		},
+	})
+	if err == nil {
+		t.Fatal("update should fail when the profile write is rejected")
+	}
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var name, storedReference string
+	if err := database.QueryRow(`
+SELECT p.Name, s.Secret
+FROM CredentialProfiles p JOIN CredentialSecrets s ON s.Id = p.Id
+WHERE p.Id = ?;`, created.ID).Scan(&name, &storedReference); err != nil {
+		t.Fatal(err)
+	}
+	if name != "SSH" || storedReference != "reference-1" {
+		t.Fatalf("failed update changed persisted state: name=%q secret=%q", name, storedReference)
+	}
+	if len(deleted) != 1 || deleted[0] != "reference-2" {
+		t.Fatalf("staged replacement was not cleaned up: %#v", deleted)
+	}
+}
+
+func TestCredentialUpdateRechecksReadOnlyStateAtWrite(t *testing.T) {
+	previousStore := credentialSecretStore
+	previousDelete := credentialSecretDelete
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	credentialSecretStore = func(id, password string) (string, string, error) {
+		if password == "initial" {
+			return "original-reference", "test-protected-v1", nil
+		}
+		database, err := openDatabase(databasePath, false)
+		if err != nil {
+			return "", "", err
+		}
+		_, updateErr := database.Exec("UPDATE CredentialProfiles SET SecretProvider = 1 WHERE lower(Id) = ?;", normalizeID(id))
+		database.Close()
+		if updateErr != nil {
+			return "", "", updateErr
+		}
+		return "staged-reference", "test-protected-v1", nil
+	}
+	deleted := make([]string, 0)
+	credentialSecretDelete = func(_ string, encoded, _ string) error {
+		deleted = append(deleted, encoded)
+		return nil
+	}
+	t.Cleanup(func() {
+		credentialSecretStore = previousStore
+		credentialSecretDelete = previousDelete
+	})
+
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "SSH", Protocol: "ssh", Username: "operator", Password: "initial",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = updateCredential(databasePath, credentialUpdateRequest{
+		ID: created.ID,
+		credentialCreateRequest: credentialCreateRequest{
+			Name: "Changed", Protocol: "ssh", Username: "operator", Password: "replacement",
+		},
+	})
+	if err == nil {
+		t.Fatal("update should not convert a concurrently changed provider into a local credential")
+	}
+	database, err := openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var name string
+	var provider int
+	if err := database.QueryRow("SELECT Name, SecretProvider FROM CredentialProfiles WHERE Id = ?;", created.ID).Scan(&name, &provider); err != nil {
+		t.Fatal(err)
+	}
+	if name != "SSH" || provider != 1 {
+		t.Fatalf("read-only state was overwritten: name=%q provider=%d", name, provider)
+	}
+	if len(deleted) != 1 || deleted[0] != "staged-reference" {
+		t.Fatalf("staged replacement was not cleaned up: %#v", deleted)
+	}
+}
+
+func TestCredentialUpdateCanonicalizesLegacySecretIDCase(t *testing.T) {
+	previousStore := credentialSecretStore
+	previousDelete := credentialSecretDelete
+	credentialSecretStore = func(_ string, _ string) (string, string, error) {
+		return "replacement-reference", "test-protected-v1", nil
+	}
+	credentialSecretDelete = func(string, string, string) error { return nil }
+	t.Cleanup(func() {
+		credentialSecretStore = previousStore
+		credentialSecretDelete = previousDelete
+	})
+
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name: "SSH", Protocol: "ssh", Username: "operator", Password: "initial",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	upperID := strings.ToUpper(created.ID)
+	if _, err := database.Exec("UPDATE CredentialSecrets SET Id = ? WHERE Id = ?;", upperID, created.ID); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	_, err = updateCredential(databasePath, credentialUpdateRequest{
+		ID: upperID,
+		credentialCreateRequest: credentialCreateRequest{
+			Name: "SSH updated", Protocol: "ssh", Username: "operator", Password: "replacement",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var count int
+	var storedID, storedReference string
+	if err := database.QueryRow(
+		"SELECT COUNT(*), MIN(Id), MIN(Secret) FROM CredentialSecrets WHERE lower(Id) = ?;",
+		created.ID,
+	).Scan(&count, &storedID, &storedReference); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || storedID != created.ID || storedReference != "replacement-reference" {
+		t.Fatalf("legacy id variants were not canonicalized: count=%d id=%q secret=%q", count, storedID, storedReference)
+	}
+}
+
+func TestCredentialDeleteSupportsLegacyKeyAndBitwardenProfiles(t *testing.T) {
+	previousDelete := credentialSecretDelete
+	credentialSecretDelete = func(string, string, string) error { return nil }
+	t.Cleanup(func() { credentialSecretDelete = previousDelete })
+
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureCredentialWriteSchema(database); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	keyID := "11111111-1111-4111-8111-111111111111"
+	bitwardenID := "22222222-2222-4222-8222-222222222222"
+	if _, err := database.Exec(`
+INSERT INTO CredentialProfiles (Id, Name, Kind, Protocol, SecretProvider, CreatedAt)
+VALUES (?, 'Imported key', 1, 0, 0, 'now'), (?, 'Vault item', 0, 0, 1, 'now');`, keyID, bitwardenID); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+	keyDirectory := filepath.Join(filepath.Dir(databasePath), "keys")
+	if err := os.MkdirAll(keyDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	keyPath := filepath.Join(keyDirectory, strings.ReplaceAll(keyID, "-", "")+".dpapi")
+	if err := os.WriteFile(keyPath, []byte("protected-key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := deleteCredential(databasePath, credentialDeleteRequest{ID: keyID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("private key file was not removed: %v", err)
+	}
+	if err := deleteCredential(databasePath, credentialDeleteRequest{ID: bitwardenID}); err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := loadWorkspace(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(workspace.Credentials) != 0 {
+		t.Fatalf("legacy profiles were not deleted: %#v", workspace.Credentials)
+	}
+}
+
+func TestCredentialValidationMatchesSupportedProtocols(t *testing.T) {
+	tests := []struct {
+		name    string
+		request credentialCreateRequest
+		valid   bool
+	}{
+		{"blank name", credentialCreateRequest{Protocol: "ssh", Username: "user", Password: "password"}, false},
+		{"SSH needs username", credentialCreateRequest{Name: "SSH", Protocol: "ssh", Password: "password"}, false},
+		{"RDP needs domain", credentialCreateRequest{Name: "RDP", Protocol: "rdp", Username: "user", Password: "password"}, false},
+		{"VNC can omit username", credentialCreateRequest{Name: "VNC", Protocol: "vnc", Password: "password"}, true},
+		{"HTTP is not a credential protocol", credentialCreateRequest{Name: "HTTP", Protocol: "http", Password: "password"}, false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := normalizeCredentialDraft(test.request)
+			if (err == nil) != test.valid {
+				t.Fatalf("valid=%v, err=%v", test.valid, err)
+			}
+		})
+	}
+}
+
+func TestWindowsCredentialCreationUsesDPAPI(t *testing.T) {
+	if !isWindowsRuntime() {
+		t.Skip("Windows DPAPI is Windows-only")
+	}
+
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	created, err := createCredential(databasePath, credentialCreateRequest{
+		Name:     "DPAPI credential",
+		Protocol: "ssh",
+		Username: "operator",
+		Password: "integration-password",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var encoding string
+	if err := database.QueryRow("SELECT Encoding FROM CredentialSecrets WHERE Id = ?;", created.ID).Scan(&encoding); err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+	if encoding != protectedSecretEncoding {
+		t.Fatalf("credential did not use DPAPI encoding: %q", encoding)
+
+	}
+
+	database, err = openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := readCredentialSecret(database, created.ID)
+	database.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(secret) != "integration-password" {
+		t.Fatal("credential could not be read back through the DPAPI provider")
 	}
 }

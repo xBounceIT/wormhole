@@ -15,6 +15,7 @@ import {
   type ReactNode,
 } from 'react';
 import wormholeIcon from '../Assets/Wormhole.png';
+import { mergeCredential } from './credential-state';
 import {
   parentLocalSftpPath,
   parentSftpPath,
@@ -434,8 +435,21 @@ type CredentialRecord = {
   username: string;
   domain?: string;
   provider: 'Local' | 'Bitwarden';
-  readOnly?: boolean;
+  canEdit: boolean;
+  canDelete: boolean;
 };
+
+type CredentialDraft = {
+  name: string;
+  protocol: 'ssh' | 'rdp' | 'vnc';
+  username: string;
+  domain: string;
+  password: string;
+};
+
+function emptyCredentialDraft(): CredentialDraft {
+  return { name: '', protocol: 'ssh', username: '', domain: '', password: '' };
+}
 
 type TunnelRecord = {
   id: string;
@@ -3755,6 +3769,28 @@ function App() {
     });
   }
 
+  async function createCredential(draft: CredentialDraft): Promise<void> {
+    if (!window.wormhole) throw new Error('The native credential bridge is unavailable.');
+    const credential = (await window.wormhole.createCredential(draft)) as CredentialRecord;
+    setCredentials((current) => mergeCredential(current, credential));
+  }
+
+  async function updateCredential(id: string, draft: CredentialDraft): Promise<void> {
+    if (!window.wormhole) throw new Error('The native credential bridge is unavailable.');
+    const credential = (await window.wormhole.updateCredential({
+      ...draft,
+      id,
+    })) as CredentialRecord;
+    setCredentials((current) => mergeCredential(current, credential));
+  }
+
+  async function deleteSavedCredential(id: string): Promise<void> {
+    if (!window.wormhole) throw new Error('The native credential bridge is unavailable.');
+    const result = await window.wormhole.deleteCredential({ id });
+    if (!result.deleted) throw new Error('The credential was not deleted.');
+    setCredentials((current) => current.filter((credential) => credential.id !== id));
+  }
+
   const currentPage = navItems.find((item) => item.id === activePage)!;
   const visibleAuthPrompt =
     authPrompt ??
@@ -4057,7 +4093,12 @@ function App() {
                   theme={theme}
                 />
               ) : activePage === 'credentials' ? (
-                <CredentialsPage initialCredentials={credentials} />
+                <CredentialsPage
+                  initialCredentials={credentials}
+                  onCreate={createCredential}
+                  onDelete={deleteSavedCredential}
+                  onUpdate={updateCredential}
+                />
               ) : activePage === 'tunnels' ? (
                 <TunnelsPage tunnels={tunnels} />
               ) : (
@@ -6788,15 +6829,31 @@ function SessionsPage({
   );
 }
 
-function CredentialsPage({ initialCredentials }: { initialCredentials: CredentialRecord[] }) {
-  const [credentials, setCredentials] = useState(initialCredentials);
+function CredentialsPage({
+  initialCredentials,
+  onCreate,
+  onUpdate,
+  onDelete,
+}: {
+  initialCredentials: CredentialRecord[];
+  onCreate: (draft: CredentialDraft) => Promise<void>;
+  onUpdate: (id: string, draft: CredentialDraft) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+}) {
   const [searchText, setSearchText] = useState('');
   const [selectedCredentials, setSelectedCredentials] = useState<string[]>([]);
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editingCredential, setEditingCredential] = useState<CredentialRecord | null>(null);
+  const [credentialForm, setCredentialForm] = useState<CredentialDraft>(emptyCredentialDraft);
+  const [pendingDeletion, setPendingDeletion] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [operationError, setOperationError] = useState('');
 
   useEffect(() => {
-    setCredentials(initialCredentials);
     setSelectedCredentials([]);
   }, [initialCredentials]);
+
+  const credentials = initialCredentials;
 
   const filteredCredentials = useMemo(() => {
     const query = searchText.trim().toLowerCase();
@@ -6812,6 +6869,14 @@ function CredentialsPage({ initialCredentials }: { initialCredentials: Credentia
   const allVisibleSelected =
     filteredCredentials.length > 0 &&
     filteredCredentials.every((credential) => selectedCredentials.includes(credential.id));
+  const deletableSelectedCredentials = selectedCredentials.filter((id) => {
+    const credential = credentials.find((candidate) => candidate.id === id);
+    return credential?.canDelete;
+  });
+
+  const deletingCredentials = pendingDeletion
+    .map((id) => credentials.find((credential) => credential.id === id))
+    .filter((credential): credential is CredentialRecord => Boolean(credential));
 
   function toggleCredential(id: string, checked: boolean) {
     setSelectedCredentials((current) =>
@@ -6819,135 +6884,394 @@ function CredentialsPage({ initialCredentials }: { initialCredentials: Credentia
     );
   }
 
-  function deleteSelectedCredentials() {
-    setCredentials((current) =>
-      current.filter((credential) => !selectedCredentials.includes(credential.id)),
-    );
+  function openNewCredential() {
+    setEditingCredential(null);
+    setCredentialForm(emptyCredentialDraft());
+    setOperationError('');
+    setEditorOpen(true);
+  }
+
+  function openEditCredential(credential: CredentialRecord) {
+    if (!credential.canEdit) return;
+    const protocol = credential.protocol as CredentialDraft['protocol'];
+    setEditingCredential(credential);
+    setCredentialForm({
+      name: credential.name,
+      protocol,
+      username: credential.username === 'No username' ? '' : credential.username,
+      domain: credential.domain ?? '',
+      // The renderer never reads saved secrets. Editing intentionally asks for a replacement.
+      password: '',
+    });
+    setOperationError('');
+    setEditorOpen(true);
+  }
+
+  function closeCredentialEditor() {
+    setEditorOpen(false);
+    setEditingCredential(null);
+    setCredentialForm(emptyCredentialDraft());
+    setOperationError('');
+  }
+
+  async function submitCredential(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy) return;
+    const draft: CredentialDraft = {
+      name: credentialForm.name.trim(),
+      protocol: credentialForm.protocol,
+      username: credentialForm.protocol === 'vnc' ? '' : credentialForm.username.trim(),
+      domain: credentialForm.protocol === 'rdp' ? credentialForm.domain.trim() : '',
+      password: credentialForm.password,
+    };
+    if (!draft.name || !draft.password) {
+      setOperationError('Enter a name and password.');
+      return;
+    }
+    if (draft.protocol !== 'vnc' && !draft.username) {
+      setOperationError('SSH and RDP credentials need a username.');
+      return;
+    }
+    if (draft.protocol === 'rdp' && !draft.domain) {
+      setOperationError('RDP credentials need a domain.');
+      return;
+    }
+    setBusy(true);
+    setOperationError('');
+    try {
+      if (editingCredential) {
+        await onUpdate(editingCredential.id, draft);
+      } else {
+        await onCreate(draft);
+      }
+      closeCredentialEditor();
+    } catch (error) {
+      setOperationError(error instanceof Error ? error.message : 'Could not save the credential.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deletePendingCredentials() {
+    if (busy || pendingDeletion.length === 0) return;
+    const ids = pendingDeletion.filter((id) => {
+      const credential = credentials.find((candidate) => candidate.id === id);
+      return credential?.canDelete;
+    });
+    if (ids.length === 0) {
+      setPendingDeletion([]);
+      return;
+    }
+    setBusy(true);
+    setOperationError('');
+    const failures: string[] = [];
+    for (const id of ids) {
+      try {
+        await onDelete(id);
+      } catch (error) {
+        const name = credentials.find((credential) => credential.id === id)?.name ?? 'Credential';
+        const message = error instanceof Error ? error.message : 'Could not delete the credential.';
+        failures.push(`${name}: ${message}`);
+      }
+    }
     setSelectedCredentials([]);
+    setPendingDeletion([]);
+    setBusy(false);
+    if (failures.length > 0) setOperationError(failures.join(' '));
   }
 
   return (
-    <section className="flex h-full min-h-0 flex-col overflow-hidden px-6 py-5">
-      <h2 className="shrink-0 text-2xl font-semibold tracking-tight">Credentials</h2>
+    <>
+      <section className="flex h-full min-h-0 flex-col overflow-hidden px-6 py-5">
+        <h2 className="shrink-0 text-2xl font-semibold tracking-tight">Credentials</h2>
 
-      <div className="mt-4 flex shrink-0 flex-wrap items-center gap-2">
-        <Input
-          aria-label="Search credentials"
-          className="h-9 min-w-60 max-w-xl flex-1"
-          onChange={(event) => setSearchText(event.target.value)}
-          placeholder="Search credentials"
-          value={searchText}
-        />
-        <Button
-          onClick={() =>
-            setSelectedCredentials(
-              allVisibleSelected ? [] : filteredCredentials.map((credential) => credential.id),
-            )
-          }
-          size="sm"
-          variant="outline"
-        >
-          <Check data-icon="inline-start" />
-          Select all
-        </Button>
-        <Button size="sm">
-          <Plus data-icon="inline-start" />
-          Add credential
-        </Button>
-      </div>
-
-      {selectedCredentials.length > 0 ? (
-        <div className="mt-3 flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2">
-          <div className="flex items-center gap-2 text-xs text-foreground/80">
-            <Check className="size-3.5" />
-            <span>{selectedCredentials.length} credential(s) selected</span>
-          </div>
-          <div className="flex gap-2">
-            <Button onClick={() => setSelectedCredentials([])} size="sm" variant="ghost">
-              Clear
-            </Button>
-            <Button onClick={deleteSelectedCredentials} size="sm" variant="destructive">
-              <X data-icon="inline-start" />
-              Delete selected
-            </Button>
-          </div>
+        <div className="mt-4 flex shrink-0 flex-wrap items-center gap-2">
+          <Input
+            aria-label="Search credentials"
+            className="h-9 min-w-60 max-w-xl flex-1"
+            onChange={(event) => setSearchText(event.target.value)}
+            placeholder="Search credentials"
+            value={searchText}
+          />
+          <Button
+            onClick={() =>
+              setSelectedCredentials(
+                allVisibleSelected ? [] : filteredCredentials.map((credential) => credential.id),
+              )
+            }
+            size="sm"
+            variant="outline"
+          >
+            <Check data-icon="inline-start" />
+            Select all
+          </Button>
+          <Button onClick={openNewCredential} size="sm">
+            <Plus data-icon="inline-start" />
+            Add credential
+          </Button>
         </div>
-      ) : null}
 
-      <div className="min-h-0 flex-1">
-        {filteredCredentials.length === 0 ? (
-          <div className="flex h-full items-center justify-center px-6 text-center">
-            <div className="max-w-[420px] space-y-3">
-              <KeyRound className="mx-auto size-12 text-muted-foreground/50" />
-              <h3 className="text-sm font-semibold">
-                {credentials.length === 0
-                  ? 'No credentials yet'
-                  : 'No credentials match your search'}
-              </h3>
-              <p className="text-xs leading-relaxed text-muted-foreground">
-                {credentials.length === 0
-                  ? 'Add a credential to reuse a username and password across SSH, RDP, and VNC connections.'
-                  : 'Try a different name, username, domain, or provider.'}
-              </p>
+        {selectedCredentials.length > 0 ? (
+          <div className="mt-3 flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2">
+            <div className="flex items-center gap-2 text-xs text-foreground/80">
+              <Check className="size-3.5" />
+              <span>{selectedCredentials.length} credential(s) selected</span>
+            </div>
+            <div className="flex gap-2">
+              <Button onClick={() => setSelectedCredentials([])} size="sm" variant="ghost">
+                Clear
+              </Button>
+              <Button
+                disabled={deletableSelectedCredentials.length === 0}
+                onClick={() => setPendingDeletion(deletableSelectedCredentials)}
+                size="sm"
+                variant="destructive"
+              >
+                <X data-icon="inline-start" />
+                Delete selected
+              </Button>
             </div>
           </div>
-        ) : (
-          <ScrollArea className="mt-4 h-full">
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-4 pb-5 pr-2">
-              {filteredCredentials.map((credential) => (
-                <Card className="min-h-44 transition-colors hover:bg-muted/50" key={credential.id}>
-                  <CardHeader>
-                    <CardTitle className="min-w-0 truncate text-sm">{credential.name}</CardTitle>
-                    <CardAction>
-                      <Badge className="shrink-0" variant="secondary">
-                        {protocolLabel(credential.protocol)}
-                      </Badge>
-                    </CardAction>
-                    <CardDescription className="flex min-w-0 items-center gap-1.5 text-xs">
-                      <KeyRound className="size-3 shrink-0" />
-                      <span className="truncate">{credential.username}</span>
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="flex-1 space-y-2">
-                    <div className="flex flex-wrap gap-2">
-                      {credential.domain ? (
-                        <Badge variant="outline">Domain · {credential.domain}</Badge>
-                      ) : null}
-                      <Badge variant="outline">{credential.provider}</Badge>
-                    </div>
-                  </CardContent>
-                  <CardFooter className="justify-between gap-2">
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Checkbox
-                          aria-label={`Select ${credential.name}`}
-                          checked={selectedCredentials.includes(credential.id)}
-                          onCheckedChange={(checked) =>
-                            toggleCredential(credential.id, checked === true)
-                          }
-                        />
-                      </TooltipTrigger>
-                      <TooltipContent side="bottom">Select credential</TooltipContent>
-                    </Tooltip>
-                    <div className="flex items-center gap-1">
-                      <IconButton disabled={credential.readOnly} label={`Edit ${credential.name}`}>
-                        <Pencil />
-                      </IconButton>
-                      <IconButton
-                        disabled={credential.readOnly}
-                        label={`Delete ${credential.name}`}
-                      >
-                        <X />
-                      </IconButton>
-                    </div>
-                  </CardFooter>
-                </Card>
-              ))}
+        ) : null}
+
+        {operationError ? <p className="mt-3 text-xs text-destructive">{operationError}</p> : null}
+
+        <div className="min-h-0 flex-1">
+          {filteredCredentials.length === 0 ? (
+            <div className="flex h-full items-center justify-center px-6 text-center">
+              <div className="max-w-[420px] space-y-3">
+                <KeyRound className="mx-auto size-12 text-muted-foreground/50" />
+                <h3 className="text-sm font-semibold">
+                  {credentials.length === 0
+                    ? 'No credentials yet'
+                    : 'No credentials match your search'}
+                </h3>
+                <p className="text-xs leading-relaxed text-muted-foreground">
+                  {credentials.length === 0
+                    ? 'Add a credential to reuse a username and password across SSH, RDP, and VNC connections.'
+                    : 'Try a different name, username, domain, or provider.'}
+                </p>
+              </div>
             </div>
-          </ScrollArea>
-        )}
-      </div>
-    </section>
+          ) : (
+            <ScrollArea className="mt-4 h-full">
+              <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-4 pb-5 pr-2">
+                {filteredCredentials.map((credential) => (
+                  <Card
+                    className="min-h-44 transition-colors hover:bg-muted/50"
+                    key={credential.id}
+                  >
+                    <CardHeader>
+                      <CardTitle className="min-w-0 truncate text-sm">{credential.name}</CardTitle>
+                      <CardAction>
+                        <Badge className="shrink-0" variant="secondary">
+                          {protocolLabel(credential.protocol)}
+                        </Badge>
+                      </CardAction>
+                      <CardDescription className="flex min-w-0 items-center gap-1.5 text-xs">
+                        <KeyRound className="size-3 shrink-0" />
+                        <span className="truncate">{credential.username}</span>
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="flex-1 space-y-2">
+                      <div className="flex flex-wrap gap-2">
+                        {credential.domain ? (
+                          <Badge variant="outline">Domain · {credential.domain}</Badge>
+                        ) : null}
+                        <Badge variant="outline">{credential.provider}</Badge>
+                      </div>
+                    </CardContent>
+                    <CardFooter className="justify-between gap-2">
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Checkbox
+                            aria-label={`Select ${credential.name}`}
+                            checked={selectedCredentials.includes(credential.id)}
+                            onCheckedChange={(checked) =>
+                              toggleCredential(credential.id, checked === true)
+                            }
+                          />
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom">Select credential</TooltipContent>
+                      </Tooltip>
+                      <div className="flex items-center gap-1">
+                        <IconButton
+                          disabled={!credential.canEdit}
+                          label={`Edit ${credential.name}`}
+                          onClick={() => openEditCredential(credential)}
+                        >
+                          <Pencil />
+                        </IconButton>
+                        <IconButton
+                          disabled={!credential.canDelete}
+                          label={`Delete ${credential.name}`}
+                          onClick={() => setPendingDeletion([credential.id])}
+                        >
+                          <X />
+                        </IconButton>
+                      </div>
+                    </CardFooter>
+                  </Card>
+                ))}
+              </div>
+            </ScrollArea>
+          )}
+        </div>
+      </section>
+
+      <Dialog
+        onOpenChange={(open) => {
+          if (!busy) {
+            if (open) setEditorOpen(true);
+            else closeCredentialEditor();
+          }
+        }}
+        open={editorOpen}
+      >
+        <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{editingCredential ? 'Edit credential' : 'Add credential'}</DialogTitle>
+            <DialogDescription>
+              {editingCredential
+                ? 'Enter a replacement password. Saved passwords are never returned to the renderer.'
+                : 'Store a reusable local password for SSH, RDP, or VNC.'}
+            </DialogDescription>
+          </DialogHeader>
+          <form className="grid gap-4" onSubmit={submitCredential}>
+            <div className="grid gap-2">
+              <Label htmlFor="credential-name">Name</Label>
+              <Input
+                autoFocus
+                id="credential-name"
+                maxLength={256}
+                onChange={(event) =>
+                  setCredentialForm((form) => ({ ...form, name: event.target.value }))
+                }
+                placeholder="Production SSH"
+                required
+                value={credentialForm.name}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="credential-protocol">Protocol</Label>
+              <Select
+                onValueChange={(value) =>
+                  setCredentialForm((form) => ({
+                    ...form,
+                    protocol: value as CredentialDraft['protocol'],
+                  }))
+                }
+                value={credentialForm.protocol}
+              >
+                <SelectTrigger id="credential-protocol">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="ssh">SSH</SelectItem>
+                  <SelectItem value="rdp">RDP</SelectItem>
+                  <SelectItem value="vnc">VNC</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {credentialForm.protocol !== 'vnc' ? (
+              <div className="grid gap-2">
+                <Label htmlFor="credential-username">Username</Label>
+                <Input
+                  autoComplete="username"
+                  id="credential-username"
+                  maxLength={512}
+                  onChange={(event) =>
+                    setCredentialForm((form) => ({ ...form, username: event.target.value }))
+                  }
+                  placeholder="user"
+                  required
+                  value={credentialForm.username}
+                />
+              </div>
+            ) : null}
+            {credentialForm.protocol === 'rdp' ? (
+              <div className="grid gap-2">
+                <Label htmlFor="credential-domain">Domain</Label>
+                <Input
+                  id="credential-domain"
+                  maxLength={512}
+                  onChange={(event) =>
+                    setCredentialForm((form) => ({ ...form, domain: event.target.value }))
+                  }
+                  placeholder="CORP"
+                  required
+                  value={credentialForm.domain}
+                />
+              </div>
+            ) : null}
+            <div className="grid gap-2">
+              <Label htmlFor="credential-password">
+                {editingCredential ? 'Replacement password' : 'Password'}
+              </Label>
+              <Input
+                autoComplete="new-password"
+                id="credential-password"
+                maxLength={4096}
+                onChange={(event) =>
+                  setCredentialForm((form) => ({ ...form, password: event.target.value }))
+                }
+                required
+                type="password"
+                value={credentialForm.password}
+              />
+            </div>
+            {operationError ? (
+              <p className="text-[11px] text-destructive">{operationError}</p>
+            ) : null}
+            <DialogFooter>
+              <Button disabled={busy} onClick={closeCredentialEditor} type="button" variant="ghost">
+                Cancel
+              </Button>
+              <Button disabled={busy} type="submit">
+                {busy ? 'Saving…' : editingCredential ? 'Save changes' : 'Add credential'}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        onOpenChange={(open) => {
+          if (!busy && !open) setPendingDeletion([]);
+        }}
+        open={pendingDeletion.length > 0}
+      >
+        <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>
+              Delete credential{deletingCredentials.length === 1 ? '' : 's'}
+            </DialogTitle>
+            <DialogDescription>
+              {deletingCredentials.length === 1
+                ? `Delete “${deletingCredentials[0].name}”? This cannot be undone.`
+                : `Delete ${deletingCredentials.length} credentials? This cannot be undone.`}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              disabled={busy}
+              onClick={() => setPendingDeletion([])}
+              type="button"
+              variant="ghost"
+            >
+              Cancel
+            </Button>
+            <Button
+              disabled={busy || deletingCredentials.length === 0}
+              onClick={deletePendingCredentials}
+              variant="destructive"
+            >
+              {busy ? 'Deleting…' : 'Delete'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }
 

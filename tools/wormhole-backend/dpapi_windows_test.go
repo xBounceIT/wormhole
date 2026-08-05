@@ -69,7 +69,7 @@ func TestUnprotectStoredSecretReadsElectronSafeStorageKey(t *testing.T) {
 	envelope = append(envelope, gcm.Seal(nil, nonce, []byte(expected), nil)...)
 	encoded := base64.StdEncoding.EncodeToString(envelope)
 
-	actual, err := unprotectStoredSecret(encoded, electronSafeStorageSecretEncoding, userDataPath)
+	actual, err := unprotectStoredSecret("credential-id", encoded, electronSafeStorageSecretEncoding, userDataPath)
 	if err != nil {
 		t.Fatal(err)
 	}

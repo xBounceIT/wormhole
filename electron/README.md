@@ -39,6 +39,16 @@ protect the verifier document. Windows Hello remains Windows-only, uses the
 Electron window as the native verification dialog owner, and always falls back
 to the configured PIN or password elsewhere.
 
+The Credentials page supports creating, editing, and deleting local password
+profiles for SSH, RDP, and VNC. The password crosses only the isolated preload
+bridge and Go writes the profile and secret reference together. Windows keeps
+the DPAPI-protected `CredentialSecrets` format; macOS uses Keychain in a
+cgo-enabled build; Linux uses the freedesktop Secret Service through
+`secret-tool`. There is deliberately no plaintext fallback when the platform
+secret service is unavailable. Existing SSH-key and persisted Bitwarden
+profiles remain visible and deletable; editing them stays disabled until their
+provider support is migrated.
+
 Saved SSH connections opened from the tree use a persistent Go backend process
 over a JSON-lines stdio channel. The backend resolves inherited connection data,
 decrypts migrated DPAPI secrets, and creates the PTY with Go's native

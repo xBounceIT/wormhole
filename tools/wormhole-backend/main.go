@@ -80,13 +80,14 @@ type workspaceNodeWebSettingsRequest struct {
 }
 
 type credentialRecord struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Protocol string `json:"protocol"`
-	Username string `json:"username"`
-	Domain   string `json:"domain,omitempty"`
-	Provider string `json:"provider"`
-	ReadOnly bool   `json:"readOnly,omitempty"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Protocol  string `json:"protocol"`
+	Username  string `json:"username"`
+	Domain    string `json:"domain,omitempty"`
+	Provider  string `json:"provider"`
+	CanEdit   bool   `json:"canEdit"`
+	CanDelete bool   `json:"canDelete"`
 }
 
 type tunnelRecord struct {
@@ -125,7 +126,7 @@ type tunnelRow struct {
 }
 
 func main() {
-	operation := flag.String("operation", "workspace", "backend operation: workspace, workspace-update-node, workspace-update-node-web-settings, web-target, migrate, ssh, serial, ssh-trust-host-key, serve, rdp, or auth-*")
+	operation := flag.String("operation", "workspace", "backend operation: workspace, credential-*, workspace-update-node, workspace-update-node-web-settings, web-target, migrate, ssh, serial, ssh-trust-host-key, serve, rdp, or auth-*")
 	databasePath := flag.String("database", "", "path to the Wormhole SQLite database")
 	electronUserDataPath := flag.String("electron-user-data", "", "path to the Electron user-data directory")
 	credentialReader := flag.String("credential-reader", "", "path to the Windows Credential Manager reader")
@@ -163,6 +164,27 @@ func main() {
 		err = decodeInput(&request)
 		if err == nil {
 			result, err = resolveWebTarget(*databasePath, request)
+		}
+	case "credential-create":
+		var request credentialCreateRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = createCredential(*databasePath, request)
+		}
+	case "credential-update":
+		var request credentialUpdateRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = updateCredential(*databasePath, request)
+		}
+	case "credential-delete":
+		var request credentialDeleteRequest
+		err = decodeInput(&request)
+		if err == nil {
+			err = deleteCredential(*databasePath, request)
+			if err == nil {
+				result = map[string]bool{"deleted": true}
+			}
 		}
 	case "workspace-update-node":
 		var request workspaceNodeSshSettingsRequest
@@ -953,7 +975,12 @@ FROM CredentialProfiles ORDER BY Name, Id;`)
 			Username: username,
 			Domain:   nullableString(row.Domain),
 			Provider: providerName(row.Provider),
-			ReadOnly: row.Kind == 1,
+			// Editing remains limited to local passwords so provider-specific or SSH-key
+			// metadata cannot be discarded. Persisted legacy profile rows can still be deleted,
+			// matching the old credentials page without exposing virtual catalog entries.
+			CanEdit: row.Kind == 0 && row.Provider == 0 &&
+				(row.Protocol == 0 || row.Protocol == 1 || row.Protocol == 6),
+			CanDelete: (row.Kind == 0 || row.Kind == 1) && (row.Provider == 0 || row.Provider == 1),
 		})
 	}
 	if err := rows.Err(); err != nil {

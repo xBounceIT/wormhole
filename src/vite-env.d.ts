@@ -97,7 +97,8 @@ interface WormholeWorkspaceCredential {
   username: string;
   domain?: string;
   provider: 'Local' | 'Bitwarden';
-  readOnly?: boolean;
+  canEdit: boolean;
+  canDelete: boolean;
 }
 
 interface WormholeWorkspaceTunnel {
@@ -378,6 +379,22 @@ interface WormholeMcpApproval {
 interface Window {
   wormhole?: {
     loadWorkspace(): Promise<WormholeWorkspaceSnapshot>;
+    createCredential(request: {
+      name: string;
+      protocol: 'ssh' | 'rdp' | 'vnc';
+      username: string;
+      domain: string;
+      password: string;
+    }): Promise<WormholeWorkspaceCredential>;
+    updateCredential(request: {
+      id: string;
+      name: string;
+      protocol: 'ssh' | 'rdp' | 'vnc';
+      username: string;
+      domain: string;
+      password: string;
+    }): Promise<WormholeWorkspaceCredential>;
+    deleteCredential(request: { id: string }): Promise<{ deleted: boolean }>;
     updateWorkspaceNodeSshSettings(request: {
       nodeId: string;
       sshAutoSudo: boolean | null;

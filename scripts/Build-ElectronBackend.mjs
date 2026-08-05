@@ -12,6 +12,9 @@ const goos = process.platform === 'win32' ? 'windows' : process.platform;
 const goarch = architecture === 'arm64' ? 'arm64' : 'amd64';
 const suffix = goos === 'windows' ? '.exe' : '';
 const binaryPath = path.join(stagingDir, `wormhole-backend-${architecture}${suffix}`);
+// The macOS credential implementation calls Keychain through Security.framework. It must be
+// built natively with the Apple SDK; the Windows and Linux backends remain pure Go.
+const cgoEnabled = goos === 'darwin' ? '1' : '0';
 
 mkdirSync(stagingDir, { recursive: true });
 rmSync(binaryPath, { force: true });
@@ -21,7 +24,7 @@ const result = spawnSync('go', ['build', '-trimpath', '-ldflags', '-s -w', '-o',
   cwd: sourceDir,
   env: {
     ...process.env,
-    CGO_ENABLED: '0',
+    CGO_ENABLED: cgoEnabled,
     GOARCH: goarch,
     GOOS: goos,
   },

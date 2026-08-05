@@ -47,6 +47,27 @@ func protectSecret(value string) (string, error) {
 	return base64.StdEncoding.EncodeToString(protected), nil
 }
 
+// Windows stores Electron-created credential values in the same DPAPI-protected SQLite format
+// used by the first-launch migration. The id is deliberately not part of the cryptographic
+// payload so existing rows remain readable by the SSH and VNC providers.
+func storeCredentialSecret(_ string, value string) (string, string, error) {
+	encoded, err := protectSecret(value)
+	if err != nil {
+		return "", "", err
+	}
+	return encoded, protectedSecretEncoding, nil
+}
+
+func unprotectPlatformCredentialSecret(string, string, string) ([]byte, error) {
+	return nil, errUnsupportedSecretEncoding
+}
+
+func deleteStoredCredentialSecret(string, string, string) error {
+	// DPAPI ciphertext is kept only in CredentialSecrets and is removed transactionally with the
+	// profile. There is no second operating-system record to clean up.
+	return nil
+}
+
 func protectAuthDocument(_ string, plaintext []byte) ([]byte, error) {
 	return protectDpapi(plaintext, appAuthenticationEntropy)
 }
