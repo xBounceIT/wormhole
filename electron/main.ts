@@ -1686,9 +1686,9 @@ class WebSurfaceManager {
     if (!record || record.owner !== owner || record.disposed) return;
     const contents = record.view.webContents;
     if (request.operation === 'back') {
-      if (contents.canGoBack()) contents.goBack();
+      if (contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack();
     } else if (request.operation === 'forward') {
-      if (contents.canGoForward()) contents.goForward();
+      if (contents.navigationHistory.canGoForward()) contents.navigationHistory.goForward();
     } else {
       contents.reload();
     }
@@ -1824,8 +1824,8 @@ class WebSurfaceManager {
         sessionId,
         attempt: record.attempt,
         url: contents.getURL().slice(0, webMaxUrlLength),
-        canGoBack: contents.canGoBack(),
-        canGoForward: contents.canGoForward(),
+        canGoBack: contents.navigationHistory.canGoBack(),
+        canGoForward: contents.navigationHistory.canGoForward(),
         error: values.error?.slice(0, 2048),
       });
     } catch {
