@@ -15,7 +15,9 @@ import (
 // writes them through the logs-info / settings-set-log-retention operations.
 const (
 	logRetentionDaysKey     = "LogRetentionDays"
+	logLevelKey             = "LogLevel"
 	defaultLogRetentionDays = 14
+	defaultLogLevel         = logLevelInfo
 	minimumLogRetentionDays = 1
 	maximumLogRetentionDays = 365
 )
@@ -24,6 +26,7 @@ type logsInfoResponse struct {
 	CurrentLogFilePath string `json:"currentLogFilePath"`
 	LogsDirectoryPath  string `json:"logsDirectoryPath"`
 	LogRetentionDays   int    `json:"logRetentionDays"`
+	LogLevel           string `json:"logLevel"`
 }
 
 func logsDirectoryPath(databasePath string) string {
@@ -42,6 +45,77 @@ func normalizeLogRetentionDays(days int) int {
 		return days
 	}
 	return defaultLogRetentionDays
+}
+
+// normalizeLogLevel maps an arbitrary value to a supported log level, defaulting to Info.
+func normalizeLogLevel(level string) string {
+	if level == logLevelDebug {
+		return logLevelDebug
+	}
+	return logLevelInfo
+}
+
+// readLogLevel reports the configured minimum log level. Absent, invalid, or unreadable
+// settings fall back to Info, matching the WinUI 3 default.
+func readLogLevel(databasePath string) (string, error) {
+	_, settingsPath := authPaths(databasePath)
+	contents, err := readAuthSettingsFile(settingsPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return defaultLogLevel, nil
+	}
+	if err != nil {
+		return defaultLogLevel, fmt.Errorf("cannot read Wormhole settings: %w", err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(contents, &document); err != nil || document == nil {
+		return defaultLogLevel, nil
+	}
+	if value, ok := document[logLevelKey]; ok {
+		var level string
+		if json.Unmarshal(value, &level) == nil {
+			return normalizeLogLevel(level), nil
+		}
+	}
+	return defaultLogLevel, nil
+}
+
+// writeLogLevel merges the level into settings.json, preserving every other key, and
+// returns the normalized value that was persisted.
+func writeLogLevel(databasePath string, level string) (string, error) {
+	normalized := normalizeLogLevel(level)
+	_, settingsPath := authPaths(databasePath)
+	document := map[string]json.RawMessage{}
+	contents, err := readAuthSettingsFile(settingsPath)
+	if err == nil {
+		_ = json.Unmarshal(contents, &document)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	if document == nil {
+		document = map[string]json.RawMessage{}
+	}
+	value, err := json.Marshal(normalized)
+	if err != nil {
+		return "", fmt.Errorf("cannot encode Wormhole settings: %w", err)
+	}
+	document[logLevelKey] = value
+
+	contents, err = json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("cannot encode Wormhole settings: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		return "", fmt.Errorf("cannot create the Wormhole data directory: %w", err)
+	}
+	temporaryPath := settingsPath + ".tmp"
+	if err := os.WriteFile(temporaryPath, append(contents, '\n'), 0o600); err != nil {
+		return "", fmt.Errorf("cannot write Wormhole settings: %w", err)
+	}
+	if err := replaceAuthFile(temporaryPath, settingsPath); err != nil {
+		_ = os.Remove(temporaryPath)
+		return "", fmt.Errorf("cannot save Wormhole settings: %w", err)
+	}
+	return normalized, nil
 }
 
 // readLogRetentionDays reports how many daily log files to keep. Absent, invalid, or
@@ -113,10 +187,15 @@ func logsInfo(databasePath string) (logsInfoResponse, error) {
 	if err != nil {
 		return logsInfoResponse{}, err
 	}
+	level, err := readLogLevel(databasePath)
+	if err != nil {
+		return logsInfoResponse{}, err
+	}
 	return logsInfoResponse{
 		CurrentLogFilePath: currentDayLogFilePath(databasePath),
 		LogsDirectoryPath:  logsDirectoryPath(databasePath),
 		LogRetentionDays:   days,
+		LogLevel:           level,
 	}, nil
 }
 

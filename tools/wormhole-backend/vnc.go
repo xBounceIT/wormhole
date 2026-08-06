@@ -41,24 +41,24 @@ const (
 )
 
 type backendCommand struct {
-	ID             string `json:"id"`
-	Action         string `json:"action"`
-	SessionID      string `json:"sessionId"`
-	NodeID         string `json:"nodeId,omitempty"`
+	ID                string `json:"id"`
+	Action            string `json:"action"`
+	SessionID         string `json:"sessionId"`
+	NodeID            string `json:"nodeId,omitempty"`
 	ProgressSessionID string `json:"progressSessionId,omitempty"`
-	CredentialID   string `json:"credentialId,omitempty"`
-	Host           string `json:"host,omitempty"`
-	Port           int    `json:"port,omitempty"`
-	Password       string `json:"password,omitempty"`
-	TunnelConfigID string `json:"tunnelConfigId,omitempty"`
-	PromptID       string `json:"promptId,omitempty"`
-	Value          string `json:"value,omitempty"`
-	Cancelled      bool   `json:"cancelled,omitempty"`
-	X              int    `json:"x,omitempty"`
-	Y              int    `json:"y,omitempty"`
-	Buttons        uint8  `json:"buttons,omitempty"`
-	Down           bool   `json:"down,omitempty"`
-	KeySym         uint32 `json:"keysym,omitempty"`
+	CredentialID      string `json:"credentialId,omitempty"`
+	Host              string `json:"host,omitempty"`
+	Port              int    `json:"port,omitempty"`
+	Password          string `json:"password,omitempty"`
+	TunnelConfigID    string `json:"tunnelConfigId,omitempty"`
+	PromptID          string `json:"promptId,omitempty"`
+	Value             string `json:"value,omitempty"`
+	Cancelled         bool   `json:"cancelled,omitempty"`
+	X                 int    `json:"x,omitempty"`
+	Y                 int    `json:"y,omitempty"`
+	Buttons           uint8  `json:"buttons,omitempty"`
+	Down              bool   `json:"down,omitempty"`
+	KeySym            uint32 `json:"keysym,omitempty"`
 }
 
 type backendResponse struct {
@@ -592,6 +592,7 @@ func newVncSession(id string, output *backendLineWriter, manager *vncManager) *v
 func (s *vncSession) connect(command backendCommand, database *sql.DB, electronUserDataPath ...string) {
 	target, err := resolveVncTarget(database, command, electronUserDataPath...)
 	if err != nil {
+		logError("VNC session failed to connect: %v", err)
 		s.fail(err)
 		return
 	}
@@ -730,6 +731,7 @@ func (s *vncSession) connect(command backendCommand, database *sql.DB, electronU
 		return
 	}
 	s.emitStatus("connected", "", false)
+	logInfo("VNC session connected: %s:%d", target.host, target.port)
 
 	listenDone := make(chan error, 1)
 	go func() {
@@ -1054,6 +1056,7 @@ func (s *vncSession) fail(err error) {
 	if !s.claimTerminal() {
 		return
 	}
+	logError("VNC session failed: %v", message)
 	s.emitStatus("failed", message, passwordRequired)
 	// Failures before the long-lived listen loop (DNS/SOCKS/RFB handshake, authentication,
 	// framebuffer setup) do not pass through its normal teardown path. Close here so a failed
@@ -1159,6 +1162,7 @@ func (s *vncSession) disconnected(message string) {
 	if !s.claimTerminal() {
 		return
 	}
+	logInfo("VNC session disconnected: %s", message)
 	s.emitStatus("disconnected", message, false)
 	s.close()
 	s.manager.remove(s)

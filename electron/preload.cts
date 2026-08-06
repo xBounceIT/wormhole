@@ -154,6 +154,7 @@ const wormholeBridge = {
   },
   readLogsInfo: () => ipcRenderer.invoke('settings:logs-info'),
   setLogRetentionDays: (days: number) => ipcRenderer.invoke('settings:set-log-retention', days),
+  setLogLevel: (level: string) => ipcRenderer.invoke('settings:set-log-level', level),
   openCurrentLogFile: () => ipcRenderer.invoke('logs:open-current-file'),
   openLogsFolder: () => ipcRenderer.invoke('logs:open-folder'),
   openSshSession: (request: { sessionId: string; nodeId: string; columns: number; rows: number }) =>

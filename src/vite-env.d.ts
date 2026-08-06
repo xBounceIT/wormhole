@@ -438,6 +438,7 @@ interface WormholeLogsInfo {
   currentLogFilePath: string;
   logsDirectoryPath: string;
   logRetentionDays: number;
+  logLevel: string;
 }
 
 interface Window {
@@ -557,6 +558,7 @@ interface Window {
     ): () => void;
     readLogsInfo(): Promise<WormholeLogsInfo>;
     setLogRetentionDays(days: number): Promise<{ updated: boolean; logRetentionDays: number }>;
+    setLogLevel(level: string): Promise<{ updated: boolean; logLevel: string }>;
     openCurrentLogFile(): Promise<{ opened: boolean }>;
     openLogsFolder(): Promise<{ opened: boolean }>;
     openSshSession(request: {

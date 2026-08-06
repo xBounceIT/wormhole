@@ -9563,6 +9563,7 @@ function SettingsPage({
   const [logsInfo, setLogsInfo] = useState<WormholeLogsInfo | null>(null);
   const [logsOpenBusy, setLogsOpenBusy] = useState(false);
   const [retentionBusy, setRetentionBusy] = useState(false);
+  const [logLevel, setLogLevelState] = useState('info');
   const [logsError, setLogsError] = useState('');
 
   useEffect(() => {
@@ -9632,6 +9633,7 @@ function SettingsPage({
         if (!active) return;
         setLogsInfo(info);
         setRetentionDays(String(info.logRetentionDays));
+        setLogLevelState(info.logLevel);
         setLogsError('');
       })
       .catch((error) => {
@@ -10088,6 +10090,27 @@ function SettingsPage({
     }
   }
 
+  async function commitLogLevel(next: string) {
+    if (retentionBusy || !window.wormhole) return;
+    const saved = logsInfo?.logLevel ?? 'info';
+    if (next !== 'info' && next !== 'debug') return;
+    if (next === saved) return;
+    setRetentionBusy(true);
+    setLogsError('');
+    try {
+      const result = await window.wormhole.setLogLevel(next);
+      setLogLevelState(result.logLevel);
+      setLogsInfo((current) =>
+        current ? { ...current, logLevel: result.logLevel } : current,
+      );
+    } catch (error) {
+      setLogLevelState(saved);
+      setLogsError(logsErrorMessage(error));
+    } finally {
+      setRetentionBusy(false);
+    }
+  }
+
   const selectedSecretMethod: WormholeAuthFallback | null =
     authMethod === 'disabled' ? null : authMethod === 'windowsHello' ? helloFallback : authMethod;
   const selectedSecretExists = selectedSecretMethod
@@ -10515,6 +10538,30 @@ function SettingsPage({
                 Open log folder
               </Button>
             </div>
+          </SettingsSection>
+
+          <SettingsSection title="Log level">
+            <div className="grid max-w-52 gap-2">
+              <Label htmlFor="settings-log-level">Detail level</Label>
+              <Select
+                disabled={retentionBusy}
+                onValueChange={(value) => void commitLogLevel(value)}
+                value={logLevel}
+              >
+                <SelectTrigger id="settings-log-level" size="sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="info">Info</SelectItem>
+                  <SelectItem value="debug">Debug</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              Info logs high-level events (boot, connections, tunnels, errors). Debug adds
+              verbose per-operation detail for diagnosing failures. Changes apply immediately.
+            </p>
+            {logsError ? <p className="text-[11px] text-destructive">{logsError}</p> : null}
           </SettingsSection>
 
           <SettingsSection title="Rotation">

@@ -41,6 +41,61 @@ func TestZeroValueLoggerIsNoop(t *testing.T) {
 	logger.close()
 }
 
+func TestAppLoggerFiltersDebugUnderInfoLevel(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	logger, err := newAppLogger(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logger.close()
+
+	// Default level is Info: DEBUG messages are dropped, INFO/WRN/ERR are kept.
+	logger.write("DBG", "debug trace")
+	logger.write("INF", "info message")
+	logger.write("WRN", "warning message")
+	logger.write("ERR", "error message")
+
+	path := currentDayLogFilePath(databasePath)
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("daily log file was not written: %v", err)
+	}
+	text := string(contents)
+	if strings.Contains(text, "debug trace") {
+		t.Fatalf("debug trace was written under Info level:\n%s", text)
+	}
+	for _, expected := range []string{"info message", "warning message", "error message"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("log under Info level misses %q:\n%s", expected, text)
+		}
+	}
+}
+
+func TestAppLoggerWritesDebugUnderDebugLevel(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	logger, err := newAppLogger(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logger.close()
+	logger.level = logLevelDebug
+
+	logger.write("DBG", "debug trace")
+	logger.write("INF", "info message")
+
+	path := currentDayLogFilePath(databasePath)
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("daily log file was not written: %v", err)
+	}
+	text := string(contents)
+	for _, expected := range []string{"debug trace", "info message"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("log under Debug level misses %q:\n%s", expected, text)
+		}
+	}
+}
+
 func TestPruneLogFilesKeepsNewestDailyFiles(t *testing.T) {
 	directory := t.TempDir()
 	var expected []string

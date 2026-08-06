@@ -89,6 +89,7 @@ type BackendOperation =
   | 'update-download'
   | 'logs-info'
   | 'settings-set-log-retention'
+  | 'settings-set-log-level'
   | 'open-log-file'
   | 'open-logs-folder';
 type VncAction =
@@ -267,6 +268,7 @@ type WormholeLogsInfo = {
   currentLogFilePath: string;
   logsDirectoryPath: string;
   logRetentionDays: number;
+  logLevel: string;
 };
 
 const authSession = new AuthSession();
@@ -3339,6 +3341,19 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         'settings-set-log-retention',
         { days },
       );
+    });
+  });
+
+  ipcMain.handle('settings:set-log-level', async (_event, value: unknown) => {
+    const level = typeof value === 'string' ? value : '';
+    if (level !== 'info' && level !== 'debug') {
+      throw new Error('Log level setting is invalid.');
+    }
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ updated: boolean; logLevel: string }>('settings-set-log-level', {
+        level,
+      });
     });
   });
 

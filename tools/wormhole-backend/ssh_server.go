@@ -480,6 +480,7 @@ func (server *sshServer) open(command sshWireCommand) {
 		if err != nil {
 			pending := server.finishPending(command.SessionID)
 			if pending && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				logError("SSH session failed to connect: %v", safeSSHError(err))
 				event := sshWireEvent{
 					Type:      "error",
 					SessionID: command.SessionID,
@@ -520,6 +521,7 @@ func (server *sshServer) open(command sshWireCommand) {
 			native.close(false)
 			return
 		}
+		logInfo("SSH session connected: %s@%s:%d", target.username, target.host, target.port)
 		native.publishTerminalFrame(native.terminal.initialFrame())
 		native.start()
 	}()
@@ -730,6 +732,7 @@ func (server *sshServer) close(sessionID string) {
 	}
 	server.cancelTransfersForSession(sessionID)
 	if native != nil {
+		logInfo("SSH session closed: %s@%s:%d", native.mcpSession.Username, native.mcpSession.Host, native.mcpSession.Port)
 		native.close(true)
 	}
 }

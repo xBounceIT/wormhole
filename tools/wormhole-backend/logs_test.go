@@ -30,6 +30,47 @@ func TestLogRetentionDaysNormalization(t *testing.T) {
 	}
 }
 
+func TestLogLevelNormalization(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"debug", logLevelDebug},
+		{"info", logLevelInfo},
+		{"", logLevelInfo},
+		{"DEBUG", logLevelInfo},
+		{"verbose", logLevelInfo},
+	}
+	for _, test := range tests {
+		if actual := normalizeLogLevel(test.input); actual != test.expected {
+			t.Fatalf("normalizeLogLevel(%q) = %q, want %q", test.input, actual, test.expected)
+		}
+	}
+}
+
+func TestLogLevelDefaultsAndPersists(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+
+	level, err := readLogLevel(databasePath)
+	if err != nil || level != defaultLogLevel {
+		t.Fatalf("absent level = %q, %v; want %q default", level, err, defaultLogLevel)
+	}
+
+	written, err := writeLogLevel(databasePath, "debug")
+	if err != nil || written != logLevelDebug {
+		t.Fatalf("writeLogLevel(debug) = %q, %v; want %q", written, err, logLevelDebug)
+	}
+	level, err = readLogLevel(databasePath)
+	if err != nil || level != logLevelDebug {
+		t.Fatalf("readLogLevel() = %q, %v; want %q", level, err, logLevelDebug)
+	}
+
+	written, err = writeLogLevel(databasePath, "not-a-level")
+	if err != nil || written != defaultLogLevel {
+		t.Fatalf("writeLogLevel(invalid) = %q, %v; want %q", written, err, defaultLogLevel)
+	}
+}
+
 func TestLogsInfoPathsMatchDailyLayout(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	info, err := logsInfo(databasePath)

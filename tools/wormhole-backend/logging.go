@@ -19,6 +19,15 @@ const (
 	logFileNameSuffix = ".log"
 )
 
+// Log levels. The default is Info: only high-level lifecycle events (boot, connection,
+// tunnel, errors) are written. Debug additionally writes the verbose per-operation
+// trace intended for diagnosing failures. The minimum level is read from settings.json
+// (see logLevelKey) at every backend process start.
+const (
+	logLevelInfo  = "info"
+	logLevelDebug = "debug"
+)
+
 // appLog is replaced by initAppLogging on every backend process start. Its zero value is a
 // safe no-op so logging failures can never fail an operation.
 var appLog = &appLogger{}
@@ -27,6 +36,7 @@ type appLogger struct {
 	mu        sync.Mutex
 	directory string
 	retention int
+	level     string
 	day       string
 	file      *os.File
 }
@@ -53,7 +63,11 @@ func newAppLogger(databasePath string) (*appLogger, error) {
 	if days, err := readLogRetentionDays(databasePath); err == nil && days >= minimumLogRetentionDays {
 		retention = days
 	}
-	logger := &appLogger{directory: directory, retention: retention}
+	level := defaultLogLevel
+	if configured, err := readLogLevel(databasePath); err == nil && configured != "" {
+		level = configured
+	}
+	logger := &appLogger{directory: directory, retention: retention, level: level}
 	if err := logger.reopen(); err != nil {
 		return nil, err
 	}
@@ -85,6 +99,9 @@ func (l *appLogger) write(level, format string, args ...any) {
 	if l.file == nil {
 		return
 	}
+	if !l.allows(level) {
+		return
+	}
 	if day := time.Now().Format("20060102"); day != l.day {
 		_ = l.reopen()
 		if l.file == nil {
@@ -103,6 +120,21 @@ func (l *appLogger) write(level, format string, args ...any) {
 	}
 }
 
+// allows reports whether a message at the given level should be written under the
+// configured minimum level. Info (the default) admits INFO and everything above
+// (WRN, ERR); Debug admits everything, including the DEBUG trace.
+func (l *appLogger) allows(level string) bool {
+	if l.level == logLevelDebug {
+		return true
+	}
+	switch level {
+	case "ERR", "WRN", "INF":
+		return true
+	default:
+		return false
+	}
+}
+
 func (l *appLogger) close() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -113,6 +145,7 @@ func (l *appLogger) close() {
 }
 
 func logInfo(format string, args ...any)  { appLog.write("INF", format, args...) }
+func logDebug(format string, args ...any) { appLog.write("DBG", format, args...) }
 func logWarn(format string, args ...any)  { appLog.write("WRN", format, args...) }
 func logError(format string, args ...any) { appLog.write("ERR", format, args...) }
 

@@ -246,6 +246,8 @@ func (server *serialServer) open(command serialWireCommand) {
 					native.close(false)
 					return
 				}
+				native.portName = target.PortName
+				logInfo("serial session connected: %s @ %d baud", target.PortName, target.BaudRate)
 				native.publishTerminalFrame(native.terminal.initialFrame())
 				native.start()
 				return
@@ -254,6 +256,7 @@ func (server *serialServer) open(command serialWireCommand) {
 
 		pending := server.finishPending(command.SessionID)
 		if pending && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			logError("serial session failed to connect: %v", publicSerialError(err))
 			server.output.write(serialWireEvent{
 				Type:      "error",
 				SessionID: command.SessionID,
@@ -318,6 +321,9 @@ func (server *serialServer) close(sessionID string) {
 		cancel()
 	}
 	if native != nil {
+		if native.portName != "" {
+			logInfo("serial session closed: %s", native.portName)
+		}
 		native.close(true)
 	}
 }
@@ -727,6 +733,7 @@ type serialNativeSession struct {
 	server   *serialServer
 	terminal *sshTerminalEmulator
 	flow     int
+	portName string
 
 	inputQueue chan []byte
 	done       chan struct{}

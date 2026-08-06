@@ -137,7 +137,7 @@ type tunnelRow struct {
 }
 
 func main() {
-	operation := flag.String("operation", "workspace", "backend operation: workspace, credential-*, tunnel-*, workspace-update-node, workspace-update-node-web-settings, workspace-update-node-tunnel, web-target, migrate, ssh, serial, ssh-trust-host-key, logs-info, settings-set-log-retention, open-log-file, open-logs-folder, serve, rdp, or auth-*")
+	operation := flag.String("operation", "workspace", "backend operation: workspace, credential-*, tunnel-*, workspace-update-node, workspace-update-node-web-settings, workspace-update-node-tunnel, web-target, migrate, ssh, serial, ssh-trust-host-key, logs-info, settings-set-log-retention, settings-set-log-level, open-log-file, open-logs-folder, serve, rdp, or auth-*")
 	databasePath := flag.String("database", "", "path to the Wormhole SQLite database")
 	electronUserDataPath := flag.String("electron-user-data", "", "path to the Electron user-data directory")
 	credentialReader := flag.String("credential-reader", "", "path to the Windows Credential Manager reader")
@@ -183,10 +183,15 @@ func main() {
 	}
 	var result any
 	var err error
-	logInfo("backend operation %s started", *operation)
+	logDebug("backend operation %s started", *operation)
 	switch *operation {
 	case "workspace":
 		result, err = loadWorkspace(*databasePath)
+		if err == nil {
+			if workspace, ok := result.(workspaceSnapshot); ok {
+				logInfo("workspace loaded: %d roots, %d credentials, %d tunnels", len(workspace.Tree), len(workspace.Credentials), len(workspace.Tunnels))
+			}
+		}
 	case "web-target":
 		var request webTargetRequest
 		err = decodeInput(&request)
@@ -294,6 +299,11 @@ func main() {
 		}
 	case "migrate":
 		result, err = migrateCredentials(*databasePath, *credentialReader)
+		if err == nil {
+			if migration, ok := result.(migrationResult); ok {
+				logInfo("credential migration completed: %d migrated, %d missing", migration.Migrated, migration.Missing)
+			}
+		}
 	case "auth-status":
 		result, err = authState(*databasePath)
 	case "auth-verify":
@@ -390,6 +400,18 @@ func main() {
 				result = map[string]any{"updated": true, "logRetentionDays": days}
 			}
 		}
+	case "settings-set-log-level":
+		var request struct {
+			Level string `json:"level"`
+		}
+		err = decodeInput(&request)
+		if err == nil {
+			var level string
+			level, err = writeLogLevel(*databasePath, request.Level)
+			if err == nil {
+				result = map[string]any{"updated": true, "logLevel": level}
+			}
+		}
 	case "open-log-file":
 		err = openCurrentDayLogFile(*databasePath)
 		if err == nil {
@@ -440,7 +462,7 @@ func main() {
 		os.Exit(1)
 		return
 	}
-	logInfo("backend operation %s completed", *operation)
+	logDebug("backend operation %s completed", *operation)
 
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
 		logError("failed to encode backend response: %v", err)
