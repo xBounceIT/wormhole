@@ -1,6 +1,21 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { RdpBackendEvent, RdpCommandRequest, RdpStartRequest } from './rdp-contract.js';
 
+type WormholeUpdateCheckResult = {
+  currentVersion: string;
+  latestVersion: string;
+  isUpdateAvailable: boolean;
+  checkFailed: boolean;
+  releaseTag?: string;
+  releaseName?: string;
+  releaseUrl?: string;
+  releaseNotes?: string;
+  installerUrl?: string;
+  installerFileName?: string;
+  installerSize?: number | null;
+  installerSha256?: string;
+};
+
 const wormholeBridge = {
   loadWorkspace: () => ipcRenderer.invoke('workspace:load'),
   createCredential: (request: {
@@ -93,9 +108,50 @@ const wormholeBridge = {
     promptId: string;
     choice: 'tunnel' | 'direct' | 'cancel';
   }) => ipcRenderer.invoke('tunnel:route-response', request),
-  readAppSettings: () => ipcRenderer.invoke('settings:read'),
+  readAppSettings: () =>
+    ipcRenderer.invoke('settings:read') as Promise<{
+      promptBeforeTunnelConnect: boolean;
+      autoCheckForUpdates: boolean;
+      lastUpdateCheck: string | null;
+      skippedUpdateVersion: string | null;
+    }>,
   setPromptBeforeTunnelConnect: (enabled: boolean) =>
     ipcRenderer.invoke('settings:set-prompt-before-tunnel', enabled),
+  setUpdatePreferences: (preferences: {
+    autoCheckForUpdates?: boolean;
+    skippedUpdateVersion?: string | null;
+  }) => ipcRenderer.invoke('settings:set-update-preferences', preferences),
+  updateStatus: () =>
+    ipcRenderer.invoke('update:status') as Promise<{
+      currentVersion: string;
+      result: WormholeUpdateCheckResult | null;
+    }>,
+  checkForUpdates: () => ipcRenderer.invoke('update:check') as Promise<WormholeUpdateCheckResult>,
+  downloadUpdate: (request: {
+    installerUrl: string;
+    installerFileName: string;
+    installerSha256?: string;
+    installerSize?: number | null;
+  }) => ipcRenderer.invoke('update:download', request) as Promise<string>,
+  installUpdate: (installerPath: string) =>
+    ipcRenderer.invoke('update:install', { path: installerPath }) as Promise<{
+      launched: boolean;
+    }>,
+  openExternal: (url: string) => ipcRenderer.invoke('update:open-release', url) as Promise<void>,
+  onUpdateResult: (listener: (result: WormholeUpdateCheckResult) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
+      listener(value as WormholeUpdateCheckResult);
+    };
+    ipcRenderer.on('update:result', handler);
+    return () => ipcRenderer.removeListener('update:result', handler);
+  },
+  onUpdateProgress: (listener: (progress: { downloaded: number; total: number }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, value: unknown) => {
+      listener(value as { downloaded: number; total: number });
+    };
+    ipcRenderer.on('update:progress', handler);
+    return () => ipcRenderer.removeListener('update:progress', handler);
+  },
   openSshSession: (request: { sessionId: string; nodeId: string; columns: number; rows: number }) =>
     ipcRenderer.invoke('ssh:open', request),
   trustSshHostKey: (request: { nodeId: string; expected: string; received: string }) =>

@@ -13,51 +13,102 @@ import (
 // settings-read / settings-set-prompt-before-tunnel operations.
 const promptBeforeTunnelConnectKey = "PromptBeforeTunnelConnect"
 
+// Update preferences share the same settings.json document and use the same JSON keys as the
+// WinUI 3 AppSettings model (AutoCheckForUpdates, LastUpdateCheck, SkippedUpdateVersion).
+const (
+	autoCheckForUpdatesKey  = "AutoCheckForUpdates"
+	lastUpdateCheckKey      = "LastUpdateCheck"
+	skippedUpdateVersionKey = "SkippedUpdateVersion"
+)
+
 // readPromptBeforeTunnelConnect reports whether connecting to a saved connection should first
 // ask whether to use its configured VPN tunnel. Absent, invalid, or unreadable settings fall
 // back to true, matching the WinUI 3 default.
 func readPromptBeforeTunnelConnect(databasePath string) (bool, error) {
-	_, settingsPath := authPaths(databasePath)
-	contents, err := readAuthSettingsFile(settingsPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return true, nil
-	}
-	if err != nil {
-		return true, fmt.Errorf("cannot read Wormhole settings: %w", err)
-	}
-	var document map[string]json.RawMessage
-	if err := json.Unmarshal(contents, &document); err != nil || document == nil {
-		return true, nil
-	}
-	if value, ok := document[promptBeforeTunnelConnectKey]; ok {
-		var enabled bool
-		if json.Unmarshal(value, &enabled) == nil {
-			return enabled, nil
-		}
-	}
-	return true, nil
+	promptBeforeTunnel, _, _, _, err := readAppSettings(databasePath)
+	return promptBeforeTunnel, err
 }
 
 // writePromptBeforeTunnelConnect merges the setting into settings.json, preserving every other
 // key (including the app-authentication settings) that already lives in the document.
 func writePromptBeforeTunnelConnect(databasePath string, enabled bool) error {
+	return writeSettingsValues(databasePath, map[string]any{promptBeforeTunnelConnectKey: enabled})
+}
+
+// readAppSettings reads the shared settings.json document. Absent, invalid, or unreadable
+// settings fall back to the WinUI 3 defaults: prompt-before-tunnel on, auto-check on, no last
+// check marker, no skipped version.
+func readAppSettings(databasePath string) (
+	promptBeforeTunnel bool,
+	autoCheckForUpdates bool,
+	lastUpdateCheck *string,
+	skippedUpdateVersion *string,
+	err error,
+) {
+	promptBeforeTunnel = true
+	autoCheckForUpdates = true
+	_, settingsPath := authPaths(databasePath)
+	contents, err := readAuthSettingsFile(settingsPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return promptBeforeTunnel, autoCheckForUpdates, nil, nil, nil
+	}
+	if err != nil {
+		return promptBeforeTunnel, autoCheckForUpdates, nil, nil,
+			fmt.Errorf("cannot read Wormhole settings: %w", err)
+	}
+	var document map[string]json.RawMessage
+	if json.Unmarshal(contents, &document) != nil || document == nil {
+		return promptBeforeTunnel, autoCheckForUpdates, nil, nil, nil
+	}
+	if value, ok := document[promptBeforeTunnelConnectKey]; ok {
+		var enabled bool
+		if json.Unmarshal(value, &enabled) == nil {
+			promptBeforeTunnel = enabled
+		}
+	}
+	if value, ok := document[autoCheckForUpdatesKey]; ok {
+		var enabled bool
+		if json.Unmarshal(value, &enabled) == nil {
+			autoCheckForUpdates = enabled
+		}
+	}
+	if value, ok := document[lastUpdateCheckKey]; ok && string(value) != "null" {
+		var stamp string
+		if json.Unmarshal(value, &stamp) == nil && stamp != "" {
+			lastUpdateCheck = &stamp
+		}
+	}
+	if value, ok := document[skippedUpdateVersionKey]; ok && string(value) != "null" {
+		var skipped string
+		if json.Unmarshal(value, &skipped) == nil && skipped != "" {
+			skippedUpdateVersion = &skipped
+		}
+	}
+	return promptBeforeTunnel, autoCheckForUpdates, lastUpdateCheck, skippedUpdateVersion, nil
+}
+
+// writeSettingsValues merges the given keys into settings.json, preserving every other key
+// (including the app-authentication settings) that already lives in the document. A nil value
+// writes JSON null, which clears the key on the next read.
+func writeSettingsValues(databasePath string, values map[string]any) error {
 	_, settingsPath := authPaths(databasePath)
 	document := map[string]json.RawMessage{}
 	contents, err := readAuthSettingsFile(settingsPath)
 	if err == nil {
 		_ = json.Unmarshal(contents, &document)
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+		return fmt.Errorf("cannot read Wormhole settings: %w", err)
 	}
 	if document == nil {
 		document = map[string]json.RawMessage{}
 	}
-	value, err := json.Marshal(enabled)
-	if err != nil {
-		return fmt.Errorf("cannot encode Wormhole settings: %w", err)
+	for key, value := range values {
+		encoded, encodeErr := json.Marshal(value)
+		if encodeErr != nil {
+			return fmt.Errorf("cannot encode Wormhole settings: %w", encodeErr)
+		}
+		document[key] = encoded
 	}
-	document[promptBeforeTunnelConnectKey] = value
-
 	contents, err = json.MarshalIndent(document, "", "  ")
 	if err != nil {
 		return fmt.Errorf("cannot encode Wormhole settings: %w", err)

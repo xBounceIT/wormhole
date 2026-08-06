@@ -164,6 +164,15 @@ func main() {
 		}
 		return
 	}
+	if *operation == "update-download" {
+		// The download streams JSON progress lines to stdout and can run for minutes, so it
+		// deliberately bypasses the one-shot result envelope of the other operations.
+		if err := serveUpdateDownload(*databasePath, os.Stdin, os.Stdout); err != nil {
+			writeError(err.Error())
+			os.Exit(1)
+		}
+		return
+	}
 	var result any
 	var err error
 	switch *operation {
@@ -297,10 +306,17 @@ func main() {
 			result, err = authUpdateSettings(*databasePath, request)
 		}
 	case "settings-read":
-		var enabled bool
-		enabled, err = readPromptBeforeTunnelConnect(*databasePath)
+		var promptBeforeTunnel, autoCheckForUpdates bool
+		var lastUpdateCheck, skippedUpdateVersion *string
+		promptBeforeTunnel, autoCheckForUpdates, lastUpdateCheck, skippedUpdateVersion, err =
+			readAppSettings(*databasePath)
 		if err == nil {
-			result = map[string]bool{"promptBeforeTunnelConnect": enabled}
+			result = map[string]any{
+				"promptBeforeTunnelConnect": promptBeforeTunnel,
+				"autoCheckForUpdates":       autoCheckForUpdates,
+				"lastUpdateCheck":           lastUpdateCheck,
+				"skippedUpdateVersion":      skippedUpdateVersion,
+			}
 		}
 	case "settings-set-prompt-before-tunnel":
 		var request struct {
@@ -312,6 +328,44 @@ func main() {
 			if err == nil {
 				result = map[string]bool{"updated": true}
 			}
+		}
+	case "settings-set-update-preferences":
+		var request struct {
+			AutoCheckForUpdates  *bool           `json:"autoCheckForUpdates"`
+			SkippedUpdateVersion json.RawMessage `json:"skippedUpdateVersion"`
+		}
+		err = decodeInput(&request)
+		if err == nil {
+			values := map[string]any{}
+			if request.AutoCheckForUpdates != nil {
+				values[autoCheckForUpdatesKey] = *request.AutoCheckForUpdates
+			}
+			if len(request.SkippedUpdateVersion) > 0 {
+				var skipped *string
+				if string(request.SkippedUpdateVersion) != "null" {
+					var value string
+					if json.Unmarshal(request.SkippedUpdateVersion, &value) != nil {
+						err = errors.New("update preferences are invalid")
+					} else {
+						skipped = &value
+					}
+				}
+				if err == nil {
+					values[skippedUpdateVersionKey] = skipped
+				}
+			}
+			if err == nil {
+				err = writeSettingsValues(*databasePath, values)
+			}
+			if err == nil {
+				result = map[string]bool{"updated": true}
+			}
+		}
+	case "update-check":
+		var request updateCheckRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = checkForUpdate(*databasePath, request)
 		}
 	case "auth-hello-status":
 		result = checkWindowsHello()

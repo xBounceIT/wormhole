@@ -412,6 +412,28 @@ interface WormholeMcpApproval {
   tool: string;
 }
 
+interface WormholeUpdateCheckResult {
+  currentVersion: string;
+  latestVersion: string;
+  isUpdateAvailable: boolean;
+  checkFailed: boolean;
+  releaseTag?: string;
+  releaseName?: string;
+  releaseUrl?: string;
+  releaseNotes?: string;
+  installerUrl?: string;
+  installerFileName?: string;
+  installerSize?: number | null;
+  installerSha256?: string;
+}
+
+interface WormholeAppSettings {
+  promptBeforeTunnelConnect: boolean;
+  autoCheckForUpdates: boolean;
+  lastUpdateCheck: string | null;
+  skippedUpdateVersion: string | null;
+}
+
 interface Window {
   wormhole?: {
     loadWorkspace(): Promise<WormholeWorkspaceSnapshot>;
@@ -507,8 +529,26 @@ interface Window {
       promptId: string;
       choice: 'tunnel' | 'direct' | 'cancel';
     }): Promise<void>;
-    readAppSettings(): Promise<{ promptBeforeTunnelConnect: boolean }>;
+    readAppSettings(): Promise<WormholeAppSettings>;
     setPromptBeforeTunnelConnect(enabled: boolean): Promise<{ updated: boolean }>;
+    setUpdatePreferences(preferences: {
+      autoCheckForUpdates?: boolean;
+      skippedUpdateVersion?: string | null;
+    }): Promise<{ updated: boolean }>;
+    updateStatus(): Promise<{ currentVersion: string; result: WormholeUpdateCheckResult | null }>;
+    checkForUpdates(): Promise<WormholeUpdateCheckResult>;
+    downloadUpdate(request: {
+      installerUrl: string;
+      installerFileName: string;
+      installerSha256?: string;
+      installerSize?: number | null;
+    }): Promise<string>;
+    installUpdate(installerPath: string): Promise<{ launched: boolean }>;
+    openExternal(url: string): Promise<void>;
+    onUpdateResult(listener: (result: WormholeUpdateCheckResult) => void): () => void;
+    onUpdateProgress(
+      listener: (progress: { downloaded: number; total: number }) => void,
+    ): () => void;
     openSshSession(request: {
       sessionId: string;
       nodeId: string;

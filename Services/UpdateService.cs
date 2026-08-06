@@ -307,7 +307,10 @@ public sealed class UpdateService : IUpdateService, IDisposable
 
     internal static GitHubReleaseAsset? FindInstallerAsset(GitHubRelease release, string arch)
     {
-        var suffix = $"-win-{arch}-setup.exe";
+        // The WinUI installer is published as Wormhole-{version}-winui-{arch}-setup.exe so it can
+        // coexist with the Electron installer (Wormhole-{version}-win-{arch}-setup.exe) in the
+        // same GitHub release during the migration.
+        var suffix = $"-winui-{arch}-setup.exe";
         foreach (var asset in release.Assets)
         {
             if (asset.Name is null) continue;
@@ -442,7 +445,7 @@ public sealed class UpdateService : IUpdateService, IDisposable
         try
         {
             if (!Directory.Exists(cacheDir)) return;
-            foreach (var file in Directory.EnumerateFiles(cacheDir, "Wormhole-*-win-*-setup.exe"))
+            foreach (var file in Directory.EnumerateFiles(cacheDir, "Wormhole-*-winui-*-setup.exe"))
             {
                 if (string.Equals(
                         Path.GetFileName(file), keepFileName,

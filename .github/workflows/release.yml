@@ -163,6 +163,14 @@ jobs:
           # 'installer/output/' and the release job's glob can't find it.
           Move-Item "$outputDir\Wormhole-*-setup.exe" .
 
+      - name: Generate SHA-256 sidecars
+        shell: pwsh
+        run: |
+          Get-ChildItem "Wormhole-*-setup.exe" | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)" | Set-Content -LiteralPath "$($_.Name).sha256" -Encoding ascii
+          }
+
       - name: Package zip
         shell: pwsh
         env:
@@ -179,11 +187,185 @@ jobs:
           path: |
             Wormhole-*.zip
             Wormhole-*-setup.exe
+            Wormhole-*.sha256
+          if-no-files-found: error
+
+  build-electron:
+    name: Build Electron ${{ matrix.platform }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [x64, arm64]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref_name }}
+          # The Electron build reuses the same real OpenVPN3 sidecar as the WinUI build.
+          submodules: recursive
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/wormhole-ovpnproxy/go.mod
+          cache: false
+
+      - name: Set up OpenVPN3 sidecar toolchain (x64)
+        if: matrix.platform == 'x64'
+        shell: pwsh
+        run: |
+          choco install mingw -y --no-progress
+          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Set up OpenVPN3 sidecar cross-toolchain (arm64)
+        if: matrix.platform == 'arm64'
+        shell: pwsh
+        run: |
+          $version = "20260602"
+          $archive = "$env:RUNNER_TEMP\llvm-mingw.zip"
+          $destination = "$env:RUNNER_TEMP\llvm-mingw"
+          $url = "https://github.com/mstorsjo/llvm-mingw/releases/download/$version/llvm-mingw-$version-ucrt-x86_64.zip"
+          $expectedSha256 = "3de3eda9377bbaf35f8c9001f190380f63b8ee981fa55d3ae9d7cce7c6ad7c70"
+          Invoke-WebRequest -Uri $url -OutFile $archive
+          $actualSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $archive).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "llvm-mingw SHA-256 mismatch: expected $expectedSha256, got $actualSha256"
+          }
+          Expand-Archive -LiteralPath $archive -DestinationPath $destination
+          $toolchain = Get-ChildItem -LiteralPath $destination -Directory | Select-Object -First 1
+          if (-not $toolchain) { throw "llvm-mingw archive did not contain a toolchain directory" }
+          $bin = Join-Path $toolchain.FullName "bin"
+          if (-not (Test-Path (Join-Path $bin "aarch64-w64-mingw32-clang.exe"))) {
+            throw "llvm-mingw archive is missing the aarch64 cross compiler"
+          }
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append
+          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WORMHOLE_OVPN_CMAKE_GENERATOR=Ninja" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          $tag = $env:INPUT_TAG
+          $version = $tag -replace '^v', ''
+          "tag=$tag"         | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Fetch Electron runtime for ${{ matrix.platform }}
+        shell: pwsh
+        run: |
+          if ("${{ matrix.platform }}" -eq "arm64") {
+            $env:npm_config_arch = 'arm64'
+            $env:npm_config_platform = 'win32'
+          }
+          node node_modules/electron/install.js
+
+      - name: Build renderer and Electron main
+        run: npm run build:renderer && npm run build:electron
+
+      - name: Build real VPN sidecars
+        shell: pwsh
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          & scripts\Build-ElectronVpnSidecars.ps1 -Arch $env:PLATFORM -RequireRealOvpn
+          if ($LASTEXITCODE -ne 0) { throw "VPN sidecar build failed with exit $LASTEXITCODE" }
+
+      - name: Build Go backend for ${{ matrix.platform }}
+        run: node scripts/Build-ElectronBackend.mjs --arch ${{ matrix.platform }}
+
+      - name: Build native helpers
+        shell: pwsh
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          & scripts\Build-CredentialReader.ps1 -Arch $env:PLATFORM
+          if ($LASTEXITCODE -ne 0) { throw "Credential reader build failed with exit $LASTEXITCODE" }
+          & scripts\Build-RdpHost.ps1 -Arch $env:PLATFORM
+          if ($LASTEXITCODE -ne 0) { throw "RDP host build failed with exit $LASTEXITCODE" }
+
+      - name: Verify real OpenVPN sidecar shipped
+        shell: pwsh
+        run: |
+          $platform = "${{ matrix.platform }}"
+          $exe = "$PWD\dist-electron\wormhole-ovpnproxy.exe"
+          if (-not (Test-Path $exe)) {
+            throw "wormhole-ovpnproxy.exe is missing from dist-electron — the sidecar build produced nothing."
+          }
+          $ascii = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($exe))
+          if ($ascii -match 'binding not linked') {
+            throw "Shipped wormhole-ovpnproxy.exe is the MOCK-ONLY stub — the '-tags ovpn3' build did not run."
+          }
+          if ($platform -eq "x64") {
+            $cfg = '{"profile_ovpn":"remote 203.0.113.1 1194\ndev tun\n","mock":false}'
+            $out = ($cfg | & $exe 2>&1 | Out-String)
+            $global:LASTEXITCODE = 0
+            if ($out -match 'binding not linked') {
+              throw "Shipped x64 sidecar is mock-only. Sidecar stderr: $out"
+            }
+          }
+          Write-Host "OK: real ovpn3 OpenVPN sidecar verified for $platform."
+
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+
+      - name: Build Electron installer
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          & scripts\Build-ElectronInstaller.ps1 -Architecture $env:PLATFORM -AppVersion $env:VERSION
+          if ($LASTEXITCODE -ne 0) { throw "Electron installer build failed with exit $LASTEXITCODE" }
+          Move-Item "installer\output\Wormhole-*-setup.exe" .
+
+      - name: Generate SHA-256 sidecars
+        shell: pwsh
+        run: |
+          Get-ChildItem "Wormhole-*-setup.exe" | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName).Hash.ToLowerInvariant()
+            "$hash  $($_.Name)" | Set-Content -LiteralPath "$($_.Name).sha256" -Encoding ascii
+          }
+
+      - name: Package zip
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          $zip = "Wormhole-$env:VERSION-electron-win-$env:PLATFORM.zip"
+          Compress-Archive -Path "artifacts/electron-app/$env:PLATFORM/Wormhole/*" -DestinationPath $zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wormhole-electron-win-${{ matrix.platform }}
+          path: |
+            Wormhole-*.zip
+            Wormhole-*-setup.exe
+            Wormhole-*.sha256
           if-no-files-found: error
 
   release:
     name: Publish GitHub Release
-    needs: build
+    needs: [build, build-electron]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -212,4 +394,5 @@ jobs:
             --title "$TAG" \
             --generate-notes \
             artifacts/Wormhole-*.zip \
-            artifacts/Wormhole-*-setup.exe
+            artifacts/Wormhole-*-setup.exe \
+            artifacts/Wormhole-*.sha256

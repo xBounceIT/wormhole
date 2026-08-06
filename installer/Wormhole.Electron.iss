@@ -1,10 +1,13 @@
-; Wormhole installer (Inno Setup 6)
-; Scaffold — wire up signing, custom pages, and per-architecture artifacts before shipping.
+; Wormhole installer — Electron build (Inno Setup 6)
 ;
-; RUNTIME: scripts/Build-Installer.ps1 publishes SELF-CONTAINED, so the .NET runtimes the app needs
-; (Microsoft.NETCore.App, Microsoft.WindowsDesktop.App, and Microsoft.AspNetCore.App — the last
-; required by the in-app MCP server / Kestrel) are bundled into the install directory. No .NET
-; runtime prerequisite is needed on the target machine.
+; RUNTIME: scripts/Build-ElectronInstaller.ps1 stages the Electron runtime + renderer + Go
+; backend into a directory (PublishDir) whose root is the app folder: Wormhole.exe (the renamed
+; Electron runtime binary) with resources\app\ holding package.json, dist\, dist-electron\ (Go
+; backend + sidecars + RDP host + credential reader), and Assets\. No Node.js runtime is needed
+; on the target machine.
+;
+; Deliberately uses a different AppId than the WinUI 3 installer so both apps can coexist
+; side-by-side during the migration.
 
 #define MyAppName       "Wormhole"
 #define MyAppPublisher  "Wormhole project"
@@ -19,11 +22,11 @@
 #endif
 
 #ifndef PublishDir
-  #define PublishDir "..\artifacts\publish\win-" + AppArchitecture
+  #define PublishDir "..\artifacts\electron-app\" + AppArchitecture + "\Wormhole"
 #endif
 
 [Setup]
-AppId={{6E3A0D9E-2A1F-4F4C-9C9F-2F8F8E1A0A11}
+AppId={{CC26892F-C6E1-4C7A-8D3D-6621619F5ADD}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
@@ -32,7 +35,7 @@ DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
 SetupIconFile=..\Assets\Wormhole.ico
-OutputBaseFilename=Wormhole-{#MyAppVersion}-winui-{#AppArchitecture}-setup
+OutputBaseFilename=Wormhole-{#MyAppVersion}-win-{#AppArchitecture}-setup
 SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed={#AppArchitecture}

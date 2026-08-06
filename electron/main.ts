@@ -5,6 +5,7 @@ import {
   ipcMain,
   screen,
   session as electronSession,
+  shell,
   WebContentsView,
 } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -51,6 +52,9 @@ const nativeBackendCommandTimeoutMs = 15_000;
 let rdpClient: RdpBackendClient | undefined;
 const rdpTunnelLeases = new Map<string, string>();
 let serialBackend: SerialBackendClient | undefined;
+let latestUpdateCheck: UpdateCheckResult | undefined;
+let updateCheckInFlight: Promise<UpdateCheckResult> | undefined;
+let updateDownloadChild: ChildProcessWithoutNullStreams | undefined;
 
 type BackendOperation =
   | 'workspace'
@@ -79,7 +83,10 @@ type BackendOperation =
   | 'auth-system-idle'
   | 'ssh-trust-host-key'
   | 'settings-read'
-  | 'settings-set-prompt-before-tunnel';
+  | 'settings-set-prompt-before-tunnel'
+  | 'settings-set-update-preferences'
+  | 'update-check'
+  | 'update-download';
 type VncAction =
   | 'vnc.connect'
   | 'vnc.disconnect'
@@ -139,6 +146,32 @@ type MigrationResponse = {
   status: 'completed' | 'already-completed' | 'skipped-non-windows';
   migrated: number;
   missing: number;
+};
+type AppSettings = {
+  promptBeforeTunnelConnect: boolean;
+  autoCheckForUpdates: boolean;
+  lastUpdateCheck: string | null;
+  skippedUpdateVersion: string | null;
+};
+type UpdateCheckResult = {
+  currentVersion: string;
+  latestVersion: string;
+  isUpdateAvailable: boolean;
+  checkFailed: boolean;
+  releaseTag?: string;
+  releaseName?: string;
+  releaseUrl?: string;
+  releaseNotes?: string;
+  installerUrl?: string;
+  installerFileName?: string;
+  installerSize?: number | null;
+  installerSha256?: string;
+};
+type UpdateDownloadRequest = {
+  installerUrl: string;
+  installerFileName: string;
+  installerSha256?: string;
+  installerSize?: number | null;
 };
 type WorkspaceResponse = {
   tree: unknown[];
@@ -2038,6 +2071,180 @@ async function runBackend<T>(operation: BackendOperation, request?: unknown): Pr
   }
 }
 
+// ---- update checks / downloads ----
+
+// performUpdateCheck keeps a single in-flight check: a startup check and a user-triggered
+// "Check now" coalesce into one GitHub round-trip instead of two concurrent backend processes.
+function performUpdateCheck(): Promise<UpdateCheckResult> {
+  if (!updateCheckInFlight) {
+    updateCheckInFlight = runBackend<UpdateCheckResult>('update-check', {
+      currentVersion: app.getVersion(),
+    })
+      .then((result) => {
+        latestUpdateCheck = result;
+        broadcastUpdateResult(result);
+        return result;
+      })
+      .finally(() => {
+        updateCheckInFlight = undefined;
+      });
+  }
+  return updateCheckInFlight;
+}
+
+function broadcastUpdateResult(result: UpdateCheckResult): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send('update:result', result);
+  }
+}
+
+function broadcastUpdateProgress(
+  target: Electron.WebContents,
+  downloaded: number,
+  total: number,
+): void {
+  if (target.isDestroyed()) return;
+  target.send('update:progress', { downloaded, total });
+}
+
+function updateCacheRoot(): string {
+  return path.join(path.dirname(wormholeDatabasePath()), 'cache', 'updates');
+}
+
+function isSafeInstallerPath(value: string): boolean {
+  const installerPath = path.resolve(value);
+  const cacheRoot = path.resolve(updateCacheRoot());
+  return (
+    path.extname(installerPath).toLowerCase() === '.exe' &&
+    (installerPath === cacheRoot || installerPath.startsWith(cacheRoot + path.sep))
+  );
+}
+
+// downloadUpdateInstaller runs a dedicated backend process that streams the installer to the
+// update cache. The backend reports {"type":"progress",...} JSON lines and finishes with
+// {"type":"complete","path":...}; the final path resolves this promise. The 30s runBackend
+// timeout would kill a large installer on a slow connection, so this spawn deliberately bypasses
+// it (matching the WinUI download client's long timeout).
+function downloadUpdateInstaller(
+  request: UpdateDownloadRequest,
+  onProgress: (downloaded: number, total: number) => void,
+): Promise<string> {
+  if (updateDownloadChild) {
+    return Promise.reject(new Error('An update download is already in progress.'));
+  }
+  const child = spawn(
+    backendPath(),
+    [
+      '--operation',
+      'update-download',
+      '--database',
+      wormholeDatabasePath(),
+      '--electron-user-data',
+      electronUserDataPath(),
+    ],
+    { stdio: 'pipe', windowsHide: true },
+  );
+  updateDownloadChild = child;
+  const cleanup = () => {
+    if (updateDownloadChild === child) updateDownloadChild = undefined;
+  };
+
+  return new Promise<string>((resolve, reject) => {
+    let stdoutBytes = 0;
+    let stderr = '';
+    let settled = false;
+    const lineReader = createInterface({ input: child.stdout!, crlfDelay: Infinity });
+
+    function finishResolve(path: string) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      lineReader.close();
+      resolve(path);
+    }
+
+    function finishReject(error: Error) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      lineReader.close();
+      reject(error);
+    }
+
+    child.stderr?.setEncoding('utf8');
+    child.stderr?.on('data', (chunk: string) => {
+      stderr += chunk;
+      if (stderr.length > backendMaxBuffer) stderr = stderr.slice(-backendMaxBuffer);
+    });
+    child.on('error', (error) => finishReject(error));
+    child.on('close', (code) => {
+      if (settled) return;
+      if (code !== 0) {
+        finishReject(new Error(stderr.trim() || 'The installer download failed.'));
+        return;
+      }
+      finishReject(new Error('The installer download ended before completing.'));
+    });
+
+    lineReader.on('line', (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      stdoutBytes += Buffer.byteLength(trimmed, 'utf8');
+      if (stdoutBytes > backendMaxBuffer) {
+        child.kill();
+        finishReject(new Error('The installer download returned too much data.'));
+        return;
+      }
+      let message: unknown;
+      try {
+        message = JSON.parse(trimmed);
+      } catch {
+        return;
+      }
+      if (!isRecord(message)) return;
+      if (
+        message.type === 'progress' &&
+        typeof message.downloaded === 'number' &&
+        typeof message.total === 'number'
+      ) {
+        onProgress(message.downloaded, message.total);
+        return;
+      }
+      if (message.type === 'complete' && typeof message.path === 'string') {
+        finishResolve(message.path);
+      }
+    });
+
+    child.stdin?.end(JSON.stringify(request));
+  });
+}
+
+function launchInstallerAndExit(installerPath: string): void {
+  // Detached + unref so the Inno Setup process survives this app's immediate exit, exactly like
+  // the WinUI app's Process.Start + Environment.Exit(0). /RESTARTAPP is handled by the installer
+  // script, which relaunches the newly installed app when present.
+  const child = spawn(installerPath, ['/SILENT', '/RESTARTAPP'], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  child.unref();
+  app.quit();
+}
+
+async function runStartupUpdateCheck(): Promise<void> {
+  try {
+    const settings = await runBackend<AppSettings>('settings-read');
+    if (!settings.autoCheckForUpdates) return;
+    await performUpdateCheck();
+  } catch (error) {
+    // A failed startup check must never block the app: the settings page still exposes
+    // "Check now", and a later result arrives through the update:result event.
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn('[Wormhole] Startup update check failed.', message);
+  }
+}
+
 async function runUserDeletion<T extends { deleted: boolean }>(
   operation: BackendOperation,
   request: { id: string },
@@ -3014,7 +3221,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
 
   ipcMain.handle('settings:read', async () => {
     return serializeAuthOperation(async () => {
-      return runBackend<{ promptBeforeTunnelConnect: boolean }>('settings-read');
+      return runBackend<AppSettings>('settings-read');
     });
   });
 
@@ -3026,6 +3233,85 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         enabled: value,
       });
     });
+  });
+
+  ipcMain.handle('settings:set-update-preferences', async (_event, value: unknown) => {
+    if (!isRecord(value)) throw new Error('Update preferences are invalid.');
+    const request: Record<string, unknown> = {};
+    if (value.autoCheckForUpdates !== undefined) {
+      if (typeof value.autoCheckForUpdates !== 'boolean') {
+        throw new Error('Update preferences are invalid.');
+      }
+      request.autoCheckForUpdates = value.autoCheckForUpdates;
+    }
+    if (value.skippedUpdateVersion !== undefined) {
+      if (value.skippedUpdateVersion !== null && typeof value.skippedUpdateVersion !== 'string') {
+        throw new Error('Update preferences are invalid.');
+      }
+      request.skippedUpdateVersion = value.skippedUpdateVersion;
+    }
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ updated: boolean }>('settings-set-update-preferences', request);
+    });
+  });
+
+  ipcMain.handle('update:status', async () => {
+    return serializeAuthOperation(async () => {
+      return { currentVersion: app.getVersion(), result: latestUpdateCheck ?? null };
+    });
+  });
+
+  ipcMain.handle('update:check', async () => {
+    return serializeAuthOperation(async () => performUpdateCheck());
+  });
+
+  ipcMain.handle('update:download', async (event, value: unknown) => {
+    if (!isRecord(value)) throw new Error('The update download request is invalid.');
+    const installerUrl = typeof value.installerUrl === 'string' ? value.installerUrl.trim() : '';
+    const installerFileName =
+      typeof value.installerFileName === 'string' ? value.installerFileName.trim() : '';
+    const installerSha256 =
+      typeof value.installerSha256 === 'string' ? value.installerSha256.trim() : '';
+    const installerSize =
+      typeof value.installerSize === 'number' && Number.isInteger(value.installerSize)
+        ? value.installerSize
+        : null;
+    if (
+      !installerUrl ||
+      !installerFileName ||
+      path.basename(installerFileName) !== installerFileName ||
+      !/^https:\/\//i.test(installerUrl)
+    ) {
+      throw new Error('The update download request is invalid.');
+    }
+    const target = event.sender;
+    return downloadUpdateInstaller(
+      {
+        installerUrl,
+        installerFileName,
+        ...(installerSha256 ? { installerSha256 } : {}),
+        ...(installerSize !== null ? { installerSize } : {}),
+      },
+      (downloaded, total) => broadcastUpdateProgress(target, downloaded, total),
+    );
+  });
+
+  ipcMain.handle('update:install', async (_event, value: unknown) => {
+    if (!isRecord(value) || typeof value.path !== 'string' || !isSafeInstallerPath(value.path)) {
+      throw new Error('The installer path is invalid.');
+    }
+    const installerPath = path.resolve(value.path);
+    if (!existsSync(installerPath)) throw new Error('The installer was not found.');
+    launchInstallerAndExit(installerPath);
+    return { launched: true };
+  });
+
+  ipcMain.handle('update:open-release', async (_event, value: unknown) => {
+    if (typeof value !== 'string' || !/^https:\/\/github\.com\//i.test(value)) {
+      throw new Error('The release URL is invalid.');
+    }
+    await shell.openExternal(value);
   });
 
   ipcMain.handle('tunnel:create', async (_event, value: unknown) => {
@@ -4085,6 +4371,7 @@ app.whenReady().then(async () => {
   }
 
   createWindow();
+  void runStartupUpdateCheck();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -4093,6 +4380,8 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  updateDownloadChild?.kill();
+  updateDownloadChild = undefined;
   webSurfaces.closeAll();
   nativeBackend?.stop();
   nativeBackend = undefined;

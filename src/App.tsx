@@ -1133,7 +1133,15 @@ function App() {
   const [newFolderOpen, setNewFolderOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [newFolderParentId, setNewFolderParentId] = useState<string | null>(null);
-  const [updateVisible, setUpdateVisible] = useState(true);
+  const [updateCurrentVersion, setUpdateCurrentVersion] = useState('');
+  const [updateResult, setUpdateResult] = useState<WormholeUpdateCheckResult | null>(null);
+  const [autoCheckForUpdates, setAutoCheckForUpdates] = useState(true);
+  const [skippedUpdateVersion, setSkippedUpdateVersion] = useState<string | null>(null);
+  const [lastUpdateCheck, setLastUpdateCheck] = useState<string | null>(null);
+  const [updateBusy, setUpdateBusy] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState('');
+  const [updateDownloadProgress, setUpdateDownloadProgress] = useState<number | null>(null);
+  const [settingsUpdatesRequest, setSettingsUpdatesRequest] = useState(0);
   const [draggedNodeIds, setDraggedNodeIds] = useState<string[]>([]);
   const [dropTarget, setDropTarget] = useState<{
     id: string;
@@ -1237,6 +1245,129 @@ function App() {
     };
   }, [authGate]);
 
+  useEffect(() => {
+    if (!window.wormhole) return;
+    let active = true;
+
+    void window.wormhole
+      .updateStatus()
+      .then(({ currentVersion, result }) => {
+        if (!active) return;
+        setUpdateCurrentVersion(currentVersion);
+        setUpdateResult(result);
+      })
+      .catch(() => {
+        // The settings page still exposes "Check now" when status cannot be read.
+      });
+    void window.wormhole
+      .readAppSettings()
+      .then((settings) => {
+        if (!active) return;
+        setAutoCheckForUpdates(settings.autoCheckForUpdates);
+        setSkippedUpdateVersion(settings.skippedUpdateVersion);
+        setLastUpdateCheck(settings.lastUpdateCheck);
+      })
+      .catch(() => {
+        // The switches keep their defaults when settings cannot be read.
+      });
+    const unsubscribeResult = window.wormhole.onUpdateResult((result) => {
+      setUpdateResult(result);
+    });
+    const unsubscribeProgress = window.wormhole.onUpdateProgress(({ downloaded, total }) => {
+      setUpdateDownloadProgress(total > 0 ? Math.min(1, downloaded / total) : null);
+    });
+    return () => {
+      active = false;
+      unsubscribeResult();
+      unsubscribeProgress();
+    };
+  }, []);
+
+  const updateBannerVisible = Boolean(
+    updateResult?.isUpdateAvailable &&
+    updateResult.latestVersion &&
+    updateResult.latestVersion !== skippedUpdateVersion,
+  );
+
+  async function handleCheckForUpdates() {
+    if (!window.wormhole || updateBusy) return;
+    setUpdateBusy(true);
+    setUpdateStatus('Checking for updates…');
+    try {
+      const result = await window.wormhole.checkForUpdates();
+      setUpdateResult(result);
+      setUpdateStatus(
+        result.checkFailed
+          ? "Couldn't reach the update server. Try again later."
+          : result.isUpdateAvailable
+            ? `Update available: ${result.latestVersion}`
+            : "You're on the latest version.",
+      );
+      const settings = await window.wormhole.readAppSettings();
+      setLastUpdateCheck(settings.lastUpdateCheck);
+    } catch {
+      setUpdateStatus("Couldn't reach the update server. Try again later.");
+    } finally {
+      setUpdateBusy(false);
+    }
+  }
+
+  function handleDismissUpdate() {
+    const latest = updateResult?.latestVersion;
+    if (!latest) return;
+    setSkippedUpdateVersion(latest);
+    void window.wormhole?.setUpdatePreferences({ skippedUpdateVersion: latest }).catch(() => {
+      // A failed save leaves the local state; the next settings read re-syncs it.
+    });
+  }
+
+  async function handleInstallUpdate() {
+    const latest = updateResult;
+    if (
+      !window.wormhole ||
+      !latest?.isUpdateAvailable ||
+      !latest.installerUrl ||
+      !latest.installerFileName ||
+      updateBusy
+    ) {
+      return;
+    }
+    setUpdateBusy(true);
+    setUpdateDownloadProgress(0);
+    setUpdateStatus('Downloading…');
+    try {
+      const installerPath = await window.wormhole.downloadUpdate({
+        installerUrl: latest.installerUrl,
+        installerFileName: latest.installerFileName,
+        ...(latest.installerSha256 ? { installerSha256: latest.installerSha256 } : {}),
+        ...(latest.installerSize != null ? { installerSize: latest.installerSize } : {}),
+      });
+      setUpdateStatus('Launching installer…');
+      // The app quits immediately after launching the installer, so the IPC reply may never
+      // arrive. Fire it and let the status line speak for itself.
+      void window.wormhole.installUpdate(installerPath);
+    } catch (error) {
+      setUpdateStatus(`Install failed: ${error instanceof Error ? error.message : String(error)}`);
+      setUpdateBusy(false);
+      setUpdateDownloadProgress(null);
+    }
+  }
+
+  function handleSetAutoCheckForUpdates(enabled: boolean) {
+    setAutoCheckForUpdates(enabled);
+    void window.wormhole?.setUpdatePreferences({ autoCheckForUpdates: enabled }).catch(() => {
+      // A failed save leaves the local switch state; the next settings read re-syncs it.
+    });
+  }
+
+  function handleOpenReleaseNotes() {
+    const url = updateResult?.releaseUrl;
+    if (!url) return;
+    void window.wormhole?.openExternal(url).catch(() => {
+      // The release page is a convenience; a failure is not user-actionable here.
+    });
+  }
+
   const requestAuthentication = useCallback(
     (reason: string) => {
       if (!authState?.configured || authState.mode === 'disabled') return Promise.resolve(true);
@@ -1313,9 +1444,7 @@ function App() {
     } catch {
       // The tunnel may have failed or timed out while the user was answering.
     } finally {
-      setRoutePrompts((current) =>
-        current.filter((item) => item.promptId !== prompt.promptId),
-      );
+      setRoutePrompts((current) => current.filter((item) => item.promptId !== prompt.promptId));
     }
   }
 
@@ -1745,12 +1874,7 @@ function App() {
         );
         return;
       }
-      if (
-        event.type === 'tunnel.route' &&
-        event.sessionId &&
-        event.leaseId &&
-        event.promptId
-      ) {
+      if (event.type === 'tunnel.route' && event.sessionId && event.leaseId && event.promptId) {
         const routePrompt = {
           sessionId: event.sessionId,
           leaseId: event.leaseId,
@@ -4085,11 +4209,7 @@ function App() {
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button
-              onClick={() => void resolveTunnelRoute('cancel')}
-              type="button"
-              variant="ghost"
-            >
+            <Button onClick={() => void resolveTunnelRoute('cancel')} type="button" variant="ghost">
               Cancel
             </Button>
             <Button
@@ -4159,10 +4279,13 @@ function App() {
               <img alt="" className="size-full object-contain" src={wormholeIcon} />
             </div>
             <span className="text-sm font-semibold tracking-tight">Wormhole</span>
-            {updateVisible ? (
+            {updateBannerVisible ? (
               <Button
                 className="h-7 gap-1.5 rounded-md border-border bg-background px-2.5 text-[10px] font-semibold text-foreground hover:bg-muted hover:text-foreground"
-                onClick={() => setUpdateVisible(false)}
+                onClick={() => {
+                  setSettingsUpdatesRequest((request) => request + 1);
+                  setActivePage('settings');
+                }}
                 size="sm"
                 variant="outline"
               >
@@ -4354,7 +4477,23 @@ function App() {
                   onAuthStateChange={setAuthState}
                   onRequestAuthentication={requestAuthentication}
                   onThemeChange={setTheme}
+                  onCheckForUpdates={() => void handleCheckForUpdates()}
+                  onDismissUpdate={handleDismissUpdate}
+                  onInstallUpdate={() => void handleInstallUpdate()}
+                  onOpenReleaseNotes={handleOpenReleaseNotes}
+                  onSetAutoCheckForUpdates={handleSetAutoCheckForUpdates}
+                  settingsUpdatesRequest={settingsUpdatesRequest}
                   theme={theme}
+                  update={{
+                    autoCheckForUpdates,
+                    busy: updateBusy,
+                    currentVersion: updateCurrentVersion,
+                    downloadProgress: updateDownloadProgress,
+                    lastUpdateCheck,
+                    result: updateResult,
+                    skippedUpdateVersion,
+                    status: updateStatus,
+                  }}
                 />
               ) : activePage === 'credentials' ? (
                 <CredentialsPage
@@ -5693,8 +5832,8 @@ function SshTerminalSurface({
               <div className="mt-5 w-full max-w-xl rounded-lg border border-amber-400/20 bg-amber-400/[0.06] p-4 text-left">
                 <p className="text-xs font-semibold text-amber-200">Host key changed</p>
                 <p className="mt-1 text-[11px] leading-relaxed text-amber-100/65">
-                  Only trust this key if you verified the server was rebuilt, rekeyed, or moved to
-                  a new host.
+                  Only trust this key if you verified the server was rebuilt, rekeyed, or moved to a
+                  new host.
                 </p>
                 <div className="mt-3 grid gap-2 font-mono text-[10px]">
                   <div className="grid gap-1 sm:grid-cols-[5rem_minmax(0,1fr)] sm:items-start sm:gap-3">
@@ -9192,6 +9331,168 @@ function AuthSecretDialog({
   );
 }
 
+function formatLastUpdateCheck(stamp: string | null): string {
+  if (!stamp) return 'Last checked: never';
+  const date = new Date(stamp);
+  if (Number.isNaN(date.getTime())) return 'Last checked: never';
+  return `Last checked: ${date.toLocaleString()}`;
+}
+
+const markdownInlinePattern = /(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/;
+
+function renderMarkdownInline(text: string, keyPrefix: string): ReactNode[] {
+  return text.split(markdownInlinePattern).flatMap((part, index) => {
+    const key = `${keyPrefix}:${index}`;
+    if (!part) return [];
+    if (part.startsWith('`') && part.endsWith('`') && part.length >= 2) {
+      return <code key={key}>{part.slice(1, -1)}</code>;
+    }
+    if (part.startsWith('**') && part.endsWith('**') && part.length >= 4) {
+      return <strong key={key}>{part.slice(2, -2)}</strong>;
+    }
+    if (part.startsWith('*') && part.endsWith('*') && part.length >= 2) {
+      return <em key={key}>{part.slice(1, -1)}</em>;
+    }
+    const link = part.match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/);
+    if (link) {
+      const url = link[2];
+      return (
+        <a
+          className="text-foreground underline decoration-border underline-offset-2 hover:text-foreground/80"
+          href={url}
+          key={key}
+          onClick={(event) => {
+            event.preventDefault();
+            void window.wormhole?.openExternal(url).catch(() => {
+              // Opening the release page is a convenience; a failure is not actionable here.
+            });
+          }}
+          rel="noreferrer"
+          target="_blank"
+        >
+          {link[1]}
+        </a>
+      );
+    }
+    return <span key={key}>{part}</span>;
+  });
+}
+
+// ReleaseNotesMarkdown is a deliberately small markdown renderer for GitHub release bodies:
+// headings, bullet/numbered lists, fenced code blocks, paragraphs, and inline
+// bold/italic/code/links. It never injects raw HTML.
+function ReleaseNotesMarkdown({ markdown }: { markdown: string }) {
+  return useMemo(() => {
+    const lines = markdown.replace(/\r\n?/g, '\n').split('\n');
+    const blocks: ReactNode[] = [];
+    let sequence = 0;
+    let listType: 'ul' | 'ol' | null = null;
+    let listItems: string[] = [];
+    let paragraph: string[] = [];
+    let codeLines: string[] | null = null;
+
+    const flushParagraph = () => {
+      if (paragraph.length === 0) return;
+      const text = paragraph.join(' ').trim();
+      paragraph = [];
+      if (!text) return;
+      blocks.push(<p key={sequence}>{renderMarkdownInline(text, `p:${sequence}`)}</p>);
+      sequence += 1;
+    };
+    const flushList = () => {
+      if (!listType) return;
+      const items = listItems;
+      const type = listType;
+      listType = null;
+      listItems = [];
+      blocks.push(
+        type === 'ol' ? (
+          <ol className="list-decimal space-y-0.5 pl-4" key={sequence}>
+            {items.map((item, index) => (
+              <li key={index}>{renderMarkdownInline(item, `li:${sequence}:${index}`)}</li>
+            ))}
+          </ol>
+        ) : (
+          <ul className="list-disc space-y-0.5 pl-4" key={sequence}>
+            {items.map((item, index) => (
+              <li key={index}>{renderMarkdownInline(item, `li:${sequence}:${index}`)}</li>
+            ))}
+          </ul>
+        ),
+      );
+      sequence += 1;
+    };
+
+    for (const line of lines) {
+      if (codeLines) {
+        if (line.trim().startsWith('```')) {
+          blocks.push(
+            <pre
+              className="overflow-x-auto rounded-md bg-muted/70 p-3 font-mono text-[10px] leading-relaxed"
+              key={sequence}
+            >
+              {codeLines.join('\n')}
+            </pre>,
+          );
+          sequence += 1;
+          codeLines = null;
+        } else {
+          codeLines.push(line);
+        }
+        continue;
+      }
+      if (line.trim().startsWith('```')) {
+        flushParagraph();
+        flushList();
+        codeLines = [];
+        continue;
+      }
+      const heading = line.match(/^(#{1,6})\s+(.+)$/);
+      if (heading) {
+        flushParagraph();
+        flushList();
+        blocks.push(
+          <p className="text-xs font-semibold text-foreground" key={sequence}>
+            {renderMarkdownInline(heading[2], `h:${sequence}`)}
+          </p>,
+        );
+        sequence += 1;
+        continue;
+      }
+      const unordered = line.match(/^[-*]\s+(.+)$/);
+      const ordered = line.match(/^\d+\.\s+(.+)$/);
+      if (unordered || ordered) {
+        flushParagraph();
+        const type: 'ul' | 'ol' = ordered ? 'ol' : 'ul';
+        if (listType !== type) flushList();
+        listType = type;
+        listItems.push((unordered ?? ordered)![1]);
+        continue;
+      }
+      if (line.trim() === '') {
+        flushParagraph();
+        flushList();
+        continue;
+      }
+      flushList();
+      paragraph.push(line);
+    }
+    flushParagraph();
+    flushList();
+    if (codeLines) {
+      blocks.push(
+        <pre
+          className="overflow-x-auto rounded-md bg-muted/70 p-3 font-mono text-[10px] leading-relaxed"
+          key={sequence}
+        >
+          {codeLines.join('\n')}
+        </pre>,
+      );
+    }
+    return blocks.length > 0 ? blocks : <p>No release notes were provided.</p>;
+  }, [markdown]);
+}
+
 function SettingsPage({
   theme,
   onThemeChange,
@@ -9199,6 +9500,13 @@ function SettingsPage({
   authState,
   onAuthStateChange,
   onRequestAuthentication,
+  onCheckForUpdates,
+  onDismissUpdate,
+  onInstallUpdate,
+  onOpenReleaseNotes,
+  onSetAutoCheckForUpdates,
+  settingsUpdatesRequest,
+  update,
 }: {
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
@@ -9206,7 +9514,24 @@ function SettingsPage({
   authState: WormholeAuthState | null;
   onAuthStateChange: (state: WormholeAuthState) => void;
   onRequestAuthentication: (reason: string) => Promise<boolean>;
+  onCheckForUpdates: () => void;
+  onDismissUpdate: () => void;
+  onInstallUpdate: () => void;
+  onOpenReleaseNotes: () => void;
+  onSetAutoCheckForUpdates: (enabled: boolean) => void;
+  settingsUpdatesRequest: number;
+  update: {
+    currentVersion: string;
+    result: WormholeUpdateCheckResult | null;
+    autoCheckForUpdates: boolean;
+    lastUpdateCheck: string | null;
+    skippedUpdateVersion: string | null;
+    busy: boolean;
+    status: string;
+    downloadProgress: number | null;
+  };
 }) {
+  const [activeTab, setActiveTab] = useState('general');
   const [confirmOnTabClose, setConfirmOnTabClose] = useState(true);
   const [autoCopyOnSelect, setAutoCopyOnSelect] = useState(false);
   const [promptBeforeTunnelConnect, setPromptBeforeTunnelConnect] = useState(true);
@@ -9226,7 +9551,6 @@ function SettingsPage({
   const [bitwardenEnabled, setBitwardenEnabled] = useState(false);
   const [bitwardenPath, setBitwardenPath] = useState('bw');
   const [browserExtensionEnabled, setBrowserExtensionEnabled] = useState(false);
-  const [autoCheckUpdates, setAutoCheckUpdates] = useState(true);
   const [retentionDays, setRetentionDays] = useState('14');
   const [mcpState, setMcpState] = useState<WormholeMcpStatus | null>(null);
   const [mcpPort, setMcpPort] = useState('8765');
@@ -9236,6 +9560,10 @@ function SettingsPage({
   const [mcpBusy, setMcpBusy] = useState(false);
   const [mcpError, setMcpError] = useState('');
   const [mcpMessage, setMcpMessage] = useState('');
+
+  useEffect(() => {
+    if (settingsUpdatesRequest > 0) setActiveTab('updates');
+  }, [settingsUpdatesRequest]);
 
   useEffect(() => {
     if (authGate === 'unlocked') return;
@@ -9294,11 +9622,9 @@ function SettingsPage({
   function handlePromptBeforeTunnelConnectChange(enabled: boolean) {
     setPromptBeforeTunnelConnect(enabled);
     if (!window.wormhole) return;
-    void window.wormhole
-      .setPromptBeforeTunnelConnect(enabled)
-      .catch(() => {
-        // A failed save leaves the local switch state; the next settings open re-syncs it.
-      });
+    void window.wormhole.setPromptBeforeTunnelConnect(enabled).catch(() => {
+      // A failed save leaves the local switch state; the next settings open re-syncs it.
+    });
   }
 
   useEffect(() => {
@@ -9696,12 +10022,17 @@ function SettingsPage({
     mcpTokenRevealed && mcpToken ? mcpToken : mcpTokenPlaceholder,
   );
   const mcpConfigDetails = mcpClientCopyDetails(mcpClient);
+  const updateAvailable = Boolean(
+    update.result?.isUpdateAvailable &&
+    update.result.latestVersion &&
+    update.result.latestVersion !== update.skippedUpdateVersion,
+  );
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden p-6">
       <h2 className="shrink-0 text-2xl font-semibold tracking-tight">Settings</h2>
 
-      <Tabs className="mt-4 min-h-0 flex-1 gap-0" defaultValue="general">
+      <Tabs className="mt-4 min-h-0 flex-1 gap-0" onValueChange={setActiveTab} value={activeTab}>
         <TabsList
           className="h-9 w-full shrink-0 items-stretch justify-start gap-1 overflow-x-auto overflow-y-hidden rounded-none border-b border-border p-0"
           variant="line"
@@ -10001,32 +10332,72 @@ function SettingsPage({
 
         <SettingsTabPanel value="updates">
           <SettingsSection title="Wormhole updates">
-            <p className="text-xs font-medium">Wormhole 0.9.1 · Electron migration preview</p>
+            <p className="text-xs font-medium">
+              Wormhole {update.currentVersion || '…'}
+              {update.currentVersion ? ' · Electron build' : ''}
+            </p>
             <p className="text-[11px] text-muted-foreground">
-              Last checked: never in this preview.
+              {formatLastUpdateCheck(update.lastUpdateCheck)}
             </p>
             <SettingsSwitch
-              checked={autoCheckUpdates}
+              checked={update.autoCheckForUpdates}
               description="Check for a newer Wormhole build when the app starts."
               label="Automatically check for updates on startup"
-              onCheckedChange={setAutoCheckUpdates}
+              onCheckedChange={onSetAutoCheckForUpdates}
             />
+            {update.status ? (
+              <p className="text-[11px] text-muted-foreground">{update.status}</p>
+            ) : null}
+            {update.downloadProgress !== null ? (
+              <div className="max-w-sm">
+                <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-muted">
+                  <div
+                    className="h-full rounded-full bg-primary transition-[width]"
+                    style={{ width: `${Math.round(update.downloadProgress * 100)}%` }}
+                  />
+                </div>
+              </div>
+            ) : null}
             <div className="flex flex-wrap gap-2">
-              <Button size="sm">Check now</Button>
-              <Button size="sm" variant="outline">
+              <Button disabled={update.busy} onClick={onCheckForUpdates} size="sm">
+                Check now
+              </Button>
+              <Button
+                disabled={update.busy || !updateAvailable}
+                onClick={onInstallUpdate}
+                size="sm"
+              >
                 Install update
               </Button>
-              <Button size="sm" variant="outline">
+              <Button
+                disabled={!updateAvailable}
+                onClick={onOpenReleaseNotes}
+                size="sm"
+                variant="outline"
+              >
                 View release notes
               </Button>
+              {updateAvailable ? (
+                <Button disabled={update.busy} onClick={onDismissUpdate} size="sm" variant="ghost">
+                  Not now
+                </Button>
+              ) : null}
             </div>
-            <p className="text-[11px] text-muted-foreground">No update has been downloaded.</p>
             <Card className="border-border/70 bg-card/40 p-4 shadow-none">
               <p className="text-xs font-semibold">Release notes</p>
-              <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
-                Update information will appear here after the native update service reports a new
-                release.
-              </p>
+              {updateAvailable ? (
+                <div className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                  <ReleaseNotesMarkdown markdown={update.result?.releaseNotes ?? ''} />
+                </div>
+              ) : (
+                <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                  {update.result?.checkFailed
+                    ? "Couldn't reach the update server. Try again later."
+                    : update.result?.latestVersion
+                      ? "You're on the latest version."
+                      : 'Update information will appear here after the native update service reports a new release.'}
+                </p>
+              )}
             </Card>
           </SettingsSection>
         </SettingsTabPanel>

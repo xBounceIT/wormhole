@@ -58,27 +58,27 @@ public class UpdateServiceTests
         var release = new GitHubRelease();
         release.Assets.Add(new GitHubReleaseAsset
         {
-            Name = "Wormhole-0.2.0-win-x64-setup.exe",
+            Name = "Wormhole-0.2.0-winui-x64-setup.exe",
             BrowserDownloadUrl = "https://example/x64",
         });
         release.Assets.Add(new GitHubReleaseAsset
         {
-            Name = "Wormhole-0.2.0-win-arm64-setup.exe",
+            Name = "Wormhole-0.2.0-winui-arm64-setup.exe",
             BrowserDownloadUrl = "https://example/arm64",
         });
         release.Assets.Add(new GitHubReleaseAsset
         {
-            Name = "Wormhole-0.2.0-win-x64-setup.exe.sha256",
+            Name = "Wormhole-0.2.0-winui-x64-setup.exe.sha256",
             BrowserDownloadUrl = "https://example/x64sha",
         });
 
         var x64 = UpdateService.FindInstallerAsset(release, "x64");
         Assert.NotNull(x64);
-        Assert.Equal("Wormhole-0.2.0-win-x64-setup.exe", x64!.Name);
+        Assert.Equal("Wormhole-0.2.0-winui-x64-setup.exe", x64!.Name);
 
         var arm = UpdateService.FindInstallerAsset(release, "arm64");
         Assert.NotNull(arm);
-        Assert.Equal("Wormhole-0.2.0-win-arm64-setup.exe", arm!.Name);
+        Assert.Equal("Wormhole-0.2.0-winui-arm64-setup.exe", arm!.Name);
     }
 
     [Fact]
@@ -87,7 +87,7 @@ public class UpdateServiceTests
         var release = new GitHubRelease();
         release.Assets.Add(new GitHubReleaseAsset
         {
-            Name = "Wormhole-0.2.0-win-arm64-setup.exe",
+            Name = "Wormhole-0.2.0-winui-arm64-setup.exe",
             BrowserDownloadUrl = "x",
         });
 
@@ -99,7 +99,7 @@ public class UpdateServiceTests
         "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234",
         "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234")]
     [InlineData(
-        "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234  Wormhole-0.2.0-win-x64-setup.exe\n",
+        "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234  Wormhole-0.2.0-winui-x64-setup.exe\n",
         "abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234")]
     [InlineData(
         "  ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234ABCD1234  ",
@@ -129,7 +129,7 @@ public class UpdateServiceTests
             prerelease: false,
             assets: new[]
             {
-                ("Wormhole-9.9.9-win-" + arch + "-setup.exe", "https://example.invalid/installer.exe"),
+                ("Wormhole-9.9.9-winui-" + arch + "-setup.exe", "https://example.invalid/installer.exe"),
             });
 
         var service = NewService(req => OkJson(json));
@@ -138,7 +138,7 @@ public class UpdateServiceTests
         Assert.True(result.IsUpdateAvailable);
         Assert.Equal(new Version(9, 9, 9), result.LatestVersion);
         Assert.Equal("https://example.invalid/installer.exe", result.InstallerUrl);
-        Assert.Equal($"Wormhole-9.9.9-win-{arch}-setup.exe", result.InstallerFileName);
+        Assert.Equal($"Wormhole-9.9.9-winui-{arch}-setup.exe", result.InstallerFileName);
     }
 
     [Fact]
@@ -151,7 +151,7 @@ public class UpdateServiceTests
             tag: tag,
             draft: false,
             prerelease: false,
-            assets: new[] { ($"Wormhole-{current}-win-{arch}-setup.exe", "https://x") });
+            assets: new[] { ($"Wormhole-{current}-winui-{arch}-setup.exe", "https://x") });
 
         var service = NewService(req => OkJson(json));
         var result = await service.CheckAsync();
@@ -186,7 +186,7 @@ public class UpdateServiceTests
         var wrongArch = arch == "x64" ? "arm64" : "x64";
         var json = MakeReleaseJson(
             tag: "v9.9.9", draft: false, prerelease: false,
-            assets: new[] { ($"Wormhole-9.9.9-win-{wrongArch}-setup.exe", "https://x") });
+            assets: new[] { ($"Wormhole-9.9.9-winui-{wrongArch}-setup.exe", "https://x") });
 
         var service = NewService(req => OkJson(json));
         var result = await service.CheckAsync();
@@ -267,7 +267,7 @@ public class UpdateServiceTests
             tag: "v9.9.9",
             draft: false,
             prerelease: false,
-            assets: new[] { ($"Wormhole-9.9.9-win-{arch}-setup.exe", "https://example.invalid/installer.exe") });
+            assets: new[] { ($"Wormhole-9.9.9-winui-{arch}-setup.exe", "https://example.invalid/installer.exe") });
 
         var attempt = 0;
         var service = NewService(req =>
@@ -325,14 +325,14 @@ public class UpdateServiceTests
     public void RotateInstallerCache_DeletesOlderInstallers_KeepsCurrent()
     {
         using var tmp = new TempDir();
-        File.WriteAllText(Path.Combine(tmp.Path, "Wormhole-0.1.0-win-x64-setup.exe"), "old");
-        File.WriteAllText(Path.Combine(tmp.Path, "Wormhole-0.2.0-win-x64-setup.exe"), "old");
-        File.WriteAllText(Path.Combine(tmp.Path, "Wormhole-0.3.0-win-x64-setup.exe"), "new");
+        File.WriteAllText(Path.Combine(tmp.Path, "Wormhole-0.1.0-winui-x64-setup.exe"), "old");
+        File.WriteAllText(Path.Combine(tmp.Path, "Wormhole-0.2.0-winui-x64-setup.exe"), "old");
+        File.WriteAllText(Path.Combine(tmp.Path, "Wormhole-0.3.0-winui-x64-setup.exe"), "new");
 
-        UpdateService.RotateInstallerCache(tmp.Path, "Wormhole-0.3.0-win-x64-setup.exe");
+        UpdateService.RotateInstallerCache(tmp.Path, "Wormhole-0.3.0-winui-x64-setup.exe");
 
         var remaining = Directory.EnumerateFiles(tmp.Path).Select(Path.GetFileName).OrderBy(n => n).ToArray();
-        Assert.Single(remaining, "Wormhole-0.3.0-win-x64-setup.exe");
+        Assert.Single(remaining, "Wormhole-0.3.0-winui-x64-setup.exe");
     }
 
     [Fact]
@@ -340,24 +340,24 @@ public class UpdateServiceTests
     {
         using var tmp = new TempDir();
         File.WriteAllText(Path.Combine(tmp.Path, "readme.txt"), "x");
-        File.WriteAllText(Path.Combine(tmp.Path, "Wormhole-0.1.0-win-x64-setup.exe.part"), "x");
-        File.WriteAllText(Path.Combine(tmp.Path, "Wormhole-0.1.0-win-x64-setup.exe"), "old");
-        File.WriteAllText(Path.Combine(tmp.Path, "Wormhole-0.2.0-win-x64-setup.exe"), "new");
+        File.WriteAllText(Path.Combine(tmp.Path, "Wormhole-0.1.0-winui-x64-setup.exe.part"), "x");
+        File.WriteAllText(Path.Combine(tmp.Path, "Wormhole-0.1.0-winui-x64-setup.exe"), "old");
+        File.WriteAllText(Path.Combine(tmp.Path, "Wormhole-0.2.0-winui-x64-setup.exe"), "new");
 
-        UpdateService.RotateInstallerCache(tmp.Path, "Wormhole-0.2.0-win-x64-setup.exe");
+        UpdateService.RotateInstallerCache(tmp.Path, "Wormhole-0.2.0-winui-x64-setup.exe");
 
         var remaining = Directory.EnumerateFiles(tmp.Path).Select(Path.GetFileName).ToHashSet();
-        Assert.Contains("Wormhole-0.2.0-win-x64-setup.exe", remaining);
-        Assert.Contains("Wormhole-0.1.0-win-x64-setup.exe.part", remaining);
+        Assert.Contains("Wormhole-0.2.0-winui-x64-setup.exe", remaining);
+        Assert.Contains("Wormhole-0.1.0-winui-x64-setup.exe.part", remaining);
         Assert.Contains("readme.txt", remaining);
-        Assert.DoesNotContain("Wormhole-0.1.0-win-x64-setup.exe", remaining);
+        Assert.DoesNotContain("Wormhole-0.1.0-winui-x64-setup.exe", remaining);
     }
 
     [Fact]
     public void RotateInstallerCache_DoesNotThrow_WhenDirectoryMissing()
     {
         var missing = Path.Combine(Path.GetTempPath(), "wormhole-rotate-" + Guid.NewGuid());
-        UpdateService.RotateInstallerCache(missing, "Wormhole-0.2.0-win-x64-setup.exe");
+        UpdateService.RotateInstallerCache(missing, "Wormhole-0.2.0-winui-x64-setup.exe");
         Assert.False(Directory.Exists(missing));
     }
 
