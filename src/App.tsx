@@ -10384,7 +10384,7 @@ function SettingsPage({
                 />
               </div>
               <p className="text-[11px] text-muted-foreground">
-                Bitwarden CLI is not connected in this preview.
+                Bitwarden CLI is not connected.
               </p>
               <div className="flex flex-wrap gap-2">
                 <Button size="sm" variant="outline">
@@ -10413,7 +10413,7 @@ function SettingsPage({
                 onCheckedChange={setBrowserExtensionEnabled}
               />
               <p className="text-[11px] text-muted-foreground">
-                No browser extension is installed in this preview.
+                No browser extension is installed.
               </p>
               <p className="text-[11px] leading-relaxed text-muted-foreground">
                 Turning this on installs the official extension automatically in the native app.
@@ -10727,7 +10727,7 @@ function SettingsPage({
               {mcpConfigDetails.caption}
             </p>
             <p className="text-[11px] leading-relaxed text-muted-foreground">
-              Reveal the token first to include it in the preview, or use Copy config to copy a
+              Reveal the token first to view it here, or use Copy config to copy a
               ready-to-paste configuration with the current token.
             </p>
             <div className="grid gap-2">

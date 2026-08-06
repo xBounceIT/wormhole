@@ -1,6 +1,6 @@
 {
   "name": "wormhole-electron",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "private": true,
   "description": "Electron migration shell for Wormhole",
   "main": "dist-electron/main.js",
