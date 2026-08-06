@@ -152,6 +152,10 @@ const wormholeBridge = {
     ipcRenderer.on('update:progress', handler);
     return () => ipcRenderer.removeListener('update:progress', handler);
   },
+  readLogsInfo: () => ipcRenderer.invoke('settings:logs-info'),
+  setLogRetentionDays: (days: number) => ipcRenderer.invoke('settings:set-log-retention', days),
+  openCurrentLogFile: () => ipcRenderer.invoke('logs:open-current-file'),
+  openLogsFolder: () => ipcRenderer.invoke('logs:open-folder'),
   openSshSession: (request: { sessionId: string; nodeId: string; columns: number; rows: number }) =>
     ipcRenderer.invoke('ssh:open', request),
   trustSshHostKey: (request: { nodeId: string; expected: string; received: string }) =>

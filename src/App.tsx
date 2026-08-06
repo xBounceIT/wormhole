@@ -9560,6 +9560,10 @@ function SettingsPage({
   const [mcpBusy, setMcpBusy] = useState(false);
   const [mcpError, setMcpError] = useState('');
   const [mcpMessage, setMcpMessage] = useState('');
+  const [logsInfo, setLogsInfo] = useState<WormholeLogsInfo | null>(null);
+  const [logsOpenBusy, setLogsOpenBusy] = useState(false);
+  const [retentionBusy, setRetentionBusy] = useState(false);
+  const [logsError, setLogsError] = useState('');
 
   useEffect(() => {
     if (settingsUpdatesRequest > 0) setActiveTab('updates');
@@ -9619,6 +9623,25 @@ function SettingsPage({
     };
   }, [authGate]);
 
+  useEffect(() => {
+    if (authGate !== 'unlocked' || !window.wormhole) return;
+    let active = true;
+    void window.wormhole
+      .readLogsInfo()
+      .then((info) => {
+        if (!active) return;
+        setLogsInfo(info);
+        setRetentionDays(String(info.logRetentionDays));
+        setLogsError('');
+      })
+      .catch((error) => {
+        if (active) setLogsError(logsErrorMessage(error));
+      });
+    return () => {
+      active = false;
+    };
+  }, [authGate]);
+
   function handlePromptBeforeTunnelConnectChange(enabled: boolean) {
     setPromptBeforeTunnelConnect(enabled);
     if (!window.wormhole) return;
@@ -9658,6 +9681,11 @@ function SettingsPage({
       return error.message;
     }
     return "Wormhole couldn't save this change. Try again.";
+  }
+
+  function logsErrorMessage(error: unknown): string {
+    if (error instanceof Error && error.message) return error.message;
+    return "Wormhole couldn't complete this action. Try again.";
   }
 
   async function persistAuthSettings(
@@ -10005,6 +10033,58 @@ function SettingsPage({
       setMcpError(errorMessage(error));
     } finally {
       setMcpBusy(false);
+    }
+  }
+
+  async function openCurrentLogFile() {
+    if (logsOpenBusy || retentionBusy || !window.wormhole) return;
+    setLogsOpenBusy(true);
+    setLogsError('');
+    try {
+      await window.wormhole.openCurrentLogFile();
+    } catch (error) {
+      setLogsError(logsErrorMessage(error));
+    } finally {
+      setLogsOpenBusy(false);
+    }
+  }
+
+  async function openLogsFolder() {
+    if (logsOpenBusy || retentionBusy || !window.wormhole) return;
+    setLogsOpenBusy(true);
+    setLogsError('');
+    try {
+      await window.wormhole.openLogsFolder();
+    } catch (error) {
+      setLogsError(logsErrorMessage(error));
+    } finally {
+      setLogsOpenBusy(false);
+    }
+  }
+
+  async function commitLogRetention() {
+    if (retentionBusy || !window.wormhole) return;
+    const saved = logsInfo?.logRetentionDays ?? 14;
+    const days = Number(retentionDays);
+    if (!Number.isInteger(days) || days < 1 || days > 365) {
+      setRetentionDays(String(saved));
+      setLogsError('Log retention must be a whole number between 1 and 365 days.');
+      return;
+    }
+    if (days === saved) return;
+    setRetentionBusy(true);
+    setLogsError('');
+    try {
+      const result = await window.wormhole.setLogRetentionDays(days);
+      setRetentionDays(String(result.logRetentionDays));
+      setLogsInfo((current) =>
+        current ? { ...current, logRetentionDays: result.logRetentionDays } : current,
+      );
+    } catch (error) {
+      setRetentionDays(String(saved));
+      setLogsError(logsErrorMessage(error));
+    } finally {
+      setRetentionBusy(false);
     }
   }
 
@@ -10410,12 +10490,28 @@ function SettingsPage({
                 id="settings-log-file"
                 readOnly
                 spellCheck={false}
-                value="%LOCALAPPDATA%\\Wormhole\\logs\\wormhole.log"
+                value={
+                  logsInfo?.currentLogFilePath ??
+                  '%LOCALAPPDATA%\\Wormhole\\logs\\wormhole-YYYYMMDD.log'
+                }
               />
             </div>
             <div className="flex flex-wrap gap-2">
-              <Button size="sm">Open today&apos;s log</Button>
-              <Button size="sm" variant="outline">
+              <Button
+                disabled={logsOpenBusy || retentionBusy}
+                onClick={() => void openCurrentLogFile()}
+                size="sm"
+                type="button"
+              >
+                Open today&apos;s log
+              </Button>
+              <Button
+                disabled={logsOpenBusy || retentionBusy}
+                onClick={() => void openLogsFolder()}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
                 Open log folder
               </Button>
             </div>
@@ -10425,17 +10521,27 @@ function SettingsPage({
             <div className="grid max-w-52 gap-2">
               <Label htmlFor="settings-retention">Retain daily log files</Label>
               <Input
+                disabled={retentionBusy}
                 id="settings-retention"
-                min="1"
                 max="365"
+                min="1"
+                onBlur={() => void commitLogRetention()}
                 onChange={(event) => setRetentionDays(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') {
+                    event.preventDefault();
+                    void commitLogRetention();
+                  }
+                }}
                 type="number"
                 value={retentionDays}
               />
             </div>
             <p className="text-[11px] leading-relaxed text-muted-foreground">
-              Logs rotate daily. Retention changes are saved by the native implementation.
+              Logs rotate daily. Retention changes are saved now and apply after restarting
+              Wormhole.
             </p>
+            {logsError ? <p className="text-[11px] text-destructive">{logsError}</p> : null}
           </SettingsSection>
         </SettingsTabPanel>
 

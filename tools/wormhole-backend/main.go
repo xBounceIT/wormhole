@@ -137,7 +137,7 @@ type tunnelRow struct {
 }
 
 func main() {
-	operation := flag.String("operation", "workspace", "backend operation: workspace, credential-*, tunnel-*, workspace-update-node, workspace-update-node-web-settings, workspace-update-node-tunnel, web-target, migrate, ssh, serial, ssh-trust-host-key, serve, rdp, or auth-*")
+	operation := flag.String("operation", "workspace", "backend operation: workspace, credential-*, tunnel-*, workspace-update-node, workspace-update-node-web-settings, workspace-update-node-tunnel, web-target, migrate, ssh, serial, ssh-trust-host-key, logs-info, settings-set-log-retention, open-log-file, open-logs-folder, serve, rdp, or auth-*")
 	databasePath := flag.String("database", "", "path to the Wormhole SQLite database")
 	electronUserDataPath := flag.String("electron-user-data", "", "path to the Electron user-data directory")
 	credentialReader := flag.String("credential-reader", "", "path to the Windows Credential Manager reader")
@@ -150,18 +150,26 @@ func main() {
 		os.Exit(1)
 		return
 	}
+	initAppLogging(*databasePath)
+	defer closeAppLog()
 	if *operation == "ssh" {
+		logInfo("native SSH backend started")
 		if err := serveSSH(*databasePath, os.Stdin, os.Stdout, *electronUserDataPath); err != nil {
+			logError("native SSH backend failed: %v", err)
 			writeError(err.Error())
 			os.Exit(1)
 		}
+		logInfo("native SSH backend stopped")
 		return
 	}
 	if *operation == "serial" {
+		logInfo("native serial backend started")
 		if err := serveSerial(*databasePath, os.Stdin, os.Stdout, *electronUserDataPath); err != nil {
+			logError("native serial backend failed: %v", err)
 			writeError(err.Error())
 			os.Exit(1)
 		}
+		logInfo("native serial backend stopped")
 		return
 	}
 	if *operation == "update-download" {
@@ -175,6 +183,7 @@ func main() {
 	}
 	var result any
 	var err error
+	logInfo("backend operation %s started", *operation)
 	switch *operation {
 	case "workspace":
 		result, err = loadWorkspace(*databasePath)
@@ -367,6 +376,30 @@ func main() {
 		if err == nil {
 			result, err = checkForUpdate(*databasePath, request)
 		}
+	case "logs-info":
+		result, err = logsInfo(*databasePath)
+	case "settings-set-log-retention":
+		var request struct {
+			Days int `json:"days"`
+		}
+		err = decodeInput(&request)
+		if err == nil {
+			var days int
+			days, err = writeLogRetentionDays(*databasePath, request.Days)
+			if err == nil {
+				result = map[string]any{"updated": true, "logRetentionDays": days}
+			}
+		}
+	case "open-log-file":
+		err = openCurrentDayLogFile(*databasePath)
+		if err == nil {
+			result = map[string]bool{"opened": true}
+		}
+	case "open-logs-folder":
+		err = openLogsDirectory(*databasePath)
+		if err == nil {
+			result = map[string]bool{"opened": true}
+		}
 	case "auth-hello-status":
 		result = checkWindowsHello()
 	case "auth-hello-verify":
@@ -387,10 +420,13 @@ func main() {
 			}
 		}
 	case "serve":
+		logInfo("native VNC backend started")
 		if err := serveBackend(*databasePath, *electronUserDataPath); err != nil {
+			logError("native VNC backend failed: %v", err)
 			writeError(err.Error())
 			os.Exit(1)
 		}
+		logInfo("native VNC backend stopped")
 		return
 	case "rdp":
 		err = runRdpController(*databasePath, *rdpHost, *freerdpPath)
@@ -399,12 +435,15 @@ func main() {
 	}
 
 	if err != nil {
+		logError("backend operation %s failed: %v", *operation, err)
 		writeError(err.Error())
 		os.Exit(1)
 		return
 	}
+	logInfo("backend operation %s completed", *operation)
 
 	if err := json.NewEncoder(os.Stdout).Encode(result); err != nil {
+		logError("failed to encode backend response: %v", err)
 		writeError("failed to encode backend response")
 		os.Exit(1)
 	}

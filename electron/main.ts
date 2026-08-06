@@ -86,7 +86,11 @@ type BackendOperation =
   | 'settings-set-prompt-before-tunnel'
   | 'settings-set-update-preferences'
   | 'update-check'
-  | 'update-download';
+  | 'update-download'
+  | 'logs-info'
+  | 'settings-set-log-retention'
+  | 'open-log-file'
+  | 'open-logs-folder';
 type VncAction =
   | 'vnc.connect'
   | 'vnc.disconnect'
@@ -257,6 +261,12 @@ type TunnelDetailsResponse = {
 type AuthStateResponse = {
   mode: string;
   configured: boolean;
+};
+
+type WormholeLogsInfo = {
+  currentLogFilePath: string;
+  logsDirectoryPath: string;
+  logRetentionDays: number;
 };
 
 const authSession = new AuthSession();
@@ -3312,6 +3322,38 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       throw new Error('The release URL is invalid.');
     }
     await shell.openExternal(value);
+  });
+
+  ipcMain.handle('settings:logs-info', async () => {
+    return serializeAuthOperation(async () => {
+      return runBackend<WormholeLogsInfo>('logs-info');
+    });
+  });
+
+  ipcMain.handle('settings:set-log-retention', async (_event, value: unknown) => {
+    const days = typeof value === 'number' && Number.isInteger(value) ? value : NaN;
+    if (!Number.isInteger(days)) throw new Error('Log retention setting is invalid.');
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ updated: boolean; logRetentionDays: number }>(
+        'settings-set-log-retention',
+        { days },
+      );
+    });
+  });
+
+  ipcMain.handle('logs:open-current-file', async () => {
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ opened: boolean }>('open-log-file');
+    });
+  });
+
+  ipcMain.handle('logs:open-folder', async () => {
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ opened: boolean }>('open-logs-folder');
+    });
   });
 
   ipcMain.handle('tunnel:create', async (_event, value: unknown) => {

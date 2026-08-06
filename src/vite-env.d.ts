@@ -434,6 +434,12 @@ interface WormholeAppSettings {
   skippedUpdateVersion: string | null;
 }
 
+interface WormholeLogsInfo {
+  currentLogFilePath: string;
+  logsDirectoryPath: string;
+  logRetentionDays: number;
+}
+
 interface Window {
   wormhole?: {
     loadWorkspace(): Promise<WormholeWorkspaceSnapshot>;
@@ -549,6 +555,10 @@ interface Window {
     onUpdateProgress(
       listener: (progress: { downloaded: number; total: number }) => void,
     ): () => void;
+    readLogsInfo(): Promise<WormholeLogsInfo>;
+    setLogRetentionDays(days: number): Promise<{ updated: boolean; logRetentionDays: number }>;
+    openCurrentLogFile(): Promise<{ opened: boolean }>;
+    openLogsFolder(): Promise<{ opened: boolean }>;
     openSshSession(request: {
       sessionId: string;
       nodeId: string;
