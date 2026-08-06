@@ -60,14 +60,28 @@ INSERT INTO Nodes (Id, ParentId, Name, Kind, Protocol, Host, Port, TunnelEnabled
 	}
 }
 
-func TestResolveWebTargetRejectsTunnelInsteadOfFallingBackToDirectNetwork(t *testing.T) {
+func TestResolveWebTargetReturnsInheritedTunnelForNativeController(t *testing.T) {
 	databasePath := createWebTargetDatabase(t, `
 INSERT INTO Nodes (Id, ParentId, Name, Kind, Protocol, Host, Port, TunnelEnabled, TunnelConfigId, HttpIgnoreCertErrors) VALUES
-    ('web', NULL, 'Private UI', 1, 4, 'private.example.test', 443, 1, 'tunnel-id', 0);`)
+    ('web', NULL, 'Private UI', 1, 4, 'private.example.test', 443, 1, '11111111-2222-3333-4444-555555555555', 0);`)
+
+	target, err := resolveWebTarget(databasePath, webTargetRequest{NodeID: "web"})
+	if err != nil {
+		t.Fatalf("resolve tunneled web target: %v", err)
+	}
+	if target.TunnelConfigID != "11111111-2222-3333-4444-555555555555" {
+		t.Fatalf("tunnel inheritance was not preserved: %#v", target)
+	}
+}
+
+func TestResolveWebTargetRejectsEnabledTunnelWithoutConfig(t *testing.T) {
+	databasePath := createWebTargetDatabase(t, `
+INSERT INTO Nodes (Id, ParentId, Name, Kind, Protocol, Host, Port, TunnelEnabled, TunnelConfigId, HttpIgnoreCertErrors) VALUES
+    ('web', NULL, 'Private UI', 1, 4, 'private.example.test', 443, 1, NULL, 0);`)
 
 	_, err := resolveWebTarget(databasePath, webTargetRequest{NodeID: "web"})
-	if err == nil || !strings.Contains(err.Error(), "VPN tunnel") {
-		t.Fatalf("expected a fail-closed tunnel error, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "no tunnel") {
+		t.Fatalf("expected a missing tunnel error, got %v", err)
 	}
 }
 

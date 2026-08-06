@@ -57,26 +57,39 @@ the renderer receives only session metadata and validated terminal screen frames
 plus bounded scrollback batches through the preload bridge. It never opens a
 socket or reads Credential Manager / DPAPI data directly. Local saved passwords and SSH
 keys are supported; Bitwarden credentials, interactive credential prompts, and
-Quick Connect are not wired in this migration slice. A connection configured
-for a VPN tunnel is rejected until Electron tunnel routing is available rather
-than falling back to a direct SSH connection.
+Quick Connect are not wired in this migration slice. Saved SSH connections
+resolve inherited VPN settings in Go; when a route is enabled, Electron starts
+the selected Go userspace sidecar and dials only through its loopback SOCKS5
+endpoint. A failed tunnel never falls back to a direct SSH connection.
 
 VNC sessions use the same bundled Go backend as a long-lived JSON-lines
 process. The renderer sends connect, pointer, and key commands over the
 preload bridge; the Go process owns the native RFB connection, framebuffer
-decoding, and DPAPI-backed password lookup. An effective VPN route currently
-fails closed until the Electron Go tunnel providers are migrated; it is never
-silently replaced with a direct TCP connection.
+decoding, and DPAPI-backed password lookup. Effective VNC routes use the same
+Go VPN sidecars and SOCKS5 path as SSH. RDP uses a Go-owned loopback forwarder
+over that SOCKS5 endpoint, so the native ActiveX/FreeRDP client never bypasses
+the selected tunnel.
+
+The Tunnels page creates, edits, tests, imports, and deletes encrypted tunnel records,
+and folder/connection editors assign a route with inherit / off / selected
+tunnel semantics. WireGuard, OpenVPN, Fortinet (password, embedded SAML, or system-browser
+SAML), WatchGuard (automatic, password, imported profile, or SAML), Stormshield (automatic,
+imported profile, and OTP), Azure VPN with Microsoft Entra ID, and Cisco Secure Client run
+through native Go backends and bundled Go sidecars. Interactive challenges are serialized by
+the Electron main process; browser tokens and VPN cookies stay inside isolated authentication
+sessions and are handed directly to Go rather than exposed to the renderer. A failed provider
+never falls back to routing outside the tunnel.
 
 Saved HTTP and HTTPS connections use a native Electron Chromium surface, kept
 separate from the React renderer. The Go backend resolves inherited web target
 settings (including the leaf-only HTTPS certificate opt-in) before Electron
-navigates it; connection tabs provide back, forward, and reload controls.
+navigates it; connection tabs provide back, forward, and reload controls. A tunneled tab
+uses an isolated Chromium session configured with the Go sidecar's loopback SOCKS5 proxy;
+the Go web controller owns the ref-counted tunnel lease until that tab closes.
 Normal tabs share only an in-memory Electron-run browser profile. A tab that
 ignores certificate errors receives its own in-memory profile so that approval
-cannot affect another connection. As with SSH and
-VNC, a connection configured for a VPN tunnel fails closed until the Go tunnel
-providers are migrated; Electron never falls back to the host network.
+cannot affect another connection. As with SSH and VNC, a failed VPN route never falls
+back to the host network.
 
 On the first Windows launch, the Electron main process copies legacy local
 Wormhole passwords (saved profiles, inline connection passwords, and the MCP

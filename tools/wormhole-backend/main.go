@@ -28,6 +28,7 @@ const (
 	credentialReaderTimeout      = 15 * time.Second
 	credentialReaderMaxOutput    = 16 * 1024 * 1024
 	backendMaxRequestBytes       = 64 * 1024
+	backendMaxTunnelRequestBytes = 4 * 1024 * 1024
 	maxCredentialTargetLength    = 256
 	maxCredentialAccountLength   = 513
 	maxCredentialPasswordUnits   = 1280
@@ -66,6 +67,8 @@ type treeNode struct {
 	HTTPIgnoreCertErrors *bool       `json:"httpIgnoreCertErrors,omitempty"`
 	Children             []*treeNode `json:"children,omitempty"`
 	SshAutoSudo          *bool       `json:"sshAutoSudo,omitempty"`
+	TunnelEnabled        *bool       `json:"tunnelEnabled,omitempty"`
+	TunnelConfigID       string      `json:"tunnelConfigId,omitempty"`
 	Persisted            bool        `json:"persisted,omitempty"`
 }
 
@@ -77,6 +80,12 @@ type workspaceNodeSshSettingsRequest struct {
 type workspaceNodeWebSettingsRequest struct {
 	NodeID               string `json:"nodeId"`
 	HTTPIgnoreCertErrors *bool  `json:"httpIgnoreCertErrors"`
+}
+
+type workspaceNodeTunnelSettingsRequest struct {
+	NodeID         string `json:"nodeId"`
+	TunnelEnabled  *bool  `json:"tunnelEnabled"`
+	TunnelConfigID string `json:"tunnelConfigId"`
 }
 
 type credentialRecord struct {
@@ -107,6 +116,8 @@ type nodeRow struct {
 	Port                 sql.NullInt64
 	SshAutoSudo          sql.NullInt64
 	HTTPIgnoreCertErrors sql.NullInt64
+	TunnelEnabled        sql.NullInt64
+	TunnelConfigID       sql.NullString
 }
 
 type credentialRow struct {
@@ -126,7 +137,7 @@ type tunnelRow struct {
 }
 
 func main() {
-	operation := flag.String("operation", "workspace", "backend operation: workspace, credential-*, workspace-update-node, workspace-update-node-web-settings, web-target, migrate, ssh, serial, ssh-trust-host-key, serve, rdp, or auth-*")
+	operation := flag.String("operation", "workspace", "backend operation: workspace, credential-*, tunnel-*, workspace-update-node, workspace-update-node-web-settings, workspace-update-node-tunnel, web-target, migrate, ssh, serial, ssh-trust-host-key, serve, rdp, or auth-*")
 	databasePath := flag.String("database", "", "path to the Wormhole SQLite database")
 	electronUserDataPath := flag.String("electron-user-data", "", "path to the Electron user-data directory")
 	credentialReader := flag.String("credential-reader", "", "path to the Windows Credential Manager reader")
@@ -153,7 +164,6 @@ func main() {
 		}
 		return
 	}
-
 	var result any
 	var err error
 	switch *operation {
@@ -164,6 +174,30 @@ func main() {
 		err = decodeInput(&request)
 		if err == nil {
 			result, err = resolveWebTarget(*databasePath, request)
+		}
+	case "watchguard-import":
+		var request watchguardImportRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = importWatchguardFile(request)
+		}
+	case "azure-vpn-import":
+		var request azureImportRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = importAzureVPNFile(request)
+		}
+	case "cisco-profile-import":
+		var request ciscoImportRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = importCiscoProfileFile(request)
+		}
+	case "ovpn-file-import":
+		var request ovpnImportRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = importOvpnFile(request)
 		}
 	case "credential-create":
 		var request credentialCreateRequest
@@ -204,6 +238,42 @@ func main() {
 				result = map[string]bool{"updated": true}
 			}
 		}
+	case "workspace-update-node-tunnel":
+		var request workspaceNodeTunnelSettingsRequest
+		err = decodeInput(&request)
+		if err == nil {
+			err = updateWorkspaceNodeTunnelSettings(*databasePath, request)
+			if err == nil {
+				result = map[string]bool{"updated": true}
+			}
+		}
+	case "tunnel-create":
+		var request tunnelWriteRequest
+		err = decodeInputLimit(os.Stdin, &request, backendMaxTunnelRequestBytes)
+		if err == nil {
+			result, err = createTunnel(*databasePath, request)
+		}
+	case "tunnel-read":
+		var request tunnelReadRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = readTunnel(*databasePath, request)
+		}
+	case "tunnel-update":
+		var request tunnelWriteRequest
+		err = decodeInputLimit(os.Stdin, &request, backendMaxTunnelRequestBytes)
+		if err == nil {
+			result, err = updateTunnel(*databasePath, request)
+		}
+	case "tunnel-delete":
+		var request tunnelDeleteRequest
+		err = decodeInput(&request)
+		if err == nil {
+			err = deleteTunnel(*databasePath, request)
+			if err == nil {
+				result = map[string]bool{"deleted": true}
+			}
+		}
 	case "migrate":
 		result, err = migrateCredentials(*databasePath, *credentialReader)
 	case "auth-status":
@@ -225,6 +295,23 @@ func main() {
 		err = decodeInput(&request)
 		if err == nil {
 			result, err = authUpdateSettings(*databasePath, request)
+		}
+	case "settings-read":
+		var enabled bool
+		enabled, err = readPromptBeforeTunnelConnect(*databasePath)
+		if err == nil {
+			result = map[string]bool{"promptBeforeTunnelConnect": enabled}
+		}
+	case "settings-set-prompt-before-tunnel":
+		var request struct {
+			Enabled bool `json:"enabled"`
+		}
+		err = decodeInput(&request)
+		if err == nil {
+			err = writePromptBeforeTunnelConnect(*databasePath, request.Enabled)
+			if err == nil {
+				result = map[string]bool{"updated": true}
+			}
 		}
 	case "auth-hello-status":
 		result = checkWindowsHello()
@@ -252,7 +339,7 @@ func main() {
 		}
 		return
 	case "rdp":
-		err = runRdpController(*rdpHost, *freerdpPath)
+		err = runRdpController(*databasePath, *rdpHost, *freerdpPath)
 	default:
 		err = fmt.Errorf("unsupported operation %q", *operation)
 	}
@@ -274,8 +361,12 @@ func decodeInput[T any](target *T) error {
 }
 
 func decodeInputReader[T any](reader io.Reader, target *T) error {
-	contents, err := io.ReadAll(io.LimitReader(reader, backendMaxRequestBytes+1))
-	if err != nil || len(contents) > backendMaxRequestBytes {
+	return decodeInputLimit(reader, target, backendMaxRequestBytes)
+}
+
+func decodeInputLimit[T any](reader io.Reader, target *T, limit int64) error {
+	contents, err := io.ReadAll(io.LimitReader(reader, limit+1))
+	if err != nil || len(contents) > int(limit) {
 		return errors.New("backend request was invalid")
 	}
 	if err := json.Unmarshal(contents, target); err != nil {
@@ -341,9 +432,59 @@ CREATE TABLE IF NOT EXISTS ElectronMigrations (
     Status        TEXT NOT NULL,
     MigratedCount INTEGER NOT NULL DEFAULT 0,
     MissingCount  INTEGER NOT NULL DEFAULT 0
-);`)
+);
+CREATE TABLE IF NOT EXISTS TunnelConfigs (
+    Id         TEXT PRIMARY KEY NOT NULL,
+    Name       TEXT NOT NULL,
+    Kind       INTEGER NOT NULL,
+    CreatedAt  TEXT NOT NULL,
+    UpdatedAt  TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS UX_TunnelConfigs_Name ON TunnelConfigs(Name);`)
 	if err != nil {
 		return fmt.Errorf("cannot create migration tables: %w", err)
+	}
+	nodesExist, err := tableExists(database, "Nodes")
+	if err != nil {
+		return err
+	}
+	if !nodesExist {
+		return nil
+	}
+	columns, err := tableColumns(database, "Nodes")
+	if err != nil {
+		return err
+	}
+	for _, column := range []struct{ name, statement string }{
+		{"TunnelEnabled", "ALTER TABLE Nodes ADD COLUMN TunnelEnabled INTEGER NULL;"},
+		{"TunnelConfigId", "ALTER TABLE Nodes ADD COLUMN TunnelConfigId TEXT NULL;"},
+	} {
+		if _, exists := columns[column.name]; exists {
+			continue
+		}
+		if _, err := database.Exec(column.statement); err != nil {
+			refreshed, inspectErr := tableColumns(database, "Nodes")
+			if inspectErr != nil {
+				return inspectErr
+			}
+			if _, concurrentlyAdded := refreshed[column.name]; !concurrentlyAdded {
+				return fmt.Errorf("cannot add VPN tunnel support: %w", err)
+			}
+		}
+	}
+	if _, err := database.Exec("CREATE INDEX IF NOT EXISTS IX_Nodes_TunnelConfigId ON Nodes(TunnelConfigId) WHERE TunnelConfigId IS NOT NULL;"); err != nil {
+		return fmt.Errorf("cannot index VPN tunnel assignments: %w", err)
+	}
+	// Keep the legacy .NET runner interoperable while Go takes ownership of Electron migrations.
+	// Without this marker, a later WinUI launch would replay 0003 and fail on duplicate columns.
+	if _, err := database.Exec(`
+CREATE TABLE IF NOT EXISTS __migration_history (
+    Id TEXT PRIMARY KEY NOT NULL,
+    AppliedAtUtc TEXT NOT NULL
+);
+INSERT OR IGNORE INTO __migration_history (Id, AppliedAtUtc) VALUES (?, ?);`,
+		"0003_add_tunnel_config", time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("cannot record the VPN tunnel migration: %w", err)
 	}
 	return nil
 }
@@ -684,8 +825,16 @@ func loadTree(database *sql.DB) ([]*treeNode, error) {
 	if _, ok := columns["HttpIgnoreCertErrors"]; ok {
 		httpIgnoreCertErrorsExpression = "HttpIgnoreCertErrors"
 	}
+	tunnelEnabledExpression := "NULL"
+	if _, ok := columns["TunnelEnabled"]; ok {
+		tunnelEnabledExpression = "TunnelEnabled"
+	}
+	tunnelConfigIDExpression := "NULL"
+	if _, ok := columns["TunnelConfigId"]; ok {
+		tunnelConfigIDExpression = "TunnelConfigId"
+	}
 	rows, err := database.Query(`
-SELECT Id, ParentId, Name, Kind, SortOrder, Protocol, Host, ` + portExpression + ` AS Port, ` + sshAutoSudoExpression + ` AS SshAutoSudo, ` + httpIgnoreCertErrorsExpression + ` AS HttpIgnoreCertErrors
+SELECT Id, ParentId, Name, Kind, SortOrder, Protocol, Host, ` + portExpression + ` AS Port, ` + sshAutoSudoExpression + ` AS SshAutoSudo, ` + httpIgnoreCertErrorsExpression + ` AS HttpIgnoreCertErrors, ` + tunnelEnabledExpression + ` AS TunnelEnabled, ` + tunnelConfigIDExpression + ` AS TunnelConfigId
 FROM Nodes
 ORDER BY SortOrder, Name, Id;`)
 	if err != nil {
@@ -700,7 +849,7 @@ ORDER BY SortOrder, Name, Id;`)
 	protocolByID := map[string]sql.NullInt64{}
 	for rows.Next() {
 		var row nodeRow
-		if err := rows.Scan(&row.ID, &row.ParentID, &row.Name, &row.Kind, &row.SortOrder, &row.Protocol, &row.Host, &row.Port, &row.SshAutoSudo, &row.HTTPIgnoreCertErrors); err != nil {
+		if err := rows.Scan(&row.ID, &row.ParentID, &row.Name, &row.Kind, &row.SortOrder, &row.Protocol, &row.Host, &row.Port, &row.SshAutoSudo, &row.HTTPIgnoreCertErrors, &row.TunnelEnabled, &row.TunnelConfigID); err != nil {
 			return nil, fmt.Errorf("cannot read a connection: %w", err)
 		}
 		node := &treeNode{ID: strings.TrimSpace(row.ID), Name: row.Name, Persisted: true}
@@ -712,6 +861,11 @@ ORDER BY SortOrder, Name, Id;`)
 			value := row.HTTPIgnoreCertErrors.Int64 != 0
 			node.HTTPIgnoreCertErrors = &value
 		}
+		if row.TunnelEnabled.Valid {
+			value := row.TunnelEnabled.Int64 != 0
+			node.TunnelEnabled = &value
+		}
+		node.TunnelConfigID = normalizeTunnelID(nullableString(row.TunnelConfigID))
 		if row.Kind == 0 {
 			node.Kind = "folder"
 		} else {
@@ -865,13 +1019,11 @@ func updateWorkspaceNodeWebSettings(databasePath string, request workspaceNodeWe
 	if nodeID == "" || len(nodeID) > 128 {
 		return errors.New("workspace node id is invalid")
 	}
-
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		return err
 	}
 	defer database.Close()
-
 	exists, err := tableExists(database, "Nodes")
 	if err != nil {
 		return err
@@ -929,6 +1081,72 @@ func updateWorkspaceNodeWebSettings(databasePath string, request workspaceNodeWe
 		return nil
 	}
 	return errors.New("workspace connection was not found")
+}
+
+func updateWorkspaceNodeTunnelSettings(databasePath string, request workspaceNodeTunnelSettingsRequest) error {
+	nodeID := strings.TrimSpace(request.NodeID)
+	if nodeID == "" || len(nodeID) > 128 {
+		return errors.New("workspace node id is invalid")
+	}
+	configID := normalizeTunnelID(request.TunnelConfigID)
+	if request.TunnelConfigID != "" && configID == "" {
+		return errors.New("VPN tunnel id is invalid")
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	if err := ensureMigrationSchema(database); err != nil {
+		return err
+	}
+	columns, err := tableColumns(database, "Nodes")
+	if err != nil {
+		return err
+	}
+	if _, ok := columns["TunnelEnabled"]; !ok {
+		return errors.New("the Wormhole database schema is missing VPN tunnel support")
+	}
+	if _, ok := columns["TunnelConfigId"]; !ok {
+		return errors.New("the Wormhole database schema is missing VPN tunnel support")
+	}
+	if configID != "" {
+		var found int
+		err := database.QueryRow("SELECT 1 FROM TunnelConfigs WHERE lower(Id) = lower(?) LIMIT 1;", configID).Scan(&found)
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("the selected VPN tunnel was not found")
+		}
+		if err != nil {
+			return fmt.Errorf("could not validate VPN tunnel: %w", err)
+		}
+	}
+	var enabled any
+	if request.TunnelEnabled != nil {
+		if *request.TunnelEnabled {
+			enabled = int64(1)
+		} else {
+			enabled = int64(0)
+		}
+	}
+	var config any
+	if configID != "" {
+		config = configID
+	}
+	result, err := database.Exec(
+		"UPDATE Nodes SET TunnelEnabled = ?, TunnelConfigId = ?, UpdatedAt = ? WHERE lower(Id) = lower(?);",
+		enabled, config, time.Now().UTC().Format(time.RFC3339Nano), nodeID,
+	)
+	if err != nil {
+		return fmt.Errorf("could not update VPN tunnel settings: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return errors.New("workspace node was not found")
+	}
+	return nil
 }
 
 func loadCredentials(database *sql.DB) ([]credentialRecord, error) {

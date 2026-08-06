@@ -31,6 +31,7 @@ type PendingRequest = {
 };
 
 const requestTimeoutMs = 15_000;
+const startRequestTimeoutMs = 315_000;
 
 /**
  * Supervises one long-lived Go RDP controller. The controller owns all native/process work;
@@ -216,10 +217,13 @@ export class RdpBackendClient {
     command: RdpWireCommand,
   ): Promise<RdpBackendEvent> {
     return new Promise<RdpBackendEvent>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(command.requestId);
-        reject(new Error('RDP backend did not acknowledge the command.'));
-      }, requestTimeoutMs);
+      const timer = setTimeout(
+        () => {
+          this.pending.delete(command.requestId);
+          reject(new Error('RDP backend did not acknowledge the command.'));
+        },
+        command.op === 'start' ? startRequestTimeoutMs : requestTimeoutMs,
+      );
       this.pending.set(command.requestId, { resolve, reject, timer });
       try {
         child.stdin.write(`${JSON.stringify(command)}\n`, (error) => {

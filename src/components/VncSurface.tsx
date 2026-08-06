@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type PointerE
 import { AlertCircle, KeyRound, LoaderCircle, Monitor, RefreshCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { ConnectionStepper, type TunnelProgress } from './ConnectionStepper';
 
 type PointerLocation = Pick<PointerEvent<HTMLDivElement>, 'clientX' | 'clientY'>;
 type PointerCommand = { x: number; y: number; buttons: number };
@@ -12,6 +13,7 @@ export type VncSurfaceSession = {
   nodeId?: string;
   host: string;
   port?: number;
+  tunnelProgress?: TunnelProgress | null;
 };
 
 type VncStatus = 'idle' | 'connecting' | 'connected' | 'failed' | 'disconnected';
@@ -93,6 +95,7 @@ export function VncSurface({ session }: { session: VncSurfaceSession }) {
   const [message, setMessage] = useState('');
   const [passwordRequired, setPasswordRequired] = useState(false);
   const [password, setPassword] = useState('');
+  const [tunnelProgress, setTunnelProgress] = useState<TunnelProgress | null>(null);
   const [frame, setFrame] = useState<string>();
   const [frameSize, setFrameSize] = useState({ width: 0, height: 0 });
   const imageRef = useRef<HTMLImageElement>(null);
@@ -140,6 +143,7 @@ export function VncSurface({ session }: { session: VncSurfaceSession }) {
       setPasswordRequired(false);
       setFrame(undefined);
       setFrameSize({ width: 0, height: 0 });
+      setTunnelProgress(null);
       lastPointer.current = null;
       pointerMoveGeneration.current += 1;
       pendingPointerMove.current = null;
@@ -201,6 +205,10 @@ export function VncSurface({ session }: { session: VncSurfaceSession }) {
     let mounted = true;
     const unsubscribe = api.onBackendEvent((event) => {
       if (!mounted || event.sessionId !== session.id) return;
+      if (event.type === 'tunnel.progress' && event.phase) {
+        setTunnelProgress({ phase: event.phase, detail: event.detail });
+        return;
+      }
       if (event.type === 'vnc.frame' && event.image) {
         setFrame(event.image);
         setFrameSize({ width: event.width ?? 0, height: event.height ?? 0 });
@@ -219,6 +227,7 @@ export function VncSurface({ session }: { session: VncSurfaceSession }) {
     return () => {
       mounted = false;
       unsubscribe();
+      setTunnelProgress(null);
       for (const keySym of pressedKeysForCleanup.values()) {
         void sendCommand({ action: 'vnc.key', sessionId: session.id, down: false, keysym: keySym });
       }
@@ -402,15 +411,19 @@ export function VncSurface({ session }: { session: VncSurfaceSession }) {
 
       {status === 'connecting' ? (
         <div className="absolute inset-0 grid place-items-center bg-[#0c0c0c] text-center text-muted-foreground">
-          <div className="grid justify-items-center gap-3">
-            <LoaderCircle className="size-7 animate-spin" />
-            <div>
-              <p className="text-sm font-medium text-foreground">Connecting to VNC</p>
-              <p className="mt-1 text-xs">
-                {displayHost}:{session.port ?? 5900}
-              </p>
+          {tunnelProgress ? (
+            <ConnectionStepper tunnelProgress={tunnelProgress} />
+          ) : (
+            <div className="grid justify-items-center gap-3">
+              <LoaderCircle className="size-7 animate-spin" />
+              <div>
+                <p className="text-sm font-medium text-foreground">Connecting to VNC</p>
+                <p className="mt-1 text-xs">
+                  {displayHost}:{session.port ?? 5900}
+                </p>
+              </div>
             </div>
-          </div>
+          )}
         </div>
       ) : null}
 

@@ -43,6 +43,10 @@ export type RdpProfile = {
   gatewayBypassLocal?: boolean;
   gatewayUseSameCreds?: boolean;
   useExternalClient?: boolean;
+  /** Main-process-only loopback endpoint supplied by the shared Go tunnel broker. */
+  socksEndpoint?: string;
+  /** Main-process-only override: when false, the Go supervisor skips the VPN tunnel entirely. */
+  tunnelEnabled?: boolean;
 };
 
 export type RdpStartRequest = {

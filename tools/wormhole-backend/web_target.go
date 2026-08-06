@@ -29,6 +29,7 @@ type webTargetResponse struct {
 	Port             int    `json:"port"`
 	IgnoreCertErrors bool   `json:"ignoreCertErrors"`
 	TunnelConfigID   string `json:"tunnelConfigId,omitempty"`
+	ProxyURL         string `json:"proxyUrl,omitempty"`
 }
 
 type webNode struct {
@@ -221,10 +222,12 @@ func resolveWebTargetFromNodes(leaf *webNode, nodes map[string]*webNode) (webTar
 		}
 	}
 
+	resolvedTunnelID := ""
 	if tunnelEnabled.Valid && tunnelEnabled.Int64 != 0 {
-		// Keep the security boundary explicit until the Go VPN providers are migrated. In particular,
-		// do not let Chromium's default network stack turn a requested private route into a direct one.
-		return webTargetResponse{}, errors.New("HTTP/HTTPS connections configured with a VPN tunnel are not available in the Electron shell yet")
+		resolvedTunnelID = normalizeTunnelID(nullableString(tunnelConfigID))
+		if resolvedTunnelID == "" {
+			return webTargetResponse{}, errors.New("web connection has VPN enabled but no tunnel is configured")
+		}
 	}
 
 	scheme := "http"
@@ -252,7 +255,7 @@ func resolveWebTargetFromNodes(leaf *webNode, nodes map[string]*webNode) (webTar
 		Host:             resolvedHost,
 		Port:             resolvedPort,
 		IgnoreCertErrors: ignoreCertErrors,
-		TunnelConfigID:   nullableString(tunnelConfigID),
+		TunnelConfigID:   resolvedTunnelID,
 	}, nil
 }
 

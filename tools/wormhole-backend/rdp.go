@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
@@ -76,6 +78,8 @@ type rdpProfile struct {
 	GatewayBypassLocal   bool   `json:"gatewayBypassLocal,omitempty"`
 	GatewayUseSameCreds  bool   `json:"gatewayUseSameCreds,omitempty"`
 	UseExternalClient    bool   `json:"useExternalClient,omitempty"`
+	SocksEndpoint        string `json:"socksEndpoint,omitempty"`
+	TunnelEnabled        *bool  `json:"tunnelEnabled,omitempty"`
 }
 
 type rdpCommand struct {
@@ -85,6 +89,8 @@ type rdpCommand struct {
 	OwnerWindow string     `json:"ownerWindow,omitempty"`
 	Bounds      rdpBounds  `json:"bounds,omitempty"`
 	Profile     rdpProfile `json:"profile,omitempty"`
+	tunnel      *tunnelRuntime
+	forwarder   *tunnelForwarder
 }
 
 type rdpEvent struct {
@@ -106,17 +112,21 @@ type rdpProcess struct {
 	stdinMu   sync.Mutex
 	stopOnce  sync.Once
 	terminal  bool
+	tunnel    *tunnelRuntime
+	forwarder *tunnelForwarder
 }
 
 type rdpController struct {
+	databasePath   string
 	nativeHostPath string
 	freerdpPath    string
 	processes      map[string]*rdpProcess
 	mu             sync.Mutex
 }
 
-func runRdpController(nativeHostPath, freerdpPath string) error {
+func runRdpController(databasePath, nativeHostPath, freerdpPath string) error {
 	controller := &rdpController{
+		databasePath:   databasePath,
 		nativeHostPath: strings.TrimSpace(nativeHostPath),
 		freerdpPath:    strings.TrimSpace(freerdpPath),
 		processes:      make(map[string]*rdpProcess),
@@ -198,6 +208,12 @@ func (c *rdpController) start(command rdpCommand) {
 	if existing != nil {
 		stopRdpProcess(existing)
 	}
+	// Establish only after every validation/duplicate-session return above. From this point the
+	// selected launcher owns command.tunnel/forwarder and closes them on every failure path.
+	if err := c.routeRdpThroughTunnel(&command, host, port); err != nil {
+		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, Message: err.Error()})
+		return
+	}
 
 	if runtime.GOOS == "windows" {
 		c.startNative(command)
@@ -206,7 +222,202 @@ func (c *rdpController) start(command rdpCommand) {
 	c.startFreeRdp(command)
 }
 
+func (c *rdpController) routeRdpThroughTunnel(command *rdpCommand, host string, port int) error {
+	if command.Profile.TunnelEnabled != nil && !*command.Profile.TunnelEnabled {
+		return nil
+	}
+	if strings.TrimSpace(command.Profile.NodeID) == "" {
+		return nil
+	}
+	tunnelID, enabled, err := resolveNodeTunnel(c.databasePath, command.Profile.NodeID)
+	if err != nil {
+		return err
+	}
+	if !enabled {
+		return nil
+	}
+	if tunnelID == "" {
+		return errors.New("RDP connection enables a VPN tunnel but no tunnel is configured")
+	}
+	if command.Profile.SocksEndpoint != "" && !isLoopbackSocksEndpoint(command.Profile.SocksEndpoint) {
+		return errors.New("RDP VPN proxy endpoint is invalid")
+	}
+	if command.Profile.UseExternalClient {
+		return errors.New("RDP external client cannot be used with a VPN tunnel")
+	}
+	if command.Profile.GatewayHostname != "" && command.Profile.GatewayUsageMethod != 0 {
+		return errors.New("RDP Gateway cannot be used with a VPN tunnel")
+	}
+	if command.Profile.ServerAuthentication != nil && *command.Profile.ServerAuthentication == 1 {
+		return errors.New("strict RDP server authentication cannot be used with a VPN tunnel")
+	}
+	var runtime *tunnelRuntime
+	var forwarder *tunnelForwarder
+	if command.Profile.SocksEndpoint != "" {
+		forwarder, err = startSocksForwarder(
+			command.Profile.SocksEndpoint, net.JoinHostPort(host, strconv.Itoa(port)),
+		)
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), tunnelStartTimeout)
+		defer cancel()
+		runtime, err = startTunnelRuntime(ctx, c.databasePath, tunnelID)
+		if err == nil {
+			forwarder, err = startTunnelForwarder(runtime, net.JoinHostPort(host, strconv.Itoa(port)))
+		}
+	}
+	if err != nil {
+		runtime.close()
+		return err
+	}
+	command.tunnel = runtime
+	command.forwarder = forwarder
+	command.Profile.Host, command.Profile.Port = forwarder.address()
+	return nil
+}
+
+func resolveNodeTunnel(databasePath, nodeID string) (string, bool, error) {
+	database, err := openDatabase(databasePath, true)
+	if err != nil {
+		return "", false, err
+	}
+	if database == nil {
+		return "", false, errors.New("RDP connection was not found")
+	}
+	defer database.Close()
+	columns, err := tableColumns(database, "Nodes")
+	if err != nil {
+		return "", false, err
+	}
+	if _, ok := columns["TunnelEnabled"]; !ok {
+		return "", false, nil
+	}
+	column := func(name string) string {
+		if _, ok := columns[name]; ok {
+			return name
+		}
+		return "NULL"
+	}
+	current := normalizeID(nodeID)
+	seen := map[string]struct{}{}
+	resolved := false
+	enabled := false
+	tunnelID := ""
+	leaf := true
+	for current != "" {
+		if _, duplicate := seen[current]; duplicate {
+			return "", false, errors.New("RDP connection tree contains a cycle")
+		}
+		seen[current] = struct{}{}
+		var parent, config sql.NullString
+		var enabledValue sql.NullInt64
+		err := database.QueryRow("SELECT "+column("ParentId")+", "+column("TunnelEnabled")+", "+column("TunnelConfigId")+" FROM Nodes WHERE lower(Id) = lower(?);", current).Scan(&parent, &enabledValue, &config)
+		if errors.Is(err, sql.ErrNoRows) {
+			if leaf {
+				return "", false, errors.New("RDP connection was not found")
+			}
+			break
+		}
+		if err != nil {
+			return "", false, errors.New("could not resolve RDP VPN tunnel")
+		}
+		if !resolved && enabledValue.Valid {
+			resolved = true
+			enabled = enabledValue.Int64 != 0
+		}
+		if tunnelID == "" && config.Valid {
+			tunnelID = normalizeTunnelID(config.String)
+		}
+		if !parent.Valid {
+			break
+		}
+		current = normalizeID(parent.String)
+		leaf = false
+	}
+	return tunnelID, resolved && enabled, nil
+}
+
+// resolveNodeDisplayName walks the node tree from nodeID upward and returns the first non-empty
+// Name. It is only used for the "ask whether to use the tunnel" dialog, so any failure falls
+// back to a neutral label.
+func resolveNodeDisplayName(databasePath, nodeID string) string {
+	database, err := openDatabase(databasePath, true)
+	if err != nil || database == nil {
+		return "the target"
+	}
+	defer database.Close()
+	columns, err := tableColumns(database, "Nodes")
+	if err != nil || len(columns) == 0 {
+		return "the target"
+	}
+	column := func(name string) string {
+		if _, ok := columns[name]; ok {
+			return name
+		}
+		return "NULL"
+	}
+	current := normalizeID(nodeID)
+	seen := map[string]struct{}{}
+	leaf := true
+	for current != "" {
+		if _, duplicate := seen[current]; duplicate {
+			return "the target"
+		}
+		seen[current] = struct{}{}
+		var parent, name sql.NullString
+		err := database.QueryRow(
+			"SELECT "+column("ParentId")+", "+column("Name")+" FROM Nodes WHERE lower(Id) = lower(?);",
+			current,
+		).Scan(&parent, &name)
+		if errors.Is(err, sql.ErrNoRows) {
+			if leaf {
+				return "the target"
+			}
+			break
+		}
+		if err != nil {
+			return "the target"
+		}
+		if name.Valid && strings.TrimSpace(name.String) != "" {
+			return strings.TrimSpace(name.String)
+		}
+		if !parent.Valid {
+			break
+		}
+		current = normalizeID(parent.String)
+		leaf = false
+	}
+	return "the target"
+}
+
+// tunnelConfigName returns the human-readable name of a tunnel configuration, falling back to a
+// neutral label when the row cannot be read.
+func tunnelConfigName(databasePath, id string) string {
+	if id == "" {
+		return "the configured VPN tunnel"
+	}
+	database, err := openDatabase(databasePath, true)
+	if err != nil || database == nil {
+		return "the configured VPN tunnel"
+	}
+	defer database.Close()
+	var name sql.NullString
+	if err := database.QueryRow(
+		"SELECT Name FROM TunnelConfigs WHERE lower(Id) = lower(?);",
+		id,
+	).Scan(&name); err != nil || !name.Valid || strings.TrimSpace(name.String) == "" {
+		return "the configured VPN tunnel"
+	}
+	return strings.TrimSpace(name.String)
+}
+
 func (c *rdpController) startNative(command rdpCommand) {
+	handoff := false
+	defer func() {
+		if !handoff {
+			command.forwarder.close()
+			command.tunnel.close()
+		}
+	}()
 	hostPath := c.nativeHostPath
 	if hostPath == "" {
 		hostPath = bundledSibling("wormhole-rdp-host-" + architectureName() + executableSuffix())
@@ -236,10 +447,11 @@ func (c *rdpController) startNative(command rdpCommand) {
 		return
 	}
 
-	running := &rdpProcess{sessionID: command.SessionID, backend: "activex", process: cmd, stdin: process}
+	running := &rdpProcess{sessionID: command.SessionID, backend: "activex", process: cmd, stdin: process, tunnel: command.tunnel, forwarder: command.forwarder}
 	c.mu.Lock()
 	c.processes[command.SessionID] = running
 	c.mu.Unlock()
+	handoff = true
 	if err := running.write(command); err != nil {
 		c.mu.Lock()
 		if current, ok := c.processes[command.SessionID]; ok && current == running {
@@ -279,6 +491,13 @@ func (c *rdpController) readNativeEvents(process *rdpProcess, stdout io.ReadClos
 }
 
 func (c *rdpController) startFreeRdp(command rdpCommand) {
+	handoff := false
+	defer func() {
+		if !handoff {
+			command.forwarder.close()
+			command.tunnel.close()
+		}
+	}()
 	client, err := locateFreeRdp(c.freerdpPath)
 	if err != nil {
 		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, Backend: "freerdp", Message: err.Error()})
@@ -298,10 +517,11 @@ func (c *rdpController) startFreeRdp(command rdpCommand) {
 		writeRdpEvent(rdpEvent{Type: "error", RequestID: command.RequestID, SessionID: command.SessionID, Backend: "freerdp", Message: "could not start FreeRDP"})
 		return
 	}
-	running := &rdpProcess{sessionID: command.SessionID, backend: "freerdp", process: cmd}
+	running := &rdpProcess{sessionID: command.SessionID, backend: "freerdp", process: cmd, tunnel: command.tunnel, forwarder: command.forwarder}
 	c.mu.Lock()
 	c.processes[command.SessionID] = running
 	c.mu.Unlock()
+	handoff = true
 	writeRdpEvent(rdpEvent{Type: "started", RequestID: command.RequestID, SessionID: command.SessionID, Backend: "freerdp"})
 	// FreeRDP's X11/SDL clients do not expose a stable machine-readable connected event across
 	// versions. Treat successful process launch as surface readiness; a non-zero exit still turns
@@ -322,6 +542,8 @@ func (c *rdpController) waitForExit(process *rdpProcess) {
 	if process.stdin != nil {
 		_ = process.stdin.Close()
 	}
+	process.forwarder.close()
+	process.tunnel.close()
 	if !wasCurrent {
 		// A terminal native event may have been replaced by a fast Retry. Do not emit a stale
 		// exited event that could overwrite the new attempt's UI state.
@@ -404,6 +626,8 @@ func stopRdpProcess(process *rdpProcess) {
 	if process.process != nil && process.process.Process != nil {
 		_ = process.process.Process.Kill()
 	}
+	process.forwarder.close()
+	process.tunnel.close()
 }
 
 func (c *rdpController) closeAll() {

@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
+import { ConnectionStepper, type TunnelProgress } from './ConnectionStepper';
 
 type WebSessionSurface = {
   id: string;
@@ -17,6 +18,7 @@ type WebSessionSurface = {
   port?: number;
   status: 'connecting' | 'connected' | 'failed' | 'closed' | 'placeholder';
   error?: string;
+  tunnelProgress?: TunnelProgress | null;
   webUrl?: string;
   webCanGoBack?: boolean;
   webCanGoForward?: boolean;
@@ -116,11 +118,19 @@ export function WebSurface({ session, isActive, isAuthorized, onReconnect }: Web
 
       <div aria-label="Web browser canvas" className="relative min-h-0 flex-1" ref={surfaceRef}>
         {session.status === 'connecting' || session.status === 'placeholder' ? (
-          <StatusOverlay>
-            <LoaderCircle className="size-7 animate-spin text-primary" />
-            <p className="text-sm font-medium">Opening {session.protocol.toUpperCase()} session…</p>
-            <p className="max-w-md text-xs leading-relaxed text-muted-foreground">{address}</p>
-          </StatusOverlay>
+          session.tunnelProgress ? (
+            <StatusOverlay>
+              <ConnectionStepper tunnelProgress={session.tunnelProgress} />
+            </StatusOverlay>
+          ) : (
+            <StatusOverlay>
+              <LoaderCircle className="size-7 animate-spin text-primary" />
+              <p className="text-sm font-medium">
+                Opening {session.protocol.toUpperCase()} session…
+              </p>
+              <p className="max-w-md text-xs leading-relaxed text-muted-foreground">{address}</p>
+            </StatusOverlay>
+          )
         ) : null}
         {session.status === 'failed' ? (
           <StatusOverlay>

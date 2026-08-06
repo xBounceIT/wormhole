@@ -1,18 +1,21 @@
 import {
   app,
   BrowserWindow,
+  dialog,
   ipcMain,
   screen,
   session as electronSession,
   WebContentsView,
 } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { createInterface, type Interface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { AuthSession } from './auth-session.js';
 import { RdpBackendClient } from './rdp.js';
+import { isMatchingOAuthRedirect } from './tunnel-auth.js';
 import {
   SerialBackendClient,
   isSerialInput,
@@ -38,21 +41,34 @@ const nativeTitlebarSymbolColor = '#ffffff';
 const nativeTitlebarHeight = 48;
 const wormholeDataDirectoryName = 'Wormhole';
 const backendTimeoutMs = 30_000;
+const tunnelTestTimeoutMs = 315_000;
+const nativeConnectionTimeoutMs = 315_000;
 const backendMaxBuffer = 16 * 1024 * 1024;
 const backendMaxRequestBytes = 64 * 1024;
+const backendMaxTunnelRequestBytes = 4 * 1024 * 1024;
 const nativeBackendLineLimit = 32 * 1024 * 1024;
 const nativeBackendCommandTimeoutMs = 15_000;
 let rdpClient: RdpBackendClient | undefined;
+const rdpTunnelLeases = new Map<string, string>();
 let serialBackend: SerialBackendClient | undefined;
 
 type BackendOperation =
   | 'workspace'
   | 'web-target'
+  | 'watchguard-import'
+  | 'azure-vpn-import'
+  | 'cisco-profile-import'
+  | 'ovpn-file-import'
   | 'credential-create'
   | 'credential-update'
   | 'credential-delete'
   | 'workspace-update-node'
   | 'workspace-update-node-web-settings'
+  | 'workspace-update-node-tunnel'
+  | 'tunnel-create'
+  | 'tunnel-read'
+  | 'tunnel-update'
+  | 'tunnel-delete'
   | 'migrate'
   | 'auth-status'
   | 'auth-verify'
@@ -61,8 +77,18 @@ type BackendOperation =
   | 'auth-hello-status'
   | 'auth-hello-verify'
   | 'auth-system-idle'
-  | 'ssh-trust-host-key';
-type VncAction = 'vnc.connect' | 'vnc.disconnect' | 'vnc.pointer' | 'vnc.key';
+  | 'ssh-trust-host-key'
+  | 'settings-read'
+  | 'settings-set-prompt-before-tunnel';
+type VncAction =
+  | 'vnc.connect'
+  | 'vnc.disconnect'
+  | 'vnc.pointer'
+  | 'vnc.key'
+  | 'tunnel.acquire'
+  | 'tunnel.release'
+  | 'tunnel.prompt-response'
+  | 'tunnel.route-response';
 type VncCommand = {
   action: VncAction;
   sessionId: string;
@@ -76,11 +102,18 @@ type VncCommand = {
   buttons?: number;
   down?: boolean;
   keysym?: number;
+  tunnelConfigId?: string;
+  promptId?: string;
+  value?: string;
+  cancelled?: boolean;
+  progressSessionId?: string;
 };
 type BackendResponse = {
   id: string;
   ok: boolean;
   error?: string;
+  socksEndpoint?: string;
+  leaseId?: string;
 };
 type BackendEvent = {
   type: string;
@@ -91,6 +124,16 @@ type BackendEvent = {
   width?: number;
   height?: number;
   image?: string;
+  promptId?: string;
+  title?: string;
+  secret?: boolean;
+  urls?: string[];
+  ignoreCertificateErrors?: boolean;
+  leaseId?: string;
+  phase?: string;
+  detail?: string;
+  connectionName?: string;
+  tunnelName?: string;
 };
 type MigrationResponse = {
   status: 'completed' | 'already-completed' | 'skipped-non-windows';
@@ -136,6 +179,8 @@ type WebTargetResponse = {
   host: string;
   port: number;
   ignoreCertErrors: boolean;
+  tunnelConfigId?: string;
+  proxyUrl?: string;
 };
 type WebOpenRequest = {
   sessionId: string;
@@ -156,6 +201,25 @@ type WebBoundsRequest = {
 type WebCommandRequest = {
   sessionId: string;
   operation: 'back' | 'forward' | 'reload';
+};
+type WorkspaceNodeTunnelSettingsRequest = {
+  nodeId: string;
+  tunnelEnabled: boolean | null;
+  tunnelConfigId: string;
+};
+type TunnelWriteRequest = {
+  id?: string;
+  name: string;
+  kind: number;
+  settings: Record<string, unknown>;
+};
+type TunnelReadRequest = { id: string };
+type TunnelDeleteRequest = { id: string };
+type TunnelDetailsResponse = {
+  id: string;
+  name: string;
+  kind: number;
+  settings: Record<string, unknown>;
 };
 type AuthStateResponse = {
   mode: string;
@@ -1220,6 +1284,283 @@ function parseMcpBackendMessage(line: string): McpControlResponse | McpApprovalE
   return undefined;
 }
 
+type TunnelBrowserEvent = {
+  sessionId: string;
+  promptId: string;
+  title: string;
+  urls: string[];
+  ignoreCertificateErrors: boolean;
+  completion: 'query-token' | 'oauth-code' | 'cookie';
+  redirectPrefix?: string;
+  expectedState?: string;
+  cookieName?: string;
+  requireHttpOnly?: boolean;
+};
+
+function parseTunnelBrowserEvent(value: object): TunnelBrowserEvent | undefined {
+  if (
+    !('sessionId' in value) ||
+    !('promptId' in value) ||
+    !('title' in value) ||
+    !('urls' in value)
+  ) {
+    return undefined;
+  }
+  const sessionId = value.sessionId;
+  const promptId = value.promptId;
+  const title = value.title;
+  const urls = value.urls;
+  const ignoreCertificateErrors =
+    'ignoreCertificateErrors' in value && value.ignoreCertificateErrors === true;
+  const completion = 'completion' in value ? value.completion : undefined;
+  const redirectPrefix = 'redirectPrefix' in value ? value.redirectPrefix : undefined;
+  const expectedState = 'expectedState' in value ? value.expectedState : undefined;
+  const cookieName = 'cookieName' in value ? value.cookieName : undefined;
+  const requireHttpOnly = 'requireHttpOnly' in value && value.requireHttpOnly === true;
+  if (
+    typeof sessionId !== 'string' ||
+    sessionId.length === 0 ||
+    sessionId.length > 128 ||
+    typeof promptId !== 'string' ||
+    promptId.length === 0 ||
+    promptId.length > 128 ||
+    typeof title !== 'string' ||
+    title.length === 0 ||
+    title.length > 256 ||
+    !Array.isArray(urls) ||
+    urls.length === 0 ||
+    urls.length > 5 ||
+    !urls.every((url) => typeof url === 'string' && url.length <= 4096) ||
+    (completion !== 'query-token' && completion !== 'oauth-code' && completion !== 'cookie') ||
+    (completion === 'oauth-code' &&
+      (typeof redirectPrefix !== 'string' ||
+        redirectPrefix !== 'http://localhost:2023' ||
+        typeof expectedState !== 'string' ||
+        expectedState.length < 16 ||
+        expectedState.length > 256)) ||
+    (completion === 'cookie' &&
+      (typeof cookieName !== 'string' || cookieName.length === 0 || cookieName.length > 256))
+  ) {
+    return undefined;
+  }
+  try {
+    const parsed = urls.map((url) => new URL(url));
+    if (parsed.some((url) => url.protocol !== 'https:' || url.username || url.password)) {
+      return undefined;
+    }
+    if (parsed.some((url) => url.origin !== parsed[0].origin)) return undefined;
+  } catch {
+    return undefined;
+  }
+  return {
+    sessionId,
+    promptId,
+    title,
+    urls,
+    ignoreCertificateErrors,
+    completion,
+    redirectPrefix: typeof redirectPrefix === 'string' ? redirectPrefix : undefined,
+    expectedState: typeof expectedState === 'string' ? expectedState : undefined,
+    cookieName: typeof cookieName === 'string' ? cookieName : undefined,
+    requireHttpOnly,
+  };
+}
+
+let tunnelBrowserAuthQueue: Promise<void> = Promise.resolve();
+
+function enqueueTunnelBrowserAuth(backend: NativeBackendProcess, event: TunnelBrowserEvent): void {
+  tunnelBrowserAuthQueue = tunnelBrowserAuthQueue
+    .catch(() => undefined)
+    .then(() => runTunnelBrowserAuth(backend, event));
+}
+
+async function runTunnelBrowserAuth(
+  backend: NativeBackendProcess,
+  event: TunnelBrowserEvent,
+): Promise<void> {
+  if (!authSession.isAccessAllowed || isQuitting) {
+    await backend
+      .respondTunnelPrompt({
+        leaseId: event.sessionId,
+        promptId: event.promptId,
+        value: '',
+        cancelled: true,
+      })
+      .catch(() => undefined);
+    return;
+  }
+  const initialURLs = event.urls.map((value) => new URL(value));
+  const fireboxOrigin = initialURLs[0].origin;
+  const cookieScopeURL = initialURLs[0].toString();
+  const fireboxHost = initialURLs[0].hostname;
+  const partition = `wormhole-tunnel-auth-${randomUUID()}`;
+  const browserSession = electronSession.fromPartition(partition, { cache: false });
+  browserSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  browserSession.setPermissionCheckHandler(() => false);
+  if (event.ignoreCertificateErrors) {
+    browserSession.setCertificateVerifyProc((request, callback) => {
+      callback(request.hostname === fireboxHost ? 0 : -3);
+    });
+  }
+  const parent = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+  const authWindow = new BrowserWindow({
+    width: 900,
+    height: 700,
+    minWidth: 640,
+    minHeight: 480,
+    title: event.title,
+    parent: parent && !parent.isDestroyed() ? parent : undefined,
+    modal: Boolean(parent && !parent.isDestroyed()),
+    show: false,
+    autoHideMenuBar: true,
+    webPreferences: {
+      partition,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+      devTools: false,
+    },
+  });
+  let candidate = 0;
+  let settled = false;
+  let authTimeout: NodeJS.Timeout | undefined;
+  let finish!: () => void;
+  const finished = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const complete = async (cancelled: boolean, value = '') => {
+    if (settled) return;
+    settled = true;
+    if (authTimeout) clearTimeout(authTimeout);
+    if (!authWindow.isDestroyed()) authWindow.destroy();
+    try {
+      await backend
+        .respondTunnelPrompt({
+          leaseId: event.sessionId,
+          promptId: event.promptId,
+          value,
+          cancelled,
+        })
+        .catch(() => undefined);
+    } finally {
+      finish();
+    }
+  };
+  authTimeout = setTimeout(() => void complete(true), nativeConnectionTimeoutMs - 5_000);
+  const matchesOAuthRedirect = (current: URL) =>
+    event.completion === 'oauth-code' && isMatchingOAuthRedirect(current, event.redirectPrefix!);
+  const inspectNavigation = async (rawURL: string) => {
+    if (settled) return;
+    let current: URL;
+    try {
+      current = new URL(rawURL);
+    } catch {
+      return;
+    }
+    if (event.completion === 'oauth-code') {
+      if (!matchesOAuthRedirect(current)) return;
+      const state = current.searchParams.get('state') ?? '';
+      const code = current.searchParams.get('code') ?? '';
+      const oauthError = current.searchParams.get('error') ?? '';
+      const description = current.searchParams.get('error_description') ?? '';
+      const value = JSON.stringify({ code, state, error: oauthError, description });
+      await complete(false, value);
+      return;
+    }
+    if (current.origin !== fireboxOrigin) return;
+    const username = current.searchParams.get('user')?.trim() ?? '';
+    const token = current.searchParams.get('token') ?? '';
+    if (!username || !token || username.length > 1024 || token.length > 16 * 1024) return;
+    const cookies = await browserSession.cookies.get({ url: cookieScopeURL });
+    const value = JSON.stringify({
+      username,
+      token,
+      cookies: cookies.slice(0, 256).map((cookie) => ({
+        name: cookie.name,
+        value: cookie.value,
+        path: cookie.path || '/',
+        domain: cookie.domain,
+        secure: cookie.secure,
+        httpOnly: cookie.httpOnly,
+      })),
+    });
+    if (Buffer.byteLength(value, 'utf8') > 16 * 1024) {
+      await complete(true);
+      return;
+    }
+    await complete(false, value);
+  };
+  const inspectCookie = async () => {
+    if (settled || event.completion !== 'cookie') return;
+    const cookies = await browserSession.cookies.get({ url: cookieScopeURL });
+    const cookie = cookies.find(
+      (candidate) =>
+        candidate.name === event.cookieName &&
+        candidate.value &&
+        (!event.requireHttpOnly || candidate.httpOnly),
+    );
+    if (cookie) await complete(false, cookie.value);
+  };
+  authWindow.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const target = new URL(url);
+      if (matchesOAuthRedirect(target)) {
+        void inspectNavigation(url);
+        return { action: 'deny' };
+      }
+      if (target.protocol === 'https:' && !target.username && !target.password) {
+        void authWindow.loadURL(target.toString()).catch(() => undefined);
+      }
+    } catch {
+      // Keep malformed and non-web popup targets outside the privileged auth session.
+    }
+    return { action: 'deny' };
+  });
+  authWindow.webContents.on('did-navigate', (_event, url) => void inspectNavigation(url));
+  authWindow.webContents.on('did-navigate-in-page', (_event, url) => void inspectNavigation(url));
+  authWindow.webContents.on('will-navigate', (navigationEvent, url) => {
+    if (event.completion === 'oauth-code') {
+      try {
+        if (matchesOAuthRedirect(new URL(url))) {
+          navigationEvent.preventDefault();
+          void inspectNavigation(url);
+        }
+      } catch {
+        // Chromium handles malformed navigation attempts as ordinary load failures.
+      }
+    }
+  });
+  authWindow.webContents.on('did-fail-load', (_event, _code, _description, _url, isMainFrame) => {
+    if (!isMainFrame || settled) return;
+    candidate++;
+    if (candidate < event.urls.length) {
+      void authWindow.loadURL(event.urls[candidate]).catch(() => undefined);
+    } else {
+      void complete(true);
+    }
+  });
+  authWindow.once('closed', () => void complete(true));
+  authWindow.once('ready-to-show', () => authWindow.show());
+  const cookieTimer =
+    event.completion === 'cookie' ? setInterval(() => void inspectCookie(), 250) : undefined;
+  authWindow.once('closed', () => {
+    if (cookieTimer) clearInterval(cookieTimer);
+  });
+  await browserSession.cookies
+    .get({ url: cookieScopeURL })
+    .then((cookies) =>
+      Promise.all(
+        cookies
+          .filter((cookie) => event.completion === 'cookie' && cookie.name === event.cookieName)
+          .map((cookie) => browserSession.cookies.remove(cookieScopeURL, cookie.name)),
+      ),
+    )
+    .catch(() => undefined);
+  await authWindow.loadURL(event.urls[0]).catch(() => complete(true));
+  await finished;
+}
+
 class NativeBackendProcess {
   private child: ReturnType<typeof spawn> | undefined;
   private startPromise: Promise<void> | undefined;
@@ -1230,7 +1571,10 @@ class NativeBackendProcess {
     { resolve: (response: BackendResponse) => void; reject: (error: Error) => void }
   >();
 
-  async send(command: VncCommand): Promise<BackendResponse> {
+  async send(
+    command: VncCommand,
+    timeoutMs = nativeBackendCommandTimeoutMs,
+  ): Promise<BackendResponse> {
     await this.start();
     const child = this.child;
     if (!child?.stdin || child.stdin.destroyed) {
@@ -1254,9 +1598,64 @@ class NativeBackendProcess {
       if (!pending) return;
       this.pending.delete(id);
       pending.reject(new Error('Native backend command timed out.'));
-    }, nativeBackendCommandTimeoutMs);
+    }, timeoutMs);
 
     return response.finally(() => clearTimeout(timeout));
+  }
+
+  async acquireTunnel(request: {
+    leaseId: string;
+    nodeId?: string;
+    tunnelConfigId?: string;
+    progressSessionId?: string;
+  }): Promise<string> {
+    const response = await this.send(
+      {
+        action: 'tunnel.acquire',
+        sessionId: request.leaseId,
+        nodeId: request.nodeId,
+        tunnelConfigId: request.tunnelConfigId,
+        progressSessionId: request.progressSessionId,
+      },
+      tunnelTestTimeoutMs,
+    );
+    if (!response.ok) throw new Error(response.error || 'Could not establish the VPN tunnel.');
+    return response.socksEndpoint ?? '';
+  }
+
+  async releaseTunnel(leaseId: string): Promise<void> {
+    const response = await this.send({ action: 'tunnel.release', sessionId: leaseId });
+    if (!response.ok) throw new Error(response.error || 'Could not release the VPN tunnel.');
+  }
+
+  async respondTunnelPrompt(request: {
+    leaseId: string;
+    promptId: string;
+    value: string;
+    cancelled: boolean;
+  }): Promise<void> {
+    const response = await this.send({
+      action: 'tunnel.prompt-response',
+      sessionId: request.leaseId,
+      promptId: request.promptId,
+      value: request.value,
+      cancelled: request.cancelled,
+    });
+    if (!response.ok) throw new Error(response.error || 'Could not answer the VPN prompt.');
+  }
+
+  async respondTunnelRoute(request: {
+    leaseId: string;
+    promptId: string;
+    value: 'tunnel' | 'direct' | 'cancel';
+  }): Promise<void> {
+    const response = await this.send({
+      action: 'tunnel.route-response',
+      sessionId: request.leaseId,
+      promptId: request.promptId,
+      value: request.value,
+    });
+    if (!response.ok) throw new Error(response.error || 'Could not answer the VPN prompt.');
   }
 
   stop(): void {
@@ -1269,9 +1668,10 @@ class NativeBackendProcess {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
     child.stdin?.end();
-    setTimeout(() => {
+    const forceKill = setTimeout(() => {
       if (!child.killed) child.kill();
-    }, 1_000);
+    }, 7_000);
+    child.once('close', () => clearTimeout(forceKill));
   }
 
   private async start(): Promise<void> {
@@ -1357,6 +1757,11 @@ class NativeBackendProcess {
         continue;
       }
       if ('type' in message && typeof message.type === 'string') {
+        if (message.type === 'tunnel.browser') {
+          const event = parseTunnelBrowserEvent(message);
+          if (event) enqueueTunnelBrowserAuth(this, event);
+          continue;
+        }
         if (!authSession.isAccessAllowed) continue;
         for (const window of BrowserWindow.getAllWindows()) {
           if (window.isDestroyed()) continue;
@@ -1378,6 +1783,11 @@ class NativeBackendProcess {
 
 let nativeBackend: NativeBackendProcess | undefined;
 let isQuitting = false;
+
+function getNativeBackend(): NativeBackendProcess {
+  nativeBackend ??= new NativeBackendProcess();
+  return nativeBackend;
+}
 
 function parseVncCommand(value: unknown): VncCommand {
   if (!value || typeof value !== 'object') throw new Error('Invalid VNC command.');
@@ -1438,6 +1848,60 @@ function parseVncCommand(value: unknown): VncCommand {
     command.down = input.down;
   }
   return command;
+}
+
+function isWorkspaceNodeTunnelSettingsRequest(
+  value: unknown,
+): value is WorkspaceNodeTunnelSettingsRequest {
+  return (
+    isRecord(value) &&
+    isSshSessionId(value.nodeId) &&
+    (value.tunnelEnabled === null || typeof value.tunnelEnabled === 'boolean') &&
+    typeof value.tunnelConfigId === 'string' &&
+    (value.tunnelConfigId === '' || isTunnelID(value.tunnelConfigId))
+  );
+}
+
+function isTunnelID(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+  );
+}
+
+function isTunnelSettings(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseTunnelWriteRequest(value: unknown, requiresID: boolean): TunnelWriteRequest {
+  if (!value || typeof value !== 'object') throw new Error('VPN tunnel settings are invalid.');
+  const input = value as Record<string, unknown>;
+  if (
+    typeof input.name !== 'string' ||
+    input.name.trim().length === 0 ||
+    input.name.length > 128 ||
+    typeof input.kind !== 'number' ||
+    !Number.isInteger(input.kind) ||
+    input.kind < 0 ||
+    input.kind > 6 ||
+    !isTunnelSettings(input.settings)
+  ) {
+    throw new Error('VPN tunnel settings are invalid.');
+  }
+  if (requiresID && !isTunnelID(input.id)) throw new Error('VPN tunnel id is invalid.');
+  return {
+    ...(isTunnelID(input.id) ? { id: input.id } : {}),
+    name: input.name,
+    kind: input.kind,
+    settings: input.settings,
+  };
+}
+
+function parseTunnelIDRequest(value: unknown): TunnelReadRequest {
+  if (!value || typeof value !== 'object' || !isTunnelID((value as Record<string, unknown>).id)) {
+    throw new Error('VPN tunnel id is invalid.');
+  }
+  return { id: (value as Record<string, string>).id };
 }
 
 function wormholeDatabasePath(): string {
@@ -1503,10 +1967,10 @@ async function runBackend<T>(operation: BackendOperation, request?: unknown): Pr
   let requestPayload: string | undefined;
   if (request !== undefined) {
     requestPayload = JSON.stringify(request);
-    if (
-      requestPayload === undefined ||
-      Buffer.byteLength(requestPayload, 'utf8') > backendMaxRequestBytes
-    ) {
+    const requestLimit = operation.startsWith('tunnel-')
+      ? backendMaxTunnelRequestBytes
+      : backendMaxRequestBytes;
+    if (requestPayload === undefined || Buffer.byteLength(requestPayload, 'utf8') > requestLimit) {
       throw new Error('Electron Go backend request is too large.');
     }
   }
@@ -1574,6 +2038,23 @@ async function runBackend<T>(operation: BackendOperation, request?: unknown): Pr
   }
 }
 
+async function runUserDeletion<T extends { deleted: boolean }>(
+  operation: BackendOperation,
+  request: { id: string },
+  what: string,
+): Promise<T | { deleted: false; error: string }> {
+  try {
+    const result = await runBackend<T>(operation, request);
+    console.info(`[Wormhole] Deleted ${what}.`, request.id);
+    return result;
+  } catch (error) {
+    // A refused or already-missing item is a normal user outcome, not an app error.
+    const message = error instanceof Error ? error.message : String(error);
+    console.info(`[Wormhole] ${what} deletion was not performed (${request.id}): ${message}`);
+    return { deleted: false, error: message };
+  }
+}
+
 function isWorkspaceNodeWebSettingsRequest(
   value: unknown,
 ): value is WorkspaceNodeWebSettingsRequest {
@@ -1590,7 +2071,35 @@ type WebSurfaceRecord = {
   attempt: number;
   initialNavigationPending: boolean;
   disposed: boolean;
+  tunnelLeaseId?: string;
 };
+
+function validateWebTarget(value: WebTargetResponse): WebTargetResponse {
+  if (
+    !value ||
+    typeof value.url !== 'string' ||
+    (value.protocol !== 'http' && value.protocol !== 'https') ||
+    typeof value.host !== 'string' ||
+    !Number.isInteger(value.port) ||
+    value.port < 1 ||
+    value.port > 65535 ||
+    typeof value.ignoreCertErrors !== 'boolean' ||
+    (value.tunnelConfigId !== undefined && !isTunnelID(value.tunnelConfigId)) ||
+    value.proxyUrl !== undefined
+  ) {
+    throw new Error('Electron Go backend returned an invalid web target.');
+  }
+  const targetUrl = new URL(value.url);
+  if (
+    targetUrl.protocol !== `${value.protocol}:` ||
+    targetUrl.hostname !== value.host ||
+    targetUrl.username ||
+    targetUrl.password
+  ) {
+    throw new Error('Electron Go backend returned an invalid web target.');
+  }
+  return value;
+}
 
 class WebSurfaceManager {
   private readonly surfaces = new Map<string, WebSurfaceRecord>();
@@ -1602,13 +2111,27 @@ class WebSurfaceManager {
     const generation = this.attempts.begin(request.sessionId);
     this.pendingOpenOwners.set(request.sessionId, owner);
     this.dispose(request.sessionId);
+    let openingLeaseId: string | undefined;
     try {
-      const target = await runBackend<WebTargetResponse>('web-target', {
-        nodeId: request.nodeId,
-        address: request.address,
-        protocol: request.protocol,
-        ignoreCertErrors: request.ignoreCertErrors,
-      });
+      const target = validateWebTarget(
+        await runBackend<WebTargetResponse>('web-target', {
+          nodeId: request.nodeId,
+          address: request.address,
+          protocol: request.protocol,
+          ignoreCertErrors: request.ignoreCertErrors,
+        }),
+      );
+      if (target.tunnelConfigId) {
+        const leaseId = randomUUID();
+        openingLeaseId = leaseId;
+        const socksEndpoint = await getNativeBackend().acquireTunnel({
+          leaseId,
+          nodeId: request.nodeId,
+          tunnelConfigId: target.tunnelConfigId,
+          progressSessionId: request.sessionId,
+        });
+        if (socksEndpoint) target.proxyUrl = `socks5://${socksEndpoint}`;
+      }
       if (
         !this.attempts.isCurrent(request.sessionId, generation) ||
         this.pendingOpenOwners.get(request.sessionId) !== owner ||
@@ -1617,10 +2140,18 @@ class WebSurfaceManager {
         throw new Error('Web session was superseded before its browser could open.');
       }
 
-      const partition = target.ignoreCertErrors
-        ? `wormhole-web-isolated-${++this.isolatedPartitionSequence}`
-        : webSharedPartition;
+      const partition = target.proxyUrl
+        ? `wormhole-web-tunnel-${++this.isolatedPartitionSequence}`
+        : target.ignoreCertErrors
+          ? `wormhole-web-isolated-${++this.isolatedPartitionSequence}`
+          : webSharedPartition;
       const browserSession = electronSession.fromPartition(partition, { cache: true });
+      if (target.proxyUrl) {
+        await browserSession.setProxy({
+          proxyRules: target.proxyUrl,
+          proxyBypassRules: '<-loopback>',
+        });
+      }
       browserSession.setPermissionRequestHandler((_webContents, _permission, callback) =>
         callback(false),
       );
@@ -1643,6 +2174,7 @@ class WebSurfaceManager {
         attempt: request.attempt,
         initialNavigationPending: true,
         disposed: false,
+        tunnelLeaseId: openingLeaseId,
       };
       this.surfaces.set(request.sessionId, record);
       this.pendingOpenOwners.delete(request.sessionId);
@@ -1657,8 +2189,14 @@ class WebSurfaceManager {
           });
         }
       });
+      openingLeaseId = undefined;
       return target;
     } catch (error) {
+      if (this.surfaces.has(request.sessionId)) {
+        this.dispose(request.sessionId);
+        openingLeaseId = undefined;
+      }
+      if (openingLeaseId) void nativeBackend?.releaseTunnel(openingLeaseId).catch(() => undefined);
       if (
         this.attempts.isCurrent(request.sessionId, generation) &&
         this.pendingOpenOwners.get(request.sessionId) === owner
@@ -1706,6 +2244,8 @@ class WebSurfaceManager {
     if (!record) return;
     this.surfaces.delete(sessionId);
     record.disposed = true;
+    if (record.tunnelLeaseId)
+      void nativeBackend?.releaseTunnel(record.tunnelLeaseId).catch(() => undefined);
     try {
       record.owner.contentView.removeChildView(record.view);
     } catch {
@@ -1879,6 +2419,7 @@ class NativeSshBackend {
   private lineReader: Interface | undefined;
   private controlSequence = 0;
   private readonly activeSessions = new Set<string>();
+  private readonly tunnelLeases = new Map<string, string>();
   private readonly openWaiters = new Map<
     string,
     {
@@ -1900,32 +2441,63 @@ class NativeSshBackend {
     if (this.openWaiters.has(request.sessionId) || this.activeSessions.has(request.sessionId)) {
       throw new Error('SSH session id is already in use.');
     }
-    this.ensureStarted();
+    const leaseId = randomUUID();
+    this.tunnelLeases.set(request.sessionId, leaseId);
+    let socksEndpoint = '';
+    try {
+      socksEndpoint = await getNativeBackend().acquireTunnel({
+        leaseId,
+        nodeId: request.nodeId,
+        progressSessionId: request.sessionId,
+      });
+    } catch (error) {
+      if (this.tunnelLeases.get(request.sessionId) === leaseId) {
+        this.tunnelLeases.delete(request.sessionId);
+      }
+      throw error;
+    }
+    if (this.tunnelLeases.get(request.sessionId) !== leaseId) {
+      throw new Error('SSH connection closed while opening its VPN tunnel.');
+    }
+    if (!socksEndpoint) {
+      this.tunnelLeases.delete(request.sessionId);
+      void nativeBackend?.releaseTunnel(leaseId).catch(() => undefined);
+    }
+    try {
+      this.ensureStarted();
+    } catch (error) {
+      this.releaseTunnel(request.sessionId);
+      throw error;
+    }
 
     return new Promise<SshConnectedResponse>((resolve, reject) => {
       const timeout = setTimeout(() => {
         const waiter = this.openWaiters.get(request.sessionId);
         if (!waiter || waiter.timeout !== timeout) return;
         this.openWaiters.delete(request.sessionId);
+        this.releaseTunnel(request.sessionId);
         reject(new Error('SSH connection timed out.'));
         try {
           this.write({ type: 'close', session_id: request.sessionId });
         } catch {
           // The backend may already have stopped; the timeout has released the renderer.
         }
-      }, backendTimeoutMs);
+      }, nativeConnectionTimeoutMs);
       this.openWaiters.set(request.sessionId, { resolve, reject, timeout });
       try {
         this.write({
           type: 'open',
           session_id: request.sessionId,
           node_id: request.nodeId,
+          socks_endpoint: socksEndpoint,
+          tunnel_enabled: socksEndpoint ? undefined : false,
           columns: request.columns,
           rows: request.rows,
         });
       } catch (error) {
         this.openWaiters.delete(request.sessionId);
         clearTimeout(timeout);
+        this.releaseTunnel(request.sessionId);
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
@@ -2057,6 +2629,14 @@ class NativeSshBackend {
         // removing this tab, so there is no useful recovery action here.
       }
     }
+    this.releaseTunnel(sessionId);
+  }
+
+  private releaseTunnel(sessionId: string): void {
+    const leaseId = this.tunnelLeases.get(sessionId);
+    if (!leaseId) return;
+    this.tunnelLeases.delete(sessionId);
+    void nativeBackend?.releaseTunnel(leaseId).catch(() => undefined);
   }
 
   requestSnapshots(): void {
@@ -2136,6 +2716,7 @@ class NativeSshBackend {
     this.openWaiters.clear();
     this.failControlWaiters(new Error('Native SSH backend stopped.'));
     this.activeSessions.clear();
+    for (const sessionId of [...this.tunnelLeases.keys()]) this.releaseTunnel(sessionId);
     this.lineReader?.close();
     this.lineReader = undefined;
     const child = this.child;
@@ -2195,6 +2776,7 @@ class NativeSshBackend {
       const failure = new Error('Native SSH backend stopped.');
       this.failOpenWaiters(failure);
       this.failControlWaiters(failure);
+      for (const sessionId of [...this.tunnelLeases.keys()]) this.releaseTunnel(sessionId);
     });
   }
 
@@ -2268,8 +2850,10 @@ class NativeSshBackend {
         clearTimeout(waiter.timeout);
         waiter.reject(new Error(event.error || 'SSH connection failed.'));
       }
+      this.releaseTunnel(event.sessionId);
     } else if (event.type === 'closed') {
       this.activeSessions.delete(event.sessionId);
+      this.releaseTunnel(event.sessionId);
     }
 
     this.broadcast(event);
@@ -2413,8 +2997,278 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     const request = parseCredentialDeleteRequest(value);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
-      return runBackend<{ deleted: boolean }>('credential-delete', request);
+      return runUserDeletion<{ deleted: boolean }>('credential-delete', request, 'credential');
     });
+  });
+
+  ipcMain.handle('workspace:update-node-tunnel', async (_event, request: unknown) => {
+    if (!isWorkspaceNodeTunnelSettingsRequest(request)) {
+      throw new Error('Workspace VPN tunnel settings are invalid.');
+    }
+    return serializeAuthOperation(async () => {
+      await ensureAuthSession();
+      authSession.requireUnlocked();
+      return runBackend<{ updated: boolean }>('workspace-update-node-tunnel', request);
+    });
+  });
+
+  ipcMain.handle('settings:read', async () => {
+    return serializeAuthOperation(async () => {
+      return runBackend<{ promptBeforeTunnelConnect: boolean }>('settings-read');
+    });
+  });
+
+  ipcMain.handle('settings:set-prompt-before-tunnel', async (_event, value: unknown) => {
+    if (typeof value !== 'boolean') throw new Error('VPN tunnel prompt setting is invalid.');
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ updated: boolean }>('settings-set-prompt-before-tunnel', {
+        enabled: value,
+      });
+    });
+  });
+
+  ipcMain.handle('tunnel:create', async (_event, value: unknown) => {
+    const request = parseTunnelWriteRequest(value, false);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<TunnelDetailsResponse>('tunnel-create', request);
+    });
+  });
+
+  ipcMain.handle('tunnel:read', async (_event, value: unknown) => {
+    const request = parseTunnelIDRequest(value);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<TunnelDetailsResponse>('tunnel-read', request);
+    });
+  });
+
+  ipcMain.handle('tunnel:update', async (_event, value: unknown) => {
+    const request = parseTunnelWriteRequest(value, true);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<TunnelDetailsResponse>('tunnel-update', request);
+    });
+  });
+
+  ipcMain.handle('tunnel:delete', async (_event, value: unknown) => {
+    const request = parseTunnelIDRequest(value) as TunnelDeleteRequest;
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runUserDeletion<{ deleted: boolean }>('tunnel-delete', request, 'VPN tunnel');
+    });
+  });
+
+  ipcMain.handle('tunnel:test', async (_event, value: unknown) => {
+    const request = parseTunnelIDRequest(value);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      const leaseId = randomUUID();
+      try {
+        const socksEndpoint = await getNativeBackend().acquireTunnel({
+          leaseId,
+          tunnelConfigId: request.id,
+        });
+        if (!socksEndpoint) throw new Error('The VPN tunnel returned no SOCKS endpoint.');
+        return { connected: true };
+      } catch (error) {
+        // A cancelled authentication is a normal user outcome; other test failures are expected
+        // user-facing results too. Return them as data instead of rejecting the IPC call, so
+        // Electron doesn't log "Error occurred in handler" for them.
+        const message = error instanceof Error ? error.message : String(error);
+        if (/cancell/i.test(message)) {
+          console.info(`[Wormhole] VPN tunnel test cancelled (${request.id}): ${message}`);
+        } else {
+          console.warn(`[Wormhole] VPN tunnel test failed (${request.id}): ${message}`);
+        }
+        return { connected: false, error: message };
+      } finally {
+        await nativeBackend?.releaseTunnel(leaseId).catch(() => undefined);
+      }
+    });
+  });
+
+  ipcMain.handle('tunnel:import-watchguard', async (event) => {
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      const owner = BrowserWindow.fromWebContents(event.sender);
+      const options: Electron.OpenDialogOptions = {
+        title: 'Import WatchGuard Mobile VPN profile',
+        properties: ['openFile'],
+        filters: [
+          { name: 'WatchGuard SSL VPN profile', extensions: ['wgssl', 'tgz', 'tar', 'gz'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      };
+      const selection = owner
+        ? await dialog.showOpenDialog(owner, options)
+        : await dialog.showOpenDialog(options);
+      if (selection.canceled || selection.filePaths.length !== 1) return null;
+      const imported = await runBackend<{
+        server: string;
+        port: number;
+        profileOvpn: string;
+      }>('watchguard-import', { path: selection.filePaths[0] });
+      if (
+        typeof imported.server !== 'string' ||
+        imported.server.length === 0 ||
+        imported.server.length > 1024 ||
+        !Number.isInteger(imported.port) ||
+        imported.port < 1 ||
+        imported.port > 65535 ||
+        typeof imported.profileOvpn !== 'string' ||
+        imported.profileOvpn.length === 0 ||
+        Buffer.byteLength(imported.profileOvpn, 'utf8') > backendMaxTunnelRequestBytes
+      ) {
+        throw new Error('The WatchGuard profile importer returned an invalid result.');
+      }
+      return imported;
+    });
+  });
+
+  ipcMain.handle('tunnel:import-azure-vpn', async (event) => {
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      const owner = BrowserWindow.fromWebContents(event.sender);
+      const options: Electron.OpenDialogOptions = {
+        title: 'Import Azure VPN profile',
+        properties: ['openFile'],
+        filters: [
+          { name: 'Azure VPN configuration', extensions: ['xml'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      };
+      const selection = owner
+        ? await dialog.showOpenDialog(owner, options)
+        : await dialog.showOpenDialog(options);
+      if (selection.canceled || selection.filePaths.length !== 1) return null;
+      const imported = await runBackend<{ name?: string; settings: Record<string, unknown> }>(
+        'azure-vpn-import',
+        { path: selection.filePaths[0] },
+      );
+      if (
+        !isRecord(imported.settings) ||
+        (imported.name !== undefined && typeof imported.name !== 'string')
+      ) {
+        throw new Error('The Azure VPN profile importer returned an invalid result.');
+      }
+      return imported;
+    });
+  });
+
+  ipcMain.handle('tunnel:import-ovpn', async (event) => {
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      const owner = BrowserWindow.fromWebContents(event.sender);
+      const options: Electron.OpenDialogOptions = {
+        title: 'Import OpenVPN profile',
+        properties: ['openFile'],
+        filters: [
+          { name: 'OpenVPN profile', extensions: ['ovpn', 'conf'] },
+          { name: 'All files', extensions: ['*'] },
+        ],
+      };
+      const selection = owner
+        ? await dialog.showOpenDialog(owner, options)
+        : await dialog.showOpenDialog(options);
+      if (selection.canceled || selection.filePaths.length !== 1) return null;
+      const imported = await runBackend<{ contents: string }>('ovpn-file-import', {
+        path: selection.filePaths[0],
+      });
+      if (
+        typeof imported.contents !== 'string' ||
+        Buffer.byteLength(imported.contents, 'utf8') > backendMaxTunnelRequestBytes
+      ) {
+        throw new Error('The OpenVPN profile importer returned an invalid result.');
+      }
+      return imported;
+    });
+  });
+
+  ipcMain.handle('tunnel:import-cisco', async (event) => {
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      const owner = BrowserWindow.fromWebContents(event.sender);
+      const options: Electron.OpenDialogOptions = {
+        title: 'Import AnyConnect profile',
+        properties: ['openFile'],
+        filters: [{ name: 'AnyConnect XML profile', extensions: ['xml'] }],
+      };
+      const selection = owner
+        ? await dialog.showOpenDialog(owner, options)
+        : await dialog.showOpenDialog(options);
+      if (selection.canceled || selection.filePaths.length !== 1) return null;
+      const imported = await runBackend<{
+        host: string;
+        port: number;
+        group?: string;
+        profileName?: string;
+      }>('cisco-profile-import', { path: selection.filePaths[0] });
+      if (
+        typeof imported.host !== 'string' ||
+        imported.host.length === 0 ||
+        imported.host.length > 1024 ||
+        !Number.isInteger(imported.port) ||
+        imported.port < 1 ||
+        imported.port > 65535 ||
+        (imported.group !== undefined &&
+          (typeof imported.group !== 'string' || imported.group.length > 256)) ||
+        (imported.profileName !== undefined &&
+          (typeof imported.profileName !== 'string' || imported.profileName.length > 256))
+      ) {
+        throw new Error('The AnyConnect profile importer returned an invalid result.');
+      }
+      return imported;
+    });
+  });
+
+  ipcMain.handle('tunnel:prompt-response', async (_event, value: unknown) => {
+    if (!isRecord(value)) throw new Error('VPN authentication response is invalid.');
+    const leaseId = value.leaseId;
+    const promptId = value.promptId;
+    const promptValue = value.value;
+    const cancelled = value.cancelled;
+    if (
+      typeof leaseId !== 'string' ||
+      leaseId.length === 0 ||
+      leaseId.length > 128 ||
+      typeof promptId !== 'string' ||
+      promptId.length === 0 ||
+      promptId.length > 128 ||
+      typeof promptValue !== 'string' ||
+      promptValue.length > 16 * 1024 ||
+      typeof cancelled !== 'boolean'
+    ) {
+      throw new Error('VPN authentication response is invalid.');
+    }
+    await requireWorkspaceAuth();
+    await getNativeBackend().respondTunnelPrompt({
+      leaseId,
+      promptId,
+      value: promptValue,
+      cancelled,
+    });
+  });
+
+  ipcMain.handle('tunnel:route-response', async (_event, value: unknown) => {
+    if (!isRecord(value)) throw new Error('VPN tunnel choice is invalid.');
+    const leaseId = value.leaseId;
+    const promptId = value.promptId;
+    const choice = value.choice;
+    if (
+      typeof leaseId !== 'string' ||
+      leaseId.length === 0 ||
+      leaseId.length > 128 ||
+      typeof promptId !== 'string' ||
+      promptId.length === 0 ||
+      promptId.length > 128 ||
+      (choice !== 'tunnel' && choice !== 'direct' && choice !== 'cancel')
+    ) {
+      throw new Error('VPN tunnel choice is invalid.');
+    }
+    await requireWorkspaceAuth();
+    await getNativeBackend().respondTunnelRoute({ leaseId, promptId, value: choice });
   });
 
   ipcMain.handle('auth:status', async () => {
@@ -2834,8 +3688,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     }
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
-      nativeBackend ??= new NativeBackendProcess();
-      return nativeBackend.send(command);
+      return getNativeBackend().send(command);
     });
   });
 
@@ -2848,7 +3701,46 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       await requireWorkspaceAuth();
       const client = getRdpClient();
       const bounds = toScreenBounds(ownerWindow, request.bounds);
-      return client.start(request, nativeWindowHandle(ownerWindow), bounds);
+      releaseRdpTunnel(request.sessionId);
+      let socksEndpoint = '';
+      if (request.profile.nodeId) {
+        const leaseId = randomUUID();
+        rdpTunnelLeases.set(request.sessionId, leaseId);
+        try {
+          socksEndpoint = await getNativeBackend().acquireTunnel({
+            leaseId,
+            nodeId: request.profile.nodeId,
+            progressSessionId: request.sessionId,
+          });
+        } catch (error) {
+          if (rdpTunnelLeases.get(request.sessionId) === leaseId) {
+            rdpTunnelLeases.delete(request.sessionId);
+          }
+          throw error;
+        }
+        if (rdpTunnelLeases.get(request.sessionId) !== leaseId) {
+          throw new Error('RDP connection closed while opening its VPN tunnel.');
+        }
+        if (!socksEndpoint) releaseRdpTunnel(request.sessionId);
+      }
+      try {
+        return await client.start(
+          {
+            ...request,
+            profile: {
+              ...request.profile,
+              socksEndpoint: socksEndpoint || undefined,
+              tunnelEnabled:
+                request.profile.nodeId && !socksEndpoint ? false : request.profile.tunnelEnabled,
+            },
+          },
+          nativeWindowHandle(ownerWindow),
+          bounds,
+        );
+      } catch (error) {
+        releaseRdpTunnel(request.sessionId);
+        throw error;
+      }
     });
   });
 
@@ -2881,7 +3773,11 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     const bounds = request.bounds ? toScreenBounds(ownerWindow, request.bounds) : undefined;
     const command = () =>
       getRdpClient().command(operation, request.sessionId, nativeWindowHandle(ownerWindow), bounds);
-    if (operation === 'hide' || operation === 'disconnect') return command();
+    if (operation === 'hide' || operation === 'disconnect') {
+      const result = command();
+      if (operation === 'disconnect') releaseRdpTunnel(request.sessionId);
+      return result;
+    }
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
       return command();
@@ -2900,11 +3796,28 @@ function getRdpClient(): RdpBackendClient {
 
   rdpClient = new RdpBackendClient({ executable: backendPath(), args });
   rdpClient.onEvent((event: RdpBackendEvent) => {
+    if (
+      event.sessionId &&
+      (event.type === 'disconnected' ||
+        event.type === 'fatalError' ||
+        event.type === 'logonError' ||
+        event.type === 'exited' ||
+        event.type === 'error')
+    ) {
+      releaseRdpTunnel(event.sessionId);
+    }
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed()) window.webContents.send('rdp:event', event);
     }
   });
   return rdpClient;
+}
+
+function releaseRdpTunnel(sessionId: string): void {
+  const leaseId = rdpTunnelLeases.get(sessionId);
+  if (!leaseId) return;
+  rdpTunnelLeases.delete(sessionId);
+  void nativeBackend?.releaseTunnel(leaseId).catch(() => undefined);
 }
 
 function getSerialBackend(): SerialBackendClient {
@@ -3051,6 +3964,7 @@ function valueAsRecord(value: unknown): Record<string, any> {
 }
 
 function createWindow() {
+  const productionRendererPath = path.resolve(__dirname, '..', 'dist', 'index.html');
   const window = new BrowserWindow({
     // Keep the window hidden until the renderer has painted its first frame
     // (ready-to-show). Showing it earlier flashes unpainted frames — black
@@ -3117,11 +4031,27 @@ function createWindow() {
   });
 
   window.once('closed', () => webSurfaces.closeForWindow(window));
+  window.webContents.on('will-navigate', (event, targetUrl) => {
+    if (!isTrustedRendererNavigation(targetUrl, productionRendererPath)) event.preventDefault();
+  });
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
   if (rendererUrl) {
     void window.loadURL(rendererUrl);
   } else {
-    void window.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+    void window.loadFile(productionRendererPath);
+  }
+}
+
+function isTrustedRendererNavigation(targetUrl: string, productionRendererPath: string): boolean {
+  try {
+    const target = new URL(targetUrl);
+    if (rendererUrl) return target.origin === new URL(rendererUrl).origin;
+    return (
+      target.protocol === 'file:' && path.resolve(fileURLToPath(target)) === productionRendererPath
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -3168,15 +4098,11 @@ app.on('before-quit', () => {
   nativeBackend = undefined;
   serialBackend?.dispose();
   serialBackend = undefined;
+  sshBackend.dispose();
+  void rdpClient?.dispose();
 });
 
 app.on('window-all-closed', () => {
   void rdpClient?.dispose();
   if (process.platform !== 'darwin') app.quit();
-});
-
-app.on('before-quit', () => {
-  sshBackend.dispose();
-  serialBackend?.dispose();
-  void rdpClient?.dispose();
 });

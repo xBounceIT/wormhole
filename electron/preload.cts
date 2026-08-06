@@ -1,7 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type { RdpBackendEvent, RdpCommandRequest, RdpStartRequest } from './rdp-contract.js';
 
-contextBridge.exposeInMainWorld('wormhole', {
+const wormholeBridge = {
   loadWorkspace: () => ipcRenderer.invoke('workspace:load'),
   createCredential: (request: {
     name: string;
@@ -62,6 +62,40 @@ contextBridge.exposeInMainWorld('wormhole', {
     ipcRenderer.on('web:event', handler);
     return () => ipcRenderer.removeListener('web:event', handler);
   },
+  updateWorkspaceNodeTunnelSettings: (request: {
+    nodeId: string;
+    tunnelEnabled: boolean | null;
+    tunnelConfigId: string;
+  }) => ipcRenderer.invoke('workspace:update-node-tunnel', request),
+  createTunnel: (request: { name: string; kind: number; settings: Record<string, unknown> }) =>
+    ipcRenderer.invoke('tunnel:create', request),
+  readTunnel: (id: string) => ipcRenderer.invoke('tunnel:read', { id }),
+  updateTunnel: (request: {
+    id: string;
+    name: string;
+    kind: number;
+    settings: Record<string, unknown>;
+  }) => ipcRenderer.invoke('tunnel:update', request),
+  deleteTunnel: (id: string) => ipcRenderer.invoke('tunnel:delete', { id }),
+  testTunnel: (id: string) => ipcRenderer.invoke('tunnel:test', { id }),
+  importWatchguardProfile: () => ipcRenderer.invoke('tunnel:import-watchguard'),
+  importAzureVpnProfile: () => ipcRenderer.invoke('tunnel:import-azure-vpn'),
+  importOvpnProfile: () => ipcRenderer.invoke('tunnel:import-ovpn'),
+  importCiscoProfile: () => ipcRenderer.invoke('tunnel:import-cisco'),
+  respondTunnelPrompt: (request: {
+    leaseId: string;
+    promptId: string;
+    value: string;
+    cancelled: boolean;
+  }) => ipcRenderer.invoke('tunnel:prompt-response', request),
+  respondTunnelRoute: (request: {
+    leaseId: string;
+    promptId: string;
+    choice: 'tunnel' | 'direct' | 'cancel';
+  }) => ipcRenderer.invoke('tunnel:route-response', request),
+  readAppSettings: () => ipcRenderer.invoke('settings:read'),
+  setPromptBeforeTunnelConnect: (enabled: boolean) =>
+    ipcRenderer.invoke('settings:set-prompt-before-tunnel', enabled),
   openSshSession: (request: { sessionId: string; nodeId: string; columns: number; rows: number }) =>
     ipcRenderer.invoke('ssh:open', request),
   trustSshHostKey: (request: { nodeId: string; expected: string; received: string }) =>
@@ -339,4 +373,8 @@ contextBridge.exposeInMainWorld('wormhole', {
     ipcRenderer.on('rdp:event', handler);
     return () => ipcRenderer.removeListener('rdp:event', handler);
   },
-});
+};
+
+// Child frames can display remote appliance content in future protocol surfaces, but they must
+// never inherit the privileged workspace/secret bridge from the top-level Wormhole renderer.
+if (process.isMainFrame) contextBridge.exposeInMainWorld('wormhole', wormholeBridge);

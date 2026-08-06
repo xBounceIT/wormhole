@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"image"
 	"image/png"
+	"io"
 	"net"
 	"os"
 	"strconv"
@@ -40,36 +41,58 @@ const (
 )
 
 type backendCommand struct {
-	ID           string `json:"id"`
-	Action       string `json:"action"`
-	SessionID    string `json:"sessionId"`
-	NodeID       string `json:"nodeId,omitempty"`
-	CredentialID string `json:"credentialId,omitempty"`
-	Host         string `json:"host,omitempty"`
-	Port         int    `json:"port,omitempty"`
-	Password     string `json:"password,omitempty"`
-	X            int    `json:"x,omitempty"`
-	Y            int    `json:"y,omitempty"`
-	Buttons      uint8  `json:"buttons,omitempty"`
-	Down         bool   `json:"down,omitempty"`
-	KeySym       uint32 `json:"keysym,omitempty"`
+	ID             string `json:"id"`
+	Action         string `json:"action"`
+	SessionID      string `json:"sessionId"`
+	NodeID         string `json:"nodeId,omitempty"`
+	ProgressSessionID string `json:"progressSessionId,omitempty"`
+	CredentialID   string `json:"credentialId,omitempty"`
+	Host           string `json:"host,omitempty"`
+	Port           int    `json:"port,omitempty"`
+	Password       string `json:"password,omitempty"`
+	TunnelConfigID string `json:"tunnelConfigId,omitempty"`
+	PromptID       string `json:"promptId,omitempty"`
+	Value          string `json:"value,omitempty"`
+	Cancelled      bool   `json:"cancelled,omitempty"`
+	X              int    `json:"x,omitempty"`
+	Y              int    `json:"y,omitempty"`
+	Buttons        uint8  `json:"buttons,omitempty"`
+	Down           bool   `json:"down,omitempty"`
+	KeySym         uint32 `json:"keysym,omitempty"`
 }
 
 type backendResponse struct {
-	ID    string `json:"id"`
-	OK    bool   `json:"ok"`
-	Error string `json:"error,omitempty"`
+	ID            string `json:"id"`
+	OK            bool   `json:"ok"`
+	Error         string `json:"error,omitempty"`
+	SocksEndpoint string `json:"socksEndpoint,omitempty"`
+	LeaseID       string `json:"leaseId,omitempty"`
 }
 
 type backendEvent struct {
-	Type             string `json:"type"`
-	SessionID        string `json:"sessionId"`
-	Status           string `json:"status,omitempty"`
-	Message          string `json:"message,omitempty"`
-	PasswordRequired bool   `json:"passwordRequired,omitempty"`
-	Width            int    `json:"width,omitempty"`
-	Height           int    `json:"height,omitempty"`
-	Image            string `json:"image,omitempty"`
+	Type                    string   `json:"type"`
+	SessionID               string   `json:"sessionId"`
+	LeaseID                 string   `json:"leaseId,omitempty"`
+	Phase                   string   `json:"phase,omitempty"`
+	Detail                  string   `json:"detail,omitempty"`
+	ConnectionName          string   `json:"connectionName,omitempty"`
+	TunnelName              string   `json:"tunnelName,omitempty"`
+	Status                  string   `json:"status,omitempty"`
+	Message                 string   `json:"message,omitempty"`
+	PasswordRequired        bool     `json:"passwordRequired,omitempty"`
+	Width                   int      `json:"width,omitempty"`
+	Height                  int      `json:"height,omitempty"`
+	Image                   string   `json:"image,omitempty"`
+	PromptID                string   `json:"promptId,omitempty"`
+	Title                   string   `json:"title,omitempty"`
+	Secret                  bool     `json:"secret,omitempty"`
+	URLs                    []string `json:"urls,omitempty"`
+	IgnoreCertificateErrors bool     `json:"ignoreCertificateErrors,omitempty"`
+	Completion              string   `json:"completion,omitempty"`
+	RedirectPrefix          string   `json:"redirectPrefix,omitempty"`
+	ExpectedState           string   `json:"expectedState,omitempty"`
+	CookieName              string   `json:"cookieName,omitempty"`
+	RequireHTTPOnly         bool     `json:"requireHttpOnly,omitempty"`
 }
 
 type backendLineWriter struct {
@@ -109,6 +132,7 @@ func serveBackend(databasePath string, electronUserDataPath ...string) error {
 
 	output := newBackendLineWriter(os.Stdout)
 	manager := newVncManager(database, output, electronUserDataPath...)
+	manager.databasePath = databasePath
 	defer manager.close()
 
 	scanner := bufio.NewScanner(os.Stdin)
@@ -131,9 +155,27 @@ type vncManager struct {
 	database             *sql.DB
 	electronUserDataPath string
 	output               *backendLineWriter
+	databasePath         string
 
-	mu       sync.Mutex
-	sessions map[string]*vncSession
+	mu             sync.Mutex
+	sessions       map[string]*vncSession
+	tunnelLeases   map[string]*tunnelRuntime
+	tunnelStarts   map[string]context.CancelFunc
+	tunnelPrompts  map[string]*pendingTunnelPrompt
+	promptSequence uint64
+	routePrompts   map[string]*pendingTunnelPrompt
+	routeSequence  uint64
+	cleanup        sync.WaitGroup
+}
+
+type pendingTunnelPrompt struct {
+	leaseID string
+	result  chan tunnelPromptResult
+}
+
+type tunnelPromptResult struct {
+	value     string
+	cancelled bool
 }
 
 func newVncManager(
@@ -150,6 +192,10 @@ func newVncManager(
 		electronUserDataPath: userDataPath,
 		output:               output,
 		sessions:             make(map[string]*vncSession),
+		tunnelLeases:         make(map[string]*tunnelRuntime),
+		tunnelStarts:         make(map[string]context.CancelFunc),
+		tunnelPrompts:        make(map[string]*pendingTunnelPrompt),
+		routePrompts:         make(map[string]*pendingTunnelPrompt),
 	}
 }
 
@@ -172,6 +218,14 @@ func (m *vncManager) handle(command backendCommand) {
 		m.input(command, func(session *vncSession) error {
 			return session.key(command.Down, command.KeySym)
 		})
+	case "tunnel.acquire":
+		m.acquireTunnel(command)
+	case "tunnel.release":
+		m.releaseTunnel(command)
+	case "tunnel.prompt-response":
+		m.respondTunnelPrompt(command)
+	case "tunnel.route-response":
+		m.respondTunnelRoute(command)
 	default:
 		m.respond(command.ID, fmt.Errorf("unsupported backend action %q", command.Action))
 	}
@@ -235,10 +289,259 @@ func (m *vncManager) close() {
 		sessions = append(sessions, session)
 	}
 	m.sessions = make(map[string]*vncSession)
+	leases := make([]*tunnelRuntime, 0, len(m.tunnelLeases))
+	for _, lease := range m.tunnelLeases {
+		leases = append(leases, lease)
+	}
+	for _, cancel := range m.tunnelStarts {
+		cancel()
+	}
+	m.tunnelLeases = make(map[string]*tunnelRuntime)
+	m.tunnelStarts = make(map[string]context.CancelFunc)
+	m.tunnelPrompts = make(map[string]*pendingTunnelPrompt)
+	m.routePrompts = make(map[string]*pendingTunnelPrompt)
 	m.mu.Unlock()
 
 	for _, session := range sessions {
-		session.close()
+		m.cleanupNative(session.close)
+	}
+	for _, lease := range leases {
+		m.cleanupNative(lease.close)
+	}
+	m.cleanup.Wait()
+}
+
+func (m *vncManager) cleanupNative(close func()) {
+	m.cleanup.Add(1)
+	go func() {
+		defer m.cleanup.Done()
+		close()
+	}()
+}
+
+func (m *vncManager) acquireTunnel(command backendCommand) {
+	m.mu.Lock()
+	if m.tunnelLeases[command.SessionID] != nil || m.tunnelStarts[command.SessionID] != nil {
+		m.mu.Unlock()
+		m.respond(command.ID, errors.New("VPN tunnel lease ID is already in use"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), tunnelStartTimeout)
+	m.tunnelStarts[command.SessionID] = cancel
+	m.cleanup.Add(1)
+	m.mu.Unlock()
+
+	go func() {
+		defer m.cleanup.Done()
+		defer cancel()
+		configID := normalizeTunnelID(command.TunnelConfigID)
+		if command.NodeID != "" {
+			resolvedID, enabled, err := resolveNodeTunnel(m.databasePath, command.NodeID)
+			if err != nil {
+				m.finishTunnelAcquire(command, nil, err)
+				return
+			}
+			if !enabled {
+				m.finishTunnelAcquire(command, nil, nil)
+				return
+			}
+			configID = resolvedID
+		}
+		if configID == "" {
+			m.finishTunnelAcquire(command, nil, errors.New("VPN tunnel is enabled but no configuration is selected"))
+			return
+		}
+		progressSessionID := command.ProgressSessionID
+		if progressSessionID == "" {
+			progressSessionID = command.SessionID
+		}
+		if command.NodeID != "" {
+			useTunnel, err := readPromptBeforeTunnelConnect(m.databasePath)
+			if err != nil {
+				m.finishTunnelAcquire(command, nil, err)
+				return
+			}
+			if useTunnel {
+				route, err := m.routeTunnel(
+					command.SessionID,
+					progressSessionID,
+					resolveNodeDisplayName(m.databasePath, command.NodeID),
+					tunnelConfigName(m.databasePath, configID),
+				)(ctx)
+				if err != nil {
+					m.finishTunnelAcquire(command, nil, err)
+					return
+				}
+				if route == "direct" {
+					m.finishTunnelAcquire(command, nil, nil)
+					return
+				}
+			}
+		}
+		ctx = withTunnelProgressHandler(ctx, m.progressTunnel(progressSessionID))
+		promptContext := withTunnelPromptHandler(ctx, m.promptTunnel(command.SessionID))
+		lease, err := startTunnelRuntime(promptContext, m.databasePath, configID)
+		m.finishTunnelAcquire(command, lease, err)
+	}()
+}
+
+func (m *vncManager) promptTunnel(leaseID string) tunnelPromptHandler {
+	return func(ctx context.Context, prompt tunnelPrompt) (string, error) {
+		m.mu.Lock()
+		m.promptSequence++
+		promptID := fmt.Sprintf("tunnel-prompt-%d", m.promptSequence)
+		pending := &pendingTunnelPrompt{leaseID: leaseID, result: make(chan tunnelPromptResult, 1)}
+		m.tunnelPrompts[promptID] = pending
+		m.mu.Unlock()
+
+		eventType := "tunnel.prompt"
+		if prompt.Browser {
+			eventType = "tunnel.browser"
+		}
+		m.emit(backendEvent{
+			Type: eventType, SessionID: leaseID, PromptID: promptID,
+			Title: prompt.Title, Message: prompt.Message, Secret: prompt.Secret,
+			URLs: prompt.URLs, IgnoreCertificateErrors: prompt.IgnoreCertificateErrors,
+			Completion: prompt.Completion, RedirectPrefix: prompt.RedirectPrefix,
+			ExpectedState: prompt.ExpectedState,
+			CookieName:    prompt.CookieName, RequireHTTPOnly: prompt.RequireHTTPOnly,
+		})
+		defer func() {
+			m.mu.Lock()
+			if m.tunnelPrompts[promptID] == pending {
+				delete(m.tunnelPrompts, promptID)
+			}
+			m.mu.Unlock()
+			m.emit(backendEvent{Type: "tunnel.prompt-closed", SessionID: leaseID, PromptID: promptID})
+		}()
+		select {
+		case result := <-pending.result:
+			if result.cancelled {
+				return "", errors.New("VPN authentication was cancelled")
+			}
+			return result.value, nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+}
+
+func (m *vncManager) respondTunnelPrompt(command backendCommand) {
+	m.mu.Lock()
+	pending := m.tunnelPrompts[command.PromptID]
+	if pending != nil && pending.leaseID == command.SessionID {
+		delete(m.tunnelPrompts, command.PromptID)
+	}
+	m.mu.Unlock()
+	if pending == nil || pending.leaseID != command.SessionID {
+		m.respond(command.ID, errors.New("VPN authentication prompt is no longer active"))
+		return
+	}
+	m.respond(command.ID, nil)
+	pending.result <- tunnelPromptResult{value: command.Value, cancelled: command.Cancelled}
+}
+
+type tunnelRouteHandler func(context.Context) (string, error)
+
+// routeTunnel asks the renderer whether a saved connection should use its configured VPN tunnel.
+// It mirrors promptTunnel but emits tunnel.route events and accepts a three-way response
+// (tunnel / direct / cancel) instead of free-form input.
+func (m *vncManager) routeTunnel(leaseID, progressSessionID, connectionName, tunnelName string) tunnelRouteHandler {
+	return func(ctx context.Context) (string, error) {
+		m.mu.Lock()
+		m.routeSequence++
+		promptID := fmt.Sprintf("tunnel-route-%d", m.routeSequence)
+		pending := &pendingTunnelPrompt{leaseID: leaseID, result: make(chan tunnelPromptResult, 1)}
+		m.routePrompts[promptID] = pending
+		m.mu.Unlock()
+
+		m.emit(backendEvent{
+			Type: "tunnel.route", SessionID: progressSessionID, LeaseID: leaseID, PromptID: promptID,
+			ConnectionName: connectionName, TunnelName: tunnelName,
+		})
+		defer func() {
+			m.mu.Lock()
+			if m.routePrompts[promptID] == pending {
+				delete(m.routePrompts, promptID)
+			}
+			m.mu.Unlock()
+			m.emit(backendEvent{Type: "tunnel.route-closed", SessionID: progressSessionID, LeaseID: leaseID, PromptID: promptID})
+		}()
+		select {
+		case result := <-pending.result:
+			if result.cancelled {
+				return "", errors.New("Connection cancelled.")
+			}
+			return result.value, nil
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+}
+
+func (m *vncManager) respondTunnelRoute(command backendCommand) {
+	m.mu.Lock()
+	pending := m.routePrompts[command.PromptID]
+	if pending != nil && pending.leaseID == command.SessionID {
+		delete(m.routePrompts, command.PromptID)
+	}
+	m.mu.Unlock()
+	if pending == nil || pending.leaseID != command.SessionID {
+		m.respond(command.ID, errors.New("VPN tunnel choice is no longer active"))
+		return
+	}
+	m.respond(command.ID, nil)
+	pending.result <- tunnelPromptResult{
+		value:     command.Value,
+		cancelled: command.Cancelled || command.Value == "cancel",
+	}
+}
+
+func (m *vncManager) progressTunnel(progressSessionID string) tunnelProgressHandler {
+	return func(_ context.Context, phase, detail string) error {
+		m.emit(backendEvent{
+			Type: "tunnel.progress", SessionID: progressSessionID, Phase: phase, Detail: detail,
+		})
+		return nil
+	}
+}
+
+func (m *vncManager) finishTunnelAcquire(command backendCommand, lease *tunnelRuntime, err error) {
+	m.mu.Lock()
+	_, stillPending := m.tunnelStarts[command.SessionID]
+	delete(m.tunnelStarts, command.SessionID)
+	if err == nil && lease != nil && stillPending {
+		m.tunnelLeases[command.SessionID] = lease
+	}
+	m.mu.Unlock()
+	if !stillPending {
+		lease.close()
+		_ = m.output.write(backendResponse{
+			ID: command.ID, OK: false, Error: "VPN tunnel establishment was cancelled",
+		})
+		return
+	}
+	response := backendResponse{ID: command.ID, OK: err == nil, LeaseID: command.SessionID}
+	if err != nil {
+		response.Error = publicBackendError(err)
+	} else if lease != nil {
+		response.SocksEndpoint = lease.socksEndpoint()
+	}
+	_ = m.output.write(response)
+}
+
+func (m *vncManager) releaseTunnel(command backendCommand) {
+	m.mu.Lock()
+	lease := m.tunnelLeases[command.SessionID]
+	delete(m.tunnelLeases, command.SessionID)
+	if cancel := m.tunnelStarts[command.SessionID]; cancel != nil {
+		cancel()
+		delete(m.tunnelStarts, command.SessionID)
+	}
+	m.mu.Unlock()
+	m.respond(command.ID, nil)
+	if lease != nil {
+		m.cleanupNative(lease.close)
 	}
 }
 
@@ -267,6 +570,7 @@ type vncSession struct {
 	connectCancel context.CancelFunc
 	conn          *vnc.ClientConn
 	netConn       net.Conn
+	tunnel        *tunnelRuntime
 	writeMu       sync.Mutex
 	eventMu       sync.Mutex
 
@@ -298,8 +602,56 @@ func (s *vncSession) connect(command backendCommand, database *sql.DB, electronU
 	defer s.endConnect()
 	s.emitStatus("connecting", "", false)
 
-	dialer := net.Dialer{Timeout: vncConnectTimeout}
-	network, err := dialer.DialContext(connectContext, "tcp", net.JoinHostPort(target.host, strconv.Itoa(target.port)))
+	var tunnel *tunnelRuntime
+	if target.tunnelConfigID != "" {
+		if target.nodeID != "" {
+			useTunnel, promptErr := readPromptBeforeTunnelConnect(s.manager.databasePath)
+			if promptErr != nil {
+				s.fail(promptErr)
+				return
+			}
+			if useTunnel {
+				connectionName := target.displayName
+				if connectionName == "" {
+					connectionName = "the target"
+				}
+				route, routeErr := s.manager.routeTunnel(
+					s.id,
+					s.id,
+					connectionName,
+					tunnelConfigName(s.manager.databasePath, target.tunnelConfigID),
+				)(connectContext)
+				if routeErr != nil {
+					s.fail(routeErr)
+					return
+				}
+				if route == "direct" {
+					target.tunnelConfigID = ""
+				}
+			}
+		}
+	}
+	if target.tunnelConfigID != "" {
+		progressContext := withTunnelProgressHandler(connectContext, s.manager.progressTunnel(s.id))
+		promptContext := withTunnelPromptHandler(progressContext, s.manager.promptTunnel(s.id))
+		tunnel, err = startTunnelRuntime(promptContext, s.manager.databasePath, target.tunnelConfigID)
+		if err != nil {
+			s.fail(err)
+			return
+		}
+		if !s.setTunnel(tunnel) {
+			tunnel.close()
+			return
+		}
+	}
+	address := net.JoinHostPort(target.host, strconv.Itoa(target.port))
+	var network net.Conn
+	if tunnel != nil {
+		network, err = tunnel.dialContext(connectContext, "tcp", address)
+	} else {
+		dialer := net.Dialer{Timeout: vncConnectTimeout}
+		network, err = dialer.DialContext(connectContext, "tcp", address)
+	}
 	if err != nil {
 		s.fail(err)
 		return
@@ -567,6 +919,16 @@ func (s *vncSession) setNetworkConnection(connection net.Conn) bool {
 	return true
 }
 
+func (s *vncSession) setTunnel(tunnel *tunnelRuntime) bool {
+	s.stateMu.Lock()
+	defer s.stateMu.Unlock()
+	if s.stopped {
+		return false
+	}
+	s.tunnel = tunnel
+	return true
+}
+
 func (s *vncSession) beginConnect() (context.Context, bool) {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
@@ -631,6 +993,7 @@ func (s *vncSession) close() {
 		cancel := s.connectCancel
 		connection := s.conn
 		network := s.netConn
+		tunnel := s.tunnel
 		s.stateMu.Unlock()
 		if cancel != nil {
 			cancel()
@@ -639,6 +1002,9 @@ func (s *vncSession) close() {
 			_ = connection.Close()
 		} else if network != nil {
 			_ = network.Close()
+		}
+		if tunnel != nil {
+			tunnel.close()
 		}
 		// Do not let an event that passed its stopped check race past teardown and overwrite a
 		// replacement session with the same renderer session ID.
@@ -689,6 +1055,11 @@ func (s *vncSession) fail(err error) {
 		return
 	}
 	s.emitStatus("failed", message, passwordRequired)
+	// Failures before the long-lived listen loop (DNS/SOCKS/RFB handshake, authentication,
+	// framebuffer setup) do not pass through its normal teardown path. Close here so a failed
+	// connection cannot retain its socket, VPN sidecar, or manager slot until the user retries.
+	s.close()
+	s.manager.remove(s)
 }
 
 func validateVncFramePayload(size int) error {
@@ -789,6 +1160,8 @@ func (s *vncSession) disconnected(message string) {
 		return
 	}
 	s.emitStatus("disconnected", message, false)
+	s.close()
+	s.manager.remove(s)
 }
 
 func (s *vncSession) claimTerminal() bool {
@@ -806,7 +1179,7 @@ func validateBackendCommand(command backendCommand) error {
 		return errors.New("backend command ID is invalid")
 	}
 	if command.SessionID == "" || len(command.SessionID) > 128 {
-		return errors.New("VNC session ID is invalid")
+		return errors.New("backend session ID is invalid")
 	}
 	switch command.Action {
 	case "vnc.connect":
@@ -830,6 +1203,27 @@ func validateBackendCommand(command backendCommand) error {
 	case "vnc.key":
 		if command.KeySym == 0 {
 			return errors.New("VNC key symbol is invalid")
+		}
+	case "tunnel.acquire":
+		if len(command.NodeID) > 128 {
+			return errors.New("VPN connection identity is invalid")
+		}
+		if command.NodeID == "" && normalizeTunnelID(command.TunnelConfigID) == "" {
+			return errors.New("VPN tunnel configuration is invalid")
+		}
+	case "tunnel.release":
+	case "tunnel.prompt-response":
+		if command.PromptID == "" || len(command.PromptID) > 128 || len(command.Value) > 16*1024 {
+			return errors.New("VPN authentication response is invalid")
+		}
+	case "tunnel.route-response":
+		if command.PromptID == "" || len(command.PromptID) > 128 {
+			return errors.New("VPN tunnel choice is invalid")
+		}
+		switch command.Value {
+		case "tunnel", "direct", "cancel":
+		default:
+			return errors.New("VPN tunnel choice is invalid")
 		}
 	default:
 		return fmt.Errorf("unsupported backend action %q", command.Action)
@@ -881,9 +1275,13 @@ func resolveVncTarget(
 }
 
 type vncTarget struct {
-	host     string
-	port     int
-	password string
+	host           string
+	port           int
+	password       string
+	tunnelConfigID string
+	nodeID         string
+	displayName    string
+	tunnelName     string
 }
 
 func splitVncHostPort(host string, port int) (string, int, error) {
@@ -991,7 +1389,18 @@ func publicVncConnectError(err error) (string, bool) {
 }
 
 func publicBackendError(err error) string {
-	return truncateBackendMessage(strings.TrimSpace(err.Error()))
+	message := strings.TrimSpace(err.Error())
+	switch {
+	case errors.Is(err, io.EOF):
+		message = "the VPN gateway closed the connection"
+	case errors.Is(err, io.ErrUnexpectedEOF):
+		message = "the VPN gateway closed the connection unexpectedly"
+	case errors.Is(err, context.DeadlineExceeded):
+		message = "the operation timed out"
+	case errors.Is(err, context.Canceled):
+		message = "the operation was cancelled"
+	}
+	return truncateBackendMessage(message)
 }
 
 func truncateBackendMessage(message string) string {
@@ -1004,6 +1413,7 @@ func truncateBackendMessage(message string) string {
 type vncNodeRow struct {
 	id             string
 	parentID       sql.NullString
+	name           sql.NullString
 	kind           int64
 	protocol       sql.NullInt64
 	host           sql.NullString
@@ -1012,6 +1422,7 @@ type vncNodeRow struct {
 	credentialMode sql.NullInt64
 	inlinePassword sql.NullInt64
 	tunnelEnabled  sql.NullInt64
+	tunnelConfigID sql.NullString
 }
 
 func readVncTargetFromDatabase(
@@ -1021,6 +1432,7 @@ func readVncTargetFromDatabase(
 	electronUserDataPath ...string,
 ) (vncTarget, error) {
 	target := vncTarget{}
+	target.nodeID = normalizeID(nodeID)
 	if resolvePassword && credentialID != "" {
 		password, _, err := readVncCredentialSecret(database, credentialID, electronUserDataPath...)
 		if err != nil {
@@ -1049,6 +1461,8 @@ func readVncTargetFromDatabase(
 	portContextResolved := false
 	tunnelResolved := false
 	tunnelEnabled := false
+	tunnelConfigID := ""
+	displayName := ""
 	for currentID != "" {
 		if _, seen := visited[currentID]; seen {
 			return vncTarget{}, errors.New("VNC connection tree contains a cycle")
@@ -1060,6 +1474,9 @@ func readVncTargetFromDatabase(
 		}
 		if err != nil {
 			return vncTarget{}, err
+		}
+		if displayName == "" && row.name.Valid && strings.TrimSpace(row.name.String) != "" {
+			displayName = strings.TrimSpace(row.name.String)
 		}
 		if !protocolResolved && row.protocol.Valid {
 			resolvedProtocol = row.protocol.Int64
@@ -1078,6 +1495,9 @@ func readVncTargetFromDatabase(
 		if !tunnelResolved && row.tunnelEnabled.Valid {
 			tunnelResolved = true
 			tunnelEnabled = row.tunnelEnabled.Int64 != 0
+		}
+		if tunnelConfigID == "" && row.tunnelConfigID.Valid {
+			tunnelConfigID = normalizeTunnelID(row.tunnelConfigID.String)
 		}
 
 		if leaf && row.inlinePassword.Valid && row.inlinePassword.Int64 != 0 {
@@ -1136,9 +1556,13 @@ func readVncTargetFromDatabase(
 	if protocolResolved && resolvedProtocol != vncProtocolValue {
 		return vncTarget{}, errors.New("VNC node does not resolve to the VNC protocol")
 	}
-	if tunnelEnabled {
-		return vncTarget{}, errors.New("VNC VPN routing is not available in the Electron native backend")
+	if tunnelEnabled && tunnelConfigID == "" {
+		return vncTarget{}, errors.New("VNC connection enables a VPN tunnel but no tunnel is configured")
 	}
+	if tunnelEnabled {
+		target.tunnelConfigID = tunnelConfigID
+	}
+	target.displayName = displayName
 	return target, nil
 }
 
@@ -1151,11 +1575,12 @@ func readVncNode(database *sql.DB, columns map[string]struct{}, id string) (vncN
 		}
 		return "NULL"
 	}
-	query := `SELECT Id, ` + column("ParentId") + `, ` + column("Kind") + `, ` + column("Protocol") + `, ` + column("Host") + `, ` + column("Port") + `, ` + column("CredentialId") + `, ` + column("CredentialMode") + `, ` + column("UseInlinePassword") + `, ` + column("TunnelEnabled") + ` FROM Nodes WHERE Id = ?;`
+	query := `SELECT Id, ` + column("ParentId") + `, ` + column("Name") + `, ` + column("Kind") + `, ` + column("Protocol") + `, ` + column("Host") + `, ` + column("Port") + `, ` + column("CredentialId") + `, ` + column("CredentialMode") + `, ` + column("UseInlinePassword") + `, ` + column("TunnelEnabled") + `, ` + column("TunnelConfigId") + ` FROM Nodes WHERE Id = ?;`
 	var row vncNodeRow
 	err := database.QueryRow(query, id).Scan(
 		&row.id,
 		&row.parentID,
+		&row.name,
 		&row.kind,
 		&row.protocol,
 		&row.host,
@@ -1164,6 +1589,7 @@ func readVncNode(database *sql.DB, columns map[string]struct{}, id string) (vncN
 		&row.credentialMode,
 		&row.inlinePassword,
 		&row.tunnelEnabled,
+		&row.tunnelConfigID,
 	)
 	return row, err
 }

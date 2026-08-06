@@ -19,6 +19,48 @@ func TestDecodeInputRejectsOversizedRequest(t *testing.T) {
 	}
 }
 
+func TestEnsureMigrationSchemaBootstrapsTunnelStorageWithoutLegacyApp(t *testing.T) {
+	database, err := openDatabase(filepath.Join(t.TempDir(), "wormhole.db"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := ensureMigrationSchema(database); err != nil {
+		t.Fatal(err)
+	}
+	if exists, err := tableExists(database, "TunnelConfigs"); err != nil || !exists {
+		t.Fatalf("TunnelConfigs exists = %v, %v", exists, err)
+	}
+}
+
+func TestEnsureMigrationSchemaAddsNodeTunnelColumnsAndLegacyMarker(t *testing.T) {
+	database, err := openDatabase(filepath.Join(t.TempDir(), "wormhole.db"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`CREATE TABLE Nodes (Id TEXT PRIMARY KEY NOT NULL);`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureMigrationSchema(database); err != nil {
+		t.Fatal(err)
+	}
+	columns, err := tableColumns(database, "Nodes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := columns["TunnelEnabled"]; !ok {
+		t.Fatal("TunnelEnabled was not added")
+	}
+	if _, ok := columns["TunnelConfigId"]; !ok {
+		t.Fatal("TunnelConfigId was not added")
+	}
+	var count int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM __migration_history WHERE Id = '0003_add_tunnel_config';`).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("migration marker count = %d, %v", count, err)
+	}
+}
+
 func TestLoadWorkspaceMapsPersistedRowsWithoutDemoData(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	database, err := openDatabase(databasePath, false)

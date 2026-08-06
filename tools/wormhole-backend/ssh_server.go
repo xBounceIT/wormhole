@@ -73,6 +73,8 @@ type sshWireCommand struct {
 	Type            string                `json:"type"`
 	SessionID       string                `json:"session_id"`
 	NodeID          string                `json:"node_id"`
+	SocksEndpoint   string                `json:"socks_endpoint"`
+	TunnelEnabled   *bool                 `json:"tunnel_enabled,omitempty"`
 	Data            string                `json:"data"`
 	Path            string                `json:"path"`
 	DestinationPath string                `json:"destination_path"`
@@ -96,6 +98,8 @@ type sshWireEvent struct {
 	Type                string             `json:"type"`
 	RequestID           string             `json:"request_id,omitempty"`
 	SessionID           string             `json:"session_id"`
+	Phase               string             `json:"phase,omitempty"`
+	Detail              string             `json:"detail,omitempty"`
 	Frame               *sshTerminalFrame  `json:"frame,omitempty"`
 	Host                string             `json:"host,omitempty"`
 	Port                int                `json:"port,omitempty"`
@@ -162,6 +166,7 @@ type sshNodeRow struct {
 	UseInlinePassword    sql.NullInt64
 	KnownHostFingerprint sql.NullString
 	TunnelEnabled        sql.NullInt64
+	TunnelConfigID       sql.NullString
 	SshAutoSudo          sql.NullInt64
 }
 
@@ -179,6 +184,7 @@ type sshNode struct {
 	useInlinePassword    bool
 	knownHostFingerprint string
 	tunnelEnabled        *bool
+	tunnelConfigID       string
 	autoSudo             *bool
 }
 
@@ -193,6 +199,8 @@ type sshTarget struct {
 	keyPassphrase        string
 	knownHostFingerprint string
 	autoSudo             bool
+	tunnelConfigID       string
+	socksEndpoint        string
 }
 
 type sshCredentialRow struct {
@@ -217,6 +225,7 @@ type sshNativeSession struct {
 	mcpCommandReplay *mcpReplayBuffer
 	mcpCommandGateMu sync.Mutex
 	mcpCommandGate   chan struct{}
+	tunnel           *tunnelRuntime
 
 	sftpMu         sync.Mutex
 	sftpListMu     sync.Mutex
@@ -429,8 +438,18 @@ func (server *sshServer) open(command sshWireCommand) {
 		server.writeError(command.SessionID, "SSH connection id is invalid")
 		return
 	}
+	if command.SocksEndpoint != "" && !isLoopbackSocksEndpoint(command.SocksEndpoint) {
+		server.writeError(command.SessionID, "SSH VPN proxy endpoint is invalid")
+		return
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	openContext := withTunnelProgressHandler(ctx, func(_ context.Context, phase, detail string) error {
+		server.output.write(sshWireEvent{
+			Type: "tunnel.progress", SessionID: command.SessionID, Phase: phase, Detail: detail,
+		})
+		return nil
+	})
 	server.mu.Lock()
 	if _, exists := server.sessions[command.SessionID]; exists {
 		server.mu.Unlock()
@@ -449,10 +468,12 @@ func (server *sshServer) open(command sshWireCommand) {
 
 	go func() {
 		native, target, err := openNativeSSH(
-			ctx,
+			openContext,
 			server.databasePath,
 			server.electronUserDataPath,
 			nodeID,
+			command.SocksEndpoint,
+			command.TunnelEnabled,
 			command.Columns,
 			command.Rows,
 		)
@@ -1118,6 +1139,9 @@ func (native *sshNativeSession) close(notify bool) {
 		}
 		if native.client != nil {
 			_ = native.client.Close()
+		}
+		if native.tunnel != nil {
+			native.tunnel.close()
 		}
 		if native.server != nil {
 			native.server.remove(native)
@@ -2501,6 +2525,8 @@ func openNativeSSH(
 	databasePath string,
 	electronUserDataPath string,
 	nodeID string,
+	socksEndpoint string,
+	tunnelEnabled *bool,
 	columns uint32,
 	rows uint32,
 ) (*sshNativeSession, sshTarget, error) {
@@ -2514,10 +2540,23 @@ func openNativeSSH(
 	if err := ctx.Err(); err != nil {
 		return nil, sshTarget{}, err
 	}
-	native, fingerprint, err := dialNativeSSH(ctx, target, columns, rows)
+	target.socksEndpoint = socksEndpoint
+	if tunnelEnabled != nil && !*tunnelEnabled {
+		target.tunnelConfigID = ""
+	}
+	var tunnel *tunnelRuntime
+	if target.tunnelConfigID != "" && target.socksEndpoint == "" {
+		tunnel, err = startTunnelRuntime(ctx, databasePath, target.tunnelConfigID)
+		if err != nil {
+			return nil, sshTarget{}, err
+		}
+	}
+	native, fingerprint, err := dialNativeSSH(ctx, target, columns, rows, tunnel)
 	if err != nil {
+		tunnel.close()
 		return nil, sshTarget{}, err
 	}
+	native.tunnel = tunnel
 	if target.knownHostFingerprint == "" {
 		if err := persistSSHFingerprint(databasePath, target.nodeID, fingerprint); err != nil {
 			if errors.Is(err, errSSHHostFingerprintChanged) {
@@ -2538,7 +2577,12 @@ func dialNativeSSH(
 	target sshTarget,
 	columns uint32,
 	rows uint32,
+	tunnels ...*tunnelRuntime,
 ) (*sshNativeSession, string, error) {
+	var tunnel *tunnelRuntime
+	if len(tunnels) > 0 {
+		tunnel = tunnels[0]
+	}
 	var fingerprint string
 	config := &ssh.ClientConfig{
 		User:    target.username,
@@ -2575,8 +2619,16 @@ func dialNativeSSH(
 	}
 
 	address := net.JoinHostPort(normalizeSSHHost(target.host), fmt.Sprintf("%d", target.port))
-	dialer := net.Dialer{Timeout: sshConnectTimeout}
-	connection, err := dialer.DialContext(ctx, "tcp", address)
+	var connection net.Conn
+	var err error
+	if target.socksEndpoint != "" {
+		connection, err = dialSocks5(ctx, target.socksEndpoint, "tcp", address)
+	} else if tunnel != nil {
+		connection, err = tunnel.dialContext(ctx, "tcp", address)
+	} else {
+		dialer := net.Dialer{Timeout: sshConnectTimeout}
+		connection, err = dialer.DialContext(ctx, "tcp", address)
+	}
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, "", ctxErr
@@ -2732,6 +2784,7 @@ func loadSSHTarget(databasePath, nodeID string, electronUserDataPath ...string) 
 	autoSudoSet := false
 	tunnelEnabled := false
 	tunnelSet := false
+	tunnelConfigID := ""
 	current := root
 	seen := make(map[string]struct{})
 	for current != nil {
@@ -2771,6 +2824,9 @@ func loadSSHTarget(databasePath, nodeID string, electronUserDataPath ...string) 
 			tunnelEnabled = *current.tunnelEnabled
 			tunnelSet = true
 		}
+		if tunnelConfigID == "" && current.tunnelConfigID != "" {
+			tunnelConfigID = current.tunnelConfigID
+		}
 		if !credentialResolved {
 			if current.credentialMode != nil {
 				switch *current.credentialMode {
@@ -2804,8 +2860,8 @@ func loadSSHTarget(databasePath, nodeID string, electronUserDataPath ...string) 
 	if protocol != 0 {
 		return sshTarget{}, errors.New("the selected connection is not an SSH connection")
 	}
-	if tunnelSet && tunnelEnabled {
-		return sshTarget{}, errors.New("SSH connections configured with a VPN tunnel are not available in the Electron shell yet")
+	if tunnelSet && tunnelEnabled && tunnelConfigID == "" {
+		return sshTarget{}, errors.New("SSH connection enables a VPN tunnel but no tunnel is configured")
 	}
 	if host == "" {
 		return sshTarget{}, errors.New("SSH connection has no host")
@@ -2829,6 +2885,9 @@ func loadSSHTarget(databasePath, nodeID string, electronUserDataPath ...string) 
 		username:             username,
 		knownHostFingerprint: knownFingerprint,
 		autoSudo:             autoSudo,
+	}
+	if tunnelSet && tunnelEnabled {
+		target.tunnelConfigID = tunnelConfigID
 	}
 	if root.useInlinePassword {
 		secret, err := readCredentialSecret(database, root.id, electronUserDataPath...)
@@ -2875,6 +2934,7 @@ func loadSSHNodes(database *sql.DB) (map[string]*sshNode, error) {
 		expression("UseInlinePassword") + ", " +
 		expression("SshKnownHostFingerprint") + ", " +
 		expression("TunnelEnabled") + ", " +
+		expression("TunnelConfigId") + ", " +
 		expression("SshAutoSudo") + " FROM Nodes n;"
 	rows, err := database.Query(query)
 	if err != nil {
@@ -2899,6 +2959,7 @@ func loadSSHNodes(database *sql.DB) (map[string]*sshNode, error) {
 			&row.UseInlinePassword,
 			&row.KnownHostFingerprint,
 			&row.TunnelEnabled,
+			&row.TunnelConfigID,
 			&row.SshAutoSudo,
 		); err != nil {
 			return nil, fmt.Errorf("cannot read an SSH connection: %w", err)
@@ -2912,6 +2973,7 @@ func loadSSHNodes(database *sql.DB) (map[string]*sshNode, error) {
 			credentialID:         normalizeID(nullableString(row.CredentialID)),
 			useInlinePassword:    row.UseInlinePassword.Valid && row.UseInlinePassword.Int64 != 0,
 			knownHostFingerprint: nullableString(row.KnownHostFingerprint),
+			tunnelConfigID:       normalizeTunnelID(nullableString(row.TunnelConfigID)),
 		}
 		if row.TunnelEnabled.Valid {
 			value := row.TunnelEnabled.Int64 != 0

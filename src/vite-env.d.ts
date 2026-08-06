@@ -47,6 +47,8 @@ interface WormholeRdpProfile {
   gatewayBypassLocal?: boolean;
   gatewayUseSameCreds?: boolean;
   useExternalClient?: boolean;
+  socksEndpoint?: string;
+  tunnelEnabled?: boolean;
 }
 
 interface WormholeRdpBackendEvent {
@@ -86,6 +88,8 @@ interface WormholeWorkspaceNode {
   serialParity?: number;
   serialFlowControl?: number;
   sshAutoSudo?: boolean;
+  tunnelEnabled?: boolean;
+  tunnelConfigId?: string;
   persisted?: boolean;
   children?: WormholeWorkspaceNode[];
 }
@@ -105,6 +109,13 @@ interface WormholeWorkspaceTunnel {
   id: string;
   name: string;
   kind: string;
+}
+
+interface WormholeTunnelDetails {
+  id: string;
+  name: string;
+  kind: number;
+  settings: Record<string, unknown>;
 }
 
 interface WormholeWorkspaceSnapshot {
@@ -203,6 +214,7 @@ type WormholeSshEvent =
       hostKeyExpected?: string;
       hostKeyReceived?: string;
     }
+  | { type: 'tunnel.progress'; sessionId: string; phase: string; detail?: string }
   | { type: 'sftp.opening' | 'sftp.closed'; sessionId: string; requestId?: string }
   | {
       type: 'sftp.ready';
@@ -348,14 +360,38 @@ interface WormholeBackendResponse {
 }
 
 interface WormholeBackendEvent {
-  type: 'vnc.status' | 'vnc.frame';
+  type:
+    | 'vnc.status'
+    | 'vnc.frame'
+    | 'tunnel.prompt'
+    | 'tunnel.prompt-closed'
+    | 'tunnel.progress'
+    | 'tunnel.route'
+    | 'tunnel.route-closed';
   sessionId: string;
+  leaseId?: string;
+  phase?: string;
+  detail?: string;
+  connectionName?: string;
+  tunnelName?: string;
   status?: 'connecting' | 'connected' | 'failed' | 'disconnected';
   message?: string;
   passwordRequired?: boolean;
   width?: number;
   height?: number;
   image?: string;
+  promptId?: string;
+  title?: string;
+  secret?: boolean;
+}
+
+interface WormholeTunnelPrompt {
+  type: 'tunnel.prompt';
+  sessionId: string;
+  promptId: string;
+  title: string;
+  message: string;
+  secret: boolean;
 }
 
 interface WormholeMcpStatus {
@@ -394,7 +430,7 @@ interface Window {
       domain: string;
       password: string;
     }): Promise<WormholeWorkspaceCredential>;
-    deleteCredential(request: { id: string }): Promise<{ deleted: boolean }>;
+    deleteCredential(request: { id: string }): Promise<{ deleted: boolean; error?: string }>;
     updateWorkspaceNodeSshSettings(request: {
       nodeId: string;
       sshAutoSudo: boolean | null;
@@ -425,6 +461,54 @@ interface Window {
     }): Promise<void>;
     closeWebSession(sessionId: string): Promise<void>;
     onWebEvent(listener: (event: WormholeWebEvent) => void): () => void;
+    updateWorkspaceNodeTunnelSettings(request: {
+      nodeId: string;
+      tunnelEnabled: boolean | null;
+      tunnelConfigId: string;
+    }): Promise<{ updated: boolean }>;
+    createTunnel(request: {
+      name: string;
+      kind: number;
+      settings: Record<string, unknown>;
+    }): Promise<WormholeTunnelDetails>;
+    readTunnel(id: string): Promise<WormholeTunnelDetails>;
+    updateTunnel(request: {
+      id: string;
+      name: string;
+      kind: number;
+      settings: Record<string, unknown>;
+    }): Promise<WormholeTunnelDetails>;
+    deleteTunnel(id: string): Promise<{ deleted: boolean; error?: string }>;
+    testTunnel(id: string): Promise<{ connected: boolean; error?: string }>;
+    importWatchguardProfile(): Promise<{
+      server: string;
+      port: number;
+      profileOvpn: string;
+    } | null>;
+    importAzureVpnProfile(): Promise<{
+      name?: string;
+      settings: Record<string, unknown>;
+    } | null>;
+    importOvpnProfile(): Promise<{ contents: string } | null>;
+    importCiscoProfile(): Promise<{
+      host: string;
+      port: number;
+      group?: string;
+      profileName?: string;
+    } | null>;
+    respondTunnelPrompt(request: {
+      leaseId: string;
+      promptId: string;
+      value: string;
+      cancelled: boolean;
+    }): Promise<void>;
+    respondTunnelRoute(request: {
+      leaseId: string;
+      promptId: string;
+      choice: 'tunnel' | 'direct' | 'cancel';
+    }): Promise<void>;
+    readAppSettings(): Promise<{ promptBeforeTunnelConnect: boolean }>;
+    setPromptBeforeTunnelConnect(enabled: boolean): Promise<{ updated: boolean }>;
     openSshSession(request: {
       sessionId: string;
       nodeId: string;

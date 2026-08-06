@@ -291,3 +291,13 @@ func unprotectFile(path string) ([]byte, error) {
 	defer localFree.Call(uintptr(unsafe.Pointer(output.pbData)))
 	return append([]byte(nil), unsafe.Slice(output.pbData, output.cbData)...), nil
 }
+
+func protectFile(path string, plaintext []byte) error {
+	protected, err := protectDpapi(plaintext, nil)
+	if err != nil {
+		return err
+	}
+	return writePrivateFileAtomic(path, protected)
+}
+
+func deleteFileProtectionKey(string) {}

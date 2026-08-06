@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 
 	"github.com/zalando/go-keyring"
@@ -18,6 +19,8 @@ const protectedSecretEncoding = "windows-dpapi-v1"
 const (
 	authKeyringService       = "Wormhole App Authentication"
 	authKeyringAccountPrefix = "document-key-v1:"
+	fileKeyringService       = "Wormhole Protected Files"
+	fileKeyringAccountPrefix = "file-key-v1:"
 )
 
 func protectSecret(string) (string, error) {
@@ -32,8 +35,31 @@ func unprotectElectronSafeStorageSecret(string, string) ([]byte, error) {
 	return nil, errors.New("Windows DPAPI is unavailable on this platform")
 }
 
-func unprotectFile(string) ([]byte, error) {
-	return nil, errors.New("Windows DPAPI is unavailable on this platform")
+func unprotectFile(path string) ([]byte, error) {
+	protected, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	key, err := fileProtectionKey(path, false)
+	if err != nil {
+		return nil, err
+	}
+	defer clearBytes(key)
+	return decryptAuthDocument(protected, key)
+}
+
+func protectFile(path string, plaintext []byte) error {
+	key, err := fileProtectionKey(path, true)
+	if err != nil {
+		return err
+	}
+	defer clearBytes(key)
+	protected, err := encryptAuthDocument(plaintext, key)
+	if err != nil {
+		return err
+	}
+	defer clearBytes(protected)
+	return writePrivateFileAtomic(path, protected)
 }
 
 func protectAuthDocument(storePath string, plaintext []byte) ([]byte, error) {
@@ -61,8 +87,19 @@ func deleteAuthProtectionKey(storePath string) {
 }
 
 func authDocumentProtectionKey(storePath string, create bool) ([]byte, error) {
-	account := authKeyringAccount(storePath)
-	encoded, err := keyring.Get(authKeyringService, account)
+	return keyringProtectionKey(authKeyringService, authKeyringAccount(storePath), create)
+}
+
+func fileProtectionKey(path string, create bool) ([]byte, error) {
+	return keyringProtectionKey(fileKeyringService, protectedFileKeyringAccount(path), create)
+}
+
+func deleteFileProtectionKey(path string) {
+	_ = keyring.Delete(fileKeyringService, protectedFileKeyringAccount(path))
+}
+
+func keyringProtectionKey(service, account string, create bool) ([]byte, error) {
+	encoded, err := keyring.Get(service, account)
 	if err == nil {
 		return decodeAuthProtectionKey(encoded)
 	}
@@ -75,7 +112,7 @@ func authDocumentProtectionKey(storePath string, create bool) ([]byte, error) {
 		return nil, errors.New("cannot generate an authentication protection key")
 	}
 	encoded = base64.RawStdEncoding.EncodeToString(key)
-	if err := keyring.Set(authKeyringService, account, encoded); err != nil {
+	if err := keyring.Set(service, account, encoded); err != nil {
 		clearBytes(key)
 		return nil, fmt.Errorf("cannot store the authentication key in the system keychain: %w", err)
 	}
@@ -92,12 +129,20 @@ func decodeAuthProtectionKey(encoded string) ([]byte, error) {
 }
 
 func authKeyringAccount(storePath string) string {
-	absolutePath, err := filepath.Abs(storePath)
+	return protectedPathAccount(authKeyringAccountPrefix, storePath)
+}
+
+func protectedFileKeyringAccount(path string) string {
+	return protectedPathAccount(fileKeyringAccountPrefix, path)
+}
+
+func protectedPathAccount(prefix, path string) string {
+	absolutePath, err := filepath.Abs(path)
 	if err != nil {
-		absolutePath = filepath.Clean(storePath)
+		absolutePath = filepath.Clean(path)
 	}
 	pathBytes := []byte(filepath.Clean(absolutePath))
 	sum := sha256.Sum256(pathBytes)
 	clearBytes(pathBytes)
-	return authKeyringAccountPrefix + base64.RawURLEncoding.EncodeToString(sum[:])
+	return prefix + base64.RawURLEncoding.EncodeToString(sum[:])
 }

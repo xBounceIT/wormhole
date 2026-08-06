@@ -48,6 +48,7 @@ import {
   AlertCircle,
   ArrowUp,
   ArrowRightLeft,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
   ChevronUp,
@@ -56,10 +57,12 @@ import {
   Download,
   File,
   FilePlus2,
+  FlaskConical,
   Folder,
   FolderOpen,
   FolderPlus,
   Globe,
+  Info,
   KeyRound,
   LoaderCircle,
   Monitor,
@@ -78,6 +81,7 @@ import {
   Upload,
   Wifi,
   X,
+  XCircle,
   Zap,
 } from 'lucide-react';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
@@ -150,6 +154,7 @@ import { getTreeRowGeometry } from './tree-layout';
 import { VncSurface } from './components/VncSurface';
 import { RdpSurface, type RdpUiStatus } from './components/RdpSurface';
 import { WebSurface } from './components/WebSurface';
+import { ConnectionStepper } from './components/ConnectionStepper';
 import {
   applyTheme,
   getInitialTheme,
@@ -162,7 +167,18 @@ import {
 import { applyRdpBackendEvent } from './rdp-state';
 import { formatSftpDate, formatSftpSize } from './sftp-format';
 import { hasSftpDragPayload, sftpDragDataType } from './sftp-dnd';
+import { cn } from '@/lib/utils';
 import { WebSessionAttemptTracker } from '../electron/web-session-attempt';
+import {
+  inheritTunnelConfigPrefix,
+  isTunnelTestCancellation,
+  missingTunnelFields,
+  normalizeTunnelEditorSettings,
+  tunnelModeFor,
+  tunnelValueFor,
+  userFacingTunnelError,
+  type TunnelMode,
+} from './tunnel-state';
 
 type Protocol = 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
 type AutoSudoMode = 'inherit' | 'on' | 'off';
@@ -237,6 +253,8 @@ type TreeNode = {
   serialFlowControl?: number;
   httpIgnoreCertErrors?: boolean;
   sshAutoSudo?: boolean | null;
+  tunnelEnabled?: boolean | null;
+  tunnelConfigId?: string;
   persisted?: boolean;
   children?: TreeNode[];
 };
@@ -391,6 +409,7 @@ type Session = {
   backendSessionId?: string;
   status: 'connecting' | 'connected' | 'failed' | 'closed' | 'placeholder';
   terminalFrame?: WormholeSshTerminalFrame;
+  tunnelProgress?: { phase: string; detail?: string } | null;
   serialSettings?: SerialSettings;
   sftp?: SftpBrowserState;
   error?: string;
@@ -598,6 +617,8 @@ function updateConnectionInTree(
     serialSettings?: SerialSettings;
     sshAutoSudo: boolean | null;
     httpIgnoreCertErrors?: boolean;
+    tunnelEnabled: boolean | null;
+    tunnelConfigId: string;
   },
 ): TreeNode[] {
   let editedConnection: TreeNode | undefined;
@@ -635,7 +656,12 @@ function updateConnectionInTree(
 function updateFolderInTree(
   nodes: TreeNode[],
   folderId: string,
-  update: { name: string; sshAutoSudo: boolean | null },
+  update: {
+    name: string;
+    sshAutoSudo: boolean | null;
+    tunnelEnabled: boolean | null;
+    tunnelConfigId: string;
+  },
 ): TreeNode[] {
   return nodes.map((node) => {
     if (node.id === folderId) return { ...node, ...update };
@@ -1041,6 +1067,21 @@ function App() {
   const [lockReason, setLockReason] = useState('Unlock Wormhole to continue.');
   const [authPrompt, setAuthPrompt] = useState<AuthPromptRequest | null>(null);
   const [mcpApprovals, setMcpApprovals] = useState<WormholeMcpApproval[]>([]);
+  const [tunnelPrompts, setTunnelPrompts] = useState<WormholeTunnelPrompt[]>([]);
+  const [tunnelPromptValue, setTunnelPromptValue] = useState('');
+  const [routePrompts, setRoutePrompts] = useState<
+    Array<{
+      sessionId: string;
+      leaseId: string;
+      promptId: string;
+      connectionName?: string;
+      tunnelName?: string;
+    }>
+  >([]);
+  const activeTunnelPromptId = tunnelPrompts[0]?.promptId;
+  useEffect(() => {
+    setTunnelPromptValue('');
+  }, [activeTunnelPromptId]);
   const authPromptResolver = useRef<((succeeded: boolean) => void) | null>(null);
   const idleCheckInFlight = useRef(false);
   const lastActivityAt = useRef(Date.now());
@@ -1075,6 +1116,7 @@ function App() {
   const [folderDetailsForm, setFolderDetailsForm] = useState({
     name: '',
     sshAutoSudo: 'inherit' as AutoSudoMode,
+    tunnel: 'inherit' as TunnelMode,
   });
   const [editorError, setEditorError] = useState('');
   const [editorBusy, setEditorBusy] = useState(false);
@@ -1085,6 +1127,7 @@ function App() {
     folder: '',
     sshAutoSudo: 'inherit' as AutoSudoMode,
     httpIgnoreCertErrors: false,
+    tunnel: 'inherit' as TunnelMode,
     serial: { ...defaultSerialSettings },
   });
   const [newFolderOpen, setNewFolderOpen] = useState(false);
@@ -1240,6 +1283,42 @@ function App() {
     }
   }
 
+  async function resolveTunnelPrompt(cancelled: boolean) {
+    const prompt = tunnelPrompts[0];
+    if (!prompt || !window.wormhole) return;
+    try {
+      await window.wormhole.respondTunnelPrompt({
+        leaseId: prompt.sessionId,
+        promptId: prompt.promptId,
+        value: cancelled ? '' : tunnelPromptValue,
+        cancelled,
+      });
+    } catch {
+      // The tunnel may have failed or timed out while the user was answering.
+    } finally {
+      setTunnelPrompts((current) => current.filter((item) => item.promptId !== prompt.promptId));
+      setTunnelPromptValue('');
+    }
+  }
+
+  async function resolveTunnelRoute(choice: 'tunnel' | 'direct' | 'cancel') {
+    const prompt = routePrompts[0];
+    if (!prompt || !window.wormhole) return;
+    try {
+      await window.wormhole.respondTunnelRoute({
+        leaseId: prompt.leaseId,
+        promptId: prompt.promptId,
+        choice,
+      });
+    } catch {
+      // The tunnel may have failed or timed out while the user was answering.
+    } finally {
+      setRoutePrompts((current) =>
+        current.filter((item) => item.promptId !== prompt.promptId),
+      );
+    }
+  }
+
   useEffect(() => {
     const markActivity = () => {
       lastActivityAt.current = Date.now();
@@ -1259,6 +1338,12 @@ function App() {
       setSessions((current) =>
         current.map((session) => {
           if (session.backendSessionId !== event.sessionId) return session;
+          if (event.type === 'tunnel.progress') {
+            return {
+              ...session,
+              tunnelProgress: { phase: event.phase, detail: event.detail },
+            };
+          }
           if (event.type === 'connected') {
             return {
               ...session,
@@ -1266,6 +1351,7 @@ function App() {
               host: event.host,
               fingerprint: event.fingerprint,
               hostKeyMismatch: undefined,
+              tunnelProgress: null,
               error: undefined,
             };
           }
@@ -1581,6 +1667,7 @@ function App() {
               ...session,
               status: 'failed',
               sftp: undefined,
+              tunnelProgress: null,
               hostKeyMismatch:
                 event.hostKeyExpected && event.hostKeyReceived
                   ? { expected: event.hostKeyExpected, received: event.hostKeyReceived }
@@ -1592,6 +1679,7 @@ function App() {
             ...session,
             status: 'closed',
             sftp: undefined,
+            tunnelProgress: null,
           };
         }),
       );
@@ -1644,9 +1732,73 @@ function App() {
           : [...current, approval],
       );
     });
+    const unsubscribeBackend = window.wormhole?.onBackendEvent((event) => {
+      if (event.type === 'tunnel.progress' && event.sessionId && event.phase) {
+        const phase = event.phase;
+        const detail = event.detail;
+        setSessions((current) =>
+          current.map((session) =>
+            session.backendSessionId === event.sessionId || session.id === event.sessionId
+              ? { ...session, tunnelProgress: { phase, detail } }
+              : session,
+          ),
+        );
+        return;
+      }
+      if (
+        event.type === 'tunnel.route' &&
+        event.sessionId &&
+        event.leaseId &&
+        event.promptId
+      ) {
+        const routePrompt = {
+          sessionId: event.sessionId,
+          leaseId: event.leaseId,
+          promptId: event.promptId,
+          connectionName: event.connectionName,
+          tunnelName: event.tunnelName,
+        };
+        setRoutePrompts((current) =>
+          current.some((item) => item.promptId === routePrompt.promptId)
+            ? current
+            : [...current, routePrompt],
+        );
+        return;
+      }
+      if (event.type === 'tunnel.route-closed' && event.promptId) {
+        setRoutePrompts((current) => current.filter((item) => item.promptId !== event.promptId));
+        return;
+      }
+      if (event.type === 'tunnel.prompt-closed' && event.promptId) {
+        setTunnelPrompts((current) => current.filter((item) => item.promptId !== event.promptId));
+        return;
+      }
+      if (
+        event.type !== 'tunnel.prompt' ||
+        !event.sessionId ||
+        !event.promptId ||
+        !event.title ||
+        typeof event.message !== 'string' ||
+        typeof event.secret !== 'boolean'
+      ) {
+        return;
+      }
+      const prompt: WormholeTunnelPrompt = {
+        type: 'tunnel.prompt',
+        sessionId: event.sessionId,
+        promptId: event.promptId,
+        title: event.title,
+        message: event.message,
+        secret: event.secret,
+      };
+      setTunnelPrompts((current) =>
+        current.some((item) => item.promptId === prompt.promptId) ? current : [...current, prompt],
+      );
+    });
     return () => {
       unsubscribe?.();
       unsubscribeMcp?.();
+      unsubscribeBackend?.();
     };
   }, []);
 
@@ -1713,7 +1865,12 @@ function App() {
       setSessions((current) =>
         current.map((session) => {
           if (session.id !== event.sessionId) return session;
-          return applyRdpBackendEvent(session, event);
+          const next = applyRdpBackendEvent(session, event);
+          return next.rdpStatus === 'connected' ||
+            next.rdpStatus === 'failed' ||
+            next.rdpStatus === 'disconnected'
+            ? { ...next, tunnelProgress: null }
+            : next;
         }),
       );
     });
@@ -1735,6 +1892,7 @@ function App() {
               ...session,
               status: 'failed',
               error: event.error || 'The browser could not open this connection.',
+              tunnelProgress: null,
               webUrl: event.url || session.webUrl,
               webCanGoBack: event.canGoBack,
               webCanGoForward: event.canGoForward,
@@ -1744,6 +1902,7 @@ function App() {
             ...session,
             status: event.type === 'connected' ? 'connected' : session.status,
             error: undefined,
+            tunnelProgress: event.type === 'connected' ? null : session.tunnelProgress,
             webUrl: event.url || session.webUrl,
             webCanGoBack: event.canGoBack,
             webCanGoForward: event.canGoForward,
@@ -2079,6 +2238,7 @@ function App() {
               ...candidate,
               rdpStatus: 'starting',
               rdpError: undefined,
+              tunnelProgress: null,
               rdpProfile: defaultRdpProfile(candidate, normalizedCredentials),
             }
           : candidate,
@@ -3196,6 +3356,7 @@ function App() {
       folder: folderId ?? getCreationFolderId() ?? folders[0]?.id ?? '',
       sshAutoSudo: 'inherit',
       httpIgnoreCertErrors: false,
+      tunnel: 'inherit',
       serial: { ...defaultSerialSettings },
     });
     setNewConnectionOpen(true);
@@ -3214,6 +3375,7 @@ function App() {
       folder: findParentFolderId(tree, node.id) ?? folders[0]?.id ?? '',
       sshAutoSudo: autoSudoModeFor(node.sshAutoSudo),
       httpIgnoreCertErrors: node.httpIgnoreCertErrors === true,
+      tunnel: tunnelModeFor(node),
       serial: serialSettingsFromNode(node),
     });
     setNewConnectionOpen(true);
@@ -3228,6 +3390,7 @@ function App() {
     setFolderDetailsForm({
       name: node.name,
       sshAutoSudo: autoSudoModeFor(node.sshAutoSudo),
+      tunnel: tunnelModeFor(node),
     });
     setFolderDetailsOpen(true);
   }
@@ -3284,6 +3447,29 @@ function App() {
     } catch (error: unknown) {
       setEditorError(
         error instanceof Error ? error.message : 'Could not save the certificate setting.',
+      );
+      return false;
+    }
+  }
+
+  async function persistNodeTunnel(nodeId: string, mode: TunnelMode): Promise<boolean> {
+    if (!window.wormhole) {
+      setEditorError('The native workspace bridge is unavailable.');
+      return false;
+    }
+    try {
+      const result = await window.wormhole.updateWorkspaceNodeTunnelSettings({
+        nodeId,
+        ...tunnelValueFor(mode),
+      });
+      if (!result.updated) {
+        setEditorError('The workspace did not save the VPN tunnel setting.');
+        return false;
+      }
+      return true;
+    } catch (error: unknown) {
+      setEditorError(
+        error instanceof Error ? error.message : 'Could not save the VPN tunnel setting.',
       );
       return false;
     }
@@ -3354,6 +3540,8 @@ function App() {
     try {
       const connectionAutoSudo =
         newConnectionForm.protocol === 'ssh' ? newConnectionForm.sshAutoSudo : 'inherit';
+      const connectionTunnel =
+        newConnectionForm.protocol === 'serial' ? 'off' : newConnectionForm.tunnel;
       if (editingId) {
         const editedNode = findTreeNode(tree, editingId);
         if (
@@ -3375,6 +3563,9 @@ function App() {
             newConnectionForm.protocol === 'https' ? newConnectionForm.httpIgnoreCertErrors : null,
           ))
         ) {
+          return;
+        }
+        if (editedNode?.persisted && !(await persistNodeTunnel(editingId, connectionTunnel))) {
           return;
         }
         const editedSessionId = `session-${editingId}`;
@@ -3405,6 +3596,7 @@ function App() {
               newConnectionForm.protocol === 'https'
                 ? newConnectionForm.httpIgnoreCertErrors
                 : undefined,
+            ...tunnelValueFor(connectionTunnel),
             serialSettings:
               newConnectionForm.protocol === 'serial' ? newConnectionForm.serial : undefined,
           }),
@@ -3489,6 +3681,7 @@ function App() {
             newConnectionForm.protocol === 'https'
               ? newConnectionForm.httpIgnoreCertErrors
               : undefined,
+          ...tunnelValueFor(connectionTunnel),
           ...(newConnectionForm.protocol === 'serial'
             ? {
                 serialBaudRate: newConnectionForm.serial.baudRate,
@@ -3535,10 +3728,17 @@ function App() {
       ) {
         return;
       }
+      if (
+        folder.persisted &&
+        !(await persistNodeTunnel(editingFolderId, folderDetailsForm.tunnel))
+      ) {
+        return;
+      }
       setTree((current) =>
         updateFolderInTree(current, editingFolderId, {
           name,
           sshAutoSudo: autoSudoValueFor(folderDetailsForm.sshAutoSudo),
+          ...tunnelValueFor(folderDetailsForm.tunnel),
         }),
       );
       setFolderDetailsOpen(false);
@@ -3773,7 +3973,7 @@ function App() {
   async function deleteSavedCredential(id: string): Promise<void> {
     if (!window.wormhole) throw new Error('The native credential bridge is unavailable.');
     const result = await window.wormhole.deleteCredential({ id });
-    if (!result.deleted) throw new Error('The credential was not deleted.');
+    if (!result.deleted) throw new Error(result.error ?? 'The credential was not deleted.');
     setCredentials((current) => current.filter((credential) => credential.id !== id));
   }
 
@@ -3827,6 +4027,84 @@ function App() {
           state={authState}
         />
       ) : null}
+      <Dialog
+        onOpenChange={(open) => {
+          if (!open) void resolveTunnelPrompt(true);
+        }}
+        open={tunnelPrompts.length > 0}
+      >
+        <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
+          <form
+            className="space-y-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (tunnelPromptValue.trim()) void resolveTunnelPrompt(false);
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>{tunnelPrompts[0]?.title || 'VPN authentication'}</DialogTitle>
+              <DialogDescription>
+                {tunnelPrompts[0]?.message || 'Enter the value requested by the VPN gateway.'}
+              </DialogDescription>
+            </DialogHeader>
+            <Input
+              autoComplete="one-time-code"
+              autoFocus
+              onChange={(event) => setTunnelPromptValue(event.target.value)}
+              type={tunnelPrompts[0]?.secret ? 'password' : 'text'}
+              value={tunnelPromptValue}
+            />
+            <DialogFooter>
+              <Button onClick={() => void resolveTunnelPrompt(true)} type="button" variant="ghost">
+                Cancel
+              </Button>
+              <Button disabled={!tunnelPromptValue.trim()} type="submit">
+                Continue
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        onOpenChange={(open) => {
+          if (!open) void resolveTunnelRoute('cancel');
+        }}
+        open={routePrompts.length > 0}
+      >
+        <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>VPN tunnel</DialogTitle>
+            <DialogDescription>
+              {routePrompts[0]?.tunnelName
+                ? `“${routePrompts[0].connectionName || 'the target'}” is set to connect through
+                    the VPN tunnel “${routePrompts[0].tunnelName}”. Start the tunnel and connect
+                    through it, or connect directly to the target?`
+                : `“${routePrompts[0]?.connectionName || 'the target'}” is set to connect through
+                    the VPN tunnel. Start the tunnel and connect through it, or connect directly
+                    to the target?`}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              onClick={() => void resolveTunnelRoute('cancel')}
+              type="button"
+              variant="ghost"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => void resolveTunnelRoute('direct')}
+              type="button"
+              variant="outline"
+            >
+              Connect directly
+            </Button>
+            <Button onClick={() => void resolveTunnelRoute('tunnel')} type="button">
+              Use tunnel
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog
         onOpenChange={(open) => {
           if (!open) void resolveMcpApproval(false);
@@ -4086,7 +4364,26 @@ function App() {
                   onUpdate={updateCredential}
                 />
               ) : activePage === 'tunnels' ? (
-                <TunnelsPage tunnels={tunnels} />
+                <TunnelsPage
+                  onTunnelCreated={(tunnel) =>
+                    setTunnels((current) =>
+                      [...current, tunnel].sort((left, right) =>
+                        left.name.localeCompare(right.name),
+                      ),
+                    )
+                  }
+                  onTunnelDeleted={(id) =>
+                    setTunnels((current) => current.filter((tunnel) => tunnel.id !== id))
+                  }
+                  onTunnelUpdated={(tunnel) =>
+                    setTunnels((current) =>
+                      current
+                        .map((item) => (item.id === tunnel.id ? tunnel : item))
+                        .sort((left, right) => left.name.localeCompare(right.name)),
+                    )
+                  }
+                  tunnels={tunnels}
+                />
               ) : (
                 <UtilityPage item={currentPage} sessions={sessions} />
               )}
@@ -4460,6 +4757,17 @@ function App() {
                       />
                     ) : null}
 
+                    <TunnelRouteField
+                      disabled={newConnectionForm.protocol === 'serial'}
+                      id="connection-tunnel-route"
+                      mode={
+                        newConnectionForm.protocol === 'serial' ? 'off' : newConnectionForm.tunnel
+                      }
+                      onChange={(tunnel) => setNewConnectionForm((form) => ({ ...form, tunnel }))}
+                      scope="connection"
+                      tunnels={tunnels}
+                    />
+
                     {newConnectionForm.protocol === 'https' ? (
                       <label className="flex items-center gap-2 text-xs">
                         <Checkbox
@@ -4800,6 +5108,13 @@ function App() {
                   setFolderDetailsForm((form) => ({ ...form, sshAutoSudo }))
                 }
                 scope="folder"
+              />
+              <TunnelRouteField
+                id="folder-tunnel-route"
+                mode={folderDetailsForm.tunnel}
+                onChange={(tunnel) => setFolderDetailsForm((form) => ({ ...form, tunnel }))}
+                scope="folder"
+                tunnels={tunnels}
               />
               {editorError ? <p className="text-[11px] text-destructive">{editorError}</p> : null}
               <DialogFooter>
@@ -5316,6 +5631,7 @@ function SshTerminalSurface({
     const isConnecting = session.status === 'connecting';
     const isFailed = session.status === 'failed';
     const hostKeyMismatch = !isSerial && isFailed ? session.hostKeyMismatch : undefined;
+    const showTunnelStepper = isConnecting && !isSerial && Boolean(session.tunnelProgress);
     const title = isConnecting
       ? isSerial
         ? 'Opening serial port'
@@ -5344,77 +5660,81 @@ function SshTerminalSurface({
         className="flex h-full min-h-0 min-w-0 flex-1 items-center justify-center overflow-auto bg-[#090909] px-6 py-10 text-zinc-100"
         ref={surfaceRef}
       >
-        <div className="flex w-full max-w-2xl flex-col items-center text-center">
-          <div
-            className={`mb-5 grid size-14 place-items-center rounded-full border ${
-              isFailed
-                ? 'border-red-400/20 bg-red-400/10 text-red-300'
-                : 'border-white/10 bg-white/[0.06] text-zinc-300'
-            }`}
-          >
-            {isConnecting ? (
-              <LoaderCircle className="size-6 animate-spin" />
-            ) : isFailed ? (
-              <AlertCircle className="size-6" />
+        {showTunnelStepper ? (
+          <ConnectionStepper tunnelProgress={session.tunnelProgress} />
+        ) : (
+          <div className="flex w-full max-w-2xl flex-col items-center text-center">
+            <div
+              className={`mb-5 grid size-14 place-items-center rounded-full border ${
+                isFailed
+                  ? 'border-red-400/20 bg-red-400/10 text-red-300'
+                  : 'border-white/10 bg-white/[0.06] text-zinc-300'
+              }`}
+            >
+              {isConnecting ? (
+                <LoaderCircle className="size-6 animate-spin" />
+              ) : isFailed ? (
+                <AlertCircle className="size-6" />
+              ) : (
+                <Terminal className="size-6" />
+              )}
+            </div>
+            <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-500">
+              {isSerial ? 'Serial terminal' : 'Secure shell'}
+            </p>
+            <h3 className="mt-2 text-sm font-semibold text-zinc-100">{title}</h3>
+            <p className="mt-2 max-w-xl break-words text-sm leading-relaxed text-zinc-400">
+              {message}
+            </p>
+            <p className="mt-3 max-w-xl truncate font-mono text-[10px] text-zinc-600">
+              {session.host || 'inherited target'}
+            </p>
+            {hostKeyMismatch ? (
+              <div className="mt-5 w-full max-w-xl rounded-lg border border-amber-400/20 bg-amber-400/[0.06] p-4 text-left">
+                <p className="text-xs font-semibold text-amber-200">Host key changed</p>
+                <p className="mt-1 text-[11px] leading-relaxed text-amber-100/65">
+                  Only trust this key if you verified the server was rebuilt, rekeyed, or moved to
+                  a new host.
+                </p>
+                <div className="mt-3 grid gap-2 font-mono text-[10px]">
+                  <div className="grid gap-1 sm:grid-cols-[5rem_minmax(0,1fr)] sm:items-start sm:gap-3">
+                    <span className="text-zinc-500">Saved</span>
+                    <code className="break-all text-zinc-300">{hostKeyMismatch.expected}</code>
+                  </div>
+                  <div className="grid gap-1 sm:grid-cols-[5rem_minmax(0,1fr)] sm:items-start sm:gap-3">
+                    <span className="text-amber-300/70">Presented</span>
+                    <code className="break-all text-amber-100">{hostKeyMismatch.received}</code>
+                  </div>
+                </div>
+                <div className="mt-4 flex justify-end">
+                  <Button
+                    onClick={() => onTrustHostKey?.(session.id, hostKeyMismatch)}
+                    size="sm"
+                    variant="secondary"
+                  >
+                    <RefreshCcw data-icon="inline-start" />
+                    Trust new key & reconnect
+                  </Button>
+                </div>
+              </div>
+            ) : isConnecting ? (
+              <div className="mt-6 flex items-center gap-2 text-[10px] text-zinc-500">
+                <span className="size-1.5 animate-pulse rounded-full bg-amber-400" />
+                {isSerial ? 'Opening local serial line' : 'Negotiating secure session'}
+              </div>
             ) : (
-              <Terminal className="size-6" />
+              <Button
+                className="mt-6"
+                onClick={() => onReconnect(session.id)}
+                size="sm"
+                variant="secondary"
+              >
+                <RefreshCcw data-icon="inline-start" />
+                Reconnect
+              </Button>
             )}
           </div>
-          <p className="font-mono text-[9px] uppercase tracking-[0.16em] text-zinc-500">
-            {isSerial ? 'Serial terminal' : 'Secure shell'}
-          </p>
-          <h3 className="mt-2 text-sm font-semibold text-zinc-100">{title}</h3>
-          <p className="mt-2 max-w-xl break-words text-sm leading-relaxed text-zinc-400">
-            {message}
-          </p>
-          <p className="mt-3 max-w-xl truncate font-mono text-[10px] text-zinc-600">
-            {session.host || 'inherited target'}
-          </p>
-          {hostKeyMismatch ? (
-            <div className="mt-5 w-full max-w-xl rounded-lg border border-amber-400/20 bg-amber-400/[0.06] p-4 text-left">
-              <p className="text-xs font-semibold text-amber-200">Host key changed</p>
-              <p className="mt-1 text-[11px] leading-relaxed text-amber-100/65">
-                Only trust this key if you verified the server was rebuilt, rekeyed, or moved to a
-                new host.
-              </p>
-              <div className="mt-3 grid gap-2 font-mono text-[10px]">
-                <div className="grid gap-1 sm:grid-cols-[5rem_minmax(0,1fr)] sm:items-start sm:gap-3">
-                  <span className="text-zinc-500">Saved</span>
-                  <code className="break-all text-zinc-300">{hostKeyMismatch.expected}</code>
-                </div>
-                <div className="grid gap-1 sm:grid-cols-[5rem_minmax(0,1fr)] sm:items-start sm:gap-3">
-                  <span className="text-amber-300/70">Presented</span>
-                  <code className="break-all text-amber-100">{hostKeyMismatch.received}</code>
-                </div>
-              </div>
-              <div className="mt-4 flex justify-end">
-                <Button
-                  onClick={() => onTrustHostKey?.(session.id, hostKeyMismatch)}
-                  size="sm"
-                  variant="secondary"
-                >
-                  <RefreshCcw data-icon="inline-start" />
-                  Trust new key & reconnect
-                </Button>
-              </div>
-            </div>
-          ) : isConnecting ? (
-            <div className="mt-6 flex items-center gap-2 text-[10px] text-zinc-500">
-              <span className="size-1.5 animate-pulse rounded-full bg-amber-400" />
-              {isSerial ? 'Opening local serial line' : 'Negotiating secure session'}
-            </div>
-          ) : (
-            <Button
-              className="mt-6"
-              onClick={() => onReconnect(session.id)}
-              size="sm"
-              variant="secondary"
-            >
-              <RefreshCcw data-icon="inline-start" />
-              Reconnect
-            </Button>
-          )}
-        </div>
+        )}
       </div>
     );
   }
@@ -6775,6 +7095,7 @@ function SessionsPage({
                 onRetry={() => onRetryRdp(session.id)}
                 sessionId={session.id}
                 status={session.rdpStatus ?? 'idle'}
+                tunnelProgress={session.tunnelProgress}
               />
             ) : session.protocol === 'vnc' ? (
               <VncSurface
@@ -6783,6 +7104,7 @@ function SessionsPage({
                   nodeId: session.nodeId,
                   host: session.host,
                   port: session.port,
+                  tunnelProgress: session.tunnelProgress,
                 }}
               />
             ) : session.protocol === 'http' || session.protocol === 'https' ? (
@@ -7261,8 +7583,1099 @@ function CredentialsPage({
   );
 }
 
-function TunnelsPage({ tunnels }: { tunnels: TunnelRecord[] }) {
+const tunnelKinds = [
+  { value: 0, label: 'WireGuard' },
+  { value: 1, label: 'OpenVPN' },
+  { value: 2, label: 'Fortinet' },
+  { value: 3, label: 'WatchGuard' },
+  { value: 4, label: 'Stormshield' },
+  { value: 5, label: 'Azure VPN' },
+  { value: 6, label: 'Cisco Secure Client' },
+] as const;
+
+type TunnelEditorValue = {
+  id?: string;
+  name: string;
+  kind: number;
+  settings: Record<string, unknown>;
+};
+
+type TunnelField = {
+  key: string;
+  label: string;
+  section?: string;
+  type?: 'password' | 'textarea' | 'number' | 'checkbox' | 'select';
+  options?: { value: number; label: string }[];
+  placeholder?: string;
+  hint?: string;
+};
+
+function tunnelKindLabel(kind: number) {
+  return tunnelKinds.find((item) => item.value === kind)?.label ?? 'Unknown';
+}
+
+function TunnelRouteField({
+  id,
+  mode,
+  onChange,
+  scope,
+  tunnels,
+  disabled = false,
+}: {
+  id: string;
+  mode: TunnelMode;
+  onChange: (mode: TunnelMode) => void;
+  scope: 'connection' | 'folder';
+  tunnels: TunnelRecord[];
+  disabled?: boolean;
+}) {
+  const isFolder = scope === 'folder';
+  const description =
+    mode === 'off'
+      ? 'Always connect directly for this item and its descendants that inherit the route.'
+      : mode === 'inherit'
+        ? isFolder
+          ? 'Follows the VPN route configured by the parent folder.'
+          : 'Follows the VPN route configured by the containing folder.'
+        : mode === 'on'
+          ? 'Forces VPN routing on while inheriting which tunnel configuration to use.'
+          : mode.startsWith(inheritTunnelConfigPrefix)
+            ? 'Inherits whether VPN routing is enabled, but overrides which tunnel to use.'
+            : 'The native backend establishes this userspace VPN route before connecting.';
+  return (
+    <div className="grid gap-2 rounded-lg border border-border/70 bg-background/40 p-3">
+      <Label htmlFor={id}>{isFolder ? 'VPN route default' : 'VPN route'}</Label>
+      <Select disabled={disabled} onValueChange={onChange} value={mode}>
+        <SelectTrigger className="w-full sm:max-w-[360px]" id={id}>
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="inherit">
+            {isFolder ? 'Inherit from parent' : 'Inherit from folder'}
+          </SelectItem>
+          <SelectItem value="off">No VPN tunnel</SelectItem>
+          <SelectItem value="on">Force VPN on · inherit tunnel</SelectItem>
+          {tunnels.map((tunnel) => (
+            <SelectItem key={tunnel.id} value={tunnel.id}>
+              {tunnel.name} · {tunnel.kind}
+            </SelectItem>
+          ))}
+          {tunnels.map((tunnel) => (
+            <SelectItem
+              key={`${inheritTunnelConfigPrefix}${tunnel.id}`}
+              value={`${inheritTunnelConfigPrefix}${tunnel.id}`}
+            >
+              Inherit on/off · {tunnel.name}
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <p className="text-[11px] leading-relaxed text-muted-foreground">{description}</p>
+    </div>
+  );
+}
+
+function tunnelEditorFields(kind: number): TunnelField[] {
+  switch (kind) {
+    case 0:
+      return [
+        {
+          key: 'InterfacePrivateKey',
+          label: 'Private key (base64)',
+          section: 'Interface',
+          type: 'password',
+        },
+        {
+          key: 'InterfaceAddress',
+          label: 'Address (e.g. 10.0.0.2/32)',
+          section: 'Interface',
+          placeholder: '10.0.0.2/32',
+        },
+        { key: 'Mtu', label: 'MTU (optional)', section: 'Interface', type: 'number' },
+        {
+          key: 'Dns',
+          label: 'DNS (comma-separated, optional)',
+          section: 'Interface',
+          placeholder: '1.1.1.1, 2606:4700:4700::1111',
+        },
+        { key: 'PeerPublicKey', label: 'Public key (base64)', section: 'Peer' },
+        {
+          key: 'PeerPresharedKey',
+          label: 'Preshared key (base64, optional)',
+          section: 'Peer',
+          type: 'password',
+        },
+        {
+          key: 'PeerEndpoint',
+          label: 'Endpoint (host:port)',
+          section: 'Peer',
+          placeholder: 'vpn.example.com:51820',
+        },
+        {
+          key: 'AllowedIps',
+          label: 'Allowed IPs (comma-separated)',
+          section: 'Peer',
+          placeholder: 'leave blank to route all traffic (0.0.0.0/0, ::/0)',
+        },
+        {
+          key: 'PersistentKeepaliveSeconds',
+          label: 'Persistent keepalive seconds (optional)',
+          section: 'Peer',
+          type: 'number',
+        },
+      ];
+    case 1:
+      return [
+        {
+          key: 'ProfileOvpn',
+          label: 'OpenVPN profile (.ovpn contents)',
+          section: 'Profile',
+          type: 'textarea',
+          placeholder: 'client\nproto udp\nremote vpn.example.com 1194\n...',
+          hint: 'Paste the full .ovpn profile.',
+        },
+        {
+          key: 'Username',
+          label: 'Username',
+          section: 'Authentication',
+          placeholder: 'leave blank for certificate-only auth',
+        },
+        { key: 'Password', label: 'Password', section: 'Authentication', type: 'password' },
+      ];
+    case 2:
+      return [
+        { key: 'Host', label: 'Host', section: 'Gateway', placeholder: 'vpn.example.com' },
+        { key: 'Port', label: 'Port', section: 'Gateway', type: 'number', placeholder: '443' },
+        { key: 'Username', label: 'Username', section: 'Credentials' },
+        { key: 'Password', label: 'Password', section: 'Credentials', type: 'password' },
+        { key: 'Realm', label: 'Realm (optional)', section: 'Credentials' },
+        {
+          key: 'UseSingleSignOn',
+          label: 'Enable single sign-on (SSO) for the VPN tunnel',
+          section: 'Single sign-on',
+          type: 'checkbox',
+        },
+        {
+          key: 'UseExternalBrowser',
+          label: 'Use external browser for SAML authentication',
+          section: 'Single sign-on',
+          type: 'checkbox',
+        },
+        {
+          key: 'SamlRedirectPort',
+          label: 'SAML callback port',
+          section: 'Single sign-on',
+          type: 'number',
+          placeholder: '8020',
+        },
+        {
+          key: 'TotpSecret',
+          label: 'TOTP shared secret (Base32, optional)',
+          section: 'Advanced',
+          type: 'password',
+          hint: 'used by username/password authentication',
+        },
+        {
+          key: 'TrustServerCertificate',
+          label: 'Trust server certificate (skip verification)',
+          section: 'Advanced',
+          type: 'checkbox',
+        },
+        {
+          key: 'ServerCertSha256Pin',
+          label: 'Server certificate SHA-256 pin (hex, optional)',
+          section: 'Advanced',
+        },
+      ];
+    case 3:
+      return [
+        {
+          key: 'AuthMode',
+          label: 'Authentication mode',
+          section: 'Gateway',
+          type: 'select',
+          options: [
+            { value: 0, label: 'Automatic' },
+            { value: 1, label: 'Username and password' },
+            { value: 2, label: 'SAML' },
+          ],
+        },
+        { key: 'Server', label: 'Server', section: 'Gateway', placeholder: 'firebox.example.com' },
+        { key: 'Port', label: 'Port', section: 'Gateway', type: 'number', placeholder: '443' },
+        { key: 'Username', label: 'Username', section: 'Credentials' },
+        {
+          key: 'Password',
+          label: 'Password',
+          section: 'Credentials',
+          type: 'password',
+          hint: 'not required for SAML',
+        },
+        {
+          key: 'Domain',
+          label: 'Authentication domain override',
+          section: 'Advanced',
+          placeholder: 'auto-detect',
+        },
+        { key: 'CaPem', label: 'CA certificate (PEM)', section: 'Advanced', type: 'textarea' },
+        {
+          key: 'ClientCertPem',
+          label: 'Client certificate (PEM)',
+          section: 'Advanced',
+          type: 'textarea',
+        },
+        {
+          key: 'ClientKeyPem',
+          label: 'Client private key (PEM)',
+          section: 'Advanced',
+          type: 'textarea',
+        },
+        {
+          key: 'ProfileOvpn',
+          label: 'Imported .ovpn fallback (optional)',
+          section: 'Advanced',
+          type: 'textarea',
+        },
+        {
+          key: 'VerifyX509Name',
+          label: 'verify-x509-name subject (advanced)',
+          section: 'Advanced',
+          placeholder: 'leave default unless the Firebox uses a custom server cert',
+        },
+        {
+          key: 'TrustServerCertificate',
+          label: 'Trust the server certificate on the pre-auth login',
+          section: 'Advanced',
+          type: 'checkbox',
+        },
+      ];
+    case 4:
+      return [
+        {
+          key: 'Mode',
+          label: 'Connection mode',
+          section: 'Connection mode',
+          type: 'select',
+          options: [
+            { value: 0, label: 'Automatic — authenticate & fetch config' },
+            { value: 1, label: 'Import — paste a downloaded .ovpn' },
+          ],
+        },
+        { key: 'Server', label: 'Server', section: 'Gateway', placeholder: 'rpv.example.com' },
+        { key: 'Port', label: 'Port', section: 'Gateway', type: 'number', placeholder: '443' },
+        { key: 'Description', label: 'Description (optional)', section: 'Gateway' },
+        {
+          key: 'UseSingleSignOn',
+          label: 'Connect with single sign-on',
+          section: 'Authentication',
+          type: 'checkbox',
+        },
+        { key: 'Username', label: 'Username', section: 'Authentication' },
+        { key: 'Password', label: 'Password', section: 'Authentication', type: 'password' },
+        { key: 'UseOtp', label: 'Use an OTP', section: 'Authentication', type: 'checkbox' },
+        {
+          key: 'ProfileOvpn',
+          label: 'OpenVPN profile (.ovpn contents)',
+          section: 'Profile',
+          type: 'textarea',
+          placeholder: 'client\ndev tun\nremote rpv.example.com 443 tcp\n...',
+        },
+        {
+          key: 'CaPem',
+          label: 'Firewall CA certificate (PEM, for automatic mode)',
+          section: 'Advanced',
+          type: 'textarea',
+          placeholder: 'paste the SNS portal CA so its TLS cert validates (CN = appliance serial)',
+        },
+        {
+          key: 'TrustServerCertificate',
+          label: 'Trust server certificate (skip ALL TLS checks)',
+          section: 'Advanced',
+          type: 'checkbox',
+        },
+        {
+          key: 'OpenVpnTransportOverride',
+          label: 'OpenVPN transport override',
+          section: 'Advanced',
+          type: 'select',
+          options: [
+            { value: 0, label: 'Auto — use profile order' },
+            { value: 1, label: 'Force TCP' },
+            { value: 2, label: 'Force UDP' },
+          ],
+        },
+        {
+          key: 'OpenVpnCompressionFramingOverride',
+          label: 'OpenVPN compression/framing',
+          section: 'Advanced',
+          type: 'select',
+          options: [
+            { value: 0, label: 'Preserve profile compression/framing' },
+            { value: 1, label: 'Add legacy no-compression stub' },
+          ],
+        },
+        {
+          key: 'AppToken',
+          label: 'Portal app token (advanced)',
+          section: 'Advanced',
+          placeholder: 'sslclient',
+        },
+      ];
+    case 5:
+      return [
+        {
+          key: 'Servers',
+          label: 'Server FQDN(s) (comma-separated)',
+          section: 'Gateway',
+          placeholder: 'gateway.vpn.azure.com, backup.vpn.azure.com',
+        },
+        {
+          key: 'Protocol',
+          label: 'Transport',
+          section: 'Gateway',
+          type: 'select',
+          options: [
+            { value: 0, label: 'TCP (default)' },
+            { value: 1, label: 'UDP' },
+          ],
+        },
+        { key: 'TenantId', label: 'Tenant ID', section: 'Microsoft Entra ID' },
+        { key: 'Audience', label: 'Audience', section: 'Microsoft Entra ID' },
+        {
+          key: 'ApplicationId',
+          label: 'Application (client) ID override',
+          section: 'Advanced',
+          placeholder: 'leave blank to use the audience as the client id',
+        },
+        {
+          key: 'Issuer',
+          label: 'Issuer',
+          section: 'Advanced',
+          placeholder: 'https://sts.windows.net/{tenant}/',
+        },
+        {
+          key: 'ServerSecretHex',
+          label: 'Server secret (tls-auth key, 512 hex chars, optional)',
+          section: 'Advanced',
+          type: 'textarea',
+        },
+        {
+          key: 'CaPem',
+          label: 'CA certificate override (PEM, optional)',
+          section: 'Advanced',
+          type: 'textarea',
+          placeholder: 'leave blank to validate against DigiCert Global Root G2',
+        },
+      ];
+    case 6:
+      return [
+        { key: 'Host', label: 'Host', section: 'Gateway', placeholder: 'vpn.example.com' },
+        { key: 'Port', label: 'Port', section: 'Gateway', type: 'number', placeholder: '443' },
+        {
+          key: 'Group',
+          label: 'Group / connection profile (optional)',
+          section: 'Gateway',
+          placeholder: 'leave blank for the gateway default',
+        },
+        { key: 'Username', label: 'Username', section: 'Credentials' },
+        { key: 'Password', label: 'Password', section: 'Credentials', type: 'password' },
+        {
+          key: 'TotpSecret',
+          label: 'TOTP shared secret (Base32, optional)',
+          section: 'Two-factor & advanced',
+          type: 'password',
+        },
+        {
+          key: 'SecondaryPassword',
+          label: 'Secondary password (optional)',
+          section: 'Two-factor & advanced',
+          type: 'password',
+        },
+        {
+          key: 'TrustServerCertificate',
+          label: 'Trust server certificate (skip verification)',
+          section: 'Two-factor & advanced',
+          type: 'checkbox',
+        },
+        {
+          key: 'ServerCertSha256Pin',
+          label: 'Server certificate SHA-256 pin (hex, optional)',
+          section: 'Two-factor & advanced',
+        },
+      ];
+    default:
+      return [];
+  }
+}
+
+function tunnelDefaultSettings(kind: number): Record<string, unknown> {
+  switch (kind) {
+    case 2:
+      return { Port: 443, UseExternalBrowser: true, SamlRedirectPort: 8020 };
+    case 3:
+      return {
+        Port: 443,
+        AuthMode: 0,
+        VerifyX509Name: '/O=WatchGuard_Technologies/OU=Fireware/CN=Fireware_SSLVPN_Server',
+      };
+    case 4:
+      return {
+        Port: 443,
+        Mode: 0,
+        OpenVpnTransportOverride: 0,
+        OpenVpnCompressionFramingOverride: 0,
+        AppToken: 'sslclient',
+      };
+    case 5:
+      return { Protocol: 0 };
+    case 6:
+      return { Port: 443 };
+    default:
+      return {};
+  }
+}
+
+function blankTunnelEditor(): TunnelEditorValue {
+  return { name: '', kind: 0, settings: tunnelDefaultSettings(0) };
+}
+
+function tunnelEditorFromDetails(details: WormholeTunnelDetails): TunnelEditorValue {
+  return {
+    id: details.id,
+    name: details.name,
+    kind: details.kind,
+    settings: { ...tunnelDefaultSettings(details.kind), ...details.settings },
+  };
+}
+
+function tunnelSettingText(settings: Record<string, unknown>, key: string): string {
+  const value = settings[key];
+  return Array.isArray(value)
+    ? value.join(', ')
+    : typeof value === 'string' || typeof value === 'number'
+      ? String(value)
+      : '';
+}
+
+function TunnelFieldRow({
+  field,
+  value,
+  disabled,
+  onChange,
+}: {
+  field: TunnelField;
+  value: Record<string, unknown>;
+  disabled?: boolean;
+  onChange: (key: string, next: unknown) => void;
+}) {
+  return (
+    <div className={field.type === 'textarea' ? 'grid gap-2 md:col-span-2' : 'grid gap-2'}>
+      <Label htmlFor={`tunnel-${field.key}`}>{field.label}</Label>
+      {field.type === 'checkbox' ? (
+        <Checkbox
+          checked={value[field.key] === true}
+          disabled={disabled}
+          id={`tunnel-${field.key}`}
+          onCheckedChange={(checked) => onChange(field.key, checked === true)}
+        />
+      ) : field.type === 'select' ? (
+        <Select
+          disabled={disabled}
+          onValueChange={(next) => onChange(field.key, Number(next))}
+          value={String(value[field.key] ?? field.options?.[0]?.value ?? '')}
+        >
+          <SelectTrigger id={`tunnel-${field.key}`}>
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {field.options?.map((option) => (
+              <SelectItem key={option.value} value={String(option.value)}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      ) : field.type === 'textarea' ? (
+        <Textarea
+          className="min-h-28 font-mono text-xs"
+          disabled={disabled}
+          id={`tunnel-${field.key}`}
+          onChange={(event) => onChange(field.key, event.target.value)}
+          placeholder={field.placeholder}
+          value={tunnelSettingText(value, field.key)}
+        />
+      ) : (
+        <Input
+          disabled={disabled}
+          id={`tunnel-${field.key}`}
+          onChange={(event) => onChange(field.key, event.target.value)}
+          placeholder={field.placeholder}
+          type={
+            field.type === 'password' ? 'password' : field.type === 'number' ? 'number' : 'text'
+          }
+          value={tunnelSettingText(value, field.key)}
+        />
+      )}
+      {field.hint ? <p className="text-[11px] text-muted-foreground">{field.hint}</p> : null}
+    </div>
+  );
+}
+
+function TunnelSection({
+  title,
+  children,
+  className,
+}: {
+  title?: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <section className={cn('grid gap-3', className)}>
+      {title ? (
+        <h4 className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+          {title}
+        </h4>
+      ) : null}
+      <div className="grid gap-4 md:grid-cols-2">{children}</div>
+    </section>
+  );
+}
+
+function TunnelAdvanced({
+  label,
+  open,
+  onOpenChange,
+  children,
+}: {
+  label: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  children: ReactNode;
+}) {
+  return (
+    <Collapsible
+      className="rounded-lg border border-border/70 bg-muted/20 px-3 py-2"
+      onOpenChange={onOpenChange}
+      open={open}
+    >
+      <CollapsibleTrigger className="flex w-full items-center justify-between text-xs font-medium">
+        <span>{label}</span>
+        <ChevronDown className={cn('size-3.5 transition-transform', open ? 'rotate-180' : '')} />
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <div className="mt-3 grid gap-4 md:grid-cols-2">{children}</div>
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
+function TunnelEditorDialog({
+  initial,
+  open,
+  onOpenChange,
+  onSaved,
+}: {
+  initial: TunnelEditorValue;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSaved: (tunnel: TunnelRecord) => void;
+}) {
+  const [value, setValue] = useState<TunnelEditorValue>(initial);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+
+  const missing = useMemo(() => missingTunnelFields(value), [value]);
+  const canSave = missing.length === 0;
+  const fields = tunnelEditorFields(value.kind);
+  const fieldByKey = (key: string) => fields.find((field) => field.key === key);
+  const rows = (
+    section: string,
+    options?: {
+      disabled?: (field: TunnelField) => boolean;
+      hidden?: (field: TunnelField) => boolean;
+    },
+  ) =>
+    fields
+      .filter((field) => field.section === section && !options?.hidden?.(field))
+      .map((field) => (
+        <TunnelFieldRow
+          disabled={options?.disabled?.(field)}
+          field={field}
+          key={field.key}
+          onChange={setSetting}
+          value={value.settings}
+        />
+      ));
+  const useSso = value.settings.UseSingleSignOn === true;
+  const useExternalBrowser = useSso && value.settings.UseExternalBrowser === true;
+  const watchguardAdvancedHasValues =
+    value.kind === 3 &&
+    ['Domain', 'CaPem', 'ClientCertPem', 'ClientKeyPem'].some(
+      (key) => typeof value.settings[key] === 'string' && (value.settings[key] as string).trim(),
+    );
+
+  useEffect(() => {
+    if (open) setAdvancedOpen(watchguardAdvancedHasValues);
+  }, [open, value.kind, watchguardAdvancedHasValues]);
+
+  useEffect(() => {
+    if (open) {
+      setValue(initial);
+      setError('');
+    } else {
+      // Drop decrypted passwords, private keys, and profiles from renderer state as soon as
+      // the editor closes. The native store remains the source of truth for the next edit.
+      setValue(blankTunnelEditor());
+    }
+  }, [initial, open]);
+
+  function setSetting(key: string, next: unknown) {
+    setValue((current) => ({
+      ...current,
+      settings: { ...current.settings, [key]: next },
+    }));
+  }
+
+  async function runTunnelImport<T>(
+    action: () => Promise<T | null>,
+    fallback: string,
+  ): Promise<T | null> {
+    const api = window.wormhole;
+    if (!api) {
+      setError('The native VPN bridge is unavailable.');
+      return null;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      return await action();
+    } catch (importError) {
+      setError(importError instanceof Error ? userFacingTunnelError(importError) : fallback);
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importWatchguardProfile() {
+    const imported = await runTunnelImport(
+      () => window.wormhole?.importWatchguardProfile() ?? Promise.resolve(null),
+      'Could not import the WatchGuard profile.',
+    );
+    if (!imported) return;
+    setValue((current) => ({
+      ...current,
+      settings: {
+        ...current.settings,
+        Server: imported.server,
+        Port: imported.port,
+        ProfileOvpn: imported.profileOvpn,
+      },
+    }));
+  }
+
+  async function importAzureVpnProfile() {
+    const imported = await runTunnelImport(
+      () => window.wormhole?.importAzureVpnProfile() ?? Promise.resolve(null),
+      'Could not import the Azure VPN profile.',
+    );
+    if (!imported) return;
+    setValue((current) => ({
+      ...current,
+      name: current.name || imported.name || '',
+      settings: { ...current.settings, ...imported.settings },
+    }));
+  }
+
+  async function importOvpnProfile() {
+    const imported = await runTunnelImport(
+      () => window.wormhole?.importOvpnProfile() ?? Promise.resolve(null),
+      'Could not import the OpenVPN profile.',
+    );
+    if (!imported) return;
+    setValue((current) => ({
+      ...current,
+      settings: { ...current.settings, ProfileOvpn: imported.contents },
+    }));
+  }
+
+  async function importCiscoProfile() {
+    const imported = await runTunnelImport(
+      () => window.wormhole?.importCiscoProfile() ?? Promise.resolve(null),
+      'Could not import the AnyConnect profile.',
+    );
+    if (!imported) return;
+    setValue((current) => ({
+      ...current,
+      name: current.name || imported.profileName || '',
+      settings: {
+        ...current.settings,
+        Host: imported.host,
+        Port: imported.port,
+        Group: imported.group ?? '',
+      },
+    }));
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canSave) return;
+    if (
+      value.id &&
+      value.kind !== initial.kind &&
+      !window.confirm(
+        `Change VPN type from ${tunnelKindLabel(initial.kind)} to ${tunnelKindLabel(value.kind)}? The previous provider credentials will be discarded.`,
+      )
+    ) {
+      return;
+    }
+    const api = window.wormhole;
+    if (!api) {
+      setError('The native VPN bridge is unavailable.');
+      return;
+    }
+    setBusy(true);
+    setError('');
+    try {
+      const settings = normalizeTunnelEditorSettings(value.kind, value.settings);
+      const saved = value.id
+        ? await api.updateTunnel({ id: value.id, name: value.name, kind: value.kind, settings })
+        : await api.createTunnel({ name: value.name, kind: value.kind, settings });
+      onSaved({ id: saved.id, name: saved.name, kind: tunnelKindLabel(saved.kind) });
+      onOpenChange(false);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : 'Could not save VPN tunnel.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Dialog onOpenChange={onOpenChange} open={open}>
+      <DialogContent className="flex max-h-[calc(100dvh-2rem)] w-full max-w-[min(48rem,calc(100vw-2rem))] flex-col overflow-hidden border-border/70 bg-card sm:max-w-[min(48rem,calc(100vw-2rem))]">
+        <DialogHeader>
+          <DialogTitle>{value.id ? 'Edit VPN tunnel' : 'Add VPN tunnel'}</DialogTitle>
+          <DialogDescription>
+            Tunnel credentials stay in the native encrypted store and never enter the connection
+            tree.
+          </DialogDescription>
+        </DialogHeader>
+        <form className="flex min-h-0 flex-1 flex-col gap-4" onSubmit={submit}>
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="grid gap-2">
+              <Label htmlFor="tunnel-name">Name</Label>
+              <Input
+                id="tunnel-name"
+                onChange={(event) =>
+                  setValue((current) => ({ ...current, name: event.target.value }))
+                }
+                placeholder="e.g. corporate VPN"
+                required
+                value={value.name}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor="tunnel-kind">VPN type</Label>
+              <Select
+                onValueChange={(next) =>
+                  setValue((current) => ({
+                    ...current,
+                    kind: Number(next),
+                    settings: tunnelDefaultSettings(Number(next)),
+                  }))
+                }
+                value={String(value.kind)}
+              >
+                <SelectTrigger id="tunnel-kind">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {tunnelKinds.map((kind) => (
+                    <SelectItem key={kind.value} value={String(kind.value)}>
+                      {kind.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          {value.kind === 3 ? (
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
+              <p className="text-[11px] text-muted-foreground">
+                Import a Firebox <span className="font-mono">.wgssl</span> bundle; key material is
+                parsed by Go and kept in the encrypted tunnel payload.
+              </p>
+              <Button
+                disabled={busy}
+                onClick={() => void importWatchguardProfile()}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                <Upload data-icon="inline-start" />
+                Import .wgssl
+              </Button>
+            </div>
+          ) : null}
+          {value.kind === 5 ? (
+            <div className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
+              <p className="text-[11px] text-muted-foreground">
+                Import <span className="font-mono">azurevpnconfig.xml</span> from the Azure portal;
+                Microsoft Entra tokens are cached separately in the protected native store.
+              </p>
+              <Button
+                disabled={busy}
+                onClick={() => void importAzureVpnProfile()}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                <Upload data-icon="inline-start" />
+                Import XML
+              </Button>
+            </div>
+          ) : null}
+          {value.kind === 6 ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
+              <p className="text-[11px] text-muted-foreground">
+                Import a Cisco Secure Client / AnyConnect profile XML; gateway and group fields are
+                filled by the native parser.
+              </p>
+              <Button
+                disabled={busy}
+                onClick={() => void importCiscoProfile()}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                <Upload data-icon="inline-start" />
+                Import AnyConnect profile XML…
+              </Button>
+            </div>
+          ) : null}
+          {missing.length > 0 ? (
+            <p className="rounded-md border border-border/70 bg-muted/20 px-3 py-2 text-[11px] text-muted-foreground">
+              To save this tunnel, fill in: {missing.join(', ')}.
+            </p>
+          ) : null}
+          <ScrollArea className="min-h-0 flex-1 pr-3">
+            <div className="grid gap-5 py-1">
+              {value.kind === 0 ? (
+                <>
+                  <TunnelSection title="Interface">{rows('Interface')}</TunnelSection>
+                  <TunnelSection title="Peer">{rows('Peer')}</TunnelSection>
+                </>
+              ) : null}
+              {value.kind === 1 ? (
+                <>
+                  <div className="grid gap-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <Label htmlFor="tunnel-ProfileOvpn">OpenVPN profile (.ovpn contents)</Label>
+                      <Button
+                        disabled={busy}
+                        onClick={() => void importOvpnProfile()}
+                        size="sm"
+                        type="button"
+                        variant="outline"
+                      >
+                        <Upload data-icon="inline-start" />
+                        Import from file…
+                      </Button>
+                    </div>
+                    {rows('Profile')}
+                  </div>
+                  <TunnelSection title="Authentication (optional)">
+                    {rows('Authentication')}
+                  </TunnelSection>
+                </>
+              ) : null}
+              {value.kind === 2 ? (
+                <>
+                  <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
+                  <TunnelSection title="Credentials">
+                    {rows('Credentials', {
+                      disabled: (field) =>
+                        field.key === 'Realm'
+                          ? useExternalBrowser &&
+                            !(
+                              typeof value.settings.Realm === 'string' &&
+                              value.settings.Realm.trim()
+                            )
+                          : useSso,
+                    })}
+                  </TunnelSection>
+                  <div className="grid gap-2 rounded-lg border border-border/70 bg-muted/20 px-3 py-2">
+                    {rows('Single sign-on', {
+                      disabled: (field) => field.key === 'UseExternalBrowser' && !useSso,
+                      hidden: (field) => field.key === 'SamlRedirectPort' && !useExternalBrowser,
+                    })}
+                    <p className="text-[11px] leading-relaxed text-muted-foreground">
+                      The embedded option uses a dedicated WebView2 profile. External-browser
+                      authentication requires the callback port configured on the FortiGate.
+                    </p>
+                  </div>
+                  <TunnelAdvanced
+                    label="Advanced"
+                    onOpenChange={setAdvancedOpen}
+                    open={advancedOpen}
+                  >
+                    {rows('Advanced', {
+                      disabled: (field) => field.key === 'TotpSecret' && useSso,
+                    })}
+                  </TunnelAdvanced>
+                </>
+              ) : null}
+              {value.kind === 3 ? (
+                <>
+                  <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
+                  <TunnelSection title="Credentials">{rows('Credentials')}</TunnelSection>
+                  <TunnelAdvanced
+                    label="Manual profile fallback & advanced"
+                    onOpenChange={setAdvancedOpen}
+                    open={advancedOpen}
+                  >
+                    {rows('Advanced')}
+                  </TunnelAdvanced>
+                </>
+              ) : null}
+              {value.kind === 4 ? (
+                <>
+                  <TunnelSection>{rows('Connection mode')}</TunnelSection>
+                  <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
+                  <TunnelSection title="Authentication">
+                    {fieldByKey('UseSingleSignOn') ? (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <div>
+                            <TunnelFieldRow
+                              disabled
+                              field={fieldByKey('UseSingleSignOn')!}
+                              onChange={setSetting}
+                              value={value.settings}
+                            />
+                          </div>
+                        </TooltipTrigger>
+                        <TooltipContent side="bottom">
+                          Single sign-on (browser/OIDC) is not yet supported — use username/password
+                          or import a profile.
+                        </TooltipContent>
+                      </Tooltip>
+                    ) : null}
+                    {rows('Authentication', {
+                      hidden: (field) => field.key === 'UseSingleSignOn',
+                    })}
+                  </TunnelSection>
+                  {value.settings.Mode === 1 ? (
+                    <div className="grid gap-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <Label htmlFor="tunnel-ProfileOvpn">Profile</Label>
+                        <Button
+                          disabled={busy}
+                          onClick={() => void importOvpnProfile()}
+                          size="sm"
+                          type="button"
+                          variant="outline"
+                        >
+                          <Upload data-icon="inline-start" />
+                          Import from file…
+                        </Button>
+                      </div>
+                      {rows('Profile')}
+                    </div>
+                  ) : null}
+                  <TunnelAdvanced
+                    label="Certificates & advanced"
+                    onOpenChange={setAdvancedOpen}
+                    open={advancedOpen}
+                  >
+                    {rows('Advanced')}
+                  </TunnelAdvanced>
+                </>
+              ) : null}
+              {value.kind === 5 ? (
+                <>
+                  <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
+                  <TunnelSection title="Microsoft Entra ID">
+                    {rows('Microsoft Entra ID')}
+                  </TunnelSection>
+                  <TunnelAdvanced
+                    label="Advanced"
+                    onOpenChange={setAdvancedOpen}
+                    open={advancedOpen}
+                  >
+                    {rows('Advanced')}
+                  </TunnelAdvanced>
+                </>
+              ) : null}
+              {value.kind === 6 ? (
+                <>
+                  <TunnelSection title="Gateway">{rows('Gateway')}</TunnelSection>
+                  <TunnelSection title="Credentials">{rows('Credentials')}</TunnelSection>
+                  <TunnelAdvanced
+                    label="Two-factor & advanced"
+                    onOpenChange={setAdvancedOpen}
+                    open={advancedOpen}
+                  >
+                    <p className="text-[11px] leading-relaxed text-muted-foreground md:col-span-2">
+                      If the gateway prompts for a second factor, provide a TOTP secret (a code is
+                      generated automatically) or a static secondary password. SAML single sign-on
+                      and client-certificate authentication are not supported.
+                    </p>
+                    {rows('Two-factor & advanced')}
+                  </TunnelAdvanced>
+                </>
+              ) : null}
+            </div>
+          </ScrollArea>
+          {error ? <p className="text-[11px] text-destructive">{error}</p> : null}
+          <DialogFooter>
+            <Button
+              disabled={busy}
+              onClick={() => onOpenChange(false)}
+              type="button"
+              variant="ghost"
+            >
+              Cancel
+            </Button>
+            <Button disabled={busy || !canSave} type="submit">
+              {value.id ? <Check data-icon="inline-start" /> : <Plus data-icon="inline-start" />}
+              {busy
+                ? 'Saving…'
+                : value.id
+                  ? 'Save changes'
+                  : canSave
+                    ? 'Add VPN tunnel'
+                    : 'Fill in required fields'}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function TunnelsPage({
+  tunnels,
+  onTunnelCreated,
+  onTunnelUpdated,
+  onTunnelDeleted,
+}: {
+  tunnels: TunnelRecord[];
+  onTunnelCreated: (tunnel: TunnelRecord) => void;
+  onTunnelUpdated: (tunnel: TunnelRecord) => void;
+  onTunnelDeleted: (id: string) => void;
+}) {
   const [searchText, setSearchText] = useState('');
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorValue, setEditorValue] = useState<TunnelEditorValue>(blankTunnelEditor);
+  const [actionError, setActionError] = useState('');
+  const [testState, setTestState] = useState<{
+    tunnel: TunnelRecord;
+    status: 'connecting' | 'connected' | 'cancelled' | 'failed';
+    error?: string;
+  } | null>(null);
+  const testAttemptRef = useRef(0);
   const filteredTunnels = useMemo(() => {
     const query = searchText.trim().toLowerCase();
     return query
@@ -7271,6 +8684,90 @@ function TunnelsPage({ tunnels }: { tunnels: TunnelRecord[] }) {
         )
       : tunnels;
   }, [searchText, tunnels]);
+
+  function addTunnel() {
+    setActionError('');
+    setEditorValue(blankTunnelEditor());
+    setEditorOpen(true);
+  }
+
+  function setTunnelEditorOpen(open: boolean) {
+    setEditorOpen(open);
+    if (!open) setEditorValue(blankTunnelEditor());
+  }
+
+  async function editTunnel(tunnel: TunnelRecord) {
+    const api = window.wormhole;
+    if (!api) {
+      setActionError('The native VPN bridge is unavailable.');
+      return;
+    }
+    setActionError('');
+    try {
+      setEditorValue(tunnelEditorFromDetails(await api.readTunnel(tunnel.id)));
+      setEditorOpen(true);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not read VPN tunnel.');
+    }
+  }
+
+  async function deleteTunnel(tunnel: TunnelRecord) {
+    const api = window.wormhole;
+    if (!api || !window.confirm(`Delete VPN tunnel “${tunnel.name}”? This cannot be undone.`))
+      return;
+    setActionError('');
+    try {
+      const result = await api.deleteTunnel(tunnel.id);
+      if (!result.deleted) {
+        setActionError(result.error ?? 'Could not delete VPN tunnel.');
+        return;
+      }
+      onTunnelDeleted(tunnel.id);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Could not delete VPN tunnel.');
+    }
+  }
+
+  async function testTunnel(tunnel: TunnelRecord) {
+    const api = window.wormhole;
+    if (!api || testState) {
+      if (!api) setActionError('The native VPN bridge is unavailable.');
+      return;
+    }
+    setActionError('');
+    const attempt = ++testAttemptRef.current;
+    setTestState({ tunnel, status: 'connecting' });
+    try {
+      const result = await api.testTunnel(tunnel.id);
+      if (attempt !== testAttemptRef.current) return;
+      if (!result.connected) {
+        const message = result.error || 'The VPN tunnel test failed.';
+        setTestState((current) =>
+          current
+            ? {
+                ...current,
+                status: isTunnelTestCancellation(message) ? 'cancelled' : 'failed',
+                error: message,
+              }
+            : current,
+        );
+        return;
+      }
+      setTestState((current) => (current ? { ...current, status: 'connected' } : current));
+    } catch (error) {
+      if (attempt !== testAttemptRef.current) return;
+      const message = userFacingTunnelError(error) || 'The VPN tunnel test failed.';
+      setTestState((current) =>
+        current
+          ? {
+              ...current,
+              status: isTunnelTestCancellation(message) ? 'cancelled' : 'failed',
+              error: message,
+            }
+          : current,
+      );
+    }
+  }
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden px-6 py-4">
@@ -7284,11 +8781,12 @@ function TunnelsPage({ tunnels }: { tunnels: TunnelRecord[] }) {
           placeholder="Search tunnels"
           value={searchText}
         />
-        <Button size="sm">
+        <Button onClick={addTunnel} size="sm">
           <Plus data-icon="inline-start" />
           Add VPN tunnel
         </Button>
       </div>
+      {actionError ? <p className="mt-2 text-[11px] text-muted-foreground">{actionError}</p> : null}
 
       <div className="min-h-0 flex-1">
         {filteredTunnels.length === 0 ? (
@@ -7329,13 +8827,22 @@ function TunnelsPage({ tunnels }: { tunnels: TunnelRecord[] }) {
                     </CardDescription>
                   </CardHeader>
                   <CardFooter className="mt-auto justify-end gap-0.5">
-                    <IconButton label={`Test ${tunnel.name}`}>
-                      <RefreshCcw />
+                    <IconButton
+                      label={`Test ${tunnel.name}`}
+                      onClick={() => void testTunnel(tunnel)}
+                    >
+                      <FlaskConical />
                     </IconButton>
-                    <IconButton label={`Edit ${tunnel.name}`}>
-                      <Settings2 />
+                    <IconButton
+                      label={`Edit ${tunnel.name}`}
+                      onClick={() => void editTunnel(tunnel)}
+                    >
+                      <Pencil />
                     </IconButton>
-                    <IconButton label={`Delete ${tunnel.name}`}>
+                    <IconButton
+                      label={`Delete ${tunnel.name}`}
+                      onClick={() => void deleteTunnel(tunnel)}
+                    >
                       <X />
                     </IconButton>
                   </CardFooter>
@@ -7345,6 +8852,66 @@ function TunnelsPage({ tunnels }: { tunnels: TunnelRecord[] }) {
           </ScrollArea>
         )}
       </div>
+      <TunnelEditorDialog
+        initial={editorValue}
+        onOpenChange={setTunnelEditorOpen}
+        onSaved={(tunnel) => (editorValue.id ? onTunnelUpdated(tunnel) : onTunnelCreated(tunnel))}
+        open={editorOpen}
+      />
+      <Dialog
+        onOpenChange={(open) => {
+          if (!open) setTestState(null);
+        }}
+        open={testState !== null}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Test VPN tunnel</DialogTitle>
+            <DialogDescription>{testState?.tunnel.name}</DialogDescription>
+          </DialogHeader>
+          <div className="flex min-h-24 items-center gap-3 rounded-lg border border-border/70 bg-muted/20 px-4 py-3">
+            {testState?.status === 'connecting' ? (
+              <>
+                <LoaderCircle className="size-5 shrink-0 animate-spin text-muted-foreground" />
+                <p className="text-sm">Connecting to the VPN gateway…</p>
+              </>
+            ) : testState?.status === 'connected' ? (
+              <>
+                <CheckCircle2 className="size-5 shrink-0 text-emerald-500" />
+                <p className="text-sm">VPN tunnel connected successfully.</p>
+              </>
+            ) : testState?.status === 'cancelled' ? (
+              <>
+                <Info className="size-5 shrink-0 text-muted-foreground" />
+                <div className="min-w-0 space-y-1">
+                  <p className="text-sm font-medium">Test cancelled.</p>
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    You stopped the authentication prompt — no changes were made.
+                  </p>
+                </div>
+              </>
+            ) : (
+              <>
+                <XCircle className="size-5 shrink-0 text-destructive" />
+                <div className="min-w-0 space-y-1">
+                  <p className="text-sm font-medium">The test didn't go through.</p>
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    {testState?.error}
+                  </p>
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    Check the gateway settings and credentials, then try again.
+                  </p>
+                </div>
+              </>
+            )}
+          </div>
+          <DialogFooter>
+            <Button onClick={() => setTestState(null)} type="button">
+              Close
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }
@@ -7707,6 +9274,32 @@ function SettingsPage({
       active = false;
     };
   }, [authGate]);
+
+  useEffect(() => {
+    if (authGate !== 'unlocked' || !window.wormhole) return;
+    let active = true;
+    void window.wormhole
+      .readAppSettings()
+      .then((settings) => {
+        if (active) setPromptBeforeTunnelConnect(settings.promptBeforeTunnelConnect);
+      })
+      .catch(() => {
+        // The switch keeps its default (true) when the setting cannot be read.
+      });
+    return () => {
+      active = false;
+    };
+  }, [authGate]);
+
+  function handlePromptBeforeTunnelConnectChange(enabled: boolean) {
+    setPromptBeforeTunnelConnect(enabled);
+    if (!window.wormhole) return;
+    void window.wormhole
+      .setPromptBeforeTunnelConnect(enabled)
+      .catch(() => {
+        // A failed save leaves the local switch state; the next settings open re-syncs it.
+      });
+  }
 
   useEffect(() => {
     if (!authState || authState.mode !== 'windowsHello' || !window.wormhole) {
@@ -8202,7 +9795,7 @@ function SettingsPage({
               checked={promptBeforeTunnelConnect}
               description="Ask whether to start a configured tunnel before connecting to a target."
               label="Ask whether to use the tunnel when connecting"
-              onCheckedChange={setPromptBeforeTunnelConnect}
+              onCheckedChange={handlePromptBeforeTunnelConnectChange}
             />
           </SettingsSection>
         </SettingsTabPanel>
