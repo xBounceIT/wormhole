@@ -43,6 +43,17 @@ public sealed class ConnectionTreeViewAssetTests
         Assert.Contains("vm.IsExpanded = expanded;", code, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void HostTooltip_StaysOnTheSidebarSideOfEmbeddedWebViews()
+    {
+        var xaml = ReadAsset("ConnectionTreeView.xaml");
+
+        Assert.Contains(
+            "ToolTipService.Placement=\"Left\"",
+            xaml,
+            StringComparison.Ordinal);
+    }
+
     private static string ReadAsset(string fileName) =>
         File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Views", "Controls", fileName));
 }

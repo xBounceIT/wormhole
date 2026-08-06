@@ -155,6 +155,7 @@
                     <TreeViewItem ItemsSource="{x:Bind DisplayChildren, Mode=OneWay}"
                                   IsExpanded="{x:Bind IsExpanded, Mode=OneWay}"
                                   ToolTipService.ToolTip="{x:Bind Host, Mode=OneWay}"
+                                  ToolTipService.Placement="Left"
                                   Loaded="OnTreeItemLoaded"
                                   Unloaded="OnTreeItemUnloaded"
                                   GotFocus="OnTreeItemGotFocus"

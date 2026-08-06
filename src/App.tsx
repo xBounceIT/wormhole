@@ -832,7 +832,7 @@ function NodeTooltip({ node, children }: { node: TreeNode; children: ReactNode }
   return (
     <Tooltip>
       <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent side="right">{node.host}</TooltipContent>
+      <TooltipContent side="left">{node.host}</TooltipContent>
     </Tooltip>
   );
 }
