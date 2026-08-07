@@ -302,6 +302,7 @@ type WebOpenRequest = {
   address?: string;
   protocol?: 'http' | 'https';
   ignoreCertErrors?: boolean;
+  tunnelConfigId?: string;
 };
 type WebBoundsRequest = {
   sessionId: string;
@@ -745,7 +746,8 @@ function isWebOpenRequest(value: unknown): value is WebOpenRequest {
       isSshSessionId(value.nodeId) &&
       value.address === undefined &&
       value.protocol === undefined &&
-      value.ignoreCertErrors === undefined
+      value.ignoreCertErrors === undefined &&
+      value.tunnelConfigId === undefined
     );
   }
   if (
@@ -756,7 +758,10 @@ function isWebOpenRequest(value: unknown): value is WebOpenRequest {
   ) {
     return false;
   }
-  return value.ignoreCertErrors === undefined || typeof value.ignoreCertErrors === 'boolean';
+  return (
+    (value.ignoreCertErrors === undefined || typeof value.ignoreCertErrors === 'boolean') &&
+    (value.tunnelConfigId === undefined || isTunnelID(value.tunnelConfigId))
+  );
 }
 
 function isWebBoundsRequest(value: unknown): value is WebBoundsRequest {
@@ -2079,6 +2084,10 @@ function parseVncCommand(value: unknown): VncCommand {
     command.credentialId = stringField('credentialId', 128);
     command.host = stringField('host', 1024);
     command.password = stringField('password', 16 * 1024);
+    command.tunnelConfigId = stringField('tunnelConfigId', 128);
+    if (command.tunnelConfigId !== undefined && !isTunnelID(command.tunnelConfigId)) {
+      throw new Error('Invalid VNC tunnel configuration.');
+    }
     command.port = numberField('port', 65535);
     return command;
   }
@@ -2545,6 +2554,7 @@ class WebSurfaceManager {
           address: request.address,
           protocol: request.protocol,
           ignoreCertErrors: request.ignoreCertErrors,
+          tunnelConfigId: request.tunnelConfigId,
         }),
       );
       if (target.tunnelConfigId) {
@@ -2556,6 +2566,11 @@ class WebSurfaceManager {
           tunnelConfigId: target.tunnelConfigId,
           progressSessionId: request.sessionId,
         });
+        // A saved connection may intentionally choose the direct route in its VPN prompt. A
+        // Quick Connect route has no such fallback: selecting a tunnel must produce a proxy.
+        if (!socksEndpoint && !request.nodeId) {
+          throw new Error('The VPN tunnel returned no SOCKS endpoint.');
+        }
         if (socksEndpoint) target.proxyUrl = `socks5://${socksEndpoint}`;
       }
       if (
@@ -4392,23 +4407,28 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       const bounds = toScreenBounds(ownerWindow, request.bounds);
       releaseRdpTunnel(request.sessionId);
       let socksEndpoint = '';
-      if (request.profile.nodeId) {
+      if (request.profile.nodeId || request.profile.tunnelConfigId) {
         const leaseId = randomUUID();
         rdpTunnelLeases.set(request.sessionId, leaseId);
         try {
           socksEndpoint = await getNativeBackend().acquireTunnel({
             leaseId,
             nodeId: request.profile.nodeId,
+            tunnelConfigId: request.profile.tunnelConfigId,
             progressSessionId: request.sessionId,
           });
         } catch (error) {
           if (rdpTunnelLeases.get(request.sessionId) === leaseId) {
-            rdpTunnelLeases.delete(request.sessionId);
+            releaseRdpTunnel(request.sessionId);
           }
           throw error;
         }
         if (rdpTunnelLeases.get(request.sessionId) !== leaseId) {
           throw new Error('RDP connection closed while opening its VPN tunnel.');
+        }
+        if (!socksEndpoint && request.profile.tunnelConfigId) {
+          releaseRdpTunnel(request.sessionId);
+          throw new Error('The VPN tunnel returned no SOCKS endpoint.');
         }
         if (!socksEndpoint) releaseRdpTunnel(request.sessionId);
       }
@@ -4420,7 +4440,9 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
               ...request.profile,
               socksEndpoint: socksEndpoint || undefined,
               tunnelEnabled:
-                request.profile.nodeId && !socksEndpoint ? false : request.profile.tunnelEnabled,
+                (request.profile.nodeId || request.profile.tunnelConfigId) && !socksEndpoint
+                  ? false
+                  : request.profile.tunnelEnabled,
             },
           },
           nativeWindowHandle(ownerWindow),
@@ -4588,6 +4610,12 @@ function parseRdpStartRequest(value: unknown): RdpStartRequest {
       profile.port > 65535)
   ) {
     throw new Error('RDP port is invalid.');
+  }
+  if (profile.nodeId !== undefined && profile.tunnelConfigId !== undefined) {
+    throw new Error('RDP tunnel configuration cannot override a saved connection.');
+  }
+  if (profile.tunnelConfigId !== undefined && !isTunnelID(profile.tunnelConfigId)) {
+    throw new Error('RDP tunnel configuration is invalid.');
   }
   if (typeof profile.password === 'string' && profile.password.length > 4096) {
     throw new Error('RDP password is too long.');

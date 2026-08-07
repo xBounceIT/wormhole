@@ -62,6 +62,7 @@ const wormholeBridge = {
     address?: string;
     protocol?: 'http' | 'https';
     ignoreCertErrors?: boolean;
+    tunnelConfigId?: string;
   }) => ipcRenderer.invoke('web:open', request),
   setWebSessionBounds: (request: {
     sessionId: string;

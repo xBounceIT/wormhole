@@ -110,6 +110,31 @@ func TestResolveWebTargetParsesQuickConnectAddressInGo(t *testing.T) {
 	}
 }
 
+func TestResolveWebTargetPreservesQuickConnectTunnel(t *testing.T) {
+	const tunnelID = "11111111-2222-3333-4444-555555555555"
+	target, err := resolveWebTarget("", webTargetRequest{
+		Address:        "private.example.test:8443",
+		Protocol:       "https",
+		TunnelConfigID: tunnelID,
+	})
+	if err != nil {
+		t.Fatalf("resolve direct web target with tunnel: %v", err)
+	}
+	if target.TunnelConfigID != tunnelID {
+		t.Fatalf("quick-connect tunnel was not preserved: %#v", target)
+	}
+}
+
+func TestResolveWebTargetRejectsInvalidQuickConnectTunnel(t *testing.T) {
+	if _, err := resolveWebTarget("", webTargetRequest{
+		Address:        "private.example.test",
+		Protocol:       "https",
+		TunnelConfigID: "not-a-uuid",
+	}); err == nil {
+		t.Fatal("invalid quick-connect tunnel was accepted")
+	}
+}
+
 func TestResolveWebTargetRejectsMalformedQuickConnectAddress(t *testing.T) {
 	for _, address := range []string{":8443", "firewall.example.test:99999", "admin@firewall.example.test", "firewall example.test"} {
 		if _, err := resolveWebTarget("", webTargetRequest{Address: address, Protocol: "https"}); err == nil {

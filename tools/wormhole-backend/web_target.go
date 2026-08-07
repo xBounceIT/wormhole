@@ -18,6 +18,7 @@ type webTargetRequest struct {
 	Address          string `json:"address"`
 	Protocol         string `json:"protocol"`
 	IgnoreCertErrors bool   `json:"ignoreCertErrors"`
+	TunnelConfigID   string `json:"tunnelConfigId"`
 }
 
 // webTargetResponse is the non-secret part of a resolved HTTP(S) connection. Electron owns the
@@ -50,7 +51,7 @@ func resolveWebTarget(databasePath string, request webTargetRequest) (webTargetR
 	if nodeID == "" {
 		return resolveDirectWebTarget(request)
 	}
-	if len(nodeID) > 128 || request.Address != "" || request.Protocol != "" || request.IgnoreCertErrors {
+	if len(nodeID) > 128 || request.Address != "" || request.Protocol != "" || request.IgnoreCertErrors || request.TunnelConfigID != "" {
 		return webTargetResponse{}, errors.New("web connection id is invalid")
 	}
 
@@ -79,6 +80,10 @@ func resolveDirectWebTarget(request webTargetRequest) (webTargetResponse, error)
 	if request.Protocol != "http" && request.Protocol != "https" {
 		return webTargetResponse{}, errors.New("web connection has an invalid protocol")
 	}
+	tunnelID := normalizeTunnelID(request.TunnelConfigID)
+	if request.TunnelConfigID != "" && tunnelID == "" {
+		return webTargetResponse{}, errors.New("web connection has an invalid VPN tunnel")
+	}
 	host, port, err := parseWebAddress(request.Address)
 	if err != nil {
 		return webTargetResponse{}, err
@@ -100,6 +105,7 @@ func resolveDirectWebTarget(request webTargetRequest) (webTargetResponse, error)
 		Host:             host,
 		Port:             port,
 		IgnoreCertErrors: request.Protocol == "https" && request.IgnoreCertErrors,
+		TunnelConfigID:   tunnelID,
 	}, nil
 }
 

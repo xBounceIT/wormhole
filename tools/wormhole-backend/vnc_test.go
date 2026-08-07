@@ -96,6 +96,93 @@ VALUES ('vnc-node', NULL, 'VNC node', 1, 6, 'vnc.example', 5900);
 	}
 }
 
+func TestResolveVncTargetPreservesQuickConnectTunnel(t *testing.T) {
+	const tunnelID = "11111111-2222-3333-4444-555555555555"
+	target, err := resolveVncTarget(nil, backendCommand{
+		Host:           "vnc.example",
+		TunnelConfigID: tunnelID,
+	})
+	if err != nil {
+		t.Fatalf("resolve VNC target with tunnel: %v", err)
+	}
+	if target.tunnelConfigID != tunnelID {
+		t.Fatalf("quick-connect tunnel was not preserved: %#v", target)
+	}
+}
+
+func TestResolveVncTargetPreservesSavedTunnelInheritance(t *testing.T) {
+	const tunnelID = "11111111-2222-3333-4444-555555555555"
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    ParentId TEXT NULL,
+    Name TEXT NOT NULL,
+    Kind INTEGER NOT NULL,
+    Protocol INTEGER NULL,
+    Host TEXT NULL,
+    Port INTEGER NULL,
+    TunnelEnabled INTEGER NULL,
+    TunnelConfigId TEXT NULL
+);
+INSERT INTO Nodes (Id, ParentId, Name, Kind, Protocol, Host, Port, TunnelEnabled, TunnelConfigId)
+VALUES ('vnc-node', NULL, 'Private VNC', 1, 6, 'vnc.example', 5900, 1, '` + tunnelID + `');
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	target, err := resolveVncTarget(database, backendCommand{NodeID: "vnc-node"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.tunnelConfigID != tunnelID || target.nodeID != "vnc-node" || target.displayName != "Private VNC" {
+		t.Fatalf("saved VPN route was not preserved: %#v", target)
+	}
+}
+
+func TestVncCommandRejectsSavedTunnelOverride(t *testing.T) {
+	err := validateBackendCommand(backendCommand{
+		ID:             "command-1",
+		Action:         "vnc.connect",
+		SessionID:      "session-1",
+		NodeID:         "saved-vnc",
+		TunnelConfigID: "11111111-2222-3333-4444-555555555555",
+	})
+	if err == nil {
+		t.Fatal("VNC command allowed a saved connection tunnel override")
+	}
+}
+
+func TestFinishTunnelAcquireHandlesCancellationBeforeLeaseCreation(t *testing.T) {
+	outputFile, err := os.CreateTemp(t.TempDir(), "backend-output-*.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := newBackendLineWriter(outputFile)
+	manager := newVncManager(nil, output)
+	manager.finishTunnelAcquire(
+		backendCommand{ID: "command-1", SessionID: "lease-1"},
+		nil,
+		errors.New("cancelled"),
+	)
+	if err := outputFile.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(outputFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "VPN tunnel establishment was cancelled") {
+		t.Fatalf("unexpected cancellation response: %s", data)
+	}
+}
+
 func TestApplyVncFramebufferUpdateProducesPng(t *testing.T) {
 	session := newVncSession("test", nil, nil)
 	if err := session.resetFramebuffer(2, 1); err != nil {

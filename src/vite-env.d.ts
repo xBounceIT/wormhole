@@ -11,6 +11,7 @@ interface WormholeRdpSurfaceRect {
 
 interface WormholeRdpProfile {
   nodeId?: string;
+  tunnelConfigId?: string;
   name?: string;
   host: string;
   port?: number;
@@ -358,6 +359,7 @@ type WormholeVncCommand =
       host?: string;
       port?: number;
       password?: string;
+      tunnelConfigId?: string;
     }
   | { action: 'vnc.disconnect'; sessionId: string }
   | { action: 'vnc.pointer'; sessionId: string; x: number; y: number; buttons: number }
@@ -550,6 +552,7 @@ interface Window {
       address?: string;
       protocol?: 'http' | 'https';
       ignoreCertErrors?: boolean;
+      tunnelConfigId?: string;
     }): Promise<WormholeWebTarget>;
     setWebSessionBounds(request: {
       sessionId: string;

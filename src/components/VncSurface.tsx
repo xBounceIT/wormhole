@@ -11,6 +11,7 @@ type PendingPointerMove = { generation: number; command: PointerCommand };
 export type VncSurfaceSession = {
   id: string;
   nodeId?: string;
+  tunnelConfigId?: string;
   host: string;
   port?: number;
   tunnelProgress?: TunnelProgress | null;
@@ -154,6 +155,7 @@ export function VncSurface({ session }: { session: VncSurfaceSession }) {
           action: 'vnc.connect',
           sessionId: session.id,
           nodeId: session.nodeId,
+          tunnelConfigId: session.tunnelConfigId,
           host: session.host,
           port: session.port,
           ...(providedPassword === undefined ? {} : { password: providedPassword }),
@@ -161,7 +163,7 @@ export function VncSurface({ session }: { session: VncSurfaceSession }) {
         true,
       );
     },
-    [sendCommand, session.host, session.id, session.nodeId, session.port],
+    [sendCommand, session.host, session.id, session.nodeId, session.port, session.tunnelConfigId],
   );
 
   const queuePointerMove = useCallback(

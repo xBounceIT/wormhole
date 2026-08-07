@@ -42,6 +42,7 @@ func (b rdpBounds) valid() bool {
 
 type rdpProfile struct {
 	NodeID               string `json:"nodeId,omitempty"`
+	TunnelConfigID       string `json:"tunnelConfigId,omitempty"`
 	Name                 string `json:"name,omitempty"`
 	Host                 string `json:"host"`
 	Port                 int    `json:"port,omitempty"`
@@ -226,14 +227,26 @@ func (c *rdpController) routeRdpThroughTunnel(command *rdpCommand, host string, 
 	if command.Profile.TunnelEnabled != nil && !*command.Profile.TunnelEnabled {
 		return nil
 	}
-	if strings.TrimSpace(command.Profile.NodeID) == "" {
-		return nil
+	tunnelID := normalizeTunnelID(command.Profile.TunnelConfigID)
+	if command.Profile.TunnelConfigID != "" && tunnelID == "" {
+		return errors.New("RDP tunnel configuration is invalid")
 	}
-	tunnelID, enabled, err := resolveNodeTunnel(c.databasePath, command.Profile.NodeID)
-	if err != nil {
-		return err
+	enabled := tunnelID != ""
+	nodeID := strings.TrimSpace(command.Profile.NodeID)
+	if nodeID != "" && tunnelID != "" {
+		return errors.New("RDP tunnel configuration cannot override a saved connection")
+	}
+	if nodeID != "" && tunnelID == "" {
+		var err error
+		tunnelID, enabled, err = resolveNodeTunnel(c.databasePath, nodeID)
+		if err != nil {
+			return err
+		}
 	}
 	if !enabled {
+		if nodeID == "" && command.Profile.TunnelEnabled != nil && *command.Profile.TunnelEnabled {
+			return errors.New("RDP connection enables a VPN tunnel but no tunnel is configured")
+		}
 		return nil
 	}
 	if tunnelID == "" {
@@ -253,6 +266,7 @@ func (c *rdpController) routeRdpThroughTunnel(command *rdpCommand, host string, 
 	}
 	var runtime *tunnelRuntime
 	var forwarder *tunnelForwarder
+	var err error
 	if command.Profile.SocksEndpoint != "" {
 		forwarder, err = startSocksForwarder(
 			command.Profile.SocksEndpoint, net.JoinHostPort(host, strconv.Itoa(port)),
@@ -266,7 +280,9 @@ func (c *rdpController) routeRdpThroughTunnel(command *rdpCommand, host string, 
 		}
 	}
 	if err != nil {
-		runtime.close()
+		if runtime != nil {
+			runtime.close()
+		}
 		return err
 	}
 	command.tunnel = runtime

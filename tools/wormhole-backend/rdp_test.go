@@ -60,6 +60,34 @@ func TestRdpCommandsWithoutAProcessAreIdempotentWhereTheSurfaceNeedsIt(t *testin
 	}
 }
 
+func TestRouteRdpThroughTunnelValidatesExplicitQuickConnectTunnel(t *testing.T) {
+	controller := &rdpController{}
+	command := &rdpCommand{Profile: rdpProfile{TunnelConfigID: "not-a-uuid"}}
+	if err := controller.routeRdpThroughTunnel(command, "rdp.example", rdpDefaultPort); err == nil {
+		t.Fatal("invalid quick-connect RDP tunnel was accepted")
+	}
+}
+
+func TestRouteRdpThroughTunnelRejectsSavedTunnelOverride(t *testing.T) {
+	controller := &rdpController{}
+	command := &rdpCommand{Profile: rdpProfile{
+		NodeID:         "saved-rdp",
+		TunnelConfigID: "11111111-2222-3333-4444-555555555555",
+	}}
+	if err := controller.routeRdpThroughTunnel(command, "rdp.example", rdpDefaultPort); err == nil {
+		t.Fatal("RDP command allowed a saved connection tunnel override")
+	}
+}
+
+func TestRouteRdpThroughTunnelFailsClosedWhenEnabledWithoutConfig(t *testing.T) {
+	enabled := true
+	controller := &rdpController{}
+	command := &rdpCommand{Profile: rdpProfile{TunnelEnabled: &enabled}}
+	if err := controller.routeRdpThroughTunnel(command, "rdp.example", rdpDefaultPort); err == nil {
+		t.Fatal("RDP tunnel request without a configuration was routed directly")
+	}
+}
+
 func TestDisconnectCanMarkTheCurrentProcessTerminalBeforeExit(t *testing.T) {
 	process := &rdpProcess{sessionID: "session-1", backend: "activex"}
 	controller := &rdpController{processes: map[string]*rdpProcess{process.sessionID: process}}

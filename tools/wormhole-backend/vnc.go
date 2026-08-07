@@ -525,7 +525,9 @@ func (m *vncManager) finishTunnelAcquire(command backendCommand, lease *tunnelRu
 	}
 	m.mu.Unlock()
 	if !stillPending {
-		lease.close()
+		if lease != nil {
+			lease.close()
+		}
 		_ = m.output.write(backendResponse{
 			ID: command.ID, OK: false, Error: "VPN tunnel establishment was cancelled",
 		})
@@ -1200,6 +1202,12 @@ func validateBackendCommand(command backendCommand) error {
 		if len(command.NodeID) > 128 || len(command.CredentialID) > 128 {
 			return errors.New("VNC connection identity is invalid")
 		}
+		if command.NodeID != "" && command.TunnelConfigID != "" {
+			return errors.New("VNC tunnel configuration cannot override a saved connection")
+		}
+		if command.TunnelConfigID != "" && normalizeTunnelID(command.TunnelConfigID) == "" {
+			return errors.New("VNC tunnel configuration is invalid")
+		}
 		if err := validateVncHost(command.Host); err != nil {
 			return err
 		}
@@ -1250,7 +1258,16 @@ func resolveVncTarget(
 	command backendCommand,
 	electronUserDataPath ...string,
 ) (vncTarget, error) {
-	target := vncTarget{host: strings.TrimSpace(command.Host), port: command.Port, password: command.Password}
+	tunnelConfigID := normalizeTunnelID(command.TunnelConfigID)
+	if command.TunnelConfigID != "" && tunnelConfigID == "" {
+		return vncTarget{}, errors.New("VNC tunnel configuration is invalid")
+	}
+	target := vncTarget{
+		host:           strings.TrimSpace(command.Host),
+		port:           command.Port,
+		password:       command.Password,
+		tunnelConfigID: tunnelConfigID,
+	}
 	hostHasPort := target.host != "" && vncHostIncludesPort(target.host)
 	if database != nil && (command.NodeID != "" || command.CredentialID != "") {
 		databaseTarget, err := readVncTargetFromDatabase(
@@ -1271,6 +1288,11 @@ func resolveVncTarget(
 		}
 		if target.password == "" {
 			target.password = databaseTarget.password
+		}
+		target.nodeID = databaseTarget.nodeID
+		target.displayName = databaseTarget.displayName
+		if target.tunnelConfigID == "" {
+			target.tunnelConfigID = databaseTarget.tunnelConfigID
 		}
 	}
 

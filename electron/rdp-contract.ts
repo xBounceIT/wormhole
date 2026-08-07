@@ -7,6 +7,7 @@ export type RdpSurfaceRect = {
 
 export type RdpProfile = {
   nodeId?: string;
+  tunnelConfigId?: string;
   name?: string;
   host: string;
   port?: number;

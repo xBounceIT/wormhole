@@ -154,6 +154,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { getTreeRowGeometry } from './tree-layout';
 import { findParentFolderId } from './tree-parent';
+import {
+  quickConnectSupportsTunnel,
+  quickConnectTunnelId,
+  type QuickConnectProtocol,
+} from './quick-connect-state';
 import { VncSurface } from './components/VncSurface';
 import { RdpSurface, type RdpUiStatus } from './components/RdpSurface';
 import { WebSurface } from './components/WebSurface';
@@ -183,7 +188,7 @@ import {
   type TunnelMode,
 } from './tunnel-state';
 
-type Protocol = 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+type Protocol = QuickConnectProtocol;
 type AutoSudoMode = 'inherit' | 'on' | 'off';
 type NavItem = 'sessions' | 'credentials' | 'tunnels' | 'settings';
 type AuthPromptKind = 'lock' | 'confirmation';
@@ -426,6 +431,7 @@ type Session = {
   status: 'connecting' | 'connected' | 'failed' | 'closed' | 'placeholder';
   terminalFrame?: WormholeSshTerminalFrame;
   tunnelProgress?: { phase: string; detail?: string } | null;
+  tunnelConfigId?: string;
   serialSettings?: SerialSettings;
   sftp?: SftpBrowserState;
   error?: string;
@@ -1162,6 +1168,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     name: '',
     host: '',
     protocol: 'ssh' as Protocol,
+    tunnel: 'off' as TunnelMode,
     httpIgnoreCertErrors: false,
     serial: { ...defaultSerialSettings },
   });
@@ -2276,6 +2283,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           address: session.host,
           protocol: session.protocol as 'http' | 'https',
           ignoreCertErrors: session.webIgnoreCertErrors === true,
+          tunnelConfigId: session.tunnelConfigId,
         };
 
     void api.openWebSession(request).then(
@@ -2339,6 +2347,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       autoReconnect: true,
       serverAuthentication: 2,
       gatewayBypassLocal: true,
+      tunnelConfigId: session.tunnelConfigId,
+      tunnelEnabled: session.tunnelConfigId ? true : undefined,
     };
   }
 
@@ -2646,7 +2656,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
     const duplicate: Session = {
       ...source,
-      id: `session-duplicate-${Date.now()}`,
+      id: `session-duplicate-${newSessionToken()}`,
       title: `${source.title} (copy)`,
       backendSessionId:
         source.protocol === 'ssh' || source.protocol === 'serial' ? newSessionToken() : undefined,
@@ -3512,6 +3522,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       name: '',
       host: '',
       protocol: 'ssh',
+      tunnel: 'off',
       httpIgnoreCertErrors: false,
       serial: { ...defaultSerialSettings },
     });
@@ -3844,7 +3855,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     event.preventDefault();
     const name = quickConnectForm.name.trim() || quickConnectForm.host.trim() || 'New connection';
     const host = quickConnectForm.host.trim() || 'localhost';
-    const id = `session-quick-${Date.now()}`;
+    const id = `session-quick-${newSessionToken()}`;
     const backendSessionId = quickConnectForm.protocol === 'serial' ? newSessionToken() : undefined;
 
     const session: Session = {
@@ -3852,6 +3863,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       title: name,
       protocol: quickConnectForm.protocol,
       host,
+      tunnelConfigId: quickConnectTunnelId(quickConnectForm.protocol, quickConnectForm.tunnel),
       canTransfer: quickConnectForm.protocol === 'ssh',
       backendSessionId,
       status:
@@ -4965,6 +4977,30 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   </SelectContent>
                 </Select>
               </div>
+              {quickConnectSupportsTunnel(quickConnectForm.protocol) ? (
+                <div className="grid gap-2">
+                  <Label htmlFor="quick-tunnel-route">VPN route</Label>
+                  <Select
+                    onValueChange={(tunnel) => setQuickConnectForm((form) => ({ ...form, tunnel }))}
+                    value={quickConnectForm.tunnel}
+                  >
+                    <SelectTrigger id="quick-tunnel-route">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="off">No VPN tunnel</SelectItem>
+                      {tunnels.map((tunnel) => (
+                        <SelectItem key={tunnel.id} value={tunnel.id}>
+                          {tunnel.name} · {tunnel.kind}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    The selected VPN tunnel starts before this temporary connection.
+                  </p>
+                </div>
+              ) : null}
               {quickConnectForm.protocol === 'https' ? (
                 <label className="flex items-center gap-2 text-xs">
                   <Checkbox
@@ -7624,6 +7660,7 @@ function SessionsPage({
                   nodeId: session.nodeId,
                   host: session.host,
                   port: session.port,
+                  tunnelConfigId: session.tunnelConfigId,
                   tunnelProgress: session.tunnelProgress,
                 }}
               />
