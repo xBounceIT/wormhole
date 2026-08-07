@@ -715,7 +715,7 @@ function AutoSudoField({
           : 'Follows the parent folder’s Auto sudo setting.';
 
   return (
-    <div className="grid gap-2 rounded-lg border border-border/70 bg-background/40 p-3">
+    <div className="grid gap-2">
       <Label htmlFor={id}>{isFolder ? 'Auto sudo default (SSH)' : 'Auto sudo (SSH)'}</Label>
       <Select onValueChange={(value) => onChange(value as AutoSudoMode)} value={mode}>
         <SelectTrigger className="w-full sm:max-w-[280px]" id={id}>
@@ -7684,7 +7684,7 @@ function TunnelRouteField({
             ? 'Inherits whether VPN routing is enabled, but overrides which tunnel to use.'
             : 'The native backend establishes this userspace VPN route before connecting.';
   return (
-    <div className="grid gap-2 rounded-lg border border-border/70 bg-background/40 p-3">
+    <div className="grid gap-2">
       <Label htmlFor={id}>{isFolder ? 'VPN route default' : 'VPN route'}</Label>
       <Select disabled={disabled} onValueChange={onChange} value={mode}>
         <SelectTrigger className="w-full sm:max-w-[360px]" id={id}>
