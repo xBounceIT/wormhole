@@ -19,3 +19,12 @@ test('web session attempts use last-request-wins semantics for a retry', () => {
   assert.equal(attempts.isCurrent('web-1', first), false);
   assert.equal(attempts.isCurrent('web-1', retry), true);
 });
+
+test('credential editor reset invalidates an in-flight Bitwarden search', () => {
+  const attempts = new WebSessionAttemptTracker();
+  const searching = attempts.begin('credential-search');
+
+  attempts.cancel('credential-search');
+
+  assert.equal(attempts.isCurrent('credential-search', searching), false);
+});

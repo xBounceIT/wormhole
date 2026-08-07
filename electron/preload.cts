@@ -32,12 +32,53 @@ const wormholeBridge = {
   selectBackupForImport: () => ipcRenderer.invoke('backup:select-import'),
   clearBackupImportSelection: () => ipcRenderer.send('backup:clear-import'),
   importBackup: (password: string) => ipcRenderer.invoke('backup:import', { password }),
+  createWorkspaceNode: (request: {
+    parentId: string;
+    name: string;
+    kind: 'folder' | 'connection';
+    protocol: '' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+    host: string;
+    sshAutoSudo: boolean | null;
+    httpIgnoreCertErrors: boolean | null;
+    tunnelEnabled: boolean | null;
+    tunnelConfigId: string;
+    credentialMode: 0 | 1 | 2;
+    credentialId: string;
+    serialBaudRate: number;
+    serialDataBits: number;
+    serialStopBits: number;
+    serialParity: number;
+    serialFlowControl: number;
+  }) => ipcRenderer.invoke('workspace:create-node', request),
+  updateWorkspaceNode: (request: {
+    id: string;
+    parentId: string;
+    name: string;
+    kind: 'folder' | 'connection';
+    protocol: '' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+    host: string;
+    sshAutoSudo: boolean | null;
+    httpIgnoreCertErrors: boolean | null;
+    tunnelEnabled: boolean | null;
+    tunnelConfigId: string;
+    credentialMode: 0 | 1 | 2;
+    credentialId: string;
+    serialBaudRate: number;
+    serialDataBits: number;
+    serialStopBits: number;
+    serialParity: number;
+    serialFlowControl: number;
+  }) => ipcRenderer.invoke('workspace:update-node', request),
   createCredential: (request: {
     name: string;
     protocol: 'ssh' | 'rdp' | 'vnc';
     username: string;
     domain: string;
     password: string;
+    provider: 'Local' | 'Bitwarden';
+    bitwardenItemId?: string;
+    bitwardenItemName?: string;
+    bitwardenFieldPath?: string;
   }) => ipcRenderer.invoke('workspace:create-credential', request),
   updateCredential: (request: {
     id: string;
@@ -46,11 +87,22 @@ const wormholeBridge = {
     username: string;
     domain: string;
     password: string;
+    provider: 'Local' | 'Bitwarden';
+    bitwardenItemId?: string;
+    bitwardenItemName?: string;
+    bitwardenFieldPath?: string;
   }) => ipcRenderer.invoke('workspace:update-credential', request),
   deleteCredential: (request: { id: string }) =>
     ipcRenderer.invoke('workspace:delete-credential', request),
   updateWorkspaceNodeSshSettings: (request: { nodeId: string; sshAutoSudo: boolean | null }) =>
     ipcRenderer.invoke('workspace:update-node-ssh-settings', request),
+  listCredentialsForProtocol: (protocol: 'ssh' | 'rdp' | 'vnc') =>
+    ipcRenderer.invoke('workspace:credentials-for-protocol', protocol),
+  updateWorkspaceNodeCredential: (request: {
+    nodeId: string;
+    mode: 0 | 1 | 2;
+    credentialId: string;
+  }) => ipcRenderer.invoke('workspace:update-node-credential', request),
   updateWorkspaceNodeWebSettings: (request: {
     nodeId: string;
     httpIgnoreCertErrors: boolean | null;
@@ -185,16 +237,56 @@ const wormholeBridge = {
   setLogLevel: (level: string) => ipcRenderer.invoke('settings:set-log-level', level),
   openCurrentLogFile: () => ipcRenderer.invoke('logs:open-current-file'),
   openLogsFolder: () => ipcRenderer.invoke('logs:open-folder'),
+  readBitwardenExtension: () => ipcRenderer.invoke('extensions:read'),
+  setBitwardenExtensionEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke('extensions:set-enabled', enabled),
+  installBitwardenExtension: () => ipcRenderer.invoke('extensions:install'),
+  ensureBitwardenExtension: () => ipcRenderer.invoke('extensions:ensure-installed'),
+  importBitwardenExtensionZip: () => ipcRenderer.invoke('extensions:import-zip'),
+  importBitwardenExtensionFolder: () => ipcRenderer.invoke('extensions:import-folder'),
+  readBitwardenCli: () => ipcRenderer.invoke('bitwarden:read'),
+  setBitwardenCliEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke('bitwarden:set-enabled', enabled),
+  setBitwardenCliConfig: (config: { path: string; serverRegion: number }) =>
+    ipcRenderer.invoke('bitwarden:set-config', config),
+  installBitwardenCli: () => ipcRenderer.invoke('bitwarden:install'),
+  refreshBitwardenCliStatus: () => ipcRenderer.invoke('bitwarden:status'),
+  loginBitwardenCli: (request: {
+    email: string;
+    masterPassword: string;
+    authenticatorCode?: string;
+    serverRegion: number;
+  }) => ipcRenderer.invoke('bitwarden:login', request),
+  unlockBitwardenCli: (masterPassword: string) =>
+    ipcRenderer.invoke('bitwarden:unlock', { masterPassword }),
+  logoutBitwardenCli: () => ipcRenderer.invoke('bitwarden:logout'),
+  syncBitwardenCli: () => ipcRenderer.invoke('bitwarden:sync'),
+  searchBitwardenItems: (query: string) => ipcRenderer.invoke('bitwarden:search-items', query),
+  nodeUsesBitwarden: (request: { nodeId: string; protocol: 'ssh' | 'rdp' | 'vnc' }) =>
+    ipcRenderer.invoke('bitwarden:node-uses-vault', request),
+  openBitwardenPopup: (sessionId: string) =>
+    ipcRenderer.invoke('web:bitwarden-popup-open', sessionId),
+  closeBitwardenPopup: (sessionId: string) =>
+    ipcRenderer.invoke('web:bitwarden-popup-close', sessionId),
+  onBitwardenPopupState: (listener: (state: { sessionId: string; open: boolean }) => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      value: { sessionId: string; open: boolean },
+    ) => listener(value);
+    ipcRenderer.on('web:bitwarden-popup-state', handler);
+    return () => ipcRenderer.removeListener('web:bitwarden-popup-state', handler);
+  },
   openSshSession: (request: {
     sessionId: string;
     nodeId?: string;
     host?: string;
     port?: number;
-    username?: string;
-    password?: string;
     tunnelConfigId?: string;
     columns: number;
     rows: number;
+    manualCredentials?: boolean;
+    username?: string;
+    password?: string;
   }) => ipcRenderer.invoke('ssh:open', request),
   trustSshHostKey: (request: { nodeId: string; expected: string; received: string }) =>
     ipcRenderer.invoke('ssh:trust-host-key', request),

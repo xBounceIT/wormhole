@@ -28,6 +28,8 @@ type PendingRequest = {
   resolve: (event: RdpBackendEvent) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+  op: RdpWireCommand['op'];
+  sessionId?: string;
 };
 
 const requestTimeoutMs = 15_000;
@@ -155,6 +157,25 @@ export class RdpBackendClient {
     );
   }
 
+  cancelPendingStarts(ownerWindow: string): void {
+    const child = this.process;
+    for (const [requestId, request] of [...this.pending]) {
+      if (request.op !== 'start' || !request.sessionId) continue;
+      this.pending.delete(requestId);
+      clearTimeout(request.timer);
+      request.reject(new Error('RDP connection cancelled while Wormhole locked.'));
+      this.forgetSession(request.sessionId);
+      if (!child || child.killed || !child.stdin.writable) continue;
+      void this.sendToProcess(child, {
+        op: 'disconnect',
+        requestId: randomUUID(),
+        sessionId: request.sessionId,
+        ownerWindow,
+        bounds: this.bounds.get(request.sessionId),
+      }).catch(() => undefined);
+    }
+  }
+
   private async ensureProcess(): Promise<void> {
     if (this.process && !this.process.killed) return;
     if (this.starting) return this.starting;
@@ -224,7 +245,13 @@ export class RdpBackendClient {
         },
         command.op === 'start' ? startRequestTimeoutMs : requestTimeoutMs,
       );
-      this.pending.set(command.requestId, { resolve, reject, timer });
+      this.pending.set(command.requestId, {
+        resolve,
+        reject,
+        timer,
+        op: command.op,
+        sessionId: command.sessionId,
+      });
       try {
         child.stdin.write(`${JSON.stringify(command)}\n`, (error) => {
           if (!error) return;

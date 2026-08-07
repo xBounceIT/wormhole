@@ -3,6 +3,7 @@ import {
   BrowserWindow,
   dialog,
   ipcMain,
+  Menu,
   screen,
   session as electronSession,
   shell,
@@ -14,7 +15,28 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { createInterface, type Interface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
+import { ElectronChromeExtensions } from 'electron-chrome-extensions';
 import { AuthSession } from './auth-session.js';
+import {
+  buildBitwardenActiveTabBridgeScript,
+  buildBitwardenPageMarkerScript,
+  createBitwardenActiveTabContext,
+  selectBitwardenTabRegistrationPartition,
+} from './bitwarden-active-tab-bridge.js';
+import {
+  buildBitwardenBrowserContext,
+  buildBitwardenPersistentRouteKey,
+  getBitwardenBrowserPartition,
+} from './bitwarden-browser-profile.js';
+import {
+  buildBitwardenCookieSetDetails,
+  buildBitwardenCookieRefreshPlan,
+  selectBitwardenCookiesForTarget,
+} from './bitwarden-cookie-seed.js';
+import { ExtensionMutationGuard } from './extension-mutation-guard.js';
+import { KeyedSingleFlight } from './keyed-single-flight.js';
+import { KeyedTaskTracker } from './keyed-task-tracker.js';
+import { shouldDeferExtensionReload } from './extension-reload-policy.js';
 import { RdpBackendClient } from './rdp.js';
 import {
   isMatchingOAuthRedirect,
@@ -31,6 +53,7 @@ import {
   type SerialOpenRequest,
 } from './serial.js';
 import { WebSessionAttemptTracker } from './web-session-attempt.js';
+import { getInSessionNavigationUrl } from './web-new-window-navigation.js';
 import type {
   RdpBackendEvent,
   RdpCommandRequest,
@@ -49,13 +72,21 @@ const wormholeDataDirectoryName = 'Wormhole';
 const backendTimeoutMs = 30_000;
 const backupTimeoutMs = 5 * 60_000;
 const tunnelTestTimeoutMs = 315_000;
+// The Go installers allow five minutes for the browser ZIP and ten minutes for the CLI ZIP.
+// IPC must outlive those inner deadlines or the UI reports a timeout while Go completes later.
+const extensionOperationTimeoutMs = 6 * 60_000;
+const cliOperationTimeoutMs = 11 * 60_000;
 const nativeConnectionTimeoutMs = 315_000;
 const backendMaxBuffer = 16 * 1024 * 1024;
 const backendMaxRequestBytes = 64 * 1024;
+
 const backendMaxTunnelRequestBytes = 4 * 1024 * 1024;
-const nativeBackendLineLimit = 32 * 1024 * 1024;
+const nativeBackendLineLimit = 64 * 1024 * 1024;
 const nativeBackendCommandTimeoutMs = 15_000;
 const startupUpdateDelayMs = 10_000;
+const bitwardenBrowserNavigationTimeoutMs = 15_000;
+const bitwardenBrowserStorageTimeoutMs = 10_000;
+const bitwardenBrowserStorageMaxJsonBytes = 8 * 1024 * 1024;
 let rdpClient: RdpBackendClient | undefined;
 const rdpTunnelLeases = new Map<string, string>();
 let serialBackend: SerialBackendClient | undefined;
@@ -85,9 +116,13 @@ type BackendOperation =
   | 'workspace-duplicate-node'
   | 'workspace-delete-node'
   | 'workspace-show-credentials'
+  | 'credentials-for-protocol'
   | 'workspace-update-node'
   | 'workspace-update-node-web-settings'
   | 'workspace-update-node-tunnel'
+  | 'workspace-update-node-credential'
+  | 'workspace-node-create'
+  | 'workspace-node-update'
   | 'tunnel-create'
   | 'tunnel-read'
   | 'tunnel-update'
@@ -110,24 +145,59 @@ type BackendOperation =
   | 'settings-set-log-retention'
   | 'settings-set-log-level'
   | 'open-log-file'
-  | 'open-logs-folder';
-type VncAction =
+  | 'open-logs-folder'
+  | 'settings-migrate'
+  | 'settings-set-prompt-before-tunnel'
+  | 'bitwarden-onboarding-read'
+  | 'bitwarden-onboarding-dismiss'
+  | 'extension-read'
+  | 'extension-set-enabled'
+  | 'extension-install'
+  | 'extension-ensure-installed'
+  | 'extension-import-zip'
+  | 'extension-import-folder'
+  | 'extension-update-if-stale';
+type NativeBackendAction =
   | 'vnc.connect'
   | 'vnc.disconnect'
   | 'vnc.pointer'
   | 'vnc.key'
   | 'tunnel.acquire'
+  | 'tunnel.forward'
   | 'tunnel.release'
   | 'tunnel.prompt-response'
-  | 'tunnel.route-response';
-type VncCommand = {
-  action: VncAction;
-  sessionId: string;
+  | 'tunnel.route-response'
+  | 'bitwarden.read'
+  | 'bitwarden.set-enabled'
+  | 'bitwarden.set-config'
+  | 'bitwarden.install'
+  | 'bitwarden.ensure-installed'
+  | 'bitwarden.status'
+  | 'bitwarden.login'
+  | 'bitwarden.unlock'
+  | 'bitwarden.logout'
+  | 'bitwarden.sync'
+  | 'bitwarden.sync-if-stale'
+  | 'bitwarden.list'
+  | 'bitwarden.search'
+  | 'bitwarden.get'
+  | 'bitwarden.resolve-credential'
+  | 'bitwarden.resolve-node'
+  | 'bitwarden.node-reference'
+  | 'bitwarden.browser-storage-read'
+  | 'bitwarden.browser-storage-capture'
+  | 'bitwarden.browser-profile-seed'
+  | 'bitwarden.browser-profile-register'
+  | 'bitwarden.clear-session';
+type NativeBackendCommand = {
+  action: NativeBackendAction;
+  sessionId?: string;
   nodeId?: string;
   credentialId?: string;
   host?: string;
   port?: number;
   password?: string;
+  passwordProvided?: boolean;
   x?: number;
   y?: number;
   buttons?: number;
@@ -139,13 +209,30 @@ type VncCommand = {
   value?: string;
   cancelled?: boolean;
   progressSessionId?: string;
+  enabled?: boolean;
+  path?: string;
+  serverRegion?: number;
+  email?: string;
+  masterPassword?: string;
+  authenticatorCode?: string;
+  query?: string;
+  itemId?: string;
+  protocol?: CredentialProtocol;
+  localJson?: string;
+  sessionJson?: string;
+  sourceRevision?: number;
+  profilePath?: string;
 };
 type BackendResponse = {
   id: string;
   ok: boolean;
   error?: string;
   socksEndpoint?: string;
+  forwardHost?: string;
+  forwardPort?: number;
+  tunnelActive?: boolean;
   leaseId?: string;
+  result?: unknown;
 };
 type BackendEvent = {
   type: string;
@@ -255,6 +342,9 @@ type WorkspaceCredential = {
   provider: 'Local' | 'Bitwarden';
   canEdit: boolean;
   canDelete: boolean;
+  bitwardenItemId?: string;
+  bitwardenItemName?: string;
+  isVirtualBitwarden?: boolean;
 };
 type CredentialProtocol = 'ssh' | 'rdp' | 'vnc';
 type CredentialCreateRequest = {
@@ -263,6 +353,10 @@ type CredentialCreateRequest = {
   username: string;
   domain: string;
   password: string;
+  provider: 'Local' | 'Bitwarden';
+  bitwardenItemId?: string;
+  bitwardenItemName?: string;
+  bitwardenFieldPath?: string;
 };
 type CredentialUpdateRequest = CredentialCreateRequest & { id: string };
 type CredentialDeleteRequest = { id: string };
@@ -286,6 +380,25 @@ type WorkspaceNodeWebSettingsRequest = {
   nodeId: string;
   httpIgnoreCertErrors: boolean | null;
 };
+type WorkspaceNodeWriteRequest = {
+  id?: string;
+  parentId: string;
+  name: string;
+  kind: 'folder' | 'connection';
+  protocol: '' | 'ssh' | 'rdp' | 'http' | 'https' | 'vnc' | 'serial';
+  host: string;
+  sshAutoSudo: boolean | null;
+  httpIgnoreCertErrors: boolean | null;
+  tunnelEnabled: boolean | null;
+  tunnelConfigId: string;
+  credentialMode: 0 | 1 | 2;
+  credentialId: string;
+  serialBaudRate: number;
+  serialDataBits: number;
+  serialStopBits: number;
+  serialParity: number;
+  serialFlowControl: number;
+};
 type WebTargetResponse = {
   url: string;
   protocol: 'http' | 'https';
@@ -294,6 +407,71 @@ type WebTargetResponse = {
   ignoreCertErrors: boolean;
   tunnelConfigId?: string;
   proxyUrl?: string;
+  bitwarden?: {
+    partition: string;
+    popupUrl: string;
+  };
+};
+type BitwardenExtensionState = {
+  enabled: boolean;
+  source: 'OfficialGitHub' | 'ManualZip' | 'ManualFolder';
+  releasesUrl: string;
+  version: string | null;
+  path: string | null;
+  sha256: string | null;
+  assetName: string | null;
+  downloadUrl: string | null;
+  lastUpdateCheckUtc: string | null;
+  lastUpdateStatus: string | null;
+  lastUpdateError: string | null;
+  availableVersion: string | null;
+  installed: {
+    name: string;
+    version: string;
+    path: string;
+    defaultPopup?: string;
+  } | null;
+};
+type WorkspaceNodeCredentialSettingsRequest = {
+  nodeId: string;
+  mode: 0 | 1 | 2;
+  credentialId: string;
+};
+type BitwardenCliState = {
+  enabled: boolean;
+  path: string;
+  serverRegion: 'UnitedStates' | 'Europe' | 'Current';
+  releasesUrl: string;
+  version: string | null;
+  sha256: string | null;
+  assetName: string | null;
+  downloadUrl: string | null;
+  installStatus: string | null;
+  installError: string | null;
+  lastSyncUtc: string | null;
+  lastSyncStatus: string | null;
+  lastSyncError: string | null;
+  availableCount: number | null;
+  installed: {
+    version: string;
+    path: string;
+    sha256?: string;
+    assetName?: string;
+    downloadUrl?: string;
+  } | null;
+};
+type BitwardenCliStatusResponse = {
+  status: 'Unauthenticated' | 'Locked' | 'Unlocked' | 'Unknown';
+  userEmail: string | null;
+  serverUrl: string | null;
+  lastSync?: string;
+  hasSessionKey?: boolean;
+};
+type BitwardenCliLoginItem = {
+  id: string;
+  name: string;
+  username?: string;
+  revisionDate?: string;
 };
 type WebOpenRequest = {
   sessionId: string;
@@ -352,6 +530,9 @@ let authOperationQueue: Promise<void> = Promise.resolve();
 let currentAuthState: AuthStateResponse | undefined;
 let authRefreshInFlight: Promise<AuthStateResponse> | undefined;
 const backupImportSelections = new WeakMap<Electron.WebContents, string>();
+let authStateMutationQueue: Promise<void> = Promise.resolve();
+let authLockRequested = false;
+let bitwardenExtensionOperationQueue: Promise<void> = Promise.resolve();
 
 type SshConnectedResponse = {
   sessionId: string;
@@ -532,6 +713,7 @@ type SshOpenRequest = {
   tunnelConfigId?: string;
   columns: number;
   rows: number;
+  manualCredentials?: boolean;
 };
 
 type SshHostKeyTrustRequest = {
@@ -599,6 +781,8 @@ const credentialMaxPasswordLength = 4096;
 const backupMaxPasswordBytes = 16 * 1024;
 const backupMaxWarnings = 1000;
 const backupMaxWarningLength = 1024;
+const credentialMaxBitwardenItemIdLength = 512;
+const credentialMaxBitwardenItemNameLength = 1024;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -698,6 +882,28 @@ function parseBackupImportResponse(value: unknown): BackupImportResponse {
     tunnelPayloadsImported: value.tunnelPayloadsImported as number,
     warnings: value.warnings as string[],
   };
+}
+
+function parseCliLoginRequest(value: unknown): {
+  email: string;
+  masterPassword: string;
+  authenticatorCode?: string;
+  serverRegion: number;
+} {
+  if (!isRecord(value)) throw new Error('Bitwarden CLI login request is invalid.');
+  const email = typeof value.email === 'string' ? value.email : '';
+  const masterPassword = typeof value.masterPassword === 'string' ? value.masterPassword : '';
+  const authenticatorCode =
+    typeof value.authenticatorCode === 'string' ? value.authenticatorCode : undefined;
+  const serverRegion = typeof value.serverRegion === 'number' ? value.serverRegion : -1;
+  if (email.length === 0 || email.length > 512) throw new Error('Bitwarden email is invalid.');
+  if (masterPassword.length === 0 || masterPassword.length > 4096)
+    throw new Error('Bitwarden master password is invalid.');
+  if (authenticatorCode && authenticatorCode.length > 64)
+    throw new Error('Bitwarden authenticator code is invalid.');
+  if (!Number.isInteger(serverRegion) || serverRegion < 0 || serverRegion > 2)
+    throw new Error('Bitwarden server region is invalid.');
+  return { email, masterPassword, authenticatorCode, serverRegion };
 }
 
 function isSshSessionId(value: unknown): value is string {
@@ -813,23 +1019,21 @@ function isSshOpenRequest(value: unknown): value is SshOpenRequest {
     return false;
   }
 
-  const hasNodeId = value.nodeId !== undefined;
-  const hasDirectTarget =
-    value.host !== undefined ||
-    value.port !== undefined ||
-    value.username !== undefined ||
-    value.password !== undefined ||
-    value.tunnelConfigId !== undefined;
-  if (hasNodeId === hasDirectTarget) return false;
-
-  if (hasNodeId) {
+  if (value.nodeId !== undefined) {
     return (
       isSshSessionId(value.nodeId) &&
       value.host === undefined &&
       value.port === undefined &&
-      value.username === undefined &&
-      value.password === undefined &&
-      value.tunnelConfigId === undefined
+      value.tunnelConfigId === undefined &&
+      (value.manualCredentials === undefined || typeof value.manualCredentials === 'boolean') &&
+      (value.username === undefined ||
+        (typeof value.username === 'string' &&
+          value.username.length <= credentialMaxUsernameLength)) &&
+      (value.password === undefined ||
+        (typeof value.password === 'string' &&
+          Buffer.byteLength(value.password, 'utf8') <= credentialMaxPasswordLength)) &&
+      (value.manualCredentials !== true ||
+        (typeof value.username === 'string' && value.username.trim().length > 0))
     );
   }
 
@@ -852,7 +1056,8 @@ function isSshOpenRequest(value: unknown): value is SshOpenRequest {
         Number.isInteger(value.port) &&
         value.port >= 1 &&
         value.port <= 65535)) &&
-    (value.tunnelConfigId === undefined || isTunnelID(value.tunnelConfigId))
+    (value.tunnelConfigId === undefined || isTunnelID(value.tunnelConfigId)) &&
+    value.manualCredentials !== true
   );
 }
 
@@ -873,13 +1078,21 @@ function parseWorkspaceNodeRequest(value: unknown): WorkspaceNodeRequest {
   return { nodeId: value.nodeId };
 }
 
-function parseCredentialCreateRequest(value: unknown): CredentialCreateRequest {
+function parseCredentialCreateRequest(
+  value: unknown,
+  allowMissingLocalPassword = false,
+): CredentialCreateRequest {
   if (!isRecord(value)) throw new Error('Credential details are invalid.');
   const name = value.name;
   const protocol = value.protocol;
   const username = value.username;
   const domain = value.domain;
   const password = value.password;
+  const provider =
+    value.provider === 'Bitwarden' ? 'Bitwarden' : value.provider === 'Local' ? 'Local' : undefined;
+  const bitwardenItemId = typeof value.bitwardenItemId === 'string' ? value.bitwardenItemId : '';
+  const bitwardenItemName =
+    typeof value.bitwardenItemName === 'string' ? value.bitwardenItemName : '';
   if (
     typeof name !== 'string' ||
     name.length > credentialMaxNameLength ||
@@ -888,17 +1101,124 @@ function parseCredentialCreateRequest(value: unknown): CredentialCreateRequest {
     typeof domain !== 'string' ||
     domain.length > credentialMaxDomainLength ||
     typeof password !== 'string' ||
-    password.length === 0 ||
     password.length > credentialMaxPasswordLength ||
+    provider === undefined ||
+    (provider === 'Local' && password.length === 0 && !allowMissingLocalPassword) ||
+    (provider === 'Bitwarden' &&
+      (bitwardenItemId.trim().length === 0 ||
+        bitwardenItemId.length > credentialMaxBitwardenItemIdLength ||
+        bitwardenItemName.length > credentialMaxBitwardenItemNameLength)) ||
     (protocol !== 'ssh' && protocol !== 'rdp' && protocol !== 'vnc')
   ) {
     throw new Error('Credential details are invalid.');
   }
-  return { name, protocol, username, domain, password };
+  return {
+    name,
+    protocol,
+    username,
+    domain,
+    password,
+    provider,
+    bitwardenItemId,
+    bitwardenItemName,
+    bitwardenFieldPath: 'login.password',
+  };
+}
+
+function parseWorkspaceNodeWriteRequest(
+  value: unknown,
+  updating: boolean,
+): WorkspaceNodeWriteRequest {
+  if (!isRecord(value)) throw new Error('Workspace node is invalid.');
+  const id = typeof value.id === 'string' ? value.id.trim() : '';
+  const parentId = typeof value.parentId === 'string' ? value.parentId.trim() : '';
+  const name = typeof value.name === 'string' ? value.name.trim() : '';
+  const kind = value.kind;
+  const protocol = value.protocol;
+  const host = typeof value.host === 'string' ? value.host.trim() : '';
+  const credentialMode = value.credentialMode;
+  const credentialId = typeof value.credentialId === 'string' ? value.credentialId.trim() : '';
+  const tunnelConfigId =
+    typeof value.tunnelConfigId === 'string' ? value.tunnelConfigId.trim() : '';
+  const nullableBoolean = (candidate: unknown) =>
+    candidate === null || typeof candidate === 'boolean';
+  const validProtocol =
+    protocol === '' ||
+    protocol === 'ssh' ||
+    protocol === 'rdp' ||
+    protocol === 'http' ||
+    protocol === 'https' ||
+    protocol === 'vnc' ||
+    protocol === 'serial';
+  if (
+    (updating ? !isSshSessionId(id) : id !== '') ||
+    (parentId !== '' && !isSshSessionId(parentId)) ||
+    name.length === 0 ||
+    name.length > 256 ||
+    (kind !== 'folder' && kind !== 'connection') ||
+    !validProtocol ||
+    (kind === 'connection' && (protocol === '' || host.length === 0)) ||
+    (kind === 'folder' && (protocol !== '' || host !== '')) ||
+    host.length > webMaxAddressLength ||
+    !nullableBoolean(value.sshAutoSudo) ||
+    !nullableBoolean(value.httpIgnoreCertErrors) ||
+    !nullableBoolean(value.tunnelEnabled) ||
+    tunnelConfigId.length > sshMaxSessionIdLength ||
+    (credentialMode !== 0 && credentialMode !== 1 && credentialMode !== 2) ||
+    (credentialMode === 2 ? !isSshSessionId(credentialId) : credentialId !== '')
+  ) {
+    throw new Error('Workspace node is invalid.');
+  }
+  const serialValues = [
+    value.serialBaudRate,
+    value.serialDataBits,
+    value.serialStopBits,
+    value.serialParity,
+    value.serialFlowControl,
+  ];
+  if (
+    !serialValues.every(
+      (candidate) =>
+        typeof candidate === 'number' && Number.isSafeInteger(candidate) && candidate >= 0,
+    )
+  ) {
+    throw new Error('Workspace serial settings are invalid.');
+  }
+  return {
+    ...(updating ? { id } : {}),
+    parentId,
+    name,
+    kind,
+    protocol,
+    host,
+    sshAutoSudo: value.sshAutoSudo as boolean | null,
+    httpIgnoreCertErrors: value.httpIgnoreCertErrors as boolean | null,
+    tunnelEnabled: value.tunnelEnabled as boolean | null,
+    tunnelConfigId,
+    credentialMode,
+    credentialId,
+    serialBaudRate: value.serialBaudRate as number,
+    serialDataBits: value.serialDataBits as number,
+    serialStopBits: value.serialStopBits as number,
+    serialParity: value.serialParity as number,
+    serialFlowControl: value.serialFlowControl as number,
+  };
+}
+
+function isWorkspaceNodeCredentialSettingsRequest(
+  value: unknown,
+): value is WorkspaceNodeCredentialSettingsRequest {
+  return (
+    isRecord(value) &&
+    isSshSessionId(value.nodeId) &&
+    (value.mode === 0 || value.mode === 1 || value.mode === 2) &&
+    typeof value.credentialId === 'string' &&
+    (value.mode !== 2 || /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value.credentialId))
+  );
 }
 
 function parseCredentialUpdateRequest(value: unknown): CredentialUpdateRequest {
-  const request = parseCredentialCreateRequest(value);
+  const request = parseCredentialCreateRequest(value, true);
   const id = isRecord(value) ? value.id : undefined;
   if (typeof id !== 'string' || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)) {
     throw new Error('Credential id is invalid.');
@@ -1874,7 +2194,7 @@ class NativeBackendProcess {
   >();
 
   async send(
-    command: VncCommand,
+    command: NativeBackendCommand,
     timeoutMs = nativeBackendCommandTimeoutMs,
   ): Promise<BackendResponse> {
     await this.start();
@@ -1912,6 +2232,16 @@ class NativeBackendProcess {
     progressSessionId?: string;
     dedicated?: boolean;
   }): Promise<string> {
+    return (await this.acquireTunnelRoute(request)).socksEndpoint;
+  }
+
+  async acquireTunnelRoute(request: {
+    leaseId: string;
+    nodeId?: string;
+    tunnelConfigId?: string;
+    progressSessionId?: string;
+    dedicated?: boolean;
+  }): Promise<{ active: boolean; socksEndpoint: string }> {
     const response = await this.send(
       {
         action: 'tunnel.acquire',
@@ -1924,7 +2254,35 @@ class NativeBackendProcess {
       tunnelTestTimeoutMs,
     );
     if (!response.ok) throw new Error(response.error || 'Could not establish the VPN tunnel.');
-    return response.socksEndpoint ?? '';
+    return {
+      active: response.tunnelActive === true,
+      socksEndpoint: response.socksEndpoint ?? '',
+    };
+  }
+
+  async bindTunnelForwarder(
+    leaseId: string,
+    host: string,
+    port: number,
+  ): Promise<{ host: string; port: number }> {
+    const response = await this.send({
+      action: 'tunnel.forward',
+      sessionId: leaseId,
+      host,
+      port,
+    });
+    const forwardPort = response.forwardPort;
+    if (
+      !response.ok ||
+      response.forwardHost !== '127.0.0.1' ||
+      typeof forwardPort !== 'number' ||
+      !Number.isInteger(forwardPort) ||
+      forwardPort < 1 ||
+      forwardPort > 65535
+    ) {
+      throw new Error(response.error || 'Could not bind the VPN tunnel forwarder.');
+    }
+    return { host: response.forwardHost, port: forwardPort };
   }
 
   async releaseTunnel(leaseId: string): Promise<void> {
@@ -2087,13 +2445,159 @@ class NativeBackendProcess {
 
 let nativeBackend: NativeBackendProcess | undefined;
 let isQuitting = false;
+let bitwardenBackgroundTimer: NodeJS.Timeout | undefined;
+let bitwardenOnboardingPromise: Promise<void> | undefined;
 
 function getNativeBackend(): NativeBackendProcess {
   nativeBackend ??= new NativeBackendProcess();
   return nativeBackend;
 }
 
-function parseVncCommand(value: unknown): VncCommand {
+async function runBitwardenCredentialMaintenance(ensureInstalled: boolean): Promise<void> {
+  // WinUI starts both Bitwarden services only after startup authentication. Keep the same native
+  // trust boundary here: a locked or not-yet-initialized renderer cannot trigger vault/installer
+  // work merely because the background timer fired.
+  if (isQuitting || !authSession.isAccessAllowed) return;
+  const authorizationEpoch = authSession.authorizationEpoch;
+  try {
+    let state = await runBitwardenBackend<BitwardenCliState>('bitwarden.read');
+    if (!isAuthorizationEpochCurrent(authorizationEpoch)) return;
+    if (state.enabled) {
+      if (!state.installed && ensureInstalled) {
+        state = await runBitwardenBackend<BitwardenCliState>('bitwarden.ensure-installed');
+        if (!isAuthorizationEpochCurrent(authorizationEpoch)) return;
+      }
+      if (state.installed && isAuthorizationEpochCurrent(authorizationEpoch)) {
+        await runBitwardenBackend('bitwarden.sync-if-stale');
+      }
+    }
+  } catch (error) {
+    console.warn('[Wormhole] Bitwarden credential background maintenance failed.', error);
+  }
+}
+
+async function runBitwardenExtensionStartupMaintenance(): Promise<void> {
+  if (isQuitting || !authSession.isAccessAllowed) return;
+  const authorizationEpoch = authSession.authorizationEpoch;
+  try {
+    await serializeBitwardenExtensionOperation(async () => {
+      if (!isAuthorizationEpochCurrent(authorizationEpoch)) return;
+      const state = await runBackend<BitwardenExtensionState>('extension-read');
+      if (state.enabled) {
+        if (!state.installed && state.source === 'OfficialGitHub') {
+          await webSurfaces.runBitwardenExtensionMutation(() => {
+            if (!isAuthorizationEpochCurrent(authorizationEpoch)) return Promise.resolve(state);
+            return runBackend<BitwardenExtensionState>(
+              'extension-ensure-installed',
+              undefined,
+              extensionOperationTimeoutMs,
+            );
+          });
+        } else if (state.installed && state.source === 'OfficialGitHub') {
+          await webSurfaces.runBitwardenExtensionMutation(() => {
+            if (!isAuthorizationEpochCurrent(authorizationEpoch)) return Promise.resolve(state);
+            return runBackend<BitwardenExtensionState>(
+              'extension-update-if-stale',
+              undefined,
+              extensionOperationTimeoutMs,
+            );
+          });
+        }
+      }
+    });
+  } catch (error) {
+    console.warn('[Wormhole] Bitwarden browser extension background maintenance failed.', error);
+  }
+}
+
+async function runBitwardenStartupMaintenance(): Promise<void> {
+  await Promise.all([
+    runBitwardenCredentialMaintenance(true),
+    runBitwardenExtensionStartupMaintenance(),
+  ]);
+}
+
+function startBitwardenBackgroundMaintenance(): void {
+  void runBitwardenStartupMaintenance();
+  // WinUI's five-minute timer only refreshes the credential catalog. Extension install/update is
+  // a startup concern (and is also checked before an HTTPS tab opens), so a failed download is not
+  // retried forever in the background.
+  bitwardenBackgroundTimer ??= setInterval(
+    () => void runBitwardenCredentialMaintenance(false),
+    5 * 60_000,
+  );
+}
+
+function showBitwardenOnboardingNoticeIfNeeded(): Promise<void> {
+  bitwardenOnboardingPromise ??= (async () => {
+    if (isQuitting || !authSession.isAccessAllowed) return;
+    const authorizationEpoch = authSession.authorizationEpoch;
+    const notice = await runBackend<{ show: boolean; title?: string; message?: string }>(
+      'bitwarden-onboarding-read',
+      { appVersion: app.getVersion() },
+    );
+    if (
+      !notice.show ||
+      !notice.title ||
+      !notice.message ||
+      !isAuthorizationEpochCurrent(authorizationEpoch)
+    )
+      return;
+
+    const owner = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+    if (!owner || owner.isDestroyed()) return;
+    await dialog.showMessageBox(owner, {
+      type: 'info',
+      title: notice.title,
+      message: notice.title,
+      detail: notice.message,
+      buttons: ['OK'],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+      icon: path.join(__dirname, '..', 'Assets', 'Bitwarden', 'bitwarden-icon.png'),
+    });
+    if (!isAuthorizationEpochCurrent(authorizationEpoch)) return;
+    await runBackend<{ updated: boolean }>('bitwarden-onboarding-dismiss');
+  })()
+    .catch((error) => {
+      console.warn('[Wormhole] Could not show the Bitwarden onboarding notice.', error);
+    })
+    .finally(() => {
+      bitwardenOnboardingPromise = undefined;
+    });
+  return bitwardenOnboardingPromise;
+}
+
+async function runBitwardenBackend<T>(
+  action: Extract<NativeBackendAction, `bitwarden.${string}`>,
+  values: Omit<NativeBackendCommand, 'action'> = {},
+  timeoutMs = cliOperationTimeoutMs,
+): Promise<T> {
+  const response = await getNativeBackend().send({ action, ...values }, timeoutMs);
+  if (!response.ok) throw new Error(response.error || 'Bitwarden operation failed.');
+  return response.result as T;
+}
+
+type BitwardenResolvedCredential = {
+  bitwarden: boolean;
+  itemId?: string;
+  itemName?: string;
+  username?: string;
+  domain?: string;
+  password?: string;
+};
+
+type BitwardenBrowserStorageSnapshot = {
+  revision: number;
+  profileRevision: number;
+  restore: boolean;
+  localJson: string;
+  sessionJson: string;
+  durable: boolean;
+};
+
+function parseVncCommand(value: unknown): NativeBackendCommand {
   if (!value || typeof value !== 'object') throw new Error('Invalid VNC command.');
   const input = value as Record<string, unknown>;
   const action = input.action;
@@ -2110,7 +2614,7 @@ function parseVncCommand(value: unknown): VncCommand {
     throw new Error('Invalid VNC command.');
   }
 
-  const command: VncCommand = { action, sessionId };
+  const command: NativeBackendCommand = { action, sessionId };
   const stringField = (name: string, maxLength: number): string | undefined => {
     const field = input[name];
     if (field === undefined) return undefined;
@@ -2135,6 +2639,13 @@ function parseVncCommand(value: unknown): VncCommand {
     command.tunnelConfigId = stringField('tunnelConfigId', 128);
     if (command.tunnelConfigId !== undefined && !isTunnelID(command.tunnelConfigId)) {
       throw new Error('Invalid VNC tunnel configuration.');
+    }
+    if (input.passwordProvided !== undefined && typeof input.passwordProvided !== 'boolean') {
+      throw new Error('Invalid VNC password presence flag.');
+    }
+    command.passwordProvided = input.passwordProvided === true;
+    if (command.passwordProvided && command.password === undefined) {
+      throw new Error('Invalid VNC password override.');
     }
     command.port = numberField('port', 65535);
     return command;
@@ -2258,7 +2769,11 @@ function credentialReaderPath(): string | undefined {
   return findBundledExecutable(`wormhole-credential-reader-${architecture}.exe`);
 }
 
-async function runBackend<T>(operation: BackendOperation, request?: unknown): Promise<T> {
+async function runBackend<T>(
+  operation: BackendOperation,
+  request?: unknown,
+  timeoutMs: number = backendTimeoutMs,
+): Promise<T> {
   const args = [
     '--operation',
     operation,
@@ -2292,11 +2807,14 @@ async function runBackend<T>(operation: BackendOperation, request?: unknown): Pr
     let stdoutBytes = 0;
     let stderr = '';
     let settled = false;
-    const operationTimeoutMs = operation.startsWith('backup-') ? backupTimeoutMs : backendTimeoutMs;
+    const effectiveTimeoutMs =
+      timeoutMs === backendTimeoutMs && operation.startsWith('backup-')
+        ? backupTimeoutMs
+        : timeoutMs;
     const timeout = setTimeout(() => {
       child.kill();
       finishReject(new Error('Electron Go backend timed out.'));
-    }, operationTimeoutMs);
+    }, effectiveTimeoutMs);
 
     function finishReject(error: Error) {
       if (settled) return;
@@ -2554,7 +3072,53 @@ type WebSurfaceRecord = {
   attempt: number;
   initialNavigationPending: boolean;
   disposed: boolean;
+  navigation: {
+    navigateUrl: string;
+    originalUrl?: string;
+  };
   tunnelLeaseId?: string;
+  bitwardenUseRelease?: () => void;
+  bitwardenTabRegistered?: boolean;
+  bitwarden?: {
+    partition: string;
+    popupUrl: string;
+  };
+};
+
+type LoadedBitwardenExtension = {
+  id: string;
+  defaultPopup?: string;
+};
+
+type BitwardenBrowserProfileSeedResult = {
+  initialized: boolean;
+  seeded: boolean;
+  cookieSourceProfiles: string[];
+};
+
+type BitwardenCookieSeed = {
+  routeKey: string;
+  targetUrl: string;
+};
+
+type ExtensionTabCreateDetails = {
+  url?: string;
+  windowId?: number;
+};
+
+type ExtensionWindowCreateDetails = {
+  url?: string | string[];
+  focused?: boolean;
+  width?: number;
+  height?: number;
+  left?: number;
+  top?: number;
+};
+
+type BitwardenAuxiliaryWindow = {
+  window: BrowserWindow;
+  partition: string;
+  sessionId: string;
 };
 
 function validateWebTarget(value: WebTargetResponse): WebTargetResponse {
@@ -2584,44 +3148,178 @@ function validateWebTarget(value: WebTargetResponse): WebTargetResponse {
   return value;
 }
 
+function validateBitwardenBrowserStorageSnapshot(
+  value: BitwardenBrowserStorageSnapshot,
+): BitwardenBrowserStorageSnapshot {
+  if (
+    !value ||
+    !Number.isSafeInteger(value.revision) ||
+    value.revision < 0 ||
+    !Number.isSafeInteger(value.profileRevision) ||
+    value.profileRevision < 0 ||
+    typeof value.restore !== 'boolean' ||
+    typeof value.localJson !== 'string' ||
+    typeof value.sessionJson !== 'string' ||
+    typeof value.durable !== 'boolean'
+  ) {
+    throw new Error('Go returned invalid Bitwarden browser storage.');
+  }
+  for (const json of [value.localJson, value.sessionJson]) {
+    const parsed: unknown = JSON.parse(json);
+    if (!isRecord(parsed)) throw new Error('Go returned invalid Bitwarden browser storage.');
+  }
+  return value;
+}
+
+function withBitwardenBrowserTimeout<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+    void operation.then(
+      (result) => {
+        clearTimeout(timeout);
+        resolve(result);
+      },
+      (error: unknown) => {
+        clearTimeout(timeout);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
+
+async function captureBitwardenExtensionStorage(
+  contents: Electron.WebContents,
+): Promise<{ localJson: string; sessionJson: string }> {
+  const captured: unknown = await withBitwardenBrowserTimeout(
+    contents.executeJavaScript(`
+      (() => new Promise((resolve, reject) => {
+        try {
+          chrome.storage.local.get(null, (local) => {
+            if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+            chrome.storage.session.get(null, (session) => {
+              if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
+              resolve({ local, session });
+            });
+          });
+        } catch (error) { reject(error); }
+      }))()
+    `),
+    bitwardenBrowserStorageTimeoutMs,
+    'Bitwarden browser storage capture timed out.',
+  );
+  if (!isRecord(captured) || !isRecord(captured.local) || !isRecord(captured.session)) {
+    throw new Error('Bitwarden extension returned invalid browser storage.');
+  }
+  const localJson = JSON.stringify(captured.local);
+  const sessionJson = JSON.stringify(captured.session);
+  if (
+    Buffer.byteLength(localJson, 'utf8') > bitwardenBrowserStorageMaxJsonBytes ||
+    Buffer.byteLength(sessionJson, 'utf8') > bitwardenBrowserStorageMaxJsonBytes
+  ) {
+    throw new Error('Bitwarden browser storage exceeded the safety limit.');
+  }
+  return { localJson, sessionJson };
+}
+
+async function restoreBitwardenExtensionStorage(
+  contents: Electron.WebContents,
+  snapshot: BitwardenBrowserStorageSnapshot,
+): Promise<void> {
+  const local = JSON.stringify(snapshot.localJson);
+  const session = JSON.stringify(snapshot.sessionJson);
+  await withBitwardenBrowserTimeout(
+    contents.executeJavaScript(`
+      (() => new Promise((resolve, reject) => {
+        const fail = () => reject(new Error(chrome.runtime.lastError?.message || 'storage operation failed'));
+        try {
+          chrome.storage.local.clear(() => {
+            if (chrome.runtime.lastError) { fail(); return; }
+            chrome.storage.local.set(JSON.parse(${local}), () => {
+              if (chrome.runtime.lastError) { fail(); return; }
+              chrome.storage.session.clear(() => {
+                if (chrome.runtime.lastError) { fail(); return; }
+                chrome.storage.session.set(JSON.parse(${session}), () => chrome.runtime.lastError ? fail() : resolve(true));
+              });
+            });
+          });
+        } catch (error) { reject(error); }
+      }))()
+    `),
+    bitwardenBrowserStorageTimeoutMs,
+    'Bitwarden browser storage restore timed out.',
+  );
+}
+
 class WebSurfaceManager {
   private readonly surfaces = new Map<string, WebSurfaceRecord>();
   private readonly pendingOpenOwners = new Map<string, BrowserWindow>();
   private readonly attempts = new WebSessionAttemptTracker();
+  private readonly extensionLoads = new Map<string, Promise<void>>();
+  private readonly extensionLoadKeys = new Map<string, string>();
+  private readonly extensionIds = new Map<string, string>();
+  private readonly extensionPopupPaths = new Map<string, string>();
+  private readonly chromeExtensionApis = new Map<string, ElectronChromeExtensions>();
+  private readonly activeBitwardenSessions = new Map<string, string>();
+  private readonly bitwardenAuxiliaryWindows = new Map<number, BitwardenAuxiliaryWindow>();
+  private readonly bitwardenPopups = new Map<string, WebContentsView>();
+  private readonly bitwardenPopupBlurHandlers = new Map<string, () => void>();
+  private readonly bitwardenPopupOpens = new KeyedSingleFlight<string, { open: boolean }>();
+  private readonly bitwardenStorageTasks = new KeyedTaskTracker<string>();
+  private readonly bitwardenExtensionMutation = new ExtensionMutationGuard();
+  private bitwardenStorageQueue: Promise<void> = Promise.resolve();
   private isolatedPartitionSequence = 0;
 
   async open(owner: BrowserWindow, request: WebOpenRequest): Promise<WebTargetResponse> {
+    const authorizationEpoch = authSession.authorizationEpoch;
     const generation = this.attempts.begin(request.sessionId);
     this.pendingOpenOwners.set(request.sessionId, owner);
     this.dispose(request.sessionId);
     let openingLeaseId: string | undefined;
+    let bitwardenUseRelease: (() => void) | undefined;
     try {
-      const target = validateWebTarget(
-        await runBackend<WebTargetResponse>('web-target', {
-          nodeId: request.nodeId,
-          address: request.address,
-          protocol: request.protocol,
-          ignoreCertErrors: request.ignoreCertErrors,
-          tunnelConfigId: request.tunnelConfigId,
-        }),
-      );
+      const targetResult = await runBackend<WebTargetResponse>('web-target', {
+        nodeId: request.nodeId,
+        address: request.address,
+        protocol: request.protocol,
+        ignoreCertErrors: request.ignoreCertErrors,
+        tunnelConfigId: request.tunnelConfigId,
+      });
+      const target = validateWebTarget(targetResult);
+      const logicalTargetUrl = target.url;
+      let resolvedTunnelRoute: 'direct' | 'socks5' | 'forwarder' = 'direct';
       if (target.tunnelConfigId) {
         const leaseId = randomUUID();
         openingLeaseId = leaseId;
-        const socksEndpoint = await getNativeBackend().acquireTunnel({
+        const tunnelRoute = await getNativeBackend().acquireTunnelRoute({
           leaseId,
           nodeId: request.nodeId,
           tunnelConfigId: target.tunnelConfigId,
           progressSessionId: request.sessionId,
         });
-        // A saved connection may intentionally choose the direct route in its VPN prompt. A
-        // Quick Connect route has no such fallback: selecting a tunnel must produce a proxy.
-        if (!socksEndpoint && !request.nodeId) {
-          throw new Error('The VPN tunnel returned no SOCKS endpoint.');
+        if (tunnelRoute.socksEndpoint) {
+          resolvedTunnelRoute = 'socks5';
+          target.proxyUrl = `socks5://${tunnelRoute.socksEndpoint}`;
+        } else if (tunnelRoute.active) {
+          resolvedTunnelRoute = 'forwarder';
+          const forwarder = await getNativeBackend().bindTunnelForwarder(
+            leaseId,
+            target.host,
+            target.port,
+          );
+          const forwardedUrl = new URL(target.url);
+          forwardedUrl.hostname = forwarder.host;
+          forwardedUrl.port = String(forwarder.port);
+          target.url = forwardedUrl.toString();
+        } else {
+          openingLeaseId = undefined;
         }
-        if (socksEndpoint) target.proxyUrl = `socks5://${socksEndpoint}`;
       }
       if (
+        !isAuthorizationEpochCurrent(authorizationEpoch) ||
         !this.attempts.isCurrent(request.sessionId, generation) ||
         this.pendingOpenOwners.get(request.sessionId) !== owner ||
         owner.isDestroyed()
@@ -2629,11 +3327,104 @@ class WebSurfaceManager {
         throw new Error('Web session was superseded before its browser could open.');
       }
 
-      const partition = target.proxyUrl
-        ? `wormhole-web-tunnel-${++this.isolatedPartitionSequence}`
-        : target.ignoreCertErrors
-          ? `wormhole-web-isolated-${++this.isolatedPartitionSequence}`
-          : webSharedPartition;
+      let extensionPath: string | undefined;
+      let bitwardenPartition: string | undefined;
+      let bitwardenDefaultPopup: string | undefined;
+      let bitwardenInstallKey: string | undefined;
+      let bitwardenCookieSeed: BitwardenCookieSeed | undefined;
+      if (target.url.startsWith('https://')) {
+        let freshState: BitwardenExtensionState | undefined;
+        try {
+          const prepared = await serializeBitwardenExtensionOperation(async () => {
+            if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
+              throw new Error('Web session was cancelled while Wormhole locked.');
+            }
+            const extensionState = await runBackend<BitwardenExtensionState>('extension-read');
+            if (!extensionState.enabled || !extensionState.installed) {
+              return { state: extensionState, release: undefined };
+            }
+
+            const use = await this.bitwardenExtensionMutation.prepareUse(
+              () => this.bitwardenStorageTasks.waitForAllIdle(),
+              async (canMutate) => {
+                if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
+                  throw new Error('Web session was cancelled while Wormhole locked.');
+                }
+                if (!canMutate) return extensionState;
+                // Match the WinUI 3 stale auto-update gate: check at most every 24h, only for
+                // official installs, and only before an HTTPS tab that will load the extension.
+                try {
+                  return await runBackend<BitwardenExtensionState>(
+                    'extension-update-if-stale',
+                    undefined,
+                    extensionOperationTimeoutMs,
+                  );
+                } catch (error) {
+                  console.warn(
+                    '[Wormhole] Bitwarden browser extension stale auto-update failed before HTTPS tab creation.',
+                    error,
+                  );
+                  return extensionState;
+                }
+              },
+            );
+            return { state: use.result, release: use.release };
+          });
+          freshState = prepared.state;
+          bitwardenUseRelease = prepared.release;
+        } catch (error) {
+          // An optional extension failure must not prevent the appliance session itself from
+          // opening. The plain HTTPS tab remains available and Settings exposes the install error.
+          console.warn(
+            '[Wormhole] Bitwarden browser extension setup failed for this HTTPS tab.',
+            error,
+          );
+        }
+        const freshInstall = freshState?.installed;
+        if (freshState?.enabled && freshInstall) {
+          // Match the WinUI 3 browser context: direct HTTPS tabs share one profile. SOCKS tabs use
+          // a runtime endpoint-specific Chromium session (proxy is session-wide) plus a stable route
+          // identity that lets the next endpoint inherit extension state and appliance cookies.
+          let routeKey = '';
+          if (target.tunnelConfigId && resolvedTunnelRoute !== 'direct') {
+            routeKey = buildBitwardenPersistentRouteKey(
+              target.tunnelConfigId,
+              resolvedTunnelRoute,
+              logicalTargetUrl,
+            );
+          }
+          const browserContext = buildBitwardenBrowserContext(target.proxyUrl, routeKey);
+          bitwardenPartition = getBitwardenBrowserPartition(
+            browserContext,
+            target.ignoreCertErrors,
+          );
+          if (routeKey) {
+            bitwardenCookieSeed = {
+              routeKey,
+              targetUrl: logicalTargetUrl,
+            };
+          }
+          extensionPath = freshInstall.path;
+          bitwardenDefaultPopup = freshInstall.defaultPopup;
+          bitwardenInstallKey = `${freshInstall.path}\0${freshState.sha256 ?? freshInstall.version}`;
+        }
+      }
+      if (
+        !isAuthorizationEpochCurrent(authorizationEpoch) ||
+        !this.attempts.isCurrent(request.sessionId, generation) ||
+        this.pendingOpenOwners.get(request.sessionId) !== owner ||
+        owner.isDestroyed()
+      ) {
+        throw new Error('Web session was superseded before its browser could open.');
+      }
+
+      const partition =
+        bitwardenPartition ??
+        (resolvedTunnelRoute !== 'direct'
+          ? `wormhole-web-tunnel-${++this.isolatedPartitionSequence}`
+          : target.ignoreCertErrors
+            ? `wormhole-web-isolated-${++this.isolatedPartitionSequence}`
+            : webSharedPartition);
       if (partition === webSharedPartition) await ensureWebSharedSessionReady();
       const browserSession = electronSession.fromPartition(partition, { cache: true });
       if (target.proxyUrl) {
@@ -2642,10 +3433,74 @@ class WebSurfaceManager {
           proxyBypassRules: '<-loopback>',
         });
       }
-      browserSession.setPermissionRequestHandler((_webContents, _permission, callback) =>
-        callback(false),
-      );
-      browserSession.setPermissionCheckHandler(() => false);
+      if (extensionPath && bitwardenPartition) {
+        // Chromium derives the unpacked extension id from its folder path; the popup URL can only
+        // be built after Electron reports the id back. A failed load degrades to a plain HTTPS tab
+        // (matching WinUI 3, where the toolbar button hides but the session still opens).
+        const loadedExtension = await this.loadBitwardenExtension(
+          bitwardenPartition,
+          extensionPath,
+          bitwardenInstallKey ?? extensionPath,
+          bitwardenDefaultPopup,
+          bitwardenCookieSeed,
+        );
+        if (loadedExtension?.defaultPopup) {
+          target.bitwarden = {
+            partition: bitwardenPartition,
+            popupUrl: `chrome-extension://${loadedExtension.id}/${loadedExtension.defaultPopup}`,
+          };
+        }
+      }
+      if (!target.bitwarden) {
+        bitwardenUseRelease?.();
+        bitwardenUseRelease = undefined;
+      }
+      const bitwardenExtensionId = target.bitwarden
+        ? new URL(target.bitwarden.popupUrl).hostname
+        : undefined;
+      const isAllowedBitwardenPermission = (permission: string, url: string): boolean => {
+        let page: URL;
+        try {
+          page = new URL(url);
+        } catch {
+          return false;
+        }
+        return (
+          page.protocol === 'chrome-extension:' &&
+          page.hostname === bitwardenExtensionId &&
+          (permission === 'clipboard-read' ||
+            permission === 'clipboard-sanitized-write' ||
+            permission === 'notifications')
+        );
+      };
+      browserSession.setPermissionRequestHandler((webContents, permission, callback) => {
+        callback(isAllowedBitwardenPermission(permission, webContents.getURL()));
+      });
+      browserSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
+        return isAllowedBitwardenPermission(permission, requestingOrigin);
+      });
+      if (target.bitwarden) {
+        try {
+          await this.synchronizeBitwardenStorageInBridge(
+            owner,
+            target.bitwarden.partition,
+            target.bitwarden.popupUrl,
+          );
+        } catch (error) {
+          console.warn(
+            '[Wormhole] Could not synchronize Bitwarden browser storage before HTTPS navigation.',
+            error,
+          );
+        }
+      }
+      if (
+        !isAuthorizationEpochCurrent(authorizationEpoch) ||
+        !this.attempts.isCurrent(request.sessionId, generation) ||
+        this.pendingOpenOwners.get(request.sessionId) !== owner ||
+        owner.isDestroyed()
+      ) {
+        throw new Error('Web session was superseded while synchronizing Bitwarden storage.');
+      }
 
       const view = new WebContentsView({
         webPreferences: {
@@ -2664,13 +3519,34 @@ class WebSurfaceManager {
         attempt: request.attempt,
         initialNavigationPending: true,
         disposed: false,
+        navigation: {
+          navigateUrl: target.url,
+          originalUrl: resolvedTunnelRoute === 'forwarder' ? logicalTargetUrl : undefined,
+        },
         tunnelLeaseId: openingLeaseId,
+        bitwardenUseRelease,
+        bitwarden: target.bitwarden,
       };
       this.surfaces.set(request.sessionId, record);
+      bitwardenUseRelease = undefined;
       this.pendingOpenOwners.delete(request.sessionId);
       owner.contentView.addChildView(view);
       view.setVisible(false);
       this.configureWebContents(request.sessionId, record, target);
+      const bitwardenTabPartition = selectBitwardenTabRegistrationPartition(
+        bitwardenPartition,
+        record.bitwarden?.partition,
+      );
+      if (bitwardenTabPartition) {
+        // Register the HTTPS tab with the chrome.* API provider so the Bitwarden service worker
+        // and popup can read chrome.tabs / chrome.windows for the active appliance page. The popup
+        // itself must not be registered as a tab, or active-tab queries would return the extension.
+        const api = this.chromeExtensionApis.get(bitwardenTabPartition);
+        if (api) {
+          api.addTab(view.webContents, owner);
+          record.bitwardenTabRegistered = true;
+        }
+      }
       void view.webContents.loadURL(target.url).catch((error: unknown) => {
         if (!record.disposed && record.initialNavigationPending) {
           record.initialNavigationPending = false;
@@ -2682,6 +3558,7 @@ class WebSurfaceManager {
       openingLeaseId = undefined;
       return target;
     } catch (error) {
+      bitwardenUseRelease?.();
       if (this.surfaces.has(request.sessionId)) {
         this.dispose(request.sessionId);
         openingLeaseId = undefined;
@@ -2707,6 +3584,10 @@ class WebSurfaceManager {
       height: Math.round(request.height),
     });
     record.view.setVisible(request.visible);
+    if (request.visible && record.bitwardenTabRegistered && record.bitwarden) {
+      this.activeBitwardenSessions.set(record.bitwarden.partition, request.sessionId);
+      this.chromeExtensionApis.get(record.bitwarden.partition)?.selectTab(record.view.webContents);
+    }
   }
 
   command(owner: BrowserWindow, request: WebCommandRequest): void {
@@ -2723,17 +3604,744 @@ class WebSurfaceManager {
     this.sendEvent(request.sessionId, record, 'navigation');
   }
 
+  async openBitwardenPopup(sessionId: string): Promise<{ open: boolean }> {
+    return this.bitwardenPopupOpens.run(sessionId, () => this.openBitwardenPopupCore(sessionId));
+  }
+
+  private async openBitwardenPopupCore(sessionId: string): Promise<{ open: boolean }> {
+    const authorizationEpoch = authSession.authorizationEpoch;
+    const record = this.surfaces.get(sessionId);
+    if (!record || record.disposed || !record.bitwarden?.popupUrl) {
+      return { open: false };
+    }
+    if (this.bitwardenPopups.has(sessionId)) {
+      return { open: true };
+    }
+    // Only one Bitwarden popup at a time: a popup on another tab would otherwise float over the
+    // window independently of the tab that owns it.
+    for (const otherSessionId of [...this.bitwardenPopups.keys()]) {
+      if (otherSessionId !== sessionId) await this.closeBitwardenPopup(otherSessionId);
+    }
+
+    const popup = new WebContentsView({
+      webPreferences: {
+        partition: record.bitwarden.partition,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        webSecurity: true,
+        allowRunningInsecureContent: false,
+        devTools: false,
+      },
+    });
+    const popupUrl = record.bitwarden.popupUrl;
+    this.activeBitwardenSessions.set(record.bitwarden.partition, sessionId);
+    const [windowWidth] = record.owner.getContentSize();
+    popup.setBounds({
+      x: Math.max(8, windowWidth - 400),
+      y: 48,
+      width: 380,
+      height: 560,
+    });
+    popup.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    popup.webContents.on('will-navigate', (event, url) => {
+      let sameExtensionPage = false;
+      try {
+        const target = new URL(url);
+        const popupTarget = new URL(popupUrl);
+        sameExtensionPage =
+          target.protocol === 'chrome-extension:' && target.hostname === popupTarget.hostname;
+      } catch {
+        // A malformed URL cannot be an extension page.
+      }
+      if (!sameExtensionPage) event.preventDefault();
+    });
+    const onOwnerBlur = () => {
+      void this.closeBitwardenPopup(sessionId);
+    };
+    record.owner.on('blur', onOwnerBlur);
+    record.owner.contentView.addChildView(popup);
+    popup.setVisible(false);
+    this.bitwardenPopups.set(sessionId, popup);
+    this.bitwardenPopupBlurHandlers.set(sessionId, onOwnerBlur);
+    try {
+      const activeTabContext = createBitwardenActiveTabContext(
+        record.navigation.navigateUrl,
+        record.navigation.originalUrl,
+        record.view.webContents.getURL(),
+      );
+      if (activeTabContext) {
+        const pageMarker = randomUUID();
+        try {
+          await record.view.webContents.executeJavaScript(
+            buildBitwardenPageMarkerScript(pageMarker),
+          );
+          activeTabContext.pageMarker = pageMarker;
+        } catch (error) {
+          console.warn('[Wormhole] Could not mark the active HTTPS tab for Bitwarden.', error);
+        }
+      }
+      const bridgeScript = activeTabContext
+        ? buildBitwardenActiveTabBridgeScript(activeTabContext)
+        : undefined;
+      let bridgeInstalledBeforeNavigation = false;
+      let bridgeScriptIdentifier: string | undefined;
+      if (bridgeScript) {
+        try {
+          popup.webContents.debugger.attach('1.3');
+          await popup.webContents.debugger.sendCommand('Page.enable');
+          const registration = (await popup.webContents.debugger.sendCommand(
+            'Page.addScriptToEvaluateOnNewDocument',
+            { source: bridgeScript },
+          )) as { identifier?: string };
+          bridgeScriptIdentifier = registration.identifier;
+          bridgeInstalledBeforeNavigation = true;
+        } catch (error) {
+          console.warn(
+            '[Wormhole] Could not install the Bitwarden active-tab bridge before navigation.',
+            error,
+          );
+          if (popup.webContents.debugger.isAttached()) popup.webContents.debugger.detach();
+        }
+      }
+      try {
+        await withBitwardenBrowserTimeout(
+          popup.webContents.loadURL(popupUrl),
+          bitwardenBrowserNavigationTimeoutMs,
+          'Bitwarden browser popup navigation timed out.',
+        );
+      } finally {
+        if (bridgeScriptIdentifier && popup.webContents.debugger.isAttached()) {
+          await popup.webContents.debugger
+            .sendCommand('Page.removeScriptToEvaluateOnNewDocument', {
+              identifier: bridgeScriptIdentifier,
+            })
+            .catch(() => undefined);
+        }
+        if (popup.webContents.debugger.isAttached()) popup.webContents.debugger.detach();
+      }
+      if (bridgeScript && !bridgeInstalledBeforeNavigation) {
+        // Old Electron/Chromium builds can reject the debugger protocol registration. The popup
+        // remains usable; a post-navigation bridge still improves active-tab behavior after startup.
+        await popup.webContents.executeJavaScript(bridgeScript);
+      }
+      await this.synchronizeBitwardenStorage(record.bitwarden.partition, popup.webContents);
+      if (this.bitwardenPopups.get(sessionId) !== popup || record.disposed) {
+        return { open: false };
+      }
+      if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
+        await this.closeBitwardenPopup(sessionId);
+        return { open: false };
+      }
+      popup.setVisible(true);
+      if (!record.owner.webContents.isDestroyed()) {
+        record.owner.webContents.send('web:bitwarden-popup-state', { sessionId, open: true });
+      }
+    } catch (error) {
+      console.warn('[Wormhole] Could not open the Bitwarden browser popup.', error);
+      await this.closeBitwardenPopup(sessionId);
+      return { open: false };
+    }
+    return { open: true };
+  }
+
+  async closeBitwardenPopup(sessionId: string): Promise<{ open: false }> {
+    const popup = this.bitwardenPopups.get(sessionId);
+    const owner = this.surfaces.get(sessionId)?.owner;
+    if (popup) {
+      this.bitwardenPopups.delete(sessionId);
+      popup.setVisible(false);
+      const record = this.surfaces.get(sessionId);
+      try {
+        owner?.contentView.removeChildView(popup);
+      } catch {
+        // The owner can already be closing.
+      }
+      if (record?.bitwarden && !popup.webContents.isDestroyed()) {
+        try {
+          await this.synchronizeBitwardenStorage(record.bitwarden.partition, popup.webContents);
+        } catch (error) {
+          console.warn(
+            '[Wormhole] Could not flush Bitwarden browser storage when its popup closed.',
+            error,
+          );
+        }
+      }
+      try {
+        popup.webContents.close();
+      } catch {
+        // Closing an already-destroyed WebContents is harmless.
+      }
+    }
+    const onOwnerBlur = this.bitwardenPopupBlurHandlers.get(sessionId);
+    this.bitwardenPopupBlurHandlers.delete(sessionId);
+    if (onOwnerBlur) {
+      owner?.removeListener('blur', onOwnerBlur);
+    }
+    if (owner && !owner.webContents.isDestroyed()) {
+      owner.webContents.send('web:bitwarden-popup-state', { sessionId, open: false });
+    }
+    return { open: false };
+  }
+
+  private serializeBitwardenStorage<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.bitwardenStorageQueue.then(operation, operation);
+    this.bitwardenStorageQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  private async synchronizeBitwardenStorage(
+    partition: string,
+    contents: Electron.WebContents,
+  ): Promise<void> {
+    await this.bitwardenStorageTasks.run(partition, () =>
+      this.synchronizeBitwardenStorageCore(partition, contents),
+    );
+  }
+
+  private async synchronizeBitwardenStorageCore(
+    partition: string,
+    contents: Electron.WebContents,
+  ): Promise<void> {
+    await this.serializeBitwardenStorage(async () => {
+      if (contents.isDestroyed()) return;
+      const profilePath = electronSession.fromPartition(partition).storagePath;
+      if (!profilePath)
+        throw new Error('Bitwarden browser profile has no persistent storage path.');
+      const shared = validateBitwardenBrowserStorageSnapshot(
+        await runBitwardenBackend<BitwardenBrowserStorageSnapshot>(
+          'bitwarden.browser-storage-read',
+          { profilePath },
+        ),
+      );
+      let sourceRevision = shared.profileRevision;
+      if (shared.restore) {
+        await restoreBitwardenExtensionStorage(contents, shared);
+        sourceRevision = shared.revision;
+      }
+      const captured = await captureBitwardenExtensionStorage(contents);
+      validateBitwardenBrowserStorageSnapshot(
+        await runBitwardenBackend<BitwardenBrowserStorageSnapshot>(
+          'bitwarden.browser-storage-capture',
+          {
+            profilePath,
+            localJson: captured.localJson,
+            sessionJson: captured.sessionJson,
+            sourceRevision,
+          },
+        ),
+      );
+    });
+  }
+
+  private async synchronizeBitwardenStorageInBridge(
+    owner: BrowserWindow,
+    partition: string,
+    popupUrl: string,
+  ): Promise<void> {
+    await this.bitwardenStorageTasks.run(partition, async () => {
+      const bridge = new WebContentsView({
+        webPreferences: {
+          partition,
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+          webSecurity: true,
+          allowRunningInsecureContent: false,
+          devTools: false,
+        },
+      });
+      owner.contentView.addChildView(bridge);
+      bridge.setBounds({ x: 0, y: 0, width: 1, height: 1 });
+      bridge.setVisible(false);
+      try {
+        await withBitwardenBrowserTimeout(
+          bridge.webContents.loadURL(popupUrl),
+          bitwardenBrowserNavigationTimeoutMs,
+          'Bitwarden browser storage page navigation timed out.',
+        );
+        await this.synchronizeBitwardenStorageCore(partition, bridge.webContents);
+      } finally {
+        try {
+          owner.contentView.removeChildView(bridge);
+        } catch {
+          // The owner can already be closing.
+        }
+        if (!bridge.webContents.isDestroyed()) bridge.webContents.close();
+      }
+    });
+  }
+
+  private async ensureChromeExtensionApis(
+    partition: string,
+  ): Promise<ElectronChromeExtensions | undefined> {
+    const existing = this.chromeExtensionApis.get(partition);
+    if (existing) return existing;
+    try {
+      const session = electronSession.fromPartition(partition, { cache: true });
+      let instance!: ElectronChromeExtensions;
+      instance = new ElectronChromeExtensions({
+        session,
+        license: 'GPL-3.0',
+        createTab: async (details) => this.openExtensionTabInSession(partition, details),
+        createWindow: async (details) =>
+          this.openExtensionWindow(partition, instance, details as ExtensionWindowCreateDetails),
+        // The library observes BrowserWindow.closed and removes its own bookkeeping. Destroying an
+        // already closed window from its default removeWindow fallback is unnecessary.
+        removeWindow: () => undefined,
+      });
+      this.chromeExtensionApis.set(partition, instance);
+      return instance;
+    } catch (error) {
+      console.warn(
+        '[Wormhole] Could not enable Chrome extension APIs for the Bitwarden browser extension.',
+        error,
+      );
+      return undefined;
+    }
+  }
+
+  private resolveBitwardenSurface(
+    partition: string,
+    windowId?: number,
+  ): [string, WebSurfaceRecord] | undefined {
+    const auxiliary =
+      windowId === undefined ? undefined : this.bitwardenAuxiliaryWindows.get(windowId);
+    const preferredSessionId =
+      auxiliary?.partition === partition
+        ? auxiliary.sessionId
+        : this.activeBitwardenSessions.get(partition);
+    const preferred = preferredSessionId ? this.surfaces.get(preferredSessionId) : undefined;
+    if (
+      preferred &&
+      !preferred.disposed &&
+      preferred.bitwarden?.partition === partition &&
+      (windowId === undefined ||
+        preferred.owner.id === windowId ||
+        auxiliary?.sessionId === preferredSessionId)
+    ) {
+      return [preferredSessionId!, preferred];
+    }
+    return [...this.surfaces.entries()].find(
+      ([, candidate]) =>
+        !candidate.disposed &&
+        candidate.bitwarden?.partition === partition &&
+        (windowId === undefined || candidate.owner.id === windowId),
+    );
+  }
+
+  private async openExtensionTabInSession(
+    partition: string,
+    details: ExtensionTabCreateDetails,
+  ): Promise<[Electron.WebContents, BrowserWindow]> {
+    if (!authSession.isAccessAllowed || isQuitting) {
+      throw new Error('Authentication is required before Bitwarden can open a browser tab.');
+    }
+    const resolved = this.resolveBitwardenSurface(partition, details.windowId);
+    if (!resolved) {
+      throw new Error('Bitwarden has no active HTTPS session for this navigation.');
+    }
+    const [selectedSessionId, record] = resolved;
+    if (!record.bitwarden) {
+      throw new Error('Bitwarden has no active HTTPS session for this navigation.');
+    }
+
+    const navigationUrl = getInSessionNavigationUrl(
+      details.url,
+      record.navigation.originalUrl ? record.navigation.navigateUrl : undefined,
+      record.navigation.originalUrl,
+    );
+    if (!navigationUrl || !isAllowedWebNavigation(navigationUrl)) {
+      throw new Error(
+        'Bitwarden requested a URL that cannot be opened within this routed session.',
+      );
+    }
+
+    // Chrome resolves tabs.create when the tab exists, before its navigation completes. Bitwarden's
+    // web-auth flow installs a tabs.onUpdated listener after that resolution, so awaiting loadURL
+    // here would lose the completion event and leave the login hanging.
+    void record.view.webContents.loadURL(navigationUrl).catch(() => undefined);
+    this.activeBitwardenSessions.set(partition, selectedSessionId);
+    return [record.view.webContents, record.owner];
+  }
+
+  private async openExtensionWindow(
+    partition: string,
+    api: ElectronChromeExtensions,
+    details: ExtensionWindowCreateDetails,
+  ): Promise<BrowserWindow> {
+    if (!authSession.isAccessAllowed || isQuitting) {
+      throw new Error('Authentication is required before Bitwarden can open a browser window.');
+    }
+    const resolved = this.resolveBitwardenSurface(partition);
+    if (!resolved) throw new Error('Bitwarden has no active HTTPS session for this window.');
+    const [sessionId, record] = resolved;
+    const requestedUrl = Array.isArray(details.url) ? details.url[0] : details.url;
+    if (!requestedUrl) throw new Error('Bitwarden requested a window without a URL.');
+
+    let requested: URL;
+    try {
+      requested = new URL(requestedUrl);
+    } catch {
+      throw new Error('Bitwarden requested an invalid window URL.');
+    }
+    const extensionId = this.extensionIds.get(partition);
+    if (requested.protocol !== 'chrome-extension:' || requested.hostname !== extensionId) {
+      const [, owner] = await this.openExtensionTabInSession(partition, {
+        url: requestedUrl,
+        windowId: record.owner.id,
+      });
+      return owner;
+    }
+
+    const extensionWindow = new BrowserWindow({
+      parent: record.owner,
+      show: false,
+      autoHideMenuBar: true,
+      width: clampWindowDimension(details.width, 420, 320, 1_200),
+      height: clampWindowDimension(details.height, 640, 320, 1_200),
+      ...(Number.isFinite(details.left) && Number.isFinite(details.top)
+        ? { x: Math.round(details.left!), y: Math.round(details.top!) }
+        : {}),
+      webPreferences: {
+        partition,
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        webSecurity: true,
+        allowRunningInsecureContent: false,
+        devTools: false,
+      },
+    });
+    this.bitwardenAuxiliaryWindows.set(extensionWindow.id, {
+      window: extensionWindow,
+      partition,
+      sessionId,
+    });
+    api.addTab(extensionWindow.webContents, extensionWindow);
+    api.selectTab(extensionWindow.webContents);
+    extensionWindow.webContents.setWindowOpenHandler(({ url }) => {
+      void this.openExtensionTabInSession(partition, {
+        url,
+        windowId: extensionWindow.id,
+      }).catch(() => undefined);
+      return { action: 'deny' };
+    });
+    extensionWindow.webContents.on('will-navigate', (event, url) => {
+      let sameExtension = false;
+      try {
+        const target = new URL(url);
+        sameExtension = target.protocol === 'chrome-extension:' && target.hostname === extensionId;
+      } catch {
+        // Invalid navigation is blocked below.
+      }
+      if (sameExtension) return;
+      event.preventDefault();
+      void this.openExtensionTabInSession(partition, {
+        url,
+        windowId: extensionWindow.id,
+      }).catch(() => undefined);
+    });
+    extensionWindow.once('closed', () => {
+      this.bitwardenAuxiliaryWindows.delete(extensionWindow.id);
+      const source = this.surfaces.get(sessionId);
+      if (source?.bitwarden && !source.disposed && !source.owner.isDestroyed()) {
+        void this.synchronizeBitwardenStorageInBridge(
+          source.owner,
+          source.bitwarden.partition,
+          source.bitwarden.popupUrl,
+        ).catch((error) => {
+          console.warn(
+            '[Wormhole] Could not flush Bitwarden browser storage after its auxiliary window closed.',
+            error,
+          );
+        });
+      }
+    });
+    try {
+      await withBitwardenBrowserTimeout(
+        extensionWindow.loadURL(requested.toString()),
+        bitwardenBrowserNavigationTimeoutMs,
+        'Bitwarden auxiliary window navigation timed out.',
+      );
+      if (!authSession.isAccessAllowed || record.disposed || record.owner.isDestroyed()) {
+        throw new Error('Bitwarden auxiliary window was cancelled while Wormhole locked.');
+      }
+      if (details.focused === false) extensionWindow.showInactive();
+      else extensionWindow.show();
+      return extensionWindow;
+    } catch (error) {
+      if (!extensionWindow.isDestroyed()) extensionWindow.destroy();
+      throw error;
+    }
+  }
+
+  private async loadBitwardenExtension(
+    partition: string,
+    extensionPath: string,
+    installKey: string,
+    defaultPopup?: string,
+    cookieSeed?: BitwardenCookieSeed,
+  ): Promise<LoadedBitwardenExtension | undefined> {
+    const existing = this.extensionLoads.get(partition);
+    if (existing) {
+      await existing;
+      if (this.extensionLoadKeys.get(partition) === installKey) {
+        return this.loadedBitwardenExtension(partition);
+      }
+      return this.loadBitwardenExtension(
+        partition,
+        extensionPath,
+        installKey,
+        defaultPopup,
+        cookieSeed,
+      );
+    }
+    let loading!: Promise<void>;
+    loading = (async () => {
+      try {
+        // A background update or manual import can replace the configured bundle while Wormhole is
+        // running. Electron otherwise keeps the first unpacked bundle loaded for the lifetime of the
+        // partition, so compare the install digest/version and reload it before opening a new tab.
+        const previousId = this.extensionIds.get(partition);
+        const activeSurfaceCount = [...this.surfaces.values()].filter(
+          (record) => !record.disposed && record.bitwarden?.partition === partition,
+        ).length;
+        if (
+          previousId &&
+          shouldDeferExtensionReload(
+            this.extensionLoadKeys.get(partition),
+            installKey,
+            activeSurfaceCount,
+          )
+        ) {
+          // Removing an extension immediately detaches it from every WebContents in the shared
+          // partition. Keep the loaded version until its final tab closes; the next open then
+          // applies the update without turning live Bitwarden buttons into stale popup URLs.
+          return;
+        }
+        for (const [sessionId, popup] of this.bitwardenPopups) {
+          const record = this.surfaces.get(sessionId);
+          if (record?.bitwarden?.partition === partition && !popup.webContents.isDestroyed()) {
+            await this.closeBitwardenPopup(sessionId);
+          }
+        }
+        // Closing a tab starts its final storage bridge asynchronously. Do not remove the loaded
+        // extension until every bridge and popup flush for this profile has finished, or the last
+        // vault mutations can be lost while Chromium tears down the old service worker.
+        await this.bitwardenStorageTasks.waitForIdle(partition);
+        const browserSession = electronSession.fromPartition(partition, { cache: true });
+        const profilePath = browserSession.storagePath;
+        if (previousId) {
+          browserSession.extensions.removeExtension(previousId);
+          this.extensionIds.delete(partition);
+          this.extensionPopupPaths.delete(partition);
+        }
+        if (profilePath) {
+          try {
+            const seedResult = await runBitwardenBackend<BitwardenBrowserProfileSeedResult>(
+              'bitwarden.browser-profile-seed',
+              {
+                profilePath,
+                path: extensionPath,
+                query: cookieSeed?.routeKey ?? '',
+              },
+            );
+            if (cookieSeed && seedResult.cookieSourceProfiles.length > 0) {
+              await this.seedBitwardenApplianceCookies(
+                browserSession,
+                seedResult.cookieSourceProfiles,
+                cookieSeed.targetUrl,
+                seedResult.initialized,
+              );
+            }
+          } catch (error) {
+            // Profile seeding is an offline convenience. A locked or concurrently active source
+            // IndexedDB must not prevent the HTTPS session or the extension from opening.
+            console.warn('[Wormhole] Bitwarden browser profile state could not be seeded.', error);
+          }
+        }
+        // Initialize chrome.* API support for the persistent session before the service worker
+        // boots. Even if the library fails to initialize, the extension still loads (the service
+        // worker just degrades to the APIs Electron implements natively).
+        await this.ensureChromeExtensionApis(partition);
+        const extension = await browserSession.extensions.loadExtension(extensionPath);
+        this.extensionIds.set(partition, extension.id);
+        this.extensionLoadKeys.set(partition, installKey);
+        if (profilePath) {
+          try {
+            await runBitwardenBackend('bitwarden.browser-profile-register', {
+              profilePath,
+              path: extensionPath,
+              value: extension.id,
+              query: cookieSeed?.routeKey ?? '',
+            });
+          } catch (error) {
+            // Registration only discovers a source for future profiles. Keep the current session
+            // usable even when its marker cannot be persisted.
+            console.warn('[Wormhole] Bitwarden browser profile could not be registered.', error);
+          }
+        }
+        if (defaultPopup) this.extensionPopupPaths.set(partition, defaultPopup);
+        else this.extensionPopupPaths.delete(partition);
+        if (defaultPopup) {
+          for (const record of this.surfaces.values()) {
+            if (record.bitwarden?.partition === partition) {
+              record.bitwarden.popupUrl = `chrome-extension://${extension.id}/${defaultPopup}`;
+            }
+          }
+        }
+      } catch (error) {
+        console.warn(
+          '[Wormhole] Bitwarden browser extension could not be loaded for this HTTPS tab.',
+          error,
+        );
+        this.extensionIds.delete(partition);
+        this.extensionLoadKeys.delete(partition);
+        this.extensionPopupPaths.delete(partition);
+      } finally {
+        if (this.extensionLoads.get(partition) === loading) {
+          this.extensionLoads.delete(partition);
+        }
+      }
+    })();
+    this.extensionLoads.set(partition, loading);
+    await loading;
+    return this.loadedBitwardenExtension(partition);
+  }
+
+  private async seedBitwardenApplianceCookies(
+    destinationSession: Electron.Session,
+    sourceProfilePaths: readonly string[],
+    targetUrl: string,
+    refreshExisting: boolean,
+  ): Promise<void> {
+    const destinationCookies = selectBitwardenCookiesForTarget(
+      await destinationSession.cookies.get({}),
+      targetUrl,
+    );
+    if (!refreshExisting && destinationCookies.length > 0) return;
+
+    const destinationPath = destinationSession.storagePath;
+    for (const sourceProfilePath of new Set(sourceProfilePaths)) {
+      if (
+        destinationPath &&
+        (process.platform === 'win32'
+          ? sourceProfilePath.toLowerCase() === destinationPath.toLowerCase()
+          : sourceProfilePath === destinationPath)
+      ) {
+        continue;
+      }
+      const sourceCookies = selectBitwardenCookiesForTarget(
+        await electronSession.fromPath(sourceProfilePath, { cache: true }).cookies.get({}),
+        targetUrl,
+      );
+
+      if (refreshExisting) {
+        const refresh = buildBitwardenCookieRefreshPlan(destinationCookies, sourceCookies);
+        for (const cookie of refresh.set) {
+          try {
+            await destinationSession.cookies.set(buildBitwardenCookieSetDetails(cookie, targetUrl));
+          } catch {
+            // Continue with the other cookies without exposing their values in a diagnostic.
+          }
+        }
+        for (const cookie of refresh.remove) {
+          try {
+            const details = buildBitwardenCookieSetDetails(cookie, targetUrl);
+            await destinationSession.cookies.remove(details.url, cookie.name);
+          } catch {
+            // Cookie refresh is best-effort and cookie values must never appear in logs.
+          }
+        }
+        return;
+      }
+
+      let copied = 0;
+      for (const cookie of sourceCookies) {
+        try {
+          await destinationSession.cookies.set(buildBitwardenCookieSetDetails(cookie, targetUrl));
+          copied++;
+        } catch {
+          // A malformed or expired individual cookie should not block the remaining appliance
+          // session state, and cookie values must never appear in logs.
+        }
+      }
+      if (copied > 0) return;
+    }
+  }
+
+  private loadedBitwardenExtension(partition: string): LoadedBitwardenExtension | undefined {
+    const id = this.extensionIds.get(partition);
+    if (!id) return undefined;
+    return { id, defaultPopup: this.extensionPopupPaths.get(partition) };
+  }
+
+  async runBitwardenExtensionMutation<TResult>(
+    operation: () => Promise<TResult>,
+  ): Promise<TResult> {
+    return this.bitwardenExtensionMutation.runMutation(
+      () => this.bitwardenStorageTasks.waitForAllIdle(),
+      operation,
+    );
+  }
+
   close(sessionId: string): void {
     this.attempts.cancel(sessionId);
     this.pendingOpenOwners.delete(sessionId);
     this.dispose(sessionId);
   }
 
-  private dispose(sessionId: string): void {
+  private dispose(sessionId: string, bitwardenAlreadyFlushed = false): void {
     const record = this.surfaces.get(sessionId);
     if (!record) return;
-    this.surfaces.delete(sessionId);
     record.disposed = true;
+    for (const auxiliary of [...this.bitwardenAuxiliaryWindows.values()]) {
+      if (auxiliary.sessionId === sessionId && !auxiliary.window.isDestroyed()) {
+        auxiliary.window.destroy();
+      }
+    }
+    const hadBitwardenPopup = this.bitwardenPopups.has(sessionId);
+    if (!bitwardenAlreadyFlushed) void this.closeBitwardenPopup(sessionId);
+    this.surfaces.delete(sessionId);
+    if (
+      !bitwardenAlreadyFlushed &&
+      !hadBitwardenPopup &&
+      record.bitwarden &&
+      !record.owner.isDestroyed()
+    ) {
+      void this.synchronizeBitwardenStorageInBridge(
+        record.owner,
+        record.bitwarden.partition,
+        record.bitwarden.popupUrl,
+      ).catch((error) => {
+        console.warn(
+          '[Wormhole] Could not flush Bitwarden browser storage when its HTTPS tab closed.',
+          error,
+        );
+      });
+    }
+    if (record.bitwarden && record.bitwardenTabRegistered) {
+      const api = this.chromeExtensionApis.get(record.bitwarden.partition);
+      if (api) {
+        try {
+          api.removeTab(record.view.webContents);
+        } catch {
+          // Removing an already-destroyed tab is harmless.
+        }
+      }
+    }
+    record.bitwardenUseRelease?.();
+    record.bitwardenUseRelease = undefined;
+    if (
+      record.bitwarden &&
+      this.activeBitwardenSessions.get(record.bitwarden.partition) === sessionId
+    ) {
+      this.activeBitwardenSessions.delete(record.bitwarden.partition);
+    }
     if (record.tunnelLeaseId)
       void nativeBackend?.releaseTunnel(record.tunnelLeaseId).catch(() => undefined);
     try {
@@ -2756,8 +4364,19 @@ class WebSurfaceManager {
   }
 
   hideAll(): void {
+    for (const sessionId of [...this.pendingOpenOwners.keys()]) {
+      this.attempts.cancel(sessionId);
+      this.pendingOpenOwners.delete(sessionId);
+    }
     for (const record of this.surfaces.values()) {
       if (!record.disposed) record.view.setVisible(false);
+    }
+    // The Bitwarden popup can hold a logged-in vault; it must never stay visible after a lock.
+    for (const sessionId of [...this.bitwardenPopups.keys()]) {
+      void this.closeBitwardenPopup(sessionId);
+    }
+    for (const auxiliary of [...this.bitwardenAuxiliaryWindows.values()]) {
+      if (!auxiliary.window.isDestroyed()) auxiliary.window.destroy();
     }
   }
 
@@ -2772,9 +4391,77 @@ class WebSurfaceManager {
     for (const sessionId of sessionIds) this.close(sessionId);
   }
 
-  closeAll(): void {
+  async flushAndCloseForWindow(owner: BrowserWindow): Promise<void> {
+    const sessionIds = new Set<string>();
+    for (const [sessionId, record] of this.surfaces) {
+      if (record.owner === owner) sessionIds.add(sessionId);
+    }
+    for (const [sessionId, pendingOwner] of this.pendingOpenOwners) {
+      if (pendingOwner === owner) sessionIds.add(sessionId);
+    }
+    const popupSessions = new Set(
+      [...this.bitwardenPopups.keys()].filter(
+        (sessionId) => this.surfaces.get(sessionId)?.owner === owner,
+      ),
+    );
+    for (const sessionId of popupSessions) {
+      await this.closeBitwardenPopup(sessionId);
+    }
+    for (const [sessionId, record] of this.surfaces) {
+      if (
+        record.owner !== owner ||
+        popupSessions.has(sessionId) ||
+        !record.bitwarden ||
+        owner.isDestroyed()
+      ) {
+        continue;
+      }
+      try {
+        await this.synchronizeBitwardenStorageInBridge(
+          owner,
+          record.bitwarden.partition,
+          record.bitwarden.popupUrl,
+        );
+      } catch (error) {
+        console.warn(
+          '[Wormhole] Could not flush Bitwarden browser storage while closing its window.',
+          error,
+        );
+      }
+    }
+    for (const sessionId of sessionIds) {
+      this.attempts.cancel(sessionId);
+      this.pendingOpenOwners.delete(sessionId);
+      this.dispose(sessionId, true);
+    }
+  }
+
+  async flushAndCloseAll(): Promise<void> {
     const sessionIds = new Set([...this.surfaces.keys(), ...this.pendingOpenOwners.keys()]);
-    for (const sessionId of sessionIds) this.close(sessionId);
+    const popupSessions = new Set(this.bitwardenPopups.keys());
+    for (const sessionId of popupSessions) {
+      await this.closeBitwardenPopup(sessionId);
+    }
+    for (const [sessionId, record] of this.surfaces) {
+      if (popupSessions.has(sessionId) || !record.bitwarden || record.owner.isDestroyed()) continue;
+      try {
+        await this.synchronizeBitwardenStorageInBridge(
+          record.owner,
+          record.bitwarden.partition,
+          record.bitwarden.popupUrl,
+        );
+      } catch (error) {
+        console.warn(
+          '[Wormhole] Could not flush Bitwarden browser storage during application shutdown.',
+          error,
+        );
+      }
+    }
+    for (const sessionId of sessionIds) {
+      this.attempts.cancel(sessionId);
+      this.pendingOpenOwners.delete(sessionId);
+      this.dispose(sessionId, true);
+    }
   }
 
   private configureWebContents(
@@ -2783,13 +4470,40 @@ class WebSurfaceManager {
     target: WebTargetResponse,
   ): void {
     const contents = record.view.webContents;
+    const routeNavigation = (url: string) =>
+      getInSessionNavigationUrl(
+        url,
+        record.navigation.originalUrl ? record.navigation.navigateUrl : undefined,
+        record.navigation.originalUrl,
+      );
     contents.setWindowOpenHandler(({ url }) => {
-      if (!isAllowedWebNavigation(url)) return { action: 'deny' };
-      void contents.loadURL(url).catch(() => undefined);
+      const navigationUrl = routeNavigation(url);
+      if (!navigationUrl || !isAllowedWebNavigation(navigationUrl)) return { action: 'deny' };
+      void contents.loadURL(navigationUrl).catch(() => undefined);
       return { action: 'deny' };
     });
-    contents.on('will-navigate', (event, url) => {
-      if (!isAllowedWebNavigation(url)) event.preventDefault();
+    const enforceRoutedNavigation = (event: Electron.Event, url: string) => {
+      const navigationUrl = routeNavigation(url);
+      if (!navigationUrl || !isAllowedWebNavigation(navigationUrl)) {
+        event.preventDefault();
+        return;
+      }
+      if (navigationUrl !== url) {
+        event.preventDefault();
+        void contents.loadURL(navigationUrl).catch(() => undefined);
+      }
+    };
+    contents.on('will-navigate', enforceRoutedNavigation);
+    contents.on('will-redirect', enforceRoutedNavigation);
+    contents.on('context-menu', (_event, params) => {
+      if (!authSession.isAccessAllowed || !record.bitwarden) return;
+      const api = this.chromeExtensionApis.get(record.bitwarden.partition);
+      if (!api) return;
+      const items = api.getContextMenuItems(contents, params);
+      if (items.length === 0) return;
+      const menu = new Menu();
+      for (const item of items) menu.append(item);
+      menu.popup({ window: record.owner });
     });
     if (target.ignoreCertErrors) {
       contents.on('certificate-error', (event, _url, _error, _certificate, callback) => {
@@ -2873,6 +4587,17 @@ function isAllowedWebNavigation(value: string): boolean {
   }
 }
 
+function clampWindowDimension(
+  value: number | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+): number {
+  return Number.isFinite(value)
+    ? Math.min(maximum, Math.max(minimum, Math.round(value!)))
+    : fallback;
+}
+
 function describeWebNavigationError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return message
@@ -2916,6 +4641,7 @@ class NativeSshBackend {
       resolve: (response: SshConnectedResponse) => void;
       reject: (error: Error) => void;
       timeout: NodeJS.Timeout;
+      usedBitwarden: boolean;
     }
   >();
   private readonly controlWaiters = new Map<
@@ -2927,10 +4653,26 @@ class NativeSshBackend {
     }
   >();
 
-  async open(request: SshOpenRequest): Promise<SshConnectedResponse> {
+  async open(request: SshOpenRequest, authorizationEpoch: number): Promise<SshConnectedResponse> {
     if (this.openWaiters.has(request.sessionId) || this.activeSessions.has(request.sessionId)) {
       throw new Error('SSH session id is already in use.');
     }
+    let bitwardenCredential: BitwardenResolvedCredential = { bitwarden: false };
+    if (request.nodeId && !request.manualCredentials) {
+      try {
+        bitwardenCredential = await runBitwardenBackend<BitwardenResolvedCredential>(
+          'bitwarden.resolve-node',
+          { nodeId: request.nodeId, protocol: 'ssh' },
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'The vault could not be read.';
+        throw new Error(`Bitwarden credential is unavailable: ${message}`);
+      }
+      if (bitwardenCredential.bitwarden && !bitwardenCredential.username?.trim()) {
+        throw new Error('Bitwarden credential is unavailable: the SSH username is missing.');
+      }
+    }
+    requireAuthorizationEpoch(authorizationEpoch);
     let socksEndpoint = '';
     const tunnelRequested = Boolean(request.nodeId || request.tunnelConfigId);
     let leaseId: string | undefined;
@@ -2962,6 +4704,7 @@ class NativeSshBackend {
         }
       }
     }
+    requireAuthorizationEpoch(authorizationEpoch);
     try {
       this.ensureStarted();
     } catch (error) {
@@ -2982,7 +4725,12 @@ class NativeSshBackend {
           // The backend may already have stopped; the timeout has released the renderer.
         }
       }, nativeConnectionTimeoutMs);
-      this.openWaiters.set(request.sessionId, { resolve, reject, timeout });
+      this.openWaiters.set(request.sessionId, {
+        resolve,
+        reject,
+        timeout,
+        usedBitwarden: bitwardenCredential.bitwarden,
+      });
       try {
         this.write({
           type: 'open',
@@ -2990,11 +4738,23 @@ class NativeSshBackend {
           node_id: request.nodeId,
           host: request.host,
           port: request.port,
-          username: request.username,
-          password: request.password,
+          username: request.nodeId ? undefined : request.username,
+          password: request.nodeId ? undefined : request.password,
           tunnel_config_id: request.tunnelConfigId,
           socks_endpoint: socksEndpoint,
           tunnel_enabled: request.nodeId && !socksEndpoint ? false : undefined,
+          username_override: request.manualCredentials
+            ? request.username?.trim()
+            : bitwardenCredential.bitwarden
+              ? bitwardenCredential.username
+              : undefined,
+          username_override_authoritative: request.manualCredentials === true,
+          password_override: request.manualCredentials
+            ? request.password
+            : bitwardenCredential.bitwarden
+              ? bitwardenCredential.password
+              : undefined,
+          credential_override: request.manualCredentials === true || bitwardenCredential.bitwarden,
           columns: request.columns,
           rows: request.rows,
         });
@@ -3134,6 +4894,10 @@ class NativeSshBackend {
       }
     }
     this.releaseTunnel(sessionId);
+  }
+
+  cancelPendingConnections(): void {
+    for (const sessionId of [...this.openWaiters.keys()]) this.close(sessionId);
   }
 
   private releaseTunnel(sessionId: string): void {
@@ -3352,7 +5116,16 @@ class NativeSshBackend {
       if (waiter) {
         this.openWaiters.delete(event.sessionId);
         clearTimeout(waiter.timeout);
-        waiter.reject(new Error(event.error || 'SSH connection failed.'));
+        const message = event.error || 'SSH connection failed.';
+        const credentialFailure =
+          /authenticat|password|permission denied|no usable ssh credential/i.test(message);
+        waiter.reject(
+          new Error(
+            waiter.usedBitwarden && credentialFailure
+              ? `Bitwarden credential was rejected by the SSH server: ${message}`
+              : message,
+          ),
+        );
       }
       this.releaseTunnel(event.sessionId);
     } else if (event.type === 'closed') {
@@ -3403,6 +5176,102 @@ function serializeAuthOperation<T>(operation: () => Promise<T>): Promise<T> {
   return result;
 }
 
+function serializeAuthStateMutation<T>(operation: () => Promise<T>): Promise<T> {
+  const result = authStateMutationQueue.then(
+    () =>
+      serializeAuthOperation(async () => {
+        if (authLockRequested) {
+          throw new Error('Authentication is required before changing Wormhole security.');
+        }
+        return operation();
+      }),
+    () =>
+      serializeAuthOperation(async () => {
+        if (authLockRequested) {
+          throw new Error('Authentication is required before changing Wormhole security.');
+        }
+        return operation();
+      }),
+  );
+  authStateMutationQueue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+async function runAuthorizedOperation<T, TResult = T>(
+  operation: (authorizationEpoch: number) => Promise<T>,
+  onAuthorizationLost?: () => Promise<void> | void,
+  commit?: (result: T) => TResult,
+): Promise<TResult> {
+  let epoch = -1;
+  let pending!: Promise<T>;
+  await serializeAuthOperation(async () => {
+    await requireWorkspaceAuth();
+    epoch = authSession.authorizationEpoch;
+    // Begin the potentially long operation while authorization is serialized, then release the
+    // queue immediately so a lock request cannot sit behind network, CLI, or native handshakes.
+    pending = operation(epoch);
+  });
+
+  let result: T;
+  let failure: unknown;
+  let failed = false;
+  try {
+    result = await pending;
+  } catch (error) {
+    failed = true;
+    failure = error;
+  }
+  let committed!: TResult;
+  const stillAuthorized = await serializeAuthOperation(async () => {
+    const current = authSession.isAccessAllowed && authSession.authorizationEpoch === epoch;
+    if (current && !failed) committed = commit ? commit(result!) : (result! as unknown as TResult);
+    return current;
+  });
+  if (!stillAuthorized) {
+    await onAuthorizationLost?.();
+    throw new Error('Authentication is required before accessing the Wormhole workspace.');
+  }
+  if (failed) throw failure;
+  return committed;
+}
+
+function isAuthorizationEpochCurrent(expectedEpoch: number): boolean {
+  return authSession.isAccessAllowed && authSession.authorizationEpoch === expectedEpoch;
+}
+
+function requireAuthorizationEpoch(expectedEpoch: number): void {
+  if (!isAuthorizationEpochCurrent(expectedEpoch)) {
+    throw new Error('Authentication is required before accessing the Wormhole workspace.');
+  }
+}
+
+async function clearBitwardenSessionAfterAuthorizationLoss(): Promise<void> {
+  await nativeBackend?.send({ action: 'bitwarden.clear-session' }).catch(() => undefined);
+}
+
+function serializeBitwardenExtensionOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const result = bitwardenExtensionOperationQueue.then(operation, operation);
+  bitwardenExtensionOperationQueue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+function runAuthorizedBitwardenExtensionOperation<T>(
+  operation: (authorizationEpoch: number) => Promise<T>,
+): Promise<T> {
+  return runAuthorizedOperation((authorizationEpoch) =>
+    serializeBitwardenExtensionOperation(async () => {
+      requireAuthorizationEpoch(authorizationEpoch);
+      return operation(authorizationEpoch);
+    }),
+  );
+}
+
 function rememberAuthState(state: AuthStateResponse, assumeUnlocked: boolean): AuthStateResponse {
   authSession.remember(state, assumeUnlocked);
   currentAuthState = state;
@@ -3451,6 +5320,32 @@ function parseMcpApproval(value: unknown): { requestId: string; approved: boolea
   return { requestId, approved: value.approved };
 }
 
+async function runFirstLaunchMigrations(): Promise<void> {
+  try {
+    const settings = await runBackend<{ updated: boolean }>('settings-migrate');
+    if (settings.updated)
+      console.info('[Wormhole] Legacy settings migrated to the current schema.');
+  } catch (error) {
+    // WinUI treats this startup migration as best-effort too. Every Go settings reader still
+    // applies the same migration in memory, so a temporarily unwritable file cannot block launch.
+    const message = error instanceof Error ? error.message : String(error);
+    console.warn('[Wormhole] Legacy settings migration could not be persisted.', message);
+  }
+
+  // The legacy Credential Manager is a Windows-only source. Keeping this guard in the Electron
+  // main process also prevents the Windows backend/helper from being loaded on other platforms.
+  if (process.platform !== 'win32') return;
+
+  const result = await runBackend<MigrationResponse>('migrate');
+  if (result.status === 'completed') {
+    console.info(
+      `[Wormhole] Credential Manager migration completed: ${result.migrated} migrated, ${result.missing} missing.`,
+    );
+  } else if (result.status === 'already-completed') {
+    console.info('[Wormhole] Credential Manager migration already completed.');
+  }
+}
+
 function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   ipcMain.on('startup:ready', (event) => {
     const owner = BrowserWindow.fromWebContents(event.sender);
@@ -3495,8 +5390,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   });
 
   ipcMain.handle('workspace:load', async () => {
-    return serializeAuthOperation(async () => {
-      await requireWorkspaceAuth();
+    return runAuthorizedOperation(async () => {
       const workspace = await runBackend<WorkspaceResponse>('workspace');
       console.info(
         `[Wormhole] Workspace loaded: ${workspace.tree.length} roots, ${workspace.credentials.length} credentials, ${workspace.tunnels.length} tunnels.`,
@@ -3603,6 +5497,22 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       });
       backupImportSelections.delete(event.sender);
       return parseBackupImportResponse(backendResult);
+    });
+  });
+
+  ipcMain.handle('workspace:create-node', async (_event, value: unknown) => {
+    const request = parseWorkspaceNodeWriteRequest(value, false);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ nodeId: string }>('workspace-node-create', request);
+    });
+  });
+
+  ipcMain.handle('workspace:update-node', async (_event, value: unknown) => {
+    const request = parseWorkspaceNodeWriteRequest(value, true);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ updated: boolean }>('workspace-node-update', request);
     });
   });
 
@@ -3777,6 +5687,240 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     });
   });
 
+  ipcMain.handle('extensions:read', async () => {
+    return runAuthorizedBitwardenExtensionOperation(() =>
+      runBackend<BitwardenExtensionState>('extension-read'),
+    );
+  });
+
+  ipcMain.handle('extensions:set-enabled', async (_event, value: unknown) => {
+    if (typeof value !== 'boolean') throw new Error('Bitwarden extension setting is invalid.');
+    return runAuthorizedBitwardenExtensionOperation(() =>
+      runBackend<BitwardenExtensionState>('extension-set-enabled', { enabled: value }),
+    );
+  });
+
+  ipcMain.handle('extensions:install', async () => {
+    return runAuthorizedBitwardenExtensionOperation((authorizationEpoch) =>
+      webSurfaces.runBitwardenExtensionMutation(() => {
+        requireAuthorizationEpoch(authorizationEpoch);
+        return runBackend<BitwardenExtensionState>(
+          'extension-install',
+          undefined,
+          extensionOperationTimeoutMs,
+        );
+      }),
+    );
+  });
+
+  ipcMain.handle('extensions:ensure-installed', async () => {
+    return runAuthorizedBitwardenExtensionOperation((authorizationEpoch) =>
+      webSurfaces.runBitwardenExtensionMutation(() => {
+        requireAuthorizationEpoch(authorizationEpoch);
+        return runBackend<BitwardenExtensionState>(
+          'extension-ensure-installed',
+          undefined,
+          extensionOperationTimeoutMs,
+        );
+      }),
+    );
+  });
+
+  ipcMain.handle('extensions:import-zip', async (event) => {
+    await serializeAuthOperation(requireWorkspaceAuth);
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    const options: Electron.OpenDialogOptions = {
+      title: 'Import Bitwarden browser extension ZIP',
+      properties: ['openFile'],
+      filters: [{ name: 'Bitwarden extension ZIP', extensions: ['zip'] }],
+    };
+    const selection = owner
+      ? await dialog.showOpenDialog(owner, options)
+      : await dialog.showOpenDialog(options);
+    if (selection.canceled || selection.filePaths.length !== 1) return null;
+    return runAuthorizedBitwardenExtensionOperation((authorizationEpoch) =>
+      webSurfaces.runBitwardenExtensionMutation(() => {
+        requireAuthorizationEpoch(authorizationEpoch);
+        return runBackend<BitwardenExtensionState>(
+          'extension-import-zip',
+          {
+            path: selection.filePaths[0],
+          },
+          extensionOperationTimeoutMs,
+        );
+      }),
+    );
+  });
+
+  ipcMain.handle('extensions:import-folder', async (event) => {
+    await serializeAuthOperation(requireWorkspaceAuth);
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    const options: Electron.OpenDialogOptions = {
+      title: 'Import unpacked Bitwarden browser extension folder',
+      properties: ['openDirectory'],
+    };
+    const selection = owner
+      ? await dialog.showOpenDialog(owner, options)
+      : await dialog.showOpenDialog(options);
+    if (selection.canceled || selection.filePaths.length !== 1) return null;
+    return runAuthorizedBitwardenExtensionOperation((authorizationEpoch) =>
+      webSurfaces.runBitwardenExtensionMutation(() => {
+        requireAuthorizationEpoch(authorizationEpoch);
+        return runBackend<BitwardenExtensionState>(
+          'extension-import-folder',
+          {
+            path: selection.filePaths[0],
+          },
+          extensionOperationTimeoutMs,
+        );
+      }),
+    );
+  });
+
+  ipcMain.handle('workspace:credentials-for-protocol', async (_event, protocol: unknown) => {
+    if (protocol !== 'ssh' && protocol !== 'rdp' && protocol !== 'vnc') {
+      throw new Error('Credential protocol is invalid.');
+    }
+    return runAuthorizedOperation(async () => {
+      return runBackend<WorkspaceCredential[]>('credentials-for-protocol', { protocol });
+    });
+  });
+
+  ipcMain.handle('workspace:update-node-credential', async (_event, request: unknown) => {
+    if (!isWorkspaceNodeCredentialSettingsRequest(request)) {
+      throw new Error('Workspace credential setting is invalid.');
+    }
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ updated: boolean }>('workspace-update-node-credential', request);
+    });
+  });
+
+  ipcMain.handle('bitwarden:read', async () => {
+    return runAuthorizedOperation(async () => {
+      return runBitwardenBackend<BitwardenCliState>('bitwarden.read');
+    });
+  });
+
+  ipcMain.handle('bitwarden:set-enabled', async (_event, value: unknown) => {
+    if (typeof value !== 'boolean') throw new Error('Bitwarden vault setting is invalid.');
+    return runAuthorizedOperation(
+      () => runBitwardenBackend<BitwardenCliState>('bitwarden.set-enabled', { enabled: value }),
+      clearBitwardenSessionAfterAuthorizationLoss,
+    );
+  });
+
+  ipcMain.handle('bitwarden:set-config', async (_event, value: unknown) => {
+    const path = isRecord(value) && typeof value.path === 'string' ? value.path : '';
+    const serverRegion =
+      isRecord(value) && typeof value.serverRegion === 'number' ? value.serverRegion : 0;
+    if (
+      path.length > 4096 ||
+      !Number.isInteger(serverRegion) ||
+      serverRegion < 0 ||
+      serverRegion > 2
+    )
+      throw new Error('Bitwarden CLI configuration is invalid.');
+    return runAuthorizedOperation(
+      () => runBitwardenBackend<BitwardenCliState>('bitwarden.set-config', { path, serverRegion }),
+      clearBitwardenSessionAfterAuthorizationLoss,
+    );
+  });
+
+  ipcMain.handle('bitwarden:install', async () => {
+    return runAuthorizedOperation(() =>
+      runBitwardenBackend<BitwardenCliState>('bitwarden.install'),
+    );
+  });
+
+  ipcMain.handle('bitwarden:status', async () => {
+    return runAuthorizedOperation(() =>
+      runBitwardenBackend<BitwardenCliStatusResponse>('bitwarden.status'),
+    );
+  });
+
+  ipcMain.handle('bitwarden:login', async (_event, value: unknown) => {
+    const { email, masterPassword, authenticatorCode, serverRegion } = parseCliLoginRequest(value);
+    return runAuthorizedOperation(async (authorizationEpoch) => {
+      let state = await runBitwardenBackend<BitwardenCliState>('bitwarden.read');
+      if (!state.enabled) throw new Error('Bitwarden credential vault is disabled in Settings.');
+      if (!state.installed) {
+        state = await runBitwardenBackend<BitwardenCliState>('bitwarden.ensure-installed');
+      }
+      requireAuthorizationEpoch(authorizationEpoch);
+      await runBitwardenBackend('bitwarden.set-config', {
+        path: state.path,
+        serverRegion,
+      });
+      requireAuthorizationEpoch(authorizationEpoch);
+      await runBitwardenBackend('bitwarden.login', {
+        email,
+        masterPassword,
+        authenticatorCode,
+      });
+      return { loggedIn: true };
+    }, clearBitwardenSessionAfterAuthorizationLoss);
+  });
+
+  ipcMain.handle('bitwarden:unlock', async (_event, value: unknown) => {
+    const masterPassword =
+      isRecord(value) && typeof value.masterPassword === 'string' ? value.masterPassword : '';
+    if (masterPassword.length === 0 || masterPassword.length > 4096)
+      throw new Error('Bitwarden master password is invalid.');
+    return runAuthorizedOperation(async () => {
+      await runBitwardenBackend('bitwarden.unlock', { masterPassword });
+      return { unlocked: true };
+    }, clearBitwardenSessionAfterAuthorizationLoss);
+  });
+
+  ipcMain.handle('bitwarden:logout', async () => {
+    return runAuthorizedOperation(() =>
+      runBitwardenBackend<{ loggedOut: boolean }>('bitwarden.logout'),
+    );
+  });
+
+  ipcMain.handle('bitwarden:sync', async () => {
+    return runAuthorizedOperation(
+      () =>
+        runBitwardenBackend<{
+          lastSyncUtc: string;
+          lastSyncStatus: string;
+          availableCount: number;
+        }>('bitwarden.sync'),
+      clearBitwardenSessionAfterAuthorizationLoss,
+    );
+  });
+
+  ipcMain.handle('bitwarden:search-items', async (_event, value: unknown) => {
+    if (typeof value !== 'string' || value.length > 2048) {
+      throw new Error('Bitwarden search query is invalid.');
+    }
+    return runAuthorizedOperation(
+      () =>
+        runBitwardenBackend<{ items: BitwardenCliLoginItem[] }>('bitwarden.search', {
+          query: value,
+        }),
+      clearBitwardenSessionAfterAuthorizationLoss,
+    );
+  });
+
+  ipcMain.handle('bitwarden:node-uses-vault', async (_event, value: unknown) => {
+    if (!isRecord(value)) throw new Error('Bitwarden connection request is invalid.');
+    if (!isSshSessionId(value.nodeId)) throw new Error('Connection id is invalid.');
+    const nodeId = value.nodeId;
+    const protocol = value.protocol;
+    if (protocol !== 'ssh' && protocol !== 'rdp' && protocol !== 'vnc') {
+      throw new Error('Bitwarden connection protocol is invalid.');
+    }
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBitwardenBackend<{ bitwarden: boolean }>('bitwarden.node-reference', {
+        nodeId,
+        protocol,
+      });
+    });
+  });
+
   ipcMain.handle('logs:open-current-file', async () => {
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
@@ -3789,6 +5933,16 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       await requireWorkspaceAuth();
       return runBackend<{ opened: boolean }>('open-logs-folder');
     });
+  });
+
+  ipcMain.handle('web:bitwarden-popup-open', async (_event, sessionId: unknown) => {
+    if (!isSshSessionId(sessionId)) throw new Error('Web session id is invalid.');
+    return runAuthorizedOperation(() => webSurfaces.openBitwardenPopup(sessionId));
+  });
+
+  ipcMain.handle('web:bitwarden-popup-close', async (_event, sessionId: unknown) => {
+    if (!isSshSessionId(sessionId)) throw new Error('Web session id is invalid.');
+    return webSurfaces.closeBitwardenPopup(sessionId);
   });
 
   ipcMain.handle('tunnel:create', async (_event, value: unknown) => {
@@ -4049,7 +6203,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   });
 
   ipcMain.handle('auth:set-secret', async (_event, request: unknown) => {
-    return serializeAuthOperation(async () => {
+    return serializeAuthStateMutation(async () => {
       await ensureAuthSession();
       authSession.requireUnlocked();
       const state = await runBackend<AuthStateResponse>('auth-set-secret', request);
@@ -4058,7 +6212,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   });
 
   ipcMain.handle('auth:update-settings', async (_event, request: unknown) => {
-    return serializeAuthOperation(async () => {
+    return serializeAuthStateMutation(async () => {
       await ensureAuthSession();
       authSession.requireUnlocked();
       const state = await runBackend<AuthStateResponse>('auth-update-settings', request);
@@ -4067,26 +6221,29 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   });
 
   ipcMain.handle('auth:lock', async (event) => {
-    return serializeAuthOperation(async () => {
+    authLockRequested = true;
+    try {
+      await authStateMutationQueue.catch(() => undefined);
       await ensureAuthSession();
       authSession.lock();
       backupImportSelections.delete(event.sender);
-      sshBackend.cancelAutoSudo();
-      sshBackend.closeAllSftp();
-      try {
-        await sshBackend.setMcpLocked(true);
-      } catch {
-        // The native process may already have exited; the Electron auth session is still locked.
-      }
-      webSurfaces.hideAll();
-      const ownerWindow = BrowserWindow.fromWebContents(event.sender);
-      if (!ownerWindow || ownerWindow.isDestroyed()) return;
-      try {
-        await rdpClient?.hideAll(nativeWindowHandle(ownerWindow));
-      } catch {
-        // Authentication remains locked even if a native RDP surface has already exited.
-      }
-    });
+    } finally {
+      authLockRequested = false;
+    }
+    sshBackend.cancelAutoSudo();
+    sshBackend.closeAllSftp();
+    sshBackend.cancelPendingConnections();
+    webSurfaces.hideAll();
+    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+    // Lock is deliberately not queued behind ordinary authorized operations: a VPN test or CLI
+    // call can run for minutes. The epoch invalidates their eventual results and the renderer gets
+    // an immediate acknowledgement that covers cached SSH/VNC frames.
+    void nativeBackend?.send({ action: 'bitwarden.clear-session' }).catch(() => undefined);
+    void sshBackend.setMcpLocked(true).catch(() => undefined);
+    if (ownerWindow && !ownerWindow.isDestroyed()) {
+      rdpClient?.cancelPendingStarts(nativeWindowHandle(ownerWindow));
+      void rdpClient?.hideAll(nativeWindowHandle(ownerWindow)).catch(() => undefined);
+    }
   });
 
   ipcMain.handle('auth:hello-status', async () => {
@@ -4196,10 +6353,10 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow || ownerWindow.isDestroyed())
       throw new Error('Web session owner window is unavailable.');
-    return serializeAuthOperation(async () => {
-      await requireWorkspaceAuth();
-      return webSurfaces.open(ownerWindow, request);
-    });
+    return runAuthorizedOperation(
+      () => webSurfaces.open(ownerWindow, request),
+      () => webSurfaces.closeForOwner(ownerWindow, request.sessionId),
+    );
   });
   ipcMain.handle('web:set-bounds', async (event, request: unknown) => {
     if (!isWebBoundsRequest(request)) throw new Error('Web surface bounds are invalid.');
@@ -4207,7 +6364,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!ownerWindow || ownerWindow.isDestroyed()) return;
     // Bounds updates are intentionally lightweight, but never make private page contents visible
     // after the native workspace was locked.
-    if (process.platform === 'win32' && !authSession.isAccessAllowed) {
+    if (!authSession.isAccessAllowed) {
       webSurfaces.hideAll();
       return;
     }
@@ -4230,15 +6387,10 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   });
   ipcMain.handle('ssh:open', async (_event, request: unknown) => {
     if (!isSshOpenRequest(request)) throw new Error('SSH open request is invalid.');
-    let connection: Promise<SshConnectedResponse> | undefined;
-    await serializeAuthOperation(async () => {
-      await requireWorkspaceAuth();
-      // Start the long-lived connection inside the authorization queue, but do not make the
-      // queue wait for the remote handshake. This keeps a lock request responsive while a host
-      // is unreachable or still negotiating.
-      connection = sshBackend.open(request);
-    });
-    return connection!;
+    return runAuthorizedOperation(
+      (authorizationEpoch) => sshBackend.open(request, authorizationEpoch),
+      () => sshBackend.close(request.sessionId),
+    );
   });
   ipcMain.handle('ssh:trust-host-key', async (_event, request: unknown) => {
     if (!isSshHostKeyTrustRequest(request)) {
@@ -4442,7 +6594,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (isQuitting) {
       return { id: '', ok: false, error: 'Native backend is stopping.' };
     }
-    let command: VncCommand;
+    let command: NativeBackendCommand;
     try {
       command = parseVncCommand(input);
     } catch (error) {
@@ -4463,58 +6615,106 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
 
-    return serializeAuthOperation(async () => {
-      await requireWorkspaceAuth();
-      const client = getRdpClient();
-      const bounds = toScreenBounds(ownerWindow, request.bounds);
-      releaseRdpTunnel(request.sessionId);
-      let socksEndpoint = '';
-      if (request.profile.nodeId || request.profile.tunnelConfigId) {
-        const leaseId = randomUUID();
-        rdpTunnelLeases.set(request.sessionId, leaseId);
-        try {
-          socksEndpoint = await getNativeBackend().acquireTunnel({
-            leaseId,
-            nodeId: request.profile.nodeId,
-            tunnelConfigId: request.profile.tunnelConfigId,
-            progressSessionId: request.sessionId,
-          });
-        } catch (error) {
-          if (rdpTunnelLeases.get(request.sessionId) === leaseId) {
-            releaseRdpTunnel(request.sessionId);
+    return runAuthorizedOperation(
+      async (authorizationEpoch) => {
+        const client = getRdpClient();
+        const bounds = toScreenBounds(ownerWindow, request.bounds);
+        let bitwardenCredential: BitwardenResolvedCredential = { bitwarden: false };
+        if (request.profile.nodeId && !request.manualCredentials) {
+          try {
+            bitwardenCredential = await runBitwardenBackend<BitwardenResolvedCredential>(
+              'bitwarden.resolve-node',
+              {
+                nodeId: request.profile.nodeId,
+                protocol: 'rdp',
+              },
+            );
+          } catch (error) {
+            const message = error instanceof Error ? error.message : 'The vault could not be read.';
+            throw new Error(`Bitwarden credential is unavailable: ${message}`);
           }
-          throw error;
+          if (bitwardenCredential.bitwarden && !bitwardenCredential.username?.trim()) {
+            throw new Error('Bitwarden credential is unavailable: the RDP username is missing.');
+          }
         }
-        if (rdpTunnelLeases.get(request.sessionId) !== leaseId) {
-          throw new Error('RDP connection closed while opening its VPN tunnel.');
+        requireAuthorizationEpoch(authorizationEpoch);
+        releaseRdpTunnel(request.sessionId);
+        let socksEndpoint = '';
+        if (request.profile.nodeId || request.profile.tunnelConfigId) {
+          const leaseId = randomUUID();
+          rdpTunnelLeases.set(request.sessionId, leaseId);
+          try {
+            socksEndpoint = await getNativeBackend().acquireTunnel({
+              leaseId,
+              nodeId: request.profile.nodeId,
+              tunnelConfigId: request.profile.tunnelConfigId,
+              progressSessionId: request.sessionId,
+            });
+          } catch (error) {
+            if (rdpTunnelLeases.get(request.sessionId) === leaseId) {
+              rdpTunnelLeases.delete(request.sessionId);
+            }
+            throw error;
+          }
+          if (rdpTunnelLeases.get(request.sessionId) !== leaseId) {
+            throw new Error('RDP connection closed while opening its VPN tunnel.');
+          }
+          if (!socksEndpoint) releaseRdpTunnel(request.sessionId);
+        }
+        if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
+          releaseRdpTunnel(request.sessionId);
+          throw new Error('Authentication is required before opening the RDP connection.');
         }
         if (!socksEndpoint && request.profile.tunnelConfigId) {
           releaseRdpTunnel(request.sessionId);
           throw new Error('The VPN tunnel returned no SOCKS endpoint.');
         }
         if (!socksEndpoint) releaseRdpTunnel(request.sessionId);
-      }
-      try {
-        return await client.start(
-          {
-            ...request,
-            profile: {
-              ...request.profile,
-              socksEndpoint: socksEndpoint || undefined,
-              tunnelEnabled:
-                (request.profile.nodeId || request.profile.tunnelConfigId) && !socksEndpoint
-                  ? false
-                  : request.profile.tunnelEnabled,
+        try {
+          const { manualCredentials: _manualCredentials, ...nativeRequest } = request;
+          return await client.start(
+            {
+              ...nativeRequest,
+              profile: {
+                ...request.profile,
+                username: bitwardenCredential.bitwarden
+                  ? bitwardenCredential.username
+                  : request.profile.username,
+                domain: bitwardenCredential.bitwarden
+                  ? bitwardenCredential.domain
+                  : request.profile.domain,
+                password: bitwardenCredential.bitwarden
+                  ? bitwardenCredential.password
+                  : request.profile.password,
+                socksEndpoint: socksEndpoint || undefined,
+                tunnelEnabled:
+                  (request.profile.nodeId || request.profile.tunnelConfigId) && !socksEndpoint
+                    ? false
+                    : request.profile.tunnelEnabled,
+              },
             },
-          },
-          nativeWindowHandle(ownerWindow),
-          bounds,
-        );
-      } catch (error) {
+            nativeWindowHandle(ownerWindow),
+            bounds,
+          );
+        } catch (error) {
+          releaseRdpTunnel(request.sessionId);
+          throw error;
+        }
+      },
+      async () => {
         releaseRdpTunnel(request.sessionId);
-        throw error;
-      }
-    });
+        if (!ownerWindow.isDestroyed()) {
+          await rdpClient
+            ?.command(
+              'disconnect',
+              request.sessionId,
+              nativeWindowHandle(ownerWindow),
+              toScreenBounds(ownerWindow, request.bounds),
+            )
+            .catch(() => undefined);
+        }
+      },
+    );
   });
 
   ipcMain.handle('rdp:resize', async (event, value: unknown) => {
@@ -4685,10 +6885,15 @@ function parseRdpStartRequest(value: unknown): RdpStartRequest {
   if (typeof profile.gatewayPassword === 'string' && profile.gatewayPassword.length > 4096) {
     throw new Error('RDP gateway password is too long.');
   }
+  const manualCredentials = valueAsUnknown(value, 'manualCredentials');
+  if (manualCredentials !== undefined && typeof manualCredentials !== 'boolean') {
+    throw new Error('RDP credential source is invalid.');
+  }
   return {
     sessionId,
     profile: { ...profile, host },
     bounds: parseOptionalBounds(valueAsUnknown(value, 'bounds')),
+    manualCredentials,
   };
 }
 
@@ -4803,8 +7008,10 @@ function createWindow() {
       // native unlock survive into the new context before it proves possession of the secret.
       authSession.lock();
       backupImportSelections.delete(window.webContents);
+      await nativeBackend?.send({ action: 'bitwarden.clear-session' }).catch(() => undefined);
       sshBackend.cancelAutoSudo();
       sshBackend.closeAllSftp();
+      sshBackend.cancelPendingConnections();
       try {
         await sshBackend.setMcpLocked(true);
       } catch {
@@ -4820,6 +7027,23 @@ function createWindow() {
     console.error(`[Wormhole] Preload failed (${path.basename(preloadPath)}).`, error.message);
   });
 
+  let windowCloseCleanupStarted = false;
+  window.on('close', (event) => {
+    if (isQuitting || windowCloseCleanupStarted) return;
+    event.preventDefault();
+    windowCloseCleanupStarted = true;
+    void withBitwardenBrowserTimeout(
+      webSurfaces.flushAndCloseForWindow(window),
+      30_000,
+      'Bitwarden browser storage window-close flush timed out.',
+    )
+      .catch((error) => {
+        console.warn('[Wormhole] Browser window shutdown did not finish cleanly.', error);
+      })
+      .finally(() => {
+        if (!window.isDestroyed()) window.destroy();
+      });
+  });
   window.once('closed', () => webSurfaces.closeForWindow(window));
   window.webContents.on('will-navigate', (event, targetUrl) => {
     if (!isTrustedRendererNavigation(targetUrl, productionRendererPath)) event.preventDefault();
@@ -4849,34 +7073,67 @@ const sshBackend = new NativeSshBackend();
 authSession.onUnlocked(() => {
   sshBackend.requestSnapshots();
   serialBackend?.requestSnapshots();
-  serialBackend?.requestSnapshots();
+  void runBitwardenStartupMaintenance();
+  void showBitwardenOnboardingNoticeIfNeeded();
   void sshBackend.syncMcpAfterUnlock().catch((error) => {
     console.error('[Wormhole] Could not synchronize the native MCP server after unlock.', error);
   });
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   registerIpcHandlers(sshBackend);
+  await ensureWebSharedSessionReady();
+  try {
+    await runFirstLaunchMigrations();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[Wormhole] Credential Manager migration failed.', message);
+  }
   createWindow();
+  startBitwardenBackgroundMaintenance();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
-app.on('before-quit', () => {
+let quitCleanupStarted = false;
+let quitCleanupComplete = false;
+
+app.on('before-quit', (event) => {
   isQuitting = true;
   if (startupUpdateTimer) clearTimeout(startupUpdateTimer);
   startupUpdateTimer = undefined;
   updateDownloadChild?.kill();
   updateDownloadChild = undefined;
-  webSurfaces.closeAll();
-  nativeBackend?.stop();
-  nativeBackend = undefined;
-  serialBackend?.dispose();
-  serialBackend = undefined;
-  sshBackend.dispose();
-  void rdpClient?.dispose();
+  if (bitwardenBackgroundTimer) {
+    clearInterval(bitwardenBackgroundTimer);
+    bitwardenBackgroundTimer = undefined;
+  }
+  if (quitCleanupComplete) return;
+  event.preventDefault();
+  if (quitCleanupStarted) return;
+  quitCleanupStarted = true;
+  void (async () => {
+    try {
+      await withBitwardenBrowserTimeout(
+        webSurfaces.flushAndCloseAll(),
+        30_000,
+        'Bitwarden browser storage shutdown flush timed out.',
+      );
+    } catch (error) {
+      console.warn('[Wormhole] Browser session shutdown did not finish cleanly.', error);
+    } finally {
+      nativeBackend?.stop();
+      nativeBackend = undefined;
+      serialBackend?.dispose();
+      serialBackend = undefined;
+      sshBackend.dispose();
+      await rdpClient?.dispose().catch(() => undefined);
+      quitCleanupComplete = true;
+      app.quit();
+    }
+  })();
 });
 
 app.on('window-all-closed', () => {

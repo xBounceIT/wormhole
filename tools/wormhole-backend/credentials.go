@@ -19,14 +19,20 @@ const (
 	maxCredentialDomainLength   = 512
 	maxStoredCredentialPassword = 4096
 	maxStoredCredentialBytes    = maxStoredCredentialPassword * utf8.UTFMax
+	maxBitwardenItemIDLength    = 512
+	maxBitwardenItemNameLength  = 1024
 )
 
 type credentialCreateRequest struct {
-	Name     string `json:"name"`
-	Protocol string `json:"protocol"`
-	Username string `json:"username"`
-	Domain   string `json:"domain"`
-	Password string `json:"password"`
+	Name               string `json:"name"`
+	Protocol           string `json:"protocol"`
+	Username           string `json:"username"`
+	Domain             string `json:"domain"`
+	Password           string `json:"password"`
+	Provider           string `json:"provider"`
+	BitwardenItemID    string `json:"bitwardenItemId"`
+	BitwardenItemName  string `json:"bitwardenItemName"`
+	BitwardenFieldPath string `json:"bitwardenFieldPath"`
 }
 
 type credentialUpdateRequest struct {
@@ -45,6 +51,10 @@ type normalizedCredentialDraft struct {
 	username      string
 	domain        string
 	password      string
+	provider      int64
+	itemID        string
+	itemName      string
+	fieldPath     string
 }
 
 // These indirections let the database transaction and validation behavior be covered on every
@@ -53,7 +63,7 @@ var credentialSecretStore = storeCredentialSecret
 var credentialSecretDelete = deleteStoredCredentialSecret
 
 func createCredential(databasePath string, request credentialCreateRequest) (credentialRecord, error) {
-	draft, err := normalizeCredentialDraft(request)
+	draft, err := normalizeCredentialDraft(request, false)
 	if err != nil {
 		return credentialRecord{}, err
 	}
@@ -76,35 +86,46 @@ func createCredential(databasePath string, request credentialCreateRequest) (cre
 	if err != nil {
 		return credentialRecord{}, errors.New("could not allocate a credential identifier")
 	}
-	encoded, encoding, err := credentialSecretStore(id, draft.password)
-	if err != nil {
-		return credentialRecord{}, errors.New("could not protect the credential password")
+	var encoded, encoding string
+	if draft.provider == 0 {
+		encoded, encoding, err = credentialSecretStore(id, draft.password)
+		if err != nil {
+			return credentialRecord{}, errors.New("could not protect the credential password")
+		}
 	}
 
 	tx, err := database.Begin()
 	if err != nil {
-		_ = credentialSecretDelete(id, encoded, encoding)
+		if draft.provider == 0 && draft.password != "" {
+			_ = credentialSecretDelete(id, encoded, encoding)
+		}
 		return credentialRecord{}, fmt.Errorf("could not start credential save: %w", err)
 	}
 	committed := false
 	defer func() {
 		if !committed {
 			_ = tx.Rollback()
-			_ = credentialSecretDelete(id, encoded, encoding)
+			if draft.provider == 0 && draft.password != "" {
+				_ = credentialSecretDelete(id, encoded, encoding)
+			}
 		}
 	}()
 
 	createdAt := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := tx.Exec(`
 INSERT INTO CredentialProfiles
-    (Id, Name, Username, Domain, Kind, PrivateKeyFileName, Protocol, SecretProvider, CreatedAt)
-VALUES (?, ?, ?, ?, 0, NULL, ?, 0, ?);`,
+    (Id, Name, Username, Domain, Kind, PrivateKeyFileName, Protocol, SecretProvider,
+     BitwardenItemId, BitwardenItemName, BitwardenFieldPath, CreatedAt)
+VALUES (?, ?, ?, ?, 0, NULL, ?, ?, ?, ?, ?, ?);`,
 		id, draft.name, nullableCredentialField(draft.username), nullableCredentialField(draft.domain),
-		draft.protocolValue, createdAt); err != nil {
+		draft.protocolValue, draft.provider, nullableCredentialField(draft.itemID),
+		nullableCredentialField(draft.itemName), draft.fieldPath, createdAt); err != nil {
 		return credentialRecord{}, normalizeCredentialWriteError(err)
 	}
-	if err := upsertCredentialSecret(tx, id, encoded, encoding); err != nil {
-		return credentialRecord{}, err
+	if draft.provider == 0 {
+		if err := upsertCredentialSecret(tx, id, encoded, encoding); err != nil {
+			return credentialRecord{}, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return credentialRecord{}, fmt.Errorf("could not save credential: %w", err)
@@ -112,7 +133,8 @@ VALUES (?, ?, ?, ?, 0, NULL, ?, 0, ?);`,
 	committed = true
 	return credentialRecord{
 		ID: id, Name: draft.name, Protocol: draft.protocol, Username: displayCredentialUsername(draft.username),
-		Domain: draft.domain, Provider: "Local", CanEdit: true, CanDelete: true,
+		Domain: draft.domain, Provider: providerName(draft.provider), CanEdit: true, CanDelete: true,
+		BitwardenItemID: draft.itemID, BitwardenItemName: draft.itemName,
 	}, nil
 }
 
@@ -121,7 +143,7 @@ func updateCredential(databasePath string, request credentialUpdateRequest) (cre
 	if !validCredentialID(id) {
 		return credentialRecord{}, errors.New("credential id is invalid")
 	}
-	draft, err := normalizeCredentialDraft(request.credentialCreateRequest)
+	draft, err := normalizeCredentialDraft(request.credentialCreateRequest, true)
 	if err != nil {
 		return credentialRecord{}, err
 	}
@@ -146,8 +168,11 @@ func updateCredential(databasePath string, request credentialUpdateRequest) (cre
 	if err != nil {
 		return credentialRecord{}, fmt.Errorf("could not read credential: %w", err)
 	}
-	if kind != 0 || provider != 0 {
-		return credentialRecord{}, errors.New("only local password credentials can be edited in Electron")
+	if kind != 0 || (provider != 0 && provider != 1) {
+		return credentialRecord{}, errors.New("only password credentials can be edited in Electron")
+	}
+	if draft.provider == 0 && draft.password == "" && provider != 0 {
+		return credentialRecord{}, errors.New("a password is required when changing to local storage")
 	}
 	if exists, err := credentialNameExists(database, draft.name, id); err != nil {
 		return credentialRecord{}, err
@@ -162,29 +187,42 @@ func updateCredential(databasePath string, request credentialUpdateRequest) (cre
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return credentialRecord{}, fmt.Errorf("could not read credential secret: %w", err)
 	}
+	if draft.provider == 0 && draft.password == "" &&
+		(!previousEncoded.Valid || !previousEncoding.Valid) {
+		return credentialRecord{}, errors.New("the stored credential password is missing; enter it again")
+	}
 
-	encoded, encoding, err := credentialSecretStore(id, draft.password)
-	if err != nil {
-		return credentialRecord{}, errors.New("could not protect the credential password")
+	var encoded, encoding string
+	if draft.provider == 0 && draft.password != "" {
+		encoded, encoding, err = credentialSecretStore(id, draft.password)
+		if err != nil {
+			return credentialRecord{}, errors.New("could not protect the credential password")
+		}
 	}
 	tx, err := database.Begin()
 	if err != nil {
-		_ = credentialSecretDelete(id, encoded, encoding)
+		if draft.provider == 0 && draft.password != "" {
+			_ = credentialSecretDelete(id, encoded, encoding)
+		}
 		return credentialRecord{}, fmt.Errorf("could not start credential update: %w", err)
 	}
 	committed := false
 	defer func() {
 		if !committed {
 			_ = tx.Rollback()
-			_ = credentialSecretDelete(id, encoded, encoding)
+			if draft.provider == 0 && draft.password != "" {
+				_ = credentialSecretDelete(id, encoded, encoding)
+			}
 		}
 	}()
 	result, err := tx.Exec(`
 UPDATE CredentialProfiles
-SET Name = ?, Username = ?, Domain = ?, Protocol = ?, SecretProvider = 0
-WHERE lower(Id) = ? AND COALESCE(Kind, 0) = 0 AND COALESCE(SecretProvider, 0) = 0;`,
+SET Name = ?, Username = ?, Domain = ?, Protocol = ?, SecretProvider = ?,
+    BitwardenItemId = ?, BitwardenItemName = ?, BitwardenFieldPath = ?
+WHERE lower(Id) = ? AND COALESCE(Kind, 0) = 0 AND COALESCE(SecretProvider, 0) IN (0, 1);`,
 		draft.name, nullableCredentialField(draft.username), nullableCredentialField(draft.domain),
-		draft.protocolValue, id)
+		draft.protocolValue, draft.provider, nullableCredentialField(draft.itemID),
+		nullableCredentialField(draft.itemName), draft.fieldPath, id)
 	if err != nil {
 		return credentialRecord{}, normalizeCredentialWriteError(err)
 	}
@@ -195,20 +233,27 @@ WHERE lower(Id) = ? AND COALESCE(Kind, 0) = 0 AND COALESCE(SecretProvider, 0) = 
 	if count == 0 {
 		return credentialRecord{}, errors.New("credential is no longer an editable local password")
 	}
-	if err := upsertCredentialSecret(tx, id, encoded, encoding); err != nil {
-		return credentialRecord{}, err
+	if draft.provider == 0 {
+		if draft.password != "" {
+			if err := upsertCredentialSecret(tx, id, encoded, encoding); err != nil {
+				return credentialRecord{}, err
+			}
+		}
+	} else if _, err := tx.Exec("DELETE FROM CredentialSecrets WHERE lower(Id) = ?;", id); err != nil {
+		return credentialRecord{}, fmt.Errorf("could not remove the obsolete local credential secret: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return credentialRecord{}, fmt.Errorf("could not update credential: %w", err)
 	}
 	committed = true
-	if previousEncoded.Valid && previousEncoding.Valid &&
+	if (draft.provider != 0 || draft.password != "") && previousEncoded.Valid && previousEncoding.Valid &&
 		(previousEncoded.String != encoded || previousEncoding.String != encoding) {
 		_ = credentialSecretDelete(id, previousEncoded.String, previousEncoding.String)
 	}
 	return credentialRecord{
 		ID: id, Name: draft.name, Protocol: draft.protocol, Username: displayCredentialUsername(draft.username),
-		Domain: draft.domain, Provider: "Local", CanEdit: true, CanDelete: true,
+		Domain: draft.domain, Provider: providerName(draft.provider), CanEdit: true, CanDelete: true,
+		BitwardenItemID: draft.itemID, BitwardenItemName: draft.itemName,
 	}, nil
 }
 
@@ -299,11 +344,23 @@ func deleteCredentialPrivateKey(databasePath, id string) error {
 	return err
 }
 
-func normalizeCredentialDraft(request credentialCreateRequest) (normalizedCredentialDraft, error) {
+func normalizeCredentialDraft(
+	request credentialCreateRequest,
+	allowMissingLocalPassword bool,
+) (normalizedCredentialDraft, error) {
 	name := strings.TrimSpace(request.Name)
 	username := strings.TrimSpace(request.Username)
 	domain := strings.TrimSpace(request.Domain)
 	protocol := strings.ToLower(strings.TrimSpace(request.Protocol))
+	providerName := strings.ToLower(strings.TrimSpace(request.Provider))
+	provider := int64(0)
+	if providerName == "bitwarden" {
+		provider = 1
+	} else if providerName != "" && providerName != "local" {
+		return normalizedCredentialDraft{}, errors.New("credential provider is invalid")
+	}
+	itemID := strings.TrimSpace(request.BitwardenItemID)
+	itemName := strings.TrimSpace(request.BitwardenItemName)
 
 	if name == "" || !validCredentialText(name, maxCredentialNameLength) {
 		return normalizedCredentialDraft{}, errors.New("credential name is invalid")
@@ -314,8 +371,20 @@ func normalizeCredentialDraft(request credentialCreateRequest) (normalizedCreden
 	if !validCredentialText(domain, maxCredentialDomainLength) {
 		return normalizedCredentialDraft{}, errors.New("credential domain is invalid")
 	}
-	if request.Password == "" || utf8.RuneCountInString(request.Password) > maxStoredCredentialPassword {
-		return normalizedCredentialDraft{}, errors.New("credential password is invalid")
+	if provider == 0 {
+		if (!allowMissingLocalPassword && request.Password == "") ||
+			utf8.RuneCountInString(request.Password) > maxStoredCredentialPassword {
+			return normalizedCredentialDraft{}, errors.New("credential password is invalid")
+		}
+		itemID = ""
+		itemName = ""
+	} else {
+		if itemID == "" || !validCredentialText(itemID, maxBitwardenItemIDLength) {
+			return normalizedCredentialDraft{}, errors.New("Bitwarden item id is invalid")
+		}
+		if !validCredentialText(itemName, maxBitwardenItemNameLength) {
+			return normalizedCredentialDraft{}, errors.New("Bitwarden item name is invalid")
+		}
 	}
 
 	protocolValue := int64(0)
@@ -341,7 +410,8 @@ func normalizeCredentialDraft(request credentialCreateRequest) (normalizedCreden
 	}
 	return normalizedCredentialDraft{
 		name: name, protocol: protocol, protocolValue: protocolValue, username: username, domain: domain,
-		password: request.Password,
+		password: request.Password, provider: provider, itemID: itemID, itemName: itemName,
+		fieldPath: "login.password",
 	}, nil
 }
 

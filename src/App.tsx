@@ -15,8 +15,9 @@ import {
   type ReactNode,
 } from 'react';
 import './index.css';
-import wormholeIcon from '../Assets/wormhole-logo-transparent.png';
 import { backupExportPasswordsMatch } from './backup-state';
+import wormholeIcon from '../Assets/Wormhole.png';
+import bitwardenIcon from '../Assets/Bitwarden/bitwarden-icon.png';
 import { mergeCredential } from './credential-state';
 import {
   parentLocalSftpPath,
@@ -56,6 +57,7 @@ import {
   ChevronUp,
   Check,
   Copy,
+  Database,
   Download,
   File,
   FilePlus2,
@@ -159,6 +161,12 @@ import {
   quickConnectTunnelId,
   type QuickConnectProtocol,
 } from './quick-connect-state';
+import { KeyedRetryQueue } from './keyed-retry-queue';
+import {
+  isBitwardenCredentialError,
+  isBitwardenUnlockError,
+  requiresSshCredentialPrompt,
+} from './runtime-credential-errors';
 import { VncSurface } from './components/VncSurface';
 import { RdpSurface, type RdpUiStatus } from './components/RdpSurface';
 import { WebSurface } from './components/WebSurface';
@@ -190,6 +198,7 @@ import {
 
 type Protocol = QuickConnectProtocol;
 type AutoSudoMode = 'inherit' | 'on' | 'off';
+type CredentialSelection = 'inherit' | 'none' | string;
 type NavItem = 'sessions' | 'credentials' | 'tunnels' | 'settings';
 type AuthPromptKind = 'lock' | 'confirmation';
 
@@ -265,6 +274,8 @@ type TreeNode = {
   sshAutoSudo?: boolean | null;
   tunnelEnabled?: boolean | null;
   tunnelConfigId?: string;
+  credentialMode?: number;
+  credentialId?: string;
   persisted?: boolean;
   children?: TreeNode[];
 };
@@ -449,6 +460,7 @@ type Session = {
   webUrl?: string;
   webCanGoBack?: boolean;
   webCanGoForward?: boolean;
+  bitwardenPopupUrl?: string;
 };
 
 type RdpCredentials = {
@@ -471,6 +483,9 @@ type CredentialRecord = {
   provider: 'Local' | 'Bitwarden';
   canEdit: boolean;
   canDelete: boolean;
+  bitwardenItemId?: string;
+  bitwardenItemName?: string;
+  isVirtualBitwarden?: boolean;
 };
 
 type CredentialDialogState =
@@ -478,16 +493,130 @@ type CredentialDialogState =
   | { kind: 'error'; message: string };
 type CredentialCopyField = 'username' | 'secret';
 
+function CredentialProviderIcon({ provider }: { provider: CredentialRecord['provider'] }) {
+  const isBitwarden = provider === 'Bitwarden';
+  const label = isBitwarden
+    ? 'Stored in Bitwarden'
+    : "Stored in Wormhole's local credential database";
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          aria-label={label}
+          className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-border/70 bg-background shadow-xs outline-none transition-colors hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/50"
+          role="img"
+          tabIndex={0}
+        >
+          {isBitwarden ? (
+            <img alt="" className="size-4 rounded-[3px]" draggable={false} src={bitwardenIcon} />
+          ) : (
+            <Database aria-hidden="true" className="size-4 text-muted-foreground" />
+          )}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="bottom">{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 type CredentialDraft = {
   name: string;
   protocol: 'ssh' | 'rdp' | 'vnc';
   username: string;
   domain: string;
   password: string;
+  provider: 'Local' | 'Bitwarden';
+  bitwardenItemId: string;
+  bitwardenItemName: string;
 };
 
 function emptyCredentialDraft(): CredentialDraft {
-  return { name: '', protocol: 'ssh', username: '', domain: '', password: '' };
+  return {
+    name: '',
+    protocol: 'ssh',
+    username: '',
+    domain: '',
+    password: '',
+    provider: 'Local',
+    bitwardenItemId: '',
+    bitwardenItemName: '',
+  };
+}
+
+function credentialSelectionFor(node: Pick<TreeNode, 'credentialMode' | 'credentialId'>) {
+  if (node.credentialMode === 1) return 'none';
+  if ((node.credentialMode === 2 || node.credentialMode == null) && node.credentialId) {
+    return node.credentialId;
+  }
+  return 'inherit';
+}
+
+function credentialSettingsFor(selection: CredentialSelection): {
+  mode: 0 | 1 | 2;
+  credentialId: string;
+} {
+  if (selection === 'inherit') return { mode: 0, credentialId: '' };
+  if (selection === 'none') return { mode: 1, credentialId: '' };
+  return { mode: 2, credentialId: selection };
+}
+
+function backendErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function formatLocalDateTime(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleString();
+}
+
+function formatBitwardenExtensionStatus(state: WormholeBitwardenExtensionState): string {
+  if (!state.enabled) return 'Disabled';
+  if (!state.installed) {
+    return 'Not installed. Wormhole will install the official Bitwarden browser extension automatically.';
+  }
+  const sourceLabel =
+    state.source === 'ManualZip'
+      ? 'manual ZIP, pinned'
+      : state.source === 'ManualFolder'
+        ? 'manual folder, pinned'
+        : 'official release, auto-update enabled';
+  const parts = [
+    `Installed ${state.installed.version} (${sourceLabel}). HTTPS tabs will load the Bitwarden extension.`,
+  ];
+  if (state.lastUpdateCheckUtc) {
+    parts.push(`Last update check: ${formatLocalDateTime(state.lastUpdateCheckUtc)}.`);
+  }
+  if (state.lastUpdateStatus) parts.push(state.lastUpdateStatus);
+  if (state.availableVersion) parts.push(`Available version: ${state.availableVersion}.`);
+  if (state.lastUpdateError) parts.push(`Last update error: ${state.lastUpdateError}.`);
+  return parts.join(' ');
+}
+
+function formatBitwardenCliStatus(status: WormholeBitwardenCliStatus): string {
+  switch (status.status) {
+    case 'Unlocked':
+      return 'Unlocked';
+    case 'Locked':
+      return 'Locked';
+    case 'Unauthenticated':
+      return 'Not logged in';
+    default:
+      return 'Unknown';
+  }
+}
+
+function bitwardenCliServerRegionCode(serverUrl: string | null | undefined): 'US' | 'EU' | null {
+  if (!serverUrl) return null;
+  try {
+    const hostname = new URL(serverUrl).hostname.toLowerCase();
+    if (hostname === 'bitwarden.eu' || hostname.endsWith('.bitwarden.eu')) return 'EU';
+    if (hostname === 'bitwarden.com' || hostname.endsWith('.bitwarden.com')) return 'US';
+  } catch {
+    // A custom or malformed CLI server URL has no US/EU shorthand.
+  }
+  return null;
 }
 
 type TunnelRecord = {
@@ -621,73 +750,6 @@ function findFirstConnection(nodes: TreeNode[]): TreeNode | undefined {
     }
   }
   return undefined;
-}
-
-function updateConnectionInTree(
-  nodes: TreeNode[],
-  connectionId: string,
-  folderId: string,
-  update: {
-    name: string;
-    host: string;
-    protocol: Protocol;
-    serialSettings?: SerialSettings;
-    sshAutoSudo: boolean | null;
-    httpIgnoreCertErrors?: boolean;
-    tunnelEnabled: boolean | null;
-    tunnelConfigId: string;
-  },
-): TreeNode[] {
-  let editedConnection: TreeNode | undefined;
-
-  function removeConnection(items: TreeNode[]): TreeNode[] {
-    return items.flatMap((node) => {
-      if (node.id === connectionId) {
-        const { serialSettings, ...baseUpdate } = update;
-        editedConnection = {
-          ...node,
-          ...baseUpdate,
-          ...(serialSettings
-            ? {
-                serialBaudRate: serialSettings.baudRate,
-                serialDataBits: serialSettings.dataBits,
-                serialStopBits: serialSettings.stopBits,
-                serialParity: serialSettings.parity,
-                serialFlowControl: serialSettings.flowControl,
-              }
-            : {}),
-        };
-        return [];
-      }
-
-      return node.children ? [{ ...node, children: removeConnection(node.children) }] : [node];
-    });
-  }
-
-  const remaining = removeConnection(nodes);
-  if (!editedConnection) return nodes;
-
-  return folderId
-    ? insertIntoTreeFolder(remaining, folderId, [editedConnection])
-    : [...remaining, editedConnection];
-}
-
-function updateFolderInTree(
-  nodes: TreeNode[],
-  folderId: string,
-  update: {
-    name: string;
-    sshAutoSudo: boolean | null;
-    tunnelEnabled: boolean | null;
-    tunnelConfigId: string;
-  },
-): TreeNode[] {
-  return nodes.map((node) => {
-    if (node.id === folderId) return { ...node, ...update };
-    return node.children
-      ? { ...node, children: updateFolderInTree(node.children, folderId, update) }
-      : node;
-  });
 }
 
 type IconButtonProps = Omit<ComponentProps<typeof Button>, 'children' | 'size'> & {
@@ -1152,6 +1214,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const quickConnectSubmitInFlight = useRef(false);
   const sshCredentialSubmitInFlight = useRef(false);
   const webSessionAttempts = useRef(new WebSessionAttemptTracker());
+  const rdpBitwardenAttempts = useRef(new Set<string>());
+  const runtimeBitwardenRetries = useRef(new KeyedRetryQueue<string>());
   const [activePage, setActivePage] = useState<NavItem>('sessions');
   const [expanded, setExpanded] = useState<Set<string>>(
     () => new Set(collectFolderIds(initialWorkspace.tree)),
@@ -1170,7 +1234,22 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     domain: '',
     password: '',
   });
-  const [sshCredentialPrompt, setSshCredentialPrompt] = useState<string | null>(null);
+  const [sshCredentialPrompt, setSshCredentialPrompt] = useState<{
+    kind: 'saved' | 'quick';
+    backendSessionId?: string;
+    nodeId?: string;
+    sessionId?: string;
+  } | null>(null);
+  const [sshCredentialForm, setSshCredentialForm] = useState<SshCredentials>({
+    username: '',
+    password: '',
+  });
+  const [bitwardenUnlockPrompt, setBitwardenUnlockPrompt] = useState<{ reason: string } | null>(
+    null,
+  );
+  const [bitwardenUnlockPassword, setBitwardenUnlockPassword] = useState('');
+  const [bitwardenUnlockBusy, setBitwardenUnlockBusy] = useState(false);
+  const [bitwardenUnlockError, setBitwardenUnlockError] = useState('');
   const [quickConnectOpen, setQuickConnectOpen] = useState(false);
   const [quickConnectForm, setQuickConnectForm] = useState({
     name: '',
@@ -1189,7 +1268,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     name: '',
     sshAutoSudo: 'inherit' as AutoSudoMode,
     tunnel: 'inherit' as TunnelMode,
+    credential: 'inherit' as CredentialSelection,
   });
+  const [folderCredentialOptions, setFolderCredentialOptions] = useState<CredentialRecord[]>([]);
   const [editorError, setEditorError] = useState('');
   const [editorBusy, setEditorBusy] = useState(false);
   const [credentialDialog, setCredentialDialog] = useState<CredentialDialogState | null>(null);
@@ -1210,8 +1291,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     sshAutoSudo: 'inherit' as AutoSudoMode,
     httpIgnoreCertErrors: false,
     tunnel: 'inherit' as TunnelMode,
+    credential: 'inherit' as CredentialSelection,
     serial: { ...defaultSerialSettings },
   });
+  const [connectionCredentialOptions, setConnectionCredentialOptions] = useState<
+    CredentialRecord[]
+  >([]);
   const [newFolderOpen, setNewFolderOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [newFolderParentId, setNewFolderParentId] = useState<string | null>(null);
@@ -1374,6 +1459,69 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       // The release page is a convenience; a failure is not user-actionable here.
     });
   }
+
+  useEffect(() => {
+    const protocol = newConnectionForm.protocol;
+    if (
+      !newConnectionOpen ||
+      !window.wormhole ||
+      (protocol !== 'ssh' && protocol !== 'rdp' && protocol !== 'vnc')
+    ) {
+      setConnectionCredentialOptions([]);
+      return;
+    }
+    let active = true;
+    void window.wormhole
+      .listCredentialsForProtocol(protocol)
+      .then((items) => {
+        if (active) setConnectionCredentialOptions(items as CredentialRecord[]);
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setConnectionCredentialOptions([]);
+          setEditorError(
+            error instanceof Error ? error.message : 'Could not load saved credentials.',
+          );
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [credentials, newConnectionForm.protocol, newConnectionOpen]);
+
+  useEffect(() => {
+    if (!folderDetailsOpen || !window.wormhole) {
+      setFolderCredentialOptions([]);
+      return;
+    }
+    let active = true;
+    void Promise.all(
+      (['ssh', 'rdp', 'vnc'] as const).map((protocol) =>
+        window.wormhole!.listCredentialsForProtocol(protocol),
+      ),
+    )
+      .then((groups) => {
+        if (!active) return;
+        const byID = new Map<string, CredentialRecord>();
+        for (const credential of groups.flat() as CredentialRecord[]) {
+          byID.set(credential.id, credential);
+        }
+        setFolderCredentialOptions(
+          [...byID.values()].sort((left, right) => left.name.localeCompare(right.name)),
+        );
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          setFolderCredentialOptions([]);
+          setEditorError(
+            error instanceof Error ? error.message : 'Could not load saved credentials.',
+          );
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [credentials, folderDetailsOpen]);
 
   const requestAuthentication = useCallback(
     (reason: string) => {
@@ -1991,6 +2139,16 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setNewFolderOpen(false);
     setEditingConnectionId(null);
     setEditingFolderId(null);
+    setSshCredentialPrompt(null);
+    setSshCredentialForm({ username: '', password: '' });
+    setRdpCredentialPrompt(null);
+    setRdpCredentialForm({ username: '', domain: '', password: '' });
+    setRdpCredentials({});
+    rdpBitwardenAttempts.current.clear();
+    runtimeBitwardenRetries.current.clear();
+    setBitwardenUnlockPrompt(null);
+    setBitwardenUnlockPassword('');
+    setBitwardenUnlockError('');
     setNewFolderParentId(null);
     setEditorError('');
     setCredentialDialog(null);
@@ -2016,6 +2174,16 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   useEffect(() => {
     const unsubscribe = window.wormhole?.onRdpEvent((event) => {
       if (!event.sessionId) return;
+      const bitwardenAuthenticationFailure =
+        rdpBitwardenAttempts.current.has(event.sessionId) &&
+        (event.type === 'logonError' ||
+          (event.type === 'fatalError' &&
+            /authenticat|credential|logon|password/i.test(event.message ?? '')));
+      if (bitwardenAuthenticationFailure) {
+        rdpBitwardenAttempts.current.delete(event.sessionId);
+        setRdpCredentialForm({ username: '', domain: '', password: '' });
+        setRdpCredentialPrompt(event.sessionId);
+      }
       setSessions((current) =>
         current.map((session) => {
           if (session.id !== event.sessionId) return session;
@@ -2203,6 +2371,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     username?: string;
     password?: string;
     tunnelConfigId?: string;
+    manualCredentials?: boolean;
   }) {
     const api = window.wormhole;
     if (!api) {
@@ -2216,19 +2385,118 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       return;
     }
 
-    void api.openSshSession({ ...request, columns: 80, rows: 24 }).catch((error: unknown) => {
-      setSessions((current) =>
-        current.map((session) =>
-          session.backendSessionId === request.sessionId
-            ? {
-                ...session,
-                status: 'failed',
-                error: error instanceof Error ? error.message : String(error),
-              }
-            : session,
-        ),
-      );
+    void api
+      .openSshSession({
+        ...request,
+        columns: 80,
+        rows: 24,
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        if (isBitwardenUnlockError(message)) {
+          requestRuntimeBitwardenUnlock(`ssh:${request.sessionId}`, message, () =>
+            startSshSession(request),
+          );
+        } else if (
+          request.nodeId &&
+          !request.manualCredentials &&
+          requiresSshCredentialPrompt(message)
+        ) {
+          setSshCredentialForm({ username: '', password: '' });
+          setSshCredentialPrompt({
+            kind: 'saved',
+            backendSessionId: request.sessionId,
+            nodeId: request.nodeId,
+          });
+        }
+        setSessions((current) =>
+          current.map((session) =>
+            session.backendSessionId === request.sessionId
+              ? {
+                  ...session,
+                  status: 'failed',
+                  error: message,
+                }
+              : session,
+          ),
+        );
+      });
+  }
+
+  function submitSshCredentials(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const prompt = sshCredentialPrompt;
+    if (!prompt || !sshCredentialForm.username.trim()) return;
+    const credentials = {
+      username: sshCredentialForm.username.trim(),
+      password: sshCredentialForm.password,
+    };
+    setSshCredentialPrompt(null);
+    setSshCredentialForm({ username: '', password: '' });
+    if (prompt.kind === 'quick' && prompt.sessionId) {
+      sshCredentialSubmitInFlight.current = true;
+      startQuickSshSession(prompt.sessionId, credentials);
+      return;
+    }
+    if (!prompt.backendSessionId || !prompt.nodeId) return;
+    setSessions((current) =>
+      current.map((session) =>
+        session.backendSessionId === prompt.backendSessionId
+          ? { ...session, status: 'connecting', error: undefined }
+          : session,
+      ),
+    );
+    startSshSession({
+      sessionId: prompt.backendSessionId,
+      nodeId: prompt.nodeId,
+      manualCredentials: true,
+      username: credentials.username,
+      password: credentials.password,
     });
+  }
+
+  function requestRuntimeBitwardenUnlock(key: string, reason: string, retry: () => void) {
+    const isFirst = runtimeBitwardenRetries.current.upsert(key, retry);
+    if (isFirst) {
+      setBitwardenUnlockPassword('');
+      setBitwardenUnlockError('');
+    }
+    setBitwardenUnlockPrompt((current) => current ?? { reason });
+  }
+
+  function dismissRuntimeBitwardenUnlock() {
+    runtimeBitwardenRetries.current.clear();
+    setBitwardenUnlockPrompt(null);
+    setBitwardenUnlockPassword('');
+    setBitwardenUnlockError('');
+  }
+
+  async function submitRuntimeBitwardenUnlock(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const prompt = bitwardenUnlockPrompt;
+    if (!prompt || !window.wormhole || bitwardenUnlockBusy) return;
+    setBitwardenUnlockBusy(true);
+    setBitwardenUnlockError('');
+    const masterPassword = bitwardenUnlockPassword;
+    setBitwardenUnlockPassword('');
+    try {
+      await window.wormhole.unlockBitwardenCli(masterPassword);
+      try {
+        await refreshWorkspaceCredentials();
+      } catch {
+        // The vault session is already valid. A transient catalog refresh failure must not keep
+        // live connections blocked; the next workspace refresh will reconcile the visible list.
+      }
+      const retries = runtimeBitwardenRetries.current.drain();
+      setBitwardenUnlockPrompt(null);
+      for (const retry of retries) retry();
+    } catch (error: unknown) {
+      setBitwardenUnlockError(
+        error instanceof Error ? error.message : 'Bitwarden could not unlock the vault.',
+      );
+    } finally {
+      setBitwardenUnlockBusy(false);
+    }
   }
 
   function startSerialSession(
@@ -2312,6 +2580,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       ...candidate,
                       webUrl: target.url,
                       webIgnoreCertErrors: target.ignoreCertErrors,
+                      bitwardenPopupUrl: target.bitwarden?.popupUrl,
                     }
                   : candidate,
               )
@@ -2368,10 +2637,38 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     };
   }
 
-  function requestRdpCredentials(sessionId: string) {
+  async function requestRdpCredentials(sessionId: string) {
     const session = sessions.find((candidate) => candidate.id === sessionId);
     if (!session || session.protocol !== 'rdp') return;
     const existing = rdpCredentials[sessionId];
+    setSelectedSessionId(sessionId);
+    setActivePage('sessions');
+    if (existing) {
+      startRdpSession(sessionId, existing, true);
+      return;
+    }
+    if (session.nodeId && window.wormhole) {
+      try {
+        const result = await window.wormhole.nodeUsesBitwarden({
+          nodeId: session.nodeId,
+          protocol: 'rdp',
+        });
+        if (result.bitwarden) {
+          startRdpSession(sessionId, { username: '', domain: '', password: '' }, false);
+          return;
+        }
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        setSessions((current) =>
+          current.map((candidate) =>
+            candidate.id === sessionId
+              ? { ...candidate, rdpStatus: 'failed', rdpError: message }
+              : candidate,
+          ),
+        );
+        return;
+      }
+    }
     setRdpCredentialForm(
       existing ?? {
         username: '',
@@ -2380,11 +2677,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       },
     );
     setRdpCredentialPrompt(sessionId);
-    setSelectedSessionId(sessionId);
-    setActivePage('sessions');
   }
 
-  function startRdpSession(sessionId: string, credentials: RdpCredentials) {
+  function startRdpSession(
+    sessionId: string,
+    credentials: RdpCredentials,
+    manualCredentials: boolean,
+  ) {
     const session = sessions.find((candidate) => candidate.id === sessionId);
     if (!session || session.protocol !== 'rdp') return;
 
@@ -2393,7 +2692,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       domain: credentials.domain.trim(),
       password: credentials.password,
     };
-    setRdpCredentials((current) => ({ ...current, [sessionId]: normalizedCredentials }));
+    if (manualCredentials) {
+      rdpBitwardenAttempts.current.delete(sessionId);
+      setRdpCredentials((current) => ({ ...current, [sessionId]: normalizedCredentials }));
+    } else {
+      rdpBitwardenAttempts.current.add(sessionId);
+    }
     setSessions((current) =>
       current.map((candidate) =>
         candidate.id === sessionId
@@ -2427,9 +2731,19 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       .startRdpSession({
         sessionId,
         profile: defaultRdpProfile(session, normalizedCredentials),
+        manualCredentials,
       })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : 'The RDP backend could not start.';
+        if (isBitwardenUnlockError(message)) {
+          requestRuntimeBitwardenUnlock(`rdp:${sessionId}`, message, () =>
+            startRdpSession(sessionId, normalizedCredentials, manualCredentials),
+          );
+        } else if (!manualCredentials && isBitwardenCredentialError(message)) {
+          rdpBitwardenAttempts.current.delete(sessionId);
+          setRdpCredentialForm({ username: '', domain: '', password: '' });
+          setRdpCredentialPrompt(sessionId);
+        }
         setSessions((current) =>
           current.map((candidate) =>
             candidate.id === sessionId
@@ -2443,7 +2757,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   function retryRdpSession(sessionId: string) {
     const credentials = rdpCredentials[sessionId];
     if (credentials) {
-      startRdpSession(sessionId, credentials);
+      startRdpSession(sessionId, credentials, true);
     } else {
       requestRdpCredentials(sessionId);
     }
@@ -2454,14 +2768,15 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (!rdpCredentialPrompt) return;
     const sessionId = rdpCredentialPrompt;
     setRdpCredentialPrompt(null);
-    startRdpSession(sessionId, rdpCredentialForm);
+    startRdpSession(sessionId, rdpCredentialForm, true);
   }
 
   function requestSshCredentials(sessionId: string) {
     const session = sessions.find((candidate) => candidate.id === sessionId);
     if (!session || session.protocol !== 'ssh' || session.nodeId) return;
     sshCredentialSubmitInFlight.current = false;
-    setSshCredentialPrompt(sessionId);
+    setSshCredentialForm({ username: '', password: '' });
+    setSshCredentialPrompt({ kind: 'quick', sessionId });
     setSelectedSessionId(sessionId);
     setActivePage('sessions');
   }
@@ -2496,20 +2811,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       password: credentials.password,
       tunnelConfigId: session.tunnelConfigId,
     });
-  }
-
-  function submitSshCredentials(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (sshCredentialSubmitInFlight.current) return;
-    const sessionId = sshCredentialPrompt;
-    if (!sessionId) return;
-    const values = new FormData(event.currentTarget);
-    const username = String(values.get('ssh-username') ?? '').trim();
-    const password = String(values.get('ssh-password') ?? '');
-    if (!username || !password) return;
-    sshCredentialSubmitInFlight.current = true;
-    setSshCredentialPrompt(null);
-    startQuickSshSession(sessionId, { username, password });
   }
 
   function openConnection(node: TreeNode) {
@@ -2568,14 +2869,27 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       );
     }
     if (session.protocol === 'rdp') {
-      setRdpCredentialForm({ username: '', domain: '', password: '' });
-      setRdpCredentialPrompt(session.id);
+      window.setTimeout(() => void requestRdpCredentials(session.id), 0);
     }
     if (session.protocol === 'http' || session.protocol === 'https') startWebSession(session);
   }
 
   function closeSession(id: string) {
     const closing = sessions.find((session) => session.id === id);
+    runtimeBitwardenRetries.current.remove(`rdp:${id}`);
+    runtimeBitwardenRetries.current.remove(`vnc:${id}`);
+    if (closing?.backendSessionId) {
+      runtimeBitwardenRetries.current.remove(`ssh:${closing.backendSessionId}`);
+    }
+    if (runtimeBitwardenRetries.current.isEmpty && bitwardenUnlockPrompt) {
+      dismissRuntimeBitwardenUnlock();
+    }
+    rdpBitwardenAttempts.current.delete(id);
+    if (rdpCredentialPrompt === id) setRdpCredentialPrompt(null);
+    if (sshCredentialPrompt?.backendSessionId === closing?.backendSessionId) {
+      setSshCredentialPrompt(null);
+      setSshCredentialForm({ username: '', password: '' });
+    }
     if (closing?.protocol === 'rdp') {
       void window.wormhole
         ?.commandRdpSession({ sessionId: id, operation: 'disconnect' })
@@ -2607,7 +2921,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       delete next[id];
       return next;
     });
-    setSshCredentialPrompt((current) => (current === id ? null : current));
+    setSshCredentialPrompt((current) =>
+      current?.sessionId === id || current?.backendSessionId === id ? null : current,
+    );
   }
 
   function closeSessionsForNodeIds(nodeIds: ReadonlySet<string>) {
@@ -2643,7 +2959,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       return nextSessions[selectedIndex]?.id ?? nextSessions[selectedIndex - 1]?.id ?? '';
     });
     setRdpCredentialPrompt((current) => (current && closingIds.has(current) ? null : current));
-    setSshCredentialPrompt((current) => (current && closingIds.has(current) ? null : current));
+    setSshCredentialPrompt((current) =>
+      current &&
+      ((current.sessionId && closingIds.has(current.sessionId)) ||
+        (current.backendSessionId && closingIds.has(current.backendSessionId)))
+        ? null
+        : current,
+    );
     setRoutePrompts((current) => current.filter((prompt) => !closingIds.has(prompt.sessionId)));
     setRdpCredentials((current) => {
       const next = { ...current };
@@ -2788,7 +3110,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     }
     if (duplicate.protocol === 'ssh' && !duplicate.nodeId) {
       sshCredentialSubmitInFlight.current = false;
-      setSshCredentialPrompt(duplicate.id);
+      setSshCredentialForm({ username: '', password: '' });
+      setSshCredentialPrompt({ kind: 'quick', sessionId: duplicate.id });
     }
     if (duplicate.backendSessionId && duplicate.protocol === 'serial') {
       startSerialSession(
@@ -3684,6 +4007,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       sshAutoSudo: 'inherit',
       httpIgnoreCertErrors: false,
       tunnel: 'inherit',
+      credential: 'inherit',
       serial: { ...defaultSerialSettings },
     });
     setNewConnectionOpen(true);
@@ -3850,6 +4174,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       sshAutoSudo: autoSudoModeFor(node.sshAutoSudo),
       httpIgnoreCertErrors: node.httpIgnoreCertErrors === true,
       tunnel: tunnelModeFor(node),
+      credential: credentialSelectionFor(node),
       serial: serialSettingsFromNode(node),
     });
     setNewConnectionOpen(true);
@@ -3865,6 +4190,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       name: node.name,
       sshAutoSudo: autoSudoModeFor(node.sshAutoSudo),
       tunnel: tunnelModeFor(node),
+      credential: credentialSelectionFor(node),
     });
     setFolderDetailsOpen(true);
   }
@@ -3877,76 +4203,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     }
   }
 
-  async function persistNodeSshAutoSudo(nodeId: string, mode: AutoSudoMode): Promise<boolean> {
-    if (!window.wormhole) {
-      setEditorError('The native workspace bridge is unavailable.');
-      return false;
-    }
-    try {
-      const result = await window.wormhole.updateWorkspaceNodeSshSettings({
-        nodeId,
-        sshAutoSudo: autoSudoValueFor(mode),
-      });
-      if (!result.updated) {
-        setEditorError('The workspace did not save the Auto sudo setting.');
-        return false;
-      }
-      return true;
-    } catch (error: unknown) {
-      setEditorError(
-        error instanceof Error ? error.message : 'Could not save the Auto sudo setting.',
-      );
-      return false;
-    }
-  }
-
-  async function persistNodeHttpIgnoreCertErrors(
-    nodeId: string,
-    value: boolean | null,
-  ): Promise<boolean> {
-    if (!window.wormhole) {
-      setEditorError('The native workspace bridge is unavailable.');
-      return false;
-    }
-    try {
-      const result = await window.wormhole.updateWorkspaceNodeWebSettings({
-        nodeId,
-        httpIgnoreCertErrors: value,
-      });
-      if (!result.updated) {
-        setEditorError('The workspace did not save the certificate setting.');
-        return false;
-      }
-      return true;
-    } catch (error: unknown) {
-      setEditorError(
-        error instanceof Error ? error.message : 'Could not save the certificate setting.',
-      );
-      return false;
-    }
-  }
-
-  async function persistNodeTunnel(nodeId: string, mode: TunnelMode): Promise<boolean> {
-    if (!window.wormhole) {
-      setEditorError('The native workspace bridge is unavailable.');
-      return false;
-    }
-    try {
-      const result = await window.wormhole.updateWorkspaceNodeTunnelSettings({
-        nodeId,
-        ...tunnelValueFor(mode),
-      });
-      if (!result.updated) {
-        setEditorError('The workspace did not save the VPN tunnel setting.');
-        return false;
-      }
-      return true;
-    } catch (error: unknown) {
-      setEditorError(
-        error instanceof Error ? error.message : 'Could not save the VPN tunnel setting.',
-      );
-      return false;
-    }
+  async function reloadWorkspaceAfterNodeWrite(): Promise<void> {
+    if (!window.wormhole) throw new Error('The native workspace bridge is unavailable.');
+    const workspace = await window.wormhole.loadWorkspace();
+    setTree(workspace.tree as TreeNode[]);
+    setCredentials(workspace.credentials as CredentialRecord[]);
+    setTunnels(workspace.tunnels as TunnelRecord[]);
   }
 
   function openNewFolder(parentFolderId?: string | null) {
@@ -4002,7 +4264,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setQuickConnectOpen(false);
     if (quickConnectForm.protocol === 'ssh') {
       sshCredentialSubmitInFlight.current = false;
-      setSshCredentialPrompt(id);
+      setSshCredentialForm({ username: '', password: '' });
+      setSshCredentialPrompt({ kind: 'quick', sessionId: id });
     }
     if (backendSessionId) {
       startSerialSession(backendSessionId, undefined, host, quickConnectForm.serial);
@@ -4030,32 +4293,37 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         newConnectionForm.protocol === 'ssh' ? newConnectionForm.sshAutoSudo : 'inherit';
       const connectionTunnel =
         newConnectionForm.protocol === 'serial' ? 'off' : newConnectionForm.tunnel;
+      const connectionCredential: CredentialSelection =
+        newConnectionForm.protocol === 'ssh' ||
+        newConnectionForm.protocol === 'rdp' ||
+        newConnectionForm.protocol === 'vnc'
+          ? newConnectionForm.credential
+          : 'none';
+      if (!window.wormhole) throw new Error('The native workspace bridge is unavailable.');
+      const tunnel = tunnelValueFor(connectionTunnel);
+      const credential = credentialSettingsFor(connectionCredential);
+      const nodeWrite = {
+        parentId: newConnectionForm.folder,
+        name,
+        kind: 'connection' as const,
+        protocol: newConnectionForm.protocol,
+        host,
+        sshAutoSudo: autoSudoValueFor(connectionAutoSudo),
+        httpIgnoreCertErrors:
+          newConnectionForm.protocol === 'https' ? newConnectionForm.httpIgnoreCertErrors : null,
+        tunnelEnabled: tunnel.tunnelEnabled,
+        tunnelConfigId: tunnel.tunnelConfigId,
+        credentialMode: credential.mode,
+        credentialId: credential.credentialId,
+        serialBaudRate: newConnectionForm.serial.baudRate,
+        serialDataBits: newConnectionForm.serial.dataBits,
+        serialStopBits: newConnectionForm.serial.stopBits,
+        serialParity: newConnectionForm.serial.parity,
+        serialFlowControl: newConnectionForm.serial.flowControl,
+      };
       if (editingId) {
-        const editedNode = findTreeNode(tree, editingId);
-        if (
-          editedNode?.persisted &&
-          !(await persistNodeSshAutoSudo(editingId, connectionAutoSudo))
-        ) {
-          return;
-        }
-        const editsWebConnection =
-          editedNode?.protocol === 'http' ||
-          editedNode?.protocol === 'https' ||
-          newConnectionForm.protocol === 'http' ||
-          newConnectionForm.protocol === 'https';
-        if (
-          editedNode?.persisted &&
-          editsWebConnection &&
-          !(await persistNodeHttpIgnoreCertErrors(
-            editingId,
-            newConnectionForm.protocol === 'https' ? newConnectionForm.httpIgnoreCertErrors : null,
-          ))
-        ) {
-          return;
-        }
-        if (editedNode?.persisted && !(await persistNodeTunnel(editingId, connectionTunnel))) {
-          return;
-        }
+        const result = await window.wormhole.updateWorkspaceNode({ id: editingId, ...nodeWrite });
+        if (!result.updated) throw new Error('The workspace did not save the connection.');
         const editedSessionId = `session-${editingId}`;
         const editedSession = sessions.find((session) => session.id === editedSessionId);
         if (editedSession?.backendSessionId) {
@@ -4074,21 +4342,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           (newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'serial')
             ? newSessionToken()
             : undefined;
-        setTree((current) =>
-          updateConnectionInTree(current, editingId, newConnectionForm.folder, {
-            name,
-            host,
-            protocol: newConnectionForm.protocol,
-            sshAutoSudo: autoSudoValueFor(connectionAutoSudo),
-            httpIgnoreCertErrors:
-              newConnectionForm.protocol === 'https'
-                ? newConnectionForm.httpIgnoreCertErrors
-                : undefined,
-            ...tunnelValueFor(connectionTunnel),
-            serialSettings:
-              newConnectionForm.protocol === 'serial' ? newConnectionForm.serial : undefined,
-          }),
-        );
+        await reloadWorkspaceAfterNodeWrite();
         setSessions((current) =>
           current.map((session) =>
             session.id === editedSessionId
@@ -4115,9 +4369,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       ? { ...newConnectionForm.serial }
                       : undefined,
                   webTargetNodeId:
-                    (newConnectionForm.protocol === 'http' ||
-                      newConnectionForm.protocol === 'https') &&
-                    editedNode?.persisted
+                    newConnectionForm.protocol === 'http' || newConnectionForm.protocol === 'https'
                       ? editingId
                       : undefined,
                   webIgnoreCertErrors:
@@ -4149,7 +4401,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             host,
             protocol: newConnectionForm.protocol,
             status: 'connecting',
-            webTargetNodeId: editedNode?.persisted ? editingId : undefined,
+            webTargetNodeId: editingId,
             webIgnoreCertErrors:
               newConnectionForm.protocol === 'https'
                 ? newConnectionForm.httpIgnoreCertErrors
@@ -4157,36 +4409,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           });
         }
       } else {
-        const id = `connection-${Date.now()}`;
-        const connection: TreeNode = {
-          id,
-          name,
-          kind: 'connection',
-          protocol: newConnectionForm.protocol,
-          host,
-          sshAutoSudo: autoSudoValueFor(connectionAutoSudo),
-          httpIgnoreCertErrors:
-            newConnectionForm.protocol === 'https'
-              ? newConnectionForm.httpIgnoreCertErrors
-              : undefined,
-          ...tunnelValueFor(connectionTunnel),
-          ...(newConnectionForm.protocol === 'serial'
-            ? {
-                serialBaudRate: newConnectionForm.serial.baudRate,
-                serialDataBits: newConnectionForm.serial.dataBits,
-                serialStopBits: newConnectionForm.serial.stopBits,
-                serialParity: newConnectionForm.serial.parity,
-                serialFlowControl: newConnectionForm.serial.flowControl,
-              }
-            : {}),
-        };
-
-        setTree((current) =>
-          newConnectionForm.folder
-            ? insertIntoTreeFolder(current, newConnectionForm.folder, [connection])
-            : [...current, connection],
-        );
-        setSelectedNodeId(id);
+        const result = await window.wormhole.createWorkspaceNode(nodeWrite);
+        await reloadWorkspaceAfterNodeWrite();
+        setSelectedNodeId(result.nodeId);
       }
 
       if (newConnectionForm.folder) {
@@ -4194,6 +4419,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       }
       setEditingConnectionId(null);
       setNewConnectionOpen(false);
+    } catch (error: unknown) {
+      setEditorError(error instanceof Error ? error.message : 'Could not save the connection.');
     } finally {
       setEditorBusy(false);
     }
@@ -4210,52 +4437,80 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     try {
       const folder = findTreeNode(tree, editingFolderId);
       if (!folder) return;
-      if (
-        folder.persisted &&
-        !(await persistNodeSshAutoSudo(editingFolderId, folderDetailsForm.sshAutoSudo))
-      ) {
-        return;
-      }
-      if (
-        folder.persisted &&
-        !(await persistNodeTunnel(editingFolderId, folderDetailsForm.tunnel))
-      ) {
-        return;
-      }
-      setTree((current) =>
-        updateFolderInTree(current, editingFolderId, {
-          name,
-          sshAutoSudo: autoSudoValueFor(folderDetailsForm.sshAutoSudo),
-          ...tunnelValueFor(folderDetailsForm.tunnel),
-        }),
-      );
+      if (!window.wormhole) throw new Error('The native workspace bridge is unavailable.');
+      const tunnel = tunnelValueFor(folderDetailsForm.tunnel);
+      const credential = credentialSettingsFor(folderDetailsForm.credential);
+      const result = await window.wormhole.updateWorkspaceNode({
+        id: editingFolderId,
+        parentId: findParentFolderId(tree, editingFolderId) ?? '',
+        name,
+        kind: 'folder',
+        protocol: '',
+        host: '',
+        sshAutoSudo: autoSudoValueFor(folderDetailsForm.sshAutoSudo),
+        httpIgnoreCertErrors: null,
+        tunnelEnabled: tunnel.tunnelEnabled,
+        tunnelConfigId: tunnel.tunnelConfigId,
+        credentialMode: credential.mode,
+        credentialId: credential.credentialId,
+        serialBaudRate: 0,
+        serialDataBits: 0,
+        serialStopBits: 0,
+        serialParity: 0,
+        serialFlowControl: 0,
+      });
+      if (!result.updated) throw new Error('The workspace did not save the folder.');
+      await reloadWorkspaceAfterNodeWrite();
       setFolderDetailsOpen(false);
       setEditingFolderId(null);
+    } catch (error: unknown) {
+      setEditorError(error instanceof Error ? error.message : 'Could not save the folder.');
     } finally {
       setEditorBusy(false);
     }
   }
 
-  function submitNewFolder(event: FormEvent<HTMLFormElement>) {
+  async function submitNewFolder(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (editorBusy) return;
     const name = newFolderName.trim();
     if (!name) return;
-
-    const id = `folder-${Date.now()}`;
-    const folder: TreeNode = { id, name, kind: 'folder', children: [] };
-    setTree((current) =>
-      newFolderParentId
-        ? insertIntoTreeFolder(current, newFolderParentId, [folder])
-        : [...current, folder],
-    );
-    setExpanded((current) => {
-      const next = new Set(current).add(id);
-      if (newFolderParentId) next.add(newFolderParentId);
-      return next;
-    });
-    setSelectedNodeId(id);
-    setNewFolderParentId(null);
-    setNewFolderOpen(false);
+    setEditorBusy(true);
+    setEditorError('');
+    try {
+      if (!window.wormhole) throw new Error('The native workspace bridge is unavailable.');
+      const result = await window.wormhole.createWorkspaceNode({
+        parentId: newFolderParentId ?? '',
+        name,
+        kind: 'folder',
+        protocol: '',
+        host: '',
+        sshAutoSudo: null,
+        httpIgnoreCertErrors: null,
+        tunnelEnabled: null,
+        tunnelConfigId: '',
+        credentialMode: 0,
+        credentialId: '',
+        serialBaudRate: 0,
+        serialDataBits: 0,
+        serialStopBits: 0,
+        serialParity: 0,
+        serialFlowControl: 0,
+      });
+      await reloadWorkspaceAfterNodeWrite();
+      setExpanded((current) => {
+        const next = new Set(current).add(result.nodeId);
+        if (newFolderParentId) next.add(newFolderParentId);
+        return next;
+      });
+      setSelectedNodeId(result.nodeId);
+      setNewFolderParentId(null);
+      setNewFolderOpen(false);
+    } catch (error: unknown) {
+      setEditorError(error instanceof Error ? error.message : 'Could not create the folder.');
+    } finally {
+      setEditorBusy(false);
+    }
   }
 
   function renderTree(nodes: TreeNode[], depth = 0): ReactNode {
@@ -4463,6 +4718,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setCredentials((current) => current.filter((credential) => credential.id !== id));
   }
 
+  async function refreshWorkspaceCredentials(): Promise<void> {
+    if (!window.wormhole) return;
+    const workspace = await window.wormhole.loadWorkspace();
+    setCredentials(workspace.credentials);
+  }
+
   const currentPage = navItems.find((item) => item.id === activePage)!;
   const visibleAuthPrompt =
     authPrompt ??
@@ -4627,7 +4888,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         }}
         open={tunnelPrompts.length > 0}
       >
-        <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
+        <DialogContent className="max-h-[88vh] overflow-y-auto border-border/70 bg-card text-card-foreground sm:max-w-xl">
           <form
             className="space-y-4"
             onSubmit={(event) => {
@@ -4927,6 +5188,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             <SidebarInset className="h-full min-h-0 min-w-0 rounded-none bg-background">
               {activePage === 'sessions' ? (
                 <SessionsPage
+                  onBitwardenUnlockRequired={(sessionId, reason, retry) =>
+                    requestRuntimeBitwardenUnlock(`vnc:${sessionId}`, reason, retry)
+                  }
                   onCloseSession={closeSession}
                   onConnectRdp={requestRdpCredentials}
                   onDuplicateSession={duplicateSession}
@@ -4991,6 +5255,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   onOpenReleaseNotes={handleOpenReleaseNotes}
                   onSetAutoCheckForUpdates={handleSetAutoCheckForUpdates}
                   settingsUpdatesRequest={settingsUpdatesRequest}
+                  onWorkspaceCredentialsChanged={refreshWorkspaceCredentials}
                   theme={theme}
                   update={{
                     autoCheckForUpdates,
@@ -5006,6 +5271,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               ) : activePage === 'credentials' ? (
                 <CredentialsPage
                   initialCredentials={credentials}
+                  isAuthorized={authGate === 'unlocked'}
                   onCreate={createCredential}
                   onDelete={deleteSavedCredential}
                   onUpdate={updateCredential}
@@ -5363,7 +5629,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         <Label htmlFor="connection-protocol">Protocol</Label>
                         <Select
                           onValueChange={(protocol: Protocol) =>
-                            setNewConnectionForm((form) => ({ ...form, protocol }))
+                            setNewConnectionForm((form) => ({
+                              ...form,
+                              protocol,
+                              credential: protocol === form.protocol ? form.credential : 'inherit',
+                            }))
                           }
                           value={newConnectionForm.protocol}
                         >
@@ -5440,6 +5710,38 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         </SelectContent>
                       </Select>
                     </div>
+
+                    {newConnectionForm.protocol === 'ssh' ||
+                    newConnectionForm.protocol === 'rdp' ||
+                    newConnectionForm.protocol === 'vnc' ? (
+                      <div className="grid gap-2">
+                        <Label htmlFor="connection-credential">Credential</Label>
+                        <Select
+                          onValueChange={(credential) =>
+                            setNewConnectionForm((form) => ({ ...form, credential }))
+                          }
+                          value={newConnectionForm.credential}
+                        >
+                          <SelectTrigger id="connection-credential" className="w-full">
+                            <SelectValue placeholder="Select a credential" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="inherit">Inherit from folder</SelectItem>
+                            <SelectItem value="none">No saved credential</SelectItem>
+                            {connectionCredentialOptions.map((credential) => (
+                              <SelectItem key={credential.id} value={credential.id}>
+                                {credential.name} · {credential.provider}
+                                {credential.isVirtualBitwarden ? ' · vault' : ''}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                        <p className="text-[11px] leading-relaxed text-muted-foreground">
+                          Bitwarden items are resolved by the Go backend only when the connection
+                          starts; passwords are never exposed to this editor.
+                        </p>
+                      </div>
+                    ) : null}
 
                     {newConnectionForm.protocol === 'ssh' ? (
                       <AutoSudoField
@@ -5780,7 +6082,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             <DialogHeader>
               <DialogTitle>Folder details</DialogTitle>
               <DialogDescription>
-                Set defaults inherited by SSH connections inside this folder.
+                Set defaults inherited by connections inside this folder.
               </DialogDescription>
             </DialogHeader>
             <form className="grid gap-4" onSubmit={submitFolderDetails}>
@@ -5795,6 +6097,30 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   required
                   value={folderDetailsForm.name}
                 />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="folder-credential">Credential</Label>
+                <Select
+                  onValueChange={(credential) =>
+                    setFolderDetailsForm((form) => ({ ...form, credential }))
+                  }
+                  value={folderDetailsForm.credential}
+                >
+                  <SelectTrigger id="folder-credential">
+                    <SelectValue placeholder="Select a credential" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="inherit">Inherit from parent folder</SelectItem>
+                    <SelectItem value="none">No saved credential</SelectItem>
+                    {folderCredentialOptions.map((credential) => (
+                      <SelectItem key={credential.id} value={credential.id}>
+                        {credential.name} · {protocolLabel(credential.protocol)} ·{' '}
+                        {credential.provider}
+                        {credential.isVirtualBitwarden ? ' · vault' : ''}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
               <AutoSudoField
                 id="folder-auto-sudo"
@@ -5832,7 +6158,60 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
         <Dialog
           onOpenChange={(open) => {
-            if (!open) setSshCredentialPrompt(null);
+            if (!open && !bitwardenUnlockBusy) {
+              dismissRuntimeBitwardenUnlock();
+            }
+          }}
+          open={bitwardenUnlockPrompt !== null}
+        >
+          <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>Unlock Bitwarden</DialogTitle>
+              <DialogDescription>
+                This connection uses a Bitwarden login. Unlock the vault to continue.
+              </DialogDescription>
+            </DialogHeader>
+            <form className="grid gap-4" onSubmit={submitRuntimeBitwardenUnlock}>
+              <div className="grid gap-2">
+                <Label htmlFor="runtime-bitwarden-password">Master password</Label>
+                <Input
+                  autoFocus
+                  autoComplete="current-password"
+                  id="runtime-bitwarden-password"
+                  onChange={(event) => setBitwardenUnlockPassword(event.target.value)}
+                  type="password"
+                  value={bitwardenUnlockPassword}
+                />
+              </div>
+              {bitwardenUnlockError ? (
+                <p className="text-[11px] text-destructive" role="alert">
+                  {bitwardenUnlockError}
+                </p>
+              ) : null}
+              <DialogFooter>
+                <Button
+                  disabled={bitwardenUnlockBusy}
+                  onClick={dismissRuntimeBitwardenUnlock}
+                  type="button"
+                  variant="ghost"
+                >
+                  Cancel
+                </Button>
+                <Button disabled={bitwardenUnlockBusy || !bitwardenUnlockPassword} type="submit">
+                  <KeyRound data-icon="inline-start" />
+                  {bitwardenUnlockBusy ? 'Unlocking…' : 'Unlock and connect'}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog
+          onOpenChange={(open) => {
+            if (!open) {
+              setSshCredentialPrompt(null);
+              setSshCredentialForm({ username: '', password: '' });
+            }
           }}
           open={sshCredentialPrompt !== null}
         >
@@ -5840,20 +6219,22 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             <DialogHeader>
               <DialogTitle>SSH credentials</DialogTitle>
               <DialogDescription>
-                Credentials stay in memory for this connection only and are never saved to the
-                connection tree.
+                The saved credential is unavailable. Enter credentials for this connection attempt;
+                they stay in memory only.
               </DialogDescription>
             </DialogHeader>
             <form className="grid gap-4" onSubmit={submitSshCredentials}>
               <div className="grid gap-2">
                 <Label htmlFor="ssh-username">Username</Label>
                 <Input
-                  autoComplete="username"
                   autoFocus
+                  autoComplete="username"
                   id="ssh-username"
-                  name="ssh-username"
-                  placeholder="operator"
+                  onChange={(event) =>
+                    setSshCredentialForm((form) => ({ ...form, username: event.target.value }))
+                  }
                   required
+                  value={sshCredentialForm.username}
                 />
               </div>
               <div className="grid gap-2">
@@ -5861,16 +6242,25 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 <Input
                   autoComplete="current-password"
                   id="ssh-password"
-                  name="ssh-password"
-                  required
+                  onChange={(event) =>
+                    setSshCredentialForm((form) => ({ ...form, password: event.target.value }))
+                  }
                   type="password"
+                  value={sshCredentialForm.password}
                 />
               </div>
               <DialogFooter>
-                <Button onClick={() => setSshCredentialPrompt(null)} type="button" variant="ghost">
+                <Button
+                  onClick={() => {
+                    setSshCredentialPrompt(null);
+                    setSshCredentialForm({ username: '', password: '' });
+                  }}
+                  type="button"
+                  variant="ghost"
+                >
                   Cancel
                 </Button>
-                <Button type="submit">
+                <Button disabled={!sshCredentialForm.username.trim()} type="submit">
                   <Power data-icon="inline-start" />
                   Connect
                 </Button>
@@ -5881,7 +6271,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
         <Dialog
           onOpenChange={(open) => {
-            setRdpCredentialPrompt(open ? rdpCredentialPrompt : null);
+            if (!open) {
+              setRdpCredentialPrompt(null);
+              setRdpCredentialForm({ username: '', domain: '', password: '' });
+            }
           }}
           open={rdpCredentialPrompt !== null}
         >
@@ -5930,7 +6323,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 />
               </div>
               <DialogFooter>
-                <Button onClick={() => setRdpCredentialPrompt(null)} type="button" variant="ghost">
+                <Button
+                  onClick={() => {
+                    setRdpCredentialPrompt(null);
+                    setRdpCredentialForm({ username: '', domain: '', password: '' });
+                  }}
+                  type="button"
+                  variant="ghost"
+                >
                   Cancel
                 </Button>
                 <Button type="submit">
@@ -7620,6 +8020,7 @@ function SessionsPage({
   isWebSurfaceVisible,
   sessions,
   selectedSession,
+  onBitwardenUnlockRequired,
   onCloseSession,
   onConnectRdp,
   onDuplicateSession,
@@ -7646,6 +8047,7 @@ function SessionsPage({
   isWebSurfaceVisible: boolean;
   sessions: Session[];
   selectedSession?: Session;
+  onBitwardenUnlockRequired: (sessionId: string, reason: string, retry: () => void) => void;
   onCloseSession: (id: string) => void;
   onConnectRdp: (id: string) => void;
   onDuplicateSession: (id: string) => void;
@@ -7843,6 +8245,10 @@ function SessionsPage({
               />
             ) : session.protocol === 'vnc' ? (
               <VncSurface
+                isAuthorized={isAuthorized}
+                onBitwardenUnlockRequired={(reason, retry) =>
+                  onBitwardenUnlockRequired(session.id, reason, retry)
+                }
                 session={{
                   id: session.id,
                   nodeId: session.nodeId,
@@ -7884,11 +8290,13 @@ function SessionsPage({
 
 function CredentialsPage({
   initialCredentials,
+  isAuthorized,
   onCreate,
   onUpdate,
   onDelete,
 }: {
   initialCredentials: CredentialRecord[];
+  isAuthorized: boolean;
   onCreate: (draft: CredentialDraft) => Promise<void>;
   onUpdate: (id: string, draft: CredentialDraft) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
@@ -7901,10 +8309,33 @@ function CredentialsPage({
   const [pendingDeletion, setPendingDeletion] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [operationError, setOperationError] = useState('');
+  const [bitwardenQuery, setBitwardenQuery] = useState('');
+  const [bitwardenItems, setBitwardenItems] = useState<WormholeBitwardenLoginItem[]>([]);
+  const [bitwardenUnlockPassword, setBitwardenUnlockPassword] = useState('');
+  const [bitwardenSearchStatus, setBitwardenSearchStatus] = useState('');
+  const [bitwardenSearching, setBitwardenSearching] = useState(false);
+  const bitwardenSearchAttempts = useRef(new WebSessionAttemptTracker());
 
   useEffect(() => {
     setSelectedCredentials([]);
   }, [initialCredentials]);
+
+  useEffect(() => {
+    if (isAuthorized) return;
+    // App-lock hides this mounted page instead of unmounting it. Explicitly remove every
+    // renderer-held credential value so typed local and Bitwarden secrets do not survive a lock.
+    setEditorOpen(false);
+    setEditingCredential(null);
+    setCredentialForm(emptyCredentialDraft());
+    setPendingDeletion([]);
+    setOperationError('');
+    setBitwardenQuery('');
+    setBitwardenItems([]);
+    setBitwardenUnlockPassword('');
+    setBitwardenSearchStatus('');
+    setBitwardenSearching(false);
+    bitwardenSearchAttempts.current.cancel('credential-search');
+  }, [isAuthorized]);
 
   const credentials = initialCredentials;
 
@@ -7941,6 +8372,7 @@ function CredentialsPage({
     setEditingCredential(null);
     setCredentialForm(emptyCredentialDraft());
     setOperationError('');
+    resetBitwardenSearch();
     setEditorOpen(true);
   }
 
@@ -7953,10 +8385,14 @@ function CredentialsPage({
       protocol,
       username: credential.username === 'No username' ? '' : credential.username,
       domain: credential.domain ?? '',
-      // The credential editor never reads saved secrets. Editing intentionally asks for a replacement.
+      // The renderer never reads saved secrets. Leaving this blank preserves a local secret.
       password: '',
+      provider: credential.provider,
+      bitwardenItemId: credential.bitwardenItemId ?? '',
+      bitwardenItemName: credential.bitwardenItemName ?? '',
     });
     setOperationError('');
+    resetBitwardenSearch();
     setEditorOpen(true);
   }
 
@@ -7965,6 +8401,76 @@ function CredentialsPage({
     setEditingCredential(null);
     setCredentialForm(emptyCredentialDraft());
     setOperationError('');
+    resetBitwardenSearch();
+  }
+
+  function resetBitwardenSearch() {
+    bitwardenSearchAttempts.current.cancel('credential-search');
+    setBitwardenQuery('');
+    setBitwardenItems([]);
+    setBitwardenUnlockPassword('');
+    setBitwardenSearchStatus('');
+    setBitwardenSearching(false);
+  }
+
+  async function searchBitwarden() {
+    if (bitwardenSearching || !window.wormhole) return;
+    const generation = bitwardenSearchAttempts.current.begin('credential-search');
+    const masterPassword = bitwardenUnlockPassword;
+    // Treat an unlock value like every other renderer-held secret: consume it before the first
+    // native await so errors, editor closure, and stale responses cannot keep it in React state.
+    setBitwardenUnlockPassword('');
+    setBitwardenSearching(true);
+    setBitwardenSearchStatus('Searching Bitwarden…');
+    setOperationError('');
+    try {
+      let response: { items: WormholeBitwardenLoginItem[] };
+      try {
+        response = await window.wormhole.searchBitwardenItems(bitwardenQuery);
+      } catch (error) {
+        if (!bitwardenSearchAttempts.current.isCurrent('credential-search', generation)) return;
+        if (!masterPassword || !isBitwardenUnlockError(backendErrorMessage(error))) {
+          throw error;
+        }
+        await window.wormhole.unlockBitwardenCli(masterPassword);
+        if (!bitwardenSearchAttempts.current.isCurrent('credential-search', generation)) return;
+        response = await window.wormhole.searchBitwardenItems(bitwardenQuery);
+      }
+      if (!bitwardenSearchAttempts.current.isCurrent('credential-search', generation)) return;
+      setBitwardenItems(response.items);
+      setBitwardenSearchStatus(
+        response.items.length === 0
+          ? 'No Bitwarden login items matched.'
+          : `Found ${response.items.length} login item(s).`,
+      );
+      if (response.items.length === 1) selectBitwardenItem(response.items[0]);
+    } catch (error) {
+      if (!bitwardenSearchAttempts.current.isCurrent('credential-search', generation)) return;
+      const message = backendErrorMessage(error);
+      const needsLogin = /log in|login|unauth/i.test(message);
+      const locked = isBitwardenUnlockError(message);
+      setBitwardenSearchStatus(
+        needsLogin
+          ? 'Bitwarden CLI is not logged in. Log in from Settings first.'
+          : locked
+            ? 'The vault is locked. Enter the master password and search again.'
+            : message,
+      );
+    } finally {
+      if (bitwardenSearchAttempts.current.isCurrent('credential-search', generation)) {
+        setBitwardenSearching(false);
+      }
+    }
+  }
+
+  function selectBitwardenItem(item: WormholeBitwardenLoginItem) {
+    setCredentialForm((form) => ({
+      ...form,
+      name: form.name || item.name,
+      username: form.protocol === 'vnc' ? '' : form.username || item.username || '',
+      bitwardenItemId: item.id,
+      bitwardenItemName: item.name,
+    }));
   }
 
   async function submitCredential(event: FormEvent<HTMLFormElement>) {
@@ -7976,9 +8482,25 @@ function CredentialsPage({
       username: credentialForm.protocol === 'vnc' ? '' : credentialForm.username.trim(),
       domain: credentialForm.protocol === 'rdp' ? credentialForm.domain.trim() : '',
       password: credentialForm.password,
+      provider: credentialForm.provider,
+      bitwardenItemId:
+        credentialForm.provider === 'Bitwarden' ? credentialForm.bitwardenItemId.trim() : '',
+      bitwardenItemName:
+        credentialForm.provider === 'Bitwarden' ? credentialForm.bitwardenItemName.trim() : '',
     };
-    if (!draft.name || !draft.password) {
-      setOperationError('Enter a name and password.');
+    const localPasswordRequired =
+      draft.provider === 'Local' && (!editingCredential || editingCredential.provider !== 'Local');
+    if (
+      !draft.name ||
+      (draft.provider === 'Local'
+        ? localPasswordRequired && !draft.password
+        : !draft.bitwardenItemId)
+    ) {
+      setOperationError(
+        draft.provider === 'Local'
+          ? 'Enter a name and password.'
+          : 'Enter a name and select a Bitwarden login item.',
+      );
       return;
     }
     if (draft.protocol !== 'vnc' && !draft.username) {
@@ -8125,7 +8647,9 @@ function CredentialsPage({
                       <CardTitle className="min-w-0 truncate text-sm">{credential.name}</CardTitle>
                       <CardAction>
                         <Badge className="shrink-0" variant="secondary">
-                          {protocolLabel(credential.protocol)}
+                          {credential.isVirtualBitwarden
+                            ? 'ANY'
+                            : protocolLabel(credential.protocol)}
                         </Badge>
                       </CardAction>
                       <CardDescription className="flex min-w-0 items-center gap-1.5 text-xs">
@@ -8138,7 +8662,7 @@ function CredentialsPage({
                         {credential.domain ? (
                           <Badge variant="outline">Domain · {credential.domain}</Badge>
                         ) : null}
-                        <Badge variant="outline">{credential.provider}</Badge>
+                        <CredentialProviderIcon provider={credential.provider} />
                       </div>
                     </CardContent>
                     <CardFooter className="justify-between gap-2">
@@ -8192,9 +8716,11 @@ function CredentialsPage({
           <DialogHeader>
             <DialogTitle>{editingCredential ? 'Edit credential' : 'Add credential'}</DialogTitle>
             <DialogDescription>
-              {editingCredential
-                ? 'Enter a replacement password. Saved passwords are never returned to the renderer.'
-                : 'Store a reusable local password for SSH, RDP, or VNC.'}
+              {credentialForm.provider === 'Bitwarden'
+                ? 'Link this profile to a Bitwarden login. Wormhole stores only the item reference.'
+                : editingCredential
+                  ? 'Leave the password blank to keep the current one. Saved passwords are never returned to the renderer.'
+                  : 'Store a reusable local password for SSH, RDP, or VNC.'}
             </DialogDescription>
           </DialogHeader>
           <form className="grid gap-4" onSubmit={submitCredential}>
@@ -8233,6 +8759,27 @@ function CredentialsPage({
                 </SelectContent>
               </Select>
             </div>
+            <div className="grid gap-2">
+              <Label htmlFor="credential-provider">Credential vault</Label>
+              <Select
+                onValueChange={(value) =>
+                  setCredentialForm((form) => ({
+                    ...form,
+                    provider: value as CredentialDraft['provider'],
+                    password: value === 'Bitwarden' ? '' : form.password,
+                  }))
+                }
+                value={credentialForm.provider}
+              >
+                <SelectTrigger id="credential-provider">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="Local">Local password</SelectItem>
+                  <SelectItem value="Bitwarden">Bitwarden item</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
             {credentialForm.protocol !== 'vnc' ? (
               <div className="grid gap-2">
                 <Label htmlFor="credential-username">Username</Label>
@@ -8264,22 +8811,118 @@ function CredentialsPage({
                 />
               </div>
             ) : null}
-            <div className="grid gap-2">
-              <Label htmlFor="credential-password">
-                {editingCredential ? 'Replacement password' : 'Password'}
-              </Label>
-              <Input
-                autoComplete="new-password"
-                id="credential-password"
-                maxLength={4096}
-                onChange={(event) =>
-                  setCredentialForm((form) => ({ ...form, password: event.target.value }))
-                }
-                required
-                type="password"
-                value={credentialForm.password}
-              />
-            </div>
+            {credentialForm.provider === 'Local' ? (
+              <div className="grid gap-2">
+                <Label htmlFor="credential-password">
+                  {editingCredential?.provider === 'Local'
+                    ? 'Replacement password (leave blank to keep current)'
+                    : 'Password'}
+                </Label>
+                <Input
+                  autoComplete="new-password"
+                  id="credential-password"
+                  maxLength={4096}
+                  onChange={(event) =>
+                    setCredentialForm((form) => ({ ...form, password: event.target.value }))
+                  }
+                  required={!editingCredential || editingCredential.provider !== 'Local'}
+                  type="password"
+                  value={credentialForm.password}
+                />
+              </div>
+            ) : (
+              <div className="grid gap-3 rounded-lg border border-border/70 bg-muted/20 p-3">
+                <div className="grid gap-2 sm:grid-cols-[1fr_auto] sm:items-end">
+                  <div className="grid gap-2">
+                    <Label htmlFor="credential-bitwarden-search">Search Bitwarden</Label>
+                    <Input
+                      id="credential-bitwarden-search"
+                      maxLength={2048}
+                      onChange={(event) => setBitwardenQuery(event.target.value)}
+                      placeholder="Item name, URI, or username"
+                      value={bitwardenQuery}
+                    />
+                  </div>
+                  <Button
+                    disabled={bitwardenSearching}
+                    onClick={() => void searchBitwarden()}
+                    type="button"
+                    variant="outline"
+                  >
+                    {bitwardenSearching ? 'Searching…' : 'Search'}
+                  </Button>
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="credential-bitwarden-unlock">Bitwarden master password</Label>
+                  <Input
+                    autoComplete="current-password"
+                    id="credential-bitwarden-unlock"
+                    maxLength={4096}
+                    onChange={(event) => setBitwardenUnlockPassword(event.target.value)}
+                    placeholder="Required only when the vault is locked"
+                    type="password"
+                    value={bitwardenUnlockPassword}
+                  />
+                </div>
+                {bitwardenItems.length > 0 ? (
+                  <div className="grid gap-2">
+                    <Label htmlFor="credential-bitwarden-item">Login item</Label>
+                    <Select
+                      onValueChange={(value) => {
+                        const item = bitwardenItems.find((candidate) => candidate.id === value);
+                        if (item) selectBitwardenItem(item);
+                      }}
+                      value={credentialForm.bitwardenItemId || undefined}
+                    >
+                      <SelectTrigger id="credential-bitwarden-item">
+                        <SelectValue placeholder="Select a login item" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {bitwardenItems.map((item) => (
+                          <SelectItem key={item.id} value={item.id}>
+                            {item.username ? `${item.name} — ${item.username}` : item.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ) : null}
+                <div className="grid gap-2">
+                  <Label htmlFor="credential-bitwarden-item-id">Item ID</Label>
+                  <Input
+                    id="credential-bitwarden-item-id"
+                    maxLength={512}
+                    onChange={(event) =>
+                      setCredentialForm((form) => ({
+                        ...form,
+                        bitwardenItemId: event.target.value,
+                      }))
+                    }
+                    placeholder="Bitwarden item id"
+                    required
+                    value={credentialForm.bitwardenItemId}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="credential-bitwarden-item-name">Item name</Label>
+                  <Input
+                    id="credential-bitwarden-item-name"
+                    maxLength={1024}
+                    onChange={(event) =>
+                      setCredentialForm((form) => ({
+                        ...form,
+                        bitwardenItemName: event.target.value,
+                      }))
+                    }
+                    placeholder="Display name"
+                    value={credentialForm.bitwardenItemName}
+                  />
+                </div>
+                {bitwardenSearchStatus ? (
+                  <p className="text-[11px] text-muted-foreground">{bitwardenSearchStatus}</p>
+                ) : null}
+              </div>
+            )}
             {operationError ? (
               <p className="text-[11px] text-destructive">{operationError}</p>
             ) : null}
@@ -9697,11 +10340,13 @@ function SettingsSwitch({
   label,
   description,
   checked,
+  disabled,
   onCheckedChange,
 }: {
   label: string;
   description?: string;
   checked: boolean;
+  disabled?: boolean;
   onCheckedChange: (checked: boolean) => void;
 }) {
   return (
@@ -9712,7 +10357,12 @@ function SettingsSwitch({
           <p className="text-[11px] leading-relaxed text-muted-foreground">{description}</p>
         ) : null}
       </div>
-      <Switch aria-label={label} checked={checked} onCheckedChange={onCheckedChange} />
+      <Switch
+        aria-label={label}
+        checked={checked}
+        disabled={disabled}
+        onCheckedChange={onCheckedChange}
+      />
     </div>
   );
 }
@@ -9727,6 +10377,186 @@ function SettingsTabPanel({ value, children }: { value: string; children: ReactN
         <div className="max-w-[720px] space-y-7 px-1 py-5 pb-12">{children}</div>
       </ScrollArea>
     </TabsContent>
+  );
+}
+
+function BitwardenCliDialog({
+  currentServerRegion,
+  defaultServerRegion,
+  loginBusy,
+  mode,
+  onClose,
+  onLogin,
+  onUnlock,
+}: {
+  currentServerRegion: 'US' | 'EU' | null;
+  defaultServerRegion: 'UnitedStates' | 'Europe' | 'Current';
+  loginBusy: boolean;
+  mode: 'login' | 'unlock' | null;
+  onClose: () => void;
+  onLogin: (
+    email: string,
+    masterPassword: string,
+    authenticatorCode: string | undefined,
+    serverRegion: 'UnitedStates' | 'Europe' | 'Current',
+  ) => void;
+  onUnlock: (masterPassword: string) => void;
+}) {
+  const [email, setEmail] = useState('');
+  const [masterPassword, setMasterPassword] = useState('');
+  const [authenticatorCode, setAuthenticatorCode] = useState('');
+  const [serverRegion, setServerRegion] = useState(defaultServerRegion);
+
+  function reset() {
+    setEmail('');
+    setMasterPassword('');
+    setAuthenticatorCode('');
+    setServerRegion(defaultServerRegion);
+  }
+
+  useEffect(() => {
+    setEmail('');
+    setMasterPassword('');
+    setAuthenticatorCode('');
+    if (mode !== null) setServerRegion(defaultServerRegion);
+  }, [defaultServerRegion, mode]);
+
+  const isLogin = mode === 'login';
+  return (
+    <Dialog
+      onOpenChange={(open) => {
+        if (!open) {
+          reset();
+          onClose();
+        }
+      }}
+      open={mode !== null}
+    >
+      <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
+        <form
+          className="space-y-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (isLogin) {
+              onLogin(email, masterPassword, authenticatorCode || undefined, serverRegion);
+              setAuthenticatorCode('');
+            } else {
+              onUnlock(masterPassword);
+            }
+            // Match WinUI's secret prompts: hand the value to the native boundary, then remove it
+            // from renderer state even when the CLI rejects the attempt.
+            setMasterPassword('');
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>{isLogin ? 'Log in to Bitwarden' : 'Unlock Bitwarden vault'}</DialogTitle>
+            <DialogDescription>
+              {isLogin
+                ? 'Enter your Bitwarden account credentials to connect this vault.'
+                : 'Enter your master password to unlock the vault.'}
+            </DialogDescription>
+          </DialogHeader>
+          {isLogin ? (
+            <div className="space-y-3">
+              <div className="grid gap-2">
+                <Label>Server region</Label>
+                <Select
+                  disabled={loginBusy}
+                  onValueChange={(value) =>
+                    setServerRegion(value as 'UnitedStates' | 'Europe' | 'Current')
+                  }
+                  value={serverRegion}
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="Current">
+                      Current CLI setting{currentServerRegion ? ` (${currentServerRegion})` : ''}
+                    </SelectItem>
+                    <SelectItem value="UnitedStates">
+                      United States (vault.bitwarden.com)
+                    </SelectItem>
+                    <SelectItem value="Europe">Europe (vault.bitwarden.eu)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="bw-login-email">Email</Label>
+                <Input
+                  autoComplete="username"
+                  autoFocus
+                  id="bw-login-email"
+                  onChange={(event) => setEmail(event.target.value)}
+                  placeholder="you@example.com"
+                  required
+                  spellCheck={false}
+                  type="email"
+                  value={email}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="bw-login-password">Master password</Label>
+                <Input
+                  autoComplete="current-password"
+                  id="bw-login-password"
+                  onChange={(event) => setMasterPassword(event.target.value)}
+                  required
+                  type="password"
+                  value={masterPassword}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="bw-login-2fa">
+                  Two-step login code <span className="text-muted-foreground">(optional)</span>
+                </Label>
+                <Input
+                  autoComplete="one-time-code"
+                  id="bw-login-2fa"
+                  onChange={(event) => setAuthenticatorCode(event.target.value)}
+                  placeholder="000000"
+                  spellCheck={false}
+                  type="text"
+                  value={authenticatorCode}
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="grid gap-2">
+              <Label htmlFor="bw-unlock-password">Master password</Label>
+              <Input
+                autoComplete="current-password"
+                autoFocus
+                id="bw-unlock-password"
+                onChange={(event) => setMasterPassword(event.target.value)}
+                required
+                type="password"
+                value={masterPassword}
+              />
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              disabled={loginBusy}
+              onClick={() => {
+                reset();
+                onClose();
+              }}
+              type="button"
+              variant="ghost"
+            >
+              Cancel
+            </Button>
+            <Button
+              disabled={loginBusy || !masterPassword || (isLogin && !email.trim())}
+              type="submit"
+            >
+              {loginBusy ? 'Working…' : isLogin ? 'Log in' : 'Unlock'}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -10124,6 +10954,7 @@ function SettingsPage({
   onSetAutoCheckForUpdates,
   settingsUpdatesRequest,
   update,
+  onWorkspaceCredentialsChanged,
 }: {
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
@@ -10148,6 +10979,7 @@ function SettingsPage({
     status: string;
     downloadProgress: number | null;
   };
+  onWorkspaceCredentialsChanged: () => Promise<void>;
 }) {
   const [activeTab, setActiveTab] = useState('general');
   const [confirmOnTabClose, setConfirmOnTabClose] = useState(true);
@@ -10168,7 +11000,23 @@ function SettingsPage({
   const helloStatusMode = useRef<WormholeAuthMode | null>(null);
   const [bitwardenEnabled, setBitwardenEnabled] = useState(false);
   const [bitwardenPath, setBitwardenPath] = useState('bw');
+  const [bitwardenServerRegion, setBitwardenServerRegion] = useState<
+    'UnitedStates' | 'Europe' | 'Current'
+  >('UnitedStates');
+  const [bitwardenCliStatus, setBitwardenCliStatus] = useState<WormholeBitwardenCliStatus | null>(
+    null,
+  );
+  const [bitwardenInstalledVersion, setBitwardenInstalledVersion] = useState('');
+  const [bitwardenInstallError, setBitwardenInstallError] = useState('');
+  const [bitwardenLastSyncStatus, setBitwardenLastSyncStatus] = useState('');
+  const [bitwardenAvailableCount, setBitwardenAvailableCount] = useState<number | null>(null);
+  const [bitwardenBusy, setBitwardenBusy] = useState(false);
+  const [bitwardenError, setBitwardenError] = useState('');
+  const [bitwardenCliDialog, setBitwardenCliDialog] = useState<'login' | 'unlock' | null>(null);
   const [browserExtensionEnabled, setBrowserExtensionEnabled] = useState(false);
+  const [browserExtensionStatus, setBrowserExtensionStatus] = useState('Disabled');
+  const [browserExtensionBusy, setBrowserExtensionBusy] = useState(false);
+  const [browserExtensionError, setBrowserExtensionError] = useState('');
   const [retentionDays, setRetentionDays] = useState('14');
   const [mcpState, setMcpState] = useState<WormholeMcpStatus | null>(null);
   const [mcpPort, setMcpPort] = useState('8765');
@@ -10212,6 +11060,7 @@ function SettingsPage({
   useEffect(() => {
     if (authGate === 'unlocked') return;
     setSecretDialog(null);
+    setBitwardenCliDialog(null);
     pendingSecretAction.current = null;
     setBackupExportOpen(false);
     setBackupExportPassword('');
@@ -10258,14 +11107,42 @@ function SettingsPage({
   useEffect(() => {
     if (authGate !== 'unlocked' || !window.wormhole) return;
     let active = true;
-    void window.wormhole
-      .readAppSettings()
-      .then((settings) => {
-        if (active) setPromptBeforeTunnelConnect(settings.promptBeforeTunnelConnect);
-      })
-      .catch(() => {
-        // The switch keeps its default (true) when the setting cannot be read.
-      });
+    void (async () => {
+      const [settingsResult, extensionResult, cliResult] = await Promise.allSettled([
+        window.wormhole!.readAppSettings(),
+        window.wormhole!.readBitwardenExtension(),
+        window.wormhole!.readBitwardenCli(),
+      ]);
+      if (!active) return;
+
+      if (settingsResult.status === 'fulfilled') {
+        setPromptBeforeTunnelConnect(settingsResult.value.promptBeforeTunnelConnect);
+      }
+      if (extensionResult.status === 'fulfilled') {
+        applyBitwardenExtensionState(extensionResult.value);
+      } else {
+        const message = backendErrorMessage(extensionResult.reason);
+        setBrowserExtensionError(message);
+        setBrowserExtensionStatus(message);
+      }
+      if (cliResult.status === 'rejected') {
+        setBitwardenError(backendErrorMessage(cliResult.reason));
+        return;
+      }
+
+      const cliState = cliResult.value;
+      applyBitwardenCliState(cliState);
+      if (!cliState.enabled || !cliState.installed) {
+        setBitwardenCliStatus(null);
+        return;
+      }
+      try {
+        const cliStatus = await window.wormhole!.refreshBitwardenCliStatus();
+        if (active) setBitwardenCliStatus(cliStatus);
+      } catch (error: unknown) {
+        if (active) setBitwardenError(backendErrorMessage(error));
+      }
+    })();
     return () => {
       active = false;
     };
@@ -10290,6 +11167,263 @@ function SettingsPage({
       active = false;
     };
   }, [authGate]);
+
+  function applyBitwardenExtensionState(state: WormholeBitwardenExtensionState) {
+    setBrowserExtensionEnabled(state.enabled);
+    setBrowserExtensionStatus(formatBitwardenExtensionStatus(state));
+    setBrowserExtensionError(state.lastUpdateError || '');
+  }
+
+  function applyBitwardenCliState(state: WormholeBitwardenCliState) {
+    setBitwardenEnabled(state.enabled);
+    setBitwardenPath(state.path || 'bw');
+    setBitwardenServerRegion(state.serverRegion);
+    setBitwardenInstalledVersion(state.installed?.version || '');
+    setBitwardenInstallError(state.installError || '');
+    setBitwardenLastSyncStatus(state.lastSyncStatus || '');
+    setBitwardenAvailableCount(state.availableCount);
+  }
+
+  async function reloadBitwardenCliStatus(state?: WormholeBitwardenCliState) {
+    if (!window.wormhole) return;
+    const freshState = state ?? (await window.wormhole.readBitwardenCli());
+    applyBitwardenCliState(freshState);
+    setBitwardenCliStatus(null);
+    setBitwardenCliStatus(
+      freshState.enabled && freshState.installed
+        ? await window.wormhole.refreshBitwardenCliStatus()
+        : null,
+    );
+  }
+
+  async function refreshBitwardenCliStatus() {
+    if (bitwardenBusy || !window.wormhole) return;
+    setBitwardenBusy(true);
+    setBitwardenError('');
+    try {
+      await reloadBitwardenCliStatus();
+    } catch (error) {
+      setBitwardenError(backendErrorMessage(error));
+    } finally {
+      setBitwardenBusy(false);
+    }
+  }
+
+  async function runBitwardenCliInstall() {
+    if (bitwardenBusy || !window.wormhole) return;
+    setBitwardenBusy(true);
+    setBitwardenError('');
+    try {
+      const state = await window.wormhole.installBitwardenCli();
+      await reloadBitwardenCliStatus(state);
+    } catch (error) {
+      const message = backendErrorMessage(error);
+      setBitwardenError(message);
+      setBitwardenInstallError(message);
+    } finally {
+      setBitwardenBusy(false);
+    }
+  }
+
+  async function handleBitwardenCliConfigSave() {
+    if (bitwardenBusy || !window.wormhole) return;
+    setBitwardenBusy(true);
+    setBitwardenError('');
+    try {
+      const state = await window.wormhole.setBitwardenCliConfig({
+        path: bitwardenPath,
+        serverRegion:
+          bitwardenServerRegion === 'UnitedStates' ? 0 : bitwardenServerRegion === 'Europe' ? 1 : 2,
+      });
+      await reloadBitwardenCliStatus(state);
+    } catch (error) {
+      setBitwardenError(backendErrorMessage(error));
+    } finally {
+      setBitwardenBusy(false);
+    }
+  }
+
+  async function handleBitwardenCliEnabledChange(enabled: boolean) {
+    if (bitwardenBusy || !window.wormhole) return;
+    setBitwardenBusy(true);
+    setBitwardenEnabled(enabled);
+    setBitwardenError('');
+    let settingSaved = false;
+    try {
+      const state = await window.wormhole.setBitwardenCliEnabled(enabled);
+      settingSaved = true;
+      await reloadBitwardenCliStatus(state);
+      await onWorkspaceCredentialsChanged();
+    } catch (error) {
+      if (!settingSaved) setBitwardenEnabled(!enabled);
+      setBitwardenError(backendErrorMessage(error));
+    } finally {
+      setBitwardenBusy(false);
+    }
+  }
+
+  async function handleBitwardenCliLogin(
+    email: string,
+    masterPassword: string,
+    authenticatorCode?: string,
+    serverRegion: 'UnitedStates' | 'Europe' | 'Current' = bitwardenServerRegion,
+  ) {
+    if (bitwardenBusy || !window.wormhole) return false;
+    setBitwardenBusy(true);
+    setBitwardenError('');
+    try {
+      await window.wormhole.loginBitwardenCli({
+        email,
+        masterPassword,
+        authenticatorCode: authenticatorCode?.trim() || undefined,
+        serverRegion: serverRegion === 'UnitedStates' ? 0 : serverRegion === 'Europe' ? 1 : 2,
+      });
+      setBitwardenCliDialog(null);
+      await reloadBitwardenCliStatus();
+      await onWorkspaceCredentialsChanged();
+      return true;
+    } catch (error) {
+      setBitwardenError(backendErrorMessage(error));
+      return false;
+    } finally {
+      setBitwardenBusy(false);
+    }
+  }
+
+  async function handleBitwardenCliUnlock(masterPassword: string) {
+    if (bitwardenBusy || !window.wormhole) return false;
+    setBitwardenBusy(true);
+    setBitwardenError('');
+    try {
+      await window.wormhole.unlockBitwardenCli(masterPassword);
+      setBitwardenCliDialog(null);
+      await reloadBitwardenCliStatus();
+      await onWorkspaceCredentialsChanged();
+      return true;
+    } catch (error) {
+      setBitwardenError(backendErrorMessage(error));
+      return false;
+    } finally {
+      setBitwardenBusy(false);
+    }
+  }
+
+  async function handleBitwardenCliSync() {
+    if (bitwardenBusy || !window.wormhole) return;
+    setBitwardenBusy(true);
+    setBitwardenError('');
+    try {
+      const result = await window.wormhole.syncBitwardenCli();
+      setBitwardenLastSyncStatus(result.lastSyncStatus);
+      setBitwardenAvailableCount(result.availableCount);
+      await reloadBitwardenCliStatus();
+      await onWorkspaceCredentialsChanged();
+    } catch (error) {
+      setBitwardenError(backendErrorMessage(error));
+    } finally {
+      setBitwardenBusy(false);
+    }
+  }
+
+  async function handleBitwardenCliLogout() {
+    if (bitwardenBusy || !window.wormhole) return;
+    setBitwardenBusy(true);
+    setBitwardenError('');
+    try {
+      await window.wormhole.logoutBitwardenCli();
+      await reloadBitwardenCliStatus();
+    } catch (error) {
+      setBitwardenError(backendErrorMessage(error));
+    } finally {
+      setBitwardenBusy(false);
+    }
+  }
+
+  async function handleBrowserExtensionEnabledChange(enabled: boolean) {
+    if (browserExtensionBusy || !window.wormhole) return;
+    setBrowserExtensionBusy(true);
+    setBrowserExtensionError('');
+    setBrowserExtensionEnabled(enabled);
+    let settingSaved = false;
+    try {
+      let state = await window.wormhole.setBitwardenExtensionEnabled(enabled);
+      settingSaved = true;
+      applyBitwardenExtensionState(state);
+      if (enabled && !state.installed) {
+        setBrowserExtensionStatus('Installing Bitwarden browser extension...');
+        state = await window.wormhole.ensureBitwardenExtension();
+        applyBitwardenExtensionState(state);
+      }
+    } catch (error) {
+      const message = backendErrorMessage(error);
+      if (!settingSaved) setBrowserExtensionEnabled(!enabled);
+      setBrowserExtensionError(message);
+      setBrowserExtensionStatus(message);
+    } finally {
+      setBrowserExtensionBusy(false);
+    }
+  }
+
+  async function runBitwardenExtensionInstall(initialStatus: string) {
+    if (browserExtensionBusy || !window.wormhole) return;
+    setBrowserExtensionBusy(true);
+    setBrowserExtensionError('');
+    setBrowserExtensionStatus(initialStatus);
+    try {
+      const state = await window.wormhole.installBitwardenExtension();
+      applyBitwardenExtensionState(state);
+    } catch (error) {
+      const message = backendErrorMessage(error);
+      setBrowserExtensionError(message);
+      setBrowserExtensionStatus(message);
+    } finally {
+      setBrowserExtensionBusy(false);
+    }
+  }
+
+  async function importBitwardenExtensionZip() {
+    if (browserExtensionBusy || !window.wormhole) return;
+    setBrowserExtensionBusy(true);
+    setBrowserExtensionError('');
+    setBrowserExtensionStatus('Importing Bitwarden browser extension ZIP...');
+    try {
+      const state = await window.wormhole.importBitwardenExtensionZip();
+      if (state) {
+        applyBitwardenExtensionState(state);
+      } else {
+        const fresh = await window.wormhole.readBitwardenExtension();
+        applyBitwardenExtensionState(fresh);
+      }
+    } catch (error) {
+      const message = backendErrorMessage(error);
+      setBrowserExtensionError(message);
+      setBrowserExtensionStatus(message);
+    } finally {
+      setBrowserExtensionBusy(false);
+    }
+  }
+
+  async function importBitwardenExtensionFolder() {
+    if (browserExtensionBusy || !window.wormhole) return;
+    setBrowserExtensionBusy(true);
+    setBrowserExtensionError('');
+    setBrowserExtensionStatus('Importing Bitwarden browser extension folder...');
+    try {
+      const state = await window.wormhole.importBitwardenExtensionFolder();
+      if (state) {
+        applyBitwardenExtensionState(state);
+      } else {
+        const fresh = await window.wormhole.readBitwardenExtension();
+        applyBitwardenExtensionState(fresh);
+      }
+    } catch (error) {
+      const message = backendErrorMessage(error);
+      setBrowserExtensionError(message);
+      setBrowserExtensionStatus(message);
+    } finally {
+      setBrowserExtensionBusy(false);
+    }
+  }
 
   function handlePromptBeforeTunnelConnectChange(enabled: boolean) {
     setPromptBeforeTunnelConnect(enabled);
@@ -11120,13 +12254,15 @@ function SettingsPage({
             <SettingsSection title="Credential vault">
               <SettingsSwitch
                 checked={bitwardenEnabled}
-                description="Resolve saved credential passwords through the bw CLI."
+                description="Manage the Bitwarden vault used by SSH, RDP, and VNC credentials."
+                disabled={bitwardenBusy}
                 label="Enable Bitwarden Password Manager"
-                onCheckedChange={setBitwardenEnabled}
+                onCheckedChange={(enabled) => void handleBitwardenCliEnabledChange(enabled)}
               />
               <div className="grid gap-2">
                 <Label htmlFor="settings-bitwarden-path">bw.exe path</Label>
                 <Input
+                  disabled={bitwardenBusy}
                   id="settings-bitwarden-path"
                   onChange={(event) => setBitwardenPath(event.target.value)}
                   placeholder="bw"
@@ -11134,22 +12270,133 @@ function SettingsPage({
                   value={bitwardenPath}
                 />
               </div>
-              <p className="text-[11px] text-muted-foreground">Bitwarden CLI is not connected.</p>
+              <div className="grid gap-2">
+                <Label>Server region</Label>
+                <Select
+                  disabled={bitwardenBusy}
+                  onValueChange={(value) =>
+                    setBitwardenServerRegion(value as 'UnitedStates' | 'Europe' | 'Current')
+                  }
+                  value={bitwardenServerRegion}
+                >
+                  <SelectTrigger className="w-full sm:max-w-[280px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="UnitedStates">bitwarden.com (US)</SelectItem>
+                    <SelectItem value="Europe">bitwarden.eu (EU)</SelectItem>
+                    <SelectItem value="Current">Current server</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  disabled={bitwardenBusy}
+                  onClick={() => void handleBitwardenCliConfigSave()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  Save path &amp; region
+                </Button>
+              </div>
+              {bitwardenCliStatus ? (
+                <div className="grid gap-1 text-[11px] leading-relaxed text-muted-foreground">
+                  <p>
+                    Status:{' '}
+                    <span className="text-foreground">
+                      {formatBitwardenCliStatus(bitwardenCliStatus)}
+                    </span>
+                  </p>
+                  {bitwardenCliStatus.userEmail ? (
+                    <p>
+                      Account:{' '}
+                      <span className="text-foreground">{bitwardenCliStatus.userEmail}</span>
+                    </p>
+                  ) : null}
+                  {bitwardenCliStatus.serverUrl ? (
+                    <p>
+                      Server:{' '}
+                      <span className="text-foreground">{bitwardenCliStatus.serverUrl}</span>
+                    </p>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="text-[11px] text-muted-foreground">
+                  No status available. Connect to Bitwarden to see your vault.
+                </p>
+              )}
+              {bitwardenInstalledVersion ? (
+                <p className="text-[11px] text-muted-foreground">
+                  Installed bw CLI {bitwardenInstalledVersion}
+                </p>
+              ) : null}
+              {bitwardenLastSyncStatus ? (
+                <p className="text-[11px] text-muted-foreground">
+                  {bitwardenLastSyncStatus}
+                  {bitwardenAvailableCount !== null ? ` · ${bitwardenAvailableCount} logins` : ''}
+                </p>
+              ) : null}
+              {bitwardenInstallError ? (
+                <p className="text-[11px] text-destructive">{bitwardenInstallError}</p>
+              ) : null}
+              {bitwardenError ? (
+                <p className="text-[11px] text-destructive">{bitwardenError}</p>
+              ) : null}
               <div className="flex flex-wrap gap-2">
-                <Button size="sm" variant="outline">
+                <Button
+                  disabled={bitwardenBusy}
+                  onClick={() => void refreshBitwardenCliStatus()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
                   Refresh status
                 </Button>
-                <Button size="sm" variant="outline">
-                  Install / Update CLI
+                <Button
+                  disabled={bitwardenBusy}
+                  onClick={() => void runBitwardenCliInstall()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  {bitwardenBusy ? 'Working…' : 'Install / Update CLI'}
                 </Button>
-                <Button size="sm" variant="outline">
+                <Button
+                  disabled={bitwardenBusy || !bitwardenEnabled}
+                  onClick={() => setBitwardenCliDialog('login')}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
                   Log in
                 </Button>
-                <Button size="sm" variant="outline">
+                <Button
+                  disabled={bitwardenBusy || !bitwardenEnabled}
+                  onClick={() => setBitwardenCliDialog('unlock')}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
                   Unlock
                 </Button>
-                <Button size="sm" variant="outline">
+                <Button
+                  disabled={bitwardenBusy || !bitwardenEnabled}
+                  onClick={() => void handleBitwardenCliSync()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
                   Sync
+                </Button>
+                <Button
+                  disabled={bitwardenBusy || !bitwardenEnabled}
+                  onClick={() => void handleBitwardenCliLogout()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  Log out
                 </Button>
               </div>
             </SettingsSection>
@@ -11158,29 +12405,68 @@ function SettingsPage({
               <SettingsSwitch
                 checked={browserExtensionEnabled}
                 description="Use the official Bitwarden extension inside HTTPS sessions."
+                disabled={browserExtensionBusy}
                 label="Enable Bitwarden in HTTPS windows"
-                onCheckedChange={setBrowserExtensionEnabled}
+                onCheckedChange={(enabled) => void handleBrowserExtensionEnabledChange(enabled)}
               />
-              <p className="text-[11px] text-muted-foreground">
-                No browser extension is installed.
+              <p
+                className={
+                  browserExtensionError
+                    ? 'text-[11px] leading-relaxed text-destructive'
+                    : 'text-[11px] leading-relaxed text-muted-foreground'
+                }
+              >
+                {browserExtensionStatus}
               </p>
               <p className="text-[11px] leading-relaxed text-muted-foreground">
-                Turning this on installs the official extension automatically in the native app.
+                Turning this on installs the official extension automatically.
               </p>
               <div className="flex flex-wrap gap-2">
-                <Button size="sm" variant="outline">
-                  Install / Update
+                <Button
+                  disabled={browserExtensionBusy}
+                  onClick={() =>
+                    void runBitwardenExtensionInstall('Installing Bitwarden browser extension...')
+                  }
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
+                  {browserExtensionBusy ? 'Working…' : 'Install / Update'}
                 </Button>
-                <Button size="sm" variant="outline">
+                <Button
+                  disabled={browserExtensionBusy}
+                  onClick={() => void importBitwardenExtensionZip()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
                   Import ZIP
                 </Button>
-                <Button size="sm" variant="outline">
+                <Button
+                  disabled={browserExtensionBusy}
+                  onClick={() => void importBitwardenExtensionFolder()}
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                >
                   Use folder
                 </Button>
               </div>
             </SettingsSection>
           </SettingsSection>
         </SettingsTabPanel>
+
+        <BitwardenCliDialog
+          currentServerRegion={bitwardenCliServerRegionCode(bitwardenCliStatus?.serverUrl)}
+          defaultServerRegion={bitwardenServerRegion}
+          loginBusy={bitwardenBusy}
+          mode={bitwardenCliDialog}
+          onClose={() => setBitwardenCliDialog(null)}
+          onLogin={(email, masterPassword, authenticatorCode, serverRegion) =>
+            void handleBitwardenCliLogin(email, masterPassword, authenticatorCode, serverRegion)
+          }
+          onUnlock={(masterPassword) => void handleBitwardenCliUnlock(masterPassword)}
+        />
 
         <SettingsTabPanel value="updates">
           <SettingsSection title="Wormhole updates">

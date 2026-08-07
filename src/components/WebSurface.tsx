@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import {
   AlertCircle,
   ChevronLeft,
@@ -7,6 +7,7 @@ import {
   LoaderCircle,
   RefreshCcw,
 } from 'lucide-react';
+import bitwardenIcon from '../../Assets/Bitwarden/bitwarden-icon.png';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { ConnectionStepper, type TunnelProgress } from './ConnectionStepper';
@@ -22,6 +23,7 @@ type WebSessionSurface = {
   webUrl?: string;
   webCanGoBack?: boolean;
   webCanGoForward?: boolean;
+  bitwardenPopupUrl?: string;
 };
 
 type WebSurfaceProps = {
@@ -34,6 +36,38 @@ type WebSurfaceProps = {
 export function WebSurface({ session, isActive, isAuthorized, onReconnect }: WebSurfaceProps) {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const visible = isActive && isAuthorized && session.status === 'connected';
+  const [bitwardenOpen, setBitwardenOpen] = useState(false);
+
+  useEffect(() => {
+    if (!visible) {
+      void window.wormhole
+        ?.closeBitwardenPopup(session.id)
+        .then(() => setBitwardenOpen(false))
+        .catch(() => setBitwardenOpen(false));
+    }
+  }, [session.id, visible]);
+
+  useEffect(() => {
+    return window.wormhole?.onBitwardenPopupState((state) => {
+      if (state.sessionId === session.id) setBitwardenOpen(state.open);
+    });
+  }, [session.id]);
+
+  function toggleBitwarden() {
+    const api = window.wormhole;
+    if (!api || !session.bitwardenPopupUrl) return;
+    if (bitwardenOpen) {
+      void api
+        .closeBitwardenPopup(session.id)
+        .then((result) => setBitwardenOpen(result.open))
+        .catch(() => setBitwardenOpen(false));
+    } else {
+      void api
+        .openBitwardenPopup(session.id)
+        .then((result) => setBitwardenOpen(result.open))
+        .catch(() => setBitwardenOpen(false));
+    }
+  }
 
   useLayoutEffect(() => {
     const surface = surfaceRef.current;
@@ -107,6 +141,15 @@ export function WebSurface({ session, isActive, isAuthorized, onReconnect }: Web
           <ToolbarButton disabled={!visible} label="Reload" onClick={() => command('reload')}>
             <RefreshCcw />
           </ToolbarButton>
+          {session.bitwardenPopupUrl ? (
+            <ToolbarButton
+              disabled={!visible}
+              label={bitwardenOpen ? 'Close Bitwarden' : 'Open Bitwarden'}
+              onClick={() => toggleBitwarden()}
+            >
+              <img alt="" className="size-4" src={bitwardenIcon} />
+            </ToolbarButton>
+          ) : null}
         </div>
         <div className="flex min-w-0 flex-1 items-center gap-2 rounded-md border border-border/70 bg-background/70 px-2.5 py-1 text-xs shadow-inner">
           <Globe className="size-3.5 shrink-0 text-primary" />

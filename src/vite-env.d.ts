@@ -91,6 +91,8 @@ interface WormholeWorkspaceNode {
   sshAutoSudo?: boolean;
   tunnelEnabled?: boolean;
   tunnelConfigId?: string;
+  credentialMode?: number;
+  credentialId?: string;
   persisted?: boolean;
   children?: WormholeWorkspaceNode[];
 }
@@ -104,6 +106,9 @@ interface WormholeWorkspaceCredential {
   provider: 'Local' | 'Bitwarden';
   canEdit: boolean;
   canDelete: boolean;
+  bitwardenItemId?: string;
+  bitwardenItemName?: string;
+  isVirtualBitwarden?: boolean;
 }
 
 interface WormholeWorkspaceTunnel {
@@ -141,6 +146,70 @@ interface WormholeWebTarget {
   host: string;
   port: number;
   ignoreCertErrors: boolean;
+  bitwarden?: {
+    partition: string;
+    popupUrl: string;
+  };
+}
+
+interface WormholeBitwardenExtensionState {
+  enabled: boolean;
+  source: 'OfficialGitHub' | 'ManualZip' | 'ManualFolder';
+  releasesUrl: string;
+  version: string | null;
+  path: string | null;
+  sha256: string | null;
+  assetName: string | null;
+  downloadUrl: string | null;
+  lastUpdateCheckUtc: string | null;
+  lastUpdateStatus: string | null;
+  lastUpdateError: string | null;
+  availableVersion: string | null;
+  installed: {
+    name: string;
+    version: string;
+    path: string;
+    defaultPopup?: string;
+  } | null;
+}
+
+interface WormholeBitwardenCliState {
+  enabled: boolean;
+  path: string;
+  serverRegion: 'UnitedStates' | 'Europe' | 'Current';
+  releasesUrl: string;
+  version: string | null;
+  sha256: string | null;
+  assetName: string | null;
+  downloadUrl: string | null;
+  installStatus: string | null;
+  installError: string | null;
+  lastSyncUtc: string | null;
+  lastSyncStatus: string | null;
+  lastSyncError: string | null;
+  availableCount: number | null;
+  installed: {
+    version: string;
+    path: string;
+    sha256?: string;
+    assetName?: string;
+    downloadUrl?: string;
+  } | null;
+}
+
+interface WormholeBitwardenCliStatus {
+  status: 'Unauthenticated' | 'Locked' | 'Unlocked' | 'Unknown';
+  userEmail: string | null;
+  serverUrl: string | null;
+  lastSync?: string;
+  hasSessionKey?: boolean;
+}
+
+interface WormholeBitwardenLoginItem {
+  id: string;
+  name: string;
+  username?: string;
+  revisionDate?: string;
 }
 
 interface WormholeWebEvent {
@@ -360,6 +429,7 @@ type WormholeVncCommand =
       port?: number;
       password?: string;
       tunnelConfigId?: string;
+      passwordProvided?: boolean;
     }
   | { action: 'vnc.disconnect'; sessionId: string }
   | { action: 'vnc.pointer'; sessionId: string; x: number; y: number; buttons: number }
@@ -521,12 +591,53 @@ interface Window {
     selectBackupForImport(): Promise<WormholeBackupImportSelection | null>;
     clearBackupImportSelection(): void;
     importBackup(password: string): Promise<WormholeBackupImportResult>;
+    createWorkspaceNode(request: {
+      parentId: string;
+      name: string;
+      kind: 'folder' | 'connection';
+      protocol: '' | WormholeProtocol;
+      host: string;
+      sshAutoSudo: boolean | null;
+      httpIgnoreCertErrors: boolean | null;
+      tunnelEnabled: boolean | null;
+      tunnelConfigId: string;
+      credentialMode: 0 | 1 | 2;
+      credentialId: string;
+      serialBaudRate: number;
+      serialDataBits: number;
+      serialStopBits: number;
+      serialParity: number;
+      serialFlowControl: number;
+    }): Promise<{ nodeId: string }>;
+    updateWorkspaceNode(request: {
+      id: string;
+      parentId: string;
+      name: string;
+      kind: 'folder' | 'connection';
+      protocol: '' | WormholeProtocol;
+      host: string;
+      sshAutoSudo: boolean | null;
+      httpIgnoreCertErrors: boolean | null;
+      tunnelEnabled: boolean | null;
+      tunnelConfigId: string;
+      credentialMode: 0 | 1 | 2;
+      credentialId: string;
+      serialBaudRate: number;
+      serialDataBits: number;
+      serialStopBits: number;
+      serialParity: number;
+      serialFlowControl: number;
+    }): Promise<{ updated: boolean }>;
     createCredential(request: {
       name: string;
       protocol: 'ssh' | 'rdp' | 'vnc';
       username: string;
       domain: string;
       password: string;
+      provider: 'Local' | 'Bitwarden';
+      bitwardenItemId?: string;
+      bitwardenItemName?: string;
+      bitwardenFieldPath?: string;
     }): Promise<WormholeWorkspaceCredential>;
     updateCredential(request: {
       id: string;
@@ -535,11 +646,23 @@ interface Window {
       username: string;
       domain: string;
       password: string;
+      provider: 'Local' | 'Bitwarden';
+      bitwardenItemId?: string;
+      bitwardenItemName?: string;
+      bitwardenFieldPath?: string;
     }): Promise<WormholeWorkspaceCredential>;
     deleteCredential(request: { id: string }): Promise<{ deleted: boolean; error?: string }>;
     updateWorkspaceNodeSshSettings(request: {
       nodeId: string;
       sshAutoSudo: boolean | null;
+    }): Promise<{ updated: boolean }>;
+    listCredentialsForProtocol(
+      protocol: 'ssh' | 'rdp' | 'vnc',
+    ): Promise<WormholeWorkspaceCredential[]>;
+    updateWorkspaceNodeCredential(request: {
+      nodeId: string;
+      mode: 0 | 1 | 2;
+      credentialId: string;
     }): Promise<{ updated: boolean }>;
     updateWorkspaceNodeWebSettings(request: {
       nodeId: string;
@@ -652,6 +775,43 @@ interface Window {
     setLogLevel(level: string): Promise<{ updated: boolean; logLevel: string }>;
     openCurrentLogFile(): Promise<{ opened: boolean }>;
     openLogsFolder(): Promise<{ opened: boolean }>;
+    readBitwardenExtension(): Promise<WormholeBitwardenExtensionState>;
+    setBitwardenExtensionEnabled(enabled: boolean): Promise<WormholeBitwardenExtensionState>;
+    installBitwardenExtension(): Promise<WormholeBitwardenExtensionState>;
+    ensureBitwardenExtension(): Promise<WormholeBitwardenExtensionState>;
+    importBitwardenExtensionZip(): Promise<WormholeBitwardenExtensionState | null>;
+    importBitwardenExtensionFolder(): Promise<WormholeBitwardenExtensionState | null>;
+    readBitwardenCli(): Promise<WormholeBitwardenCliState>;
+    setBitwardenCliEnabled(enabled: boolean): Promise<WormholeBitwardenCliState>;
+    setBitwardenCliConfig(config: {
+      path: string;
+      serverRegion: number;
+    }): Promise<WormholeBitwardenCliState>;
+    installBitwardenCli(): Promise<WormholeBitwardenCliState>;
+    refreshBitwardenCliStatus(): Promise<WormholeBitwardenCliStatus>;
+    loginBitwardenCli(request: {
+      email: string;
+      masterPassword: string;
+      authenticatorCode?: string;
+      serverRegion: number;
+    }): Promise<{ loggedIn: boolean }>;
+    unlockBitwardenCli(masterPassword: string): Promise<{ unlocked: boolean }>;
+    logoutBitwardenCli(): Promise<{ loggedOut: boolean }>;
+    syncBitwardenCli(): Promise<{
+      lastSyncUtc: string;
+      lastSyncStatus: string;
+      availableCount: number;
+    }>;
+    searchBitwardenItems(query: string): Promise<{ items: WormholeBitwardenLoginItem[] }>;
+    nodeUsesBitwarden(request: {
+      nodeId: string;
+      protocol: 'ssh' | 'rdp' | 'vnc';
+    }): Promise<{ bitwarden: boolean }>;
+    openBitwardenPopup(sessionId: string): Promise<{ open: boolean }>;
+    closeBitwardenPopup(sessionId: string): Promise<{ open: false }>;
+    onBitwardenPopupState(
+      listener: (state: { sessionId: string; open: boolean }) => void,
+    ): () => void;
     openSshSession(request: {
       sessionId: string;
       nodeId?: string;
@@ -662,6 +822,7 @@ interface Window {
       tunnelConfigId?: string;
       columns: number;
       rows: number;
+      manualCredentials?: boolean;
     }): Promise<WormholeSshConnected>;
     trustSshHostKey(request: {
       nodeId: string;
@@ -756,6 +917,7 @@ interface Window {
       sessionId: string;
       profile: WormholeRdpProfile;
       bounds?: WormholeRdpSurfaceRect;
+      manualCredentials?: boolean;
     }): Promise<WormholeRdpBackendEvent>;
     resizeRdpSession(request: {
       sessionId: string;

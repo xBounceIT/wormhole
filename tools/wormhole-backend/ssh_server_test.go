@@ -62,6 +62,37 @@ INSERT INTO Nodes (Id, ParentId, Name, Kind, Protocol, Host, Port, Username, Upd
 	}
 }
 
+func TestLoadSSHTargetRejectsMissingProtocol(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    ParentId TEXT NULL,
+    Name TEXT NOT NULL,
+    Kind INTEGER NOT NULL,
+    Protocol INTEGER NULL,
+    Host TEXT NULL,
+    Username TEXT NULL
+);
+INSERT INTO Nodes (Id, ParentId, Name, Kind, Protocol, Host, Username)
+VALUES ('leaf', NULL, 'Protocol-less leaf', 1, NULL, 'ssh.example', 'operator');
+`)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	_, err = loadSSHTarget(databasePath, "leaf")
+	if err == nil || !strings.Contains(err.Error(), "no protocol") {
+		t.Fatalf("expected missing-protocol error, got %v", err)
+	}
+}
+
 func TestLoadSSHTargetUsesInheritedSSHDefaults(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	database, err := openDatabase(databasePath, false)
@@ -229,6 +260,150 @@ INSERT INTO Nodes (Id, ParentId, Name, Kind, Protocol, Host, Username, Credentia
 	}
 }
 
+func TestLoadSSHTargetUnknownCredentialModeStopsSavedCredentialInheritance(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    ParentId TEXT NULL,
+    Name TEXT NOT NULL,
+    Kind INTEGER NOT NULL,
+    Protocol INTEGER NULL,
+    Host TEXT NULL,
+    Username TEXT NULL,
+    CredentialId TEXT NULL,
+    CredentialMode INTEGER NULL,
+    UpdatedAt TEXT NOT NULL
+);
+INSERT INTO Nodes (Id, ParentId, Name, Kind, Protocol, Host, Username, CredentialId, CredentialMode, UpdatedAt) VALUES
+    ('folder', NULL, 'SSH defaults', 0, 0, 'ssh.example', 'operator', 'parent-credential', 2, 'now'),
+    ('leaf', 'folder', 'SSH leaf', 1, 0, NULL, NULL, NULL, 99, 'now');
+`)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	target, err := loadSSHTarget(databasePath, "leaf")
+	if err != nil {
+		t.Fatalf("unknown credential mode inherited the parent credential: %v", err)
+	}
+	if target.username != "operator" || target.password != "" {
+		t.Fatalf("unexpected SSH target: %#v", target)
+	}
+}
+
+func TestLoadSSHTargetAcceptsTransientVirtualBitwardenCredential(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialID := bitwardenVirtualCredentialID("item-1", 0)
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    ParentId TEXT NULL,
+    Name TEXT NOT NULL,
+    Kind INTEGER NOT NULL,
+    Protocol INTEGER NULL,
+    Host TEXT NULL,
+    Username TEXT NULL,
+    CredentialId TEXT NULL,
+    CredentialMode INTEGER NULL,
+    UpdatedAt TEXT NOT NULL
+);
+INSERT INTO Nodes (Id, Name, Kind, Protocol, Host, CredentialId, CredentialMode, UpdatedAt)
+VALUES ('leaf', 'SSH leaf', 1, 0, 'ssh.example', ?, 2, 'now');`, credentialID)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	target, err := loadSSHTargetWithOverrides(
+		databasePath,
+		"leaf",
+		"vault-user",
+		"vault-password",
+		true,
+		false,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.username != "vault-user" || target.password != "vault-password" {
+		t.Fatalf("virtual Bitwarden target = %#v", target)
+	}
+}
+
+func TestLoadSSHTargetKeepsExplicitUsernameOverBitwardenUsername(t *testing.T) {
+	target := sshTarget{username: "connection-user"}
+	if !applySSHCredentialOverride(&target, "vault-user", "vault-password", true, false) {
+		t.Fatal("valid Bitwarden override was rejected")
+	}
+	if target.username != "connection-user" || target.password != "vault-password" {
+		t.Fatalf("resolved SSH identity = %#v", target)
+	}
+}
+
+func TestLoadSSHTargetAcceptsAuthoritativeManualUsernameAndEmptyPasswordOverride(t *testing.T) {
+	target := sshTarget{username: "connection-user", password: "saved-password"}
+	if !applySSHCredentialOverride(&target, "manual-user", "", true, true) {
+		t.Fatal("explicit empty SSH password override was rejected")
+	}
+	if target.username != "manual-user" || target.password != "" {
+		t.Fatalf("resolved SSH identity = %#v", target)
+	}
+}
+
+func TestLoadSSHTargetAppliesManualCredentialsWithoutSavedBinding(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    ParentId TEXT NULL,
+    Name TEXT NOT NULL,
+    Kind INTEGER NOT NULL,
+    Protocol INTEGER NULL,
+    Host TEXT NULL,
+    Username TEXT NULL,
+    CredentialId TEXT NULL,
+    CredentialMode INTEGER NULL
+);
+INSERT INTO Nodes (Id, ParentId, Name, Kind, Protocol, Host, Username, CredentialId, CredentialMode)
+VALUES ('leaf', NULL, 'SSH leaf', 1, 0, 'ssh.example', NULL, NULL, 1);`)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	target, err := loadSSHTargetWithOverrides(
+		databasePath,
+		"leaf",
+		"manual-user",
+		"manual-password",
+		true,
+		true,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.username != "manual-user" || target.password != "manual-password" {
+		t.Fatalf("manual SSH target = %#v", target)
+	}
+}
+
 func TestLoadSSHTargetRejectsInheritedVPNWithoutConfiguration(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	database, err := openDatabase(databasePath, false)
@@ -288,20 +463,14 @@ func TestResolveDirectSSHTargetUsesTemporaryCredentialsAndDefaultsPort(t *testin
 
 func TestResolveDirectSSHTargetRejectsInvalidTunnelAndBounds(t *testing.T) {
 	_, err := resolveDirectSSHTarget(sshWireCommand{
-		Host:           "ssh.example",
-		Username:       "operator",
-		Password:       "secret",
-		Port:           65536,
-		TunnelConfigID: "not-a-tunnel",
+		Host: "ssh.example", Username: "operator", Password: "secret",
+		Port: 65536, TunnelConfigID: "not-a-tunnel",
 	})
 	if err == nil || !strings.Contains(err.Error(), "port") {
 		t.Fatalf("expected invalid port to be rejected, got %v", err)
 	}
-
 	_, err = resolveDirectSSHTarget(sshWireCommand{
-		Host:           "ssh.example",
-		Username:       "operator",
-		Password:       "secret",
+		Host: "ssh.example", Username: "operator", Password: "secret",
 		TunnelConfigID: "not-a-tunnel",
 	})
 	if err == nil || !strings.Contains(err.Error(), "tunnel") {

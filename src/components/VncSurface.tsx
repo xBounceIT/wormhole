@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent, type PointerE
 import { AlertCircle, KeyRound, LoaderCircle, Monitor, RefreshCcw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { isBitwardenUnlockError } from '@/runtime-credential-errors';
 import { ConnectionStepper, type TunnelProgress } from './ConnectionStepper';
 
 type PointerLocation = Pick<PointerEvent<HTMLDivElement>, 'clientX' | 'clientY'>;
@@ -91,10 +92,19 @@ function isFormInteraction(target: EventTarget | null): boolean {
   return target instanceof Element && target.closest('form, input, button') !== null;
 }
 
-export function VncSurface({ session }: { session: VncSurfaceSession }) {
+export function VncSurface({
+  isAuthorized,
+  session,
+  onBitwardenUnlockRequired,
+}: {
+  isAuthorized: boolean;
+  session: VncSurfaceSession;
+  onBitwardenUnlockRequired?: (reason: string, retry: () => void) => void;
+}) {
   const [status, setStatus] = useState<VncStatus>('idle');
   const [message, setMessage] = useState('');
   const [passwordRequired, setPasswordRequired] = useState(false);
+  const [bitwardenUnlockRequired, setBitwardenUnlockRequired] = useState(false);
   const [password, setPassword] = useState('');
   const [tunnelProgress, setTunnelProgress] = useState<TunnelProgress | null>(null);
   const [frame, setFrame] = useState<string>();
@@ -124,12 +134,15 @@ export function VncSurface({ session }: { session: VncSurfaceSession }) {
           setStatus('failed');
           setMessage(response.error ?? 'The native VNC backend rejected the request.');
           setPasswordRequired(isAuthenticationMessage(response.error));
+          setBitwardenUnlockRequired(isBitwardenUnlockError(response.error));
         }
         return response.ok;
       } catch (error) {
         if (showError) {
           setStatus('failed');
-          setMessage(error instanceof Error ? error.message : 'The native VNC backend failed.');
+          const message = error instanceof Error ? error.message : 'The native VNC backend failed.';
+          setMessage(message);
+          setBitwardenUnlockRequired(isBitwardenUnlockError(message));
         }
         return false;
       }
@@ -142,6 +155,7 @@ export function VncSurface({ session }: { session: VncSurfaceSession }) {
       setStatus('connecting');
       setMessage('');
       setPasswordRequired(false);
+      setBitwardenUnlockRequired(false);
       setFrame(undefined);
       setFrameSize({ width: 0, height: 0 });
       setTunnelProgress(null);
@@ -158,7 +172,9 @@ export function VncSurface({ session }: { session: VncSurfaceSession }) {
           tunnelConfigId: session.tunnelConfigId,
           host: session.host,
           port: session.port,
-          ...(providedPassword === undefined ? {} : { password: providedPassword }),
+          ...(providedPassword === undefined
+            ? {}
+            : { password: providedPassword, passwordProvided: true }),
         },
         true,
       );
@@ -222,6 +238,7 @@ export function VncSurface({ session }: { session: VncSurfaceSession }) {
       setStatus(nextStatus);
       setMessage(event.message ?? '');
       setPasswordRequired(Boolean(event.passwordRequired));
+      setBitwardenUnlockRequired(isBitwardenUnlockError(event.message));
     });
 
     void connect();
@@ -240,6 +257,22 @@ export function VncSurface({ session }: { session: VncSurfaceSession }) {
       void sendCommand({ action: 'vnc.disconnect', sessionId: session.id });
     };
   }, [connect, sendCommand, session.id]);
+
+  useEffect(() => {
+    if (
+      !isAuthorized ||
+      status !== 'failed' ||
+      !bitwardenUnlockRequired ||
+      !onBitwardenUnlockRequired
+    ) {
+      return;
+    }
+    onBitwardenUnlockRequired(message, () => void connect());
+  }, [bitwardenUnlockRequired, connect, isAuthorized, message, onBitwardenUnlockRequired, status]);
+
+  useEffect(() => {
+    if (!isAuthorized) setPassword('');
+  }, [isAuthorized]);
 
   function mapPointer(event: PointerLocation): { x: number; y: number } | undefined {
     const image = imageRef.current;
@@ -376,14 +409,31 @@ export function VncSurface({ session }: { session: VncSurfaceSession }) {
     pressedKeys.current.clear();
   }
 
-  function submitPassword(event: FormEvent<HTMLFormElement>) {
+  async function submitPassword(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const value = password;
     setPassword('');
-    void connect(value);
+    if (bitwardenUnlockRequired) {
+      try {
+        await window.wormhole?.unlockBitwardenCli(value);
+        await connect();
+      } catch (error: unknown) {
+        setStatus('failed');
+        setMessage(
+          error instanceof Error ? error.message : 'Bitwarden could not unlock the vault.',
+        );
+        setBitwardenUnlockRequired(true);
+      }
+      return;
+    }
+    await connect(value);
   }
 
-  const showPasswordPrompt = status === 'failed' && passwordRequired;
+  const globalBitwardenUnlockPending =
+    bitwardenUnlockRequired && Boolean(onBitwardenUnlockRequired);
+  const showPasswordPrompt =
+    status === 'failed' &&
+    (passwordRequired || (bitwardenUnlockRequired && !globalBitwardenUnlockPending));
   const displayHost = session.host || 'inherited target';
 
   return (
@@ -448,23 +498,29 @@ export function VncSurface({ session }: { session: VncSurfaceSession }) {
                     : 'The remote host closed the connection.')}
               </p>
             </div>
-            {showPasswordPrompt ? (
+            {globalBitwardenUnlockPending ? (
+              <p className="text-xs text-muted-foreground">
+                Unlock Bitwarden in the shared prompt to continue this session.
+              </p>
+            ) : showPasswordPrompt ? (
               <form className="grid w-full gap-2 text-left" onSubmit={submitPassword}>
                 <label className="text-xs font-medium" htmlFor={`vnc-password-${session.id}`}>
-                  VNC password
+                  {bitwardenUnlockRequired ? 'Bitwarden master password' : 'VNC password'}
                 </label>
                 <div className="flex gap-2">
                   <Input
                     autoFocus
                     id={`vnc-password-${session.id}`}
                     onChange={(event) => setPassword(event.target.value)}
-                    placeholder="Enter password"
+                    placeholder={
+                      bitwardenUnlockRequired ? 'Unlock the Bitwarden vault' : 'Enter password'
+                    }
                     type="password"
                     value={password}
                   />
-                  <Button disabled={!password} type="submit">
+                  <Button disabled={bitwardenUnlockRequired && !password} type="submit">
                     <KeyRound data-icon="inline-start" />
-                    Connect
+                    {bitwardenUnlockRequired ? 'Unlock and connect' : 'Connect'}
                   </Button>
                 </div>
               </form>

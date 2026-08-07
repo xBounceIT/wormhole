@@ -13,9 +13,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"unicode"
 	"unicode/utf16"
 )
+
+var settingsProcessLocks sync.Map
 
 const (
 	authStoreFilename       = "app-auth.dpapi"
@@ -161,41 +164,88 @@ func loadAuthSettings(settingsPath string) (authSettings, error) {
 }
 
 func saveAuthSettings(settingsPath string, settings authSettings) error {
+	return updateSettingsDocument(settingsPath, func(document map[string]json.RawMessage) error {
+		mode, _ := json.Marshal(settings.Mode)
+		fallback, _ := json.Marshal(settings.Fallback)
+		document["AppAuthenticationMode"] = mode
+		document["AppAuthenticationHelloFallback"] = fallback
+		if settings.IdleTimeoutMinutes == nil {
+			document["AppAuthenticationIdleTimeoutMinutes"] = json.RawMessage("null")
+		} else {
+			minutes, _ := json.Marshal(*settings.IdleTimeoutMinutes)
+			document["AppAuthenticationIdleTimeoutMinutes"] = minutes
+		}
+		return nil
+	})
+}
+
+func updateSettingsDocument(
+	settingsPath string,
+	mutate func(map[string]json.RawMessage) error,
+) error {
+	cleanPath := filepath.Clean(settingsPath)
+	lockValue, _ := settingsProcessLocks.LoadOrStore(cleanPath, &sync.Mutex{})
+	processLock := lockValue.(*sync.Mutex)
+	processLock.Lock()
+	defer processLock.Unlock()
+
+	if err := os.MkdirAll(filepath.Dir(cleanPath), 0o700); err != nil {
+		return fmt.Errorf("cannot create the Wormhole data directory: %w", err)
+	}
+	release, err := acquireSettingsFileLock(cleanPath + ".lock")
+	if err != nil {
+		return err
+	}
+	defer release()
+
 	document := map[string]json.RawMessage{}
-	contents, err := readAuthSettingsFile(settingsPath)
+	contents, err := readAuthSettingsFile(cleanPath)
 	if err == nil {
-		_ = json.Unmarshal(contents, &document)
+		if json.Unmarshal(contents, &document) == nil && document != nil {
+			migrateLegacySettingsDocument(document)
+		} else {
+			document = map[string]json.RawMessage{}
+			currentSchema, _ := json.Marshal(currentSettingsSchemaVersion)
+			document[settingsSchemaVersionKey] = currentSchema
+		}
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
+	} else {
+		currentSchema, _ := json.Marshal(currentSettingsSchemaVersion)
+		document[settingsSchemaVersionKey] = currentSchema
 	}
 	if document == nil {
 		document = map[string]json.RawMessage{}
 	}
-
-	mode, _ := json.Marshal(settings.Mode)
-	fallback, _ := json.Marshal(settings.Fallback)
-	document["AppAuthenticationMode"] = mode
-	document["AppAuthenticationHelloFallback"] = fallback
-	if settings.IdleTimeoutMinutes == nil {
-		document["AppAuthenticationIdleTimeoutMinutes"] = json.RawMessage("null")
-	} else {
-		minutes, _ := json.Marshal(*settings.IdleTimeoutMinutes)
-		document["AppAuthenticationIdleTimeoutMinutes"] = minutes
+	if err := mutate(document); err != nil {
+		return err
 	}
-
 	contents, err = json.MarshalIndent(document, "", "  ")
 	if err != nil {
 		return fmt.Errorf("cannot encode Wormhole settings: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
-		return fmt.Errorf("cannot create the Wormhole data directory: %w", err)
+	temporary, err := os.CreateTemp(filepath.Dir(cleanPath), ".wormhole-settings-*.tmp")
+	if err != nil {
+		return fmt.Errorf("cannot create temporary Wormhole settings: %w", err)
 	}
-	temporaryPath := settingsPath + ".tmp"
-	if err := os.WriteFile(temporaryPath, append(contents, '\n'), 0o600); err != nil {
+	temporaryPath := temporary.Name()
+	defer func() {
+		_ = temporary.Close()
+		_ = os.Remove(temporaryPath)
+	}()
+	if err := temporary.Chmod(0o600); err != nil {
+		return fmt.Errorf("cannot protect temporary Wormhole settings: %w", err)
+	}
+	if _, err := temporary.Write(append(contents, '\n')); err != nil {
 		return fmt.Errorf("cannot write Wormhole settings: %w", err)
 	}
-	if err := replaceAuthFile(temporaryPath, settingsPath); err != nil {
-		_ = os.Remove(temporaryPath)
+	if err := temporary.Sync(); err != nil {
+		return fmt.Errorf("cannot flush Wormhole settings: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("cannot close Wormhole settings: %w", err)
+	}
+	if err := replaceAuthFile(temporaryPath, cleanPath); err != nil {
 		return fmt.Errorf("cannot save Wormhole settings: %w", err)
 	}
 	return nil

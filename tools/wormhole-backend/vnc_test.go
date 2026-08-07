@@ -63,6 +63,84 @@ func TestVncPersistedInputLimitsAreSharedWithCommands(t *testing.T) {
 	}
 }
 
+func TestVncExplicitEmptyPasswordDoesNotReloadSavedSecret(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY,
+    ParentId TEXT NULL,
+    Name TEXT NOT NULL,
+    Kind INTEGER NOT NULL,
+    Protocol INTEGER NULL,
+    Host TEXT NULL,
+    Port INTEGER NULL
+);
+INSERT INTO Nodes (Id, ParentId, Name, Kind, Protocol, Host, Port)
+VALUES ('vnc-node', NULL, 'VNC node', 1, 6, 'vnc.example', 5900);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := resolveVncTarget(database, backendCommand{
+		NodeID: "vnc-node", Password: "", PasswordProvided: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.password != "" {
+		t.Fatalf("explicit empty password was replaced: %q", target.password)
+	}
+}
+
+func TestBitwardenSessionClearCancelsPendingVncHandshakeOnly(t *testing.T) {
+	manager := newVncManager(nil, nil)
+	pending := newVncSession("pending", nil, manager)
+	pendingContext, ok := pending.beginConnect()
+	if !ok {
+		t.Fatal("pending VNC connection did not start")
+	}
+	pendingClient, pendingPeer := net.Pipe()
+	defer pendingPeer.Close()
+	if !pending.setNetworkConnection(pendingClient) {
+		t.Fatal("pending VNC network was rejected")
+	}
+
+	connected := newVncSession("connected", nil, manager)
+	connectedContext, ok := connected.beginConnect()
+	if !ok {
+		t.Fatal("connected VNC connection did not start")
+	}
+	connectedClient, connectedPeer := net.Pipe()
+	defer connectedClient.Close()
+	defer connectedPeer.Close()
+	connected.stateMu.Lock()
+	connected.netConn = connectedClient
+	connected.conn = &vnc.ClientConn{}
+	connected.stateMu.Unlock()
+
+	manager.sessions[pending.id] = pending
+	manager.sessions[connected.id] = connected
+	manager.cancelPendingVncConnections()
+
+	select {
+	case <-pendingContext.Done():
+	default:
+		t.Fatal("pending VNC handshake was not cancelled")
+	}
+	select {
+	case <-connectedContext.Done():
+		t.Fatal("established VNC session was cancelled")
+	default:
+	}
+
+	pending.endConnect()
+	connected.endConnect()
+}
+
 func TestVncCommandHostPortWinsOverPersistedPort(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	database, err := openDatabase(databasePath, false)
@@ -99,8 +177,7 @@ VALUES ('vnc-node', NULL, 'VNC node', 1, 6, 'vnc.example', 5900);
 func TestResolveVncTargetPreservesQuickConnectTunnel(t *testing.T) {
 	const tunnelID = "11111111-2222-3333-4444-555555555555"
 	target, err := resolveVncTarget(nil, backendCommand{
-		Host:           "vnc.example",
-		TunnelConfigID: tunnelID,
+		Host: "vnc.example", TunnelConfigID: tunnelID,
 	})
 	if err != nil {
 		t.Fatalf("resolve VNC target with tunnel: %v", err)
@@ -136,7 +213,6 @@ VALUES ('vnc-node', NULL, 'Private VNC', 1, 6, 'vnc.example', 5900, 1, '` + tunn
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	target, err := resolveVncTarget(database, backendCommand{NodeID: "vnc-node"})
 	if err != nil {
 		t.Fatal(err)
@@ -148,11 +224,8 @@ VALUES ('vnc-node', NULL, 'Private VNC', 1, 6, 'vnc.example', 5900, 1, '` + tunn
 
 func TestVncCommandRejectsSavedTunnelOverride(t *testing.T) {
 	err := validateBackendCommand(backendCommand{
-		ID:             "command-1",
-		Action:         "vnc.connect",
-		SessionID:      "session-1",
-		NodeID:         "saved-vnc",
-		TunnelConfigID: "11111111-2222-3333-4444-555555555555",
+		ID: "command-1", Action: "vnc.connect", SessionID: "session-1",
+		NodeID: "saved-vnc", TunnelConfigID: "11111111-2222-3333-4444-555555555555",
 	})
 	if err == nil {
 		t.Fatal("VNC command allowed a saved connection tunnel override")
@@ -180,6 +253,90 @@ func TestFinishTunnelAcquireHandlesCancellationBeforeLeaseCreation(t *testing.T)
 	}
 	if !strings.Contains(string(data), "VPN tunnel establishment was cancelled") {
 		t.Fatalf("unexpected cancellation response: %s", data)
+	}
+}
+
+func TestVncInlinePasswordFlagDoesNotSuppressSavedCredentialInheritance(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    ParentId TEXT NULL,
+    Name TEXT NOT NULL,
+    Kind INTEGER NOT NULL,
+    Protocol INTEGER NULL,
+    Host TEXT NULL,
+    CredentialId TEXT NULL,
+    CredentialMode INTEGER NULL,
+    UseInlinePassword INTEGER NULL
+);
+CREATE TABLE CredentialProfiles (
+    Id TEXT PRIMARY KEY NOT NULL,
+    SecretProvider INTEGER NULL,
+    Protocol INTEGER NULL,
+    Kind INTEGER NULL
+);
+CREATE TABLE CredentialSecrets (
+    Id TEXT PRIMARY KEY NOT NULL,
+    Secret TEXT NOT NULL,
+    Encoding TEXT NOT NULL
+);
+INSERT INTO Nodes (Id, ParentId, Name, Kind, Protocol, CredentialId, CredentialMode)
+VALUES ('folder', NULL, 'VNC defaults', 0, 6, 'vnc-credential', 2);
+INSERT INTO Nodes (Id, ParentId, Name, Kind, Host, UseInlinePassword)
+VALUES ('leaf', 'folder', 'VNC leaf', 1, 'vnc.example', 1);
+INSERT INTO CredentialProfiles (Id, SecretProvider, Protocol, Kind)
+VALUES ('vnc-credential', 0, 6, 0);
+INSERT INTO CredentialSecrets (Id, Secret, Encoding)
+VALUES ('vnc-credential', 'not-a-secret', 'unsupported-test-encoding');
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = resolveVncTarget(database, backendCommand{NodeID: "leaf"})
+	if err == nil || !strings.Contains(err.Error(), errUnsupportedSecretEncoding.Error()) {
+		t.Fatalf("VNC inline-password flag suppressed its inherited saved credential: %v", err)
+	}
+}
+
+func TestVncUnknownCredentialModeStopsSavedCredentialInheritance(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    ParentId TEXT NULL,
+    Name TEXT NOT NULL,
+    Kind INTEGER NOT NULL,
+    Protocol INTEGER NULL,
+    Host TEXT NULL,
+    CredentialId TEXT NULL,
+    CredentialMode INTEGER NULL
+);
+INSERT INTO Nodes (Id, ParentId, Name, Kind, Protocol, Host, CredentialId, CredentialMode) VALUES
+    ('folder', NULL, 'VNC defaults', 0, 6, NULL, 'parent-credential', 2),
+    ('leaf', 'folder', 'VNC leaf', 1, NULL, 'vnc.example', NULL, 99);
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	target, err := resolveVncTarget(database, backendCommand{NodeID: "leaf"})
+	if err != nil {
+		t.Fatalf("unknown credential mode inherited the parent credential: %v", err)
+	}
+	if target.password != "" {
+		t.Fatal("unknown credential mode resolved an inherited password")
 	}
 }
 
@@ -716,5 +873,19 @@ VALUES ('cycle-a', 'cycle-b', 'Cycle A', 0, 0, NULL, NULL),
 	_, err = loadTree(database)
 	if err == nil || !strings.Contains(err.Error(), "cycle") {
 		t.Fatalf("expected inherited-protocol cycle error, got %v", err)
+	}
+}
+
+func TestPublicVncConnectErrorOffersManualFallbackForUnavailableBitwardenCredential(t *testing.T) {
+	message, passwordRequired := publicVncConnectError(errors.New("the linked Bitwarden item was not found"))
+	if !passwordRequired || !strings.Contains(message, "Enter the VNC password") {
+		t.Fatalf("manual fallback was not offered: message=%q required=%v", message, passwordRequired)
+	}
+}
+
+func TestPublicVncConnectErrorKeepsLockedVaultUnlockFlow(t *testing.T) {
+	message, passwordRequired := publicVncConnectError(errors.New("Bitwarden vault is locked or the session is invalid"))
+	if passwordRequired || !strings.Contains(message, "vault is locked") {
+		t.Fatalf("locked vault was not preserved: message=%q required=%v", message, passwordRequired)
 	}
 }

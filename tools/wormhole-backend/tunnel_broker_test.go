@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -127,6 +129,67 @@ INSERT INTO TunnelConfigs (Id, Name, Kind, CreatedAt, UpdatedAt) VALUES
 	}
 	if starts != 2 {
 		t.Fatalf("sidecar starts = %d, want a fresh diagnostic start in addition to the live tunnel", starts)
+	}
+}
+
+func TestTunnelBrokerOwnsLoopbackForwarderForLeaseLifetime(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+CREATE TABLE TunnelConfigs (Id TEXT PRIMARY KEY, Name TEXT, Kind INTEGER, CreatedAt TEXT, UpdatedAt TEXT);
+INSERT INTO TunnelConfigs VALUES ('11111111-2222-3333-4444-555555555555', 'Web', 0, 'one', 'one');`)
+	_ = database.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	process := newTestTunnelProcess()
+	previousPool := processTunnelPool
+	processTunnelPool = newTunnelRuntimePool(func(context.Context, tunnelConfigSnapshot) (*tunnelProcess, error) {
+		return process, nil
+	})
+	defer func() { processTunnelPool = previousPool }()
+
+	outputReader, outputWriter := io.Pipe()
+	defer outputReader.Close()
+	defer outputWriter.Close()
+	manager := newVncManager(nil, &backendLineWriter{writer: bufio.NewWriter(outputWriter)})
+	manager.databasePath = databasePath
+	defer manager.close()
+	responses := json.NewDecoder(outputReader)
+
+	manager.handle(backendCommand{
+		ID: "acquire", Action: "tunnel.acquire", SessionID: "web",
+		TunnelConfigID: "11111111-2222-3333-4444-555555555555",
+	})
+	if response := readTunnelResponse(t, responses, "acquire"); !response.OK {
+		t.Fatalf("acquire response = %#v", response)
+	}
+	go manager.handle(backendCommand{
+		ID: "forward", Action: "tunnel.forward", SessionID: "web",
+		Host: "appliance.internal", Port: 443,
+	})
+	forward := readTunnelResponse(t, responses, "forward")
+	if !forward.OK || forward.ForwardHost != "127.0.0.1" || forward.ForwardPort < 1 {
+		t.Fatalf("forward response = %#v", forward)
+	}
+	address := net.JoinHostPort(forward.ForwardHost, strconv.Itoa(forward.ForwardPort))
+	connection, err := net.DialTimeout("tcp", address, time.Second)
+	if err != nil {
+		t.Fatalf("forwarder did not accept a local connection: %v", err)
+	}
+	_ = connection.Close()
+
+	go manager.handle(backendCommand{ID: "release", Action: "tunnel.release", SessionID: "web"})
+	if response := readTunnelResponse(t, responses, "release"); !response.OK {
+		t.Fatalf("release response = %#v", response)
+	}
+	if connection, err = net.DialTimeout("tcp", address, 100*time.Millisecond); err == nil {
+		_ = connection.Close()
+		t.Fatal("lease release left the loopback forwarder accepting connections")
 	}
 }
 
@@ -265,7 +328,11 @@ INSERT INTO TunnelConfigs (Id, Name, Kind, CreatedAt, UpdatedAt) VALUES
 		t.Fatalf("cancel acquire response = %#v", response)
 	}
 
-	if err := os.WriteFile(settingsPath, []byte(`{"PromptBeforeTunnelConnect": false}`), 0o600); err != nil {
+	if err := os.WriteFile(
+		settingsPath,
+		[]byte(`{"SettingsSchemaVersion": 8, "PromptBeforeTunnelConnect": false}`),
+		0o600,
+	); err != nil {
 		t.Fatal(err)
 	}
 	manager.handle(backendCommand{ID: "acquire-noask", Action: "tunnel.acquire", SessionID: "lease-noask", NodeID: "node-1"})

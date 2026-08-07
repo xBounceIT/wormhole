@@ -54,6 +54,8 @@ export type RdpStartRequest = {
   sessionId: string;
   profile: RdpProfile;
   bounds?: RdpSurfaceRect;
+  /** Renderer supplied transient credentials; skip saved/Bitwarden resolution for this attempt. */
+  manualCredentials?: boolean;
 };
 
 export type RdpCommandRequest = {

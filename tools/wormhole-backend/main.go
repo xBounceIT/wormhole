@@ -95,6 +95,8 @@ type treeNode struct {
 	SshAutoSudo          *bool       `json:"sshAutoSudo,omitempty"`
 	TunnelEnabled        *bool       `json:"tunnelEnabled,omitempty"`
 	TunnelConfigID       string      `json:"tunnelConfigId,omitempty"`
+	CredentialMode       *int        `json:"credentialMode,omitempty"`
+	CredentialID         string      `json:"credentialId,omitempty"`
 	Persisted            bool        `json:"persisted,omitempty"`
 }
 
@@ -114,15 +116,28 @@ type workspaceNodeTunnelSettingsRequest struct {
 	TunnelConfigID string `json:"tunnelConfigId"`
 }
 
+type workspaceNodeCredentialSettingsRequest struct {
+	NodeID       string `json:"nodeId"`
+	Mode         int    `json:"mode"`
+	CredentialID string `json:"credentialId"`
+}
+
+type credentialsForProtocolRequest struct {
+	Protocol string `json:"protocol"`
+}
+
 type credentialRecord struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Protocol  string `json:"protocol"`
-	Username  string `json:"username"`
-	Domain    string `json:"domain,omitempty"`
-	Provider  string `json:"provider"`
-	CanEdit   bool   `json:"canEdit"`
-	CanDelete bool   `json:"canDelete"`
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	Protocol           string `json:"protocol"`
+	Username           string `json:"username"`
+	Domain             string `json:"domain,omitempty"`
+	Provider           string `json:"provider"`
+	CanEdit            bool   `json:"canEdit"`
+	CanDelete          bool   `json:"canDelete"`
+	BitwardenItemID    string `json:"bitwardenItemId,omitempty"`
+	BitwardenItemName  string `json:"bitwardenItemName,omitempty"`
+	IsVirtualBitwarden bool   `json:"isVirtualBitwarden,omitempty"`
 }
 
 type tunnelRecord struct {
@@ -144,6 +159,8 @@ type nodeRow struct {
 	HTTPIgnoreCertErrors sql.NullInt64
 	TunnelEnabled        sql.NullInt64
 	TunnelConfigID       sql.NullString
+	CredentialMode       sql.NullInt64
+	CredentialID         sql.NullString
 }
 
 type credentialRow struct {
@@ -163,7 +180,7 @@ type tunnelRow struct {
 }
 
 func main() {
-	operation := flag.String("operation", "workspace", "backend operation: startup, startup-unlock, workspace, workspace-duplicate-node, workspace-delete-node, workspace-show-credentials, backup-*, credential-*, tunnel-*, workspace-update-node, workspace-update-node-web-settings, workspace-update-node-tunnel, web-target, migrate, ssh, serial, ssh-trust-host-key, logs-info, settings-set-log-retention, settings-set-log-level, open-log-file, open-logs-folder, serve, rdp, or auth-*")
+	operation := flag.String("operation", "workspace", "backend operation: startup, startup-unlock, workspace, workspace-duplicate-node, workspace-delete-node, workspace-show-credentials, backup-*, credential-*, tunnel-*, workspace-node-*, workspace-update-node-*, web-target, migrate, ssh, serial, ssh-trust-host-key, logs-info, settings-set-log-retention, settings-set-log-level, open-log-file, open-logs-folder, serve, rdp, extension-*, bitwarden-*, or auth-*")
 	databasePath := flag.String("database", "", "path to the Wormhole SQLite database")
 	electronUserDataPath := flag.String("electron-user-data", "", "path to the Electron user-data directory")
 	credentialReader := flag.String("credential-reader", "", "path to the Windows Credential Manager reader")
@@ -178,6 +195,11 @@ func main() {
 	}
 	initAppLogging(*databasePath)
 	defer closeAppLog()
+	if err := ensureElectronWorkspaceSchema(*databasePath); err != nil {
+		writeError(err.Error())
+		os.Exit(1)
+		return
+	}
 	if *operation == "ssh" {
 		logInfo("native SSH backend started")
 		if err := serveSSH(*databasePath, os.Stdin, os.Stdout, *electronUserDataPath); err != nil {
@@ -313,6 +335,12 @@ func main() {
 				result = map[string]bool{"deleted": true}
 			}
 		}
+	case "credentials-for-protocol":
+		var request credentialsForProtocolRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = loadCredentialsForProtocol(*databasePath, request.Protocol)
+		}
 	case "workspace-update-node":
 		var request workspaceNodeSshSettingsRequest
 		err = decodeInput(&request)
@@ -336,6 +364,34 @@ func main() {
 		err = decodeInput(&request)
 		if err == nil {
 			err = updateWorkspaceNodeTunnelSettings(*databasePath, request)
+			if err == nil {
+				result = map[string]bool{"updated": true}
+			}
+		}
+	case "workspace-update-node-credential":
+		var request workspaceNodeCredentialSettingsRequest
+		err = decodeInput(&request)
+		if err == nil {
+			err = updateWorkspaceNodeCredentialSettings(*databasePath, request)
+			if err == nil {
+				result = map[string]bool{"updated": true}
+			}
+		}
+	case "workspace-node-create":
+		var request workspaceNodeWriteRequest
+		err = decodeInput(&request)
+		if err == nil {
+			var nodeID string
+			nodeID, err = createWorkspaceNode(*databasePath, request)
+			if err == nil {
+				result = map[string]string{"nodeId": nodeID}
+			}
+		}
+	case "workspace-node-update":
+		var request workspaceNodeWriteRequest
+		err = decodeInput(&request)
+		if err == nil {
+			err = updateWorkspaceNode(*databasePath, request)
 			if err == nil {
 				result = map[string]bool{"updated": true}
 			}
@@ -407,6 +463,8 @@ func main() {
 				"skippedUpdateVersion":      skippedUpdateVersion,
 			}
 		}
+	case "settings-migrate":
+		result, err = persistLegacySettingsMigration(*databasePath)
 	case "settings-set-prompt-before-tunnel":
 		var request struct {
 			Enabled bool `json:"enabled"`
@@ -492,6 +550,51 @@ func main() {
 		if err == nil {
 			result = map[string]bool{"opened": true}
 		}
+	case "bitwarden-onboarding-read":
+		var request struct {
+			AppVersion string `json:"appVersion"`
+		}
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = readBitwardenOnboardingNotice(*databasePath, request.AppVersion)
+		}
+	case "bitwarden-onboarding-dismiss":
+		err = dismissBitwardenOnboardingNotice(*databasePath)
+		if err == nil {
+			result = map[string]bool{"updated": true}
+		}
+	case "extension-read":
+		result, err = readBitwardenExtensionState(*databasePath)
+	case "extension-set-enabled":
+		var request struct {
+			Enabled bool `json:"enabled"`
+		}
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = setBitwardenExtensionEnabled(*databasePath, request.Enabled)
+		}
+	case "extension-install":
+		result, err = installBitwardenExtensionLatest(*databasePath)
+	case "extension-ensure-installed":
+		result, err = ensureBitwardenExtensionInstalled(*databasePath)
+	case "extension-import-zip":
+		var request struct {
+			Path string `json:"path"`
+		}
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = importBitwardenExtensionZip(*databasePath, request.Path)
+		}
+	case "extension-import-folder":
+		var request struct {
+			Path string `json:"path"`
+		}
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = importBitwardenExtensionFolder(*databasePath, request.Path)
+		}
+	case "extension-update-if-stale":
+		result, err = updateBitwardenExtensionIfStale(*databasePath)
 	case "auth-hello-status":
 		result = checkWindowsHello()
 	case "auth-hello-verify":
@@ -1084,7 +1187,7 @@ func loadWorkspace(databasePath string) (workspaceSnapshot, error) {
 	if err != nil {
 		return workspaceSnapshot{}, err
 	}
-	credentials, err := loadCredentials(database)
+	credentials, err := loadCredentials(database, databasePath)
 	if err != nil {
 		return workspaceSnapshot{}, err
 	}
@@ -1124,8 +1227,16 @@ func loadTree(database *sql.DB) ([]*treeNode, error) {
 	if _, ok := columns["TunnelConfigId"]; ok {
 		tunnelConfigIDExpression = "TunnelConfigId"
 	}
+	credentialModeExpression := "NULL"
+	if _, ok := columns["CredentialMode"]; ok {
+		credentialModeExpression = "CredentialMode"
+	}
+	credentialIDExpression := "NULL"
+	if _, ok := columns["CredentialId"]; ok {
+		credentialIDExpression = "CredentialId"
+	}
 	rows, err := database.Query(`
-SELECT Id, ParentId, Name, Kind, SortOrder, Protocol, Host, ` + portExpression + ` AS Port, ` + sshAutoSudoExpression + ` AS SshAutoSudo, ` + httpIgnoreCertErrorsExpression + ` AS HttpIgnoreCertErrors, ` + tunnelEnabledExpression + ` AS TunnelEnabled, ` + tunnelConfigIDExpression + ` AS TunnelConfigId
+SELECT Id, ParentId, Name, Kind, SortOrder, Protocol, Host, ` + portExpression + ` AS Port, ` + sshAutoSudoExpression + ` AS SshAutoSudo, ` + httpIgnoreCertErrorsExpression + ` AS HttpIgnoreCertErrors, ` + tunnelEnabledExpression + ` AS TunnelEnabled, ` + tunnelConfigIDExpression + ` AS TunnelConfigId, ` + credentialModeExpression + ` AS CredentialMode, ` + credentialIDExpression + ` AS CredentialId
 FROM Nodes
 ORDER BY SortOrder, Name, Id;`)
 	if err != nil {
@@ -1140,7 +1251,7 @@ ORDER BY SortOrder, Name, Id;`)
 	protocolByID := map[string]sql.NullInt64{}
 	for rows.Next() {
 		var row nodeRow
-		if err := rows.Scan(&row.ID, &row.ParentID, &row.Name, &row.Kind, &row.SortOrder, &row.Protocol, &row.Host, &row.Port, &row.SshAutoSudo, &row.HTTPIgnoreCertErrors, &row.TunnelEnabled, &row.TunnelConfigID); err != nil {
+		if err := rows.Scan(&row.ID, &row.ParentID, &row.Name, &row.Kind, &row.SortOrder, &row.Protocol, &row.Host, &row.Port, &row.SshAutoSudo, &row.HTTPIgnoreCertErrors, &row.TunnelEnabled, &row.TunnelConfigID, &row.CredentialMode, &row.CredentialID); err != nil {
 			return nil, fmt.Errorf("cannot read a connection: %w", err)
 		}
 		node := &treeNode{ID: strings.TrimSpace(row.ID), Name: row.Name, Persisted: true}
@@ -1157,6 +1268,11 @@ ORDER BY SortOrder, Name, Id;`)
 			node.TunnelEnabled = &value
 		}
 		node.TunnelConfigID = normalizeTunnelID(nullableString(row.TunnelConfigID))
+		if row.CredentialMode.Valid {
+			value := int(row.CredentialMode.Int64)
+			node.CredentialMode = &value
+		}
+		node.CredentialID = normalizeID(nullableString(row.CredentialID))
 		if row.Kind == 0 {
 			node.Kind = "folder"
 		} else {
@@ -1447,14 +1563,192 @@ func updateWorkspaceNodeTunnelSettings(databasePath string, request workspaceNod
 	return nil
 }
 
-func loadCredentials(database *sql.DB) ([]credentialRecord, error) {
-	exists, err := tableExists(database, "CredentialProfiles")
+func updateWorkspaceNodeCredentialSettings(
+	databasePath string,
+	request workspaceNodeCredentialSettingsRequest,
+) error {
+	nodeID := strings.TrimSpace(request.NodeID)
+	if nodeID == "" || len(nodeID) > 128 || request.Mode < 0 || request.Mode > 2 {
+		return errors.New("workspace credential setting is invalid")
+	}
+	credentialID := normalizeID(request.CredentialID)
+	if request.Mode == 2 && !validCredentialID(credentialID) {
+		return errors.New("selected credential id is invalid")
+	}
+	if request.Mode != 2 {
+		credentialID = ""
+	}
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	columns, err := tableColumns(database, "Nodes")
+	if err != nil || len(columns) == 0 {
+		if err != nil {
+			return err
+		}
+		return errors.New("Wormhole database has no connections")
+	}
+	for _, column := range []struct{ name, statement string }{
+		{"CredentialMode", "ALTER TABLE Nodes ADD COLUMN CredentialMode INTEGER NULL;"},
+		{"CredentialId", "ALTER TABLE Nodes ADD COLUMN CredentialId TEXT NULL;"},
+	} {
+		if _, ok := columns[column.name]; ok {
+			continue
+		}
+		if _, err := database.Exec(column.statement); err != nil {
+			return fmt.Errorf("could not add connection credential support: %w", err)
+		}
+	}
+	var kind int64
+	var nodeProtocol sql.NullInt64
+	if err := database.QueryRow(
+		"SELECT Kind, Protocol FROM Nodes WHERE lower(Id) = ? LIMIT 1;",
+		normalizeID(nodeID),
+	).Scan(&kind, &nodeProtocol); errors.Is(err, sql.ErrNoRows) {
+		return errors.New("workspace node was not found")
+	} else if err != nil {
+		return fmt.Errorf("could not read workspace node: %w", err)
+	}
+	if credentialID != "" {
+		credentialProtocol, found, err := credentialProtocolByID(database, credentialID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			return errors.New("selected credential was not found")
+		}
+		if kind == 1 && nodeProtocol.Valid && nodeProtocol.Int64 != credentialProtocol {
+			return errors.New("selected credential does not match the connection protocol")
+		}
+	}
+	var storedID any
+	if credentialID != "" {
+		storedID = credentialID
+	}
+	updatedAt := ""
+	if _, ok := columns["UpdatedAt"]; ok {
+		updatedAt = ", UpdatedAt = ?"
+	}
+	args := []any{request.Mode, storedID}
+	if updatedAt != "" {
+		args = append(args, time.Now().UTC().Format(time.RFC3339Nano))
+	}
+	args = append(args, normalizeID(nodeID))
+	result, err := database.Exec(
+		"UPDATE Nodes SET CredentialMode = ?, CredentialId = ?"+updatedAt+" WHERE lower(Id) = ?;",
+		args...,
+	)
+	if err != nil {
+		return fmt.Errorf("could not update connection credential: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return errors.New("workspace node was not found")
+	}
+	return nil
+}
+
+func credentialProtocolByID(database *sql.DB, credentialID string) (int64, bool, error) {
+	var protocol int64
+	profilesExist, err := tableExists(database, "CredentialProfiles")
+	if err != nil {
+		return 0, false, err
+	}
+	if profilesExist {
+		err = database.QueryRow(
+			"SELECT COALESCE(Protocol, 0) FROM CredentialProfiles WHERE lower(Id) = ? LIMIT 1;",
+			credentialID,
+		).Scan(&protocol)
+		if err == nil {
+			return protocol, true, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return 0, false, fmt.Errorf("could not validate selected credential: %w", err)
+		}
+	}
+	exists, err := tableExists(database, "BitwardenCredentialCache")
 	if err != nil || !exists {
-		return []credentialRecord{}, err
+		return 0, false, err
+	}
+	var sshID, rdpID, vncID string
+	err = database.QueryRow(`
+SELECT SshCredentialId, RdpCredentialId, VncCredentialId
+FROM BitwardenCredentialCache
+WHERE lower(SshCredentialId) = ? OR lower(RdpCredentialId) = ? OR lower(VncCredentialId) = ?
+LIMIT 1;`, credentialID, credentialID, credentialID).Scan(&sshID, &rdpID, &vncID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("could not validate virtual Bitwarden credential: %w", err)
+	}
+	switch credentialID {
+	case normalizeID(rdpID):
+		return 1, true, nil
+	case normalizeID(vncID):
+		return 6, true, nil
+	default:
+		return 0, true, nil
+	}
+}
+
+func loadCredentials(database *sql.DB, databasePath string) ([]credentialRecord, error) {
+	credentials, linkedBitwardenItems, err := loadStoredCredentials(database)
+	if err != nil {
+		return nil, err
+	}
+	settings, settingsErr := readBitwardenCliSettings(databasePath)
+	if settingsErr != nil {
+		return nil, settingsErr
+	}
+	if settings.Enabled {
+		entries, cacheErr := loadBitwardenCredentialCache(database)
+		if cacheErr != nil {
+			return nil, cacheErr
+		}
+		for _, entry := range entries {
+			if _, linked := linkedBitwardenItems[entry.ItemID]; linked {
+				continue
+			}
+			credentials = append(credentials, credentialRecord{
+				ID:                 entry.SshCredentialID,
+				Name:               entry.Name,
+				Protocol:           "ssh",
+				Username:           displayCredentialUsername(entry.Username),
+				Provider:           "Bitwarden",
+				BitwardenItemID:    entry.ItemID,
+				BitwardenItemName:  entry.Name,
+				IsVirtualBitwarden: true,
+			})
+		}
+	}
+	sort.SliceStable(credentials, func(left, right int) bool {
+		if credentials[left].Name != credentials[right].Name {
+			return credentials[left].Name < credentials[right].Name
+		}
+		return credentials[left].ID < credentials[right].ID
+	})
+	return credentials, nil
+}
+
+func loadStoredCredentials(database *sql.DB) ([]credentialRecord, map[string]struct{}, error) {
+	exists, err := tableExists(database, "CredentialProfiles")
+	if err != nil {
+		return nil, nil, err
+	}
+	credentials := make([]credentialRecord, 0)
+	linkedBitwardenItems := make(map[string]struct{})
+	if !exists {
+		return credentials, linkedBitwardenItems, nil
 	}
 	columns, err := tableColumns(database, "CredentialProfiles")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	protocolExpression := "0"
 	if _, ok := columns["Protocol"]; ok {
@@ -1468,41 +1762,125 @@ func loadCredentials(database *sql.DB) ([]credentialRecord, error) {
 	if _, ok := columns["Kind"]; ok {
 		kindExpression = "COALESCE(Kind, 0)"
 	}
-	rows, err := database.Query(`SELECT Id, Name, Username, Domain, ` + protocolExpression + `, ` + providerExpression + `, ` + kindExpression + `
+	bitwardenItemIDExpression := "NULL"
+	if _, ok := columns["BitwardenItemId"]; ok {
+		bitwardenItemIDExpression = "BitwardenItemId"
+	}
+	bitwardenItemNameExpression := "NULL"
+	if _, ok := columns["BitwardenItemName"]; ok {
+		bitwardenItemNameExpression = "BitwardenItemName"
+	}
+	rows, err := database.Query(`SELECT Id, Name, Username, Domain, ` + protocolExpression + `, ` + providerExpression + `, ` + kindExpression + `, ` + bitwardenItemIDExpression + `, ` + bitwardenItemNameExpression + `
 FROM CredentialProfiles ORDER BY Name, Id;`)
 	if err != nil {
-		return nil, fmt.Errorf("cannot read credentials: %w", err)
+		return nil, nil, fmt.Errorf("cannot read credentials: %w", err)
 	}
 	defer rows.Close()
-	credentials := make([]credentialRecord, 0)
 	for rows.Next() {
 		var row credentialRow
-		if err := rows.Scan(&row.ID, &row.Name, &row.Username, &row.Domain, &row.Protocol, &row.Provider, &row.Kind); err != nil {
-			return nil, fmt.Errorf("cannot read a credential: %w", err)
+		var itemID, itemName sql.NullString
+		if err := rows.Scan(&row.ID, &row.Name, &row.Username, &row.Domain, &row.Protocol, &row.Provider, &row.Kind, &itemID, &itemName); err != nil {
+			return nil, nil, fmt.Errorf("cannot read a credential: %w", err)
 		}
 		username := "No username"
 		if row.Username.Valid && strings.TrimSpace(row.Username.String) != "" {
 			username = row.Username.String
 		}
-		credentials = append(credentials, credentialRecord{
+		record := credentialRecord{
 			ID:       row.ID,
 			Name:     row.Name,
 			Protocol: protocolName(sql.NullInt64{Int64: row.Protocol, Valid: true}),
 			Username: username,
 			Domain:   nullableString(row.Domain),
 			Provider: providerName(row.Provider),
-			// Editing remains limited to local passwords so provider-specific or SSH-key
-			// metadata cannot be discarded. Persisted legacy profile rows can still be deleted,
-			// matching the old credentials page without exposing virtual catalog entries.
-			CanEdit: row.Kind == 0 && row.Provider == 0 &&
+			CanEdit: row.Kind == 0 && (row.Provider == 0 || row.Provider == 1) &&
 				(row.Protocol == 0 || row.Protocol == 1 || row.Protocol == 6),
-			CanDelete: (row.Kind == 0 || row.Kind == 1) && (row.Provider == 0 || row.Provider == 1),
-		})
+			CanDelete:         (row.Kind == 0 || row.Kind == 1) && (row.Provider == 0 || row.Provider == 1),
+			BitwardenItemID:   strings.TrimSpace(nullableString(itemID)),
+			BitwardenItemName: strings.TrimSpace(nullableString(itemName)),
+		}
+		credentials = append(credentials, record)
+		if row.Provider == 1 && record.BitwardenItemID != "" {
+			linkedBitwardenItems[record.BitwardenItemID] = struct{}{}
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("cannot enumerate credentials: %w", err)
+		return nil, nil, fmt.Errorf("cannot enumerate credentials: %w", err)
 	}
-	return credentials, nil
+	return credentials, linkedBitwardenItems, nil
+}
+
+func loadCredentialsForProtocol(databasePath, protocol string) ([]credentialRecord, error) {
+	protocol = strings.ToLower(strings.TrimSpace(protocol))
+	protocolValue := int64(0)
+	switch protocol {
+	case "ssh":
+	case "rdp":
+		protocolValue = 1
+	case "vnc":
+		protocolValue = 6
+	default:
+		return nil, errors.New("credential protocol is invalid")
+	}
+	database, err := openDatabase(databasePath, true)
+	if err != nil {
+		return nil, err
+	}
+	if database == nil {
+		return []credentialRecord{}, nil
+	}
+	defer database.Close()
+	storedCredentials, _, err := loadStoredCredentials(database)
+	if err != nil {
+		return nil, err
+	}
+	profiles := make([]credentialRecord, 0)
+	linkedItems := make(map[string]struct{})
+	for _, credential := range storedCredentials {
+		if credential.Protocol != protocol {
+			continue
+		}
+		profiles = append(profiles, credential)
+		if credential.Provider == "Bitwarden" && credential.BitwardenItemID != "" {
+			linkedItems[credential.BitwardenItemID] = struct{}{}
+		}
+	}
+	settings, err := readBitwardenCliSettings(databasePath)
+	if err != nil || !settings.Enabled {
+		return profiles, err
+	}
+	entries, err := loadBitwardenCredentialCache(database)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if _, linked := linkedItems[entry.ItemID]; linked {
+			continue
+		}
+		credentialID := entry.SshCredentialID
+		if protocolValue == 1 {
+			credentialID = entry.RdpCredentialID
+		} else if protocolValue == 6 {
+			credentialID = entry.VncCredentialID
+		}
+		profiles = append(profiles, credentialRecord{
+			ID:                 credentialID,
+			Name:               entry.Name,
+			Protocol:           protocol,
+			Username:           displayCredentialUsername(entry.Username),
+			Provider:           "Bitwarden",
+			BitwardenItemID:    entry.ItemID,
+			BitwardenItemName:  entry.Name,
+			IsVirtualBitwarden: true,
+		})
+	}
+	sort.SliceStable(profiles, func(left, right int) bool {
+		if profiles[left].Name != profiles[right].Name {
+			return profiles[left].Name < profiles[right].Name
+		}
+		return profiles[left].ID < profiles[right].ID
+	})
+	return profiles, nil
 }
 
 func loadTunnels(database *sql.DB) ([]tunnelRecord, error) {

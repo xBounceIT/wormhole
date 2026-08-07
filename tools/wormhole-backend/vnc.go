@@ -28,7 +28,7 @@ import (
 const (
 	vncConnectTimeout   = 20 * time.Second
 	vncWriteTimeout     = 5 * time.Second
-	backendLineLimit    = 32 * 1024 * 1024
+	backendLineLimit    = 64 * 1024 * 1024
 	maxVncFrameWidth    = 16384
 	maxVncFrameHeight   = 16384
 	maxVncFramePixels   = 64 * 1024 * 1024
@@ -50,6 +50,7 @@ type backendCommand struct {
 	Host              string `json:"host,omitempty"`
 	Port              int    `json:"port,omitempty"`
 	Password          string `json:"password,omitempty"`
+	PasswordProvided  bool   `json:"passwordProvided,omitempty"`
 	TunnelConfigID    string `json:"tunnelConfigId,omitempty"`
 	Dedicated         bool   `json:"dedicated,omitempty"`
 	PromptID          string `json:"promptId,omitempty"`
@@ -60,6 +61,19 @@ type backendCommand struct {
 	Buttons           uint8  `json:"buttons,omitempty"`
 	Down              bool   `json:"down,omitempty"`
 	KeySym            uint32 `json:"keysym,omitempty"`
+	Enabled           *bool  `json:"enabled,omitempty"`
+	Path              string `json:"path,omitempty"`
+	ServerRegion      int    `json:"serverRegion,omitempty"`
+	Email             string `json:"email,omitempty"`
+	MasterPassword    string `json:"masterPassword,omitempty"`
+	AuthenticatorCode string `json:"authenticatorCode,omitempty"`
+	Query             string `json:"query,omitempty"`
+	ItemID            string `json:"itemId,omitempty"`
+	Protocol          string `json:"protocol,omitempty"`
+	LocalJSON         string `json:"localJson,omitempty"`
+	SessionJSON       string `json:"sessionJson,omitempty"`
+	SourceRevision    int64  `json:"sourceRevision,omitempty"`
+	ProfilePath       string `json:"profilePath,omitempty"`
 }
 
 type backendResponse struct {
@@ -67,7 +81,11 @@ type backendResponse struct {
 	OK            bool   `json:"ok"`
 	Error         string `json:"error,omitempty"`
 	SocksEndpoint string `json:"socksEndpoint,omitempty"`
+	ForwardHost   string `json:"forwardHost,omitempty"`
+	ForwardPort   int    `json:"forwardPort,omitempty"`
+	TunnelActive  bool   `json:"tunnelActive,omitempty"`
 	LeaseID       string `json:"leaseId,omitempty"`
+	Result        any    `json:"result,omitempty"`
 }
 
 type backendEvent struct {
@@ -160,15 +178,24 @@ type vncManager struct {
 	output               *backendLineWriter
 	databasePath         string
 
-	mu             sync.Mutex
-	sessions       map[string]*vncSession
-	tunnelLeases   map[string]*tunnelRuntime
-	tunnelStarts   map[string]context.CancelFunc
-	tunnelPrompts  map[string]*pendingTunnelPrompt
-	promptSequence uint64
-	routePrompts   map[string]*pendingTunnelPrompt
-	routeSequence  uint64
-	cleanup        sync.WaitGroup
+	mu                                 sync.Mutex
+	sessions                           map[string]*vncSession
+	tunnelLeases                       map[string]*tunnelRuntime
+	tunnelForwarders                   map[string]*tunnelForwarder
+	tunnelStarts                       map[string]context.CancelFunc
+	tunnelPrompts                      map[string]*pendingTunnelPrompt
+	promptSequence                     uint64
+	routePrompts                       map[string]*pendingTunnelPrompt
+	routeSequence                      uint64
+	cleanup                            sync.WaitGroup
+	bitwardenMu                        sync.RWMutex
+	bitwardenOperationMu               sync.Mutex
+	bitwardenBrowserMu                 sync.Mutex
+	bitwardenSessionKey                string
+	bitwardenSessionGeneration         uint64
+	bitwardenBrowserLoaded             bool
+	bitwardenBrowserPrimaryNeedsRepair bool
+	bitwardenBrowserStorage            bitwardenBrowserStorageSnapshot
 }
 
 type pendingTunnelPrompt struct {
@@ -196,6 +223,7 @@ func newVncManager(
 		output:               output,
 		sessions:             make(map[string]*vncSession),
 		tunnelLeases:         make(map[string]*tunnelRuntime),
+		tunnelForwarders:     make(map[string]*tunnelForwarder),
 		tunnelStarts:         make(map[string]context.CancelFunc),
 		tunnelPrompts:        make(map[string]*pendingTunnelPrompt),
 		routePrompts:         make(map[string]*pendingTunnelPrompt),
@@ -225,10 +253,25 @@ func (m *vncManager) handle(command backendCommand) {
 		m.acquireTunnel(command)
 	case "tunnel.release":
 		m.releaseTunnel(command)
+	case "tunnel.forward":
+		m.bindTunnelForwarder(command)
 	case "tunnel.prompt-response":
 		m.respondTunnelPrompt(command)
 	case "tunnel.route-response":
 		m.respondTunnelRoute(command)
+	case "bitwarden.clear-session":
+		// App lock must invalidate the in-memory vault session immediately. In particular, do not
+		// queue this command behind a potentially long-running Bitwarden CLI operation.
+		m.handleBitwarden(command, m.bitwardenGeneration())
+	case "bitwarden.read", "bitwarden.set-enabled", "bitwarden.set-config",
+		"bitwarden.install", "bitwarden.ensure-installed", "bitwarden.status", "bitwarden.login", "bitwarden.unlock",
+		"bitwarden.logout", "bitwarden.sync", "bitwarden.sync-if-stale", "bitwarden.list", "bitwarden.search",
+		"bitwarden.get", "bitwarden.resolve-credential", "bitwarden.resolve-node",
+		"bitwarden.node-reference", "bitwarden.browser-storage-read",
+		"bitwarden.browser-storage-capture", "bitwarden.browser-profile-seed",
+		"bitwarden.browser-profile-register":
+		generation := m.bitwardenGeneration()
+		go m.handleBitwarden(command, generation)
 	default:
 		m.respond(command.ID, fmt.Errorf("unsupported backend action %q", command.Action))
 	}
@@ -286,6 +329,7 @@ func (m *vncManager) remove(session *vncSession) {
 }
 
 func (m *vncManager) close() {
+	m.clearBitwardenSession()
 	m.mu.Lock()
 	sessions := make([]*vncSession, 0, len(m.sessions))
 	for _, session := range m.sessions {
@@ -299,7 +343,12 @@ func (m *vncManager) close() {
 	for _, cancel := range m.tunnelStarts {
 		cancel()
 	}
+	forwarders := make([]*tunnelForwarder, 0, len(m.tunnelForwarders))
+	for _, forwarder := range m.tunnelForwarders {
+		forwarders = append(forwarders, forwarder)
+	}
 	m.tunnelLeases = make(map[string]*tunnelRuntime)
+	m.tunnelForwarders = make(map[string]*tunnelForwarder)
 	m.tunnelStarts = make(map[string]context.CancelFunc)
 	m.tunnelPrompts = make(map[string]*pendingTunnelPrompt)
 	m.routePrompts = make(map[string]*pendingTunnelPrompt)
@@ -307,6 +356,9 @@ func (m *vncManager) close() {
 
 	for _, session := range sessions {
 		m.cleanupNative(session.close)
+	}
+	for _, forwarder := range forwarders {
+		forwarder.close()
 	}
 	for _, lease := range leases {
 		m.cleanupNative(lease.close)
@@ -537,6 +589,7 @@ func (m *vncManager) finishTunnelAcquire(command backendCommand, lease *tunnelRu
 	if err != nil {
 		response.Error = publicBackendError(err)
 	} else if lease != nil {
+		response.TunnelActive = true
 		response.SocksEndpoint = lease.socksEndpoint()
 	}
 	_ = m.output.write(response)
@@ -546,19 +599,64 @@ func (m *vncManager) releaseTunnel(command backendCommand) {
 	m.mu.Lock()
 	lease := m.tunnelLeases[command.SessionID]
 	delete(m.tunnelLeases, command.SessionID)
+	forwarder := m.tunnelForwarders[command.SessionID]
+	delete(m.tunnelForwarders, command.SessionID)
 	if cancel := m.tunnelStarts[command.SessionID]; cancel != nil {
 		cancel()
 		delete(m.tunnelStarts, command.SessionID)
 	}
 	m.mu.Unlock()
+	forwarder.close()
 	m.respond(command.ID, nil)
 	if lease != nil {
 		m.cleanupNative(lease.close)
 	}
 }
 
+func (m *vncManager) bindTunnelForwarder(command backendCommand) {
+	targetHost := strings.TrimSpace(command.Host)
+	if strings.HasPrefix(targetHost, "[") && strings.HasSuffix(targetHost, "]") {
+		targetHost = strings.TrimSuffix(strings.TrimPrefix(targetHost, "["), "]")
+	}
+	target := net.JoinHostPort(targetHost, strconv.Itoa(command.Port))
+
+	m.mu.Lock()
+	lease := m.tunnelLeases[command.SessionID]
+	if lease == nil {
+		m.mu.Unlock()
+		m.respond(command.ID, errors.New("VPN tunnel lease is not active"))
+		return
+	}
+	if m.tunnelForwarders[command.SessionID] != nil {
+		m.mu.Unlock()
+		m.respond(command.ID, errors.New("VPN tunnel forwarder is already active"))
+		return
+	}
+	forwarder, err := startTunnelForwarder(lease, target)
+	if err == nil {
+		m.tunnelForwarders[command.SessionID] = forwarder
+	}
+	m.mu.Unlock()
+	if err != nil {
+		m.respond(command.ID, err)
+		return
+	}
+	host, port := forwarder.address()
+	_ = m.output.write(backendResponse{
+		ID: command.ID, OK: true, LeaseID: command.SessionID, ForwardHost: host, ForwardPort: port,
+	})
+}
+
 func (m *vncManager) respond(id string, err error) {
 	response := backendResponse{ID: id, OK: err == nil}
+	if err != nil {
+		response.Error = publicBackendError(err)
+	}
+	_ = m.output.write(response)
+}
+
+func (m *vncManager) respondResult(id string, result any, err error) {
+	response := backendResponse{ID: id, OK: err == nil, Result: result}
 	if err != nil {
 		response.Error = publicBackendError(err)
 	}
@@ -602,17 +700,51 @@ func newVncSession(id string, output *backendLineWriter, manager *vncManager) *v
 }
 
 func (s *vncSession) connect(command backendCommand, database *sql.DB, electronUserDataPath ...string) {
+	connectContext, ok := s.beginConnect()
+	if !ok {
+		return
+	}
+	defer s.endConnect()
+
 	target, err := resolveVncTarget(database, command, electronUserDataPath...)
 	if err != nil {
 		logError("VNC session failed to connect: %v", err)
 		s.fail(err)
 		return
 	}
-	connectContext, ok := s.beginConnect()
-	if !ok {
+	passwordProvided := command.PasswordProvided || command.Password != ""
+	if target.password == "" && !passwordProvided && database != nil {
+		credentialID := command.CredentialID
+		if credentialID == "" && command.NodeID != "" {
+			credentialID, err = resolveNodeCredentialID(database, command.NodeID, vncProtocolValue)
+		}
+		if err == nil && credentialID != "" {
+			generation := s.manager.bitwardenGeneration()
+			s.manager.bitwardenOperationMu.Lock()
+			var resolved bitwardenResolvedCredential
+			if s.manager.bitwardenGenerationIs(generation) {
+				resolved, err = s.manager.resolveBitwardenCredential(credentialID, vncProtocolValue)
+			} else {
+				err = errBitwardenSessionInvalidated
+			}
+			s.manager.bitwardenOperationMu.Unlock()
+			if err == nil && !s.manager.bitwardenGenerationIs(generation) {
+				resolved = bitwardenResolvedCredential{}
+				err = errBitwardenSessionInvalidated
+			}
+			if err == nil && resolved.Bitwarden {
+				target.password = resolved.Password
+			}
+		}
+		if err != nil {
+			s.fail(err)
+			return
+		}
+	}
+	if connectContext.Err() != nil {
+		s.fail(errors.New("VNC connection was cancelled"))
 		return
 	}
-	defer s.endConnect()
 	s.emitStatus("connecting", "", false)
 
 	var tunnel *tunnelRuntime
@@ -960,6 +1092,35 @@ func (s *vncSession) endConnect() {
 	s.stateMu.Unlock()
 }
 
+func (s *vncSession) cancelPendingConnect() {
+	s.stateMu.Lock()
+	if s.conn != nil {
+		s.stateMu.Unlock()
+		return
+	}
+	cancel := s.connectCancel
+	network := s.netConn
+	s.stateMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if network != nil {
+		_ = network.Close()
+	}
+}
+
+func (m *vncManager) cancelPendingVncConnections() {
+	m.mu.Lock()
+	sessions := make([]*vncSession, 0, len(m.sessions))
+	for _, session := range m.sessions {
+		sessions = append(sessions, session)
+	}
+	m.mu.Unlock()
+	for _, session := range sessions {
+		session.cancelPendingConnect()
+	}
+}
+
 func (s *vncSession) setVncConnection(connection *vnc.ClientConn) bool {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
@@ -1194,7 +1355,8 @@ func validateBackendCommand(command backendCommand) error {
 	if command.ID == "" || len(command.ID) > 128 {
 		return errors.New("backend command ID is invalid")
 	}
-	if command.SessionID == "" || len(command.SessionID) > 128 {
+	bitwardenAction := strings.HasPrefix(command.Action, "bitwarden.")
+	if !bitwardenAction && (command.SessionID == "" || len(command.SessionID) > 128) {
 		return errors.New("backend session ID is invalid")
 	}
 	switch command.Action {
@@ -1234,6 +1396,13 @@ func validateBackendCommand(command backendCommand) error {
 			return errors.New("VPN tunnel configuration is invalid")
 		}
 	case "tunnel.release":
+	case "tunnel.forward":
+		if strings.TrimSpace(command.Host) == "" || command.Port < 1 || command.Port > 65535 {
+			return errors.New("VPN tunnel forward target is invalid")
+		}
+		if _, err := buildWebURL("http", command.Host, command.Port); err != nil {
+			return errors.New("VPN tunnel forward target is invalid")
+		}
 	case "tunnel.prompt-response":
 		if command.PromptID == "" || len(command.PromptID) > 128 || len(command.Value) > 16*1024 {
 			return errors.New("VPN authentication response is invalid")
@@ -1246,6 +1415,64 @@ func validateBackendCommand(command backendCommand) error {
 		case "tunnel", "direct", "cancel":
 		default:
 			return errors.New("VPN tunnel choice is invalid")
+		}
+	case "bitwarden.read", "bitwarden.install", "bitwarden.ensure-installed", "bitwarden.status", "bitwarden.logout",
+		"bitwarden.sync", "bitwarden.sync-if-stale",
+		"bitwarden.clear-session":
+	case "bitwarden.browser-storage-read":
+		if !validBitwardenBrowserProfilePath(command.ProfilePath) {
+			return errors.New("Bitwarden browser profile path is invalid")
+		}
+	case "bitwarden.browser-storage-capture":
+		if !validBitwardenBrowserProfilePath(command.ProfilePath) || command.SourceRevision < 0 ||
+			len(command.LocalJSON) > bitwardenBrowserStorageMaxJSON ||
+			len(command.SessionJSON) > bitwardenBrowserStorageMaxJSON {
+			return errors.New("Bitwarden browser storage capture is invalid")
+		}
+	case "bitwarden.browser-profile-seed":
+		if !validBitwardenBrowserProfilePath(command.ProfilePath) ||
+			len(command.Path) == 0 || len(command.Path) > 4096 ||
+			!validBitwardenRouteKey(command.Query) {
+			return errors.New("Bitwarden browser profile seed request is invalid")
+		}
+	case "bitwarden.browser-profile-register":
+		if !validBitwardenBrowserProfilePath(command.ProfilePath) ||
+			len(command.Path) == 0 || len(command.Path) > 4096 ||
+			!validBitwardenExtensionID(command.Value) || !validBitwardenRouteKey(command.Query) {
+			return errors.New("Bitwarden browser profile registration is invalid")
+		}
+	case "bitwarden.set-enabled":
+		if command.Enabled == nil {
+			return errors.New("Bitwarden enabled setting is invalid")
+		}
+	case "bitwarden.set-config":
+		if len([]rune(command.Path)) > 4096 || command.ServerRegion < 0 || command.ServerRegion > 2 {
+			return errors.New("Bitwarden CLI configuration is invalid")
+		}
+	case "bitwarden.login":
+		if len([]rune(command.Email)) > 320 || len([]rune(command.MasterPassword)) > 4096 ||
+			len([]rune(command.AuthenticatorCode)) > 64 {
+			return errors.New("Bitwarden login request is invalid")
+		}
+	case "bitwarden.unlock":
+		if command.MasterPassword == "" || len([]rune(command.MasterPassword)) > 4096 {
+			return errors.New("Bitwarden unlock request is invalid")
+		}
+	case "bitwarden.list", "bitwarden.search":
+		if len([]rune(command.Query)) > 2048 {
+			return errors.New("Bitwarden search query is invalid")
+		}
+	case "bitwarden.get":
+		if strings.TrimSpace(command.ItemID) == "" || len([]rune(command.ItemID)) > maxBitwardenItemIDLength {
+			return errors.New("Bitwarden item id is invalid")
+		}
+	case "bitwarden.resolve-credential":
+		if len(command.CredentialID) > 128 || bitwardenProtocolValue(command.Protocol) < 0 {
+			return errors.New("Bitwarden credential request is invalid")
+		}
+	case "bitwarden.resolve-node", "bitwarden.node-reference":
+		if len(command.NodeID) == 0 || len(command.NodeID) > 128 || bitwardenProtocolValue(command.Protocol) < 0 {
+			return errors.New("Bitwarden connection request is invalid")
 		}
 	default:
 		return fmt.Errorf("unsupported backend action %q", command.Action)
@@ -1268,13 +1495,14 @@ func resolveVncTarget(
 		password:       command.Password,
 		tunnelConfigID: tunnelConfigID,
 	}
+	passwordProvided := command.PasswordProvided || command.Password != ""
 	hostHasPort := target.host != "" && vncHostIncludesPort(target.host)
 	if database != nil && (command.NodeID != "" || command.CredentialID != "") {
 		databaseTarget, err := readVncTargetFromDatabase(
 			database,
 			command.NodeID,
 			command.CredentialID,
-			command.Password == "",
+			!passwordProvided,
 			electronUserDataPath...,
 		)
 		if err != nil {
@@ -1286,7 +1514,7 @@ func resolveVncTarget(
 		if target.port == 0 && !hostHasPort {
 			target.port = databaseTarget.port
 		}
-		if target.password == "" {
+		if target.password == "" && !passwordProvided {
 			target.password = databaseTarget.password
 		}
 		target.nodeID = databaseTarget.nodeID
@@ -1415,8 +1643,16 @@ func vncColorByte(value uint16) byte {
 func publicVncConnectError(err error) (string, bool) {
 	message := strings.TrimSpace(err.Error())
 	lower := strings.ToLower(message)
+	bitwardenFailure := strings.Contains(lower, "bitwarden") || strings.Contains(lower, "vault")
+	if bitwardenFailure &&
+		(strings.Contains(lower, "locked") || strings.Contains(lower, "unlock") || strings.Contains(lower, "session")) {
+		return "The Bitwarden vault is locked. Unlock it to continue.", false
+	}
 	if strings.Contains(lower, "password") || strings.Contains(lower, "authentication") || strings.Contains(lower, "security handshake") {
 		return "VNC authentication failed. Enter the VNC password and try again.", true
+	}
+	if bitwardenFailure {
+		return "The saved Bitwarden credential is unavailable. Enter the VNC password and try again.", true
 	}
 	if errors.Is(err, os.ErrDeadlineExceeded) || strings.Contains(lower, "i/o timeout") {
 		return "VNC connection timed out.", false
@@ -1456,7 +1692,6 @@ type vncNodeRow struct {
 	port           sql.NullInt64
 	credentialID   sql.NullString
 	credentialMode sql.NullInt64
-	inlinePassword sql.NullInt64
 	tunnelEnabled  sql.NullInt64
 	tunnelConfigID sql.NullString
 }
@@ -1490,7 +1725,6 @@ func readVncTargetFromDatabase(
 	visited := make(map[string]struct{})
 	currentID := normalizeID(nodeID)
 	inheritCredential := true
-	leaf := true
 	var resolvedProtocol int64
 	var portContextProtocol int64
 	protocolResolved := false
@@ -1536,20 +1770,11 @@ func readVncTargetFromDatabase(
 			tunnelConfigID = normalizeTunnelID(row.tunnelConfigID.String)
 		}
 
-		if leaf && row.inlinePassword.Valid && row.inlinePassword.Int64 != 0 {
-			// Inline passwords are an SSH/RDP-only setting in the legacy resolver. A VNC
-			// node carrying the flag must stop saved-credential inheritance, but its
-			// per-node secret is not a VNC credential; the UI will prompt instead.
-			inheritCredential = false
-		}
 		if inheritCredential {
 			if row.credentialMode.Valid {
-				switch row.credentialMode.Int64 {
-				case 1:
+				if row.credentialMode.Int64 != 0 {
 					inheritCredential = false
-				case 2:
-					inheritCredential = false
-					if resolvePassword && row.credentialID.Valid && strings.TrimSpace(row.credentialID.String) != "" {
+					if row.credentialMode.Int64 == 2 && resolvePassword && row.credentialID.Valid && strings.TrimSpace(row.credentialID.String) != "" {
 						password, found, err := readVncCredentialSecret(
 							database,
 							row.credentialID.String,
@@ -1584,7 +1809,6 @@ func readVncTargetFromDatabase(
 			break
 		}
 		currentID = normalizeID(row.parentID.String)
-		leaf = false
 	}
 	if protocolResolved && portContextResolved && resolvedProtocol != portContextProtocol {
 		target.port = 0
@@ -1611,7 +1835,7 @@ func readVncNode(database *sql.DB, columns map[string]struct{}, id string) (vncN
 		}
 		return "NULL"
 	}
-	query := `SELECT Id, ` + column("ParentId") + `, ` + column("Name") + `, ` + column("Kind") + `, ` + column("Protocol") + `, ` + column("Host") + `, ` + column("Port") + `, ` + column("CredentialId") + `, ` + column("CredentialMode") + `, ` + column("UseInlinePassword") + `, ` + column("TunnelEnabled") + `, ` + column("TunnelConfigId") + ` FROM Nodes WHERE Id = ?;`
+	query := `SELECT Id, ` + column("ParentId") + `, ` + column("Name") + `, ` + column("Kind") + `, ` + column("Protocol") + `, ` + column("Host") + `, ` + column("Port") + `, ` + column("CredentialId") + `, ` + column("CredentialMode") + `, ` + column("TunnelEnabled") + `, ` + column("TunnelConfigId") + ` FROM Nodes WHERE Id = ?;`
 	var row vncNodeRow
 	err := database.QueryRow(query, id).Scan(
 		&row.id,
@@ -1623,7 +1847,6 @@ func readVncNode(database *sql.DB, columns map[string]struct{}, id string) (vncN
 		&row.port,
 		&row.credentialID,
 		&row.credentialMode,
-		&row.inlinePassword,
 		&row.tunnelEnabled,
 		&row.tunnelConfigID,
 	)

@@ -8,6 +8,7 @@ export class AuthSession {
   private initialized = false;
   private configured = false;
   private unlocked = false;
+  private epoch = 0;
   private readonly unlockListeners = new Set<UnlockListener>();
 
   get isInitialized(): boolean {
@@ -16,6 +17,10 @@ export class AuthSession {
 
   get isAccessAllowed(): boolean {
     return this.initialized && (!this.configured || this.unlocked);
+  }
+
+  get authorizationEpoch(): number {
+    return this.epoch;
   }
 
   onUnlocked(listener: UnlockListener): () => void {
@@ -31,6 +36,7 @@ export class AuthSession {
     this.unlocked = state.configured
       ? assumeUnlocked || (sameConfiguration && this.unlocked)
       : true;
+    if (wasAccessAllowed && !this.isAccessAllowed) this.epoch++;
     this.notifyUnlockIfNeeded(wasAccessAllowed);
   }
 
@@ -42,7 +48,9 @@ export class AuthSession {
   }
 
   lock(): void {
+    const wasAccessAllowed = this.isAccessAllowed;
     if (this.configured) this.unlocked = false;
+    if (wasAccessAllowed && !this.isAccessAllowed) this.epoch++;
   }
 
   requireUnlocked(): void {

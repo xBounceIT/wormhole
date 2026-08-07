@@ -20,9 +20,23 @@ test('locking a configured session blocks workspace access again', () => {
   const session = new AuthSession();
 
   session.remember({ configured: true }, true);
+  const epoch = session.authorizationEpoch;
   session.lock();
+  assert.equal(session.authorizationEpoch, epoch + 1);
   session.remember({ configured: true }, false);
   assert.throws(() => session.requireUnlocked(), /Authentication is required/);
+  assert.equal(session.isAccessAllowed, false);
+  assert.equal(session.authorizationEpoch, epoch + 1);
+});
+
+test('an authorized-to-locked settings transition invalidates in-flight work', () => {
+  const session = new AuthSession();
+
+  session.remember({ configured: false }, false);
+  const epoch = session.authorizationEpoch;
+  session.remember({ configured: true }, false);
+
+  assert.equal(session.authorizationEpoch, epoch + 1);
   assert.equal(session.isAccessAllowed, false);
 });
 

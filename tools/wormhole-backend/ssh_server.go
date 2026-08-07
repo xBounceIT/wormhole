@@ -73,32 +73,36 @@ func (err *sshHostKeyMismatchError) Error() string {
 }
 
 type sshWireCommand struct {
-	Type            string                `json:"type"`
-	SessionID       string                `json:"session_id"`
-	NodeID          string                `json:"node_id"`
-	Host            string                `json:"host"`
-	Username        string                `json:"username"`
-	Password        string                `json:"password"`
-	TunnelConfigID  string                `json:"tunnel_config_id"`
-	SocksEndpoint   string                `json:"socks_endpoint"`
-	TunnelEnabled   *bool                 `json:"tunnel_enabled,omitempty"`
-	Data            string                `json:"data"`
-	Path            string                `json:"path"`
-	DestinationPath string                `json:"destination_path"`
-	RequestID       string                `json:"request_id"`
-	ApprovalID      string                `json:"approval_id"`
-	Pane            string                `json:"pane"`
-	Operation       string                `json:"operation"`
-	TransferID      string                `json:"transfer_id"`
-	ItemID          string                `json:"item_id"`
-	Direction       string                `json:"direction"`
-	Decision        string                `json:"decision"`
-	ApplyToAll      bool                  `json:"apply_to_all"`
-	Items           []sshSftpTransferItem `json:"items"`
-	Columns         uint32                `json:"columns"`
-	Rows            uint32                `json:"rows"`
-	Port            int                   `json:"port"`
-	Approved        bool                  `json:"approved"`
+	Type                          string                `json:"type"`
+	SessionID                     string                `json:"session_id"`
+	NodeID                        string                `json:"node_id"`
+	Host                          string                `json:"host"`
+	Username                      string                `json:"username"`
+	Password                      string                `json:"password"`
+	TunnelConfigID                string                `json:"tunnel_config_id"`
+	SocksEndpoint                 string                `json:"socks_endpoint"`
+	UsernameOverride              string                `json:"username_override,omitempty"`
+	UsernameOverrideAuthoritative bool                  `json:"username_override_authoritative,omitempty"`
+	PasswordOverride              string                `json:"password_override,omitempty"`
+	CredentialOverride            bool                  `json:"credential_override,omitempty"`
+	TunnelEnabled                 *bool                 `json:"tunnel_enabled,omitempty"`
+	Data                          string                `json:"data"`
+	Path                          string                `json:"path"`
+	DestinationPath               string                `json:"destination_path"`
+	RequestID                     string                `json:"request_id"`
+	ApprovalID                    string                `json:"approval_id"`
+	Pane                          string                `json:"pane"`
+	Operation                     string                `json:"operation"`
+	TransferID                    string                `json:"transfer_id"`
+	ItemID                        string                `json:"item_id"`
+	Direction                     string                `json:"direction"`
+	Decision                      string                `json:"decision"`
+	ApplyToAll                    bool                  `json:"apply_to_all"`
+	Items                         []sshSftpTransferItem `json:"items"`
+	Columns                       uint32                `json:"columns"`
+	Rows                          uint32                `json:"rows"`
+	Port                          int                   `json:"port"`
+	Approved                      bool                  `json:"approved"`
 }
 
 type sshWireEvent struct {
@@ -464,6 +468,11 @@ func (server *sshServer) open(command sshWireCommand) {
 		server.writeError(command.SessionID, "SSH VPN proxy endpoint is invalid")
 		return
 	}
+	if len([]rune(command.UsernameOverride)) > maxCredentialUsernameLength ||
+		len([]rune(command.PasswordOverride)) > maxStoredCredentialPassword {
+		server.writeError(command.SessionID, "SSH Bitwarden credential is invalid")
+		return
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	openContext := withTunnelProgressHandler(ctx, func(_ context.Context, phase, detail string) error {
@@ -497,6 +506,10 @@ func (server *sshServer) open(command sshWireCommand) {
 			directTarget,
 			command.SocksEndpoint,
 			command.TunnelEnabled,
+			command.UsernameOverride,
+			command.PasswordOverride,
+			command.CredentialOverride,
+			command.UsernameOverrideAuthoritative,
 			command.Columns,
 			command.Rows,
 		)
@@ -2593,6 +2606,10 @@ func openNativeSSH(
 	directTarget *sshTarget,
 	socksEndpoint string,
 	tunnelEnabled *bool,
+	usernameOverride string,
+	passwordOverride string,
+	credentialOverride bool,
+	usernameOverrideAuthoritative bool,
 	columns uint32,
 	rows uint32,
 ) (*sshNativeSession, sshTarget, error) {
@@ -2601,10 +2618,18 @@ func openNativeSSH(
 	}
 	var target sshTarget
 	var err error
-	if nodeID != "" {
-		target, err = loadSSHTarget(databasePath, nodeID, electronUserDataPath)
-	} else if directTarget != nil {
+	if directTarget != nil {
 		target = *directTarget
+	} else if nodeID != "" {
+		target, err = loadSSHTargetWithOverrides(
+			databasePath,
+			nodeID,
+			usernameOverride,
+			passwordOverride,
+			credentialOverride,
+			usernameOverrideAuthoritative,
+			electronUserDataPath,
+		)
 	} else {
 		err = errors.New("SSH connection target is missing")
 	}
@@ -2826,6 +2851,15 @@ func normalizeTerminalSize(columns, rows uint32) (uint32, uint32) {
 }
 
 func loadSSHTarget(databasePath, nodeID string, electronUserDataPath ...string) (sshTarget, error) {
+	return loadSSHTargetWithOverrides(databasePath, nodeID, "", "", false, false, electronUserDataPath...)
+}
+
+func loadSSHTargetWithOverrides(
+	databasePath, nodeID, usernameOverride, passwordOverride string,
+	credentialOverride bool,
+	usernameOverrideAuthoritative bool,
+	electronUserDataPath ...string,
+) (sshTarget, error) {
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		return sshTarget{}, err
@@ -2903,15 +2937,14 @@ func loadSSHTarget(databasePath, nodeID string, electronUserDataPath ...string) 
 		}
 		if !credentialResolved {
 			if current.credentialMode != nil {
-				switch *current.credentialMode {
-				case 1: // explicit none
+				if *current.credentialMode != 0 {
 					credentialResolved = true
-				case 2: // saved
-					credentialResolved = true
-					credentialID = current.credentialID
-					if credentialID != "" {
-						identityBoundary = true
-						credentialContextPending = true
+					if *current.credentialMode == 2 { // saved
+						credentialID = current.credentialID
+						if credentialID != "" {
+							identityBoundary = true
+							credentialContextPending = true
+						}
 					}
 				}
 			} else if current.credentialID != "" {
@@ -2931,6 +2964,9 @@ func loadSSHTarget(databasePath, nodeID string, electronUserDataPath ...string) 
 		current = nodes[current.parentID]
 	}
 
+	if !protocolSet {
+		return sshTarget{}, errors.New("SSH connection has no protocol")
+	}
 	if protocol != 0 {
 		return sshTarget{}, errors.New("the selected connection is not an SSH connection")
 	}
@@ -2963,14 +2999,32 @@ func loadSSHTarget(databasePath, nodeID string, electronUserDataPath ...string) 
 	if tunnelSet && tunnelEnabled {
 		target.tunnelConfigID = tunnelConfigID
 	}
-	if root.useInlinePassword {
+	if credentialOverride {
+		applySSHCredentialOverride(
+			&target,
+			usernameOverride,
+			passwordOverride,
+			true,
+			usernameOverrideAuthoritative,
+		)
+	} else if root.useInlinePassword {
 		secret, err := readCredentialSecret(database, root.id, electronUserDataPath...)
 		if err != nil {
 			return sshTarget{}, fmt.Errorf("could not read the SSH password: %w", err)
 		}
 		target.password = string(secret)
 	} else if credentialID != "" {
-		if err := loadSSHCredential(database, databasePath, credentialID, &target, electronUserDataPath...); err != nil {
+		if err := loadSSHCredential(
+			database,
+			databasePath,
+			credentialID,
+			&target,
+			usernameOverride,
+			passwordOverride,
+			credentialOverride,
+			usernameOverrideAuthoritative,
+			electronUserDataPath...,
+		); err != nil {
 			return sshTarget{}, err
 		}
 	}
@@ -3084,6 +3138,9 @@ func loadSSHCredential(
 	database *sql.DB,
 	databasePath, credentialID string,
 	target *sshTarget,
+	usernameOverride, passwordOverride string,
+	credentialOverride bool,
+	usernameOverrideAuthoritative bool,
 	electronUserDataPath ...string,
 ) error {
 	if strings.TrimSpace(credentialID) == "" {
@@ -3094,6 +3151,15 @@ func loadSSHCredential(
 		return err
 	}
 	if !exists {
+		if applySSHCredentialOverride(
+			target,
+			usernameOverride,
+			passwordOverride,
+			credentialOverride,
+			usernameOverrideAuthoritative,
+		) {
+			return nil
+		}
 		return errors.New("Wormhole database has no SSH credentials")
 	}
 	columns, err := tableColumns(database, "CredentialProfiles")
@@ -3113,13 +3179,37 @@ func loadSSHCredential(
 		normalizeID(credentialID),
 	).Scan(&row.Username, &row.Kind, &row.Protocol, &row.SecretProvider)
 	if errors.Is(err, sql.ErrNoRows) {
+		// Virtual Bitwarden credentials intentionally exist only in the cache. The long-lived Go
+		// vault backend resolves them and Electron forwards the values directly to this separate
+		// Go SSH process for this one connection; they are never persisted here.
+		if applySSHCredentialOverride(
+			target,
+			usernameOverride,
+			passwordOverride,
+			credentialOverride,
+			usernameOverrideAuthoritative,
+		) {
+			return nil
+		}
 		return errors.New("SSH credential was not found")
 	}
 	if err != nil {
 		return fmt.Errorf("cannot read SSH credential: %w", err)
 	}
 	if row.SecretProvider.Valid && row.SecretProvider.Int64 != 0 {
-		return errors.New("Bitwarden SSH credentials are not available in the Electron shell yet")
+		if !applySSHCredentialOverride(
+			target,
+			usernameOverride,
+			passwordOverride,
+			credentialOverride,
+			usernameOverrideAuthoritative,
+		) {
+			return errors.New("Bitwarden vault is locked or the linked credential is unavailable")
+		}
+		if target.username == "" {
+			target.username = strings.TrimSpace(nullableString(row.Username))
+		}
+		return nil
 	}
 	if row.Protocol.Valid && row.Protocol.Int64 != 0 {
 		return errors.New("the selected credential is not an SSH credential")
@@ -3152,6 +3242,23 @@ func loadSSHCredential(
 	}
 	target.password = string(secret)
 	return nil
+}
+
+func applySSHCredentialOverride(
+	target *sshTarget,
+	usernameOverride, passwordOverride string,
+	credentialOverride bool,
+	usernameOverrideAuthoritative bool,
+) bool {
+	if !credentialOverride {
+		return false
+	}
+	if username := strings.TrimSpace(usernameOverride); username != "" &&
+		(usernameOverrideAuthoritative || target.username == "") {
+		target.username = username
+	}
+	target.password = passwordOverride
+	return true
 }
 
 func protectedCredentialFileStem(id string) (string, error) {

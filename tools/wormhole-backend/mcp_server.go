@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -684,36 +683,13 @@ func saveMcpSettings(databasePath string, settings mcpSettings) error {
 		return err
 	}
 	_, settingsPath := authPaths(databasePath)
-	document := map[string]json.RawMessage{}
-	contents, err := readAuthSettingsFile(settingsPath)
-	if err == nil {
-		_ = json.Unmarshal(contents, &document)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	if document == nil {
-		document = map[string]json.RawMessage{}
-	}
-	enabled, _ := json.Marshal(settings.Enabled)
-	port, _ := json.Marshal(settings.Port)
-	document["EnableMcpServer"] = enabled
-	document["McpServerPort"] = port
-	contents, err = json.MarshalIndent(document, "", "  ")
-	if err != nil {
-		return fmt.Errorf("cannot encode MCP settings: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
-		return fmt.Errorf("cannot create the Wormhole data directory: %w", err)
-	}
-	temporaryPath := settingsPath + ".tmp"
-	if err := os.WriteFile(temporaryPath, append(contents, '\n'), 0o600); err != nil {
-		return fmt.Errorf("cannot write MCP settings: %w", err)
-	}
-	if err := replaceAuthFile(temporaryPath, settingsPath); err != nil {
-		_ = os.Remove(temporaryPath)
-		return fmt.Errorf("cannot save MCP settings: %w", err)
-	}
-	return nil
+	return updateSettingsDocument(settingsPath, func(document map[string]json.RawMessage) error {
+		enabled, _ := json.Marshal(settings.Enabled)
+		port, _ := json.Marshal(settings.Port)
+		document["EnableMcpServer"] = enabled
+		document["McpServerPort"] = port
+		return nil
+	})
 }
 
 func newMcpRequestID() (string, error) {

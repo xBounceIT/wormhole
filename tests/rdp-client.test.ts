@@ -51,6 +51,56 @@ test('hideAll hides every started or measured RDP session', async () => {
   );
 });
 
+test('cancelPendingStarts disconnects only RDP handshakes still in progress', async () => {
+  const client = new RdpBackendClient({ executable: 'unused', args: [] });
+  const commands: Array<Record<string, unknown>> = [];
+  const internals = client as any;
+  const fakeProcess = {
+    killed: false,
+    stdin: {
+      writable: true,
+      write(payload: string, callback: (error?: Error | null) => void) {
+        const command = JSON.parse(payload) as Record<string, unknown>;
+        commands.push(command);
+        callback();
+        if (command.op === 'disconnect') {
+          queueMicrotask(() =>
+            internals.handleLine(
+              JSON.stringify({
+                type: 'ack',
+                requestId: command.requestId,
+                sessionId: command.sessionId,
+              }),
+            ),
+          );
+        }
+        return true;
+      },
+    },
+  };
+  internals.process = fakeProcess;
+
+  const pendingStart = (
+    internals as { send(command: Record<string, unknown>): Promise<unknown> }
+  ).send({ op: 'start', sessionId: 'pending-session' });
+  internals.sessionIds.add('pending-session');
+  internals.sessionIds.add('connected-session');
+
+  client.cancelPendingStarts('window-handle');
+
+  await assert.rejects(pendingStart, /cancelled while Wormhole locked/);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    commands.map((command) => [command.op, command.sessionId]),
+    [
+      ['start', 'pending-session'],
+      ['disconnect', 'pending-session'],
+    ],
+  );
+  assert.equal(internals.sessionIds.has('pending-session'), false);
+  assert.equal(internals.sessionIds.has('connected-session'), true);
+});
+
 test('RDP ignores events from a superseded backend process', () => {
   const client = new RdpBackendClient({ executable: 'unused', args: [] });
   const events: Array<Record<string, unknown>> = [];
