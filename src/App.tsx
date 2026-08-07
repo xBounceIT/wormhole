@@ -14,7 +14,8 @@ import {
   type MouseEvent,
   type ReactNode,
 } from 'react';
-import wormholeIcon from '../Assets/Wormhole.png';
+import './index.css';
+import wormholeIcon from '../Assets/wormhole-logo-transparent.png';
 import { mergeCredential } from './credential-state';
 import {
   parentLocalSftpPath,
@@ -1053,17 +1054,20 @@ function AuthPrompt({
   );
 }
 
-function App() {
+type WormholeAppProps = {
+  initialAuthState: WormholeAuthState;
+  initialWorkspace: WormholeWorkspaceSnapshot;
+  initialSettings: WormholeAppSettings;
+};
+
+function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAppProps) {
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme);
-  const [tree, setTree] = useState<TreeNode[]>([]);
-  const [credentials, setCredentials] = useState<CredentialRecord[]>([]);
-  const [tunnels, setTunnels] = useState<TunnelRecord[]>([]);
-  const [workspaceStatus, setWorkspaceStatus] = useState<'loading' | 'ready' | 'error'>('loading');
-  const [authState, setAuthState] = useState<WormholeAuthState | null>(null);
-  const [authGate, setAuthGate] = useState<'loading' | 'locked' | 'unlocked' | 'error'>('loading');
-  const [authError, setAuthError] = useState('');
-  const [authRetry, setAuthRetry] = useState(0);
+  const [tree, setTree] = useState<TreeNode[]>(initialWorkspace.tree);
+  const [credentials, setCredentials] = useState<CredentialRecord[]>(initialWorkspace.credentials);
+  const [tunnels, setTunnels] = useState<TunnelRecord[]>(initialWorkspace.tunnels);
+  const [authState, setAuthState] = useState<WormholeAuthState | null>(initialAuthState);
+  const [authGate, setAuthGate] = useState<'locked' | 'unlocked'>('unlocked');
   const [lockReason, setLockReason] = useState('Unlock Wormhole to continue.');
   const [authPrompt, setAuthPrompt] = useState<AuthPromptRequest | null>(null);
   const [mcpApprovals, setMcpApprovals] = useState<WormholeMcpApproval[]>([]);
@@ -1085,11 +1089,14 @@ function App() {
   const authPromptResolver = useRef<((succeeded: boolean) => void) | null>(null);
   const idleCheckInFlight = useRef(false);
   const lastActivityAt = useRef(Date.now());
-  const workspaceLoaded = useRef(false);
   const webSessionAttempts = useRef(new WebSessionAttemptTracker());
   const [activePage, setActivePage] = useState<NavItem>('sessions');
-  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
-  const [selectedNodeId, setSelectedNodeId] = useState('');
+  const [expanded, setExpanded] = useState<Set<string>>(
+    () => new Set(collectFolderIds(initialWorkspace.tree)),
+  );
+  const [selectedNodeId, setSelectedNodeId] = useState(
+    () => findFirstConnection(initialWorkspace.tree)?.id ?? initialWorkspace.tree[0]?.id ?? '',
+  );
   const [selectedTreeNodeIds, setSelectedTreeNodeIds] = useState<Set<string>>(() => new Set());
   const [searchText, setSearchText] = useState('');
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -1135,9 +1142,15 @@ function App() {
   const [newFolderParentId, setNewFolderParentId] = useState<string | null>(null);
   const [updateCurrentVersion, setUpdateCurrentVersion] = useState('');
   const [updateResult, setUpdateResult] = useState<WormholeUpdateCheckResult | null>(null);
-  const [autoCheckForUpdates, setAutoCheckForUpdates] = useState(true);
-  const [skippedUpdateVersion, setSkippedUpdateVersion] = useState<string | null>(null);
-  const [lastUpdateCheck, setLastUpdateCheck] = useState<string | null>(null);
+  const [autoCheckForUpdates, setAutoCheckForUpdates] = useState(
+    initialSettings.autoCheckForUpdates,
+  );
+  const [skippedUpdateVersion, setSkippedUpdateVersion] = useState<string | null>(
+    initialSettings.skippedUpdateVersion,
+  );
+  const [lastUpdateCheck, setLastUpdateCheck] = useState<string | null>(
+    initialSettings.lastUpdateCheck,
+  );
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateStatus, setUpdateStatus] = useState('');
   const [updateDownloadProgress, setUpdateDownloadProgress] = useState<number | null>(null);
@@ -1176,76 +1189,6 @@ function App() {
   }, [theme]);
 
   useEffect(() => {
-    let mounted = true;
-
-    async function loadAuth() {
-      if (!window.wormhole) {
-        setAuthError("Wormhole couldn't start app lock.");
-        setAuthGate('error');
-        return;
-      }
-
-      try {
-        const state = await window.wormhole.getAuthState();
-        if (!mounted) return;
-        setAuthState(state);
-        setAuthError('');
-        setAuthGate(state.configured ? 'locked' : 'unlocked');
-      } catch {
-        if (!mounted) return;
-        setAuthError("Wormhole couldn't start app lock.");
-        setAuthGate('error');
-      }
-    }
-
-    void loadAuth();
-    return () => {
-      mounted = false;
-    };
-  }, [authRetry]);
-
-  useEffect(() => {
-    if (authGate !== 'unlocked' || workspaceLoaded.current) return;
-    let mounted = true;
-
-    async function loadWorkspace() {
-      if (!window.wormhole) {
-        setWorkspaceStatus('error');
-        return;
-      }
-
-      try {
-        const workspace = await window.wormhole.loadWorkspace();
-        if (!mounted) return;
-
-        setTree(workspace.tree);
-        setCredentials(workspace.credentials);
-        setTunnels(workspace.tunnels);
-        setSelectedTreeNodeIds(new Set());
-        setExpanded(new Set(collectFolderIds(workspace.tree)));
-        const firstConnection = findFirstConnection(workspace.tree);
-        setSelectedNodeId(firstConnection?.id ?? workspace.tree[0]?.id ?? '');
-        setWorkspaceStatus('ready');
-        workspaceLoaded.current = true;
-      } catch {
-        if (!mounted) return;
-        setTree([]);
-        setCredentials([]);
-        setTunnels([]);
-        setSelectedTreeNodeIds(new Set());
-        setExpanded(new Set());
-        setSelectedNodeId('');
-        setWorkspaceStatus('error');
-      }
-    }
-
-    void loadWorkspace();
-    return () => {
-      mounted = false;
-    };
-  }, [authGate]);
-
-  useEffect(() => {
     if (!window.wormhole) return;
     let active = true;
 
@@ -1258,17 +1201,6 @@ function App() {
       })
       .catch(() => {
         // The settings page still exposes "Check now" when status cannot be read.
-      });
-    void window.wormhole
-      .readAppSettings()
-      .then((settings) => {
-        if (!active) return;
-        setAutoCheckForUpdates(settings.autoCheckForUpdates);
-        setSkippedUpdateVersion(settings.skippedUpdateVersion);
-        setLastUpdateCheck(settings.lastUpdateCheck);
-      })
-      .catch(() => {
-        // The switches keep their defaults when settings cannot be read.
       });
     const unsubscribeResult = window.wormhole.onUpdateResult((result) => {
       setUpdateResult(result);
@@ -3931,7 +3863,7 @@ function App() {
         <Button
           aria-current={isSelected ? 'true' : undefined}
           className={[
-            'relative z-10 h-8 w-full cursor-grab justify-start gap-1.5 rounded-md px-2 text-left text-xs font-medium text-sidebar-foreground/80 transition-[background-color,box-shadow,opacity] duration-150 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground aria-expanded:bg-transparent aria-expanded:text-sidebar-foreground/80 active:cursor-grabbing',
+            'relative z-10 h-8 w-full cursor-grab justify-start gap-1.5 rounded-md px-2 text-left !text-xs font-medium text-sidebar-foreground/80 transition-[background-color,box-shadow,opacity] duration-150 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground aria-expanded:bg-transparent aria-expanded:text-sidebar-foreground/80 active:cursor-grabbing',
             isSelected
               ? 'bg-sidebar-accent text-sidebar-accent-foreground aria-expanded:bg-sidebar-accent aria-expanded:text-sidebar-accent-foreground'
               : '',
@@ -4110,40 +4042,6 @@ function App() {
 
   return (
     <TooltipProvider delayDuration={300}>
-      {authGate === 'loading' ? (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background/95 p-6 backdrop-blur-sm">
-          <Card className="w-full max-w-sm border-border/70 bg-card/95 shadow-2xl">
-            <CardContent className="flex items-center gap-3 py-6">
-              <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
-                <KeyRound className="size-4" />
-              </div>
-              <div className="space-y-1">
-                <p className="text-sm font-medium">Opening Wormhole</p>
-                <p className="text-[11px] text-muted-foreground">Checking app lock…</p>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      ) : null}
-      {authGate === 'error' ? (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background/95 p-6 backdrop-blur-sm">
-          <Card className="w-full max-w-sm border-destructive/40 bg-card/95 shadow-2xl">
-            <CardHeader className="gap-3 border-l-2 border-destructive py-5">
-              <CardTitle>Wormhole couldn't open</CardTitle>
-              <CardDescription>
-                Try again. If this keeps happening, restart Wormhole.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <p className="text-[11px] text-destructive">{authError}</p>
-              <Button onClick={() => setAuthRetry((value) => value + 1)} size="sm">
-                <RefreshCcw data-icon="inline-start" />
-                Try again
-              </Button>
-            </CardContent>
-          </Card>
-        </div>
-      ) : null}
       {visibleAuthPrompt && authState ? (
         <AuthPrompt
           onResult={handleAuthPromptResult}
@@ -4304,9 +4202,9 @@ function App() {
             >
               <Sidebar className="relative w-full border-r-0" collapsible="none">
                 <SidebarHeader className="gap-3 p-3">
-                  <div className="flex items-end justify-between gap-2 px-1">
+                  <div className="flex items-center justify-between gap-2 px-1">
                     <div>
-                      <h1 className="text-sm font-semibold tracking-tight">Connections</h1>
+                      <h1 className="!text-xs font-semibold tracking-tight">Connections</h1>
                     </div>
                     <div className="flex items-center gap-0.5">
                       <IconButton
@@ -4352,9 +4250,9 @@ function App() {
                     </div>
                   </div>
                   <Button
-                    className="w-full justify-center gap-2"
+                    className="w-full justify-center gap-2 !text-xs"
                     onClick={openQuickConnect}
-                    size="sm"
+                    size="default"
                   >
                     <Zap data-icon="inline-start" />
                     Quick Connect
@@ -4364,7 +4262,7 @@ function App() {
                     <Search className="pointer-events-none absolute left-2.5 top-1/2 z-10 size-3.5 -translate-y-1/2 text-muted-foreground" />
                     <SidebarInput
                       aria-label="Search connections"
-                      className="h-9 bg-background/60 pl-8 pr-8 text-xs shadow-none"
+                      className="bg-background/60 pl-8 pr-8 !text-xs shadow-none"
                       onChange={(event) => setSearchText(event.target.value)}
                       placeholder="Search connections"
                       value={searchText}
@@ -4380,7 +4278,7 @@ function App() {
                     ) : null}
                   </div>
                   {searchText ? (
-                    <p className="px-1 text-[10px] text-muted-foreground">
+                    <p className="px-1 text-xs text-muted-foreground">
                       {visibleTree.length === 0
                         ? 'No matches'
                         : `Showing matches for “${searchText}”`}
@@ -4394,11 +4292,7 @@ function App() {
                       renderTree(visibleTree)
                     ) : (
                       <p className="px-3 py-8 text-center text-xs text-muted-foreground">
-                        {workspaceStatus === 'loading'
-                          ? 'Loading connections…'
-                          : workspaceStatus === 'error'
-                            ? 'Unable to load connections.'
-                            : 'Nothing here yet.'}
+                        Nothing here yet.
                       </p>
                     )}
                   </ScrollArea>
@@ -4410,6 +4304,7 @@ function App() {
                       {navItems.map((item) => (
                         <SidebarMenuItem key={item.id}>
                           <SidebarMenuButton
+                            className="!text-xs"
                             isActive={activePage === item.id}
                             onClick={() => setActivePage(item.id)}
                             size="sm"
@@ -7132,7 +7027,7 @@ function SessionsPage({
                     }}
                     value={session.id}
                   >
-                    <span className="min-w-0 flex-1 truncate text-xs font-semibold">
+                    <span className="min-w-0 flex-1 truncate !text-xs font-semibold">
                       {session.title}
                     </span>
                   </TabsTrigger>
@@ -7430,29 +7325,30 @@ function CredentialsPage({
   return (
     <>
       <section className="flex h-full min-h-0 flex-col overflow-hidden px-6 py-5">
-        <h2 className="shrink-0 text-2xl font-semibold tracking-tight">Credentials</h2>
+        <h2 className="shrink-0 text-xl font-semibold tracking-tight">Credentials</h2>
 
         <div className="mt-4 flex shrink-0 flex-wrap items-center gap-2">
           <Input
             aria-label="Search credentials"
-            className="h-9 min-w-60 max-w-xl flex-1"
+            className="!text-xs min-w-60 max-w-xl flex-1"
             onChange={(event) => setSearchText(event.target.value)}
             placeholder="Search credentials"
             value={searchText}
           />
           <Button
+            className="!text-xs"
             onClick={() =>
               setSelectedCredentials(
                 allVisibleSelected ? [] : filteredCredentials.map((credential) => credential.id),
               )
             }
-            size="sm"
+            size="default"
             variant="outline"
           >
             <Check data-icon="inline-start" />
             Select all
           </Button>
-          <Button onClick={openNewCredential} size="sm">
+          <Button className="!text-xs" onClick={openNewCredential} size="default">
             <Plus data-icon="inline-start" />
             Add credential
           </Button>
@@ -7465,13 +7361,19 @@ function CredentialsPage({
               <span>{selectedCredentials.length} credential(s) selected</span>
             </div>
             <div className="flex gap-2">
-              <Button onClick={() => setSelectedCredentials([])} size="sm" variant="ghost">
+              <Button
+                className="!text-xs"
+                onClick={() => setSelectedCredentials([])}
+                size="default"
+                variant="ghost"
+              >
                 Clear
               </Button>
               <Button
+                className="!text-xs"
                 disabled={deletableSelectedCredentials.length === 0}
                 onClick={() => setPendingDeletion(deletableSelectedCredentials)}
-                size="sm"
+                size="default"
                 variant="destructive"
               >
                 <X data-icon="inline-start" />
@@ -8910,17 +8812,17 @@ function TunnelsPage({
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden px-6 py-4">
-      <h2 className="shrink-0 text-2xl font-semibold tracking-tight">VPN tunnels</h2>
+      <h2 className="shrink-0 text-xl font-semibold tracking-tight">VPN tunnels</h2>
 
       <div className="mt-3 flex shrink-0 flex-wrap items-center gap-2">
         <Input
           aria-label="Search tunnels"
-          className="h-8 min-w-52 max-w-[480px] flex-1"
+          className="!text-xs min-w-52 max-w-[480px] flex-1"
           onChange={(event) => setSearchText(event.target.value)}
           placeholder="Search tunnels"
           value={searchText}
         />
-        <Button onClick={addTunnel} size="sm">
+        <Button className="!text-xs" onClick={addTunnel} size="default">
           <Plus data-icon="inline-start" />
           Add VPN tunnel
         </Button>
@@ -10100,9 +10002,7 @@ function SettingsPage({
     try {
       const result = await window.wormhole.setLogLevel(next);
       setLogLevelState(result.logLevel);
-      setLogsInfo((current) =>
-        current ? { ...current, logLevel: result.logLevel } : current,
-      );
+      setLogsInfo((current) => (current ? { ...current, logLevel: result.logLevel } : current));
     } catch (error) {
       setLogLevelState(saved);
       setLogsError(logsErrorMessage(error));
@@ -10133,7 +10033,7 @@ function SettingsPage({
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden p-6">
-      <h2 className="shrink-0 text-2xl font-semibold tracking-tight">Settings</h2>
+      <h2 className="shrink-0 text-xl font-semibold tracking-tight">Settings</h2>
 
       <Tabs className="mt-4 min-h-0 flex-1 gap-0" onValueChange={setActiveTab} value={activeTab}>
         <TabsList
@@ -10558,8 +10458,8 @@ function SettingsPage({
               </Select>
             </div>
             <p className="text-[11px] leading-relaxed text-muted-foreground">
-              Info logs high-level events (boot, connections, tunnels, errors). Debug adds
-              verbose per-operation detail for diagnosing failures. Changes apply immediately.
+              Info logs high-level events (boot, connections, tunnels, errors). Debug adds verbose
+              per-operation detail for diagnosing failures. Changes apply immediately.
             </p>
             {logsError ? <p className="text-[11px] text-destructive">{logsError}</p> : null}
           </SettingsSection>
@@ -10808,7 +10708,7 @@ function UtilityPage({
           <p className="mb-1 font-mono text-[9px] uppercase tracking-[0.14em] text-muted-foreground">
             {details.kicker}
           </p>
-          <h2 className="text-2xl font-semibold tracking-tight">{details.title}</h2>
+          <h2 className="text-xl font-semibold tracking-tight">{details.title}</h2>
           <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
             {details.description}
           </p>

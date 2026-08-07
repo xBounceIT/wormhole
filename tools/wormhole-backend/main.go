@@ -23,6 +23,7 @@ import (
 
 const (
 	windowsCredentialMigrationID = "windows-credential-manager-to-sqlite-v1"
+	tunnelConfigMigrationID      = "0003_add_tunnel_config"
 	credentialPrefix             = "Wormhole:"
 	mcpTokenCredentialID         = "a7f3c1e2-9b6d-4e8a-bf21-7c0d2e5a4b91"
 	credentialReaderTimeout      = 15 * time.Second
@@ -50,6 +51,31 @@ type workspaceSnapshot struct {
 	Tree        []*treeNode        `json:"tree"`
 	Credentials []credentialRecord `json:"credentials"`
 	Tunnels     []tunnelRecord     `json:"tunnels"`
+}
+
+type appSettingsSnapshot struct {
+	PromptBeforeTunnelConnect bool    `json:"promptBeforeTunnelConnect"`
+	AutoCheckForUpdates       bool    `json:"autoCheckForUpdates"`
+	LastUpdateCheck           *string `json:"lastUpdateCheck"`
+	SkippedUpdateVersion      *string `json:"skippedUpdateVersion"`
+}
+
+// startupSnapshot deliberately returns the workspace only while app authentication is disabled.
+// A configured workspace crosses the process boundary only after startupUnlock has verified the
+// user's secret. Combining these reads in one process avoids paying the Windows process, logging,
+// settings, and SQLite initialization costs several times during every launch.
+type startupSnapshot struct {
+	Auth            authStateResponse   `json:"auth"`
+	Workspace       *workspaceSnapshot  `json:"workspace,omitempty"`
+	Settings        appSettingsSnapshot `json:"settings"`
+	Migration       migrationResult     `json:"migration"`
+	MigrationFailed bool                `json:"migrationFailed"`
+}
+
+type startupUnlockSnapshot struct {
+	Succeeded bool               `json:"succeeded"`
+	Message   string             `json:"message"`
+	Workspace *workspaceSnapshot `json:"workspace,omitempty"`
 }
 
 type treeNode struct {
@@ -137,7 +163,7 @@ type tunnelRow struct {
 }
 
 func main() {
-	operation := flag.String("operation", "workspace", "backend operation: workspace, credential-*, tunnel-*, workspace-update-node, workspace-update-node-web-settings, workspace-update-node-tunnel, web-target, migrate, ssh, serial, ssh-trust-host-key, logs-info, settings-set-log-retention, settings-set-log-level, open-log-file, open-logs-folder, serve, rdp, or auth-*")
+	operation := flag.String("operation", "workspace", "backend operation: startup, startup-unlock, workspace, credential-*, tunnel-*, workspace-update-node, workspace-update-node-web-settings, workspace-update-node-tunnel, web-target, migrate, ssh, serial, ssh-trust-host-key, logs-info, settings-set-log-retention, settings-set-log-level, open-log-file, open-logs-folder, serve, rdp, or auth-*")
 	databasePath := flag.String("database", "", "path to the Wormhole SQLite database")
 	electronUserDataPath := flag.String("electron-user-data", "", "path to the Electron user-data directory")
 	credentialReader := flag.String("credential-reader", "", "path to the Windows Credential Manager reader")
@@ -185,6 +211,14 @@ func main() {
 	var err error
 	logDebug("backend operation %s started", *operation)
 	switch *operation {
+	case "startup":
+		result, err = loadStartupSnapshot(*databasePath, *credentialReader)
+	case "startup-unlock":
+		var request authVerifyRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = unlockStartup(*databasePath, request)
+		}
 	case "workspace":
 		result, err = loadWorkspace(*databasePath)
 		if err == nil {
@@ -598,7 +632,7 @@ CREATE TABLE IF NOT EXISTS __migration_history (
     AppliedAtUtc TEXT NOT NULL
 );
 INSERT OR IGNORE INTO __migration_history (Id, AppliedAtUtc) VALUES (?, ?);`,
-		"0003_add_tunnel_config", time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		tunnelConfigMigrationID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("cannot record the VPN tunnel migration: %w", err)
 	}
 	return nil
@@ -606,6 +640,73 @@ INSERT OR IGNORE INTO __migration_history (Id, AppliedAtUtc) VALUES (?, ?);`,
 
 func migrateCredentials(databasePath, readerPath string) (migrationResult, error) {
 	return migrateCredentialsWithReader(databasePath, readerPath, readWindowsCredentials)
+}
+
+func loadStartupSnapshot(databasePath, readerPath string) (startupSnapshot, error) {
+	migration, migrationErr := migrateCredentials(databasePath, readerPath)
+	if migrationErr != nil {
+		// Credential migration is retryable and has never been allowed to make the application
+		// unusable. Keep the bootstrap useful while recording the failure in the native log.
+		logError("credential migration failed during startup: %v", migrationErr)
+	}
+
+	auth, err := authState(databasePath)
+	if err != nil {
+		return startupSnapshot{}, err
+	}
+	settings, err := loadAppSettingsSnapshot(databasePath)
+	if err != nil {
+		return startupSnapshot{}, err
+	}
+	result := startupSnapshot{
+		Auth:            auth,
+		Settings:        settings,
+		Migration:       migration,
+		MigrationFailed: migrationErr != nil,
+	}
+	if auth.Configured {
+		return result, nil
+	}
+	workspace, err := loadWorkspace(databasePath)
+	if err != nil {
+		return startupSnapshot{}, err
+	}
+	result.Workspace = &workspace
+	return result, nil
+}
+
+func unlockStartup(databasePath string, request authVerifyRequest) (startupUnlockSnapshot, error) {
+	verification, err := authVerify(databasePath, request)
+	if err != nil {
+		return startupUnlockSnapshot{}, err
+	}
+	result := startupUnlockSnapshot{
+		Succeeded: verification.Succeeded,
+		Message:   verification.Message,
+	}
+	if !verification.Succeeded {
+		return result, nil
+	}
+	workspace, err := loadWorkspace(databasePath)
+	if err != nil {
+		return startupUnlockSnapshot{}, err
+	}
+	result.Workspace = &workspace
+	return result, nil
+}
+
+func loadAppSettingsSnapshot(databasePath string) (appSettingsSnapshot, error) {
+	promptBeforeTunnel, autoCheckForUpdates, lastUpdateCheck, skippedUpdateVersion, err :=
+		readAppSettings(databasePath)
+	if err != nil {
+		return appSettingsSnapshot{}, err
+	}
+	return appSettingsSnapshot{
+		PromptBeforeTunnelConnect: promptBeforeTunnel,
+		AutoCheckForUpdates:       autoCheckForUpdates,
+		LastUpdateCheck:           lastUpdateCheck,
+		SkippedUpdateVersion:      skippedUpdateVersion,
+	}, nil
 }
 
 func migrateCredentialsWithReader(
@@ -623,10 +724,21 @@ func migrateCredentialsWithReader(
 	}
 	defer database.Close()
 
+	// The completed markers are the overwhelmingly common launch path. Checking them first
+	// avoids replaying CREATE/ALTER/INDEX statements and schema introspection on every startup.
+	// Older databases without both markers still take the full idempotent migration path.
+	completed, err := startupMigrationsAlreadyApplied(database)
+	if err != nil {
+		return migrationResult{}, err
+	}
+	if completed {
+		return migrationResult{Status: "already-completed"}, nil
+	}
+
 	if err := ensureMigrationSchema(database); err != nil {
 		return migrationResult{}, err
 	}
-	completed, err := hasCompletedMigration(database)
+	completed, err = hasCompletedMigration(database)
 	if err != nil {
 		return migrationResult{}, err
 	}
@@ -710,6 +822,34 @@ ON CONFLICT(Id) DO UPDATE SET
 	}
 	committed = true
 	return migrationResult{Status: "completed", Migrated: len(secrets), Missing: missing}, nil
+}
+
+func startupMigrationsAlreadyApplied(database *sql.DB) (bool, error) {
+	for _, table := range []string{"ElectronMigrations", "__migration_history"} {
+		exists, err := tableExists(database, table)
+		if err != nil {
+			return false, err
+		}
+		if !exists {
+			return false, nil
+		}
+	}
+	credentialMigrationComplete, err := hasCompletedMigration(database)
+	if err != nil || !credentialMigrationComplete {
+		return false, err
+	}
+	var schemaMigrationPresent int
+	err = database.QueryRow(
+		`SELECT 1 FROM __migration_history WHERE Id = ? LIMIT 1;`,
+		tunnelConfigMigrationID,
+	).Scan(&schemaMigrationPresent)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("cannot read the VPN tunnel migration status: %w", err)
+	}
+	return schemaMigrationPresent == 1, nil
 }
 
 type secretToStore struct {

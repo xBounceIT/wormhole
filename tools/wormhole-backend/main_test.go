@@ -61,6 +61,123 @@ func TestEnsureMigrationSchemaAddsNodeTunnelColumnsAndLegacyMarker(t *testing.T)
 	}
 }
 
+func TestStartupMigrationsAlreadyAppliedUsesCompletionMarkers(t *testing.T) {
+	databasePath := prepareStartupTestDatabase(t)
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+
+	completed, err := startupMigrationsAlreadyApplied(database)
+	if err != nil || !completed {
+		t.Fatalf("startup migrations complete = %v, %v", completed, err)
+	}
+	if _, err := database.Exec(`DELETE FROM __migration_history WHERE Id = ?;`, tunnelConfigMigrationID); err != nil {
+		t.Fatal(err)
+	}
+	completed, err = startupMigrationsAlreadyApplied(database)
+	if err != nil || completed {
+		t.Fatalf("startup migrations complete without schema marker = %v, %v", completed, err)
+	}
+}
+
+func TestLoadStartupSnapshotReturnsUnlockedWorkspaceAndSettings(t *testing.T) {
+	databasePath := prepareStartupTestDatabase(t)
+	startup, err := loadStartupSnapshot(databasePath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if startup.Auth.Configured {
+		t.Fatal("fresh startup unexpectedly requires authentication")
+	}
+	if startup.Workspace == nil || len(startup.Workspace.Tree) != 1 || startup.Workspace.Tree[0].ID != "startup-node" {
+		t.Fatalf("unexpected startup workspace: %#v", startup.Workspace)
+	}
+	if !startup.Settings.PromptBeforeTunnelConnect || !startup.Settings.AutoCheckForUpdates {
+		t.Fatalf("unexpected default startup settings: %#v", startup.Settings)
+	}
+	if startup.Migration.Status != "already-completed" || startup.MigrationFailed {
+		t.Fatalf("unexpected migration result: %#v, failed=%v", startup.Migration, startup.MigrationFailed)
+	}
+}
+
+func TestLoadStartupSnapshotKeepsLockedWorkspacePrivate(t *testing.T) {
+	databasePath := prepareStartupTestDatabase(t)
+	storePath, settingsPath := authPaths(databasePath)
+	verifier, err := newAuthVerifier("1234")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAuthDocument(storePath, authDocument{Version: authStoreVersion, Pin: verifier}); err != nil {
+		t.Fatal(err)
+	}
+	settings := defaultAuthSettings()
+	settings.Mode = 1
+	if err := saveAuthSettings(settingsPath, settings); err != nil {
+		t.Fatal(err)
+	}
+
+	startup, err := loadStartupSnapshot(databasePath, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !startup.Auth.Configured {
+		t.Fatal("configured startup was reported as unlocked")
+	}
+	if startup.Workspace != nil {
+		t.Fatalf("locked startup exposed workspace: %#v", startup.Workspace)
+	}
+
+	failed, err := unlockStartup(databasePath, authVerifyRequest{Method: "pin", Secret: "0000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Succeeded || failed.Workspace != nil {
+		t.Fatalf("failed unlock exposed workspace: %#v", failed)
+	}
+	succeeded, err := unlockStartup(databasePath, authVerifyRequest{Method: "pin", Secret: "1234"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !succeeded.Succeeded || succeeded.Workspace == nil || len(succeeded.Workspace.Tree) != 1 {
+		t.Fatalf("successful startup unlock did not return workspace: %#v", succeeded)
+	}
+}
+
+func prepareStartupTestDatabase(t *testing.T) string {
+	t.Helper()
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if _, err := database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    ParentId TEXT NULL,
+    Name TEXT NOT NULL,
+    Kind INTEGER NOT NULL,
+    SortOrder INTEGER NOT NULL DEFAULT 0,
+    Protocol INTEGER NULL,
+    Host TEXT NULL
+);
+INSERT INTO Nodes (Id, ParentId, Name, Kind, SortOrder, Protocol, Host)
+VALUES ('startup-node', NULL, 'Startup connection', 1, 0, 0, 'startup.example');`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureMigrationSchema(database); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.Exec(`
+INSERT INTO ElectronMigrations (Id, AppliedAt, Status, MigratedCount, MissingCount)
+VALUES (?, '2026-01-01T00:00:00Z', 'completed', 0, 0);`, windowsCredentialMigrationID); err != nil {
+		t.Fatal(err)
+	}
+	return databasePath
+}
+
 func TestLoadWorkspaceMapsPersistedRowsWithoutDemoData(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	database, err := openDatabase(databasePath, false)

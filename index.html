@@ -1,13 +1,44 @@
 <!doctype html>
-<html lang="en">
+<html class="dark" lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#0b0f13" />
+    <script>
+      try {
+        const theme = localStorage.getItem('wormhole-theme') || 'dark';
+        const dark =
+          theme === 'dark' ||
+          (theme === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+        document.documentElement.classList.toggle('dark', dark);
+      } catch {
+        // The static launch frame safely keeps its dark default when storage is unavailable.
+      }
+    </script>
     <title>Wormhole</title>
   </head>
   <body>
-    <div id="root"></div>
+    <!-- Static first frame: Electron can paint this before React and the workspace bundle are
+         parsed. main.tsx replaces it as soon as the native bootstrap reports progress. -->
+    <div id="root">
+      <main class="startup-shell startup-loading-shell">
+        <div aria-label="Wormhole is loading" class="startup-loading" role="status">
+          <div aria-label="Wormhole" class="startup-logo-stage">
+            <img
+              alt=""
+              class="startup-logo startup-logo-base"
+              src="./Assets/wormhole-logo-transparent.png"
+            />
+            <img
+              alt=""
+              aria-hidden="true"
+              class="startup-logo startup-logo-shine"
+              src="./Assets/wormhole-logo-transparent.png"
+            />
+          </div>
+        </div>
+      </main>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

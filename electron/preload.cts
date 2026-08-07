@@ -17,6 +17,10 @@ type WormholeUpdateCheckResult = {
 };
 
 const wormholeBridge = {
+  loadStartup: () => ipcRenderer.invoke('startup:load'),
+  unlockStartup: (request: { method: 'pin' | 'password'; secret: string }) =>
+    ipcRenderer.invoke('startup:unlock', request),
+  markStartupReady: () => ipcRenderer.send('startup:ready'),
   loadWorkspace: () => ipcRenderer.invoke('workspace:load'),
   createCredential: (request: {
     name: string;

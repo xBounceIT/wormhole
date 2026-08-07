@@ -40,6 +40,7 @@ const rendererUrl = process.env.VITE_DEV_SERVER_URL;
 const nativeTitlebarColor = '#0a0a0a00';
 const nativeTitlebarSymbolColor = '#ffffff';
 const nativeTitlebarHeight = 48;
+const startupWindowOpacity = 0.96;
 const wormholeDataDirectoryName = 'Wormhole';
 const backendTimeoutMs = 30_000;
 const tunnelTestTimeoutMs = 315_000;
@@ -49,14 +50,21 @@ const backendMaxRequestBytes = 64 * 1024;
 const backendMaxTunnelRequestBytes = 4 * 1024 * 1024;
 const nativeBackendLineLimit = 32 * 1024 * 1024;
 const nativeBackendCommandTimeoutMs = 15_000;
+const startupUpdateDelayMs = 10_000;
 let rdpClient: RdpBackendClient | undefined;
 const rdpTunnelLeases = new Map<string, string>();
 let serialBackend: SerialBackendClient | undefined;
 let latestUpdateCheck: UpdateCheckResult | undefined;
 let updateCheckInFlight: Promise<UpdateCheckResult> | undefined;
 let updateDownloadChild: ChildProcessWithoutNullStreams | undefined;
+let startupUpdateTimer: NodeJS.Timeout | undefined;
+let startupUpdateScheduled = false;
+let webSharedSessionReady: Promise<void> | undefined;
+const startupReadyWindows = new WeakSet<BrowserWindow>();
 
 type BackendOperation =
+  | 'startup'
+  | 'startup-unlock'
   | 'workspace'
   | 'web-target'
   | 'watchguard-import'
@@ -157,6 +165,18 @@ type AppSettings = {
   autoCheckForUpdates: boolean;
   lastUpdateCheck: string | null;
   skippedUpdateVersion: string | null;
+};
+type StartupResponse = {
+  auth: AuthStateResponse;
+  workspace?: WorkspaceResponse;
+  settings: AppSettings;
+  migration: MigrationResponse;
+  migrationFailed: boolean;
+};
+type StartupUnlockResponse = {
+  succeeded: boolean;
+  message: string;
+  workspace?: WorkspaceResponse;
 };
 type UpdateCheckResult = {
   currentVersion: string;
@@ -273,6 +293,8 @@ type WormholeLogsInfo = {
 
 const authSession = new AuthSession();
 let authOperationQueue: Promise<void> = Promise.resolve();
+let currentAuthState: AuthStateResponse | undefined;
+let authRefreshInFlight: Promise<AuthStateResponse> | undefined;
 
 type SshConnectedResponse = {
   sessionId: string;
@@ -532,6 +554,23 @@ const webSharedPartition = 'wormhole-web';
 const webMaxUrlLength = 4096;
 const webMaxAddressLength = 4096;
 const webMaxSurfaceCoordinate = 100_000;
+
+function ensureWebSharedSessionReady(): Promise<void> {
+  if (!webSharedSessionReady) {
+    const browserSession = electronSession.fromPartition(webSharedPartition, { cache: true });
+    webSharedSessionReady = Promise.all([
+      browserSession.clearStorageData(),
+      browserSession.clearCache(),
+    ])
+      .then(() => undefined)
+      .catch((error) => {
+        // Clearing an in-memory partition is defense in depth. A failure should not prevent the
+        // user from opening an appliance, and this lazy path keeps the work off app startup.
+        console.warn('[Wormhole] Could not clear the browser session.', error);
+      });
+  }
+  return webSharedSessionReady;
+}
 
 function isWebOpenRequest(value: unknown): value is WebOpenRequest {
   if (
@@ -2005,7 +2044,7 @@ async function runBackend<T>(operation: BackendOperation, request?: unknown): Pr
     '--electron-user-data',
     electronUserDataPath(),
   ];
-  if (operation === 'migrate') {
+  if (operation === 'migrate' || operation === 'startup') {
     const reader = credentialReaderPath();
     if (reader) args.push('--credential-reader', reader);
   }
@@ -2244,17 +2283,18 @@ function launchInstallerAndExit(installerPath: string): void {
   app.quit();
 }
 
-async function runStartupUpdateCheck(): Promise<void> {
-  try {
-    const settings = await runBackend<AppSettings>('settings-read');
-    if (!settings.autoCheckForUpdates) return;
-    await performUpdateCheck();
-  } catch (error) {
-    // A failed startup check must never block the app: the settings page still exposes
-    // "Check now", and a later result arrives through the update:result event.
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn('[Wormhole] Startup update check failed.', message);
-  }
+function scheduleStartupUpdateCheck(settings: AppSettings): void {
+  if (!settings.autoCheckForUpdates || startupUpdateScheduled) return;
+  startupUpdateScheduled = true;
+  startupUpdateTimer = setTimeout(() => {
+    startupUpdateTimer = undefined;
+    void performUpdateCheck().catch((error) => {
+      // A failed startup check must never block the app: the settings page still exposes
+      // "Check now", and a later result arrives through the update:result event.
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn('[Wormhole] Startup update check failed.', message);
+    });
+  }, startupUpdateDelayMs);
 }
 
 async function runUserDeletion<T extends { deleted: boolean }>(
@@ -2364,6 +2404,7 @@ class WebSurfaceManager {
         : target.ignoreCertErrors
           ? `wormhole-web-isolated-${++this.isolatedPartitionSequence}`
           : webSharedPartition;
+      if (partition === webSharedPartition) await ensureWebSharedSessionReady();
       const browserSession = electronSession.fromPartition(partition, { cache: true });
       if (target.proxyUrl) {
         await browserSession.setProxy({
@@ -3120,12 +3161,19 @@ function serializeAuthOperation<T>(operation: () => Promise<T>): Promise<T> {
 
 function rememberAuthState(state: AuthStateResponse, assumeUnlocked: boolean): AuthStateResponse {
   authSession.remember(state, assumeUnlocked);
+  currentAuthState = state;
   return state;
 }
 
-async function refreshAuthSession(): Promise<AuthStateResponse> {
-  const state = await runBackend<AuthStateResponse>('auth-status');
-  return rememberAuthState(state, false);
+function refreshAuthSession(): Promise<AuthStateResponse> {
+  if (!authRefreshInFlight) {
+    authRefreshInFlight = runBackend<AuthStateResponse>('auth-status')
+      .then((state) => rememberAuthState(state, false))
+      .finally(() => {
+        authRefreshInFlight = undefined;
+      });
+  }
+  return authRefreshInFlight;
 }
 
 async function ensureAuthSession(): Promise<void> {
@@ -3159,22 +3207,49 @@ function parseMcpApproval(value: unknown): { requestId: string; approved: boolea
   return { requestId, approved: value.approved };
 }
 
-async function runFirstLaunchMigrations(): Promise<void> {
-  // The legacy Credential Manager is a Windows-only source. Keeping this guard in the Electron
-  // main process also prevents the Windows backend/helper from being loaded on other platforms.
-  if (process.platform !== 'win32') return;
-
-  const result = await runBackend<MigrationResponse>('migrate');
-  if (result.status === 'completed') {
-    console.info(
-      `[Wormhole] Credential Manager migration completed: ${result.migrated} migrated, ${result.missing} missing.`,
-    );
-  } else if (result.status === 'already-completed') {
-    console.info('[Wormhole] Credential Manager migration already completed.');
-  }
-}
-
 function registerIpcHandlers(sshBackend: NativeSshBackend): void {
+  ipcMain.on('startup:ready', (event) => {
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (!owner || owner.isDestroyed()) return;
+    startupReadyWindows.add(owner);
+    if (owner.isVisible()) owner.setOpacity(1);
+  });
+
+  ipcMain.handle('startup:load', async () => {
+    return serializeAuthOperation(async () => {
+      const startup = await runBackend<StartupResponse>('startup');
+      if (startup.auth.configured && startup.workspace) {
+        throw new Error('Electron Go backend exposed a locked workspace.');
+      }
+      rememberAuthState(startup.auth, false);
+      scheduleStartupUpdateCheck(startup.settings);
+      if (startup.migrationFailed) {
+        console.error(
+          '[Wormhole] Credential Manager migration failed. It will be retried next launch.',
+        );
+      } else if (startup.migration.status === 'completed') {
+        console.info(
+          `[Wormhole] Credential Manager migration completed: ${startup.migration.migrated} migrated, ${startup.migration.missing} missing.`,
+        );
+      }
+      return startup;
+    });
+  });
+
+  ipcMain.handle('startup:unlock', async (_event, request: unknown) => {
+    return serializeAuthOperation(async () => {
+      await ensureAuthSession();
+      const result = await runBackend<StartupUnlockResponse>('startup-unlock', request);
+      if (result.succeeded) {
+        if (!result.workspace) throw new Error('Electron Go backend returned no workspace.');
+        authSession.markUnlocked();
+      } else if (result.workspace) {
+        throw new Error('Electron Go backend exposed a workspace before authentication.');
+      }
+      return result;
+    });
+  });
+
   ipcMain.handle('workspace:load', async () => {
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
@@ -3680,7 +3755,8 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     }
     return serializeAuthOperation(async () => {
       await ensureAuthSession();
-      const state = await refreshAuthSession();
+      const state = currentAuthState;
+      if (!state) throw new Error('Authentication state is not initialized.');
       if (state.mode !== 'windowsHello' || !state.configured) {
         return {
           succeeded: false,
@@ -4340,17 +4416,27 @@ function createWindow() {
     },
   });
 
+  // Wormhole has no user-facing page zoom. Normalize the renderer to its native CSS scale so a
+  // previously persisted Chromium zoom level cannot make the whole workspace look oversized.
+  window.webContents.setZoomLevel(0);
+  window.webContents.setZoomFactor(1);
+  window.setOpacity(startupWindowOpacity);
+
   // Safety net: if the first paint never arrives (failed page load, hung dev
   // server), show the window anyway so the app is never left invisible.
   let showFallbackTimer: NodeJS.Timeout | undefined;
   const showWindow = () => {
     if (showFallbackTimer) clearTimeout(showFallbackTimer);
-    if (!window.isDestroyed()) window.show();
+    if (window.isDestroyed()) return;
+    window.show();
+    if (startupReadyWindows.has(window)) window.setOpacity(1);
   };
   window.once('ready-to-show', showWindow);
   showFallbackTimer = setTimeout(showWindow, 10_000);
 
   window.webContents.on('did-start-loading', () => {
+    startupReadyWindows.delete(window);
+    window.setOpacity(startupWindowOpacity);
     webSurfaces.closeForWindow(window);
     void serializeAuthOperation(async () => {
       // A renderer reload creates a fresh UI process context. Do not let a previous renderer's
@@ -4408,27 +4494,9 @@ authSession.onUnlocked(() => {
   });
 });
 
-app.whenReady().then(async () => {
+app.whenReady().then(() => {
   registerIpcHandlers(sshBackend);
-  try {
-    // Defense in depth for the in-memory profile: a run starts with no appliance cookies or cache.
-    const browserSession = electronSession.fromPartition(webSharedPartition, { cache: true });
-    await Promise.all([browserSession.clearStorageData(), browserSession.clearCache()]);
-  } catch (error) {
-    console.warn('[Wormhole] Could not clear the browser session at startup.', error);
-  }
-  try {
-    await runFirstLaunchMigrations();
-  } catch (error) {
-    // A failed first attempt remains retryable because no completion marker is written. The app
-    // still opens so a missing native dependency or a temporarily locked DB cannot prevent the
-    // user from launching Electron and fixing the environment.
-    const message = error instanceof Error ? error.message : String(error);
-    console.error('[Wormhole] Credential Manager migration failed.', message);
-  }
-
   createWindow();
-  void runStartupUpdateCheck();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -4437,6 +4505,8 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  if (startupUpdateTimer) clearTimeout(startupUpdateTimer);
+  startupUpdateTimer = undefined;
   updateDownloadChild?.kill();
   updateDownloadChild = undefined;
   webSurfaces.closeAll();

@@ -26,9 +26,10 @@ export function ConnectionStepper({ tunnelProgress }: ConnectionStepperProps) {
   const tunnelActive = Boolean(phase) && phase !== 'ready';
   const tunnelDone = phase === 'ready';
   const connecting = !phase || tunnelDone;
-  const phaseLabel = tunnelActive && phase
-    ? (TUNNEL_PHASE_LABELS[phase] ?? 'Establishing the VPN tunnel…')
-    : undefined;
+  const phaseLabel =
+    tunnelActive && phase
+      ? (TUNNEL_PHASE_LABELS[phase] ?? 'Establishing the VPN tunnel…')
+      : undefined;
   const detail = tunnelActive ? tunnelProgress?.detail : undefined;
 
   return (

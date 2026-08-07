@@ -434,6 +434,24 @@ interface WormholeAppSettings {
   skippedUpdateVersion: string | null;
 }
 
+interface WormholeStartupSnapshot {
+  auth: WormholeAuthState;
+  workspace?: WormholeWorkspaceSnapshot;
+  settings: WormholeAppSettings;
+  migration: {
+    status: 'completed' | 'already-completed' | 'skipped-non-windows';
+    migrated: number;
+    missing: number;
+  };
+  migrationFailed: boolean;
+}
+
+interface WormholeStartupUnlock {
+  succeeded: boolean;
+  message: string;
+  workspace?: WormholeWorkspaceSnapshot;
+}
+
 interface WormholeLogsInfo {
   currentLogFilePath: string;
   logsDirectoryPath: string;
@@ -443,6 +461,9 @@ interface WormholeLogsInfo {
 
 interface Window {
   wormhole?: {
+    loadStartup(): Promise<WormholeStartupSnapshot>;
+    unlockStartup(request: WormholeAuthVerificationRequest): Promise<WormholeStartupUnlock>;
+    markStartupReady(): void;
     loadWorkspace(): Promise<WormholeWorkspaceSnapshot>;
     createCredential(request: {
       name: string;
