@@ -807,7 +807,10 @@ interface Window {
       nodeId: string;
       protocol: 'ssh' | 'rdp' | 'vnc';
     }): Promise<{ bitwarden: boolean }>;
-    openBitwardenPopup(sessionId: string): Promise<{ open: boolean }>;
+    openBitwardenPopup(request: {
+      sessionId: string;
+      anchor: { x: number; y: number; width: number; height: number };
+    }): Promise<{ open: boolean }>;
     closeBitwardenPopup(sessionId: string): Promise<{ open: false }>;
     onBitwardenPopupState(
       listener: (state: { sessionId: string; open: boolean }) => void,

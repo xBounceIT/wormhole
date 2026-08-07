@@ -264,8 +264,10 @@ const wormholeBridge = {
   searchBitwardenItems: (query: string) => ipcRenderer.invoke('bitwarden:search-items', query),
   nodeUsesBitwarden: (request: { nodeId: string; protocol: 'ssh' | 'rdp' | 'vnc' }) =>
     ipcRenderer.invoke('bitwarden:node-uses-vault', request),
-  openBitwardenPopup: (sessionId: string) =>
-    ipcRenderer.invoke('web:bitwarden-popup-open', sessionId),
+  openBitwardenPopup: (request: {
+    sessionId: string;
+    anchor: { x: number; y: number; width: number; height: number };
+  }) => ipcRenderer.invoke('web:bitwarden-popup-open', request),
   closeBitwardenPopup: (sessionId: string) =>
     ipcRenderer.invoke('web:bitwarden-popup-close', sessionId),
   onBitwardenPopupState: (listener: (state: { sessionId: string; open: boolean }) => void) => {

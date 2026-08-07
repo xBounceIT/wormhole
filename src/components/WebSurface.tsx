@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, type ReactNode, type Ref } from 'react';
 import {
   AlertCircle,
   ChevronLeft,
@@ -30,42 +30,46 @@ type WebSurfaceProps = {
   session: WebSessionSurface;
   isActive: boolean;
   isAuthorized: boolean;
+  bitwardenOpen: boolean;
   onReconnect: (sessionId: string) => void;
 };
 
-export function WebSurface({ session, isActive, isAuthorized, onReconnect }: WebSurfaceProps) {
+export function WebSurface({
+  session,
+  isActive,
+  isAuthorized,
+  bitwardenOpen,
+  onReconnect,
+}: WebSurfaceProps) {
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const bitwardenButtonRef = useRef<HTMLButtonElement>(null);
   const visible = isActive && isAuthorized && session.status === 'connected';
-  const [bitwardenOpen, setBitwardenOpen] = useState(false);
 
   useEffect(() => {
     if (!visible) {
-      void window.wormhole
-        ?.closeBitwardenPopup(session.id)
-        .then(() => setBitwardenOpen(false))
-        .catch(() => setBitwardenOpen(false));
+      void window.wormhole?.closeBitwardenPopup(session.id).catch(() => undefined);
     }
   }, [session.id, visible]);
-
-  useEffect(() => {
-    return window.wormhole?.onBitwardenPopupState((state) => {
-      if (state.sessionId === session.id) setBitwardenOpen(state.open);
-    });
-  }, [session.id]);
 
   function toggleBitwarden() {
     const api = window.wormhole;
     if (!api || !session.bitwardenPopupUrl) return;
     if (bitwardenOpen) {
-      void api
-        .closeBitwardenPopup(session.id)
-        .then((result) => setBitwardenOpen(result.open))
-        .catch(() => setBitwardenOpen(false));
+      void api.closeBitwardenPopup(session.id).catch(() => undefined);
     } else {
+      const bounds = bitwardenButtonRef.current?.getBoundingClientRect();
+      if (!bounds) return;
       void api
-        .openBitwardenPopup(session.id)
-        .then((result) => setBitwardenOpen(result.open))
-        .catch(() => setBitwardenOpen(false));
+        .openBitwardenPopup({
+          sessionId: session.id,
+          anchor: {
+            x: bounds.x,
+            y: bounds.y,
+            width: bounds.width,
+            height: bounds.height,
+          },
+        })
+        .catch(() => undefined);
     }
   }
 
@@ -143,6 +147,7 @@ export function WebSurface({ session, isActive, isAuthorized, onReconnect }: Web
           </ToolbarButton>
           {session.bitwardenPopupUrl ? (
             <ToolbarButton
+              buttonRef={bitwardenButtonRef}
               disabled={!visible}
               label={bitwardenOpen ? 'Close Bitwarden' : 'Open Bitwarden'}
               onClick={() => toggleBitwarden()}
@@ -203,11 +208,13 @@ export function WebSurface({ session, isActive, isAuthorized, onReconnect }: Web
 }
 
 function ToolbarButton({
+  buttonRef,
   children,
   disabled,
   label,
   onClick,
 }: {
+  buttonRef?: Ref<HTMLButtonElement>;
   children: ReactNode;
   disabled: boolean;
   label: string;
@@ -218,6 +225,7 @@ function ToolbarButton({
       <TooltipTrigger asChild>
         <Button
           aria-label={label}
+          ref={buttonRef}
           className="size-7 p-0"
           disabled={disabled}
           onClick={onClick}

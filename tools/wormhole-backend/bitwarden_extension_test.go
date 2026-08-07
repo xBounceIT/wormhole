@@ -18,15 +18,23 @@ import (
 )
 
 const validBitwardenManifest = `{
-  "manifest_version": 3,
+  "manifest_version": 2,
   "name": "Bitwarden Password Manager",
   "version": "2026.6.1",
-  "action": {
+  "browser_action": {
     "default_popup": "popup.html"
   }
 }`
 
-func TestBitwardenInstallLatestPrefersEdgeAssetVerifiesDigestAndPersists(t *testing.T) {
+const incompatibleBitwardenManifestV3 = `{
+  "manifest_version": 3,
+  "name": "Bitwarden Password Manager",
+  "version": "2026.6.1",
+  "background": { "service_worker": "background.js" },
+  "action": { "default_popup": "popup.html" }
+}`
+
+func TestBitwardenInstallLatestPrefersFirefoxAssetVerifiesDigestAndPersists(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	zipBytes := bitwardenTestZip(t, map[string]string{
 		"manifest.json": validBitwardenManifest,
@@ -48,7 +56,7 @@ func TestBitwardenInstallLatestPrefersEdgeAssetVerifiesDigestAndPersists(t *test
 	if install.Version != "2026.6.1" {
 		t.Fatalf("version = %q", install.Version)
 	}
-	if install.AssetName != "dist-edge-2026.6.1.zip" {
+	if install.AssetName != "dist-firefox-2026.6.1.zip" {
 		t.Fatalf("asset = %q", install.AssetName)
 	}
 	if install.Sha256 != sha256hex {
@@ -140,6 +148,64 @@ func TestEnsureBitwardenExtensionInstalledReusesConfiguredInstall(t *testing.T) 
 	}
 }
 
+func TestEnsureBitwardenExtensionInstalledReplacesIncompatibleManifestV3Install(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	installRoot := bitwardenExtensionInstallRoot(databasePath)
+	currentPath := bitwardenTestInstallTree(t, installRoot, "2026.6.1")
+	if err := os.WriteFile(
+		filepath.Join(currentPath, "manifest.json"),
+		[]byte(incompatibleBitwardenManifestV3),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	oldWorker := filepath.Join(currentPath, "background.js")
+	if err := os.WriteFile(oldWorker, []byte("// incompatible service worker"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	zipBytes := bitwardenTestZip(t, map[string]string{
+		"manifest.json": validBitwardenManifest,
+		"popup.html":    "<html></html>",
+	})
+	server := bitwardenTestReleaseServer(
+		t,
+		"browser-v2026.6.1",
+		bitwardenTestSha256(zipBytes),
+		zipBytes,
+	)
+	restore := bitwardenTestBaseURL(t, server)
+	defer restore()
+
+	bitwardenTestWriteSettings(t, databasePath, map[string]any{
+		bwExtKeyEnabled:   true,
+		bwExtKeySource:    bitwardenSourceOfficialGitHub,
+		bwExtKeyVersion:   "2026.6.1",
+		bwExtKeyPath:      currentPath,
+		bwExtKeyAssetName: "dist-edge-2026.6.1.zip",
+	})
+
+	state, err := ensureBitwardenExtensionInstalled(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Installed == nil || state.Installed.Path != currentPath {
+		t.Fatalf("ensure result = %+v", state)
+	}
+	if state.AssetName == nil || *state.AssetName != "dist-firefox-2026.6.1.zip" {
+		t.Fatalf("asset = %v", state.AssetName)
+	}
+	if _, err := os.Stat(oldWorker); !os.IsNotExist(err) {
+		t.Fatalf("Manifest V3 files survived replacement: %v", err)
+	}
+	manifest, err := readBitwardenManifest(currentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBitwardenElectronManifest(manifest); err != nil {
+		t.Fatalf("replacement is not Electron-compatible: %v", err)
+	}
+}
+
 func TestBitwardenInstallRejectsDigestMismatch(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	zipBytes := bitwardenTestZip(t, map[string]string{
@@ -188,6 +254,28 @@ func TestBitwardenImportZipBlocksZipSlipEntries(t *testing.T) {
 	}
 	if !persisted.Enabled {
 		t.Fatal("manual import did not preserve the WinUI enable action after failure")
+	}
+}
+
+func TestBitwardenImportRejectsManifestV3ServiceWorker(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	zipPath := filepath.Join(t.TempDir(), "bitwarden-mv3.zip")
+	bitwardenTestWriteZip(t, zipPath, map[string]string{
+		"manifest.json": incompatibleBitwardenManifestV3,
+		"background.js": "// service worker",
+		"popup.html":    "<html></html>",
+	})
+
+	if _, err := importBitwardenExtensionZip(databasePath, zipPath); err == nil ||
+		!strings.Contains(err.Error(), "Manifest V3") {
+		t.Fatalf("expected Electron compatibility error, got %v", err)
+	}
+	settings, err := readBitwardenExtensionSettings(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.Path != "" {
+		t.Fatalf("incompatible extension was persisted at %q", settings.Path)
 	}
 }
 
@@ -285,12 +373,13 @@ func TestBitwardenReleaseHelpers(t *testing.T) {
 		Assets: []bitwardenReleaseAsset{
 			{Name: "dist-chrome-2026.6.1.zip", BrowserDownloadURL: "https://example/chrome.zip"},
 			{Name: "dist-edge-2026.6.1.zip", BrowserDownloadURL: "https://example/edge.zip"},
+			{Name: "dist-firefox-2026.6.1.zip", BrowserDownloadURL: "https://example/firefox.zip"},
 		},
 	}
 	if !isBitwardenBrowserRelease(release) {
 		t.Fatal("release was not recognized as a browser release")
 	}
-	if asset := findPreferredBitwardenAsset(release); asset == nil || asset.Name != "dist-edge-2026.6.1.zip" {
+	if asset := findPreferredBitwardenAsset(release); asset == nil || asset.Name != "dist-firefox-2026.6.1.zip" {
 		t.Fatalf("preferred asset = %+v", asset)
 	}
 	if version := parseBitwardenBrowserVersion("browser-v2026.6.1"); version != "2026.6.1" {
@@ -606,7 +695,7 @@ func TestBitwardenExtensionRollbackReportsMissingBackup(t *testing.T) {
 
 func bitwardenTestReleaseServer(t *testing.T, tagName, digest string, zipBytes []byte) *httptest.Server {
 	t.Helper()
-	assetName := "dist-edge-" + strings.TrimPrefix(tagName, "browser-v") + ".zip"
+	assetName := "dist-firefox-" + strings.TrimPrefix(tagName, "browser-v") + ".zip"
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if strings.HasPrefix(request.URL.Path, "/repos/") {
 			asset := map[string]any{

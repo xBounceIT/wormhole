@@ -1214,6 +1214,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const quickConnectSubmitInFlight = useRef(false);
   const sshCredentialSubmitInFlight = useRef(false);
   const webSessionAttempts = useRef(new WebSessionAttemptTracker());
+  const webSessionOpenInFlight = useRef(new Map<string, number>());
   const rdpBitwardenAttempts = useRef(new Set<string>());
   const runtimeBitwardenRetries = useRef(new KeyedRetryQueue<string>());
   const [activePage, setActivePage] = useState<NavItem>('sessions');
@@ -2540,9 +2541,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   function startWebSession(session: Session) {
+    if (webSessionOpenInFlight.current.has(session.id)) return;
     const generation = webSessionAttempts.current.begin(session.id);
+    webSessionOpenInFlight.current.set(session.id, generation);
     const api = window.wormhole;
     if (!api) {
+      webSessionOpenInFlight.current.delete(session.id);
       setSessions((current) =>
         webSessionAttempts.current.isCurrent(session.id, generation)
           ? current.map((candidate) =>
@@ -2570,42 +2574,50 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           tunnelConfigId: session.tunnelConfigId,
         };
 
-    void api.openWebSession(request).then(
-      (target) => {
-        setSessions((current) =>
-          webSessionAttempts.current.isCurrent(session.id, generation)
-            ? current.map((candidate) =>
-                candidate.id === session.id
-                  ? {
-                      ...candidate,
-                      webUrl: target.url,
-                      webIgnoreCertErrors: target.ignoreCertErrors,
-                      bitwardenPopupUrl: target.bitwarden?.popupUrl,
-                    }
-                  : candidate,
-              )
-            : current,
-        );
-      },
-      (error: unknown) => {
-        setSessions((current) =>
-          webSessionAttempts.current.isCurrent(session.id, generation)
-            ? current.map((candidate) =>
-                candidate.id === session.id
-                  ? {
-                      ...candidate,
-                      status: 'failed',
-                      error: error instanceof Error ? error.message : String(error),
-                    }
-                  : candidate,
-              )
-            : current,
-        );
-      },
-    );
+    void api
+      .openWebSession(request)
+      .then(
+        (target) => {
+          setSessions((current) =>
+            webSessionAttempts.current.isCurrent(session.id, generation)
+              ? current.map((candidate) =>
+                  candidate.id === session.id
+                    ? {
+                        ...candidate,
+                        webUrl: target.url,
+                        webIgnoreCertErrors: target.ignoreCertErrors,
+                        bitwardenPopupUrl: target.bitwarden?.popupUrl,
+                      }
+                    : candidate,
+                )
+              : current,
+          );
+        },
+        (error: unknown) => {
+          setSessions((current) =>
+            webSessionAttempts.current.isCurrent(session.id, generation)
+              ? current.map((candidate) =>
+                  candidate.id === session.id
+                    ? {
+                        ...candidate,
+                        status: 'failed',
+                        error: error instanceof Error ? error.message : String(error),
+                      }
+                    : candidate,
+                )
+              : current,
+          );
+        },
+      )
+      .finally(() => {
+        if (webSessionOpenInFlight.current.get(session.id) === generation) {
+          webSessionOpenInFlight.current.delete(session.id);
+        }
+      });
   }
 
   async function closeWebSession(sessionId: string): Promise<void> {
+    webSessionOpenInFlight.current.delete(sessionId);
     webSessionAttempts.current.cancel(sessionId);
     await window.wormhole?.closeWebSession(sessionId);
   }
@@ -2816,7 +2828,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   function openConnection(node: TreeNode) {
     if (node.kind !== 'connection' || !node.protocol) return;
 
-    const existing = sessions.find((session) => session.id === `session-${node.id}`);
+    const sessionId = `session-${node.id}`;
+    if (webSessionOpenInFlight.current.has(sessionId)) {
+      setSelectedSessionId(sessionId);
+      setActivePage('sessions');
+      return;
+    }
+
+    const existing = sessions.find((session) => session.id === sessionId);
     if (existing) {
       setSelectedSessionId(existing.id);
       setActivePage('sessions');
@@ -2830,7 +2849,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       node.protocol === 'ssh' || node.protocol === 'serial' ? newSessionToken() : undefined;
     const serialSettings = node.protocol === 'serial' ? serialSettingsFromNode(node) : undefined;
     const session: Session = {
-      id: `session-${node.id}`,
+      id: sessionId,
       title: node.name,
       protocol: node.protocol,
       host: node.host ?? '',
@@ -8087,6 +8106,13 @@ function SessionsPage({
   onTrustSshHostKey: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
   onRetryRdp: (id: string) => void;
 }) {
+  const [bitwardenOpenSessionId, setBitwardenOpenSessionId] = useState('');
+  useEffect(() => {
+    return window.wormhole?.onBitwardenPopupState((state) => {
+      setBitwardenOpenSessionId(state.open ? state.sessionId : '');
+    });
+  }, []);
+
   if (!selectedSession || sessions.length === 0) {
     return (
       <section className="flex h-full flex-col items-center justify-center bg-background p-8 text-center">
@@ -8260,6 +8286,7 @@ function SessionsPage({
               />
             ) : session.protocol === 'http' || session.protocol === 'https' ? (
               <WebSurface
+                bitwardenOpen={bitwardenOpenSessionId === session.id}
                 isActive={session.id === selectedSession.id}
                 isAuthorized={isAuthorized && isWebSurfaceVisible}
                 onReconnect={onReconnectSession}
@@ -12259,6 +12286,9 @@ function SettingsPage({
                 label="Enable Bitwarden Password Manager"
                 onCheckedChange={(enabled) => void handleBitwardenCliEnabledChange(enabled)}
               />
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                Turning this on installs the official Bitwarden CLI automatically.
+              </p>
               <div className="grid gap-2">
                 <Label htmlFor="settings-bitwarden-path">bw.exe path</Label>
                 <Input
@@ -12360,7 +12390,7 @@ function SettingsPage({
                   type="button"
                   variant="outline"
                 >
-                  {bitwardenBusy ? 'Working…' : 'Install / Update CLI'}
+                  {bitwardenBusy ? 'Working…' : 'Update'}
                 </Button>
                 <Button
                   disabled={bitwardenBusy || !bitwardenEnabled}
@@ -12425,13 +12455,13 @@ function SettingsPage({
                 <Button
                   disabled={browserExtensionBusy}
                   onClick={() =>
-                    void runBitwardenExtensionInstall('Installing Bitwarden browser extension...')
+                    void runBitwardenExtensionInstall('Updating Bitwarden browser extension...')
                   }
                   size="sm"
                   type="button"
                   variant="outline"
                 >
-                  {browserExtensionBusy ? 'Working…' : 'Install / Update'}
+                  {browserExtensionBusy ? 'Working…' : 'Update'}
                 </Button>
                 <Button
                   disabled={browserExtensionBusy}

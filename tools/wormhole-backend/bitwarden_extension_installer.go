@@ -72,9 +72,10 @@ type bitwardenExtensionInstall struct {
 }
 
 type bitwardenExtensionManifest struct {
-	Name         string
-	Version      string
-	DefaultPopup string
+	ManifestVersion int
+	Name            string
+	Version         string
+	DefaultPopup    string
 }
 
 func getBitwardenExtensionInstall(settings bitwardenExtensionSettings) *bitwardenExtensionInstall {
@@ -87,7 +88,7 @@ func getBitwardenExtensionInstall(settings bitwardenExtensionSettings) *bitwarde
 		return nil
 	}
 	manifest, err := readBitwardenManifest(path)
-	if err != nil {
+	if err != nil || validateBitwardenElectronManifest(manifest) != nil {
 		return nil
 	}
 	version := settings.Version
@@ -120,9 +121,10 @@ func readBitwardenManifest(extensionRoot string) (bitwardenExtensionManifest, er
 		return bitwardenExtensionManifest{}, errors.New("The extension manifest is too large.")
 	}
 	var document struct {
-		Name    string `json:"name"`
-		Version string `json:"version"`
-		Action  *struct {
+		ManifestVersion int    `json:"manifest_version"`
+		Name            string `json:"name"`
+		Version         string `json:"version"`
+		Action          *struct {
 			DefaultPopup string `json:"default_popup"`
 		} `json:"action"`
 		BrowserAction *struct {
@@ -136,8 +138,9 @@ func readBitwardenManifest(extensionRoot string) (bitwardenExtensionManifest, er
 		return bitwardenExtensionManifest{}, errors.New("The extension manifest does not define a name.")
 	}
 	manifest := bitwardenExtensionManifest{
-		Name:    document.Name,
-		Version: strings.TrimSpace(document.Version),
+		ManifestVersion: document.ManifestVersion,
+		Name:            document.Name,
+		Version:         strings.TrimSpace(document.Version),
 	}
 	if document.Action != nil {
 		manifest.DefaultPopup = strings.TrimSpace(document.Action.DefaultPopup)
@@ -148,6 +151,16 @@ func readBitwardenManifest(extensionRoot string) (bitwardenExtensionManifest, er
 	return manifest, nil
 }
 
+func validateBitwardenElectronManifest(manifest bitwardenExtensionManifest) error {
+	if manifest.ManifestVersion != 2 {
+		return errors.New("This Bitwarden browser package uses Manifest V3, which Electron cannot run reliably. Install the Firefox/MV2 Bitwarden package instead.")
+	}
+	if strings.TrimSpace(manifest.DefaultPopup) == "" {
+		return errors.New("The Bitwarden browser package does not define a popup.")
+	}
+	return nil
+}
+
 func isBitwardenBrowserRelease(release bitwardenRelease) bool {
 	return !release.Draft &&
 		!release.Prerelease &&
@@ -155,10 +168,13 @@ func isBitwardenBrowserRelease(release bitwardenRelease) bool {
 }
 
 func findPreferredBitwardenAsset(release bitwardenRelease) *bitwardenReleaseAsset {
-	if asset := findBitwardenAsset(release, "dist-edge-"); asset != nil {
+	// Electron officially supports MV2 background pages, while Bitwarden's Chromium bundles use
+	// an MV3 service worker and currently fail during chrome.* API initialization. The Firefox
+	// bundle is Bitwarden's supported MV2 build and runs as a persistent background page.
+	if asset := findBitwardenAsset(release, "dist-firefox-"); asset != nil {
 		return asset
 	}
-	return findBitwardenAsset(release, "dist-chrome-")
+	return nil
 }
 
 func findBitwardenAsset(release bitwardenRelease, prefix string) *bitwardenReleaseAsset {
@@ -213,6 +229,7 @@ func parseBitwardenBrowserVersion(value string) string {
 	}
 	text = trimBitwardenPrefix(text, "dist-edge-")
 	text = trimBitwardenPrefix(text, "dist-chrome-")
+	text = trimBitwardenPrefix(text, "dist-firefox-")
 	if strings.HasSuffix(strings.ToLower(text), ".zip") {
 		text = text[:len(text)-4]
 	}
@@ -372,7 +389,7 @@ func resolveBitwardenLatestRelease(settings bitwardenExtensionSettings) (resolve
 	}
 	asset := findPreferredBitwardenAsset(*release)
 	if asset == nil {
-		return resolvedBitwardenRelease{}, errors.New("The latest Bitwarden browser release has no Edge or Chrome extension ZIP asset.")
+		return resolvedBitwardenRelease{}, errors.New("The latest Bitwarden browser release has no Firefox/MV2 extension ZIP asset compatible with Electron.")
 	}
 	if strings.TrimSpace(asset.BrowserDownloadURL) == "" {
 		return resolvedBitwardenRelease{}, errors.New("The Bitwarden extension asset has no download URL.")
@@ -570,6 +587,9 @@ func installBitwardenZipFile(
 	if err != nil {
 		return bitwardenExtensionInstall{}, err
 	}
+	if err := validateBitwardenElectronManifest(manifest); err != nil {
+		return bitwardenExtensionInstall{}, err
+	}
 	version := forcedVersion
 	if version == "" {
 		version = manifest.Version
@@ -612,6 +632,9 @@ func installBitwardenFolder(
 	}
 	manifest, err := readBitwardenManifest(stagedExtension)
 	if err != nil {
+		return bitwardenExtensionInstall{}, err
+	}
+	if err := validateBitwardenElectronManifest(manifest); err != nil {
 		return bitwardenExtensionInstall{}, err
 	}
 	version := manifest.Version

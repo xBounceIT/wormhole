@@ -7,6 +7,7 @@ import {
   screen,
   session as electronSession,
   shell,
+  webContents as electronWebContents,
   WebContentsView,
 } from 'electron';
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
@@ -18,8 +19,6 @@ import { fileURLToPath } from 'node:url';
 import { ElectronChromeExtensions } from 'electron-chrome-extensions';
 import { AuthSession } from './auth-session.js';
 import {
-  buildBitwardenActiveTabBridgeScript,
-  buildBitwardenPageMarkerScript,
   createBitwardenActiveTabContext,
   selectBitwardenTabRegistrationPartition,
 } from './bitwarden-active-tab-bridge.js';
@@ -28,6 +27,19 @@ import {
   buildBitwardenPersistentRouteKey,
   getBitwardenBrowserPartition,
 } from './bitwarden-browser-profile.js';
+import {
+  isPointInsideBitwardenAnchor,
+  positionBitwardenPopup,
+  type BitwardenPopupAnchor,
+} from './bitwarden-popup-layout.js';
+import {
+  afterBitwardenPopupInputEvent,
+  closeBitwardenPopupContents,
+} from './bitwarden-popup-lifecycle.js';
+import {
+  captureBitwardenExtensionStorage,
+  restoreBitwardenExtensionStorage,
+} from './bitwarden-storage.js';
 import {
   buildBitwardenCookieSetDetails,
   buildBitwardenCookieRefreshPlan,
@@ -85,8 +97,8 @@ const nativeBackendLineLimit = 64 * 1024 * 1024;
 const nativeBackendCommandTimeoutMs = 15_000;
 const startupUpdateDelayMs = 10_000;
 const bitwardenBrowserNavigationTimeoutMs = 15_000;
-const bitwardenBrowserStorageTimeoutMs = 10_000;
-const bitwardenBrowserStorageMaxJsonBytes = 8 * 1024 * 1024;
+const bitwardenExtensionReadyTimeoutMs = 15_000;
+const bitwardenExtensionHostMaxListeners = 64;
 let rdpClient: RdpBackendClient | undefined;
 const rdpTunnelLeases = new Map<string, string>();
 let serialBackend: SerialBackendClient | undefined;
@@ -493,6 +505,10 @@ type WebBoundsRequest = {
 type WebCommandRequest = {
   sessionId: string;
   operation: 'back' | 'forward' | 'reload';
+};
+type BitwardenPopupOpenRequest = {
+  sessionId: string;
+  anchor: BitwardenPopupAnchor;
 };
 type WorkspaceNodeTunnelSettingsRequest = {
   nodeId: string;
@@ -1000,6 +1016,30 @@ function isWebCommandRequest(value: unknown): value is WebCommandRequest {
     isRecord(value) &&
     isSshSessionId(value.sessionId) &&
     (value.operation === 'back' || value.operation === 'forward' || value.operation === 'reload')
+  );
+}
+
+function isBitwardenPopupOpenRequest(value: unknown): value is BitwardenPopupOpenRequest {
+  if (!isRecord(value) || !isSshSessionId(value.sessionId) || !isRecord(value.anchor)) {
+    return false;
+  }
+  const anchor = value.anchor;
+  for (const field of ['x', 'y', 'width', 'height'] as const) {
+    const coordinate = anchor[field];
+    if (
+      typeof coordinate !== 'number' ||
+      !Number.isFinite(coordinate) ||
+      coordinate < 0 ||
+      coordinate > webMaxSurfaceCoordinate
+    ) {
+      return false;
+    }
+  }
+  return (
+    typeof anchor.width === 'number' &&
+    anchor.width > 0 &&
+    typeof anchor.height === 'number' &&
+    anchor.height > 0
   );
 }
 
@@ -2447,6 +2487,7 @@ let nativeBackend: NativeBackendProcess | undefined;
 let isQuitting = false;
 let bitwardenBackgroundTimer: NodeJS.Timeout | undefined;
 let bitwardenOnboardingPromise: Promise<void> | undefined;
+let bitwardenStartupMaintenancePromise: Promise<void> | undefined;
 
 function getNativeBackend(): NativeBackendProcess {
   nativeBackend ??= new NativeBackendProcess();
@@ -2510,18 +2551,22 @@ async function runBitwardenExtensionStartupMaintenance(): Promise<void> {
   }
 }
 
-async function runBitwardenStartupMaintenance(): Promise<void> {
-  await Promise.all([
+function runBitwardenStartupMaintenance(): Promise<void> {
+  bitwardenStartupMaintenancePromise ??= Promise.all([
     runBitwardenCredentialMaintenance(true),
     runBitwardenExtensionStartupMaintenance(),
-  ]);
+  ])
+    .then(() => undefined)
+    .finally(() => {
+      bitwardenStartupMaintenancePromise = undefined;
+    });
+  return bitwardenStartupMaintenancePromise;
 }
 
 function startBitwardenBackgroundMaintenance(): void {
   void runBitwardenStartupMaintenance();
   // WinUI's five-minute timer only refreshes the credential catalog. Extension install/update is
-  // a startup concern (and is also checked before an HTTPS tab opens), so a failed download is not
-  // retried forever in the background.
+  // a startup concern, so a failed download is not retried forever in the background.
   bitwardenBackgroundTimer ??= setInterval(
     () => void runBitwardenCredentialMaintenance(false),
     5 * 60_000,
@@ -3191,67 +3236,53 @@ function withBitwardenBrowserTimeout<T>(
   });
 }
 
-async function captureBitwardenExtensionStorage(
-  contents: Electron.WebContents,
-): Promise<{ localJson: string; sessionJson: string }> {
-  const captured: unknown = await withBitwardenBrowserTimeout(
-    contents.executeJavaScript(`
-      (() => new Promise((resolve, reject) => {
-        try {
-          chrome.storage.local.get(null, (local) => {
-            if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
-            chrome.storage.session.get(null, (session) => {
-              if (chrome.runtime.lastError) { reject(new Error(chrome.runtime.lastError.message)); return; }
-              resolve({ local, session });
-            });
-          });
-        } catch (error) { reject(error); }
-      }))()
-    `),
-    bitwardenBrowserStorageTimeoutMs,
-    'Bitwarden browser storage capture timed out.',
-  );
-  if (!isRecord(captured) || !isRecord(captured.local) || !isRecord(captured.session)) {
-    throw new Error('Bitwarden extension returned invalid browser storage.');
+async function loadBitwardenExtensionWhenReady(
+  browserSession: Electron.Session,
+  extensionPath: string,
+): Promise<Electron.Extension> {
+  const readyIds = new Set<string>();
+  let loadedId = '';
+  let resolveReady!: () => void;
+  const ready = new Promise<void>((resolve) => {
+    resolveReady = resolve;
+  });
+  const onReady = (_event: Electron.Event, extension: Electron.Extension) => {
+    readyIds.add(extension.id);
+    if (loadedId === extension.id) resolveReady();
+  };
+  const configureExtensionHost = (contents: Electron.WebContents) => {
+    if (contents.session === browserSession && contents.getType() === 'backgroundPage') {
+      // electron-chrome-extensions installs one cleanup listener per chrome.* event subscribed by
+      // Bitwarden. They all belong to this host and are removed when it is destroyed.
+      contents.setMaxListeners(bitwardenExtensionHostMaxListeners);
+    }
+  };
+  const onWebContentsCreated = (_event: Electron.Event, contents: Electron.WebContents) => {
+    configureExtensionHost(contents);
+  };
+  browserSession.extensions.on('extension-ready', onReady);
+  app.on('web-contents-created', onWebContentsCreated);
+  let extension: Electron.Extension | undefined;
+  try {
+    extension = await browserSession.extensions.loadExtension(extensionPath);
+    loadedId = extension.id;
+    if (readyIds.has(extension.id)) resolveReady();
+    await withBitwardenBrowserTimeout(
+      ready,
+      bitwardenExtensionReadyTimeoutMs,
+      'Bitwarden extension background page did not become ready.',
+    );
+    for (const contents of electronWebContents.getAllWebContents()) {
+      configureExtensionHost(contents);
+    }
+    return extension;
+  } catch (error) {
+    if (extension) browserSession.extensions.removeExtension(extension.id);
+    throw error;
+  } finally {
+    browserSession.extensions.off('extension-ready', onReady);
+    app.off('web-contents-created', onWebContentsCreated);
   }
-  const localJson = JSON.stringify(captured.local);
-  const sessionJson = JSON.stringify(captured.session);
-  if (
-    Buffer.byteLength(localJson, 'utf8') > bitwardenBrowserStorageMaxJsonBytes ||
-    Buffer.byteLength(sessionJson, 'utf8') > bitwardenBrowserStorageMaxJsonBytes
-  ) {
-    throw new Error('Bitwarden browser storage exceeded the safety limit.');
-  }
-  return { localJson, sessionJson };
-}
-
-async function restoreBitwardenExtensionStorage(
-  contents: Electron.WebContents,
-  snapshot: BitwardenBrowserStorageSnapshot,
-): Promise<void> {
-  const local = JSON.stringify(snapshot.localJson);
-  const session = JSON.stringify(snapshot.sessionJson);
-  await withBitwardenBrowserTimeout(
-    contents.executeJavaScript(`
-      (() => new Promise((resolve, reject) => {
-        const fail = () => reject(new Error(chrome.runtime.lastError?.message || 'storage operation failed'));
-        try {
-          chrome.storage.local.clear(() => {
-            if (chrome.runtime.lastError) { fail(); return; }
-            chrome.storage.local.set(JSON.parse(${local}), () => {
-              if (chrome.runtime.lastError) { fail(); return; }
-              chrome.storage.session.clear(() => {
-                if (chrome.runtime.lastError) { fail(); return; }
-                chrome.storage.session.set(JSON.parse(${session}), () => chrome.runtime.lastError ? fail() : resolve(true));
-              });
-            });
-          });
-        } catch (error) { reject(error); }
-      }))()
-    `),
-    bitwardenBrowserStorageTimeoutMs,
-    'Bitwarden browser storage restore timed out.',
-  );
 }
 
 class WebSurfaceManager {
@@ -3266,7 +3297,16 @@ class WebSurfaceManager {
   private readonly activeBitwardenSessions = new Map<string, string>();
   private readonly bitwardenAuxiliaryWindows = new Map<number, BitwardenAuxiliaryWindow>();
   private readonly bitwardenPopups = new Map<string, WebContentsView>();
-  private readonly bitwardenPopupBlurHandlers = new Map<string, () => void>();
+  private readonly bitwardenPopupDismissHandlers = new Map<
+    string,
+    {
+      owner: BrowserWindow;
+      pageContents: Electron.WebContents;
+      ownerBlur: () => void;
+      ownerMouse: (event: Electron.Event, mouse: Electron.MouseInputEvent) => void;
+      pageMouse: (event: Electron.Event, mouse: Electron.MouseInputEvent) => void;
+    }
+  >();
   private readonly bitwardenPopupOpens = new KeyedSingleFlight<string, { open: boolean }>();
   private readonly bitwardenStorageTasks = new KeyedTaskTracker<string>();
   private readonly bitwardenExtensionMutation = new ExtensionMutationGuard();
@@ -3334,45 +3374,22 @@ class WebSurfaceManager {
       let bitwardenCookieSeed: BitwardenCookieSeed | undefined;
       if (target.url.startsWith('https://')) {
         let freshState: BitwardenExtensionState | undefined;
+        let reservedUseRelease: (() => void) | undefined;
         try {
-          const prepared = await serializeBitwardenExtensionOperation(async () => {
+          const extensionState = await runBackend<BitwardenExtensionState>('extension-read');
+          if (extensionState.enabled && extensionState.installed) {
+            // Updating the extension is background maintenance. Opening an HTTPS tab must never
+            // wait for a GitHub request or a storage flush before its browser surface is created.
+            reservedUseRelease = this.bitwardenExtensionMutation.reserveUse();
             if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
               throw new Error('Web session was cancelled while Wormhole locked.');
             }
-            const extensionState = await runBackend<BitwardenExtensionState>('extension-read');
-            if (!extensionState.enabled || !extensionState.installed) {
-              return { state: extensionState, release: undefined };
-            }
-
-            const use = await this.bitwardenExtensionMutation.prepareUse(
-              () => this.bitwardenStorageTasks.waitForAllIdle(),
-              async (canMutate) => {
-                if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
-                  throw new Error('Web session was cancelled while Wormhole locked.');
-                }
-                if (!canMutate) return extensionState;
-                // Match the WinUI 3 stale auto-update gate: check at most every 24h, only for
-                // official installs, and only before an HTTPS tab that will load the extension.
-                try {
-                  return await runBackend<BitwardenExtensionState>(
-                    'extension-update-if-stale',
-                    undefined,
-                    extensionOperationTimeoutMs,
-                  );
-                } catch (error) {
-                  console.warn(
-                    '[Wormhole] Bitwarden browser extension stale auto-update failed before HTTPS tab creation.',
-                    error,
-                  );
-                  return extensionState;
-                }
-              },
-            );
-            return { state: use.result, release: use.release };
-          });
-          freshState = prepared.state;
-          bitwardenUseRelease = prepared.release;
+            freshState = extensionState;
+            bitwardenUseRelease = reservedUseRelease;
+            reservedUseRelease = undefined;
+          }
         } catch (error) {
+          reservedUseRelease?.();
           // An optional extension failure must not prevent the appliance session itself from
           // opening. The plain HTTPS tab remains available and Settings exposes the install error.
           console.warn(
@@ -3479,27 +3496,13 @@ class WebSurfaceManager {
       browserSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
         return isAllowedBitwardenPermission(permission, requestingOrigin);
       });
-      if (target.bitwarden) {
-        try {
-          await this.synchronizeBitwardenStorageInBridge(
-            owner,
-            target.bitwarden.partition,
-            target.bitwarden.popupUrl,
-          );
-        } catch (error) {
-          console.warn(
-            '[Wormhole] Could not synchronize Bitwarden browser storage before HTTPS navigation.',
-            error,
-          );
-        }
-      }
       if (
         !isAuthorizationEpochCurrent(authorizationEpoch) ||
         !this.attempts.isCurrent(request.sessionId, generation) ||
         this.pendingOpenOwners.get(request.sessionId) !== owner ||
         owner.isDestroyed()
       ) {
-        throw new Error('Web session was superseded while synchronizing Bitwarden storage.');
+        throw new Error('Web session was superseded while preparing its browser surface.');
       }
 
       const view = new WebContentsView({
@@ -3513,6 +3516,9 @@ class WebSurfaceManager {
           devTools: false,
         },
       });
+      if (target.bitwarden) {
+        view.webContents.setMaxListeners(bitwardenExtensionHostMaxListeners);
+      }
       const record: WebSurfaceRecord = {
         owner,
         view,
@@ -3590,9 +3596,16 @@ class WebSurfaceManager {
     }
   }
 
-  command(owner: BrowserWindow, request: WebCommandRequest): void {
-    const record = this.surfaces.get(request.sessionId);
+  async command(owner: BrowserWindow, request: WebCommandRequest): Promise<void> {
+    let record = this.surfaces.get(request.sessionId);
     if (!record || record.owner !== owner || record.disposed) return;
+    if (this.bitwardenPopups.has(request.sessionId)) {
+      await afterBitwardenPopupInputEvent(async () => {
+        await this.closeBitwardenPopup(request.sessionId);
+      });
+      record = this.surfaces.get(request.sessionId);
+      if (!record || record.owner !== owner || record.disposed) return;
+    }
     const contents = record.view.webContents;
     if (request.operation === 'back') {
       if (contents.navigationHistory.canGoBack()) contents.navigationHistory.goBack();
@@ -3604,11 +3617,16 @@ class WebSurfaceManager {
     this.sendEvent(request.sessionId, record, 'navigation');
   }
 
-  async openBitwardenPopup(sessionId: string): Promise<{ open: boolean }> {
-    return this.bitwardenPopupOpens.run(sessionId, () => this.openBitwardenPopupCore(sessionId));
+  async openBitwardenPopup(request: BitwardenPopupOpenRequest): Promise<{ open: boolean }> {
+    return this.bitwardenPopupOpens.run(request.sessionId, () =>
+      this.openBitwardenPopupCore(request),
+    );
   }
 
-  private async openBitwardenPopupCore(sessionId: string): Promise<{ open: boolean }> {
+  private async openBitwardenPopupCore(
+    request: BitwardenPopupOpenRequest,
+  ): Promise<{ open: boolean }> {
+    const { sessionId } = request;
     const authorizationEpoch = authSession.authorizationEpoch;
     const record = this.surfaces.get(sessionId);
     if (!record || record.disposed || !record.bitwarden?.popupUrl) {
@@ -3634,15 +3652,11 @@ class WebSurfaceManager {
         devTools: false,
       },
     });
+    popup.webContents.setMaxListeners(bitwardenExtensionHostMaxListeners);
     const popupUrl = record.bitwarden.popupUrl;
     this.activeBitwardenSessions.set(record.bitwarden.partition, sessionId);
-    const [windowWidth] = record.owner.getContentSize();
-    popup.setBounds({
-      x: Math.max(8, windowWidth - 400),
-      y: 48,
-      width: 380,
-      height: 560,
-    });
+    const [contentWidth, contentHeight] = record.owner.getContentSize();
+    popup.setBounds(positionBitwardenPopup(request.anchor, [contentWidth, contentHeight]));
     popup.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     popup.webContents.on('will-navigate', (event, url) => {
       let sameExtensionPage = false;
@@ -3656,76 +3670,57 @@ class WebSurfaceManager {
       }
       if (!sameExtensionPage) event.preventDefault();
     });
-    const onOwnerBlur = () => {
-      void this.closeBitwardenPopup(sessionId);
+    let dismissScheduled = false;
+    const dismiss = () => {
+      if (dismissScheduled) return;
+      dismissScheduled = true;
+      void afterBitwardenPopupInputEvent(async () => {
+        if (this.bitwardenPopups.get(sessionId) !== popup) return;
+        await this.closeBitwardenPopup(sessionId);
+      }).catch((error) => {
+        console.warn('[Wormhole] Could not dismiss the Bitwarden browser popup.', error);
+      });
     };
-    record.owner.on('blur', onOwnerBlur);
+    const onOwnerMouse = (_event: Electron.Event, mouse: Electron.MouseInputEvent) => {
+      if (
+        mouse.type === 'mouseDown' &&
+        !isPointInsideBitwardenAnchor({ x: mouse.x, y: mouse.y }, request.anchor)
+      ) {
+        dismiss();
+      }
+    };
+    const onPageMouse = (_event: Electron.Event, mouse: Electron.MouseInputEvent) => {
+      if (mouse.type === 'mouseDown') dismiss();
+    };
+    record.owner.on('blur', dismiss);
+    record.owner.webContents.on('before-mouse-event', onOwnerMouse);
+    record.view.webContents.on('before-mouse-event', onPageMouse);
     record.owner.contentView.addChildView(popup);
     popup.setVisible(false);
     this.bitwardenPopups.set(sessionId, popup);
-    this.bitwardenPopupBlurHandlers.set(sessionId, onOwnerBlur);
+    this.bitwardenPopupDismissHandlers.set(sessionId, {
+      owner: record.owner,
+      pageContents: record.view.webContents,
+      ownerBlur: dismiss,
+      ownerMouse: onOwnerMouse,
+      pageMouse: onPageMouse,
+    });
+    // Restore shared vault state through the MV2 background page while the popup loads. This must
+    // never delay showing the UI; direct profiles already have their local state and routed
+    // profiles receive chrome.storage change events when the asynchronous restore completes.
+    void this.synchronizeBitwardenStorageInBridge(
+      record.owner,
+      record.bitwarden.partition,
+      popupUrl,
+    ).catch((error) => {
+      console.warn('[Wormhole] Could not prepare Bitwarden browser storage for its popup.', error);
+    });
     try {
-      const activeTabContext = createBitwardenActiveTabContext(
-        record.navigation.navigateUrl,
-        record.navigation.originalUrl,
-        record.view.webContents.getURL(),
+      await withBitwardenBrowserTimeout(
+        popup.webContents.loadURL(popupUrl),
+        bitwardenBrowserNavigationTimeoutMs,
+        'Bitwarden browser popup navigation timed out.',
       );
-      if (activeTabContext) {
-        const pageMarker = randomUUID();
-        try {
-          await record.view.webContents.executeJavaScript(
-            buildBitwardenPageMarkerScript(pageMarker),
-          );
-          activeTabContext.pageMarker = pageMarker;
-        } catch (error) {
-          console.warn('[Wormhole] Could not mark the active HTTPS tab for Bitwarden.', error);
-        }
-      }
-      const bridgeScript = activeTabContext
-        ? buildBitwardenActiveTabBridgeScript(activeTabContext)
-        : undefined;
-      let bridgeInstalledBeforeNavigation = false;
-      let bridgeScriptIdentifier: string | undefined;
-      if (bridgeScript) {
-        try {
-          popup.webContents.debugger.attach('1.3');
-          await popup.webContents.debugger.sendCommand('Page.enable');
-          const registration = (await popup.webContents.debugger.sendCommand(
-            'Page.addScriptToEvaluateOnNewDocument',
-            { source: bridgeScript },
-          )) as { identifier?: string };
-          bridgeScriptIdentifier = registration.identifier;
-          bridgeInstalledBeforeNavigation = true;
-        } catch (error) {
-          console.warn(
-            '[Wormhole] Could not install the Bitwarden active-tab bridge before navigation.',
-            error,
-          );
-          if (popup.webContents.debugger.isAttached()) popup.webContents.debugger.detach();
-        }
-      }
-      try {
-        await withBitwardenBrowserTimeout(
-          popup.webContents.loadURL(popupUrl),
-          bitwardenBrowserNavigationTimeoutMs,
-          'Bitwarden browser popup navigation timed out.',
-        );
-      } finally {
-        if (bridgeScriptIdentifier && popup.webContents.debugger.isAttached()) {
-          await popup.webContents.debugger
-            .sendCommand('Page.removeScriptToEvaluateOnNewDocument', {
-              identifier: bridgeScriptIdentifier,
-            })
-            .catch(() => undefined);
-        }
-        if (popup.webContents.debugger.isAttached()) popup.webContents.debugger.detach();
-      }
-      if (bridgeScript && !bridgeInstalledBeforeNavigation) {
-        // Old Electron/Chromium builds can reject the debugger protocol registration. The popup
-        // remains usable; a post-navigation bridge still improves active-tab behavior after startup.
-        await popup.webContents.executeJavaScript(bridgeScript);
-      }
-      await this.synchronizeBitwardenStorage(record.bitwarden.partition, popup.webContents);
       if (this.bitwardenPopups.get(sessionId) !== popup || record.disposed) {
         return { open: false };
       }
@@ -3745,42 +3740,76 @@ class WebSurfaceManager {
     return { open: true };
   }
 
-  async closeBitwardenPopup(sessionId: string): Promise<{ open: false }> {
+  async closeBitwardenPopup(
+    sessionId: string,
+    waitForStorageFlush = false,
+  ): Promise<{ open: false }> {
     const popup = this.bitwardenPopups.get(sessionId);
-    const owner = this.surfaces.get(sessionId)?.owner;
+    const record = this.surfaces.get(sessionId);
+    const owner = record?.owner;
+    const dismissHandlers = this.bitwardenPopupDismissHandlers.get(sessionId);
+    this.bitwardenPopupDismissHandlers.delete(sessionId);
+    if (dismissHandlers) {
+      try {
+        dismissHandlers.owner.removeListener('blur', dismissHandlers.ownerBlur);
+        if (
+          !dismissHandlers.owner.isDestroyed() &&
+          !dismissHandlers.owner.webContents.isDestroyed()
+        ) {
+          dismissHandlers.owner.webContents.removeListener(
+            'before-mouse-event',
+            dismissHandlers.ownerMouse,
+          );
+        }
+      } catch {
+        // The BrowserWindow can disappear while Bitwarden completes an autofill operation.
+      }
+      try {
+        if (!dismissHandlers.pageContents.isDestroyed()) {
+          dismissHandlers.pageContents.removeListener(
+            'before-mouse-event',
+            dismissHandlers.pageMouse,
+          );
+        }
+      } catch {
+        // The embedded page can close in the same input event that dismisses the popup.
+      }
+    }
     if (popup) {
       this.bitwardenPopups.delete(sessionId);
-      popup.setVisible(false);
-      const record = this.surfaces.get(sessionId);
+      try {
+        popup.setVisible(false);
+      } catch {
+        // Bitwarden can close its own extension window immediately after filling a credential.
+      }
       try {
         owner?.contentView.removeChildView(popup);
       } catch {
         // The owner can already be closing.
       }
-      if (record?.bitwarden && !popup.webContents.isDestroyed()) {
-        try {
-          await this.synchronizeBitwardenStorage(record.bitwarden.partition, popup.webContents);
-        } catch (error) {
-          console.warn(
-            '[Wormhole] Could not flush Bitwarden browser storage when its popup closed.',
-            error,
-          );
-        }
+      closeBitwardenPopupContents(popup);
+    }
+    try {
+      if (owner && !owner.isDestroyed() && !owner.webContents.isDestroyed()) {
+        owner.webContents.send('web:bitwarden-popup-state', { sessionId, open: false });
       }
-      try {
-        popup.webContents.close();
-      } catch {
-        // Closing an already-destroyed WebContents is harmless.
-      }
+    } catch {
+      // Sending state to a renderer that is closing is unnecessary.
     }
-    const onOwnerBlur = this.bitwardenPopupBlurHandlers.get(sessionId);
-    this.bitwardenPopupBlurHandlers.delete(sessionId);
-    if (onOwnerBlur) {
-      owner?.removeListener('blur', onOwnerBlur);
-    }
-    if (owner && !owner.webContents.isDestroyed()) {
-      owner.webContents.send('web:bitwarden-popup-state', { sessionId, open: false });
-    }
+    const storageFlush =
+      popup && record?.bitwarden && !record.owner.isDestroyed()
+        ? this.synchronizeBitwardenStorageInBridge(
+            record.owner,
+            record.bitwarden.partition,
+            record.bitwarden.popupUrl,
+          ).catch((error) => {
+            console.warn(
+              '[Wormhole] Could not flush Bitwarden browser storage when its popup closed.',
+              error,
+            );
+          })
+        : undefined;
+    if (waitForStorageFlush) await storageFlush;
     return { open: false };
   }
 
@@ -3791,15 +3820,6 @@ class WebSurfaceManager {
       () => undefined,
     );
     return result;
-  }
-
-  private async synchronizeBitwardenStorage(
-    partition: string,
-    contents: Electron.WebContents,
-  ): Promise<void> {
-    await this.bitwardenStorageTasks.run(partition, () =>
-      this.synchronizeBitwardenStorageCore(partition, contents),
-    );
   }
 
   private async synchronizeBitwardenStorageCore(
@@ -3843,6 +3863,28 @@ class WebSurfaceManager {
     popupUrl: string,
   ): Promise<void> {
     await this.bitwardenStorageTasks.run(partition, async () => {
+      const extensionId = new URL(popupUrl).hostname;
+      const browserSession = electronSession.fromPartition(partition, { cache: true });
+      const backgroundContents = electronWebContents.getAllWebContents().find((contents) => {
+        if (
+          contents.isDestroyed() ||
+          contents.session !== browserSession ||
+          contents.getType() !== 'backgroundPage'
+        ) {
+          return false;
+        }
+        try {
+          const url = new URL(contents.getURL());
+          return url.protocol === 'chrome-extension:' && url.hostname === extensionId;
+        } catch {
+          return false;
+        }
+      });
+      if (backgroundContents) {
+        await this.synchronizeBitwardenStorageCore(partition, backgroundContents);
+        return;
+      }
+
       const bridge = new WebContentsView({
         webPreferences: {
           partition,
@@ -3854,6 +3896,7 @@ class WebSurfaceManager {
           devTools: false,
         },
       });
+      bridge.webContents.setMaxListeners(bitwardenExtensionHostMaxListeners);
       owner.contentView.addChildView(bridge);
       bridge.setBounds({ x: 0, y: 0, width: 1, height: 1 });
       bridge.setVisible(false);
@@ -3875,33 +3918,38 @@ class WebSurfaceManager {
     });
   }
 
-  private async ensureChromeExtensionApis(
-    partition: string,
-  ): Promise<ElectronChromeExtensions | undefined> {
+  private async ensureChromeExtensionApis(partition: string): Promise<ElectronChromeExtensions> {
     const existing = this.chromeExtensionApis.get(partition);
     if (existing) return existing;
-    try {
-      const session = electronSession.fromPartition(partition, { cache: true });
-      let instance!: ElectronChromeExtensions;
-      instance = new ElectronChromeExtensions({
-        session,
-        license: 'GPL-3.0',
-        createTab: async (details) => this.openExtensionTabInSession(partition, details),
-        createWindow: async (details) =>
-          this.openExtensionWindow(partition, instance, details as ExtensionWindowCreateDetails),
-        // The library observes BrowserWindow.closed and removes its own bookkeeping. Destroying an
-        // already closed window from its default removeWindow fallback is unnecessary.
-        removeWindow: () => undefined,
-      });
-      this.chromeExtensionApis.set(partition, instance);
-      return instance;
-    } catch (error) {
-      console.warn(
-        '[Wormhole] Could not enable Chrome extension APIs for the Bitwarden browser extension.',
-        error,
-      );
-      return undefined;
-    }
+    const session = electronSession.fromPartition(partition, { cache: true });
+    let instance!: ElectronChromeExtensions;
+    instance = new ElectronChromeExtensions({
+      session,
+      license: 'GPL-3.0',
+      createTab: async (details) => this.openExtensionTabInSession(partition, details),
+      createWindow: async (details) =>
+        this.openExtensionWindow(partition, instance, details as ExtensionWindowCreateDetails),
+      assignTabDetails: (details, contents) => {
+        const record = [...this.surfaces.values()].find(
+          (candidate) =>
+            !candidate.disposed &&
+            candidate.bitwarden?.partition === partition &&
+            candidate.view.webContents === contents,
+        );
+        if (!record) return;
+        const context = createBitwardenActiveTabContext(
+          record.navigation.navigateUrl,
+          record.navigation.originalUrl,
+          contents.getURL(),
+        );
+        if (context) details.url = context.logicalUrl;
+      },
+      // The library observes BrowserWindow.closed and removes its own bookkeeping. Destroying an
+      // already closed window from its default removeWindow fallback is unnecessary.
+      removeWindow: () => undefined,
+    });
+    this.chromeExtensionApis.set(partition, instance);
+    return instance;
   }
 
   private resolveBitwardenSurface(
@@ -4016,6 +4064,7 @@ class WebSurfaceManager {
         devTools: false,
       },
     });
+    extensionWindow.webContents.setMaxListeners(bitwardenExtensionHostMaxListeners);
     this.bitwardenAuxiliaryWindows.set(extensionWindow.id, {
       window: extensionWindow,
       partition,
@@ -4164,11 +4213,11 @@ class WebSurfaceManager {
             console.warn('[Wormhole] Bitwarden browser profile state could not be seeded.', error);
           }
         }
-        // Initialize chrome.* API support for the persistent session before the service worker
-        // boots. Even if the library fails to initialize, the extension still loads (the service
-        // worker just degrades to the APIs Electron implements natively).
+        // Initialize the chrome.* API bridge before Electron starts Bitwarden's persistent MV2
+        // background page. Loading without this bridge produces a popup that looks healthy but
+        // cannot communicate with the vault background context.
         await this.ensureChromeExtensionApis(partition);
-        const extension = await browserSession.extensions.loadExtension(extensionPath);
+        const extension = await loadBitwardenExtensionWhenReady(browserSession, extensionPath);
         this.extensionIds.set(partition, extension.id);
         this.extensionLoadKeys.set(partition, installKey);
         if (profilePath) {
@@ -4405,7 +4454,7 @@ class WebSurfaceManager {
       ),
     );
     for (const sessionId of popupSessions) {
-      await this.closeBitwardenPopup(sessionId);
+      await this.closeBitwardenPopup(sessionId, true);
     }
     for (const [sessionId, record] of this.surfaces) {
       if (
@@ -4440,7 +4489,7 @@ class WebSurfaceManager {
     const sessionIds = new Set([...this.surfaces.keys(), ...this.pendingOpenOwners.keys()]);
     const popupSessions = new Set(this.bitwardenPopups.keys());
     for (const sessionId of popupSessions) {
-      await this.closeBitwardenPopup(sessionId);
+      await this.closeBitwardenPopup(sessionId, true);
     }
     for (const [sessionId, record] of this.surfaces) {
       if (popupSessions.has(sessionId) || !record.bitwarden || record.owner.isDestroyed()) continue;
@@ -5935,14 +5984,16 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     });
   });
 
-  ipcMain.handle('web:bitwarden-popup-open', async (_event, sessionId: unknown) => {
-    if (!isSshSessionId(sessionId)) throw new Error('Web session id is invalid.');
-    return runAuthorizedOperation(() => webSurfaces.openBitwardenPopup(sessionId));
+  ipcMain.handle('web:bitwarden-popup-open', async (_event, request: unknown) => {
+    if (!isBitwardenPopupOpenRequest(request)) {
+      throw new Error('Bitwarden popup request is invalid.');
+    }
+    return runAuthorizedOperation(() => webSurfaces.openBitwardenPopup(request));
   });
 
   ipcMain.handle('web:bitwarden-popup-close', async (_event, sessionId: unknown) => {
     if (!isSshSessionId(sessionId)) throw new Error('Web session id is invalid.');
-    return webSurfaces.closeBitwardenPopup(sessionId);
+    return afterBitwardenPopupInputEvent(() => webSurfaces.closeBitwardenPopup(sessionId));
   });
 
   ipcMain.handle('tunnel:create', async (_event, value: unknown) => {
@@ -6376,7 +6427,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!ownerWindow || ownerWindow.isDestroyed()) return;
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
-      webSurfaces.command(ownerWindow, request);
+      await webSurfaces.command(ownerWindow, request);
     });
   });
   ipcMain.handle('web:close', async (event, sessionId: unknown) => {
