@@ -16,6 +16,7 @@ import {
 } from 'react';
 import './index.css';
 import wormholeIcon from '../Assets/wormhole-logo-transparent.png';
+import { backupExportPasswordsMatch } from './backup-state';
 import { mergeCredential } from './credential-state';
 import {
   parentLocalSftpPath,
@@ -4834,6 +4835,23 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   authGate={authGate}
                   authState={authState}
                   onAuthStateChange={setAuthState}
+                  onBackupImported={(workspace) => {
+                    setTree(workspace.tree);
+                    setCredentials(workspace.credentials);
+                    setTunnels(workspace.tunnels);
+                    setExpanded(
+                      (current) => new Set([...current, ...collectFolderIds(workspace.tree)]),
+                    );
+                    setSelectedNodeId((current) =>
+                      findTreeNode(workspace.tree, current)
+                        ? current
+                        : (findFirstConnection(workspace.tree)?.id ?? workspace.tree[0]?.id ?? ''),
+                    );
+                    setSelectedTreeNodeIds(
+                      (current) =>
+                        new Set([...current].filter((id) => findTreeNode(workspace.tree, id))),
+                    );
+                  }}
                   onRequestAuthentication={requestAuthentication}
                   onThemeChange={setTheme}
                   onCheckForUpdates={() => void handleCheckForUpdates()}
@@ -9872,6 +9890,7 @@ function SettingsPage({
   authGate,
   authState,
   onAuthStateChange,
+  onBackupImported,
   onRequestAuthentication,
   onCheckForUpdates,
   onDismissUpdate,
@@ -9886,6 +9905,7 @@ function SettingsPage({
   authGate: 'loading' | 'locked' | 'unlocked' | 'error';
   authState: WormholeAuthState | null;
   onAuthStateChange: (state: WormholeAuthState) => void;
+  onBackupImported: (workspace: WormholeWorkspaceSnapshot) => void;
   onRequestAuthentication: (reason: string) => Promise<boolean>;
   onCheckForUpdates: () => void;
   onDismissUpdate: () => void;
@@ -9938,6 +9958,27 @@ function SettingsPage({
   const [retentionBusy, setRetentionBusy] = useState(false);
   const [logLevel, setLogLevelState] = useState('info');
   const [logsError, setLogsError] = useState('');
+  const [backupExportOpen, setBackupExportOpen] = useState(false);
+  const [backupExportPassword, setBackupExportPassword] = useState('');
+  const [backupExportConfirmation, setBackupExportConfirmation] = useState('');
+  const [backupExportBusy, setBackupExportBusy] = useState(false);
+  const [backupExportError, setBackupExportError] = useState('');
+  const [backupExportResult, setBackupExportResult] = useState<WormholeBackupExportResult | null>(
+    null,
+  );
+  const [backupImportOpen, setBackupImportOpen] = useState(false);
+  const [backupImportPickerBusy, setBackupImportPickerBusy] = useState(false);
+  const [backupImportSelection, setBackupImportSelection] =
+    useState<WormholeBackupImportSelection | null>(null);
+  const [backupImportPassword, setBackupImportPassword] = useState('');
+  const [backupImportBusy, setBackupImportBusy] = useState(false);
+  const [backupImportError, setBackupImportError] = useState('');
+  const [backupImportResult, setBackupImportResult] = useState<WormholeBackupImportResult | null>(
+    null,
+  );
+  const [backupSectionError, setBackupSectionError] = useState('');
+  const backupAuthGateRef = useRef(authGate);
+  backupAuthGateRef.current = authGate;
 
   useEffect(() => {
     if (settingsUpdatesRequest > 0) setActiveTab('updates');
@@ -9947,6 +9988,14 @@ function SettingsPage({
     if (authGate === 'unlocked') return;
     setSecretDialog(null);
     pendingSecretAction.current = null;
+    setBackupExportOpen(false);
+    setBackupExportPassword('');
+    setBackupExportConfirmation('');
+    setBackupImportOpen(false);
+    setBackupImportPassword('');
+    setBackupImportSelection(null);
+    setBackupSectionError('');
+    window.wormhole?.clearBackupImportSelection();
   }, [authGate]);
 
   useEffect(() => {
@@ -10482,6 +10531,108 @@ function SettingsPage({
     }
   }
 
+  function backupErrorMessage(error: unknown): string {
+    if (!(error instanceof Error) || !error.message) {
+      return "Wormhole couldn't complete the backup operation.";
+    }
+    if (/password is incorrect|wrong password/i.test(error.message)) {
+      return 'Wrong password, or the backup file is corrupted. Try again.';
+    }
+    return error.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/, '');
+  }
+
+  function closeBackupExport(open: boolean) {
+    if (open) {
+      setBackupExportOpen(true);
+      return;
+    }
+    if (backupExportBusy) return;
+    setBackupExportOpen(false);
+    setBackupExportPassword('');
+    setBackupExportConfirmation('');
+    setBackupExportError('');
+    setBackupExportResult(null);
+  }
+
+  async function exportWormholeBackup() {
+    if (backupExportBusy || !window.wormhole) return;
+    if (!backupExportPasswordsMatch(backupExportPassword, backupExportConfirmation)) {
+      setBackupExportError('The password confirmation does not match.');
+      return;
+    }
+    setBackupExportBusy(true);
+    setBackupExportError('');
+    setBackupExportResult(null);
+    try {
+      const result = await window.wormhole.exportBackup(backupExportPassword);
+      if (!result) return;
+      setBackupExportResult(result);
+      setBackupExportPassword('');
+      setBackupExportConfirmation('');
+    } catch (error) {
+      setBackupExportError(backupErrorMessage(error));
+    } finally {
+      setBackupExportBusy(false);
+    }
+  }
+
+  async function chooseBackupForImport() {
+    if (backupImportPickerBusy || !window.wormhole) return;
+    setBackupImportPickerBusy(true);
+    setBackupSectionError('');
+    try {
+      const selection = await window.wormhole.selectBackupForImport();
+      if (!selection) return;
+      setBackupImportSelection(selection);
+      setBackupImportPassword('');
+      setBackupImportError('');
+      setBackupImportResult(null);
+      setBackupImportOpen(true);
+    } catch (error) {
+      if (backupAuthGateRef.current === 'unlocked') {
+        setBackupSectionError(backupErrorMessage(error));
+      }
+    } finally {
+      setBackupImportPickerBusy(false);
+    }
+  }
+
+  function closeBackupImport(open: boolean) {
+    if (open) {
+      setBackupImportOpen(true);
+      return;
+    }
+    if (backupImportBusy) return;
+    setBackupImportOpen(false);
+    setBackupImportPassword('');
+    setBackupImportError('');
+    setBackupImportResult(null);
+    setBackupImportSelection(null);
+    window.wormhole?.clearBackupImportSelection();
+  }
+
+  async function importWormholeBackup() {
+    if (backupImportBusy || !window.wormhole || !backupImportSelection) return;
+    setBackupImportBusy(true);
+    setBackupImportError('');
+    try {
+      const result = await window.wormhole.importBackup(backupImportPassword);
+      setBackupImportResult(result);
+      setBackupImportPassword('');
+      try {
+        onBackupImported(await window.wormhole.loadWorkspace());
+      } catch {
+        setBackupImportError(
+          'Import completed, but the workspace could not refresh. Restart Wormhole to show the imported items.',
+        );
+      }
+    } catch (error) {
+      setBackupImportError(backupErrorMessage(error));
+    } finally {
+      setBackupImportBusy(false);
+    }
+  }
+
   const selectedSecretMethod: WormholeAuthFallback | null =
     authMethod === 'disabled' ? null : authMethod === 'windowsHello' ? helloFallback : authMethod;
   const selectedSecretExists = selectedSecretMethod
@@ -10500,6 +10651,10 @@ function SettingsPage({
     update.result?.isUpdateAvailable &&
     update.result.latestVersion &&
     update.result.latestVersion !== update.skippedUpdateVersion,
+  );
+  const backupExportPasswordConfirmed = backupExportPasswordsMatch(
+    backupExportPassword,
+    backupExportConfirmation,
   );
 
   return (
@@ -10965,15 +11120,46 @@ function SettingsPage({
           <SettingsSection title="Backup &amp; Restore">
             <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
               Export your connections, credentials, SSH keys, and VPN tunnels to a JSON file, or
-              restore a backup from another installation. Existing items with the same ID are kept;
-              the import never overwrites.
+              restore a backup from another installation. Existing metadata and readable secrets are
+              kept; missing or unreadable secrets can be repaired from the backup.
             </p>
             <div className="flex flex-wrap gap-2">
-              <Button size="sm">Export backup...</Button>
-              <Button size="sm" variant="outline">
-                Import backup...
+              <Button
+                disabled={backupImportPickerBusy}
+                onClick={() => {
+                  setBackupSectionError('');
+                  setBackupExportError('');
+                  setBackupExportResult(null);
+                  setBackupExportOpen(true);
+                }}
+                size="sm"
+                type="button"
+              >
+                <Download data-icon="inline-start" />
+                Export backup…
+              </Button>
+              <Button
+                disabled={backupImportPickerBusy}
+                onClick={() => void chooseBackupForImport()}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                {backupImportPickerBusy ? (
+                  <LoaderCircle className="animate-spin" data-icon="inline-start" />
+                ) : (
+                  <Upload data-icon="inline-start" />
+                )}
+                Import backup…
               </Button>
             </div>
+            <p className="max-w-2xl text-[11px] leading-relaxed text-muted-foreground">
+              Backups use the same schema as Wormhole for WinUI3. Add a password to encrypt every
+              connection name and secret; plaintext exports contain readable credentials.
+            </p>
+            {backupSectionError ? (
+              <p className="text-[11px] text-destructive">{backupSectionError}</p>
+            ) : null}
           </SettingsSection>
         </SettingsTabPanel>
 
@@ -11123,6 +11309,256 @@ function SettingsPage({
           </SettingsSection>
         </SettingsTabPanel>
       </Tabs>
+      <Dialog onOpenChange={closeBackupExport} open={backupExportOpen}>
+        <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Export backup</DialogTitle>
+            <DialogDescription>
+              Save all connection metadata and locally stored secrets in the WinUI-compatible
+              Wormhole backup format.
+            </DialogDescription>
+          </DialogHeader>
+          {backupExportResult ? (
+            <div className="grid gap-4">
+              <div className="flex gap-3 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3">
+                <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-400" />
+                <div className="grid gap-1">
+                  <p className="text-xs font-medium">Backup exported</p>
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    {backupExportResult.fileName} contains {backupExportResult.nodeCount} nodes,{' '}
+                    {backupExportResult.credentialCount} credentials,{' '}
+                    {backupExportResult.tunnelCount} tunnels, {backupExportResult.passwordCount}{' '}
+                    password{backupExportResult.passwordCount === 1 ? '' : 's'},{' '}
+                    {backupExportResult.privateKeyCount} private key
+                    {backupExportResult.privateKeyCount === 1 ? '' : 's'}, and{' '}
+                    {backupExportResult.tunnelPayloadCount} tunnel payload
+                    {backupExportResult.tunnelPayloadCount === 1 ? '' : 's'}. The file is{' '}
+                    {backupExportResult.encrypted ? 'encrypted' : 'plaintext'}.
+                  </p>
+                </div>
+              </div>
+              <DialogFooter>
+                <Button onClick={() => closeBackupExport(false)} size="sm" type="button">
+                  Close
+                </Button>
+              </DialogFooter>
+            </div>
+          ) : (
+            <form
+              className="grid gap-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void exportWormholeBackup();
+              }}
+            >
+              <div className="grid gap-2">
+                <Label htmlFor="backup-export-password">Encryption password (optional)</Label>
+                <Input
+                  autoComplete="new-password"
+                  autoFocus
+                  disabled={backupExportBusy}
+                  id="backup-export-password"
+                  onChange={(event) => {
+                    const password = event.target.value;
+                    setBackupExportPassword(password);
+                    if (password.length === 0) setBackupExportConfirmation('');
+                  }}
+                  placeholder="Leave blank for a plaintext backup"
+                  type="password"
+                  value={backupExportPassword}
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="backup-export-confirmation">Confirm password</Label>
+                <Input
+                  autoComplete="new-password"
+                  disabled={backupExportBusy || backupExportPassword.length === 0}
+                  id="backup-export-confirmation"
+                  onChange={(event) => setBackupExportConfirmation(event.target.value)}
+                  type="password"
+                  value={backupExportConfirmation}
+                />
+              </div>
+              {backupExportPassword.length === 0 ? (
+                <div className="flex gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+                  <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-400" />
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    Without a password, connection names, passwords, private keys, and VPN payloads
+                    are readable in the JSON file.
+                  </p>
+                </div>
+              ) : !backupExportPasswordConfirmed ? (
+                <p className="text-[11px] text-destructive">The passwords do not match.</p>
+              ) : null}
+              {backupExportError ? (
+                <p className="text-[11px] text-destructive">{backupExportError}</p>
+              ) : null}
+              <DialogFooter>
+                <Button
+                  disabled={backupExportBusy}
+                  onClick={() => closeBackupExport(false)}
+                  size="sm"
+                  type="button"
+                  variant="ghost"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  disabled={backupExportBusy || !backupExportPasswordConfirmed}
+                  size="sm"
+                  type="submit"
+                >
+                  {backupExportBusy ? (
+                    <LoaderCircle className="animate-spin" data-icon="inline-start" />
+                  ) : (
+                    <Download data-icon="inline-start" />
+                  )}
+                  {backupExportBusy ? 'Exporting…' : 'Choose destination…'}
+                </Button>
+              </DialogFooter>
+            </form>
+          )}
+        </DialogContent>
+      </Dialog>
+      <Dialog onOpenChange={closeBackupImport} open={backupImportOpen}>
+        <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Import backup</DialogTitle>
+            <DialogDescription>
+              Merge a Wormhole backup into this workspace. Existing metadata and readable secrets
+              are preserved; missing or unreadable secrets can be repaired.
+            </DialogDescription>
+          </DialogHeader>
+          {backupImportSelection ? (
+            <div className="grid gap-4">
+              <div className="rounded-lg border border-border/70 bg-muted/30 p-3">
+                <p className="truncate text-xs font-medium">{backupImportSelection.fileName}</p>
+                <p className="mt-1 text-[11px] text-muted-foreground">
+                  Schema v{backupImportSelection.schemaVersion}
+                  {backupImportSelection.exportedAt
+                    ? ` · Exported ${new Date(backupImportSelection.exportedAt).toLocaleString()}`
+                    : ''}
+                  {' · '}
+                  {backupImportSelection.encrypted ? 'Encrypted' : 'Plaintext'}
+                </p>
+              </div>
+              {backupImportResult ? (
+                <div className="grid gap-3">
+                  <div className="flex gap-3 rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3">
+                    <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-400" />
+                    <div className="grid gap-1">
+                      <p className="text-xs font-medium">Import complete</p>
+                      <p className="text-[11px] leading-relaxed text-muted-foreground">
+                        {backupImportResult.nodesImported} nodes imported (
+                        {backupImportResult.nodesSkipped} skipped),{' '}
+                        {backupImportResult.credentialsImported} credentials imported (
+                        {backupImportResult.credentialsSkipped} skipped), and{' '}
+                        {backupImportResult.tunnelsImported} tunnels imported (
+                        {backupImportResult.tunnelsSkipped} skipped). Restored{' '}
+                        {backupImportResult.passwordsImported} password
+                        {backupImportResult.passwordsImported === 1 ? '' : 's'},{' '}
+                        {backupImportResult.privateKeysImported} private key
+                        {backupImportResult.privateKeysImported === 1 ? '' : 's'}, and{' '}
+                        {backupImportResult.tunnelPayloadsImported} tunnel payload
+                        {backupImportResult.tunnelPayloadsImported === 1 ? '' : 's'}.
+                      </p>
+                    </div>
+                  </div>
+                  {backupImportResult.warnings.length > 0 ? (
+                    <div className="grid gap-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+                      <p className="text-[11px] font-medium text-amber-300">
+                        {backupImportResult.warnings.length} import warning
+                        {backupImportResult.warnings.length === 1 ? '' : 's'}
+                      </p>
+                      <ul className="grid list-disc gap-1 pl-4 text-[10px] leading-relaxed text-muted-foreground">
+                        {backupImportResult.warnings.slice(0, 5).map((warning, index) => (
+                          <li key={`${index}:${warning}`}>{warning}</li>
+                        ))}
+                      </ul>
+                      {backupImportResult.warnings.length > 5 ? (
+                        <p className="text-[10px] text-muted-foreground">
+                          +{backupImportResult.warnings.length - 5} more. See the Wormhole log for
+                          the full list.
+                        </p>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <form
+                  className="grid gap-4"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void importWormholeBackup();
+                  }}
+                >
+                  {backupImportSelection.encrypted ? (
+                    <div className="grid gap-2">
+                      <Label htmlFor="backup-import-password">Backup password</Label>
+                      <Input
+                        autoComplete="current-password"
+                        autoFocus
+                        disabled={backupImportBusy}
+                        id="backup-import-password"
+                        onChange={(event) => setBackupImportPassword(event.target.value)}
+                        type="password"
+                        value={backupImportPassword}
+                      />
+                      <p className="text-[10px] leading-relaxed text-muted-foreground">
+                        Enter the password used when this backup was exported.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="flex gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+                      <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-400" />
+                      <p className="text-[11px] leading-relaxed text-muted-foreground">
+                        This backup is plaintext. Its contents will still be restored into the
+                        platform-protected Wormhole stores.
+                      </p>
+                    </div>
+                  )}
+                  <DialogFooter>
+                    <Button
+                      disabled={backupImportBusy}
+                      onClick={() => closeBackupImport(false)}
+                      size="sm"
+                      type="button"
+                      variant="ghost"
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      disabled={
+                        backupImportBusy ||
+                        (backupImportSelection.encrypted && backupImportPassword.length === 0)
+                      }
+                      size="sm"
+                      type="submit"
+                    >
+                      {backupImportBusy ? (
+                        <LoaderCircle className="animate-spin" data-icon="inline-start" />
+                      ) : (
+                        <Upload data-icon="inline-start" />
+                      )}
+                      {backupImportBusy ? 'Importing…' : 'Import backup'}
+                    </Button>
+                  </DialogFooter>
+                </form>
+              )}
+              {backupImportError ? (
+                <p className="text-[11px] text-destructive">{backupImportError}</p>
+              ) : null}
+              {backupImportResult ? (
+                <DialogFooter>
+                  <Button onClick={() => closeBackupImport(false)} size="sm" type="button">
+                    Close
+                  </Button>
+                </DialogFooter>
+              ) : null}
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
       <AuthSecretDialog
         busy={securityBusy}
         error={securityError}

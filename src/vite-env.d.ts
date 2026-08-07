@@ -448,6 +448,37 @@ interface WormholeAppSettings {
   skippedUpdateVersion: string | null;
 }
 
+interface WormholeBackupExportResult {
+  fileName: string;
+  nodeCount: number;
+  credentialCount: number;
+  tunnelCount: number;
+  passwordCount: number;
+  privateKeyCount: number;
+  tunnelPayloadCount: number;
+  encrypted: boolean;
+}
+
+interface WormholeBackupImportSelection {
+  fileName: string;
+  encrypted: boolean;
+  schemaVersion: number;
+  exportedAt: string;
+}
+
+interface WormholeBackupImportResult {
+  nodesImported: number;
+  nodesSkipped: number;
+  credentialsImported: number;
+  credentialsSkipped: number;
+  tunnelsImported: number;
+  tunnelsSkipped: number;
+  passwordsImported: number;
+  privateKeysImported: number;
+  tunnelPayloadsImported: number;
+  warnings: string[];
+}
+
 interface WormholeStartupSnapshot {
   auth: WormholeAuthState;
   workspace?: WormholeWorkspaceSnapshot;
@@ -484,6 +515,10 @@ interface Window {
     showWorkspaceCredentials(request: {
       nodeId: string;
     }): Promise<WormholeWorkspaceCredentialReveal>;
+    exportBackup(password: string): Promise<WormholeBackupExportResult | null>;
+    selectBackupForImport(): Promise<WormholeBackupImportSelection | null>;
+    clearBackupImportSelection(): void;
+    importBackup(password: string): Promise<WormholeBackupImportResult>;
     createCredential(request: {
       name: string;
       protocol: 'ssh' | 'rdp' | 'vnc';

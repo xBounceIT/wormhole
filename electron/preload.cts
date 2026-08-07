@@ -28,6 +28,10 @@ const wormholeBridge = {
     ipcRenderer.invoke('workspace:delete-node', request),
   showWorkspaceCredentials: (request: { nodeId: string }) =>
     ipcRenderer.invoke('workspace:show-credentials', request),
+  exportBackup: (password: string) => ipcRenderer.invoke('backup:export', { password }),
+  selectBackupForImport: () => ipcRenderer.invoke('backup:select-import'),
+  clearBackupImportSelection: () => ipcRenderer.send('backup:clear-import'),
+  importBackup: (password: string) => ipcRenderer.invoke('backup:import', { password }),
   createCredential: (request: {
     name: string;
     protocol: 'ssh' | 'rdp' | 'vnc';

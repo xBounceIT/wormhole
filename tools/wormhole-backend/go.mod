@@ -9,6 +9,7 @@ require (
 	github.com/pkg/sftp v1.13.9
 	github.com/zalando/go-keyring v0.2.8
 	go.bug.st/serial v1.8.0
+	golang.org/x/text v0.37.0
 	modernc.org/sqlite v1.56.0
 )
 

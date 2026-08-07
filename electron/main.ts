@@ -47,6 +47,7 @@ const nativeTitlebarHeight = 48;
 const startupWindowOpacity = 0.96;
 const wormholeDataDirectoryName = 'Wormhole';
 const backendTimeoutMs = 30_000;
+const backupTimeoutMs = 5 * 60_000;
 const tunnelTestTimeoutMs = 315_000;
 const nativeConnectionTimeoutMs = 315_000;
 const backendMaxBuffer = 16 * 1024 * 1024;
@@ -70,6 +71,9 @@ type BackendOperation =
   | 'startup'
   | 'startup-unlock'
   | 'workspace'
+  | 'backup-inspect'
+  | 'backup-export'
+  | 'backup-import'
   | 'web-target'
   | 'watchguard-import'
   | 'azure-vpn-import'
@@ -213,6 +217,35 @@ type WorkspaceResponse = {
   credentials: WorkspaceCredential[];
   tunnels: unknown[];
 };
+type BackupInspectBackendResponse = {
+  encrypted: boolean;
+  schemaVersion: number;
+  exportedAt: string;
+};
+type BackupExportBackendResponse = {
+  path: string;
+  nodeCount: number;
+  credentialCount: number;
+  tunnelCount: number;
+  passwordCount: number;
+  privateKeyCount: number;
+  tunnelPayloadCount: number;
+  encrypted: boolean;
+};
+type BackupExportResponse = Omit<BackupExportBackendResponse, 'path'> & { fileName: string };
+type BackupImportResponse = {
+  nodesImported: number;
+  nodesSkipped: number;
+  credentialsImported: number;
+  credentialsSkipped: number;
+  tunnelsImported: number;
+  tunnelsSkipped: number;
+  passwordsImported: number;
+  privateKeysImported: number;
+  tunnelPayloadsImported: number;
+  warnings: string[];
+};
+type BackupImportSelection = BackupInspectBackendResponse & { fileName: string };
 type WorkspaceCredential = {
   id: string;
   name: string;
@@ -317,6 +350,7 @@ const authSession = new AuthSession();
 let authOperationQueue: Promise<void> = Promise.resolve();
 let currentAuthState: AuthStateResponse | undefined;
 let authRefreshInFlight: Promise<AuthStateResponse> | undefined;
+const backupImportSelections = new WeakMap<Electron.WebContents, string>();
 
 type SshConnectedResponse = {
   sessionId: string;
@@ -556,9 +590,108 @@ const credentialMaxNameLength = 256;
 const credentialMaxUsernameLength = 512;
 const credentialMaxDomainLength = 512;
 const credentialMaxPasswordLength = 4096;
+const backupMaxPasswordBytes = 16 * 1024;
+const backupMaxWarnings = 1000;
+const backupMaxWarningLength = 1024;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function parseBackupPasswordRequest(value: unknown): { password: string } {
+  if (!isRecord(value) || typeof value.password !== 'string') {
+    throw new Error('Backup password is invalid.');
+  }
+  if (Buffer.byteLength(value.password, 'utf8') > backupMaxPasswordBytes) {
+    throw new Error('Backup password is too long.');
+  }
+  return { password: value.password };
+}
+
+function isBackupCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function parseBackupInspectResponse(value: unknown): BackupInspectBackendResponse {
+  if (
+    !isRecord(value) ||
+    typeof value.encrypted !== 'boolean' ||
+    !Number.isSafeInteger(value.schemaVersion) ||
+    typeof value.exportedAt !== 'string' ||
+    value.exportedAt.length > 128 ||
+    (value.exportedAt.length > 0 && Number.isNaN(Date.parse(value.exportedAt)))
+  ) {
+    throw new Error('The backup inspector returned an invalid result.');
+  }
+  return {
+    encrypted: value.encrypted,
+    schemaVersion: value.schemaVersion as number,
+    exportedAt: value.exportedAt,
+  };
+}
+
+function parseBackupExportResponse(value: unknown, selectedPath: string): BackupExportResponse {
+  if (!isRecord(value) || value.path !== selectedPath || typeof value.encrypted !== 'boolean') {
+    throw new Error('The backup exporter returned an invalid result.');
+  }
+  const countFields = [
+    'nodeCount',
+    'credentialCount',
+    'tunnelCount',
+    'passwordCount',
+    'privateKeyCount',
+    'tunnelPayloadCount',
+  ] as const;
+  if (countFields.some((field) => !isBackupCount(value[field]))) {
+    throw new Error('The backup exporter returned an invalid result.');
+  }
+  return {
+    fileName: path.basename(selectedPath),
+    nodeCount: value.nodeCount as number,
+    credentialCount: value.credentialCount as number,
+    tunnelCount: value.tunnelCount as number,
+    passwordCount: value.passwordCount as number,
+    privateKeyCount: value.privateKeyCount as number,
+    tunnelPayloadCount: value.tunnelPayloadCount as number,
+    encrypted: value.encrypted,
+  };
+}
+
+function parseBackupImportResponse(value: unknown): BackupImportResponse {
+  if (!isRecord(value)) throw new Error('The backup importer returned an invalid result.');
+  const countFields = [
+    'nodesImported',
+    'nodesSkipped',
+    'credentialsImported',
+    'credentialsSkipped',
+    'tunnelsImported',
+    'tunnelsSkipped',
+    'passwordsImported',
+    'privateKeysImported',
+    'tunnelPayloadsImported',
+  ] as const;
+  if (
+    countFields.some((field) => !isBackupCount(value[field])) ||
+    !Array.isArray(value.warnings) ||
+    value.warnings.length > backupMaxWarnings ||
+    value.warnings.some(
+      (warning) => typeof warning !== 'string' || warning.length > backupMaxWarningLength,
+    )
+  ) {
+    throw new Error('The backup importer returned an invalid result.');
+  }
+  return {
+    nodesImported: value.nodesImported as number,
+    nodesSkipped: value.nodesSkipped as number,
+    credentialsImported: value.credentialsImported as number,
+    credentialsSkipped: value.credentialsSkipped as number,
+    tunnelsImported: value.tunnelsImported as number,
+    tunnelsSkipped: value.tunnelsSkipped as number,
+    passwordsImported: value.passwordsImported as number,
+    privateKeysImported: value.privateKeysImported as number,
+    tunnelPayloadsImported: value.tunnelPayloadsImported as number,
+    warnings: value.warnings as string[],
+  };
 }
 
 function isSshSessionId(value: unknown): value is string {
@@ -2102,10 +2235,11 @@ async function runBackend<T>(operation: BackendOperation, request?: unknown): Pr
     let stdoutBytes = 0;
     let stderr = '';
     let settled = false;
+    const operationTimeoutMs = operation.startsWith('backup-') ? backupTimeoutMs : backendTimeoutMs;
     const timeout = setTimeout(() => {
       child.kill();
       finishReject(new Error('Electron Go backend timed out.'));
-    }, backendTimeoutMs);
+    }, operationTimeoutMs);
 
     function finishReject(error: Error) {
       if (settled) return;
@@ -3318,6 +3452,83 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     });
   });
 
+  ipcMain.handle('backup:export', async (event, value: unknown) => {
+    const request = parseBackupPasswordRequest(value);
+    await serializeAuthOperation(requireWorkspaceAuth);
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    const date = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+    const options: Electron.SaveDialogOptions = {
+      title: 'Export Wormhole backup',
+      defaultPath: path.join(app.getPath('documents'), `wormhole-backup-${date}.json`),
+      filters: [
+        { name: 'Wormhole backup', extensions: ['json'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    };
+    const selection = owner
+      ? await dialog.showSaveDialog(owner, options)
+      : await dialog.showSaveDialog(options);
+    if (selection.canceled || !selection.filePath) return null;
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      const backendResult = await runBackend<BackupExportBackendResponse>('backup-export', {
+        path: selection.filePath,
+        password: request.password,
+      });
+      return parseBackupExportResponse(backendResult, selection.filePath);
+    });
+  });
+
+  ipcMain.handle('backup:select-import', async (event) => {
+    await serializeAuthOperation(requireWorkspaceAuth);
+    backupImportSelections.delete(event.sender);
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    const options: Electron.OpenDialogOptions = {
+      title: 'Import Wormhole backup',
+      properties: ['openFile'],
+      filters: [
+        { name: 'Wormhole backup', extensions: ['json'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    };
+    const selection = owner
+      ? await dialog.showOpenDialog(owner, options)
+      : await dialog.showOpenDialog(options);
+    if (selection.canceled || selection.filePaths.length !== 1) return null;
+    const selectedPath = selection.filePaths[0];
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      const inspected = parseBackupInspectResponse(
+        await runBackend<BackupInspectBackendResponse>('backup-inspect', { path: selectedPath }),
+      );
+      backupImportSelections.set(event.sender, selectedPath);
+      const response: BackupImportSelection = {
+        ...inspected,
+        fileName: path.basename(selectedPath),
+      };
+      return response;
+    });
+  });
+
+  ipcMain.on('backup:clear-import', (event) => {
+    backupImportSelections.delete(event.sender);
+  });
+
+  ipcMain.handle('backup:import', async (event, value: unknown) => {
+    const request = parseBackupPasswordRequest(value);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      const selectedPath = backupImportSelections.get(event.sender);
+      if (!selectedPath) throw new Error('Choose a backup file before importing.');
+      const backendResult = await runBackend<BackupImportResponse>('backup-import', {
+        path: selectedPath,
+        password: request.password,
+      });
+      backupImportSelections.delete(event.sender);
+      return parseBackupImportResponse(backendResult);
+    });
+  });
+
   ipcMain.handle('workspace:update-node-ssh-settings', async (_event, request: unknown) => {
     if (!isWorkspaceNodeSshSettingsRequest(request)) {
       throw new Error('Workspace node settings are invalid.');
@@ -3782,6 +3993,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     return serializeAuthOperation(async () => {
       await ensureAuthSession();
       authSession.lock();
+      backupImportSelections.delete(event.sender);
       sshBackend.cancelAutoSudo();
       sshBackend.closeAllSftp();
       try {
@@ -4500,6 +4712,7 @@ function createWindow() {
       // A renderer reload creates a fresh UI process context. Do not let a previous renderer's
       // native unlock survive into the new context before it proves possession of the secret.
       authSession.lock();
+      backupImportSelections.delete(window.webContents);
       sshBackend.cancelAutoSudo();
       sshBackend.closeAllSftp();
       try {
