@@ -22,6 +22,12 @@ const wormholeBridge = {
     ipcRenderer.invoke('startup:unlock', request),
   markStartupReady: () => ipcRenderer.send('startup:ready'),
   loadWorkspace: () => ipcRenderer.invoke('workspace:load'),
+  duplicateWorkspaceNode: (request: { nodeId: string }) =>
+    ipcRenderer.invoke('workspace:duplicate-node', request),
+  deleteWorkspaceNode: (request: { nodeId: string }) =>
+    ipcRenderer.invoke('workspace:delete-node', request),
+  showWorkspaceCredentials: (request: { nodeId: string }) =>
+    ipcRenderer.invoke('workspace:show-credentials', request),
   createCredential: (request: {
     name: string;
     protocol: 'ssh' | 'rdp' | 'vnc';

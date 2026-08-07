@@ -124,6 +124,16 @@ interface WormholeWorkspaceSnapshot {
   tunnels: WormholeWorkspaceTunnel[];
 }
 
+interface WormholeWorkspaceCredentialReveal {
+  found: boolean;
+  connectionName: string;
+  credentialName?: string;
+  username?: string;
+  domain?: string;
+  secretLabel?: string;
+  secret?: string;
+}
+
 interface WormholeWebTarget {
   url: string;
   protocol: 'http' | 'https';
@@ -469,6 +479,11 @@ interface Window {
     unlockStartup(request: WormholeAuthVerificationRequest): Promise<WormholeStartupUnlock>;
     markStartupReady(): void;
     loadWorkspace(): Promise<WormholeWorkspaceSnapshot>;
+    duplicateWorkspaceNode(request: { nodeId: string }): Promise<{ nodeId: string; name: string }>;
+    deleteWorkspaceNode(request: { nodeId: string }): Promise<{ deleted: boolean }>;
+    showWorkspaceCredentials(request: {
+      nodeId: string;
+    }): Promise<WormholeWorkspaceCredentialReveal>;
     createCredential(request: {
       name: string;
       protocol: 'ssh' | 'rdp' | 'vnc';

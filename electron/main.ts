@@ -78,6 +78,9 @@ type BackendOperation =
   | 'credential-create'
   | 'credential-update'
   | 'credential-delete'
+  | 'workspace-duplicate-node'
+  | 'workspace-delete-node'
+  | 'workspace-show-credentials'
   | 'workspace-update-node'
   | 'workspace-update-node-web-settings'
   | 'workspace-update-node-tunnel'
@@ -230,6 +233,18 @@ type CredentialCreateRequest = {
 };
 type CredentialUpdateRequest = CredentialCreateRequest & { id: string };
 type CredentialDeleteRequest = { id: string };
+type WorkspaceNodeRequest = { nodeId: string };
+type WorkspaceDuplicateNodeResponse = { nodeId: string; name: string };
+type WorkspaceDeleteNodeResponse = { deleted: boolean };
+type WorkspaceCredentialRevealResponse = {
+  found: boolean;
+  connectionName: string;
+  credentialName?: string;
+  username?: string;
+  domain?: string;
+  secretLabel?: string;
+  secret?: string;
+};
 type WorkspaceNodeSshSettingsRequest = {
   nodeId: string;
   sshAutoSudo: boolean | null;
@@ -663,6 +678,13 @@ function isWorkspaceNodeSshSettingsRequest(
     isSshSessionId(value.nodeId) &&
     (value.sshAutoSudo === null || typeof value.sshAutoSudo === 'boolean')
   );
+}
+
+function parseWorkspaceNodeRequest(value: unknown): WorkspaceNodeRequest {
+  if (!isRecord(value) || !isSshSessionId(value.nodeId)) {
+    throw new Error('Workspace connection is invalid.');
+  }
+  return { nodeId: value.nodeId };
 }
 
 function parseCredentialCreateRequest(value: unknown): CredentialCreateRequest {
@@ -3269,6 +3291,30 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         `[Wormhole] Workspace loaded: ${workspace.tree.length} roots, ${workspace.credentials.length} credentials, ${workspace.tunnels.length} tunnels.`,
       );
       return workspace;
+    });
+  });
+
+  ipcMain.handle('workspace:duplicate-node', async (_event, value: unknown) => {
+    const request = parseWorkspaceNodeRequest(value);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<WorkspaceDuplicateNodeResponse>('workspace-duplicate-node', request);
+    });
+  });
+
+  ipcMain.handle('workspace:delete-node', async (_event, value: unknown) => {
+    const request = parseWorkspaceNodeRequest(value);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<WorkspaceDeleteNodeResponse>('workspace-delete-node', request);
+    });
+  });
+
+  ipcMain.handle('workspace:show-credentials', async (_event, value: unknown) => {
+    const request = parseWorkspaceNodeRequest(value);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<WorkspaceCredentialRevealResponse>('workspace-show-credentials', request);
     });
   });
 

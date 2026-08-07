@@ -288,6 +288,17 @@ function containsTreeNode(node: TreeNode, nodeId: string): boolean {
   );
 }
 
+function collectTreeNodeIds(node: TreeNode): string[] {
+  return [node.id, ...(node.children?.flatMap(collectTreeNodeIds) ?? [])];
+}
+
+function removeTreeNode(nodes: TreeNode[], nodeId: string): TreeNode[] {
+  return nodes.flatMap((node) => {
+    if (node.id === nodeId) return [];
+    return node.children ? [{ ...node, children: removeTreeNode(node.children, nodeId) }] : [node];
+  });
+}
+
 function extractTreeNodes(
   nodes: TreeNode[],
   nodeIds: ReadonlySet<string>,
@@ -446,6 +457,11 @@ type CredentialRecord = {
   canEdit: boolean;
   canDelete: boolean;
 };
+
+type CredentialDialogState =
+  | { kind: 'credentials'; result: WormholeWorkspaceCredentialReveal }
+  | { kind: 'error'; message: string };
+type CredentialCopyField = 'username' | 'secret';
 
 type CredentialDraft = {
   name: string;
@@ -690,6 +706,42 @@ function IconButton({ label, children, className, ...props }: IconButtonProps) {
   );
 }
 
+function CredentialValueRow({
+  id,
+  label,
+  value,
+  copied,
+  onCopy,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  copied: boolean;
+  onCopy: () => void;
+}) {
+  return (
+    <div className="grid gap-1.5">
+      <Label className="text-[11px] text-muted-foreground" htmlFor={id}>
+        {label}
+      </Label>
+      <div className="flex items-center gap-2">
+        <Input
+          aria-label={label}
+          className="min-w-0 font-mono text-xs"
+          id={id}
+          readOnly
+          spellCheck={false}
+          value={value}
+        />
+        <Button onClick={onCopy} size="sm" type="button" variant="outline">
+          {copied ? <Check data-icon="inline-start" /> : <Copy data-icon="inline-start" />}
+          {copied ? 'Copied' : 'Copy'}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function AutoSudoField({
   id,
   mode,
@@ -738,12 +790,18 @@ function NodeContextMenu({
   onEdit,
   onNewConnection,
   onNewFolder,
+  onShowCredentials,
+  onDuplicateConnection,
+  onDelete,
 }: {
   node: TreeNode;
   children: ReactNode;
   onEdit: () => void;
   onNewConnection: () => void;
   onNewFolder: () => void;
+  onShowCredentials?: () => void;
+  onDuplicateConnection?: () => void;
+  onDelete: () => void;
 }) {
   return (
     <ContextMenu>
@@ -760,11 +818,11 @@ function NodeContextMenu({
         <ContextMenuSeparator />
         {node.kind === 'connection' ? (
           <>
-            <ContextMenuItem>
+            <ContextMenuItem onSelect={() => onShowCredentials?.()}>
               <KeyRound />
               Show credentials
             </ContextMenuItem>
-            <ContextMenuItem>
+            <ContextMenuItem onSelect={() => onDuplicateConnection?.()}>
               <Terminal />
               Duplicate connection
             </ContextMenuItem>
@@ -775,7 +833,7 @@ function NodeContextMenu({
           <Settings2 />
           Edit
         </ContextMenuItem>
-        <ContextMenuItem variant="destructive">
+        <ContextMenuItem onSelect={onDelete} variant="destructive">
           <X />
           Delete
         </ContextMenuItem>
@@ -1127,6 +1185,16 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   });
   const [editorError, setEditorError] = useState('');
   const [editorBusy, setEditorBusy] = useState(false);
+  const [credentialDialog, setCredentialDialog] = useState<CredentialDialogState | null>(null);
+  const [copiedCredentialField, setCopiedCredentialField] = useState<CredentialCopyField | null>(
+    null,
+  );
+  const [credentialRevealBusy, setCredentialRevealBusy] = useState(false);
+  const credentialRevealRequest = useRef(0);
+  const copiedCredentialTimer = useRef<number | undefined>(undefined);
+  const [pendingDeleteNode, setPendingDeleteNode] = useState<TreeNode | null>(null);
+  const [deleteNodeBusy, setDeleteNodeBusy] = useState(false);
+  const [deleteNodeError, setDeleteNodeError] = useState('');
   const [newConnectionForm, setNewConnectionForm] = useState({
     name: '',
     host: '',
@@ -1902,6 +1970,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   useEffect(() => {
     if (authGate === 'unlocked') return;
+    credentialRevealRequest.current += 1;
+    if (copiedCredentialTimer.current !== undefined) {
+      window.clearTimeout(copiedCredentialTimer.current);
+      copiedCredentialTimer.current = undefined;
+    }
     sftpRequestIds.current.clear();
     sftpCancelRequests.current.clear();
     setQuickConnectOpen(false);
@@ -1912,12 +1985,25 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setEditingFolderId(null);
     setNewFolderParentId(null);
     setEditorError('');
+    setCredentialDialog(null);
+    setCopiedCredentialField(null);
+    setPendingDeleteNode(null);
+    setDeleteNodeError('');
     setSessions((current) => {
       if (!current.some((session) => session.sftp)) return current;
       return current.map((session) => ({ ...session, sftp: undefined }));
     });
     setMcpApprovals([]);
   }, [authGate]);
+
+  useEffect(
+    () => () => {
+      if (copiedCredentialTimer.current !== undefined) {
+        window.clearTimeout(copiedCredentialTimer.current);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     const unsubscribe = window.wormhole?.onRdpEvent((event) => {
@@ -2445,6 +2531,47 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       if (!(id in current)) return current;
       const next = { ...current };
       delete next[id];
+      return next;
+    });
+  }
+
+  function closeSessionsForNodeIds(nodeIds: ReadonlySet<string>) {
+    const closing = sessions.filter((session) => session.nodeId && nodeIds.has(session.nodeId));
+    if (closing.length === 0) return;
+    const closingIds = new Set(closing.map((session) => session.id));
+    const selectedIndex = sessions.findIndex((session) => session.id === selectedSessionId);
+
+    for (const session of closing) {
+      if (session.protocol === 'rdp') {
+        void window.wormhole
+          ?.commandRdpSession({ sessionId: session.id, operation: 'disconnect' })
+          .catch(() => undefined);
+      }
+      if (session.protocol === 'http' || session.protocol === 'https') {
+        void closeWebSession(session.id).catch(() => undefined);
+      }
+      if (session.backendSessionId) {
+        if (session.protocol === 'serial') {
+          void window.wormhole?.closeSerialSession(session.backendSessionId);
+        } else {
+          void window.wormhole?.closeSshSession(session.backendSessionId);
+        }
+      }
+      sftpRequestIds.current.delete(session.id);
+      clearSftpCancelRequestsForBrowser(sftpCancelRequests.current, session.sftp);
+    }
+
+    const nextSessions = sessions.filter((session) => !closingIds.has(session.id));
+    setSessions(nextSessions);
+    setSelectedSessionId((current) => {
+      if (!closingIds.has(current)) return current;
+      return nextSessions[selectedIndex]?.id ?? nextSessions[selectedIndex - 1]?.id ?? '';
+    });
+    setRdpCredentialPrompt((current) => (current && closingIds.has(current) ? null : current));
+    setRoutePrompts((current) => current.filter((prompt) => !closingIds.has(prompt.sessionId)));
+    setRdpCredentials((current) => {
+      const next = { ...current };
+      for (const id of closingIds) delete next[id];
       return next;
     });
   }
@@ -3406,6 +3533,45 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     return findParentFolderId(tree, selectedNodeId) ?? folders[0]?.id;
   }
 
+  function applyWorkspaceSnapshot(workspace: WormholeWorkspaceSnapshot) {
+    const nextTree = workspace.tree as TreeNode[];
+    setTree(nextTree);
+    setCredentials(workspace.credentials as CredentialRecord[]);
+    setTunnels(workspace.tunnels as TunnelRecord[]);
+    setExpanded(
+      (current) =>
+        new Set([...current].filter((id) => findTreeNode(nextTree, id)?.kind === 'folder')),
+    );
+    setSelectedTreeNodeIds(
+      (current) => new Set([...current].filter((id) => Boolean(findTreeNode(nextTree, id)))),
+    );
+    setSelectedNodeId(
+      (current) =>
+        findTreeNode(nextTree, current)?.id ??
+        findFirstConnection(nextTree)?.id ??
+        nextTree[0]?.id ??
+        '',
+    );
+  }
+
+  function applyDeletedTreeState(nextTree: TreeNode[]) {
+    setTree(nextTree);
+    setExpanded(
+      (current) =>
+        new Set([...current].filter((id) => findTreeNode(nextTree, id)?.kind === 'folder')),
+    );
+    setSelectedTreeNodeIds(
+      (current) => new Set([...current].filter((id) => Boolean(findTreeNode(nextTree, id)))),
+    );
+    setSelectedNodeId(
+      (current) =>
+        findTreeNode(nextTree, current)?.id ??
+        findFirstConnection(nextTree)?.id ??
+        nextTree[0]?.id ??
+        '',
+    );
+  }
+
   function openNewConnection(folderId?: string) {
     setEditingConnectionId(null);
     setEditorError('');
@@ -3420,6 +3586,153 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       serial: { ...defaultSerialSettings },
     });
     setNewConnectionOpen(true);
+  }
+
+  async function showConnectionCredentials(node: TreeNode) {
+    const api = window.wormhole;
+    if (node.kind !== 'connection' || !api || credentialRevealBusy) return;
+
+    const requestId = ++credentialRevealRequest.current;
+    setCredentialRevealBusy(true);
+    try {
+      const result = await api.showWorkspaceCredentials({ nodeId: node.id });
+      if (credentialRevealRequest.current !== requestId) return;
+      setCopiedCredentialField(null);
+      setCredentialDialog({ kind: 'credentials', result });
+    } catch (error: unknown) {
+      if (credentialRevealRequest.current !== requestId) return;
+      setCredentialDialog({
+        kind: 'error',
+        message:
+          error instanceof Error ? error.message : 'Could not show the connection credentials.',
+      });
+    } finally {
+      setCredentialRevealBusy(false);
+    }
+  }
+
+  function closeCredentialDialog() {
+    credentialRevealRequest.current += 1;
+    setCredentialDialog(null);
+    setCopiedCredentialField(null);
+    if (copiedCredentialTimer.current !== undefined) {
+      window.clearTimeout(copiedCredentialTimer.current);
+      copiedCredentialTimer.current = undefined;
+    }
+  }
+
+  async function copyCredentialValue(field: CredentialCopyField, value: string) {
+    try {
+      await copyTextToClipboard(value);
+      setCopiedCredentialField(field);
+      if (copiedCredentialTimer.current !== undefined) {
+        window.clearTimeout(copiedCredentialTimer.current);
+      }
+      copiedCredentialTimer.current = window.setTimeout(() => {
+        copiedCredentialTimer.current = undefined;
+        setCopiedCredentialField(null);
+      }, 1600);
+    } catch {
+      setCredentialDialog({
+        kind: 'error',
+        message: `Could not copy the ${field === 'username' ? 'username' : 'password'} to the clipboard.`,
+      });
+    }
+  }
+
+  function openDeleteNode(node: TreeNode) {
+    if (deleteNodeBusy) return;
+    setDeleteNodeError('');
+    setPendingDeleteNode(findTreeNode(tree, node.id) ?? node);
+  }
+
+  async function confirmDeleteNode() {
+    const node = pendingDeleteNode;
+    if (!node || deleteNodeBusy) return;
+
+    setDeleteNodeBusy(true);
+    setDeleteNodeError('');
+    try {
+      const deletedNodeIds = new Set(collectTreeNodeIds(node));
+      if (node.persisted) {
+        const api = window.wormhole;
+        if (!api) throw new Error('The native workspace bridge is unavailable.');
+        const result = await api.deleteWorkspaceNode({ nodeId: node.id });
+        if (!result.deleted) throw new Error('The workspace node was not deleted.');
+        closeSessionsForNodeIds(deletedNodeIds);
+        applyDeletedTreeState(removeTreeNode(tree, node.id));
+        setPendingDeleteNode(null);
+        try {
+          applyWorkspaceSnapshot(await api.loadWorkspace());
+        } catch {
+          // The delete is already committed. The local tree has been updated above, so a
+          // transient refresh failure must not leave a deleted node visible or invite a retry.
+        }
+      } else {
+        closeSessionsForNodeIds(deletedNodeIds);
+        applyDeletedTreeState(removeTreeNode(tree, node.id));
+        setPendingDeleteNode(null);
+      }
+    } catch (error: unknown) {
+      setDeleteNodeError(error instanceof Error ? error.message : 'Could not delete the node.');
+    } finally {
+      setDeleteNodeBusy(false);
+    }
+  }
+
+  function duplicateConnection(node: TreeNode) {
+    if (node.kind !== 'connection') return;
+    const api = window.wormhole;
+    if (node.persisted) {
+      if (!api) {
+        setEditorError('The native workspace bridge is unavailable.');
+        return;
+      }
+      void api
+        .duplicateWorkspaceNode({ nodeId: node.id })
+        .then(async ({ nodeId, name }) => {
+          try {
+            applyWorkspaceSnapshot(await api.loadWorkspace());
+          } catch (error: unknown) {
+            const duplicate: TreeNode = {
+              ...node,
+              id: nodeId,
+              name,
+              persisted: true,
+              children: undefined,
+            };
+            setTree((current) =>
+              findTreeNode(current, nodeId)
+                ? current
+                : insertRelativeToTreeNode(current, node.id, [duplicate], 'after'),
+            );
+            setEditorError(
+              `Connection duplicated, but the workspace could not be refreshed: ${
+                error instanceof Error ? error.message : 'unknown error'
+              }`,
+            );
+          }
+          setSelectedNodeId(nodeId);
+          setSelectedTreeNodeIds(new Set());
+        })
+        .catch((error: unknown) => {
+          setEditorError(
+            error instanceof Error ? error.message : 'Could not duplicate the connection.',
+          );
+        });
+      return;
+    }
+
+    const duplicate: TreeNode = {
+      ...node,
+      id: `connection-duplicate-${newSessionToken()}`,
+      name: `${node.name} (copy)`,
+      persisted: false,
+      children: undefined,
+    };
+    setTree((current) => insertRelativeToTreeNode(current, node.id, [duplicate], 'after'));
+    setSelectedNodeId(duplicate.id);
+    setSelectedTreeNodeIds(new Set());
   }
 
   function openEditConnection(node: TreeNode) {
@@ -3956,9 +4269,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           <NodeContextMenu
             key={node.id}
             node={node}
+            onDuplicateConnection={() => duplicateConnection(node)}
+            onDelete={() => openDeleteNode(node)}
             onEdit={() => openEditNode(node)}
             onNewConnection={() => openNewConnection(creationFolderId)}
             onNewFolder={() => openNewFolder(creationFolderId)}
+            onShowCredentials={() => showConnectionCredentials(node)}
           >
             <div
               className="relative py-0.5"
@@ -3987,6 +4303,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           {treeVerticalGuide}
           <NodeContextMenu
             node={node}
+            onDelete={() => openDeleteNode(node)}
             onEdit={() => openEditNode(node)}
             onNewConnection={() => openNewConnection(creationFolderId)}
             onNewFolder={() => openNewFolder(creationFolderId)}
@@ -4043,6 +4360,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     (authGate === 'locked' && authState?.configured
       ? { kind: 'lock' as const, reason: lockReason, autoWindowsHello: true }
       : null);
+  const credentialResult =
+    credentialDialog?.kind === 'credentials' ? credentialDialog.result : null;
+  const deleteNodeDescendantCount = pendingDeleteNode
+    ? collectTreeNodeIds(pendingDeleteNode).length - 1
+    : 0;
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -4053,6 +4375,143 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           state={authState}
         />
       ) : null}
+      <Dialog
+        onOpenChange={(open) => {
+          if (!open) closeCredentialDialog();
+        }}
+        open={credentialDialog !== null}
+      >
+        <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-lg">
+          {credentialResult ? (
+            <>
+              <DialogHeader>
+                <DialogTitle>
+                  Credentials — {credentialResult.connectionName || 'Connection'}
+                </DialogTitle>
+                <DialogDescription>
+                  {credentialResult.found
+                    ? credentialResult.credentialName
+                      ? `Stored credential: ${credentialResult.credentialName}`
+                      : 'Stored connection credentials.'
+                    : 'This connection has no stored credentials to show.'}
+                </DialogDescription>
+              </DialogHeader>
+              {credentialResult.found ? (
+                <div className="space-y-4">
+                  {credentialResult.username ? (
+                    <CredentialValueRow
+                      copied={copiedCredentialField === 'username'}
+                      id="revealed-credential-username"
+                      label="Username"
+                      onCopy={() =>
+                        void copyCredentialValue('username', credentialResult.username ?? '')
+                      }
+                      value={credentialResult.username}
+                    />
+                  ) : null}
+                  {credentialResult.domain ? (
+                    <div className="grid gap-1.5">
+                      <Label className="text-[11px] text-muted-foreground">Domain</Label>
+                      <p className="rounded-md border border-border/70 bg-muted/20 px-3 py-2 font-mono text-xs">
+                        {credentialResult.domain}
+                      </p>
+                    </div>
+                  ) : null}
+                  {credentialResult.secret ? (
+                    <CredentialValueRow
+                      copied={copiedCredentialField === 'secret'}
+                      id="revealed-credential-secret"
+                      label={credentialResult.secretLabel || 'Password'}
+                      onCopy={() =>
+                        void copyCredentialValue('secret', credentialResult.secret ?? '')
+                      }
+                      value={credentialResult.secret}
+                    />
+                  ) : (
+                    <p className="rounded-md border border-border/70 bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+                      No stored password or key passphrase is available for this connection.
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <p className="rounded-md border border-border/70 bg-muted/20 px-3 py-3 text-xs text-muted-foreground">
+                  There is no stored password or key passphrase to show.
+                </p>
+              )}
+              <DialogFooter>
+                <Button onClick={closeCredentialDialog} type="button" variant="outline">
+                  Close
+                </Button>
+              </DialogFooter>
+            </>
+          ) : (
+            <>
+              <DialogHeader>
+                <DialogTitle>Couldn&apos;t show credentials</DialogTitle>
+                <DialogDescription>
+                  Wormhole could not read the credentials for this connection.
+                </DialogDescription>
+              </DialogHeader>
+              <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-3 text-xs text-destructive">
+                {credentialDialog?.kind === 'error' ? credentialDialog.message : null}
+              </p>
+              <DialogFooter>
+                <Button onClick={closeCredentialDialog} type="button" variant="outline">
+                  Close
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        onOpenChange={(open) => {
+          if (!open && !deleteNodeBusy) {
+            setPendingDeleteNode(null);
+            setDeleteNodeError('');
+          }
+        }}
+        open={pendingDeleteNode !== null}
+      >
+        <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>
+              Delete {pendingDeleteNode?.kind === 'folder' ? 'folder' : 'connection'}
+            </DialogTitle>
+            <DialogDescription>
+              {pendingDeleteNode?.kind === 'folder' && deleteNodeDescendantCount > 0
+                ? `Delete “${pendingDeleteNode.name}” and its ${deleteNodeDescendantCount} ${deleteNodeDescendantCount === 1 ? 'child' : 'children'}? This cannot be undone.`
+                : `Delete “${pendingDeleteNode?.name ?? 'this item'}”? This cannot be undone.`}
+            </DialogDescription>
+          </DialogHeader>
+          {deleteNodeError ? (
+            <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-3 text-xs text-destructive">
+              {deleteNodeError}
+            </p>
+          ) : null}
+          <DialogFooter>
+            <Button
+              disabled={deleteNodeBusy}
+              onClick={() => {
+                setPendingDeleteNode(null);
+                setDeleteNodeError('');
+              }}
+              type="button"
+              variant="ghost"
+            >
+              Cancel
+            </Button>
+            <Button
+              disabled={deleteNodeBusy}
+              onClick={() => void confirmDeleteNode()}
+              type="button"
+              variant="destructive"
+            >
+              {deleteNodeBusy ? 'Deleting…' : 'Delete'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog
         onOpenChange={(open) => {
           if (!open) void resolveTunnelPrompt(true);
@@ -7253,7 +7712,7 @@ function CredentialsPage({
       protocol,
       username: credential.username === 'No username' ? '' : credential.username,
       domain: credential.domain ?? '',
-      // The renderer never reads saved secrets. Editing intentionally asks for a replacement.
+      // The credential editor never reads saved secrets. Editing intentionally asks for a replacement.
       password: '',
     });
     setOperationError('');

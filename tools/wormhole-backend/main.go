@@ -163,7 +163,7 @@ type tunnelRow struct {
 }
 
 func main() {
-	operation := flag.String("operation", "workspace", "backend operation: startup, startup-unlock, workspace, credential-*, tunnel-*, workspace-update-node, workspace-update-node-web-settings, workspace-update-node-tunnel, web-target, migrate, ssh, serial, ssh-trust-host-key, logs-info, settings-set-log-retention, settings-set-log-level, open-log-file, open-logs-folder, serve, rdp, or auth-*")
+	operation := flag.String("operation", "workspace", "backend operation: startup, startup-unlock, workspace, workspace-duplicate-node, workspace-delete-node, workspace-show-credentials, credential-*, tunnel-*, workspace-update-node, workspace-update-node-web-settings, workspace-update-node-tunnel, web-target, migrate, ssh, serial, ssh-trust-host-key, logs-info, settings-set-log-retention, settings-set-log-level, open-log-file, open-logs-folder, serve, rdp, or auth-*")
 	databasePath := flag.String("database", "", "path to the Wormhole SQLite database")
 	electronUserDataPath := flag.String("electron-user-data", "", "path to the Electron user-data directory")
 	credentialReader := flag.String("credential-reader", "", "path to the Windows Credential Manager reader")
@@ -225,6 +225,24 @@ func main() {
 			if workspace, ok := result.(workspaceSnapshot); ok {
 				logInfo("workspace loaded: %d roots, %d credentials, %d tunnels", len(workspace.Tree), len(workspace.Credentials), len(workspace.Tunnels))
 			}
+		}
+	case "workspace-duplicate-node":
+		var request workspaceNodeRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = duplicateWorkspaceNode(*databasePath, request)
+		}
+	case "workspace-delete-node":
+		var request workspaceNodeRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = deleteWorkspaceNode(*databasePath, request)
+		}
+	case "workspace-show-credentials":
+		var request workspaceNodeRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = showWorkspaceNodeCredentials(*databasePath, request, *electronUserDataPath)
 		}
 	case "web-target":
 		var request webTargetRequest
