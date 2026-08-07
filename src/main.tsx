@@ -1,4 +1,3 @@
-import './startup.css';
 import startupLogo from '../Assets/wormhole-logo-transparent.png';
 import { applyTheme, getInitialTheme } from './theme';
 
