@@ -32,7 +32,9 @@ func TestPrepareAzureVPNUsesInteractiveCodeThenSilentRefresh(t *testing.T) {
 			if request.Form.Get("refresh_token") != "refresh-one" {
 				t.Fatalf("invalid refresh exchange: %#v", request.Form)
 			}
-			_, _ = writer.Write([]byte(`{"access_token":"access-two","refresh_token":"refresh-two"}`))
+			// Entra may rotate only the access token. The existing refresh token must still be
+			// re-persisted so its local 90-day inactivity window advances, matching WinUI.
+			_, _ = writer.Write([]byte(`{"access_token":"access-two"}`))
 		default:
 			t.Fatalf("unexpected grant: %#v", request.Form)
 		}
@@ -67,6 +69,14 @@ func TestPrepareAzureVPNUsesInteractiveCodeThenSilentRefresh(t *testing.T) {
 	if tunnelSettingString(settings, "Username") != "AzureAD" || tunnelSettingString(settings, "Password") != "access-one" {
 		t.Fatalf("interactive token was not routed: %s", prepared)
 	}
+	firstCacheBytes, err := unprotectFile(azureRefreshPath(snapshot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var firstCache azureRefreshCache
+	if json.Unmarshal(firstCacheBytes, &firstCache) != nil {
+		t.Fatalf("invalid first refresh cache: %s", firstCacheBytes)
+	}
 	prepared, err = prepareAzureVPN(ctx, raw, snapshot)
 	if err != nil {
 		t.Fatalf("silent Azure prepare: %v", err)
@@ -74,6 +84,15 @@ func TestPrepareAzureVPNUsesInteractiveCodeThenSilentRefresh(t *testing.T) {
 	_ = json.Unmarshal(prepared, &settings)
 	if tunnelSettingString(settings, "Password") != "access-two" || prompts != 1 || requests != 2 {
 		t.Fatalf("silent refresh failed: prepared=%s prompts=%d requests=%d", prepared, prompts, requests)
+	}
+	secondCacheBytes, err := unprotectFile(azureRefreshPath(snapshot))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var secondCache azureRefreshCache
+	if json.Unmarshal(secondCacheBytes, &secondCache) != nil || secondCache.RefreshToken != "refresh-one" ||
+		!secondCache.CreatedAt.After(firstCache.CreatedAt) {
+		t.Fatalf("silent refresh did not rotate the existing cache record: before=%#v after=%#v", firstCache, secondCache)
 	}
 }
 

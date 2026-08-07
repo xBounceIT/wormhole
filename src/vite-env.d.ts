@@ -383,6 +383,8 @@ interface WormholeBackendEvent {
   promptId?: string;
   title?: string;
   secret?: boolean;
+  confirmation?: boolean;
+  acceptLabel?: string;
 }
 
 interface WormholeTunnelPrompt {
@@ -392,6 +394,8 @@ interface WormholeTunnelPrompt {
   title: string;
   message: string;
   secret: boolean;
+  confirmation: boolean;
+  acceptLabel?: string;
 }
 
 interface WormholeMcpStatus {

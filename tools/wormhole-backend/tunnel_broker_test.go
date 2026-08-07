@@ -85,6 +85,51 @@ INSERT INTO TunnelConfigs (Id, Name, Kind, CreatedAt, UpdatedAt) VALUES
 	}
 }
 
+func TestTunnelBrokerDedicatedAcquireDoesNotReuseLiveSidecar(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+CREATE TABLE TunnelConfigs (Id TEXT PRIMARY KEY, Name TEXT, Kind INTEGER, CreatedAt TEXT, UpdatedAt TEXT);
+INSERT INTO TunnelConfigs (Id, Name, Kind, CreatedAt, UpdatedAt) VALUES
+    ('11111111-2222-3333-4444-555555555555', 'Diagnostic', 0, 'one', 'one');`)
+	_ = database.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	starts := 0
+	previousPool := processTunnelPool
+	processTunnelPool = newTunnelRuntimePool(func(context.Context, tunnelConfigSnapshot) (*tunnelProcess, error) {
+		starts++
+		return newTestTunnelProcess(), nil
+	})
+	defer func() { processTunnelPool = previousPool }()
+
+	outputReader, outputWriter := io.Pipe()
+	defer outputReader.Close()
+	defer outputWriter.Close()
+	manager := newVncManager(nil, &backendLineWriter{writer: bufio.NewWriter(outputWriter)})
+	manager.databasePath = databasePath
+	defer manager.close()
+	responses := json.NewDecoder(outputReader)
+
+	for _, command := range []backendCommand{
+		{ID: "shared", Action: "tunnel.acquire", SessionID: "live", TunnelConfigID: "11111111-2222-3333-4444-555555555555"},
+		{ID: "diagnostic", Action: "tunnel.acquire", SessionID: "test", TunnelConfigID: "11111111-2222-3333-4444-555555555555", Dedicated: true},
+	} {
+		manager.handle(command)
+		if response := readTunnelResponse(t, responses, command.ID); !response.OK {
+			t.Fatalf("%s acquire = %#v", command.ID, response)
+		}
+	}
+	if starts != 2 {
+		t.Fatalf("sidecar starts = %d, want a fresh diagnostic start in addition to the live tunnel", starts)
+	}
+}
+
 // readTunnelLine decodes the next raw backend output line.
 func readTunnelLine(t *testing.T, responses *json.Decoder) json.RawMessage {
 	t.Helper()
@@ -286,7 +331,7 @@ INSERT INTO TunnelConfigs VALUES ('11111111-2222-3333-4444-555555555555', 'Share
 		}
 		break
 	}
-	want := []string{"preparing", "authenticating"}
+	want := []string{"preparing", "authenticating", "ready"}
 	if len(phases) != len(want) {
 		t.Fatalf("progress phases = %v, want %v", phases, want)
 	}

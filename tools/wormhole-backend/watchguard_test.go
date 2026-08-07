@@ -89,6 +89,110 @@ func TestPrepareWatchguardAutomaticAuthenticatesDownloadsAndCachesProfile(t *tes
 	}
 }
 
+func TestPrepareWatchguardAutomaticSupportsMultipleChallengeRounds(t *testing.T) {
+	bundle := testWatchguardBundle(t, map[string]string{
+		"client.ovpn": "client\ndev tun\nca ca.crt\ncert client.crt\nkey client.pem\nremote firebox.example.test 443 tcp\n",
+		"ca.crt":      "CA",
+		"client.crt":  "CERT",
+		"client.pem":  "KEY",
+	})
+	challengeLeg := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Query().Get("action") {
+		case "sslvpn_logon":
+			writer.Header().Set("Content-Type", "application/xml")
+			if request.URL.Query().Get("fw_logon_type") == "logon" {
+				_, _ = writer.Write([]byte(`<resp><logon_status>8</logon_status><logon_id>first</logon_id><chaStr>First code</chaStr></resp>`))
+				return
+			}
+			challengeLeg++
+			if challengeLeg == 1 {
+				if request.URL.Query().Get("response") != "111111" || request.URL.Query().Get("fw_logon_id") != "first" {
+					t.Errorf("first challenge request: %s", request.URL.RawQuery)
+				}
+				_, _ = writer.Write([]byte(`<resp><logon_status>4</logon_status><logon_id>second</logon_id><chaStr>Second code</chaStr></resp>`))
+				return
+			}
+			if request.URL.Query().Get("response") != "222222" || request.URL.Query().Get("fw_logon_id") != "second" {
+				t.Errorf("second challenge request: %s", request.URL.RawQuery)
+			}
+			_, _ = writer.Write([]byte(`<resp><logon_status>1</logon_status></resp>`))
+		case "sslvpn_download":
+			_, _ = writer.Write(bundle)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	serverURL, _ := url.Parse(server.URL)
+	raw, _ := json.Marshal(map[string]any{
+		"Server": serverURL.Hostname(), "Port": mustTestPort(t, serverURL.Port()), "AuthMode": 1,
+		"Username": "alice", "Password": "secret", "TrustServerCertificate": true,
+	})
+	codes := []string{"111111", "222222"}
+	prompt := 0
+	ctx := withTunnelPromptHandler(context.Background(), func(_ context.Context, _ tunnelPrompt) (string, error) {
+		answer := codes[prompt]
+		prompt++
+		return answer, nil
+	})
+	prepared, err := prepareWatchguardProfile(ctx, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]json.RawMessage
+	_ = json.Unmarshal(prepared, &settings)
+	if password := tunnelSettingString(settings, "Password"); password != "222222" {
+		t.Fatalf("data-plane password=%q, want final response", password)
+	}
+	if prompt != 2 || challengeLeg != 2 {
+		t.Fatalf("prompts=%d challenge legs=%d, want 2/2", prompt, challengeLeg)
+	}
+}
+
+func TestPrepareWatchguardAutomaticPushKeepsAccountPasswordForOpenVPN(t *testing.T) {
+	bundle := testWatchguardBundle(t, map[string]string{
+		"client.ovpn": "client\nca ca.crt\ncert client.crt\nkey client.pem\nremote firebox.example.test 443 tcp\n",
+		"ca.crt":      "CA", "client.crt": "CERT", "client.pem": "KEY",
+	})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Query().Get("action") {
+		case "sslvpn_logon":
+			writer.Header().Set("Content-Type", "application/xml")
+			if request.URL.Query().Get("fw_logon_type") == "logon" {
+				_, _ = writer.Write([]byte(`<resp><logon_status>8</logon_status><logon_id>push</logon_id></resp>`))
+			} else {
+				if request.URL.Query().Get("fw_logon_type") != "mfa_response" || request.URL.Query().Get("mfa_choice") != "p" {
+					t.Errorf("unexpected push response: %s", request.URL.RawQuery)
+				}
+				_, _ = writer.Write([]byte(`<resp><logon_status>1</logon_status></resp>`))
+			}
+		case "sslvpn_download":
+			_, _ = writer.Write(bundle)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	serverURL, _ := url.Parse(server.URL)
+	raw, _ := json.Marshal(map[string]any{
+		"Server": serverURL.Hostname(), "Port": mustTestPort(t, serverURL.Port()), "AuthMode": 1,
+		"Username": "alice", "Password": "secret", "TrustServerCertificate": true,
+	})
+	ctx := withTunnelPromptHandler(context.Background(), func(_ context.Context, _ tunnelPrompt) (string, error) {
+		return "P", nil
+	})
+	prepared, err := prepareWatchguardProfile(ctx, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]json.RawMessage
+	_ = json.Unmarshal(prepared, &settings)
+	if password := tunnelSettingString(settings, "Password"); password != "secret" {
+		t.Fatalf("OpenVPN password=%q, want the account password after push approval", password)
+	}
+}
+
 func TestBuildWatchguardImportedProfileRejectsMissingKeyMaterial(t *testing.T) {
 	settings := stormshieldTestSettings(t, map[string]any{
 		"ProfileOvpn": "client\nca ca.crt\ncert client.crt\nkey client.pem\n",

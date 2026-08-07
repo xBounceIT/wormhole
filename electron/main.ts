@@ -16,7 +16,11 @@ import { createInterface, type Interface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { AuthSession } from './auth-session.js';
 import { RdpBackendClient } from './rdp.js';
-import { isMatchingOAuthRedirect } from './tunnel-auth.js';
+import {
+  isMatchingOAuthRedirect,
+  tunnelAuthPartition,
+  type TunnelBrowserCompletion,
+} from './tunnel-auth.js';
 import {
   SerialBackendClient,
   isSerialInput,
@@ -123,6 +127,7 @@ type VncCommand = {
   down?: boolean;
   keysym?: number;
   tunnelConfigId?: string;
+  dedicated?: boolean;
   promptId?: string;
   value?: string;
   cancelled?: boolean;
@@ -147,6 +152,8 @@ type BackendEvent = {
   promptId?: string;
   title?: string;
   secret?: boolean;
+  confirmation?: boolean;
+  acceptLabel?: string;
   urls?: string[];
   ignoreCertificateErrors?: boolean;
   leaseId?: string;
@@ -1374,7 +1381,7 @@ type TunnelBrowserEvent = {
   title: string;
   urls: string[];
   ignoreCertificateErrors: boolean;
-  completion: 'query-token' | 'oauth-code' | 'cookie';
+  completion: TunnelBrowserCompletion;
   redirectPrefix?: string;
   expectedState?: string;
   cookieName?: string;
@@ -1477,15 +1484,15 @@ async function runTunnelBrowserAuth(
   const fireboxOrigin = initialURLs[0].origin;
   const cookieScopeURL = initialURLs[0].toString();
   const fireboxHost = initialURLs[0].hostname;
-  const partition = `wormhole-tunnel-auth-${randomUUID()}`;
+  const partition = tunnelAuthPartition(event.completion);
   const browserSession = electronSession.fromPartition(partition, { cache: false });
   browserSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   browserSession.setPermissionCheckHandler(() => false);
-  if (event.ignoreCertificateErrors) {
-    browserSession.setCertificateVerifyProc((request, callback) => {
-      callback(request.hostname === fireboxHost ? 0 : -3);
-    });
-  }
+  // Persistent sessions retain handlers too. Always replace the verifier so a prior explicit
+  // trust opt-in cannot leak into the next tunnel using the same provider partition.
+  browserSession.setCertificateVerifyProc((request, callback) => {
+    callback(event.ignoreCertificateErrors && request.hostname === fireboxHost ? 0 : -3);
+  });
   const parent = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
   const authWindow = new BrowserWindow({
     width: 900,
@@ -1586,6 +1593,15 @@ async function runTunnelBrowserAuth(
     );
     if (cookie) await complete(false, cookie.value);
   };
+  const clearCompletionCookie = async () => {
+    if (event.completion !== 'cookie') return;
+    const cookies = await browserSession.cookies.get({ url: cookieScopeURL });
+    await Promise.all(
+      cookies
+        .filter((cookie) => cookie.name === event.cookieName)
+        .map((cookie) => browserSession.cookies.remove(cookieScopeURL, cookie.name)),
+    );
+  };
   authWindow.webContents.setWindowOpenHandler(({ url }) => {
     try {
       const target = new URL(url);
@@ -1631,18 +1647,12 @@ async function runTunnelBrowserAuth(
   authWindow.once('closed', () => {
     if (cookieTimer) clearInterval(cookieTimer);
   });
-  await browserSession.cookies
-    .get({ url: cookieScopeURL })
-    .then((cookies) =>
-      Promise.all(
-        cookies
-          .filter((cookie) => event.completion === 'cookie' && cookie.name === event.cookieName)
-          .map((cookie) => browserSession.cookies.remove(cookieScopeURL, cookie.name)),
-      ),
-    )
-    .catch(() => undefined);
+  await clearCompletionCookie().catch(() => undefined);
   await authWindow.loadURL(event.urls[0]).catch(() => complete(true));
   await finished;
+  // Keep the IdP profile persistent, but never retain Fortinet's ephemeral VPN credential in
+  // Chromium's cookie store after it has crossed the one-shot Go sidecar boundary.
+  await clearCompletionCookie().catch(() => undefined);
 }
 
 class NativeBackendProcess {
@@ -1692,6 +1702,7 @@ class NativeBackendProcess {
     nodeId?: string;
     tunnelConfigId?: string;
     progressSessionId?: string;
+    dedicated?: boolean;
   }): Promise<string> {
     const response = await this.send(
       {
@@ -1700,6 +1711,7 @@ class NativeBackendProcess {
         nodeId: request.nodeId,
         tunnelConfigId: request.tunnelConfigId,
         progressSessionId: request.progressSessionId,
+        dedicated: request.dedicated,
       },
       tunnelTestTimeoutMs,
     );
@@ -3487,6 +3499,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         const socksEndpoint = await getNativeBackend().acquireTunnel({
           leaseId,
           tunnelConfigId: request.id,
+          dedicated: true,
         });
         if (!socksEndpoint) throw new Error('The VPN tunnel returned no SOCKS endpoint.');
         return { connected: true };

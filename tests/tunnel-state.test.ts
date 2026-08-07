@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   isTunnelTestCancellation,
+  isTunnelTestNotice,
   missingTunnelFields,
   normalizeTunnelEditorSettings,
   tunnelModeFor,
@@ -23,6 +24,28 @@ test('VPN route state preserves independent enable and config inheritance', () =
   for (const state of states) {
     assert.deepEqual(tunnelValueFor(tunnelModeFor(state)), state);
   }
+});
+
+test('recoverable Stormshield outcomes are informational tunnel-test notices', () => {
+  assert.equal(
+    isTunnelTestNotice(
+      'Stormshield downloaded and protected a fresh VPN profile; connect again with a new one-time code',
+    ),
+    true,
+  );
+  assert.equal(
+    isTunnelTestNotice(
+      'that Stormshield one-time code was just used; wait until your authenticator shows a new code',
+    ),
+    true,
+  );
+  assert.equal(
+    isTunnelTestNotice(
+      'Stormshield downloaded a fresh VPN profile, but could not protect its cache; reconnecting will download it again',
+    ),
+    true,
+  );
+  assert.equal(isTunnelTestNotice('the VPN gateway rejected the credentials'), false);
 });
 
 test('VPN editor normalizes every numeric input and removes cleared optional values', () => {

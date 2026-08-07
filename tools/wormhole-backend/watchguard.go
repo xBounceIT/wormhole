@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -148,11 +147,13 @@ func prepareWatchguardProfile(
 	if json.Unmarshal(raw, &settings) != nil {
 		return nil, errors.New("VPN tunnel settings are invalid")
 	}
+	defer clearTunnelSettingsMap(settings)
 	var snapshot tunnelConfigSnapshot
 	if len(snapshots) > 0 {
 		snapshot = snapshots[0]
 	}
-	settingsHash := fmt.Sprintf("%x", sha256.Sum256(raw))
+	settingsHash := providerCacheIdentity(3, settings)
+	cacheState := providerCacheState(3, settings)
 	authMode := tunnelSettingNumber(settings, "AuthMode")
 	if authMode == 2 {
 		return prepareWatchguardSAML(ctx, settings)
@@ -180,6 +181,7 @@ func prepareWatchguardProfile(
 	}
 	if snapshot.id != "" {
 		if cached := readWatchguardCachedProfile(snapshot, settingsHash); cached != "" {
+			settings["_WormholeWatchguardCacheHit"] = json.RawMessage("true")
 			return finishWatchguardStoredProfile(ctx, settings, cached)
 		}
 	}
@@ -206,7 +208,10 @@ func prepareWatchguardProfile(
 		return nil, err
 	}
 	dataPlanePassword := password
-	if result.Status == 4 || result.Status == 8 {
+	for challengeRound := 0; result.Status == 4 || result.Status == 8; challengeRound++ {
+		if challengeRound >= 3 {
+			return nil, errors.New("WatchGuard authentication requested too many consecutive challenge responses")
+		}
 		if strings.TrimSpace(result.LogonID) == "" {
 			return nil, errors.New("WatchGuard requested 2FA without a logon identifier")
 		}
@@ -225,7 +230,8 @@ func prepareWatchguardProfile(
 			return nil, errors.New("WatchGuard two-factor response is required")
 		}
 		responseType, responseField := "response", "response"
-		if strings.EqualFold(answer, "p") {
+		isPush := strings.EqualFold(answer, "p")
+		if isPush {
 			responseType, responseField = "mfa_response", "mfa_choice"
 			answer = "p"
 		}
@@ -236,7 +242,13 @@ func prepareWatchguardProfile(
 		if err != nil {
 			return nil, err
 		}
-		dataPlanePassword = answer
+		if isPush {
+			dataPlanePassword = password
+			delete(settings, "_WormholeWatchguardTypedOTP")
+		} else {
+			dataPlanePassword = answer
+			settings["_WormholeWatchguardTypedOTP"] = json.RawMessage("true")
+		}
 	}
 	if result.Status != 1 {
 		message := strings.TrimSpace(result.Message)
@@ -249,6 +261,9 @@ func prepareWatchguardProfile(
 		return nil, errors.New("WatchGuard authentication failed: " + message)
 	}
 
+	if err := reportTunnelProgress(ctx, "downloading", ""); err != nil {
+		return nil, err
+	}
 	bundle, err := downloadWatchguardBundle(ctx, client, settings)
 	if err != nil {
 		return nil, err
@@ -258,7 +273,9 @@ func prepareWatchguardProfile(
 		return nil, err
 	}
 	if snapshot.id != "" {
-		_ = writeWatchguardCachedProfile(snapshot, settingsHash, profile)
+		_ = persistTunnelCacheIfCurrent(snapshot, 3, cacheState, func() error {
+			return writeWatchguardCachedProfile(snapshot, settingsHash, profile)
+		})
 	}
 	settings["ProfileOvpn"], _ = json.Marshal(profile)
 	settings["Password"], _ = json.Marshal(dataPlanePassword)
@@ -313,6 +330,9 @@ func prepareWatchguardSAML(
 		})
 	}
 	client.Jar.SetCookies(baseURL, cookies)
+	if err := reportTunnelProgress(ctx, "downloading", ""); err != nil {
+		return nil, err
+	}
 	bundle, err := downloadWatchguardBundle(ctx, client, settings)
 	if err != nil {
 		return nil, err
@@ -353,6 +373,9 @@ func finishWatchguardStoredProfile(
 	}
 	settings["ProfileOvpn"], _ = json.Marshal(profile)
 	settings["ChallengeResponse"], _ = json.Marshal(answer)
+	if !strings.EqualFold(answer, "p") {
+		settings["_WormholeWatchguardTypedOTP"] = json.RawMessage("true")
+	}
 	return json.Marshal(settings)
 }
 
@@ -561,6 +584,15 @@ func watchguardHasManualMaterial(settings map[string]json.RawMessage) bool {
 }
 
 func buildWatchguardProfile(settings map[string]json.RawMessage) (string, error) {
+	if hasTunnelDirectiveDelimiter(tunnelSettingString(settings, "Server"), false) ||
+		hasTunnelDirectiveDelimiter(tunnelSettingString(settings, "VerifyX509Name"), false) {
+		return "", errors.New("WatchGuard server or certificate subject is invalid")
+	}
+	for _, name := range []string{"CaPem", "ClientCertPem", "ClientKeyPem"} {
+		if strings.ContainsAny(tunnelSettingString(settings, name), "<>") {
+			return "", errors.New("WatchGuard PEM material is invalid")
+		}
+	}
 	profile := strings.TrimSpace(tunnelSettingString(settings, "ProfileOvpn"))
 	if profile != "" {
 		files := map[string]string{
@@ -585,9 +617,6 @@ func buildWatchguardProfile(settings map[string]json.RawMessage) (string, error)
 		return "", errors.New("WatchGuard server is invalid")
 	}
 	verify := strings.TrimSpace(tunnelSettingString(settings, "VerifyX509Name"))
-	if strings.ContainsAny(verify, "\r\n\"") {
-		return "", errors.New("WatchGuard certificate subject is invalid")
-	}
 	var builder strings.Builder
 	fmt.Fprintf(&builder, "client\ndev tun\nproto tcp-client\nremote %s %d\nresolv-retry infinite\nnobind\npersist-key\npersist-tun\nremote-cert-tls server\n", server, port)
 	if verify != "" && !tunnelSettingBool(settings, "TrustServerCertificate") {
@@ -606,8 +635,11 @@ func buildWatchguardProfile(settings map[string]json.RawMessage) (string, error)
 }
 
 func watchguardCachePath(snapshot tunnelConfigSnapshot) string {
-	compact := strings.ReplaceAll(normalizeTunnelID(snapshot.id), "-", "")
-	return filepath.Join(filepath.Dir(snapshot.databasePath), "watchguard-cache", compact+".ovpncache")
+	return tunnelProviderCachePath(snapshot, "electron-watchguard-cache", ".ovpncache")
+}
+
+func winUIWatchguardCachePath(snapshot tunnelConfigSnapshot) string {
+	return tunnelProviderCachePath(snapshot, "watchguard-cache", ".ovpncache")
 }
 
 func readWatchguardCachedProfile(snapshot tunnelConfigSnapshot, settingsHash string) string {

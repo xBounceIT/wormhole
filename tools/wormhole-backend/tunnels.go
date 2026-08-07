@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -11,7 +12,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
+	"unicode"
 )
 
 // Tunnel settings are deliberately accepted as an opaque JSON object at the IPC boundary. The
@@ -43,6 +46,10 @@ type tunnelDetails struct {
 const tunnelSecretPrefix = "tunnel:"
 const maxTunnelProtectedBytes = backendMaxTunnelRequestBytes + 64*1024
 
+// A tunnel save spans both SQLite and a protected sidecar file. Serialize mutations so a
+// provider that persists newly accepted trust cannot race an editor save or a delete.
+var tunnelMutationMu sync.RWMutex
+
 func createTunnel(databasePath string, request tunnelWriteRequest) (tunnelDetails, error) {
 	request.ID = newTunnelID()
 	return writeTunnel(databasePath, request, true)
@@ -53,6 +60,9 @@ func updateTunnel(databasePath string, request tunnelWriteRequest) (tunnelDetail
 }
 
 func writeTunnel(databasePath string, request tunnelWriteRequest, create bool) (tunnelDetails, error) {
+	tunnelMutationMu.Lock()
+	defer tunnelMutationMu.Unlock()
+
 	if err := validateTunnelWriteRequest(&request, !create); err != nil {
 		return tunnelDetails{}, err
 	}
@@ -72,7 +82,25 @@ func writeTunnel(databasePath string, request tunnelWriteRequest, create bool) (
 	}
 
 	secretPath := legacyTunnelSecretPath(databasePath, request.ID)
+	previousKind := int64(-1)
+	cacheIdentityChanged := true
+	if !create {
+		_ = database.QueryRow("SELECT Kind FROM TunnelConfigs WHERE lower(Id) = lower(?);", request.ID).Scan(&previousKind)
+		if previousSettings, readErr := readTunnelSettings(database, databasePath, request.ID); readErr == nil {
+			defer clearBytes(previousSettings)
+			var previousObject map[string]json.RawMessage
+			var nextObject map[string]json.RawMessage
+			previousErr := json.Unmarshal(previousSettings, &previousObject)
+			nextErr := json.Unmarshal(request.Settings, &nextObject)
+			defer clearTunnelSettingsMap(previousObject)
+			defer clearTunnelSettingsMap(nextObject)
+			if previousErr == nil && nextErr == nil {
+				cacheIdentityChanged = tunnelProviderCacheMustClear(previousKind, request.Kind, previousObject, nextObject)
+			}
+		}
+	}
 	previousSecret, previousSecretErr := readTunnelProtectedFile(secretPath)
+	defer clearBytes(previousSecret)
 	previousSecretExists := previousSecretErr == nil
 	if previousSecretErr != nil && !errors.Is(previousSecretErr, os.ErrNotExist) {
 		return tunnelDetails{}, errors.New("could not read the existing VPN tunnel settings")
@@ -150,10 +178,19 @@ func writeTunnel(databasePath string, request tunnelWriteRequest, create bool) (
 		return tunnelDetails{}, fmt.Errorf("could not save VPN tunnel: %w", err)
 	}
 	committed = true
+	if !create && cacheIdentityChanged {
+		clearTunnelProviderCaches(databasePath, request.ID, previousKind, request.Kind)
+	}
 	return tunnelDetails{ID: request.ID, Name: request.Name, Kind: request.Kind, Settings: request.Settings}, nil
 }
 
 func readTunnel(databasePath string, request tunnelReadRequest) (tunnelDetails, error) {
+	tunnelMutationMu.RLock()
+	defer tunnelMutationMu.RUnlock()
+	return readTunnelUnlocked(databasePath, request)
+}
+
+func readTunnelUnlocked(databasePath string, request tunnelReadRequest) (tunnelDetails, error) {
 	id := normalizeTunnelID(request.ID)
 	if id == "" {
 		return tunnelDetails{}, errors.New("VPN tunnel id is invalid")
@@ -184,6 +221,9 @@ func readTunnel(databasePath string, request tunnelReadRequest) (tunnelDetails, 
 }
 
 func deleteTunnel(databasePath string, request tunnelDeleteRequest) error {
+	tunnelMutationMu.Lock()
+	defer tunnelMutationMu.Unlock()
+
 	id := normalizeTunnelID(request.ID)
 	if id == "" {
 		return errors.New("VPN tunnel id is invalid")
@@ -252,19 +292,153 @@ func deleteTunnel(databasePath string, request tunnelDeleteRequest) error {
 	if err := os.Remove(secretPath); err == nil || errors.Is(err, os.ErrNotExist) {
 		deleteFileProtectionKey(secretPath)
 	}
-	cachePath := stormshieldCachePath(tunnelConfigSnapshot{databasePath: databasePath, id: id})
-	if err := os.Remove(cachePath); err == nil || errors.Is(err, os.ErrNotExist) {
-		deleteFileProtectionKey(cachePath)
-	}
-	watchguardCache := watchguardCachePath(tunnelConfigSnapshot{databasePath: databasePath, id: id})
-	if err := os.Remove(watchguardCache); err == nil || errors.Is(err, os.ErrNotExist) {
-		deleteFileProtectionKey(watchguardCache)
-	}
-	azureCache := azureRefreshPath(tunnelConfigSnapshot{databasePath: databasePath, id: id})
-	if err := os.Remove(azureCache); err == nil || errors.Is(err, os.ErrNotExist) {
-		deleteFileProtectionKey(azureCache)
-	}
+	snapshot := tunnelConfigSnapshot{databasePath: databasePath, id: id}
+	removeProtectedTunnelFile(stormshieldCachePath(snapshot))
+	removeProtectedTunnelFile(winUIStormshieldCachePath(snapshot))
+	clearStormshieldOTPGuard(id)
+	removeProtectedTunnelFile(watchguardCachePath(snapshot))
+	removeProtectedTunnelFile(winUIWatchguardCachePath(snapshot))
+	removeProtectedTunnelFile(azureRefreshPath(snapshot))
+	removeProtectedTunnelFile(winUIAzureRefreshPath(snapshot))
 	return nil
+}
+
+func removeProtectedTunnelFile(path string) {
+	if err := os.Remove(path); err == nil || errors.Is(err, os.ErrNotExist) {
+		deleteFileProtectionKey(path)
+	}
+}
+
+func removeProtectedTunnelFileIfCurrent(snapshot tunnelConfigSnapshot, path string) {
+	tunnelMutationMu.Lock()
+	defer tunnelMutationMu.Unlock()
+	if snapshot.updatedAt != "" {
+		current, err := loadTunnelSnapshot(snapshot.databasePath, snapshot.id)
+		if err != nil || current.kind != snapshot.kind || current.updatedAt != snapshot.updatedAt {
+			return
+		}
+	}
+	removeProtectedTunnelFile(path)
+}
+
+func tunnelProviderCachePath(snapshot tunnelConfigSnapshot, directory, suffix string) string {
+	compact := strings.ReplaceAll(normalizeTunnelID(snapshot.id), "-", "")
+	return filepath.Join(filepath.Dir(snapshot.databasePath), directory, compact+suffix)
+}
+
+func clearTunnelProviderCaches(databasePath, id string, kinds ...int64) {
+	snapshot := tunnelConfigSnapshot{databasePath: databasePath, id: id}
+	seen := make(map[int64]bool)
+	for _, kind := range kinds {
+		if seen[kind] {
+			continue
+		}
+		seen[kind] = true
+		switch kind {
+		case 3:
+			removeProtectedTunnelFile(watchguardCachePath(snapshot))
+		case 4:
+			removeProtectedTunnelFile(stormshieldCachePath(snapshot))
+			clearStormshieldOTPGuard(id)
+		case 5:
+			removeProtectedTunnelFile(azureRefreshPath(snapshot))
+		}
+	}
+}
+
+func tunnelProviderCacheMustClear(
+	previousKind int64,
+	nextKind int64,
+	previous map[string]json.RawMessage,
+	next map[string]json.RawMessage,
+) bool {
+	if previousKind != nextKind {
+		return true
+	}
+	return providerCacheState(previousKind, previous) != providerCacheState(nextKind, next)
+}
+
+func providerCacheState(kind int64, settings map[string]json.RawMessage) string {
+	state := providerCacheIdentity(kind, settings)
+	switch kind {
+	case 3:
+		return fmt.Sprintf("%s\n%d\n%t\n%t", state, tunnelSettingNumber(settings, "AuthMode"),
+			watchguardHasManualMaterial(settings), strings.TrimSpace(tunnelSettingString(settings, "ProfileOvpn")) != "")
+	case 4:
+		return fmt.Sprintf("%s\n%d\n%t", state, tunnelSettingNumber(settings, "Mode"), tunnelSettingBool(settings, "UseOtp"))
+	default:
+		return state
+	}
+}
+
+func persistTunnelCacheIfCurrent(
+	snapshot tunnelConfigSnapshot,
+	kind int64,
+	state string,
+	write func() error,
+) error {
+	if snapshot.updatedAt == "" {
+		return write()
+	}
+	tunnelMutationMu.Lock()
+	defer tunnelMutationMu.Unlock()
+	details, err := readTunnelUnlocked(snapshot.databasePath, tunnelReadRequest{ID: snapshot.id})
+	if err != nil {
+		return errors.New("VPN tunnel changed while authentication was in progress")
+	}
+	defer clearBytes(details.Settings)
+	if details.Kind != kind {
+		return errors.New("VPN tunnel changed while authentication was in progress")
+	}
+	var current map[string]json.RawMessage
+	unmarshalErr := json.Unmarshal(details.Settings, &current)
+	defer clearTunnelSettingsMap(current)
+	if unmarshalErr != nil || providerCacheState(kind, current) != state {
+		return errors.New("VPN tunnel changed while authentication was in progress")
+	}
+	return write()
+}
+
+func providerCacheIdentity(kind int64, settings map[string]json.RawMessage) string {
+	port := tunnelSettingNumber(settings, "Port")
+	if port == 0 {
+		port = 443
+	}
+	boolText := func(name string) string {
+		if tunnelSettingBool(settings, name) {
+			return "1"
+		}
+		return "0"
+	}
+	var material []string
+	switch kind {
+	case 3:
+		material = []string{
+			tunnelSettingString(settings, "Server"), fmt.Sprint(port), tunnelSettingString(settings, "Username"),
+			boolText("TrustServerCertificate"), tunnelSettingString(settings, "CaPem"),
+		}
+	case 4:
+		appToken := strings.TrimSpace(tunnelSettingString(settings, "AppToken"))
+		if appToken == "" {
+			appToken = "sslclient"
+		}
+		material = []string{
+			tunnelSettingString(settings, "Server"), fmt.Sprint(port), tunnelSettingString(settings, "Username"),
+			appToken, boolText("TrustServerCertificate"), tunnelSettingString(settings, "CaPem"),
+		}
+	case 5:
+		applicationID := strings.TrimSpace(tunnelSettingString(settings, "ApplicationId"))
+		if applicationID == "" {
+			applicationID = strings.TrimSpace(tunnelSettingString(settings, "Audience"))
+		}
+		material = []string{
+			tunnelSettingString(settings, "TenantId"), tunnelSettingString(settings, "Audience"), applicationID,
+		}
+	default:
+		return ""
+	}
+	digest := sha256.Sum256([]byte(strings.Join(material, "\n")))
+	return hex.EncodeToString(digest[:])
 }
 
 func readTunnelSettings(database *sql.DB, databasePath, id string) (json.RawMessage, error) {
@@ -310,7 +484,9 @@ func validateStoredTunnelSettings(settings []byte) (json.RawMessage, error) {
 		return nil, errors.New("VPN tunnel settings are invalid")
 	}
 	var value map[string]json.RawMessage
-	if err := json.Unmarshal(settings, &value); err != nil || value == nil {
+	err := json.Unmarshal(settings, &value)
+	defer clearTunnelSettingsMap(value)
+	if err != nil || value == nil {
 		return nil, errors.New("VPN tunnel settings are invalid")
 	}
 	return append(json.RawMessage(nil), settings...), nil
@@ -332,7 +508,9 @@ func validateTunnelWriteRequest(request *tunnelWriteRequest, requireID bool) err
 		return errors.New("VPN tunnel settings are invalid")
 	}
 	var settings map[string]json.RawMessage
-	if err := json.Unmarshal(request.Settings, &settings); err != nil || settings == nil {
+	err := json.Unmarshal(request.Settings, &settings)
+	defer clearTunnelSettingsMap(settings)
+	if err != nil || settings == nil {
 		return errors.New("VPN tunnel settings must be a JSON object")
 	}
 	if err := validateTunnelSettings(request.Kind, settings); err != nil {
@@ -421,6 +599,15 @@ func validateTunnelSettings(kind int64, settings map[string]json.RawMessage) err
 		if err := required("Server"); err != nil {
 			return err
 		}
+		if hasTunnelDirectiveDelimiter(tunnelSettingString(settings, "Server"), false) ||
+			hasTunnelDirectiveDelimiter(tunnelSettingString(settings, "VerifyX509Name"), false) {
+			return errors.New("WatchGuard server and certificate subject contain a forbidden character")
+		}
+		for _, name := range []string{"CaPem", "ClientCertPem", "ClientKeyPem"} {
+			if strings.ContainsAny(tunnelSettingString(settings, name), "<>") {
+				return errors.New("WatchGuard PEM material contains an invalid angle bracket")
+			}
+		}
 		if tunnelSettingNumber(settings, "AuthMode") == 1 {
 			return required("Username", "Password")
 		}
@@ -442,6 +629,14 @@ func validateTunnelSettings(kind int64, settings map[string]json.RawMessage) err
 		if len(servers) == 0 || strings.TrimSpace(servers[0]) == "" {
 			return errors.New("VPN tunnel setting \"Servers\" requires at least one gateway")
 		}
+		for _, server := range servers {
+			if hasTunnelDirectiveDelimiter(server, true) {
+				return errors.New("Azure VPN gateway entries must be bare host names")
+			}
+		}
+		if strings.ContainsAny(tunnelSettingString(settings, "CaPem"), "<>") {
+			return errors.New("Azure VPN CA certificate contains an invalid angle bracket")
+		}
 		if secret := strings.Join(strings.Fields(tunnelSettingString(settings, "ServerSecretHex")), ""); secret != "" {
 			if len(secret) != 512 {
 				return errors.New("VPN tunnel setting \"ServerSecretHex\" must contain 512 hexadecimal characters")
@@ -449,11 +644,19 @@ func validateTunnelSettings(kind int64, settings map[string]json.RawMessage) err
 			if _, err := hex.DecodeString(secret); err != nil {
 				return errors.New("VPN tunnel setting \"ServerSecretHex\" must contain 512 hexadecimal characters")
 			}
+			settings["ServerSecretHex"], _ = json.Marshal(secret)
 		}
 	case 6:
 		return required("Host", "Username", "Password")
 	}
 	return nil
+}
+
+func hasTunnelDirectiveDelimiter(value string, rejectSpace bool) bool {
+	return strings.IndexFunc(value, func(character rune) bool {
+		return character == '\'' || character == '"' ||
+			(rejectSpace && (character == ' ' || character == '\t')) || unicode.IsControl(character)
+	}) >= 0
 }
 
 func validateOptionalTunnelBool(settings map[string]json.RawMessage, name string) error {
@@ -518,6 +721,13 @@ func tunnelSettingNumber(settings map[string]json.RawMessage, name string) int64
 	var result int64
 	_ = json.Unmarshal(settings[name], &result)
 	return result
+}
+
+func clearTunnelSettingsMap(settings map[string]json.RawMessage) {
+	for key, value := range settings {
+		clearBytes(value)
+		delete(settings, key)
+	}
 }
 
 func tunnelSecretID(id string) string {

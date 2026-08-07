@@ -91,6 +91,7 @@ func prepareAzureVPN(
 	if json.Unmarshal(raw, &settings) != nil {
 		return nil, errors.New("Azure VPN settings are invalid")
 	}
+	defer clearTunnelSettingsMap(settings)
 	profile, err := buildAzureVPNProfile(settings)
 	if err != nil {
 		return nil, err
@@ -99,7 +100,8 @@ func prepareAzureVPN(
 	if len(snapshots) > 0 {
 		snapshot = snapshots[0]
 	}
-	settingsHash := fmt.Sprintf("%x", sha256.Sum256(raw))
+	settingsHash := providerCacheIdentity(5, settings)
+	cacheState := providerCacheState(5, settings)
 	accessToken := ""
 	if snapshot.id != "" {
 		if refresh := readAzureRefreshToken(snapshot, settingsHash); refresh != "" {
@@ -108,9 +110,15 @@ func prepareAzureVPN(
 				"refresh_token": {refresh}, "scope": {azureScope(settings)},
 			}); refreshErr == nil {
 				accessToken = token.AccessToken
-				if token.RefreshToken != "" {
-					_ = writeAzureRefreshToken(snapshot, settingsHash, token.RefreshToken)
+				rotatedRefresh := token.RefreshToken
+				if rotatedRefresh == "" {
+					rotatedRefresh = refresh
 				}
+				_ = persistTunnelCacheIfCurrent(snapshot, 5, cacheState, func() error {
+					return writeAzureRefreshToken(snapshot, settingsHash, rotatedRefresh)
+				})
+			} else if strings.Contains(strings.ToLower(refreshErr.Error()), "rejected") {
+				removeProtectedTunnelFileIfCurrent(snapshot, azureRefreshPath(snapshot))
 			}
 		}
 	}
@@ -155,7 +163,9 @@ func prepareAzureVPN(
 		}
 		accessToken = token.AccessToken
 		if snapshot.id != "" && token.RefreshToken != "" {
-			_ = writeAzureRefreshToken(snapshot, settingsHash, token.RefreshToken)
+			_ = persistTunnelCacheIfCurrent(snapshot, 5, cacheState, func() error {
+				return writeAzureRefreshToken(snapshot, settingsHash, token.RefreshToken)
+			})
 		}
 	}
 	settings["ProfileOvpn"], _ = json.Marshal(profile)
@@ -261,6 +271,9 @@ func buildAzureVPNProfile(settings map[string]json.RawMessage) (string, error) {
 	fmt.Fprintf(&builder, "client\ndev tun\nproto %s\n", protocol)
 	for _, server := range servers {
 		server = strings.TrimSpace(server)
+		if hasTunnelDirectiveDelimiter(server, true) {
+			return "", errors.New("Azure VPN gateway server is invalid")
+		}
 		if _, err := buildWebURL("https", server, 443); err != nil {
 			return "", errors.New("Azure VPN gateway server is invalid")
 		}
@@ -271,11 +284,11 @@ func buildAzureVPNProfile(settings map[string]json.RawMessage) (string, error) {
 	if ca == "" {
 		ca = azureDigiCertGlobalRootG2
 	}
-	if strings.Contains(strings.ToLower(ca), "</ca>") {
+	if strings.ContainsAny(ca, "<>") {
 		return "", errors.New("Azure VPN CA certificate is invalid")
 	}
 	fmt.Fprintf(&builder, "<ca>\n%s\n</ca>\n", ca)
-	secret := strings.TrimSpace(tunnelSettingString(settings, "ServerSecretHex"))
+	secret := strings.Join(strings.Fields(tunnelSettingString(settings, "ServerSecretHex")), "")
 	if secret != "" {
 		decoded, err := hex.DecodeString(secret)
 		if err != nil || len(secret) != azureServerSecretChars || len(decoded) != azureServerSecretChars/2 {
@@ -292,8 +305,11 @@ func buildAzureVPNProfile(settings map[string]json.RawMessage) (string, error) {
 }
 
 func azureRefreshPath(snapshot tunnelConfigSnapshot) string {
-	compact := strings.ReplaceAll(normalizeTunnelID(snapshot.id), "-", "")
-	return filepath.Join(filepath.Dir(snapshot.databasePath), "azure-token-cache", compact+".token")
+	return tunnelProviderCachePath(snapshot, "azure-token-cache", ".token")
+}
+
+func winUIAzureRefreshPath(snapshot tunnelConfigSnapshot) string {
+	return tunnelProviderCachePath(snapshot, "azurevpn-cache", ".tokencache")
 }
 
 func readAzureRefreshToken(snapshot tunnelConfigSnapshot, settingsHash string) string {

@@ -101,6 +101,53 @@ func TestNormalizeStormshieldProfileAndTransportOverride(t *testing.T) {
 	}
 }
 
+func TestStormshieldCacheRetainsBaseProfileForOverrideChanges(t *testing.T) {
+	snapshot := tunnelConfigSnapshot{
+		databasePath: filepath.Join(t.TempDir(), "wormhole.db"),
+		id:           "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+	}
+	base := "client\ndev tun\nproto udp\nremote sns.example.test 1194 udp\nremote sns.example.test 443 tcp\n"
+	if err := writeStormshieldCachedProfile(snapshot, "identity", strings.Repeat("a", 64), base); err != nil {
+		t.Fatal(err)
+	}
+	record := readStormshieldCachedProfile(snapshot, "identity")
+	if record == nil {
+		t.Fatal("fresh cache record was not readable")
+	}
+	tcpOnly, err := applyStormshieldTransportOverride(record.Profile, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	automatic, err := applyStormshieldTransportOverride(record.Profile, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(tcpOnly, "1194 udp") || !strings.Contains(tcpOnly, "443 tcp") {
+		t.Fatalf("TCP override did not filter the cached base profile:\n%s", tcpOnly)
+	}
+	if !strings.Contains(automatic, "1194 udp") || !strings.Contains(automatic, "443 tcp") {
+		t.Fatalf("returning to Automatic could not restore the cached base profile:\n%s", automatic)
+	}
+}
+
+func TestExtractOpenVPNTransportRemotesHonorsDirectiveScopesAndQuotes(t *testing.T) {
+	profile := "port 1194\nproto udp\nremote 'primary gateway.test'\n<ca>\nremote ignored.test 1 tcp\n</ca>\n<connection>\nport 443\nproto tcp-client\nremote fallback.test\n</connection>\nremote explicit.test 8443 tcp\n"
+	remotes := extractOpenVPNTransportRemotes(profile)
+	want := []openVPNTransportRemote{
+		{Host: "primary gateway.test", Port: "1194", Protocol: "udp"},
+		{Host: "fallback.test", Port: "443", Protocol: "tcp-client"},
+		{Host: "explicit.test", Port: "8443", Protocol: "tcp"},
+	}
+	if len(remotes) != len(want) {
+		t.Fatalf("remotes=%#v", remotes)
+	}
+	for index := range want {
+		if remotes[index] != want[index] {
+			t.Fatalf("remote[%d]=%#v, want %#v", index, remotes[index], want[index])
+		}
+	}
+}
+
 func TestPrepareStormshieldAutomaticProducesSidecarReadyProfile(t *testing.T) {
 	bundle := testStormshieldBundle(t, map[string]string{
 		"client.ovpn": "client\ndev tun\nremote sns.example.test 443 tcp\ncipher AES-256-CBC\n",
@@ -132,6 +179,10 @@ func TestPrepareStormshieldOtpCachesDownloadedProfileAndUsesFreshCodeForDataPlan
 	})
 	requests := 0
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/auth/v1/sslvpn/hash" {
+			_, _ = writer.Write([]byte(`"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"`))
+			return
+		}
 		requests++
 		if err := request.ParseForm(); err != nil {
 			t.Error(err)
@@ -187,6 +238,158 @@ func TestPrepareStormshieldOtpCachesDownloadedProfileAndUsesFreshCodeForDataPlan
 	}
 	if requests != 1 || promptIndex != 2 {
 		t.Fatalf("requests=%d prompts=%d, want 1/2", requests, promptIndex)
+	}
+}
+
+func TestPrepareStormshieldOtpInvalidatesCacheWhenPortalHashChanges(t *testing.T) {
+	bundle := testStormshieldBundle(t, map[string]string{
+		"client.ovpn": "client\ndev tun\nauth-user-pass\nremote sns.example.test 443 tcp\n",
+	})
+	configHash := strings.Repeat("a", 64)
+	downloads := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/auth/v1/sslvpn/hash" {
+			_, _ = writer.Write([]byte(`"` + configHash + `"`))
+			return
+		}
+		downloads++
+		writer.Header().Set("Content-Type", "application/zip")
+		_, _ = writer.Write(bundle)
+	}))
+	defer server.Close()
+	serverURL, _ := url.Parse(server.URL)
+	raw, _ := json.Marshal(map[string]any{
+		"Server": serverURL.Hostname(), "Port": mustTestPort(t, serverURL.Port()), "Mode": 0,
+		"Username": "alice", "Password": "secret", "UseOtp": true, "TrustServerCertificate": true,
+	})
+	snapshot := tunnelConfigSnapshot{
+		databasePath: filepath.Join(t.TempDir(), "wormhole.db"),
+		id:           "11111111-2222-3333-4444-555555555555",
+	}
+	prompt := 0
+	ctx := withTunnelPromptHandler(context.Background(), func(_ context.Context, _ tunnelPrompt) (string, error) {
+		prompt++
+		return strconv.Itoa(100000 + prompt), nil
+	})
+	if _, err := prepareStormshieldProfile(ctx, raw, snapshot); err == nil || !strings.Contains(err.Error(), "connect again") {
+		t.Fatalf("first prepare = %v", err)
+	}
+	configHash = strings.Repeat("b", 64)
+	if _, err := prepareStormshieldProfile(ctx, raw, snapshot); err == nil || !strings.Contains(err.Error(), "connect again") {
+		t.Fatalf("changed-hash prepare = %v", err)
+	}
+	if downloads != 2 || prompt != 2 {
+		t.Fatalf("downloads=%d prompts=%d, want 2/2", downloads, prompt)
+	}
+}
+
+func TestPrepareStormshieldRejectsImmediatelyReusedSpentOtp(t *testing.T) {
+	bundle := testStormshieldBundle(t, map[string]string{
+		"client.ovpn": "client\ndev tun\nauth-user-pass\nremote sns.example.test 443 tcp\n",
+	})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/auth/v1/sslvpn/hash" {
+			_, _ = writer.Write([]byte(`"` + strings.Repeat("c", 64) + `"`))
+			return
+		}
+		writer.Header().Set("Content-Type", "application/zip")
+		_, _ = writer.Write(bundle)
+	}))
+	defer server.Close()
+	serverURL, _ := url.Parse(server.URL)
+	raw, _ := json.Marshal(map[string]any{
+		"Server": serverURL.Hostname(), "Port": mustTestPort(t, serverURL.Port()), "Mode": 0,
+		"Username": "alice", "Password": "secret", "UseOtp": true, "TrustServerCertificate": true,
+	})
+	snapshot := tunnelConfigSnapshot{
+		databasePath: filepath.Join(t.TempDir(), "wormhole.db"),
+		id:           "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+	}
+	clearStormshieldOTPGuard(snapshot.id)
+	t.Cleanup(func() { clearStormshieldOTPGuard(snapshot.id) })
+	ctx := withTunnelPromptHandler(context.Background(), func(_ context.Context, _ tunnelPrompt) (string, error) {
+		return "654321", nil
+	})
+	if _, err := prepareStormshieldProfile(ctx, raw, snapshot); err == nil || !strings.Contains(err.Error(), "connect again") {
+		t.Fatalf("first prepare = %v", err)
+	}
+	if _, err := prepareStormshieldProfile(ctx, raw, snapshot); err == nil || !strings.Contains(err.Error(), "just used") {
+		t.Fatalf("reused OTP prepare = %v", err)
+	}
+}
+
+func TestPrepareStormshieldOffersCertificateConsentBeforeRetry(t *testing.T) {
+	bundle := testStormshieldBundle(t, map[string]string{
+		"client.ovpn": "client\ndev tun\nremote sns.example.test 443 tcp\n",
+	})
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/zip")
+		_, _ = writer.Write(bundle)
+	}))
+	defer server.Close()
+	serverURL, _ := url.Parse(server.URL)
+	raw, _ := json.Marshal(map[string]any{
+		"Server": serverURL.Hostname(), "Port": mustTestPort(t, serverURL.Port()), "Mode": 0,
+		"Username": "alice", "Password": "secret",
+	})
+	prompts := 0
+	ctx := withTunnelPromptHandler(context.Background(), func(_ context.Context, prompt tunnelPrompt) (string, error) {
+		prompts++
+		if !prompt.Confirmation || prompt.AcceptLabel != "Trust and connect" || prompt.Secret || prompt.Browser {
+			t.Fatalf("unexpected trust prompt: %#v", prompt)
+		}
+		return "accept", nil
+	})
+	prepared, err := prepareStormshieldProfile(ctx, raw)
+	if err != nil {
+		t.Fatalf("prepare after consent: %v", err)
+	}
+	var settings map[string]json.RawMessage
+	if json.Unmarshal(prepared, &settings) != nil || !tunnelSettingBool(settings, "TrustServerCertificate") {
+		t.Fatalf("prepared settings did not retain attempt trust: %s", prepared)
+	}
+	if prompts != 1 {
+		t.Fatalf("prompts=%d, want 1", prompts)
+	}
+}
+
+func TestPrepareStormshieldCachedProfileDoesNotPromptForHashEndpointCertificate(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/auth/v1/sslvpn/hash" {
+			t.Fatalf("cached flow unexpectedly sent credentials to %s", request.URL.Path)
+		}
+		_, _ = writer.Write([]byte(`"` + strings.Repeat("d", 64) + `"`))
+	}))
+	defer server.Close()
+	serverURL, _ := url.Parse(server.URL)
+	raw, _ := json.Marshal(map[string]any{
+		"Server": serverURL.Hostname(), "Port": mustTestPort(t, serverURL.Port()), "Mode": 0,
+		"Username": "alice", "Password": "secret", "UseOtp": true,
+	})
+	var values map[string]json.RawMessage
+	_ = json.Unmarshal(raw, &values)
+	snapshot := tunnelConfigSnapshot{
+		databasePath: filepath.Join(t.TempDir(), "wormhole.db"),
+		id:           "dddddddd-eeee-4fff-8aaa-bbbbbbbbbbbb",
+	}
+	profile := "client\ndev tun\nauth-user-pass\nremote sns.example.test 443 tcp\n"
+	if err := writeStormshieldCachedProfile(snapshot, providerCacheIdentity(4, values), strings.Repeat("a", 64), profile); err != nil {
+		t.Fatal(err)
+	}
+	ctx := withTunnelPromptHandler(context.Background(), func(_ context.Context, prompt tunnelPrompt) (string, error) {
+		if prompt.Confirmation {
+			t.Fatal("the cache-only flow requested portal certificate consent")
+		}
+		return "123456", nil
+	})
+	prepared, err := prepareStormshieldProfile(ctx, raw, snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var preparedSettings map[string]json.RawMessage
+	_ = json.Unmarshal(prepared, &preparedSettings)
+	if !tunnelSettingBool(preparedSettings, "_WormholeStormshieldOptimisticCache") {
+		t.Fatalf("certificate-failed hash check was not marked optimistic: %s", prepared)
 	}
 }
 

@@ -67,6 +67,8 @@ type tunnelPrompt struct {
 	ExpectedState           string
 	CookieName              string
 	RequireHTTPOnly         bool
+	Confirmation            bool
+	AcceptLabel             string
 }
 
 type tunnelPromptHandler func(context.Context, tunnelPrompt) (string, error)
@@ -121,16 +123,32 @@ type sharedTunnelEntry struct {
 	refs             int
 	cancel           context.CancelFunc
 	establish        context.Context
-	progressHandlers []tunnelProgressHandler
+	progressHandlers []tunnelProgressSubscription
+	lastPhase        string
+	lastDetail       string
+	hasProgress      bool
+}
+
+type tunnelProgressSubscription struct {
+	id      uint64
+	handler tunnelProgressHandler
 }
 
 type tunnelRuntimePool struct {
-	mu      sync.Mutex
-	entries map[string]*sharedTunnelEntry
-	start   func(context.Context, tunnelConfigSnapshot) (*tunnelProcess, error)
+	mu             sync.Mutex
+	entries        map[string]*sharedTunnelEntry
+	nextProgressID uint64
+	loadSettings   bool
+	probe          func(context.Context, *tunnelProcess) error
+	start          func(context.Context, tunnelConfigSnapshot) (*tunnelProcess, error)
 }
 
-var processTunnelPool = newTunnelRuntimePool(startTunnelProcess)
+var processTunnelPool = func() *tunnelRuntimePool {
+	pool := newTunnelRuntimePool(startTunnelProcess)
+	pool.loadSettings = true
+	pool.probe = probeTunnelProcess
+	return pool
+}()
 
 func newTunnelRuntimePool(
 	start func(context.Context, tunnelConfigSnapshot) (*tunnelProcess, error),
@@ -234,7 +252,30 @@ func (forwarder *tunnelForwarder) close() {
 }
 
 func startTunnelRuntime(ctx context.Context, databasePath, id string) (*tunnelRuntime, error) {
+	return startTunnelRuntimeScoped(ctx, databasePath, id, "")
+}
+
+// startTunnelRuntimeScoped uses the normal shared config key unless scope is non-empty. A scoped
+// runtime is still lifecycle-managed by the same pool, but cannot join an already-live tunnel.
+// Diagnostics use this to prove that the saved config can establish from scratch.
+func startTunnelRuntimeScoped(ctx context.Context, databasePath, id, scope string) (*tunnelRuntime, error) {
+	tunnelMutationMu.RLock()
 	snapshot, err := loadTunnelSnapshot(databasePath, id)
+	if err != nil {
+		tunnelMutationMu.RUnlock()
+		return nil, err
+	}
+	if processTunnelPool.loadSettings {
+		database, openErr := openDatabase(databasePath, true)
+		if openErr == nil && database != nil {
+			snapshot.settings, openErr = readTunnelSettings(database, databasePath, snapshot.id)
+			_ = database.Close()
+		} else if openErr == nil {
+			openErr = errors.New("VPN tunnel was not found")
+		}
+		err = openErr
+	}
+	tunnelMutationMu.RUnlock()
 	if err != nil {
 		return nil, err
 	}
@@ -245,6 +286,9 @@ func startTunnelRuntime(ctx context.Context, databasePath, id string) (*tunnelRu
 	snapshot.prompt = tunnelPromptHandlerFromContext(ctx)
 	snapshot.progress = tunnelProgressHandlerFromContext(ctx)
 	key := strings.ToLower(filepath.Clean(absoluteDatabasePath)) + "\x00" + snapshot.id
+	if scope != "" {
+		key += "\x00dedicated\x00" + scope
+	}
 	return processTunnelPool.acquire(ctx, key, snapshot)
 }
 
@@ -277,58 +321,152 @@ func (pool *tunnelRuntimePool) acquire(
 ) (*tunnelRuntime, error) {
 	pool.mu.Lock()
 	entry := pool.entries[key]
-	sharedReady := false
+	var subscriptionID uint64
+	var replayPhase, replayDetail string
+	reusedReady := false
+	joinedEstablishment := false
 	if entry != nil && (entry.updatedAt != snapshot.updatedAt || (entry.process != nil && !entry.process.alive())) {
 		delete(pool.entries, key)
 		entry = nil
 	}
 	if entry == nil {
 		establish, cancel := context.WithTimeout(context.Background(), tunnelStartTimeout)
-		if snapshot.progress != nil {
-			// The first acquirer has no handler registered on the entry yet, so carry its
-			// progress handler on the establish context. startTunnelProcess reports its
-			// phases (preparing → ready) through the context; later acquirers are notified
-			// by the ready broadcast in establish or the join path in acquire.
-			establish = withTunnelProgressHandler(establish, snapshot.progress)
-		}
 		entry = &sharedTunnelEntry{
 			key: key, updatedAt: snapshot.updatedAt, ready: make(chan struct{}), settled: make(chan struct{}), refs: 1,
-			cancel: cancel, establish: establish,
+			cancel: cancel,
+		}
+		entry.establish = withTunnelProgressHandler(establish, pool.progress(entry))
+		if snapshot.progress != nil {
+			subscriptionID = pool.subscribeProgressLocked(entry, snapshot.progress)
 		}
 		pool.entries[key] = entry
 		go pool.establish(entry, snapshot)
 	} else {
 		entry.refs++
 		if snapshot.progress != nil {
-			entry.progressHandlers = append(entry.progressHandlers, snapshot.progress)
-			sharedReady = entry.process != nil && entry.err == nil
+			if entry.process != nil && entry.err == nil {
+				replayPhase = "ready"
+			} else {
+				subscriptionID = pool.subscribeProgressLocked(entry, snapshot.progress)
+				if entry.hasProgress {
+					replayPhase, replayDetail = entry.lastPhase, entry.lastDetail
+				}
+			}
 		}
+		reusedReady = entry.process != nil && entry.err == nil
+		joinedEstablishment = !reusedReady
 	}
 	pool.mu.Unlock()
-	if sharedReady && snapshot.progress != nil {
-		_ = snapshot.progress(ctx, "ready", "")
+	if joinedEstablishment {
+		clearBytes(snapshot.settings)
+		snapshot.settings = nil
+	}
+	if reusedReady && pool.probe != nil {
+		if err := pool.probe(ctx, entry.process); err != nil {
+			pool.evict(entry)
+			pool.release(entry)
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return pool.acquire(ctx, key, snapshot)
+		}
+	}
+	if reusedReady {
+		clearBytes(snapshot.settings)
+		snapshot.settings = nil
+	}
+	if replayPhase != "" && snapshot.progress != nil {
+		_ = snapshot.progress(ctx, replayPhase, replayDetail)
 	}
 
 	select {
 	case <-entry.ready:
+		pool.unsubscribeProgress(entry, subscriptionID)
 		if entry.err != nil {
 			pool.release(entry)
 			return nil, entry.err
 		}
 		return &tunnelRuntime{entry: entry, pool: pool}, nil
 	case <-ctx.Done():
+		pool.unsubscribeProgress(entry, subscriptionID)
 		pool.release(entry)
 		return nil, ctx.Err()
 	}
 }
 
+func (pool *tunnelRuntimePool) evict(entry *sharedTunnelEntry) {
+	pool.mu.Lock()
+	if current := pool.entries[entry.key]; current == entry {
+		delete(pool.entries, entry.key)
+	}
+	pool.mu.Unlock()
+}
+
+func probeTunnelProcess(ctx context.Context, process *tunnelProcess) error {
+	if process == nil || !process.alive() || !isLoopbackSocksEndpoint(process.socks) {
+		return errors.New("VPN tunnel is not healthy")
+	}
+	probeContext, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	connection, err := (&net.Dialer{}).DialContext(probeContext, "tcp", process.socks)
+	if err != nil {
+		return err
+	}
+	_ = connection.Close()
+	return nil
+}
+
+func (pool *tunnelRuntimePool) subscribeProgressLocked(
+	entry *sharedTunnelEntry,
+	handler tunnelProgressHandler,
+) uint64 {
+	pool.nextProgressID++
+	id := pool.nextProgressID
+	entry.progressHandlers = append(entry.progressHandlers, tunnelProgressSubscription{id: id, handler: handler})
+	return id
+}
+
+func (pool *tunnelRuntimePool) unsubscribeProgress(entry *sharedTunnelEntry, id uint64) {
+	if id == 0 {
+		return
+	}
+	pool.mu.Lock()
+	for index, subscription := range entry.progressHandlers {
+		if subscription.id == id {
+			entry.progressHandlers = append(entry.progressHandlers[:index], entry.progressHandlers[index+1:]...)
+			break
+		}
+	}
+	pool.mu.Unlock()
+}
+
+func (pool *tunnelRuntimePool) progress(entry *sharedTunnelEntry) tunnelProgressHandler {
+	return func(ctx context.Context, phase, detail string) error {
+		pool.mu.Lock()
+		entry.lastPhase, entry.lastDetail, entry.hasProgress = phase, detail, true
+		handlers := append([]tunnelProgressSubscription(nil), entry.progressHandlers...)
+		pool.mu.Unlock()
+		for _, subscription := range handlers {
+			if err := subscription.handler(ctx, phase, detail); err != nil {
+				pool.unsubscribeProgress(entry, subscription.id)
+			}
+		}
+		// A broken progress consumer must never abort the shared VPN establishment for every
+		// other waiter. Failed subscriptions are detached above, matching the .NET fan-out.
+		return nil
+	}
+}
+
 func (pool *tunnelRuntimePool) establish(entry *sharedTunnelEntry, snapshot tunnelConfigSnapshot) {
 	process, err := pool.start(entry.establish, snapshot)
+	if err == nil {
+		_ = pool.progress(entry)(entry.establish, "ready", "")
+	}
 	pool.mu.Lock()
 	entry.cancel()
 	entry.process = process
 	entry.err = err
-	handlers := append([]tunnelProgressHandler(nil), entry.progressHandlers...)
+	entry.progressHandlers = nil
 	if err != nil {
 		if current := pool.entries[entry.key]; current == entry {
 			delete(pool.entries, entry.key)
@@ -337,11 +475,6 @@ func (pool *tunnelRuntimePool) establish(entry *sharedTunnelEntry, snapshot tunn
 	orphaned := entry.refs == 0
 	close(entry.ready)
 	pool.mu.Unlock()
-	if err == nil {
-		for _, handler := range handlers {
-			_ = handler(context.Background(), "ready", "")
-		}
-	}
 	if orphaned && process != nil {
 		process.close()
 	}
@@ -396,6 +529,7 @@ func startTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot) (*tu
 			return nil, err
 		}
 	}
+	defer clearBytes(snapshot.settings)
 	if err := reportTunnelProgress(ctx, "authenticating", ""); err != nil {
 		return nil, err
 	}
@@ -403,15 +537,12 @@ func startTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot) (*tu
 	if err != nil {
 		return nil, err
 	}
-	if snapshot.kind == 3 || snapshot.kind == 4 || snapshot.kind == 5 {
-		if err := reportTunnelProgress(ctx, "downloading", ""); err != nil {
-			return nil, err
-		}
-	}
+	defer clearBytes(settings)
 	executable, config, err := tunnelSidecarCommand(snapshot.kind, settings)
 	if err != nil {
 		return nil, err
 	}
+	defer clearBytes(config)
 	path, err := findTunnelSidecar(executable)
 	if err != nil {
 		return nil, err
@@ -466,7 +597,6 @@ func startTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot) (*tu
 	select {
 	case port := <-ready:
 		process.socks = net.JoinHostPort("127.0.0.1", port)
-		_ = reportTunnelProgress(ctx, "ready", "")
 		return process, nil
 	case <-ctx.Done():
 		process.close()
@@ -477,7 +607,7 @@ func startTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot) (*tu
 		case <-stderrDone:
 		case <-time.After(tunnelSidecarStderrWaitTimeout):
 		}
-		return nil, tunnelSidecarFailureMessage(executable, diagnostics.text(), process.command.ProcessState.ExitCode())
+		return nil, tunnelSidecarStartupFailure(snapshot, settings, executable, diagnostics.text(), process.command.ProcessState.ExitCode())
 	case err := <-readErr:
 		process.close()
 		select {
@@ -488,11 +618,60 @@ func startTunnelProcess(ctx context.Context, snapshot tunnelConfigSnapshot) (*tu
 			case <-stderrDone:
 			case <-time.After(tunnelSidecarStderrWaitTimeout):
 			}
-			return nil, tunnelSidecarFailureMessage(executable, diagnostics.text(), process.command.ProcessState.ExitCode())
+			return nil, tunnelSidecarStartupFailure(snapshot, settings, executable, diagnostics.text(), process.command.ProcessState.ExitCode())
 		default:
 			return nil, err
 		}
 	}
+}
+
+func tunnelSidecarStartupFailure(
+	snapshot tunnelConfigSnapshot,
+	settings json.RawMessage,
+	executable string,
+	stderr string,
+	exitCode int,
+) error {
+	var values map[string]json.RawMessage
+	_ = json.Unmarshal(settings, &values)
+	defer clearTunnelSettingsMap(values)
+	lower := strings.ToLower(stderr)
+	authFailure := strings.Contains(lower, "auth_failed") || strings.Contains(lower, "auth failed") ||
+		strings.Contains(lower, "authentication failed") || strings.Contains(lower, "authentication rejected") ||
+		strings.Contains(lower, "login failed")
+	transientTransport := strings.Contains(lower, "connection_timeout") || strings.Contains(lower, "transport_error") ||
+		strings.Contains(lower, "network_recv") || strings.Contains(lower, "eof_error") ||
+		strings.Contains(lower, "timed out") || strings.Contains(lower, "timeout") ||
+		strings.Contains(lower, "connection refused") || strings.Contains(lower, "no such host")
+
+	if snapshot.id != "" {
+		switch snapshot.kind {
+		case 3:
+			if tunnelSettingBool(values, "_WormholeWatchguardTypedOTP") && (authFailure || transientTransport) {
+				return errors.New("WatchGuard couldn't complete the connection with the one-time code; AuthPoint may be rate-limiting a recent login or push approval, so wait about 30 seconds and retry with a fresh code (or type 'p' to approve with a push)")
+			}
+			if tunnelSettingBool(values, "_WormholeWatchguardCacheHit") && !authFailure &&
+				!strings.Contains(lower, "dynamic-challenge") && !transientTransport {
+				removeProtectedTunnelFileIfCurrent(snapshot, watchguardCachePath(snapshot))
+				return errors.New("couldn't start the VPN tunnel: the cached WatchGuard profile was rejected and has been cleared; reconnect to download a fresh profile")
+			}
+		case 4:
+			if tunnelSettingBool(values, "_WormholeStormshieldOptimisticCache") {
+				removeProtectedTunnelFileIfCurrent(snapshot, stormshieldCachePath(snapshot))
+				return errors.New("couldn't start the VPN tunnel: the unverified Stormshield profile cache has been cleared; reconnect with a fresh one-time code to download the current profile")
+			}
+			if tunnelSettingNumber(values, "Mode") == 0 && tunnelSettingBool(values, "UseOtp") {
+				base := tunnelSidecarFailureMessage(executable, stderr, exitCode)
+				return fmt.Errorf("%s; the Stormshield one-time code may have been used or expired during this attempt, so retry with a new code", base)
+			}
+		case 5:
+			if authFailure {
+				removeProtectedTunnelFileIfCurrent(snapshot, azureRefreshPath(snapshot))
+				return errors.New("couldn't start the VPN tunnel: Azure rejected the Microsoft access token; cached sign-in was cleared, so reconnect to authenticate again")
+			}
+		}
+	}
+	return tunnelSidecarFailureMessage(executable, stderr, exitCode)
 }
 
 type boundedStderrBuilder struct {
@@ -589,6 +768,7 @@ func prepareTunnelAuthentication(
 	if err := json.Unmarshal(raw, &settings); err != nil {
 		return nil, errors.New("VPN tunnel settings are invalid")
 	}
+	defer clearTunnelSettingsMap(settings)
 	if !tunnelSettingBool(settings, "UseSingleSignOn") {
 		return raw, nil
 	}
@@ -746,6 +926,7 @@ func tunnelSidecarCommand(kind int64, raw json.RawMessage) (string, []byte, erro
 	if err := json.Unmarshal(raw, &settings); err != nil {
 		return "", nil, errors.New("VPN tunnel settings are invalid")
 	}
+	defer clearTunnelSettingsMap(settings)
 	stringValue := func(key string) string { return tunnelSettingString(settings, key) }
 	numberValue := func(key string, fallback int64) int64 {
 		value := tunnelSettingNumber(settings, key)
@@ -813,7 +994,20 @@ func tunnelSidecarCommand(kind int64, raw json.RawMessage) (string, []byte, erro
 		if strings.TrimSpace(profile) == "" {
 			return "", nil, errors.New("Stormshield OpenVPN profile is missing")
 		}
-		payload, err := encode(openVPNConfig(profile, stringValue("Username"), stringValue("Password")))
+		adapters, err := physicalTransportAdapterIDs()
+		if err != nil {
+			return "", nil, err
+		}
+		config := openVPNConfig(profile, stringValue("Username"), stringValue("Password"))
+		if len(adapters) > 0 {
+			remotes := extractOpenVPNTransportRemotes(profile)
+			if len(remotes) == 0 {
+				return "", nil, errors.New("Stormshield OpenVPN profile contains no transport remote")
+			}
+			config["transport_adapter_ids"] = adapters
+			config["transport_remotes"] = remotes
+		}
+		payload, err := encode(config)
 		return "wormhole-ovpnproxy", payload, err
 	case 5:
 		profile := stringValue("ProfileOvpn")

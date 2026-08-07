@@ -125,6 +125,45 @@ func TestTunnelSidecarFailureMessageNeverEchoesRawStderr(t *testing.T) {
 	}
 }
 
+func TestWatchguardTypedOTPFailureGetsCooldownGuidance(t *testing.T) {
+	settings := json.RawMessage(`{"_WormholeWatchguardTypedOTP":true}`)
+	err := tunnelSidecarStartupFailure(
+		tunnelConfigSnapshot{id: "watchguard", kind: 3}, settings, "wormhole-ovpnproxy",
+		"TRANSPORT_ERROR CONNECTION_TIMEOUT", 1,
+	)
+	if !strings.Contains(err.Error(), "wait about 30 seconds") || !strings.Contains(err.Error(), "fresh code") {
+		t.Fatalf("typed OTP failure guidance = %v", err)
+	}
+}
+
+func TestElectronProviderCachesDoNotCollideWithWinUI(t *testing.T) {
+	snapshot := tunnelConfigSnapshot{
+		databasePath: filepath.Join(t.TempDir(), "wormhole.db"),
+		id:           "11111111-2222-3333-8444-555555555555",
+	}
+	pairs := [][2]string{
+		{stormshieldCachePath(snapshot), winUIStormshieldCachePath(snapshot)},
+		{watchguardCachePath(snapshot), winUIWatchguardCachePath(snapshot)},
+		{azureRefreshPath(snapshot), winUIAzureRefreshPath(snapshot)},
+	}
+	for _, pair := range pairs {
+		if filepath.Clean(pair[0]) == filepath.Clean(pair[1]) {
+			t.Fatalf("Electron and WinUI cache paths collide: %q", pair[0])
+		}
+	}
+}
+
+func TestStormshieldDataPlaneFailureRequiresANewOTP(t *testing.T) {
+	settings := json.RawMessage(`{"Mode":0,"UseOtp":true}`)
+	err := tunnelSidecarStartupFailure(
+		tunnelConfigSnapshot{id: "stormshield", kind: 4}, settings, "wormhole-ovpnproxy",
+		"AUTH_FAILED", 1,
+	)
+	if !strings.Contains(err.Error(), "new code") || !strings.Contains(err.Error(), "may have been used") {
+		t.Fatalf("Stormshield OTP failure guidance = %v", err)
+	}
+}
+
 func TestTunnelSidecarFailureMessageDebugOptInShowsBoundedDetail(t *testing.T) {
 	t.Setenv("WORMHOLE_TUNNEL_DEBUG", "1")
 	long := strings.Repeat("x", 2000)
@@ -134,6 +173,60 @@ func TestTunnelSidecarFailureMessageDebugOptInShowsBoundedDetail(t *testing.T) {
 	}
 	if len(err.Error()) > 1200 {
 		t.Fatalf("debug detail was not bounded: %d bytes", len(err.Error()))
+	}
+}
+
+func TestTunnelSidecarStartupFailureInvalidatesOnlyActionableProviderCaches(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	snapshot := tunnelConfigSnapshot{
+		databasePath: databasePath,
+		id:           "11111111-2222-3333-4444-555555555555",
+		kind:         3,
+	}
+	watchguardPath := watchguardCachePath(snapshot)
+	if err := os.MkdirAll(filepath.Dir(watchguardPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(watchguardPath, []byte("cache"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	settings := json.RawMessage(`{"_WormholeWatchguardCacheHit":true}`)
+	_ = tunnelSidecarStartupFailure(snapshot, settings, "wormhole-ovpnproxy", "AUTH_FAILED", 1)
+	if _, err := os.Stat(watchguardPath); err != nil {
+		t.Fatalf("an OTP/auth failure must retain the WatchGuard cache: %v", err)
+	}
+	message := tunnelSidecarStartupFailure(snapshot, settings, "wormhole-ovpnproxy", "VERIFY ERROR certificate expired", 1)
+	if _, err := os.Stat(watchguardPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale WatchGuard cache was retained: %v", err)
+	}
+	if !strings.Contains(message.Error(), "cleared") {
+		t.Fatalf("cache reset was not explained: %v", message)
+	}
+
+	snapshot.kind = 4
+	stormshieldPath := stormshieldCachePath(snapshot)
+	if err := os.MkdirAll(filepath.Dir(stormshieldPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(stormshieldPath, []byte("cache"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = tunnelSidecarStartupFailure(snapshot, json.RawMessage(`{"_WormholeStormshieldOptimisticCache":true}`), "wormhole-ovpnproxy", "transport failed", 1)
+	if _, err := os.Stat(stormshieldPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("optimistic Stormshield cache was retained: %v", err)
+	}
+
+	snapshot.kind = 5
+	azurePath := azureRefreshPath(snapshot)
+	if err := os.MkdirAll(filepath.Dir(azurePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(azurePath, []byte("cache"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = tunnelSidecarStartupFailure(snapshot, nil, "wormhole-ovpnproxy", "AUTH_FAILED", 1)
+	if _, err := os.Stat(azurePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected Azure refresh cache was retained: %v", err)
 	}
 }
 
@@ -371,6 +464,53 @@ func TestTunnelRuntimePoolCoalescesAndReferenceCounts(t *testing.T) {
 	}
 }
 
+func TestTunnelRuntimePoolReplaysCurrentProgressToLateJoiner(t *testing.T) {
+	continueStart := make(chan struct{})
+	reported := make(chan struct{})
+	pool := newTunnelRuntimePool(func(ctx context.Context, _ tunnelConfigSnapshot) (*tunnelProcess, error) {
+		if err := reportTunnelProgress(ctx, "authenticating", "waiting for approval"); err != nil {
+			return nil, err
+		}
+		close(reported)
+		<-continueStart
+		return newTestTunnelProcess(), nil
+	})
+	firstProgress := make(chan string, 2)
+	secondProgress := make(chan string, 2)
+	firstResult := make(chan *tunnelRuntime, 1)
+	secondResult := make(chan *tunnelRuntime, 1)
+	snapshot := tunnelConfigSnapshot{id: "id", updatedAt: "one", progress: func(_ context.Context, phase, detail string) error {
+		firstProgress <- phase + ":" + detail
+		return nil
+	}}
+	go func() {
+		lease, _ := pool.acquire(context.Background(), "database\x00id", snapshot)
+		firstResult <- lease
+	}()
+	<-reported
+	late := snapshot
+	late.progress = func(_ context.Context, phase, detail string) error {
+		secondProgress <- phase + ":" + detail
+		return nil
+	}
+	go func() {
+		lease, _ := pool.acquire(context.Background(), "database\x00id", late)
+		secondResult <- lease
+	}()
+	select {
+	case value := <-secondProgress:
+		if value != "authenticating:waiting for approval" {
+			t.Fatalf("late progress = %q", value)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("late joiner did not receive the current shared-establishment phase")
+	}
+	close(continueStart)
+	first, second := <-firstResult, <-secondResult
+	first.close()
+	second.close()
+}
+
 func TestTunnelRuntimePoolRefreshesEditedConfig(t *testing.T) {
 	var starts int
 	pool := newTunnelRuntimePool(func(context.Context, tunnelConfigSnapshot) (*tunnelProcess, error) {
@@ -405,6 +545,37 @@ func TestTunnelRuntimePoolRefreshesEditedConfig(t *testing.T) {
 	if oldProcess.alive() {
 		t.Fatal("stale sidecar stayed alive after its final release")
 	}
+}
+
+func TestTunnelRuntimePoolEvictsAProcessWithDeadSocksListener(t *testing.T) {
+	oldProcess := newTestTunnelProcess()
+	pool := newTunnelRuntimePool(func(context.Context, tunnelConfigSnapshot) (*tunnelProcess, error) {
+		return newTestTunnelProcess(), nil
+	})
+	pool.probe = func(context.Context, *tunnelProcess) error {
+		return errors.New("listener is closed")
+	}
+	entry := &sharedTunnelEntry{
+		key: "database\x00id", updatedAt: "one", refs: 1, process: oldProcess,
+		ready: make(chan struct{}), settled: make(chan struct{}),
+	}
+	close(entry.ready)
+	close(entry.settled)
+	pool.entries[entry.key] = entry
+	oldLease := &tunnelRuntime{entry: entry, pool: pool}
+
+	replacement, err := pool.acquire(context.Background(), entry.key, tunnelConfigSnapshot{id: "id", updatedAt: "one"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replacement.entry == entry || replacement.entry.process == oldProcess {
+		t.Fatal("dead SOCKS listener reused the stale pooled process")
+	}
+	if !oldProcess.alive() {
+		t.Fatal("eviction interrupted an existing lease on the stale process")
+	}
+	replacement.close()
+	oldLease.close()
 }
 
 func TestLoadTunnelSnapshotDefersSecretReadUntilNewSidecarStarts(t *testing.T) {
@@ -558,6 +729,60 @@ func TestValidateTunnelWriteRequestRejectsMalformedAzureServerSecret(t *testing.
 	}
 	if err := validateTunnelWriteRequest(&request, false); err != nil {
 		t.Fatalf("valid 512-hex ServerSecretHex was rejected: %v", err)
+	}
+}
+
+func TestValidateTunnelWriteRequestRejectsOpenVPNDirectiveInjection(t *testing.T) {
+	tests := []struct {
+		name     string
+		kind     int64
+		settings string
+	}{
+		{
+			name: "WatchGuard certificate subject", kind: 3,
+			settings: `{"Server":"firebox.example.test","AuthMode":0,"VerifyX509Name":"safe'\nup evil"}`,
+		},
+		{
+			name: "WatchGuard inline PEM", kind: 3,
+			settings: `{"Server":"firebox.example.test","AuthMode":0,"CaPem":"base64</ca>up evil"}`,
+		},
+		{
+			name: "Azure gateway", kind: 5,
+			settings: `{"TenantId":"tenant","Audience":"audience","Servers":["gateway.test up evil"]}`,
+		},
+		{
+			name: "Azure inline CA", kind: 5,
+			settings: `{"TenantId":"tenant","Audience":"audience","Servers":["gateway.test"],"CaPem":"base64</ca>up evil"}`,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := tunnelWriteRequest{Name: test.name, Kind: test.kind, Settings: json.RawMessage(test.settings)}
+			if err := validateTunnelWriteRequest(&request, false); err == nil {
+				t.Fatal("directive-bearing input was accepted")
+			}
+		})
+	}
+}
+
+func TestProviderCacheIdentityIgnoresRotatedPasswordsButTracksSiteTrust(t *testing.T) {
+	base := stormshieldTestSettings(t, map[string]any{
+		"Server": "vpn.example.test", "Port": 443, "Username": "alice", "Password": "old",
+	})
+	rotated := stormshieldTestSettings(t, map[string]any{
+		"Server": "vpn.example.test", "Port": 443, "Username": "alice", "Password": "new",
+	})
+	trusted := stormshieldTestSettings(t, map[string]any{
+		"Server": "vpn.example.test", "Port": 443, "Username": "alice", "Password": "new",
+		"TrustServerCertificate": true,
+	})
+	for _, kind := range []int64{3, 4} {
+		if providerCacheIdentity(kind, base) != providerCacheIdentity(kind, rotated) {
+			t.Fatalf("kind %d cache identity changed with password rotation", kind)
+		}
+		if providerCacheIdentity(kind, rotated) == providerCacheIdentity(kind, trusted) {
+			t.Fatalf("kind %d cache identity ignored trust change", kind)
+		}
 	}
 }
 

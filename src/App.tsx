@@ -173,6 +173,7 @@ import { WebSessionAttemptTracker } from '../electron/web-session-attempt';
 import {
   inheritTunnelConfigPrefix,
   isTunnelTestCancellation,
+  isTunnelTestNotice,
   missingTunnelFields,
   normalizeTunnelEditorSettings,
   tunnelModeFor,
@@ -1353,7 +1354,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       await window.wormhole.respondTunnelPrompt({
         leaseId: prompt.sessionId,
         promptId: prompt.promptId,
-        value: cancelled ? '' : tunnelPromptValue,
+        value: cancelled ? '' : prompt.confirmation ? 'accept' : tunnelPromptValue,
         cancelled,
       });
     } catch {
@@ -1835,7 +1836,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         !event.promptId ||
         !event.title ||
         typeof event.message !== 'string' ||
-        typeof event.secret !== 'boolean'
+        typeof event.secret !== 'boolean' ||
+        (event.confirmation !== undefined && typeof event.confirmation !== 'boolean') ||
+        (event.acceptLabel !== undefined && typeof event.acceptLabel !== 'string')
       ) {
         return;
       }
@@ -1846,6 +1849,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         title: event.title,
         message: event.message,
         secret: event.secret,
+        confirmation: event.confirmation === true,
+        acceptLabel: event.acceptLabel,
       };
       setTunnelPrompts((current) =>
         current.some((item) => item.promptId === prompt.promptId) ? current : [...current, prompt],
@@ -4060,7 +4065,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             className="space-y-4"
             onSubmit={(event) => {
               event.preventDefault();
-              if (tunnelPromptValue.trim()) void resolveTunnelPrompt(false);
+              if (tunnelPrompts[0]?.confirmation || tunnelPromptValue.trim()) {
+                void resolveTunnelPrompt(false);
+              }
             }}
           >
             <DialogHeader>
@@ -4069,19 +4076,24 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 {tunnelPrompts[0]?.message || 'Enter the value requested by the VPN gateway.'}
               </DialogDescription>
             </DialogHeader>
-            <Input
-              autoComplete="one-time-code"
-              autoFocus
-              onChange={(event) => setTunnelPromptValue(event.target.value)}
-              type={tunnelPrompts[0]?.secret ? 'password' : 'text'}
-              value={tunnelPromptValue}
-            />
+            {!tunnelPrompts[0]?.confirmation ? (
+              <Input
+                autoComplete="one-time-code"
+                autoFocus
+                onChange={(event) => setTunnelPromptValue(event.target.value)}
+                type={tunnelPrompts[0]?.secret ? 'password' : 'text'}
+                value={tunnelPromptValue}
+              />
+            ) : null}
             <DialogFooter>
               <Button onClick={() => void resolveTunnelPrompt(true)} type="button" variant="ghost">
                 Cancel
               </Button>
-              <Button disabled={!tunnelPromptValue.trim()} type="submit">
-                Continue
+              <Button
+                disabled={!tunnelPrompts[0]?.confirmation && !tunnelPromptValue.trim()}
+                type="submit"
+              >
+                {tunnelPrompts[0]?.acceptLabel || 'Continue'}
               </Button>
             </DialogFooter>
           </form>
@@ -8713,7 +8725,7 @@ function TunnelsPage({
   const [actionError, setActionError] = useState('');
   const [testState, setTestState] = useState<{
     tunnel: TunnelRecord;
-    status: 'connecting' | 'connected' | 'cancelled' | 'failed';
+    status: 'connecting' | 'connected' | 'notice' | 'cancelled' | 'failed';
     error?: string;
   } | null>(null);
   const testAttemptRef = useRef(0);
@@ -8787,7 +8799,11 @@ function TunnelsPage({
           current
             ? {
                 ...current,
-                status: isTunnelTestCancellation(message) ? 'cancelled' : 'failed',
+                status: isTunnelTestCancellation(message)
+                  ? 'cancelled'
+                  : isTunnelTestNotice(message)
+                    ? 'notice'
+                    : 'failed',
                 error: message,
               }
             : current,
@@ -8802,7 +8818,11 @@ function TunnelsPage({
         current
           ? {
               ...current,
-              status: isTunnelTestCancellation(message) ? 'cancelled' : 'failed',
+              status: isTunnelTestCancellation(message)
+                ? 'cancelled'
+                : isTunnelTestNotice(message)
+                  ? 'notice'
+                  : 'failed',
               error: message,
             }
           : current,
@@ -8929,6 +8949,14 @@ function TunnelsPage({
                   <p className="text-xs leading-relaxed text-muted-foreground">
                     You stopped the authentication prompt — no changes were made.
                   </p>
+                </div>
+              </>
+            ) : testState?.status === 'notice' ? (
+              <>
+                <Info className="size-5 shrink-0 text-emerald-500" />
+                <div className="min-w-0 space-y-1">
+                  <p className="text-sm font-medium">VPN preparation completed.</p>
+                  <p className="text-xs leading-relaxed text-muted-foreground">{testState.error}</p>
                 </div>
               </>
             ) : (

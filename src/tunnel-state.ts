@@ -239,3 +239,9 @@ export function userFacingTunnelError(error: unknown): string {
 export function isTunnelTestCancellation(message: string): boolean {
   return /(authentication|prompt|operation|establishment).{0,48}cancell/i.test(message);
 }
+
+export function isTunnelTestNotice(message: string): boolean {
+  return /downloaded (?:and protected )?a fresh VPN profile|one-time code was just used/i.test(
+    message,
+  );
+}

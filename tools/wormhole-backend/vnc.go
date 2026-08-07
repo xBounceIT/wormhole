@@ -51,6 +51,7 @@ type backendCommand struct {
 	Port              int    `json:"port,omitempty"`
 	Password          string `json:"password,omitempty"`
 	TunnelConfigID    string `json:"tunnelConfigId,omitempty"`
+	Dedicated         bool   `json:"dedicated,omitempty"`
 	PromptID          string `json:"promptId,omitempty"`
 	Value             string `json:"value,omitempty"`
 	Cancelled         bool   `json:"cancelled,omitempty"`
@@ -93,6 +94,8 @@ type backendEvent struct {
 	ExpectedState           string   `json:"expectedState,omitempty"`
 	CookieName              string   `json:"cookieName,omitempty"`
 	RequireHTTPOnly         bool     `json:"requireHttpOnly,omitempty"`
+	Confirmation            bool     `json:"confirmation,omitempty"`
+	AcceptLabel             string   `json:"acceptLabel,omitempty"`
 }
 
 type backendLineWriter struct {
@@ -380,7 +383,13 @@ func (m *vncManager) acquireTunnel(command backendCommand) {
 		}
 		ctx = withTunnelProgressHandler(ctx, m.progressTunnel(progressSessionID))
 		promptContext := withTunnelPromptHandler(ctx, m.promptTunnel(command.SessionID))
-		lease, err := startTunnelRuntime(promptContext, m.databasePath, configID)
+		var lease *tunnelRuntime
+		var err error
+		if command.Dedicated {
+			lease, err = startTunnelRuntimeScoped(promptContext, m.databasePath, configID, command.SessionID)
+		} else {
+			lease, err = startTunnelRuntime(promptContext, m.databasePath, configID)
+		}
 		m.finishTunnelAcquire(command, lease, err)
 	}()
 }
@@ -405,6 +414,7 @@ func (m *vncManager) promptTunnel(leaseID string) tunnelPromptHandler {
 			Completion: prompt.Completion, RedirectPrefix: prompt.RedirectPrefix,
 			ExpectedState: prompt.ExpectedState,
 			CookieName:    prompt.CookieName, RequireHTTPOnly: prompt.RequireHTTPOnly,
+			Confirmation: prompt.Confirmation, AcceptLabel: prompt.AcceptLabel,
 		})
 		defer func() {
 			m.mu.Lock()
