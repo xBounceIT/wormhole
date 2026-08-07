@@ -524,7 +524,12 @@ type SshBackendEvent =
 
 type SshOpenRequest = {
   sessionId: string;
-  nodeId: string;
+  nodeId?: string;
+  host?: string;
+  port?: number;
+  username?: string;
+  password?: string;
+  tunnelConfigId?: string;
   columns: number;
   rows: number;
 };
@@ -793,18 +798,61 @@ function isWebCommandRequest(value: unknown): value is WebCommandRequest {
 }
 
 function isSshOpenRequest(value: unknown): value is SshOpenRequest {
+  if (
+    !isRecord(value) ||
+    !isSshSessionId(value.sessionId) ||
+    typeof value.columns !== 'number' ||
+    !Number.isInteger(value.columns) ||
+    value.columns < 0 ||
+    value.columns > 500 ||
+    typeof value.rows !== 'number' ||
+    !Number.isInteger(value.rows) ||
+    value.rows < 0 ||
+    value.rows > 500
+  ) {
+    return false;
+  }
+
+  const hasNodeId = value.nodeId !== undefined;
+  const hasDirectTarget =
+    value.host !== undefined ||
+    value.port !== undefined ||
+    value.username !== undefined ||
+    value.password !== undefined ||
+    value.tunnelConfigId !== undefined;
+  if (hasNodeId === hasDirectTarget) return false;
+
+  if (hasNodeId) {
+    return (
+      isSshSessionId(value.nodeId) &&
+      value.host === undefined &&
+      value.port === undefined &&
+      value.username === undefined &&
+      value.password === undefined &&
+      value.tunnelConfigId === undefined
+    );
+  }
+
+  const host = value.host;
+  const username = value.username;
+  const password = value.password;
   return (
-    isRecord(value) &&
-    isSshSessionId(value.sessionId) &&
-    isSshSessionId(value.nodeId) &&
-    typeof value.columns === 'number' &&
-    Number.isInteger(value.columns) &&
-    value.columns >= 0 &&
-    value.columns <= 500 &&
-    typeof value.rows === 'number' &&
-    Number.isInteger(value.rows) &&
-    value.rows >= 0 &&
-    value.rows <= 500
+    typeof host === 'string' &&
+    host.trim().length > 0 &&
+    host.length <= 4096 &&
+    !/[\r\n\0]/.test(host) &&
+    typeof username === 'string' &&
+    username.trim().length > 0 &&
+    username.length <= credentialMaxUsernameLength &&
+    !/[\r\n\0]/.test(username) &&
+    typeof password === 'string' &&
+    Buffer.byteLength(password, 'utf8') <= credentialMaxPasswordLength &&
+    (value.port === undefined ||
+      (typeof value.port === 'number' &&
+        Number.isInteger(value.port) &&
+        value.port >= 1 &&
+        value.port <= 65535)) &&
+    (value.tunnelConfigId === undefined || isTunnelID(value.tunnelConfigId))
   );
 }
 
@@ -2883,27 +2931,36 @@ class NativeSshBackend {
     if (this.openWaiters.has(request.sessionId) || this.activeSessions.has(request.sessionId)) {
       throw new Error('SSH session id is already in use.');
     }
-    const leaseId = randomUUID();
-    this.tunnelLeases.set(request.sessionId, leaseId);
     let socksEndpoint = '';
-    try {
-      socksEndpoint = await getNativeBackend().acquireTunnel({
-        leaseId,
-        nodeId: request.nodeId,
-        progressSessionId: request.sessionId,
-      });
-    } catch (error) {
-      if (this.tunnelLeases.get(request.sessionId) === leaseId) {
-        this.tunnelLeases.delete(request.sessionId);
+    const tunnelRequested = Boolean(request.nodeId || request.tunnelConfigId);
+    let leaseId: string | undefined;
+    if (tunnelRequested) {
+      leaseId = randomUUID();
+      this.tunnelLeases.set(request.sessionId, leaseId);
+      try {
+        socksEndpoint = await getNativeBackend().acquireTunnel({
+          leaseId,
+          nodeId: request.nodeId,
+          tunnelConfigId: request.tunnelConfigId,
+          progressSessionId: request.sessionId,
+        });
+      } catch (error) {
+        if (this.tunnelLeases.get(request.sessionId) === leaseId) {
+          this.tunnelLeases.delete(request.sessionId);
+        }
+        throw error;
       }
-      throw error;
-    }
-    if (this.tunnelLeases.get(request.sessionId) !== leaseId) {
-      throw new Error('SSH connection closed while opening its VPN tunnel.');
-    }
-    if (!socksEndpoint) {
-      this.tunnelLeases.delete(request.sessionId);
-      void nativeBackend?.releaseTunnel(leaseId).catch(() => undefined);
+      if (this.tunnelLeases.get(request.sessionId) !== leaseId) {
+        void nativeBackend?.releaseTunnel(leaseId).catch(() => undefined);
+        throw new Error('SSH connection closed while opening its VPN tunnel.');
+      }
+      if (!socksEndpoint) {
+        this.tunnelLeases.delete(request.sessionId);
+        void nativeBackend?.releaseTunnel(leaseId).catch(() => undefined);
+        if (request.tunnelConfigId) {
+          throw new Error('The VPN tunnel returned no SOCKS endpoint.');
+        }
+      }
     }
     try {
       this.ensureStarted();
@@ -2931,8 +2988,13 @@ class NativeSshBackend {
           type: 'open',
           session_id: request.sessionId,
           node_id: request.nodeId,
+          host: request.host,
+          port: request.port,
+          username: request.username,
+          password: request.password,
+          tunnel_config_id: request.tunnelConfigId,
           socks_endpoint: socksEndpoint,
-          tunnel_enabled: socksEndpoint ? undefined : false,
+          tunnel_enabled: request.nodeId && !socksEndpoint ? false : undefined,
           columns: request.columns,
           rows: request.rows,
         });

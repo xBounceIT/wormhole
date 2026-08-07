@@ -35,6 +35,9 @@ const (
 	sshOutputChunk                    = 16 * 1024
 	sshMaxColumns                     = 500
 	sshMaxRows                        = 500
+	sshMaxHostLength                  = 4096
+	sshMaxUsernameLength              = 512
+	sshMaxPasswordBytes               = 4096
 	sshAutoSudoTimeout                = 10 * time.Second
 	sshAutoSudoTailBytes              = 512
 	sshAutoSudoPromptBytes            = 16
@@ -73,6 +76,10 @@ type sshWireCommand struct {
 	Type            string                `json:"type"`
 	SessionID       string                `json:"session_id"`
 	NodeID          string                `json:"node_id"`
+	Host            string                `json:"host"`
+	Username        string                `json:"username"`
+	Password        string                `json:"password"`
+	TunnelConfigID  string                `json:"tunnel_config_id"`
 	SocksEndpoint   string                `json:"socks_endpoint"`
 	TunnelEnabled   *bool                 `json:"tunnel_enabled,omitempty"`
 	Data            string                `json:"data"`
@@ -434,9 +441,24 @@ func (server *sshServer) cancelAutoSudo(command sshWireCommand) {
 
 func (server *sshServer) open(command sshWireCommand) {
 	nodeID := strings.TrimSpace(command.NodeID)
-	if nodeID == "" || len(nodeID) > 128 {
-		server.writeError(command.SessionID, "SSH connection id is invalid")
-		return
+	var directTarget *sshTarget
+	if nodeID != "" {
+		if len(nodeID) > 128 ||
+			command.Host != "" ||
+			command.Port != 0 ||
+			command.Username != "" ||
+			command.Password != "" ||
+			command.TunnelConfigID != "" {
+			server.writeError(command.SessionID, "SSH connection target is invalid")
+			return
+		}
+	} else {
+		target, err := resolveDirectSSHTarget(command)
+		if err != nil {
+			server.writeError(command.SessionID, err.Error())
+			return
+		}
+		directTarget = &target
 	}
 	if command.SocksEndpoint != "" && !isLoopbackSocksEndpoint(command.SocksEndpoint) {
 		server.writeError(command.SessionID, "SSH VPN proxy endpoint is invalid")
@@ -472,6 +494,7 @@ func (server *sshServer) open(command sshWireCommand) {
 			server.databasePath,
 			server.electronUserDataPath,
 			nodeID,
+			directTarget,
 			command.SocksEndpoint,
 			command.TunnelEnabled,
 			command.Columns,
@@ -2523,11 +2546,51 @@ func isSafeSftpName(name string) bool {
 	return !strings.ContainsAny(name, "/\\:\x00")
 }
 
+func resolveDirectSSHTarget(command sshWireCommand) (sshTarget, error) {
+	host := strings.TrimSpace(command.Host)
+	if host == "" {
+		return sshTarget{}, errors.New("SSH host is required")
+	}
+	if len([]byte(host)) > sshMaxHostLength || strings.ContainsAny(host, "\r\n\x00") {
+		return sshTarget{}, errors.New("SSH host is invalid")
+	}
+	username := strings.TrimSpace(command.Username)
+	if username == "" {
+		return sshTarget{}, errors.New("SSH username is required")
+	}
+	if len([]byte(username)) > sshMaxUsernameLength || strings.ContainsAny(username, "\r\n\x00") {
+		return sshTarget{}, errors.New("SSH username is invalid")
+	}
+	if len([]byte(command.Password)) > sshMaxPasswordBytes {
+		return sshTarget{}, errors.New("SSH password is too long")
+	}
+	port := command.Port
+	if port == 0 {
+		port = 22
+	}
+	if port < 1 || port > 65535 {
+		return sshTarget{}, errors.New("SSH port is invalid")
+	}
+	tunnelConfigID := normalizeTunnelID(command.TunnelConfigID)
+	if command.TunnelConfigID != "" && tunnelConfigID == "" {
+		return sshTarget{}, errors.New("SSH VPN tunnel is invalid")
+	}
+	return sshTarget{
+		title:          host,
+		host:           host,
+		port:           port,
+		username:       username,
+		password:       command.Password,
+		tunnelConfigID: tunnelConfigID,
+	}, nil
+}
+
 func openNativeSSH(
 	ctx context.Context,
 	databasePath string,
 	electronUserDataPath string,
 	nodeID string,
+	directTarget *sshTarget,
 	socksEndpoint string,
 	tunnelEnabled *bool,
 	columns uint32,
@@ -2536,7 +2599,15 @@ func openNativeSSH(
 	if err := ctx.Err(); err != nil {
 		return nil, sshTarget{}, err
 	}
-	target, err := loadSSHTarget(databasePath, nodeID, electronUserDataPath)
+	var target sshTarget
+	var err error
+	if nodeID != "" {
+		target, err = loadSSHTarget(databasePath, nodeID, electronUserDataPath)
+	} else if directTarget != nil {
+		target = *directTarget
+	} else {
+		err = errors.New("SSH connection target is missing")
+	}
 	if err != nil {
 		return nil, sshTarget{}, err
 	}
@@ -2560,7 +2631,7 @@ func openNativeSSH(
 		return nil, sshTarget{}, err
 	}
 	native.tunnel = tunnel
-	if target.knownHostFingerprint == "" {
+	if target.knownHostFingerprint == "" && target.nodeID != "" {
 		if err := persistSSHFingerprint(databasePath, target.nodeID, fingerprint); err != nil {
 			if errors.Is(err, errSSHHostFingerprintChanged) {
 				native.close(false)

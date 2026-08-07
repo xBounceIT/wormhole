@@ -56,11 +56,13 @@ decrypts migrated DPAPI secrets, and creates the PTY with Go's native
 the renderer receives only session metadata and validated terminal screen frames
 plus bounded scrollback batches through the preload bridge. It never opens a
 socket or reads Credential Manager / DPAPI data directly. Local saved passwords and
-SSH keys are supported; Bitwarden credentials and interactive SSH credential prompts
-are not wired in this migration slice. Quick Connect supports temporary HTTP(S),
-VNC, RDP, and serial sessions; network sessions can select a saved VPN route,
-while serial remains local-only. SSH Quick Connect remains unavailable. For saved
-SSH connections, Go resolves inherited VPN settings; when a route is enabled,
+SSH keys are supported; Bitwarden-backed saved credentials and interactive prompts
+for saved SSH connections remain outside this migration slice. Quick Connect supports
+temporary password-authenticated SSH, HTTP(S), VNC, RDP, and serial sessions; network
+sessions can select a saved VPN route, while serial remains local-only. Temporary SSH
+connections accept an optional port and request username/password credentials without
+saving them to the connection tree. For saved SSH connections, Go resolves inherited
+VPN settings; when a route is enabled,
 Electron starts the selected Go userspace sidecar and dials only through its loopback SOCKS5
 endpoint. A failed tunnel never falls back to a direct SSH connection.
 

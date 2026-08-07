@@ -185,8 +185,17 @@ const wormholeBridge = {
   setLogLevel: (level: string) => ipcRenderer.invoke('settings:set-log-level', level),
   openCurrentLogFile: () => ipcRenderer.invoke('logs:open-current-file'),
   openLogsFolder: () => ipcRenderer.invoke('logs:open-folder'),
-  openSshSession: (request: { sessionId: string; nodeId: string; columns: number; rows: number }) =>
-    ipcRenderer.invoke('ssh:open', request),
+  openSshSession: (request: {
+    sessionId: string;
+    nodeId?: string;
+    host?: string;
+    port?: number;
+    username?: string;
+    password?: string;
+    tunnelConfigId?: string;
+    columns: number;
+    rows: number;
+  }) => ipcRenderer.invoke('ssh:open', request),
   trustSshHostKey: (request: { nodeId: string; expected: string; received: string }) =>
     ipcRenderer.invoke('ssh:trust-host-key', request),
   sendSshInput: (sessionId: string, data: string) =>

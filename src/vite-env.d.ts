@@ -654,7 +654,12 @@ interface Window {
     openLogsFolder(): Promise<{ opened: boolean }>;
     openSshSession(request: {
       sessionId: string;
-      nodeId: string;
+      nodeId?: string;
+      host?: string;
+      port?: number;
+      username?: string;
+      password?: string;
+      tunnelConfigId?: string;
       columns: number;
       rows: number;
     }): Promise<WormholeSshConnected>;

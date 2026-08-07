@@ -457,6 +457,11 @@ type RdpCredentials = {
   password: string;
 };
 
+type SshCredentials = {
+  username: string;
+  password: string;
+};
+
 type CredentialRecord = {
   id: string;
   name: string;
@@ -1144,6 +1149,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const authPromptResolver = useRef<((succeeded: boolean) => void) | null>(null);
   const idleCheckInFlight = useRef(false);
   const lastActivityAt = useRef(Date.now());
+  const quickConnectSubmitInFlight = useRef(false);
+  const sshCredentialSubmitInFlight = useRef(false);
   const webSessionAttempts = useRef(new WebSessionAttemptTracker());
   const [activePage, setActivePage] = useState<NavItem>('sessions');
   const [expanded, setExpanded] = useState<Set<string>>(
@@ -1163,10 +1170,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     domain: '',
     password: '',
   });
+  const [sshCredentialPrompt, setSshCredentialPrompt] = useState<string | null>(null);
   const [quickConnectOpen, setQuickConnectOpen] = useState(false);
   const [quickConnectForm, setQuickConnectForm] = useState({
     name: '',
     host: '',
+    port: '',
     protocol: 'ssh' as Protocol,
     tunnel: 'off' as TunnelMode,
     httpIgnoreCertErrors: false,
@@ -1976,6 +1985,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     sftpRequestIds.current.clear();
     sftpCancelRequests.current.clear();
     setQuickConnectOpen(false);
+    setSshCredentialPrompt(null);
     setNewConnectionOpen(false);
     setFolderDetailsOpen(false);
     setNewFolderOpen(false);
@@ -2185,12 +2195,20 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setDropTarget(null);
   }
 
-  function startSshSession(sessionId: string, nodeId: string) {
+  function startSshSession(request: {
+    sessionId: string;
+    nodeId?: string;
+    host?: string;
+    port?: number;
+    username?: string;
+    password?: string;
+    tunnelConfigId?: string;
+  }) {
     const api = window.wormhole;
     if (!api) {
       setSessions((current) =>
         current.map((session) =>
-          session.backendSessionId === sessionId
+          session.backendSessionId === request.sessionId
             ? { ...session, status: 'failed', error: 'The native SSH bridge is unavailable.' }
             : session,
         ),
@@ -2198,21 +2216,19 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       return;
     }
 
-    void api
-      .openSshSession({ sessionId, nodeId, columns: 80, rows: 24 })
-      .catch((error: unknown) => {
-        setSessions((current) =>
-          current.map((session) =>
-            session.backendSessionId === sessionId
-              ? {
-                  ...session,
-                  status: 'failed',
-                  error: error instanceof Error ? error.message : String(error),
-                }
-              : session,
-          ),
-        );
-      });
+    void api.openSshSession({ ...request, columns: 80, rows: 24 }).catch((error: unknown) => {
+      setSessions((current) =>
+        current.map((session) =>
+          session.backendSessionId === request.sessionId
+            ? {
+                ...session,
+                status: 'failed',
+                error: error instanceof Error ? error.message : String(error),
+              }
+            : session,
+        ),
+      );
+    });
   }
 
   function startSerialSession(
@@ -2441,6 +2457,61 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     startRdpSession(sessionId, rdpCredentialForm);
   }
 
+  function requestSshCredentials(sessionId: string) {
+    const session = sessions.find((candidate) => candidate.id === sessionId);
+    if (!session || session.protocol !== 'ssh' || session.nodeId) return;
+    sshCredentialSubmitInFlight.current = false;
+    setSshCredentialPrompt(sessionId);
+    setSelectedSessionId(sessionId);
+    setActivePage('sessions');
+  }
+
+  function startQuickSshSession(sessionId: string, credentials: SshCredentials) {
+    const session = sessions.find((candidate) => candidate.id === sessionId);
+    if (!session || session.protocol !== 'ssh' || session.nodeId) return;
+
+    const backendSessionId = newSessionToken();
+    const username = credentials.username.trim();
+    setSessions((current) =>
+      current.map((candidate) =>
+        candidate.id === sessionId
+          ? {
+              ...candidate,
+              backendSessionId,
+              status: 'connecting',
+              terminalFrame: undefined,
+              sftp: undefined,
+              error: undefined,
+              hostKeyMismatch: undefined,
+              tunnelProgress: null,
+            }
+          : candidate,
+      ),
+    );
+    startSshSession({
+      sessionId: backendSessionId,
+      host: session.host,
+      port: session.port,
+      username,
+      password: credentials.password,
+      tunnelConfigId: session.tunnelConfigId,
+    });
+  }
+
+  function submitSshCredentials(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (sshCredentialSubmitInFlight.current) return;
+    const sessionId = sshCredentialPrompt;
+    if (!sessionId) return;
+    const values = new FormData(event.currentTarget);
+    const username = String(values.get('ssh-username') ?? '').trim();
+    const password = String(values.get('ssh-password') ?? '');
+    if (!username || !password) return;
+    sshCredentialSubmitInFlight.current = true;
+    setSshCredentialPrompt(null);
+    startQuickSshSession(sessionId, { username, password });
+  }
+
   function openConnection(node: TreeNode) {
     if (node.kind !== 'connection' || !node.protocol) return;
 
@@ -2485,7 +2556,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setSessions((current) => [...current, session]);
     setSelectedSessionId(session.id);
     setActivePage('sessions');
-    if (backendSessionId && session.protocol === 'ssh') startSshSession(backendSessionId, node.id);
+    if (backendSessionId && session.protocol === 'ssh') {
+      startSshSession({ sessionId: backendSessionId, nodeId: node.id });
+    }
     if (backendSessionId && session.protocol === 'serial') {
       startSerialSession(
         backendSessionId,
@@ -2534,6 +2607,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       delete next[id];
       return next;
     });
+    setSshCredentialPrompt((current) => (current === id ? null : current));
   }
 
   function closeSessionsForNodeIds(nodeIds: ReadonlySet<string>) {
@@ -2569,6 +2643,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       return nextSessions[selectedIndex]?.id ?? nextSessions[selectedIndex - 1]?.id ?? '';
     });
     setRdpCredentialPrompt((current) => (current && closingIds.has(current) ? null : current));
+    setSshCredentialPrompt((current) => (current && closingIds.has(current) ? null : current));
     setRoutePrompts((current) => current.filter((prompt) => !closingIds.has(prompt.sessionId)));
     setRdpCredentials((current) => {
       const next = { ...current };
@@ -2619,7 +2694,25 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             : session,
         ),
       );
-      startSshSession(backendSessionId, source.nodeId);
+      startSshSession({ sessionId: backendSessionId, nodeId: source.nodeId });
+    } else if (source.protocol === 'ssh') {
+      setSessions((current) =>
+        current.map((session) =>
+          session.id === id
+            ? {
+                ...session,
+                backendSessionId: undefined,
+                status: 'placeholder',
+                terminalFrame: undefined,
+                sftp: undefined,
+                error: undefined,
+                hostKeyMismatch: undefined,
+                tunnelProgress: null,
+              }
+            : session,
+        ),
+      );
+      requestSshCredentials(id);
     }
     if (source.protocol === 'serial') {
       const backendSessionId = newSessionToken();
@@ -2659,9 +2752,15 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       id: `session-duplicate-${newSessionToken()}`,
       title: `${source.title} (copy)`,
       backendSessionId:
-        source.protocol === 'ssh' || source.protocol === 'serial' ? newSessionToken() : undefined,
+        (source.protocol === 'ssh' && source.nodeId) || source.protocol === 'serial'
+          ? newSessionToken()
+          : undefined,
       status:
-        source.protocol === 'ssh' || source.protocol === 'serial' ? 'connecting' : 'placeholder',
+        source.protocol === 'ssh' && !source.nodeId
+          ? 'placeholder'
+          : source.protocol === 'ssh' || source.protocol === 'serial'
+            ? 'connecting'
+            : 'placeholder',
       terminalFrame: undefined,
       sftp: undefined,
       error: undefined,
@@ -2685,7 +2784,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setSelectedSessionId(duplicate.id);
     setActivePage('sessions');
     if (duplicate.backendSessionId && duplicate.nodeId && duplicate.protocol === 'ssh') {
-      startSshSession(duplicate.backendSessionId, duplicate.nodeId);
+      startSshSession({ sessionId: duplicate.backendSessionId, nodeId: duplicate.nodeId });
+    }
+    if (duplicate.protocol === 'ssh' && !duplicate.nodeId) {
+      sshCredentialSubmitInFlight.current = false;
+      setSshCredentialPrompt(duplicate.id);
     }
     if (duplicate.backendSessionId && duplicate.protocol === 'serial') {
       startSerialSession(
@@ -3518,9 +3621,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   function openQuickConnect() {
+    quickConnectSubmitInFlight.current = false;
     setQuickConnectForm({
       name: '',
       host: '',
+      port: '',
       protocol: 'ssh',
       tunnel: 'off',
       httpIgnoreCertErrors: false,
@@ -3853,8 +3958,20 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   function submitQuickConnect(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (quickConnectSubmitInFlight.current) return;
+    quickConnectSubmitInFlight.current = true;
     const name = quickConnectForm.name.trim() || quickConnectForm.host.trim() || 'New connection';
     const host = quickConnectForm.host.trim() || 'localhost';
+    const portText = quickConnectForm.port.trim();
+    const sshPort = portText ? Number(portText) : undefined;
+    if (
+      quickConnectForm.protocol === 'ssh' &&
+      portText &&
+      (typeof sshPort !== 'number' || !Number.isInteger(sshPort) || sshPort < 1 || sshPort > 65535)
+    ) {
+      quickConnectSubmitInFlight.current = false;
+      return;
+    }
     const id = `session-quick-${newSessionToken()}`;
     const backendSessionId = quickConnectForm.protocol === 'serial' ? newSessionToken() : undefined;
 
@@ -3863,6 +3980,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       title: name,
       protocol: quickConnectForm.protocol,
       host,
+      port: quickConnectForm.protocol === 'ssh' ? sshPort : undefined,
       tunnelConfigId: quickConnectTunnelId(quickConnectForm.protocol, quickConnectForm.tunnel),
       canTransfer: quickConnectForm.protocol === 'ssh',
       backendSessionId,
@@ -3874,10 +3992,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           : 'placeholder',
       serialSettings:
         quickConnectForm.protocol === 'serial' ? { ...quickConnectForm.serial } : undefined,
-      error:
-        quickConnectForm.protocol === 'ssh'
-          ? 'Quick Connect needs a saved SSH credential before it can connect.'
-          : undefined,
       rdpStatus: quickConnectForm.protocol === 'rdp' ? 'idle' : undefined,
       webIgnoreCertErrors:
         quickConnectForm.protocol === 'https' && quickConnectForm.httpIgnoreCertErrors,
@@ -3886,6 +4000,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setSelectedSessionId(id);
     setActivePage('sessions');
     setQuickConnectOpen(false);
+    if (quickConnectForm.protocol === 'ssh') {
+      sshCredentialSubmitInFlight.current = false;
+      setSshCredentialPrompt(id);
+    }
     if (backendSessionId) {
       startSerialSession(backendSessionId, undefined, host, quickConnectForm.serial);
     }
@@ -4011,7 +4129,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           ),
         );
         if (backendSessionId && newConnectionForm.protocol === 'ssh') {
-          startSshSession(backendSessionId, editingId);
+          startSshSession({ sessionId: backendSessionId, nodeId: editingId });
         }
         if (backendSessionId && newConnectionForm.protocol === 'serial') {
           startSerialSession(
@@ -4837,7 +4955,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     !folderDetailsOpen &&
                     !newFolderOpen &&
                     !authPrompt &&
-                    !rdpCredentialPrompt
+                    !rdpCredentialPrompt &&
+                    !sshCredentialPrompt
                   }
                   selectedSession={selectedSession}
                   sessions={sessions}
@@ -4977,6 +5096,26 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   </SelectContent>
                 </Select>
               </div>
+              {quickConnectForm.protocol === 'ssh' ? (
+                <div className="grid gap-2">
+                  <Label htmlFor="quick-ssh-port">SSH port</Label>
+                  <Input
+                    id="quick-ssh-port"
+                    inputMode="numeric"
+                    max={65535}
+                    min={1}
+                    onChange={(event) =>
+                      setQuickConnectForm((form) => ({ ...form, port: event.target.value }))
+                    }
+                    placeholder="22 (default)"
+                    type="number"
+                    value={quickConnectForm.port}
+                  />
+                  <p className="text-[11px] leading-relaxed text-muted-foreground">
+                    SSH credentials are requested next and kept only for this temporary session.
+                  </p>
+                </div>
+              ) : null}
               {quickConnectSupportsTunnel(quickConnectForm.protocol) ? (
                 <div className="grid gap-2">
                   <Label htmlFor="quick-tunnel-route">VPN route</Label>
@@ -5685,6 +5824,55 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 <Button disabled={editorBusy} type="submit">
                   <Check data-icon="inline-start" />
                   {editorBusy ? 'Saving…' : 'Save changes'}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
+
+        <Dialog
+          onOpenChange={(open) => {
+            if (!open) setSshCredentialPrompt(null);
+          }}
+          open={sshCredentialPrompt !== null}
+        >
+          <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle>SSH credentials</DialogTitle>
+              <DialogDescription>
+                Credentials stay in memory for this connection only and are never saved to the
+                connection tree.
+              </DialogDescription>
+            </DialogHeader>
+            <form className="grid gap-4" onSubmit={submitSshCredentials}>
+              <div className="grid gap-2">
+                <Label htmlFor="ssh-username">Username</Label>
+                <Input
+                  autoComplete="username"
+                  autoFocus
+                  id="ssh-username"
+                  name="ssh-username"
+                  placeholder="operator"
+                  required
+                />
+              </div>
+              <div className="grid gap-2">
+                <Label htmlFor="ssh-password">Password</Label>
+                <Input
+                  autoComplete="current-password"
+                  id="ssh-password"
+                  name="ssh-password"
+                  required
+                  type="password"
+                />
+              </div>
+              <DialogFooter>
+                <Button onClick={() => setSshCredentialPrompt(null)} type="button" variant="ghost">
+                  Cancel
+                </Button>
+                <Button type="submit">
+                  <Power data-icon="inline-start" />
+                  Connect
                 </Button>
               </DialogFooter>
             </form>

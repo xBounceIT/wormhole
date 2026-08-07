@@ -229,7 +229,7 @@ INSERT INTO Nodes (Id, ParentId, Name, Kind, Protocol, Host, Username, Credentia
 	}
 }
 
-func TestLoadSSHTargetRejectsInheritedVPNRouteUntilElectronSupportsIt(t *testing.T) {
+func TestLoadSSHTargetRejectsInheritedVPNWithoutConfiguration(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
@@ -261,6 +261,51 @@ INSERT INTO Nodes (Id, ParentId, Name, Kind, Protocol, Host, Username, TunnelEna
 	_, err = loadSSHTarget(databasePath, "leaf")
 	if err == nil || !strings.Contains(err.Error(), "VPN tunnel") {
 		t.Fatalf("expected tunneled SSH connection to be rejected, got %v", err)
+	}
+}
+
+func TestResolveDirectSSHTargetUsesTemporaryCredentialsAndDefaultsPort(t *testing.T) {
+	const tunnelID = "11111111-2222-4333-8444-555555555555"
+	target, err := resolveDirectSSHTarget(sshWireCommand{
+		Host:           " [2001:db8::10] ",
+		Username:       " operator ",
+		Password:       "temporary-secret",
+		TunnelConfigID: tunnelID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.nodeID != "" || target.host != "[2001:db8::10]" || target.port != 22 {
+		t.Fatalf("unexpected direct SSH target: %#v", target)
+	}
+	if target.username != "operator" || target.password != "temporary-secret" {
+		t.Fatalf("temporary SSH credential was not preserved: %#v", target)
+	}
+	if target.tunnelConfigID != tunnelID {
+		t.Fatalf("unexpected direct SSH tunnel: %q", target.tunnelConfigID)
+	}
+}
+
+func TestResolveDirectSSHTargetRejectsInvalidTunnelAndBounds(t *testing.T) {
+	_, err := resolveDirectSSHTarget(sshWireCommand{
+		Host:           "ssh.example",
+		Username:       "operator",
+		Password:       "secret",
+		Port:           65536,
+		TunnelConfigID: "not-a-tunnel",
+	})
+	if err == nil || !strings.Contains(err.Error(), "port") {
+		t.Fatalf("expected invalid port to be rejected, got %v", err)
+	}
+
+	_, err = resolveDirectSSHTarget(sshWireCommand{
+		Host:           "ssh.example",
+		Username:       "operator",
+		Password:       "secret",
+		TunnelConfigID: "not-a-tunnel",
+	})
+	if err == nil || !strings.Contains(err.Error(), "tunnel") {
+		t.Fatalf("expected invalid tunnel to be rejected, got %v", err)
 	}
 }
 
