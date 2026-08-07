@@ -152,6 +152,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { getTreeRowGeometry } from './tree-layout';
+import { findParentFolderId } from './tree-parent';
 import { VncSurface } from './components/VncSurface';
 import { RdpSurface, type RdpUiStatus } from './components/RdpSurface';
 import { WebSurface } from './components/WebSurface';
@@ -201,6 +202,8 @@ const defaultSerialSettings: SerialSettings = {
   parity: 0,
   flowControl: 0,
 };
+
+const rootFolderSelectionValue = '__wormhole-root__';
 
 function serialSettingsFromNode(
   node: Pick<
@@ -592,21 +595,6 @@ function findFirstConnection(nodes: TreeNode[]): TreeNode | undefined {
   return undefined;
 }
 
-function findParentFolderId(nodes: TreeNode[], childId: string): string | undefined {
-  for (const node of nodes) {
-    if (node.kind === 'folder' && node.children?.some((child) => child.id === childId)) {
-      return node.id;
-    }
-
-    if (node.children) {
-      const parentId = findParentFolderId(node.children, childId);
-      if (parentId) return parentId;
-    }
-  }
-
-  return undefined;
-}
-
 function updateConnectionInTree(
   nodes: TreeNode[],
   connectionId: string,
@@ -651,7 +639,9 @@ function updateConnectionInTree(
   const remaining = removeConnection(nodes);
   if (!editedConnection) return nodes;
 
-  return insertIntoTreeFolder(remaining, folderId, [editedConnection]);
+  return folderId
+    ? insertIntoTreeFolder(remaining, folderId, [editedConnection])
+    : [...remaining, editedConnection];
 }
 
 function updateFolderInTree(
@@ -3400,20 +3390,14 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setQuickConnectOpen(true);
   }
 
-  function getCreationFolderId(): string | undefined {
-    const selectedNode = findTreeNode(tree, selectedNodeId);
-    if (selectedNode?.kind === 'folder') return selectedNode.id;
-    return findParentFolderId(tree, selectedNodeId) ?? folders[0]?.id;
-  }
-
-  function openNewConnection(folderId?: string) {
+  function openNewConnection(folderId?: string | null) {
     setEditingConnectionId(null);
     setEditorError('');
     setNewConnectionForm({
       name: '',
       host: '',
       protocol: 'ssh',
-      folder: folderId ?? getCreationFolderId() ?? folders[0]?.id ?? '',
+      folder: folderId ?? '',
       sshAutoSudo: 'inherit',
       httpIgnoreCertErrors: false,
       tunnel: 'inherit',
@@ -3432,7 +3416,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       name: node.name,
       host: node.host ?? '',
       protocol: node.protocol,
-      folder: findParentFolderId(tree, node.id) ?? folders[0]?.id ?? '',
+      folder: findParentFolderId(tree, node.id) ?? '',
       sshAutoSudo: autoSudoModeFor(node.sshAutoSudo),
       httpIgnoreCertErrors: node.httpIgnoreCertErrors === true,
       tunnel: tunnelModeFor(node),
@@ -3535,9 +3519,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     }
   }
 
-  function openNewFolder(parentFolderId?: string) {
+  function openNewFolder(parentFolderId?: string | null) {
     setNewFolderName('');
-    setNewFolderParentId(parentFolderId ?? getCreationFolderId() ?? null);
+    setNewFolderParentId(parentFolderId ?? null);
     setEditorError('');
     setNewFolderOpen(true);
   }
@@ -3888,15 +3872,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           variant="ghost"
         >
           {treeCheckbox}
-          {isFolder ? (
+          {isFolder && hasChildren ? (
             <span className="grid size-4 shrink-0 place-items-center text-muted-foreground">
-              {hasChildren ? (
-                isExpanded ? (
-                  <ChevronDown size={13} />
-                ) : (
-                  <ChevronRight size={13} />
-                )
-              ) : null}
+              {isExpanded ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
             </span>
           ) : null}
           <span
@@ -4252,10 +4230,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                           </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
-                      <IconButton label="New folder" onClick={() => openNewFolder()}>
+                      <IconButton label="New folder" onClick={() => openNewFolder(null)}>
                         <FolderPlus />
                       </IconButton>
-                      <IconButton label="New connection" onClick={() => openNewConnection()}>
+                      <IconButton label="New connection" onClick={() => openNewConnection(null)}>
                         <Plus />
                       </IconButton>
                     </div>
@@ -4298,15 +4276,31 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 </SidebarHeader>
 
                 <SidebarContent className="min-h-0 overflow-hidden px-2">
-                  <ScrollArea className="min-h-0 flex-1 px-1">
-                    {visibleTree.length > 0 ? (
-                      renderTree(visibleTree)
-                    ) : (
-                      <p className="px-3 py-8 text-center text-xs text-muted-foreground">
-                        Nothing here yet.
-                      </p>
-                    )}
-                  </ScrollArea>
+                  <ContextMenu>
+                    <ContextMenuTrigger asChild>
+                      <div className="flex min-h-0 flex-1 flex-col">
+                        <ScrollArea className="min-h-0 flex-1 px-1">
+                          {visibleTree.length > 0 ? (
+                            renderTree(visibleTree)
+                          ) : (
+                            <p className="px-3 py-8 text-center text-xs text-muted-foreground">
+                              Nothing here yet.
+                            </p>
+                          )}
+                        </ScrollArea>
+                      </div>
+                    </ContextMenuTrigger>
+                    <ContextMenuContent className="w-52">
+                      <ContextMenuItem onSelect={() => openNewFolder(null)}>
+                        <FolderPlus />
+                        New folder
+                      </ContextMenuItem>
+                      <ContextMenuItem onSelect={() => openNewConnection(null)}>
+                        <Plus />
+                        New connection
+                      </ContextMenuItem>
+                    </ContextMenuContent>
+                  </ContextMenu>
                 </SidebarContent>
 
                 <SidebarFooter className="gap-2 border-t border-sidebar-border p-2">
@@ -4774,14 +4768,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       <Label htmlFor="connection-folder">Folder</Label>
                       <Select
                         onValueChange={(folder) =>
-                          setNewConnectionForm((form) => ({ ...form, folder }))
+                          setNewConnectionForm((form) => ({
+                            ...form,
+                            folder: folder === rootFolderSelectionValue ? '' : folder,
+                          }))
                         }
-                        value={newConnectionForm.folder}
+                        value={newConnectionForm.folder || rootFolderSelectionValue}
                       >
                         <SelectTrigger id="connection-folder" className="w-full">
-                          <SelectValue placeholder="Select folder" />
+                          <SelectValue placeholder="Root" />
                         </SelectTrigger>
                         <SelectContent>
+                          <SelectItem value={rootFolderSelectionValue}>Root</SelectItem>
                           {folders.map((folder) => (
                             <SelectItem key={folder.id} value={folder.id}>
                               {folder.name}
