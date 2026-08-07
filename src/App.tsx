@@ -4188,7 +4188,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             <div className="grid size-8 shrink-0 place-items-center rounded-md p-1">
               <img alt="" className="size-full object-contain" src={wormholeIcon} />
             </div>
-            <span className="text-sm font-semibold tracking-tight">Wormhole</span>
+            <span className="select-none text-sm font-semibold tracking-tight">Wormhole</span>
             {updateBannerVisible ? (
               <Button
                 className="h-7 gap-1.5 rounded-md border-border bg-background px-2.5 text-[10px] font-semibold text-foreground hover:bg-muted hover:text-foreground"
