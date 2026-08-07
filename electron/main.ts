@@ -1949,13 +1949,12 @@ function parseVncCommand(value: unknown): VncCommand {
 function isWorkspaceNodeTunnelSettingsRequest(
   value: unknown,
 ): value is WorkspaceNodeTunnelSettingsRequest {
-  return (
-    isRecord(value) &&
-    isSshSessionId(value.nodeId) &&
-    (value.tunnelEnabled === null || typeof value.tunnelEnabled === 'boolean') &&
-    typeof value.tunnelConfigId === 'string' &&
-    (value.tunnelConfigId === '' || isTunnelID(value.tunnelConfigId))
-  );
+  if (!isRecord(value) || !isSshSessionId(value.nodeId)) return false;
+  const hasCanonicalRoute =
+    (value.tunnelEnabled === null && value.tunnelConfigId === '') ||
+    (value.tunnelEnabled === false && value.tunnelConfigId === '') ||
+    (value.tunnelEnabled === true && isTunnelID(value.tunnelConfigId));
+  return hasCanonicalRoute;
 }
 
 function isTunnelID(value: unknown): value is string {

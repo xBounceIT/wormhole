@@ -515,11 +515,24 @@ interface Window {
     }): Promise<void>;
     closeWebSession(sessionId: string): Promise<void>;
     onWebEvent(listener: (event: WormholeWebEvent) => void): () => void;
-    updateWorkspaceNodeTunnelSettings(request: {
-      nodeId: string;
-      tunnelEnabled: boolean | null;
-      tunnelConfigId: string;
-    }): Promise<{ updated: boolean }>;
+    updateWorkspaceNodeTunnelSettings(
+      request:
+        | {
+            nodeId: string;
+            tunnelEnabled: null;
+            tunnelConfigId: '';
+          }
+        | {
+            nodeId: string;
+            tunnelEnabled: false;
+            tunnelConfigId: '';
+          }
+        | {
+            nodeId: string;
+            tunnelEnabled: true;
+            tunnelConfigId: string;
+          },
+    ): Promise<{ updated: boolean }>;
     createTunnel(request: {
       name: string;
       kind: number;

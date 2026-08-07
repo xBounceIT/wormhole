@@ -897,7 +897,7 @@ INSERT INTO Nodes (Id, ParentId, TunnelEnabled, TunnelConfigId) VALUES
 	}
 }
 
-func TestUpdateWorkspaceTunnelAllowsForceOnWithInheritedConfig(t *testing.T) {
+func TestUpdateWorkspaceTunnelRejectsForceOnWithoutSelectedTunnel(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wormhole.db")
 	database, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -919,8 +919,8 @@ INSERT INTO Nodes (Id) VALUES ('connection');`)
 	enabled := true
 	if err := updateWorkspaceNodeTunnelSettings(path, workspaceNodeTunnelSettingsRequest{
 		NodeID: "connection", TunnelEnabled: &enabled,
-	}); err != nil {
-		t.Fatalf("force-on inherited config was rejected: %v", err)
+	}); err == nil {
+		t.Fatal("force-on without a selected tunnel was accepted")
 	}
 
 	database, err = sql.Open("sqlite", path)
@@ -935,7 +935,61 @@ INSERT INTO Nodes (Id) VALUES ('connection');`)
 	).Scan(&storedEnabled, &storedConfig); err != nil {
 		t.Fatal(err)
 	}
-	if !storedEnabled.Valid || storedEnabled.Int64 != 1 || storedConfig.Valid {
-		t.Fatalf("stored route = (%v, %v), want (true, null)", storedEnabled, storedConfig)
+	if storedEnabled.Valid || storedConfig.Valid {
+		t.Fatalf("rejected route changed storage = (%v, %v), want (null, null)", storedEnabled, storedConfig)
+	}
+}
+
+func TestUpdateWorkspaceTunnelRejectsInheritedEnableWithSelectedTunnel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY, TunnelEnabled INTEGER NULL, TunnelConfigId TEXT NULL, UpdatedAt TEXT NULL
+);
+CREATE TABLE TunnelConfigs (
+    Id TEXT PRIMARY KEY, Name TEXT, Kind INTEGER, CreatedAt TEXT, UpdatedAt TEXT
+);
+INSERT INTO Nodes (Id) VALUES ('connection');
+INSERT INTO TunnelConfigs (Id, Name, Kind) VALUES ('b2a0a6b0-69c8-4f3e-a4cb-f3395aa0a9f7', 'WireGuard', 0);`)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	if err := updateWorkspaceNodeTunnelSettings(path, workspaceNodeTunnelSettingsRequest{
+		NodeID:         "connection",
+		TunnelConfigID: "b2a0a6b0-69c8-4f3e-a4cb-f3395aa0a9f7",
+	}); err == nil {
+		t.Fatal("inherit-on/off with a selected tunnel was accepted")
+	}
+
+	enabled := true
+	if err := updateWorkspaceNodeTunnelSettings(path, workspaceNodeTunnelSettingsRequest{
+		NodeID:         "connection",
+		TunnelEnabled:  &enabled,
+		TunnelConfigID: "b2a0a6b0-69c8-4f3e-a4cb-f3395aa0a9f7",
+	}); err != nil {
+		t.Fatalf("explicit tunnel selection was rejected: %v", err)
+	}
+
+	database, err = sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var storedEnabled sql.NullInt64
+	var storedConfig sql.NullString
+	if err := database.QueryRow(
+		"SELECT TunnelEnabled, TunnelConfigId FROM Nodes WHERE Id = 'connection';",
+	).Scan(&storedEnabled, &storedConfig); err != nil {
+		t.Fatal(err)
+	}
+	if !storedEnabled.Valid || storedEnabled.Int64 != 1 || !storedConfig.Valid || storedConfig.String != "b2a0a6b0-69c8-4f3e-a4cb-f3395aa0a9f7" {
+		t.Fatalf("stored explicit route = (%v, %v), want (true, selected tunnel)", storedEnabled, storedConfig)
 	}
 }

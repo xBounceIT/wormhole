@@ -81,11 +81,24 @@ const wormholeBridge = {
     ipcRenderer.on('web:event', handler);
     return () => ipcRenderer.removeListener('web:event', handler);
   },
-  updateWorkspaceNodeTunnelSettings: (request: {
-    nodeId: string;
-    tunnelEnabled: boolean | null;
-    tunnelConfigId: string;
-  }) => ipcRenderer.invoke('workspace:update-node-tunnel', request),
+  updateWorkspaceNodeTunnelSettings: (
+    request:
+      | {
+          nodeId: string;
+          tunnelEnabled: null;
+          tunnelConfigId: '';
+        }
+      | {
+          nodeId: string;
+          tunnelEnabled: false;
+          tunnelConfigId: '';
+        }
+      | {
+          nodeId: string;
+          tunnelEnabled: true;
+          tunnelConfigId: string;
+        },
+  ) => ipcRenderer.invoke('workspace:update-node-tunnel', request),
   createTunnel: (request: { name: string; kind: number; settings: Record<string, unknown> }) =>
     ipcRenderer.invoke('tunnel:create', request),
   readTunnel: (id: string) => ipcRenderer.invoke('tunnel:read', { id }),

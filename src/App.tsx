@@ -171,7 +171,6 @@ import { hasSftpDragPayload, sftpDragDataType } from './sftp-dnd';
 import { cn } from '@/lib/utils';
 import { WebSessionAttemptTracker } from '../electron/web-session-attempt';
 import {
-  inheritTunnelConfigPrefix,
   isTunnelTestCancellation,
   isTunnelTestNotice,
   missingTunnelFields,
@@ -7690,11 +7689,7 @@ function TunnelRouteField({
         ? isFolder
           ? 'Follows the VPN route configured by the parent folder.'
           : 'Follows the VPN route configured by the containing folder.'
-        : mode === 'on'
-          ? 'Forces VPN routing on while inheriting which tunnel configuration to use.'
-          : mode.startsWith(inheritTunnelConfigPrefix)
-            ? 'Inherits whether VPN routing is enabled, but overrides which tunnel to use.'
-            : 'The native backend establishes this userspace VPN route before connecting.';
+        : 'The native backend establishes this userspace VPN route before connecting.';
   return (
     <div className="grid gap-2">
       <Label htmlFor={id}>{isFolder ? 'VPN route default' : 'VPN route'}</Label>
@@ -7707,18 +7702,9 @@ function TunnelRouteField({
             {isFolder ? 'Inherit from parent' : 'Inherit from folder'}
           </SelectItem>
           <SelectItem value="off">No VPN tunnel</SelectItem>
-          <SelectItem value="on">Force VPN on · inherit tunnel</SelectItem>
           {tunnels.map((tunnel) => (
             <SelectItem key={tunnel.id} value={tunnel.id}>
               {tunnel.name} · {tunnel.kind}
-            </SelectItem>
-          ))}
-          {tunnels.map((tunnel) => (
-            <SelectItem
-              key={`${inheritTunnelConfigPrefix}${tunnel.id}`}
-              value={`${inheritTunnelConfigPrefix}${tunnel.id}`}
-            >
-              Inherit on/off · {tunnel.name}
             </SelectItem>
           ))}
         </SelectContent>
@@ -10311,9 +10297,7 @@ function SettingsPage({
                   value={bitwardenPath}
                 />
               </div>
-              <p className="text-[11px] text-muted-foreground">
-                Bitwarden CLI is not connected.
-              </p>
+              <p className="text-[11px] text-muted-foreground">Bitwarden CLI is not connected.</p>
               <div className="flex flex-wrap gap-2">
                 <Button size="sm" variant="outline">
                   Refresh status
@@ -10655,8 +10639,8 @@ function SettingsPage({
               {mcpConfigDetails.caption}
             </p>
             <p className="text-[11px] leading-relaxed text-muted-foreground">
-              Reveal the token first to view it here, or use Copy config to copy a
-              ready-to-paste configuration with the current token.
+              Reveal the token first to view it here, or use Copy config to copy a ready-to-paste
+              configuration with the current token.
             </p>
             <div className="grid gap-2">
               <Label htmlFor="settings-mcp-config">{mcpConfigDetails.label}</Label>

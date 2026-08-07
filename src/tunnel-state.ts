@@ -1,31 +1,26 @@
-export type TunnelMode = 'inherit' | 'off' | 'on' | string;
-
-export const inheritTunnelConfigPrefix = 'inherit-config:';
+export type TunnelMode = 'inherit' | 'off' | string;
+export type TunnelSettings =
+  | { tunnelEnabled: null; tunnelConfigId: '' }
+  | { tunnelEnabled: false; tunnelConfigId: '' }
+  | { tunnelEnabled: true; tunnelConfigId: string };
 
 export function tunnelModeFor(node: {
   tunnelEnabled?: boolean | null;
   tunnelConfigId?: string;
 }): TunnelMode {
   if (node.tunnelEnabled === false) return 'off';
-  if (node.tunnelEnabled === true && node.tunnelConfigId) return node.tunnelConfigId;
-  if (node.tunnelEnabled === true) return 'on';
-  if (node.tunnelConfigId) return `${inheritTunnelConfigPrefix}${node.tunnelConfigId}`;
+  // A selected tunnel is the only meaningful enabled route. Treat the old
+  // "inherit on/off with a selected tunnel" shape as an explicit selection so
+  // it remains visible and editable without exposing the obsolete mode.
+  if (node.tunnelConfigId) return node.tunnelConfigId;
   return 'inherit';
 }
 
-export function tunnelValueFor(mode: TunnelMode): {
-  tunnelEnabled: boolean | null;
-  tunnelConfigId: string;
-} {
+export function tunnelValueFor(mode: TunnelMode): TunnelSettings {
   if (mode === 'inherit') return { tunnelEnabled: null, tunnelConfigId: '' };
   if (mode === 'off') return { tunnelEnabled: false, tunnelConfigId: '' };
-  if (mode === 'on') return { tunnelEnabled: true, tunnelConfigId: '' };
-  if (mode.startsWith(inheritTunnelConfigPrefix)) {
-    return {
-      tunnelEnabled: null,
-      tunnelConfigId: mode.slice(inheritTunnelConfigPrefix.length),
-    };
-  }
+  // Keep stale editor state from recreating the removed "force on" route.
+  if (!mode || mode === 'on') return { tunnelEnabled: null, tunnelConfigId: '' };
   return { tunnelEnabled: true, tunnelConfigId: mode };
 }
 

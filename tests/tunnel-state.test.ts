@@ -12,18 +12,20 @@ import {
 
 const tunnelId = 'b2a0a6b0-69c8-4f3e-a4cb-f3395aa0a9f7';
 
-test('VPN route state preserves independent enable and config inheritance', () => {
+test('VPN route state only exposes inherit, off, or an explicit tunnel', () => {
   const states = [
     { tunnelEnabled: null, tunnelConfigId: '' },
     { tunnelEnabled: false, tunnelConfigId: '' },
-    { tunnelEnabled: true, tunnelConfigId: '' },
     { tunnelEnabled: true, tunnelConfigId: tunnelId },
-    { tunnelEnabled: null, tunnelConfigId: tunnelId },
   ] as const;
 
   for (const state of states) {
     assert.deepEqual(tunnelValueFor(tunnelModeFor(state)), state);
   }
+
+  assert.equal(tunnelModeFor({ tunnelEnabled: null, tunnelConfigId: tunnelId }), tunnelId);
+  assert.equal(tunnelModeFor({ tunnelEnabled: true, tunnelConfigId: '' }), 'inherit');
+  assert.deepEqual(tunnelValueFor('on'), { tunnelEnabled: null, tunnelConfigId: '' });
 });
 
 test('recoverable Stormshield outcomes are informational tunnel-test notices', () => {

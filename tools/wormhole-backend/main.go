@@ -1347,6 +1347,13 @@ func updateWorkspaceNodeTunnelSettings(databasePath string, request workspaceNod
 	if request.TunnelConfigID != "" && configID == "" {
 		return errors.New("VPN tunnel id is invalid")
 	}
+	if request.TunnelEnabled == nil || !*request.TunnelEnabled {
+		if configID != "" {
+			return errors.New("VPN route must inherit or disable tunneling when no tunnel is selected")
+		}
+	} else if configID == "" {
+		return errors.New("VPN route must select a tunnel when tunneling is enabled")
+	}
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		return err
