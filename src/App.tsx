@@ -201,6 +201,7 @@ import { VncSurface } from './components/VncSurface';
 import { RdpSurface, type RdpUiStatus } from './components/RdpSurface';
 import { WebSurface } from './components/WebSurface';
 import { ConnectionStepper } from './components/ConnectionStepper';
+import { MRemoteImportDialog } from './components/MRemoteImportDialog';
 import { SearchableCombobox, type SearchableComboboxOption } from './components/SearchableCombobox';
 import { VirtualCardGrid } from './components/VirtualCardGrid';
 import {
@@ -1366,6 +1367,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [bitwardenUnlockBusy, setBitwardenUnlockBusy] = useState(false);
   const [bitwardenUnlockError, setBitwardenUnlockError] = useState('');
   const [quickConnectOpen, setQuickConnectOpen] = useState(false);
+  const [mremoteImportOpen, setMremoteImportOpen] = useState(false);
   const [quickConnectForm, setQuickConnectForm] = useState({
     name: '',
     host: '',
@@ -2228,6 +2230,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     sftpRequestIds.current.clear();
     sftpCancelRequests.current.clear();
     setQuickConnectOpen(false);
+    setMremoteImportOpen(false);
+    window.wormhole?.clearMRemoteImport();
     setSshCredentialPrompt(null);
     setNewConnectionOpen(false);
     setFolderDetailsOpen(false);
@@ -5236,7 +5240,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                           <TooltipContent side="bottom">Import connections</TooltipContent>
                         </Tooltip>
                         <DropdownMenuContent align="end" className="w-52">
-                          <DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setMremoteImportOpen(true)}>
                             <Upload />
                             Import from mRemoteNG
                           </DropdownMenuItem>
@@ -5468,6 +5472,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             </SidebarInset>
           </ResizablePanel>
         </ResizablePanelGroup>
+
+        <MRemoteImportDialog
+          onImported={applyWorkspaceSnapshot}
+          onOpenChange={setMremoteImportOpen}
+          open={mremoteImportOpen}
+        />
 
         <Dialog onOpenChange={setQuickConnectOpen} open={quickConnectOpen}>
           <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">

@@ -554,6 +554,41 @@ interface WormholeBackupImportResult {
   warnings: string[];
 }
 
+interface WormholeMRemoteImportInspection {
+  fileName: string;
+  fileSize: number;
+  confVersion: string;
+  passwordRequired: boolean;
+  fullFileEncrypted: boolean;
+}
+
+interface WormholeMRemoteImportPlan {
+  planToken: string;
+  folders: number;
+  connections: number;
+  credentials: number;
+  skippedUnsupported: number;
+  skippedUnsupportedSamples: string[];
+  warnings: string[];
+  droppedWarnings: number;
+  preview: Array<{
+    name: string;
+    kind: 'folder' | 'connection';
+    protocol?: 'ssh' | 'rdp' | 'vnc';
+    depth: number;
+  }>;
+  previewTruncated: boolean;
+}
+
+interface WormholeMRemoteImportResult {
+  foldersCreated: number;
+  connectionsCreated: number;
+  credentialsCreated: number;
+  skippedUnsupported: number;
+  warnings: string[];
+  droppedWarnings: number;
+}
+
 interface WormholeStartupSnapshot {
   auth: WormholeAuthState;
   workspace?: WormholeWorkspaceSnapshot;
@@ -585,6 +620,17 @@ interface Window {
     unlockStartup(request: WormholeAuthVerificationRequest): Promise<WormholeStartupUnlock>;
     markStartupReady(): void;
     loadWorkspace(): Promise<WormholeWorkspaceSnapshot>;
+    selectMRemoteImport(): Promise<WormholeMRemoteImportInspection | null>;
+    analyzeMRemoteImport(options: {
+      password: string;
+      structureOnly: boolean;
+    }): Promise<WormholeMRemoteImportPlan>;
+    cancelMRemoteImportAnalysis(): void;
+    commitMRemoteImport(options: {
+      password: string;
+      structureOnly: boolean;
+    }): Promise<WormholeMRemoteImportResult>;
+    clearMRemoteImport(): void;
     duplicateWorkspaceNode(request: { nodeId: string }): Promise<{ nodeId: string; name: string }>;
     deleteWorkspaceNode(request: { nodeId: string }): Promise<{ deleted: boolean }>;
     showWorkspaceCredentials(request: {

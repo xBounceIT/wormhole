@@ -45,7 +45,10 @@ scoped native compatibility helpers; shared domain behavior remains in Go.
 - Optional MCP server for controlling already-open SSH sessions.
 - Optional Bitwarden integration for saved credential passwords and HTTPS
   browser autofill.
-- Versioned SQLite storage, mRemoteNG import, and in-app update checks.
+- Versioned SQLite storage and in-app update checks.
+- Preview-before-commit mRemoteNG XML import for SSH, RDP, and VNC trees,
+  including AES-GCM protected passwords, structure-only fallback, bounded
+  parsing, collision-safe credential names, and atomic workspace writes.
 
 ## Per-connection VPN
 
@@ -148,7 +151,7 @@ used for new work.
 | VPN tunnels | Go providers and native Go sidecars |
 | Secrets and authentication | Go-owned OS protection and encrypted stores |
 | IPC | Validated Electron preload bridge and Go process protocols |
-| Import | mRemoteNG XML importer |
+| Import | Go-owned, preview-before-commit mRemoteNG XML importer |
 | AI control | Go-owned loopback MCP server |
 
 See [electron/README.md](electron/README.md) for Electron-specific details and

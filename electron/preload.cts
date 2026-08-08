@@ -22,6 +22,13 @@ const wormholeBridge = {
     ipcRenderer.invoke('startup:unlock', request),
   markStartupReady: () => ipcRenderer.send('startup:ready'),
   loadWorkspace: () => ipcRenderer.invoke('workspace:load'),
+  selectMRemoteImport: () => ipcRenderer.invoke('mremote-import:select'),
+  analyzeMRemoteImport: (options: { password: string; structureOnly: boolean }) =>
+    ipcRenderer.invoke('mremote-import:analyze', options),
+  cancelMRemoteImportAnalysis: () => ipcRenderer.send('mremote-import:cancel-analysis'),
+  commitMRemoteImport: (options: { password: string; structureOnly: boolean }) =>
+    ipcRenderer.invoke('mremote-import:commit', options),
+  clearMRemoteImport: () => ipcRenderer.send('mremote-import:clear'),
   duplicateWorkspaceNode: (request: { nodeId: string }) =>
     ipcRenderer.invoke('workspace:duplicate-node', request),
   deleteWorkspaceNode: (request: { nodeId: string }) =>

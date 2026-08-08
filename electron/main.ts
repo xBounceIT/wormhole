@@ -75,6 +75,13 @@ import type {
   RdpStartRequest,
   RdpSurfaceRect,
 } from './rdp-contract.js';
+import {
+  parseMRemoteImportInspection,
+  parseMRemoteImportOptions,
+  parseMRemoteImportPlan,
+  parseMRemoteImportResult,
+  type MRemoteImportPlan,
+} from './mremote-import-contract.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const rendererUrl = process.env.VITE_DEV_SERVER_URL;
@@ -116,6 +123,9 @@ type BackendOperation =
   | 'startup'
   | 'startup-unlock'
   | 'workspace'
+  | 'mremote-import-inspect'
+  | 'mremote-import-analyze'
+  | 'mremote-import-commit'
   | 'backup-inspect'
   | 'backup-export'
   | 'backup-import'
@@ -560,6 +570,14 @@ let authOperationQueue: Promise<void> = Promise.resolve();
 let currentAuthState: AuthStateResponse | undefined;
 let authRefreshInFlight: Promise<AuthStateResponse> | undefined;
 const backupImportSelections = new WeakMap<Electron.WebContents, string>();
+type MRemoteImportSelection = {
+  path: string;
+  planNonce?: string;
+  planToken?: string;
+  structureOnly?: boolean;
+};
+const mremoteImportSelections = new WeakMap<Electron.WebContents, MRemoteImportSelection>();
+const mremoteImportAnalysis = new WeakMap<Electron.WebContents, AbortController>();
 let authStateMutationQueue: Promise<void> = Promise.resolve();
 let authLockRequested = false;
 let bitwardenExtensionOperationQueue: Promise<void> = Promise.resolve();
@@ -2861,7 +2879,9 @@ async function runBackend<T>(
   operation: BackendOperation,
   request?: unknown,
   timeoutMs: number = backendTimeoutMs,
+  signal?: AbortSignal,
 ): Promise<T> {
+  if (signal?.aborted) throw new Error('Operation cancelled.');
   const args = [
     '--operation',
     operation,
@@ -2903,11 +2923,17 @@ async function runBackend<T>(
       child.kill();
       finishReject(new Error('Electron Go backend timed out.'));
     }, effectiveTimeoutMs);
+    const abort = () => {
+      child.kill();
+      finishReject(new Error('Operation cancelled.'));
+    };
+    signal?.addEventListener('abort', abort, { once: true });
 
     function finishReject(error: Error) {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      signal?.removeEventListener('abort', abort);
       reject(error);
     }
 
@@ -2931,6 +2957,7 @@ async function runBackend<T>(
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      signal?.removeEventListener('abort', abort);
       if (code !== 0) {
         reject(new Error(stderr.trim() || 'Electron Go backend failed.'));
         return;
@@ -5616,6 +5643,123 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     });
   });
 
+  ipcMain.handle('mremote-import:select', async (event) => {
+    await serializeAuthOperation(requireWorkspaceAuth);
+    mremoteImportAnalysis.get(event.sender)?.abort();
+    mremoteImportAnalysis.delete(event.sender);
+    mremoteImportSelections.delete(event.sender);
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    const options: Electron.OpenDialogOptions = {
+      title: 'Import connections from mRemoteNG',
+      properties: ['openFile'],
+      filters: [
+        { name: 'mRemoteNG connections', extensions: ['xml', 'conf', 'config'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
+    };
+    const selection = owner
+      ? await dialog.showOpenDialog(owner, options)
+      : await dialog.showOpenDialog(options);
+    if (selection.canceled || selection.filePaths.length !== 1) return null;
+    const selectedPath = selection.filePaths[0];
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      const inspected = parseMRemoteImportInspection(
+        await runBackend('mremote-import-inspect', { path: selectedPath }),
+        path.basename(selectedPath),
+      );
+      mremoteImportSelections.set(event.sender, { path: selectedPath });
+      return inspected;
+    });
+  });
+
+  ipcMain.handle('mremote-import:analyze', async (event, value: unknown) => {
+    const options = parseMRemoteImportOptions(value);
+    const selection = mremoteImportSelections.get(event.sender);
+    if (!selection) throw new Error('Choose an mRemoteNG file before analyzing it.');
+    mremoteImportAnalysis.get(event.sender)?.abort();
+    const controller = new AbortController();
+    mremoteImportAnalysis.set(event.sender, controller);
+    const abortWhenRendererCloses = () => controller.abort();
+    event.sender.once('destroyed', abortWhenRendererCloses);
+    const planNonce = randomUUID();
+    try {
+      return await runAuthorizedOperation(
+        async () =>
+          parseMRemoteImportPlan(
+            await runBackend<MRemoteImportPlan>(
+              'mremote-import-analyze',
+              {
+                path: selection.path,
+                password: options.password,
+                structureOnly: options.structureOnly,
+                planNonce,
+              },
+              backupTimeoutMs,
+              controller.signal,
+            ),
+          ),
+        undefined,
+        (plan) => {
+          mremoteImportSelections.set(event.sender, {
+            path: selection.path,
+            planNonce,
+            planToken: plan.planToken,
+            structureOnly: options.structureOnly,
+          });
+          return plan;
+        },
+      );
+    } finally {
+      event.sender.removeListener('destroyed', abortWhenRendererCloses);
+      if (mremoteImportAnalysis.get(event.sender) === controller)
+        mremoteImportAnalysis.delete(event.sender);
+    }
+  });
+
+  ipcMain.on('mremote-import:cancel-analysis', (event) => {
+    mremoteImportAnalysis.get(event.sender)?.abort();
+  });
+
+  ipcMain.on('mremote-import:clear', (event) => {
+    mremoteImportAnalysis.get(event.sender)?.abort();
+    mremoteImportAnalysis.delete(event.sender);
+    mremoteImportSelections.delete(event.sender);
+  });
+
+  ipcMain.handle('mremote-import:commit', async (event, value: unknown) => {
+    const options = parseMRemoteImportOptions(value);
+    const selection = mremoteImportSelections.get(event.sender);
+    if (
+      !selection?.planNonce ||
+      !selection.planToken ||
+      selection.structureOnly !== options.structureOnly
+    ) {
+      throw new Error('Analyze the mRemoteNG file with these options before importing it.');
+    }
+    return runAuthorizedOperation(
+      async () =>
+        parseMRemoteImportResult(
+          await runBackend(
+            'mremote-import-commit',
+            {
+              path: selection.path,
+              password: options.password,
+              structureOnly: options.structureOnly,
+              planNonce: selection.planNonce,
+              planToken: selection.planToken,
+            },
+            backupTimeoutMs,
+          ),
+        ),
+      undefined,
+      (result) => {
+        mremoteImportSelections.delete(event.sender);
+        return result;
+      },
+    );
+  });
+
   ipcMain.handle('backup:export', async (event, value: unknown) => {
     const request = parseBackupPasswordRequest(value);
     await serializeAuthOperation(requireWorkspaceAuth);
@@ -6432,6 +6576,9 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       await ensureAuthSession();
       authSession.lock();
       backupImportSelections.delete(event.sender);
+      mremoteImportAnalysis.get(event.sender)?.abort();
+      mremoteImportAnalysis.delete(event.sender);
+      mremoteImportSelections.delete(event.sender);
     } finally {
       authLockRequested = false;
     }
@@ -7263,6 +7410,9 @@ function createWindow() {
       // native unlock survive into the new context before it proves possession of the secret.
       authSession.lock();
       backupImportSelections.delete(window.webContents);
+      mremoteImportAnalysis.get(window.webContents)?.abort();
+      mremoteImportAnalysis.delete(window.webContents);
+      mremoteImportSelections.delete(window.webContents);
       await nativeBackend?.send({ action: 'bitwarden.clear-session' }).catch(() => undefined);
       sshBackend.cancelAutoSudo();
       sshBackend.closeAllSftp();

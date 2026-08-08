@@ -268,6 +268,24 @@ func main() {
 		if err == nil {
 			result, err = showWorkspaceNodeCredentials(*databasePath, request, *electronUserDataPath)
 		}
+	case "mremote-import-inspect":
+		var request mremoteImportRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = inspectMRemoteImport(request)
+		}
+	case "mremote-import-analyze":
+		var request mremoteImportRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = analyzeMRemoteImport(*databasePath, request)
+		}
+	case "mremote-import-commit":
+		var request mremoteImportRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = commitMRemoteImport(*databasePath, request)
+		}
 	case "backup-inspect":
 		var request backupRequest
 		err = decodeInput(&request)
