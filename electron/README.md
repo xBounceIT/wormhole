@@ -1,8 +1,9 @@
-# Wormhole Electron migration shell
+# Wormhole Electron application
 
-This directory contains the Electron main process. The React renderer lives in
-`src/` so the new shell can sit beside the existing WinUI 3 implementation while
-protocol providers are migrated incrementally.
+This directory contains the active Wormhole desktop shell. The React renderer
+lives in `src/`, Electron owns native window and isolated Chromium lifecycle,
+and all durable state and protocol behavior are delegated to the Go backend.
+The legacy WinUI implementation is frozen reference code, not a second product.
 
 From the repository root:
 
@@ -45,9 +46,8 @@ bridge and Go writes the profile and secret reference together. Windows keeps
 the DPAPI-protected `CredentialSecrets` format; macOS uses Keychain in a
 cgo-enabled build; Linux uses the freedesktop Secret Service through
 `secret-tool`. There is deliberately no plaintext fallback when the platform
-secret service is unavailable. Existing SSH-key and persisted Bitwarden
-profiles remain visible and deletable; editing them stays disabled until their
-provider support is migrated.
+secret service is unavailable. SSH-key and Bitwarden-backed profiles are
+resolved by Go without exposing their secrets to the renderer.
 
 Saved SSH connections opened from the tree use a persistent Go backend process
 over a JSON-lines stdio channel. The backend resolves inherited connection data,
@@ -55,9 +55,8 @@ decrypts migrated DPAPI secrets, and creates the PTY with Go's native
 `golang.org/x/crypto/ssh` package. Go also owns the VT/ANSI terminal emulator;
 the renderer receives only session metadata and validated terminal screen frames
 plus bounded scrollback batches through the preload bridge. It never opens a
-socket or reads Credential Manager / DPAPI data directly. Local saved passwords and
-SSH keys are supported; Bitwarden-backed saved credentials and interactive prompts
-for saved SSH connections remain outside this migration slice. Quick Connect supports
+socket or reads Credential Manager / DPAPI data directly. Local saved passwords,
+SSH keys, and Bitwarden-backed saved credentials are supported. Quick Connect supports
 temporary password-authenticated SSH, HTTP(S), VNC, RDP, and serial sessions; network
 sessions can select a saved VPN route, while serial remains local-only. Temporary SSH
 connections accept an optional port and request username/password credentials without
@@ -101,8 +100,7 @@ token) from Windows Credential Manager into the existing
 `%LOCALAPPDATA%\Wormhole\wormhole.db`. The Go backend protects copied values
 with Windows DPAPI before writing `CredentialSecrets`. The completion marker
 lives in `ElectronMigrations`; later launches do not read Credential Manager.
-The source entries are intentionally retained while the WinUI and Electron
-applications coexist.
+The source entries are intentionally retained so the migration is non-destructive.
 
 Build the Windows Go backend and Credential Manager reader alongside the
 Electron process before running the Windows app:

@@ -518,6 +518,8 @@ interface WormholeUpdateCheckResult {
 interface WormholeAppSettings {
   promptBeforeTunnelConnect: boolean;
   autoCopyOnSelect: boolean;
+  confirmOnTabClose: boolean;
+  sidebarWidth: number;
   autoCheckForUpdates: boolean;
   lastUpdateCheck: string | null;
   skippedUpdateVersion: string | null;
@@ -812,6 +814,10 @@ interface Window {
     }): Promise<void>;
     readAppSettings(): Promise<WormholeAppSettings>;
     setPromptBeforeTunnelConnect(enabled: boolean): Promise<{ updated: boolean }>;
+    setConfirmOnTabClose(enabled: boolean): Promise<{ updated: boolean }>;
+    setSidebarWidth(width: number): Promise<{ updated: boolean; sidebarWidth: number }>;
+    reportActiveSessionCount(count: number): void;
+    onWindowCloseRequested(listener: () => Promise<void>): () => void;
     setAutoCopyOnSelect(enabled: boolean): Promise<{ updated: boolean }>;
     setUpdatePreferences(preferences: {
       autoCheckForUpdates?: boolean;

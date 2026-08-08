@@ -311,11 +311,12 @@ func TestServeUpdateDownloadShaMismatch(t *testing.T) {
 
 func mustReadAppSettings(t *testing.T, databasePath string) (bool, bool, *string, *string) {
 	t.Helper()
-	prompt, _, autoCheck, lastCheck, skipped, err := readAppSettings(databasePath)
+	settings, err := readAppSettings(databasePath)
 	if err != nil {
 		t.Fatalf("readAppSettings failed: %v", err)
 	}
-	return prompt, autoCheck, lastCheck, skipped
+	return settings.PromptBeforeTunnelConnect, settings.AutoCheckForUpdates,
+		settings.LastUpdateCheck, settings.SkippedUpdateVersion
 }
 
 func TestUpdateSettingsMergePreservesKeys(t *testing.T) {

@@ -1,6 +1,6 @@
 # Wormhole Electron backend
 
-This is the Go backend for the Electron migration shell. It owns SQLite access,
+This is the Go backend for the active Electron application. It owns SQLite access,
 the Windows Credential Manager migration, native secret protection, and the
 workspace metadata snapshot consumed by the TypeScript renderer.
 

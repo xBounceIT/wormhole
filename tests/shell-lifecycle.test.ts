@@ -1,0 +1,209 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import {
+  runWindowTeardown,
+  WindowCloseCoordinator,
+  WindowCloseReasonTracker,
+} from '../electron/window-lifecycle.ts';
+import {
+  isSessionActive,
+  nextSelectedSessionId,
+  SessionCloseGate,
+  shouldConfirmConnectedTabClose,
+} from '../src/session-lifecycle.ts';
+import {
+  createDebouncedSidebarWriter,
+  defaultSidebarWidth,
+  maxSidebarWidth,
+  minSidebarWidth,
+  normalizeSidebarWidth,
+} from '../src/sidebar-settings.ts';
+
+test('session activity excludes failed, closed, disconnected, and idle tabs', () => {
+  assert.equal(isSessionActive({ protocol: 'ssh', status: 'connected' }), true);
+  assert.equal(isSessionActive({ protocol: 'serial', status: 'connecting' }), true);
+  assert.equal(isSessionActive({ protocol: 'ssh', status: 'closed' }), false);
+  assert.equal(
+    isSessionActive({ protocol: 'rdp', status: 'placeholder', rdpStatus: 'connected' }),
+    true,
+  );
+  assert.equal(
+    isSessionActive({ protocol: 'rdp', status: 'placeholder', rdpStatus: 'disconnected' }),
+    false,
+  );
+  assert.equal(
+    shouldConfirmConnectedTabClose(false, [{ protocol: 'ssh', status: 'connected' }]),
+    false,
+  );
+});
+
+test('window close cancellation is fail-closed and duplicate requests do not prompt twice', async () => {
+  const coordinator = new WindowCloseCoordinator();
+  coordinator.updateActiveCount(2);
+  let prompts = 0;
+  let teardowns = 0;
+  let closes = 0;
+  const request = {
+    reason: 'window' as const,
+    confirm: async () => {
+      prompts++;
+      return false;
+    },
+    teardown: async () => {
+      teardowns++;
+    },
+    close: () => {
+      closes++;
+    },
+  };
+  await Promise.all([coordinator.request(request), coordinator.request(request)]);
+  assert.deepEqual({ prompts, teardowns, closes }, { prompts: 1, teardowns: 0, closes: 0 });
+});
+
+test('confirmed and non-interactive closes teardown once before closing', async () => {
+  for (const reason of [
+    'window',
+    'quit',
+    'update',
+    'system-shutdown',
+    'renderer-failure',
+  ] as const) {
+    const coordinator = new WindowCloseCoordinator();
+    coordinator.updateActiveCount(1);
+    const order: string[] = [];
+    await coordinator.request({
+      reason,
+      confirm: async () => {
+        order.push('confirm');
+        return true;
+      },
+      teardown: async () => {
+        order.push('teardown');
+      },
+      close: () => order.push('close'),
+    });
+    assert.deepEqual(
+      order,
+      reason === 'window' ? ['confirm', 'teardown', 'close'] : ['teardown', 'close'],
+    );
+  }
+});
+
+test('window teardown flushes browser state before sessions and still releases sessions on failure', async () => {
+  const order: string[] = [];
+  await runWindowTeardown(
+    async () => {
+      order.push('bitwarden-flush');
+    },
+    async () => {
+      order.push('session-release');
+    },
+  );
+  assert.deepEqual(order, ['bitwarden-flush', 'session-release']);
+
+  order.length = 0;
+  await assert.rejects(
+    runWindowTeardown(
+      async () => {
+        order.push('bitwarden-flush');
+        throw new Error('backend unavailable');
+      },
+      async () => {
+        order.push('session-release');
+      },
+    ),
+  );
+  assert.deepEqual(order, ['bitwarden-flush', 'session-release']);
+});
+
+test('sidebar values clamp and resize writes debounce', async () => {
+  assert.equal(normalizeSidebarWidth(undefined), defaultSidebarWidth);
+  assert.equal(normalizeSidebarWidth(-1), minSidebarWidth);
+  assert.equal(normalizeSidebarWidth(9999), maxSidebarWidth);
+  const callbacks: Array<() => void> = [];
+  const writes: number[] = [];
+  const writer = createDebouncedSidebarWriter((width) => writes.push(width), {
+    delayMs: 250,
+    scheduler: {
+      set(callback) {
+        callbacks.push(callback);
+        return callbacks.length - 1;
+      },
+      clear(handle) {
+        callbacks[handle as number] = () => undefined;
+      },
+    },
+  });
+  writer.schedule(300);
+  writer.schedule(340.4);
+  for (const callback of callbacks) callback();
+  await writer.flush();
+  assert.deepEqual(writes, [340]);
+  writer.schedule(340);
+  callbacks.at(-1)?.();
+  await writer.flush();
+  assert.deepEqual(writes, [340]);
+  writer.schedule(360);
+  await writer.flush();
+  assert.deepEqual(writes, [340, 360]);
+});
+
+test('failed sidebar persistence is retried and flush waits for the write', async () => {
+  let attempts = 0;
+  const writer = createDebouncedSidebarWriter(async () => {
+    attempts++;
+    if (attempts === 1) throw new Error('backend unavailable');
+  });
+  writer.schedule(400);
+  await assert.rejects(writer.flush());
+  writer.schedule(400);
+  await writer.flush();
+  assert.equal(attempts, 2);
+});
+
+test('connected tab close gate rejects duplicates until the first close settles', async () => {
+  const gate = new SessionCloseGate();
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const first = gate.run('session-1', () => pending);
+  assert.equal(await gate.run('session-1', async () => undefined), false);
+  release();
+  assert.equal(await first, true);
+  assert.equal(await gate.run('session-1', async () => undefined), true);
+});
+
+test('concurrent tab removal never selects or restores another closing tab', () => {
+  const sessions = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+  const closing = new Set(['a', 'b']);
+  assert.equal(
+    nextSelectedSessionId(sessions, 'a', (id) => closing.has(id)),
+    'c',
+  );
+  assert.equal(
+    nextSelectedSessionId(sessions, 'c', (id) => closing.has(id)),
+    'c',
+  );
+  assert.equal(
+    nextSelectedSessionId(sessions, 'c', (id) => id === 'a' || id === 'c'),
+    'b',
+  );
+});
+
+test('cancelled OS shutdown restores ordinary close confirmation policy', () => {
+  let reset = () => undefined;
+  const tracker = new WindowCloseReasonTracker({
+    set(callback) {
+      reset = callback;
+      return 1;
+    },
+    clear() {
+      reset = () => undefined;
+    },
+  });
+  tracker.beginSystemShutdown();
+  assert.equal(tracker.reason, 'system-shutdown');
+  reset();
+  assert.equal(tracker.reason, 'window');
+});

@@ -96,10 +96,12 @@ export function VncSurface({
   isAuthorized,
   session,
   onBitwardenUnlockRequired,
+  onStatusChange,
 }: {
   isAuthorized: boolean;
   session: VncSurfaceSession;
   onBitwardenUnlockRequired?: (reason: string, retry: () => void) => void;
+  onStatusChange?: (status: VncStatus) => void;
 }) {
   const [status, setStatus] = useState<VncStatus>('idle');
   const [message, setMessage] = useState('');
@@ -117,6 +119,12 @@ export function VncSurface({
   const pendingPointerMove = useRef<PendingPointerMove | null>(null);
   const pointerMoveSending = useRef<number | null>(null);
   const buttons = useRef(0);
+  const onStatusChangeRef = useRef(onStatusChange);
+
+  useEffect(() => {
+    onStatusChangeRef.current = onStatusChange;
+  }, [onStatusChange]);
+  useEffect(() => onStatusChangeRef.current?.(status), [status]);
 
   const sendCommand = useCallback(
     async (command: WormholeVncCommand, showError = false): Promise<boolean> => {

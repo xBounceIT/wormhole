@@ -57,6 +57,8 @@ type workspaceSnapshot struct {
 type appSettingsSnapshot struct {
 	PromptBeforeTunnelConnect bool    `json:"promptBeforeTunnelConnect"`
 	AutoCopyOnSelect          bool    `json:"autoCopyOnSelect"`
+	ConfirmOnTabClose         bool    `json:"confirmOnTabClose"`
+	SidebarWidth              int     `json:"sidebarWidth"`
 	AutoCheckForUpdates       bool    `json:"autoCheckForUpdates"`
 	LastUpdateCheck           *string `json:"lastUpdateCheck"`
 	SkippedUpdateVersion      *string `json:"skippedUpdateVersion"`
@@ -471,17 +473,17 @@ func main() {
 			result, err = authUpdateSettings(*databasePath, request)
 		}
 	case "settings-read":
-		var promptBeforeTunnel, autoCopyOnSelect, autoCheckForUpdates bool
-		var lastUpdateCheck, skippedUpdateVersion *string
-		promptBeforeTunnel, autoCopyOnSelect, autoCheckForUpdates, lastUpdateCheck, skippedUpdateVersion, err =
-			readAppSettings(*databasePath)
+		var settings appSettingsValues
+		settings, err = readAppSettings(*databasePath)
 		if err == nil {
 			result = map[string]any{
-				"promptBeforeTunnelConnect": promptBeforeTunnel,
-				"autoCopyOnSelect":          autoCopyOnSelect,
-				"autoCheckForUpdates":       autoCheckForUpdates,
-				"lastUpdateCheck":           lastUpdateCheck,
-				"skippedUpdateVersion":      skippedUpdateVersion,
+				"promptBeforeTunnelConnect": settings.PromptBeforeTunnelConnect,
+				"autoCopyOnSelect":          settings.AutoCopyOnSelect,
+				"confirmOnTabClose":         settings.ConfirmOnTabClose,
+				"sidebarWidth":              settings.SidebarWidth,
+				"autoCheckForUpdates":       settings.AutoCheckForUpdates,
+				"lastUpdateCheck":           settings.LastUpdateCheck,
+				"skippedUpdateVersion":      settings.SkippedUpdateVersion,
 			}
 		}
 	case "settings-migrate":
@@ -506,6 +508,34 @@ func main() {
 			err = writeAutoCopyOnSelect(*databasePath, request.Enabled)
 			if err == nil {
 				result = map[string]bool{"updated": true}
+			}
+		}
+	case "settings-set-confirm-on-tab-close":
+		var request struct {
+			Enabled *bool `json:"enabled"`
+		}
+		err = decodeInput(&request)
+		if err == nil && request.Enabled == nil {
+			err = errors.New("connected-tab close setting is invalid")
+		}
+		if err == nil && request.Enabled != nil {
+			err = writeConfirmOnTabClose(*databasePath, *request.Enabled)
+			if err == nil {
+				result = map[string]bool{"updated": true}
+			}
+		}
+	case "settings-set-sidebar-width":
+		var request struct {
+			Width *int `json:"width"`
+		}
+		err = decodeInput(&request)
+		if err == nil && request.Width == nil {
+			err = errors.New("sidebar width is invalid")
+		}
+		if err == nil && request.Width != nil {
+			err = writeSidebarWidth(*databasePath, *request.Width)
+			if err == nil {
+				result = map[string]any{"updated": true, "sidebarWidth": clampSidebarWidth(*request.Width)}
 			}
 		}
 	case "settings-set-update-preferences":
@@ -867,17 +897,18 @@ func unlockStartup(databasePath string, request authVerifyRequest) (startupUnloc
 }
 
 func loadAppSettingsSnapshot(databasePath string) (appSettingsSnapshot, error) {
-	promptBeforeTunnel, autoCopyOnSelect, autoCheckForUpdates, lastUpdateCheck, skippedUpdateVersion, err :=
-		readAppSettings(databasePath)
+	settings, err := readAppSettings(databasePath)
 	if err != nil {
 		return appSettingsSnapshot{}, err
 	}
 	return appSettingsSnapshot{
-		PromptBeforeTunnelConnect: promptBeforeTunnel,
-		AutoCopyOnSelect:          autoCopyOnSelect,
-		AutoCheckForUpdates:       autoCheckForUpdates,
-		LastUpdateCheck:           lastUpdateCheck,
-		SkippedUpdateVersion:      skippedUpdateVersion,
+		PromptBeforeTunnelConnect: settings.PromptBeforeTunnelConnect,
+		AutoCopyOnSelect:          settings.AutoCopyOnSelect,
+		ConfirmOnTabClose:         settings.ConfirmOnTabClose,
+		SidebarWidth:              settings.SidebarWidth,
+		AutoCheckForUpdates:       settings.AutoCheckForUpdates,
+		LastUpdateCheck:           settings.LastUpdateCheck,
+		SkippedUpdateVersion:      settings.SkippedUpdateVersion,
 	}, nil
 }
 

@@ -223,22 +223,69 @@ func TestPromptReaderAppliesLegacySettingsMigrationInMemory(t *testing.T) {
 func TestAutoCopyOnSelectDefaultsOnAndPersistsChanges(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 
-	_, autoCopy, _, _, _, err := readAppSettings(databasePath)
+	settings, err := readAppSettings(databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !autoCopy {
+	if !settings.AutoCopyOnSelect {
 		t.Fatal("auto-copy selection should be enabled by default")
 	}
 
 	if err := writeAutoCopyOnSelect(databasePath, false); err != nil {
 		t.Fatal(err)
 	}
-	_, autoCopy, _, _, _, err = readAppSettings(databasePath)
+	settings, err = readAppSettings(databasePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if autoCopy {
+	if settings.AutoCopyOnSelect {
 		t.Fatal("disabled auto-copy selection setting was not persisted")
+	}
+}
+
+func TestShellSettingsDefaultPersistAndClamp(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	settings, err := readAppSettings(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !settings.ConfirmOnTabClose || settings.SidebarWidth != defaultSidebarWidth {
+		t.Fatalf("defaults = %+v", settings)
+	}
+	if err := writeConfirmOnTabClose(databasePath, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeSidebarWidth(databasePath, maxSidebarWidth+1000); err != nil {
+		t.Fatal(err)
+	}
+	settings, err = readAppSettings(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings.ConfirmOnTabClose || settings.SidebarWidth != maxSidebarWidth {
+		t.Fatalf("persisted settings = %+v", settings)
+	}
+}
+
+func TestShellSettingsRejectBadLegacyValuesSafely(t *testing.T) {
+	for name, test := range map[string]struct {
+		value any
+		want  int
+	}{
+		"invalid-type": {value: "wide", want: defaultSidebarWidth},
+		"below-min":    {value: -42, want: minSidebarWidth},
+		"above-max":    {value: 100000, want: maxSidebarWidth},
+	} {
+		t.Run(name, func(t *testing.T) {
+			databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+			bitwardenTestWriteSettings(t, databasePath, map[string]any{sidebarWidthKey: test.value})
+			settings, err := readAppSettings(databasePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.SidebarWidth != test.want {
+				t.Fatalf("sidebar width = %d, want %d", settings.SidebarWidth, test.want)
+			}
+		})
 	}
 }

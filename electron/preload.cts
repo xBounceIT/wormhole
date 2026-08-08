@@ -210,6 +210,8 @@ const wormholeBridge = {
     ipcRenderer.invoke('settings:read') as Promise<{
       promptBeforeTunnelConnect: boolean;
       autoCopyOnSelect: boolean;
+      confirmOnTabClose: boolean;
+      sidebarWidth: number;
       autoCheckForUpdates: boolean;
       lastUpdateCheck: string | null;
       skippedUpdateVersion: string | null;
@@ -218,6 +220,21 @@ const wormholeBridge = {
     ipcRenderer.invoke('settings:set-prompt-before-tunnel', enabled),
   setAutoCopyOnSelect: (enabled: boolean) =>
     ipcRenderer.invoke('settings:set-auto-copy-on-select', enabled),
+  setConfirmOnTabClose: (enabled: boolean) =>
+    ipcRenderer.invoke('settings:set-confirm-on-tab-close', enabled),
+  setSidebarWidth: (width: number) => ipcRenderer.invoke('settings:set-sidebar-width', width),
+  reportActiveSessionCount: (count: number) =>
+    ipcRenderer.send('lifecycle:active-session-count', count),
+  onWindowCloseRequested: (listener: () => Promise<void>) => {
+    const handler = (_event: Electron.IpcRendererEvent, requestId: unknown) => {
+      if (typeof requestId !== 'string') return;
+      void Promise.resolve(listener()).finally(() => {
+        ipcRenderer.send('lifecycle:teardown-complete', requestId);
+      });
+    };
+    ipcRenderer.on('lifecycle:prepare-close', handler);
+    return () => ipcRenderer.removeListener('lifecycle:prepare-close', handler);
+  },
   setUpdatePreferences: (preferences: {
     autoCheckForUpdates?: boolean;
     skippedUpdateVersion?: string | null;

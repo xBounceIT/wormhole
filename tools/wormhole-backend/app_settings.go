@@ -16,6 +16,14 @@ const promptBeforeTunnelConnectKey = "PromptBeforeTunnelConnect"
 
 const autoCopyOnSelectKey = "AutoCopyOnSelect"
 
+const (
+	confirmOnTabCloseKey = "ConfirmOnTabClose"
+	sidebarWidthKey      = "SidebarWidth"
+	defaultSidebarWidth  = 320
+	minSidebarWidth      = 180
+	maxSidebarWidth      = 600
+)
+
 // Update preferences share the same settings.json document and use the same JSON keys as the
 // WinUI 3 AppSettings model (AutoCheckForUpdates, LastUpdateCheck, SkippedUpdateVersion).
 const (
@@ -189,8 +197,8 @@ func bitwardenAppMajorMinor(version string) (int, int, bool) {
 // ask whether to use its configured VPN tunnel. Absent, invalid, or unreadable settings fall
 // back to true, matching the WinUI 3 default.
 func readPromptBeforeTunnelConnect(databasePath string) (bool, error) {
-	promptBeforeTunnel, _, _, _, _, err := readAppSettings(databasePath)
-	return promptBeforeTunnel, err
+	settings, err := readAppSettings(databasePath)
+	return settings.PromptBeforeTunnelConnect, err
 }
 
 // writePromptBeforeTunnelConnect merges the setting into settings.json, preserving every other
@@ -203,65 +211,100 @@ func writeAutoCopyOnSelect(databasePath string, enabled bool) error {
 	return writeSettingsValues(databasePath, map[string]any{autoCopyOnSelectKey: enabled})
 }
 
-// readAppSettings reads the shared settings.json document. Absent, invalid, or unreadable
-// settings fall back to prompt-before-tunnel on, auto-copy-selection on, auto-check on, no last
-// check marker, and no skipped version.
-func readAppSettings(databasePath string) (
-	promptBeforeTunnel bool,
-	autoCopyOnSelect bool,
-	autoCheckForUpdates bool,
-	lastUpdateCheck *string,
-	skippedUpdateVersion *string,
-	err error,
-) {
-	promptBeforeTunnel = true
-	autoCopyOnSelect = true
-	autoCheckForUpdates = true
+func writeConfirmOnTabClose(databasePath string, enabled bool) error {
+	return writeSettingsValues(databasePath, map[string]any{confirmOnTabCloseKey: enabled})
+}
+
+func clampSidebarWidth(width int) int {
+	if width < minSidebarWidth {
+		return minSidebarWidth
+	}
+	if width > maxSidebarWidth {
+		return maxSidebarWidth
+	}
+	return width
+}
+
+func writeSidebarWidth(databasePath string, width int) error {
+	return writeSettingsValues(databasePath, map[string]any{sidebarWidthKey: clampSidebarWidth(width)})
+}
+
+type appSettingsValues struct {
+	PromptBeforeTunnelConnect bool
+	AutoCopyOnSelect          bool
+	ConfirmOnTabClose         bool
+	SidebarWidth              int
+	AutoCheckForUpdates       bool
+	LastUpdateCheck           *string
+	SkippedUpdateVersion      *string
+}
+
+// readAppSettings reads the shared settings.json document. Absent or invalid values use safe
+// defaults, including confirmation for connected tabs and a bounded sidebar width.
+func readAppSettings(databasePath string) (appSettingsValues, error) {
+	settings := appSettingsValues{
+		PromptBeforeTunnelConnect: true,
+		AutoCopyOnSelect:          true,
+		ConfirmOnTabClose:         true,
+		SidebarWidth:              defaultSidebarWidth,
+		AutoCheckForUpdates:       true,
+	}
 	_, settingsPath := authPaths(databasePath)
 	contents, err := readAuthSettingsFile(settingsPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return promptBeforeTunnel, autoCopyOnSelect, autoCheckForUpdates, nil, nil, nil
+		return settings, nil
 	}
 	if err != nil {
-		return promptBeforeTunnel, autoCopyOnSelect, autoCheckForUpdates, nil, nil,
-			fmt.Errorf("cannot read Wormhole settings: %w", err)
+		return settings, fmt.Errorf("cannot read Wormhole settings: %w", err)
 	}
 	var document map[string]json.RawMessage
 	if json.Unmarshal(contents, &document) != nil || document == nil {
-		return promptBeforeTunnel, autoCopyOnSelect, autoCheckForUpdates, nil, nil, nil
+		return settings, nil
 	}
 	migrateLegacySettingsDocument(document)
 	if value, ok := document[promptBeforeTunnelConnectKey]; ok {
 		var enabled bool
 		if json.Unmarshal(value, &enabled) == nil {
-			promptBeforeTunnel = enabled
+			settings.PromptBeforeTunnelConnect = enabled
 		}
 	}
 	if value, ok := document[autoCopyOnSelectKey]; ok {
 		var enabled bool
 		if json.Unmarshal(value, &enabled) == nil {
-			autoCopyOnSelect = enabled
+			settings.AutoCopyOnSelect = enabled
+		}
+	}
+	if value, ok := document[confirmOnTabCloseKey]; ok {
+		var enabled bool
+		if json.Unmarshal(value, &enabled) == nil {
+			settings.ConfirmOnTabClose = enabled
+		}
+	}
+	if value, ok := document[sidebarWidthKey]; ok {
+		var width int
+		if json.Unmarshal(value, &width) == nil {
+			settings.SidebarWidth = clampSidebarWidth(width)
 		}
 	}
 	if value, ok := document[autoCheckForUpdatesKey]; ok {
 		var enabled bool
 		if json.Unmarshal(value, &enabled) == nil {
-			autoCheckForUpdates = enabled
+			settings.AutoCheckForUpdates = enabled
 		}
 	}
 	if value, ok := document[lastUpdateCheckKey]; ok && string(value) != "null" {
 		var stamp string
 		if json.Unmarshal(value, &stamp) == nil && stamp != "" {
-			lastUpdateCheck = &stamp
+			settings.LastUpdateCheck = &stamp
 		}
 	}
 	if value, ok := document[skippedUpdateVersionKey]; ok && string(value) != "null" {
 		var skipped string
 		if json.Unmarshal(value, &skipped) == nil && skipped != "" {
-			skippedUpdateVersion = &skipped
+			settings.SkippedUpdateVersion = &skipped
 		}
 	}
-	return promptBeforeTunnel, autoCopyOnSelect, autoCheckForUpdates, lastUpdateCheck, skippedUpdateVersion, nil
+	return settings, nil
 }
 
 // writeSettingsValues merges the given keys into settings.json, preserving every other key

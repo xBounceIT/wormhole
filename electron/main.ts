@@ -20,6 +20,11 @@ import { fileURLToPath } from 'node:url';
 import { ElectronChromeExtensions } from 'electron-chrome-extensions';
 import { AuthSession } from './auth-session.js';
 import {
+  runWindowTeardown,
+  WindowCloseCoordinator,
+  WindowCloseReasonTracker,
+} from './window-lifecycle.js';
+import {
   createBitwardenActiveTabContext,
   selectBitwardenTabRegistrationPartition,
 } from './bitwarden-active-tab-bridge.js';
@@ -172,6 +177,8 @@ type BackendOperation =
   | 'open-logs-folder'
   | 'settings-migrate'
   | 'settings-set-auto-copy-on-select'
+  | 'settings-set-confirm-on-tab-close'
+  | 'settings-set-sidebar-width'
   | 'bitwarden-onboarding-read'
   | 'bitwarden-onboarding-dismiss'
   | 'extension-read'
@@ -288,10 +295,43 @@ type MigrationResponse = {
 type AppSettings = {
   promptBeforeTunnelConnect: boolean;
   autoCopyOnSelect: boolean;
+  confirmOnTabClose: boolean;
+  sidebarWidth: number;
   autoCheckForUpdates: boolean;
   lastUpdateCheck: string | null;
   skippedUpdateVersion: string | null;
 };
+
+const windowCloseCoordinators = new WeakMap<BrowserWindow, WindowCloseCoordinator>();
+const rendererTeardownWaiters = new Map<
+  string,
+  { webContentsId: number; resolve: () => void; timer: NodeJS.Timeout }
+>();
+
+function requestRendererTeardown(window: BrowserWindow, timeoutMs = 5_000): Promise<void> {
+  if (window.isDestroyed() || window.webContents.isDestroyed()) return Promise.resolve();
+  const requestId = randomUUID();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      rendererTeardownWaiters.delete(requestId);
+      resolve();
+    }, timeoutMs);
+    rendererTeardownWaiters.set(requestId, {
+      webContentsId: window.webContents.id,
+      resolve: () => {
+        clearTimeout(timer);
+        rendererTeardownWaiters.delete(requestId);
+        resolve();
+      },
+      timer,
+    });
+    try {
+      window.webContents.send('lifecycle:prepare-close', requestId);
+    } catch {
+      rendererTeardownWaiters.get(requestId)?.resolve();
+    }
+  });
+}
 type StartupResponse = {
   auth: AuthStateResponse;
   workspace?: WorkspaceResponse;
@@ -2546,6 +2586,7 @@ class NativeBackendProcess {
 
 let nativeBackend: NativeBackendProcess | undefined;
 let isQuitting = false;
+let skipQuitConfirmation = false;
 let bitwardenBackgroundTimer: NodeJS.Timeout | undefined;
 let bitwardenOnboardingPromise: Promise<void> | undefined;
 let bitwardenStartupMaintenancePromise: Promise<void> | undefined;
@@ -2626,8 +2667,8 @@ function runBitwardenStartupMaintenance(): Promise<void> {
 
 function startBitwardenBackgroundMaintenance(): void {
   void runBitwardenStartupMaintenance();
-  // WinUI's five-minute timer only refreshes the credential catalog. Extension install/update is
-  // a startup concern, so a failed download is not retried forever in the background.
+  // The five-minute timer refreshes only the credential catalog. Extension install/update is a
+  // startup concern, so a failed download is not retried forever in the background.
   bitwardenBackgroundTimer ??= setInterval(
     () => void runBitwardenCredentialMaintenance(false),
     5 * 60_000,
@@ -3137,6 +3178,7 @@ function launchInstallerAndExit(installerPath: string): void {
     windowsHide: true,
   });
   child.unref();
+  skipQuitConfirmation = true;
   app.quit();
 }
 
@@ -4645,6 +4687,11 @@ class WebSurfaceManager {
     for (const sessionId of sessionIds) {
       this.attempts.cancel(sessionId);
       this.pendingOpenOwners.delete(sessionId);
+      const record = this.surfaces.get(sessionId);
+      if (record?.tunnelLeaseId) {
+        await nativeBackend?.releaseTunnel(record.tunnelLeaseId).catch(() => undefined);
+        record.tunnelLeaseId = undefined;
+      }
       this.dispose(sessionId, true);
     }
   }
@@ -4673,6 +4720,11 @@ class WebSurfaceManager {
     for (const sessionId of sessionIds) {
       this.attempts.cancel(sessionId);
       this.pendingOpenOwners.delete(sessionId);
+      const record = this.surfaces.get(sessionId);
+      if (record?.tunnelLeaseId) {
+        await nativeBackend?.releaseTunnel(record.tunnelLeaseId).catch(() => undefined);
+        record.tunnelLeaseId = undefined;
+      }
       this.dispose(sessionId, true);
     }
   }
@@ -4928,7 +4980,7 @@ class NativeSshBackend {
     try {
       this.ensureStarted();
     } catch (error) {
-      this.releaseTunnel(request.sessionId);
+      await this.releaseTunnel(request.sessionId);
       throw error;
     }
 
@@ -4937,7 +4989,7 @@ class NativeSshBackend {
         const waiter = this.openWaiters.get(request.sessionId);
         if (!waiter || waiter.timeout !== timeout) return;
         this.openWaiters.delete(request.sessionId);
-        this.releaseTunnel(request.sessionId);
+        void this.releaseTunnel(request.sessionId);
         reject(new Error('SSH connection timed out.'));
         try {
           this.write({ type: 'close', session_id: request.sessionId });
@@ -4981,7 +5033,7 @@ class NativeSshBackend {
       } catch (error) {
         this.openWaiters.delete(request.sessionId);
         clearTimeout(timeout);
-        this.releaseTunnel(request.sessionId);
+        void this.releaseTunnel(request.sessionId);
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
@@ -5098,7 +5150,7 @@ class NativeSshBackend {
     }
   }
 
-  close(sessionId: string): void {
+  async close(sessionId: string): Promise<void> {
     const waiter = this.openWaiters.get(sessionId);
     if (waiter) {
       this.openWaiters.delete(sessionId);
@@ -5113,18 +5165,18 @@ class NativeSshBackend {
         // removing this tab, so there is no useful recovery action here.
       }
     }
-    this.releaseTunnel(sessionId);
+    await this.releaseTunnel(sessionId);
   }
 
   cancelPendingConnections(): void {
     for (const sessionId of [...this.openWaiters.keys()]) this.close(sessionId);
   }
 
-  private releaseTunnel(sessionId: string): void {
+  private async releaseTunnel(sessionId: string): Promise<void> {
     const leaseId = this.tunnelLeases.get(sessionId);
     if (!leaseId) return;
     this.tunnelLeases.delete(sessionId);
-    void nativeBackend?.releaseTunnel(leaseId).catch(() => undefined);
+    await nativeBackend?.releaseTunnel(leaseId).catch(() => undefined);
   }
 
   requestSnapshots(): void {
@@ -5204,7 +5256,7 @@ class NativeSshBackend {
     this.openWaiters.clear();
     this.failControlWaiters(new Error('Native SSH backend stopped.'));
     this.activeSessions.clear();
-    for (const sessionId of [...this.tunnelLeases.keys()]) this.releaseTunnel(sessionId);
+    for (const sessionId of [...this.tunnelLeases.keys()]) void this.releaseTunnel(sessionId);
     this.lineReader?.close();
     this.lineReader = undefined;
     const child = this.child;
@@ -5264,7 +5316,7 @@ class NativeSshBackend {
       const failure = new Error('Native SSH backend stopped.');
       this.failOpenWaiters(failure);
       this.failControlWaiters(failure);
-      for (const sessionId of [...this.tunnelLeases.keys()]) this.releaseTunnel(sessionId);
+      for (const sessionId of [...this.tunnelLeases.keys()]) void this.releaseTunnel(sessionId);
     });
   }
 
@@ -5347,10 +5399,10 @@ class NativeSshBackend {
           ),
         );
       }
-      this.releaseTunnel(event.sessionId);
+      void this.releaseTunnel(event.sessionId);
     } else if (event.type === 'closed') {
       this.activeSessions.delete(event.sessionId);
-      this.releaseTunnel(event.sessionId);
+      void this.releaseTunnel(event.sessionId);
     }
 
     this.broadcast(event);
@@ -5546,8 +5598,8 @@ async function runFirstLaunchMigrations(): Promise<void> {
     if (settings.updated)
       console.info('[Wormhole] Legacy settings migrated to the current schema.');
   } catch (error) {
-    // WinUI treats this startup migration as best-effort too. Every Go settings reader still
-    // applies the same migration in memory, so a temporarily unwritable file cannot block launch.
+    // Every Go settings reader still applies the compatibility transform in memory, so a
+    // temporarily unwritable settings file cannot block launch.
     const message = error instanceof Error ? error.message : String(error);
     console.warn('[Wormhole] Legacy settings migration could not be persisted.', message);
   }
@@ -5567,6 +5619,16 @@ async function runFirstLaunchMigrations(): Promise<void> {
 }
 
 function registerIpcHandlers(sshBackend: NativeSshBackend): void {
+  ipcMain.on('lifecycle:active-session-count', (event, value: unknown) => {
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (!owner) return;
+    windowCloseCoordinators.get(owner)?.updateActiveCount(value);
+  });
+  ipcMain.on('lifecycle:teardown-complete', (event, requestId: unknown) => {
+    if (typeof requestId !== 'string') return;
+    const waiter = rendererTeardownWaiters.get(requestId);
+    if (waiter?.webContentsId === event.sender.id) waiter.resolve();
+  });
   ipcMain.on('startup:ready', (event) => {
     const owner = BrowserWindow.fromWebContents(event.sender);
     if (!owner || owner.isDestroyed()) return;
@@ -5920,6 +5982,28 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       await requireWorkspaceAuth();
       return runBackend<{ updated: boolean }>('settings-set-auto-copy-on-select', {
         enabled: value,
+      });
+    });
+  });
+
+  ipcMain.handle('settings:set-confirm-on-tab-close', async (_event, value: unknown) => {
+    if (typeof value !== 'boolean') throw new Error('Connected-tab close setting is invalid.');
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ updated: boolean }>('settings-set-confirm-on-tab-close', {
+        enabled: value,
+      });
+    });
+  });
+
+  ipcMain.handle('settings:set-sidebar-width', async (_event, value: unknown) => {
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 0 || value > 10_000) {
+      throw new Error('Sidebar width setting is invalid.');
+    }
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ updated: boolean; sidebarWidth: number }>('settings-set-sidebar-width', {
+        width: value,
       });
     });
   });
@@ -6946,7 +7030,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   });
   ipcMain.handle('ssh:close', async (_event, sessionId: unknown) => {
     if (!isSshSessionId(sessionId)) throw new Error('SSH close request is invalid.');
-    sshBackend.close(sessionId);
+    await sshBackend.close(sessionId);
   });
   ipcMain.handle('serial:open', async (_event, request: unknown) => {
     if (!isSerialOpenRequest(request)) throw new Error('Serial open request is invalid.');
@@ -7382,6 +7466,8 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
     },
   });
+  const closeCoordinator = new WindowCloseCoordinator();
+  windowCloseCoordinators.set(window, closeCoordinator);
 
   // Wormhole has no user-facing page zoom. Normalize the renderer to its native CSS scale so a
   // previously persisted Chromium zoom level cannot make the whole workspace look oversized.
@@ -7432,24 +7518,75 @@ function createWindow() {
     console.error(`[Wormhole] Preload failed (${path.basename(preloadPath)}).`, error.message);
   });
 
-  let windowCloseCleanupStarted = false;
+  const closeReason = new WindowCloseReasonTracker();
+  window.on('query-session-end', () => {
+    closeReason.beginSystemShutdown();
+  });
+  window.on('session-end', () => {
+    closeReason.confirmSystemShutdown();
+    skipQuitConfirmation = true;
+    isQuitting = true;
+    nativeBackend?.stop();
+    nativeBackend = undefined;
+    serialBackend?.dispose();
+    serialBackend = undefined;
+    sshBackend.dispose();
+  });
+  window.webContents.on('render-process-gone', () => {
+    closeReason.rendererFailed();
+    if (!window.isDestroyed()) window.close();
+  });
   window.on('close', (event) => {
-    if (isQuitting || windowCloseCleanupStarted) return;
+    if (isQuitting || closeCoordinator.isComplete) return;
     event.preventDefault();
-    windowCloseCleanupStarted = true;
-    void withBitwardenBrowserTimeout(
-      webSurfaces.flushAndCloseForWindow(window),
-      30_000,
-      'Bitwarden browser storage window-close flush timed out.',
-    )
-      .catch((error) => {
-        console.warn('[Wormhole] Browser window shutdown did not finish cleanly.', error);
+    void closeCoordinator
+      .request({
+        reason: closeReason.reason,
+        confirm: async (activeCount) => {
+          const result = await dialog.showMessageBox(window, {
+            type: 'warning',
+            title: 'Close Wormhole?',
+            message: 'Close Wormhole?',
+            detail:
+              activeCount === 1
+                ? '1 connection is still active. Closing the window will disconnect it.'
+                : `${activeCount} connections are still active. Closing the window will disconnect them.`,
+            buttons: ['Close and disconnect', 'Cancel'],
+            defaultId: 1,
+            cancelId: 1,
+            noLink: true,
+          });
+          return result.response === 0;
+        },
+        teardown: async () => {
+          await runWindowTeardown(
+            async () => {
+              try {
+                await withBitwardenBrowserTimeout(
+                  webSurfaces.flushAndCloseForWindow(window),
+                  30_000,
+                  'Bitwarden browser storage window-close flush timed out.',
+                );
+              } catch (error) {
+                console.warn('[Wormhole] Browser window shutdown did not finish cleanly.', error);
+              }
+            },
+            () =>
+              closeReason.reason === 'renderer-failure'
+                ? Promise.resolve()
+                : requestRendererTeardown(window),
+          );
+        },
+        close: () => {
+          if (!window.isDestroyed()) window.destroy();
+        },
       })
-      .finally(() => {
-        if (!window.isDestroyed()) window.destroy();
+      .catch((error) => {
+        console.warn('[Wormhole] Window close cleanup failed.', error);
       });
   });
   window.once('closed', () => {
+    closeReason.dispose();
     treeTooltips.closeForWindow(window);
     webSurfaces.closeForWindow(window);
   });
@@ -7509,20 +7646,58 @@ let quitCleanupStarted = false;
 let quitCleanupComplete = false;
 
 app.on('before-quit', (event) => {
-  isQuitting = true;
-  if (startupUpdateTimer) clearTimeout(startupUpdateTimer);
-  startupUpdateTimer = undefined;
-  updateDownloadChild?.kill();
-  updateDownloadChild = undefined;
-  if (bitwardenBackgroundTimer) {
-    clearInterval(bitwardenBackgroundTimer);
-    bitwardenBackgroundTimer = undefined;
+  if (quitCleanupComplete) {
+    isQuitting = true;
+    return;
   }
-  if (quitCleanupComplete) return;
   event.preventDefault();
   if (quitCleanupStarted) return;
   quitCleanupStarted = true;
   void (async () => {
+    if (!skipQuitConfirmation) {
+      const windows = BrowserWindow.getAllWindows();
+      const activeCount = windows.reduce(
+        (count, window) =>
+          count + (windowCloseCoordinators.get(window)?.connectedSessionCount ?? 0),
+        0,
+      );
+      if (activeCount > 0) {
+        const owner = BrowserWindow.getFocusedWindow() ?? windows[0];
+        let confirmed = false;
+        try {
+          const result = await dialog.showMessageBox(owner, {
+            type: 'warning',
+            title: 'Quit Wormhole?',
+            message: 'Quit Wormhole?',
+            detail:
+              activeCount === 1
+                ? '1 connection is still active. Quitting Wormhole will disconnect it.'
+                : `${activeCount} connections are still active. Quitting Wormhole will disconnect them.`,
+            buttons: ['Quit and disconnect', 'Cancel'],
+            defaultId: 1,
+            cancelId: 1,
+            noLink: true,
+          });
+          confirmed = result.response === 0;
+        } catch {
+          confirmed = false;
+        }
+        if (!confirmed) {
+          quitCleanupStarted = false;
+          return;
+        }
+      }
+    }
+
+    isQuitting = true;
+    if (startupUpdateTimer) clearTimeout(startupUpdateTimer);
+    startupUpdateTimer = undefined;
+    updateDownloadChild?.kill();
+    updateDownloadChild = undefined;
+    if (bitwardenBackgroundTimer) {
+      clearInterval(bitwardenBackgroundTimer);
+      bitwardenBackgroundTimer = undefined;
+    }
     try {
       await withBitwardenBrowserTimeout(
         webSurfaces.flushAndCloseAll(),
@@ -7532,6 +7707,9 @@ app.on('before-quit', (event) => {
     } catch (error) {
       console.warn('[Wormhole] Browser session shutdown did not finish cleanly.', error);
     } finally {
+      await Promise.allSettled(
+        BrowserWindow.getAllWindows().map((window) => requestRendererTeardown(window)),
+      );
       nativeBackend?.stop();
       nativeBackend = undefined;
       serialBackend?.dispose();

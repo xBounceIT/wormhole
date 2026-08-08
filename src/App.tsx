@@ -113,12 +113,10 @@ import {
   Terminal,
   Trash2,
   Upload,
-  Wifi,
   X,
   XCircle,
   Zap,
 } from 'lucide-react';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
@@ -218,6 +216,19 @@ import { formatSftpDate, formatSftpSize } from './sftp-format';
 import { hasSftpDragPayload, sftpDragDataType } from './sftp-dnd';
 import { cn } from '@/lib/utils';
 import { WebSessionAttemptTracker } from '../electron/web-session-attempt';
+import {
+  connectedTabCloseMessage,
+  isSessionActive,
+  nextSelectedSessionId,
+  SessionCloseGate,
+  shouldConfirmConnectedTabClose,
+} from './session-lifecycle';
+import {
+  createDebouncedSidebarWriter,
+  maxSidebarWidth,
+  minSidebarWidth,
+  normalizeSidebarWidth,
+} from './sidebar-settings';
 import {
   isTunnelTestCancellation,
   isTunnelTestNotice,
@@ -1342,6 +1353,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [selectedTreeNodeIds, setSelectedTreeNodeIds] = useState<Set<string>>(() => new Set());
   const [searchText, setSearchText] = useState('');
   const [sessions, setSessions] = useState<Session[]>([]);
+  const sessionsRef = useRef(sessions);
+  sessionsRef.current = sessions;
   const [selectedSessionId, setSelectedSessionId] = useState('');
   const [rdpCredentials, setRdpCredentials] = useState<Record<string, RdpCredentials>>({});
   const [rdpCredentialPrompt, setRdpCredentialPrompt] = useState<string | null>(null);
@@ -1426,6 +1439,17 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     initialSettings.lastUpdateCheck,
   );
   const [autoCopyOnSelect, setAutoCopyOnSelect] = useState(initialSettings.autoCopyOnSelect);
+  const [confirmOnTabClose, setConfirmOnTabClose] = useState(initialSettings.confirmOnTabClose);
+  const sidebarWidth = normalizeSidebarWidth(initialSettings.sidebarWidth);
+  const sidebarWriter = useMemo(
+    () =>
+      createDebouncedSidebarWriter(
+        (width) => window.wormhole?.setSidebarWidth(width).then(() => undefined),
+        { initialWidth: initialSettings.sidebarWidth },
+      ),
+    [initialSettings.sidebarWidth],
+  );
+  const sessionCloseGate = useRef(new SessionCloseGate());
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateStatus, setUpdateStatus] = useState('');
   const [updateDownloadProgress, setUpdateDownloadProgress] = useState<number | null>(null);
@@ -1450,6 +1474,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     () => filterTree(tree, searchText.trim().toLowerCase()),
     [searchText, tree],
   );
+
+  useEffect(() => () => sidebarWriter.cancel(), [sidebarWriter]);
+  const activeSessionCount = useMemo(() => sessions.filter(isSessionActive).length, [sessions]);
+  useEffect(() => {
+    window.wormhole?.reportActiveSessionCount(activeSessionCount);
+  }, [activeSessionCount]);
   const folders = useMemo(() => collectFolders(tree), [tree]);
   const folderSelectionOptions = useMemo<SearchableComboboxOption[]>(
     () => [
@@ -2960,6 +2990,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       backendSessionId,
       status:
         node.protocol === 'ssh' ||
+        node.protocol === 'vnc' ||
         node.protocol === 'serial' ||
         node.protocol === 'http' ||
         node.protocol === 'https'
@@ -2994,88 +3025,99 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (session.protocol === 'http' || session.protocol === 'https') startWebSession(session);
   }
 
-  function closeSession(id: string, preferredNextSessionId?: string) {
-    const closing = sessions.find((session) => session.id === id);
-    runtimeBitwardenRetries.current.remove(`rdp:${id}`);
-    runtimeBitwardenRetries.current.remove(`vnc:${id}`);
-    if (closing?.backendSessionId) {
-      runtimeBitwardenRetries.current.remove(`ssh:${closing.backendSessionId}`);
-    }
-    if (runtimeBitwardenRetries.current.isEmpty && bitwardenUnlockPrompt) {
-      dismissRuntimeBitwardenUnlock();
-    }
-    rdpBitwardenAttempts.current.delete(id);
-    if (rdpCredentialPrompt === id) setRdpCredentialPrompt(null);
-    if (sshCredentialPrompt?.backendSessionId === closing?.backendSessionId) {
-      setSshCredentialPrompt(null);
-      setSshCredentialForm({ username: '', password: '' });
-    }
-    if (closing?.protocol === 'rdp') {
-      void window.wormhole
-        ?.commandRdpSession({ sessionId: id, operation: 'disconnect' })
-        .catch(() => undefined);
-    }
-    if (closing?.protocol === 'http' || closing?.protocol === 'https') {
-      void closeWebSession(closing.id).catch(() => undefined);
-    }
-    const index = sessions.findIndex((session) => session.id === id);
-    const nextSessions = sessions.filter((session) => session.id !== id);
-    setSessions(nextSessions);
-    sftpRequestIds.current.delete(id);
-    clearSftpCancelRequestsForBrowser(sftpCancelRequests.current, closing?.sftp);
-
-    if (closing?.backendSessionId) {
-      if (closing.protocol === 'serial') {
-        void window.wormhole?.closeSerialSession(closing.backendSessionId);
-      } else {
-        void window.wormhole?.closeSshSession(closing.backendSessionId);
-      }
-    }
-
-    if (selectedSessionId === id) {
-      setSelectedSessionId(
-        (preferredNextSessionId &&
-        nextSessions.some((session) => session.id === preferredNextSessionId)
-          ? preferredNextSessionId
-          : undefined) ??
-          nextSessions[index]?.id ??
-          nextSessions[index - 1]?.id ??
-          '',
+  async function releaseSessionResources(closing: Session): Promise<void> {
+    const releases: Promise<unknown>[] = [];
+    if (closing.protocol === 'rdp') {
+      releases.push(
+        window.wormhole
+          ?.commandRdpSession({ sessionId: closing.id, operation: 'disconnect' })
+          .catch(() => undefined) ?? Promise.resolve(),
+      );
+    } else if (closing.protocol === 'http' || closing.protocol === 'https') {
+      releases.push(closeWebSession(closing.id).catch(() => undefined));
+    } else if (closing.protocol === 'vnc') {
+      releases.push(
+        window.wormhole
+          ?.sendVncCommand({ action: 'vnc.disconnect', sessionId: closing.id })
+          .catch(() => undefined) ?? Promise.resolve(),
       );
     }
-    setRdpCredentials((current) => {
-      if (!(id in current)) return current;
-      const next = { ...current };
-      delete next[id];
-      return next;
-    });
-    setSshCredentialPrompt((current) =>
-      current?.sessionId === id || current?.backendSessionId === id ? null : current,
-    );
+    if (closing.backendSessionId) {
+      const release =
+        closing.protocol === 'serial'
+          ? window.wormhole?.closeSerialSession(closing.backendSessionId)
+          : window.wormhole?.closeSshSession(closing.backendSessionId);
+      if (release) releases.push(release.catch(() => undefined));
+    }
+    await Promise.allSettled(releases);
   }
 
-  function closeSessionsForNodeIds(nodeIds: ReadonlySet<string>) {
+  function handleConfirmOnTabCloseChange(enabled: boolean) {
+    setConfirmOnTabClose(enabled);
+    void window.wormhole?.setConfirmOnTabClose(enabled).catch(() => undefined);
+  }
+
+  async function closeSession(id: string, preferredNextSessionId?: string) {
+    const closing = sessions.find((session) => session.id === id);
+    if (!closing) return;
+    await sessionCloseGate.current.run(id, async () => {
+      if (
+        shouldConfirmConnectedTabClose(confirmOnTabClose, [closing]) &&
+        !window.confirm(connectedTabCloseMessage(1))
+      ) {
+        return;
+      }
+      runtimeBitwardenRetries.current.remove(`rdp:${id}`);
+      runtimeBitwardenRetries.current.remove(`vnc:${id}`);
+      if (closing.backendSessionId) {
+        runtimeBitwardenRetries.current.remove(`ssh:${closing.backendSessionId}`);
+      }
+      if (runtimeBitwardenRetries.current.isEmpty && bitwardenUnlockPrompt) {
+        dismissRuntimeBitwardenUnlock();
+      }
+      rdpBitwardenAttempts.current.delete(id);
+      if (rdpCredentialPrompt === id) setRdpCredentialPrompt(null);
+      if (sshCredentialPrompt?.backendSessionId === closing.backendSessionId) {
+        setSshCredentialPrompt(null);
+        setSshCredentialForm({ username: '', password: '' });
+      }
+      await releaseSessionResources(closing);
+      setSessions((current) => current.filter((session) => session.id !== id));
+      sftpRequestIds.current.delete(id);
+      clearSftpCancelRequestsForBrowser(sftpCancelRequests.current, closing.sftp);
+
+      const closingSessionIds = sessionCloseGate.current.activeSessionIds();
+      setSelectedSessionId((current) => {
+        if (!closingSessionIds.has(current)) return current;
+        if (
+          preferredNextSessionId &&
+          !closingSessionIds.has(preferredNextSessionId) &&
+          sessions.some((session) => session.id === preferredNextSessionId)
+        ) {
+          return preferredNextSessionId;
+        }
+        return nextSelectedSessionId(sessions, current, (sessionId) =>
+          closingSessionIds.has(sessionId),
+        );
+      });
+      setRdpCredentials((current) => {
+        if (!(id in current)) return current;
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+      setSshCredentialPrompt((current) =>
+        current?.sessionId === id || current?.backendSessionId === id ? null : current,
+      );
+    });
+  }
+
+  async function closeSessionsForNodeIds(nodeIds: ReadonlySet<string>) {
     const closing = sessions.filter((session) => session.nodeId && nodeIds.has(session.nodeId));
     if (closing.length === 0) return;
     const closingIds = new Set(closing.map((session) => session.id));
-    const selectedIndex = sessions.findIndex((session) => session.id === selectedSessionId);
-
+    await Promise.allSettled(closing.map(releaseSessionResources));
     for (const session of closing) {
-      if (session.protocol === 'rdp') {
-        void window.wormhole
-          ?.commandRdpSession({ sessionId: session.id, operation: 'disconnect' })
-          .catch(() => undefined);
-      }
-      if (session.protocol === 'http' || session.protocol === 'https') {
-        void closeWebSession(session.id).catch(() => undefined);
-      }
-      if (session.backendSessionId) {
-        if (session.protocol === 'serial') {
-          void window.wormhole?.closeSerialSession(session.backendSessionId);
-        } else {
-          void window.wormhole?.closeSshSession(session.backendSessionId);
-        }
-      }
       sftpRequestIds.current.delete(session.id);
       clearSftpCancelRequestsForBrowser(sftpCancelRequests.current, session.sftp);
     }
@@ -3084,7 +3126,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setSessions(nextSessions);
     setSelectedSessionId((current) => {
       if (!closingIds.has(current)) return current;
-      return nextSessions[selectedIndex]?.id ?? nextSessions[selectedIndex - 1]?.id ?? '';
+      return nextSelectedSessionId(sessions, current, (sessionId) => closingIds.has(sessionId));
     });
     setRdpCredentialPrompt((current) => (current && closingIds.has(current) ? null : current));
     setSshCredentialPrompt((current) =>
@@ -3101,6 +3143,19 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       return next;
     });
   }
+
+  const releaseSessionResourcesRef = useRef(releaseSessionResources);
+  releaseSessionResourcesRef.current = releaseSessionResources;
+  useEffect(() => {
+    return window.wormhole?.onWindowCloseRequested(async () => {
+      await sidebarWriter.flush().catch(() => undefined);
+      await Promise.allSettled(
+        sessionsRef.current.map((session) => releaseSessionResourcesRef.current(session)),
+      );
+      setSessions([]);
+      setSelectedSessionId('');
+    });
+  }, [sidebarWriter]);
 
   function reconnectSession(id: string) {
     const source = sessions.find((session) => session.id === id);
@@ -4215,7 +4270,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         if (!api) throw new Error('The native workspace bridge is unavailable.');
         const result = await api.deleteWorkspaceNode({ nodeId: node.id });
         if (!result.deleted) throw new Error('The workspace node was not deleted.');
-        closeSessionsForNodeIds(deletedNodeIds);
+        await closeSessionsForNodeIds(deletedNodeIds);
         applyDeletedTreeState(removeTreeNode(tree, node.id));
         setPendingDeleteNode(null);
         try {
@@ -4225,7 +4280,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           // transient refresh failure must not leave a deleted node visible or invite a retry.
         }
       } else {
-        closeSessionsForNodeIds(deletedNodeIds);
+        await closeSessionsForNodeIds(deletedNodeIds);
         applyDeletedTreeState(removeTreeNode(tree, node.id));
         setPendingDeleteNode(null);
       }
@@ -4381,6 +4436,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       backendSessionId,
       status:
         quickConnectForm.protocol === 'serial' ||
+        quickConnectForm.protocol === 'vnc' ||
         quickConnectForm.protocol === 'http' ||
         quickConnectForm.protocol === 'https'
           ? 'connecting'
@@ -4501,6 +4557,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   backendSessionId,
                   status:
                     newConnectionForm.protocol === 'ssh' ||
+                    newConnectionForm.protocol === 'vnc' ||
                     newConnectionForm.protocol === 'serial' ||
                     newConnectionForm.protocol === 'http' ||
                     newConnectionForm.protocol === 'https'
@@ -5200,7 +5257,16 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         </header>
 
         <ResizablePanelGroup className="h-full min-h-0 flex-1" orientation="horizontal">
-          <ResizablePanel className="min-h-0" defaultSize="24%" maxSize="36%" minSize="18%">
+          <ResizablePanel
+            className="min-h-0"
+            defaultSize={`${sidebarWidth}px`}
+            groupResizeBehavior="preserve-pixel-size"
+            maxSize={`${maxSidebarWidth}px`}
+            minSize={`${minSidebarWidth}px`}
+            onResize={(size, _id, previous) => {
+              if (previous) sidebarWriter.schedule(size.inPixels);
+            }}
+          >
             <SidebarProvider
               className="h-full min-h-0"
               style={{ '--sidebar-width': '100%' } as CSSProperties}
@@ -5378,6 +5444,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   onSftpRefresh={refreshSftpBrowser}
                   onSshInput={sendSshInput}
                   onTrustSshHostKey={trustSshHostKey}
+                  onVncStatusChange={(sessionId, status) =>
+                    setSessions((current) =>
+                      current.map((session) =>
+                        session.id === sessionId ? { ...session, status } : session,
+                      ),
+                    )
+                  }
                   isAuthorized={authGate === 'unlocked'}
                   isWebSurfaceVisible={
                     !quickConnectOpen &&
@@ -5394,10 +5467,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               ) : activePage === 'settings' ? (
                 <SettingsPage
                   autoCopyOnSelect={autoCopyOnSelect}
+                  confirmOnTabClose={confirmOnTabClose}
                   authGate={authGate}
                   authState={authState}
                   onAuthStateChange={setAuthState}
                   onAutoCopyOnSelectChange={handleAutoCopyOnSelectChange}
+                  onConfirmOnTabCloseChange={handleConfirmOnTabCloseChange}
                   onBackupImported={(workspace) => {
                     setTree(workspace.tree);
                     setCredentials(workspace.credentials);
@@ -8231,6 +8306,7 @@ function SessionsPage({
   onSerialInput,
   onTrustSshHostKey,
   onRetryRdp,
+  onVncStatusChange,
 }: {
   autoCopyOnSelect: boolean;
   isAuthorized: boolean;
@@ -8276,6 +8352,7 @@ function SessionsPage({
   onSerialInput: (sessionId: string, value: string) => void;
   onTrustSshHostKey: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
   onRetryRdp: (id: string) => void;
+  onVncStatusChange: (sessionId: string, status: Session['status']) => void;
 }) {
   const [bitwardenOpenSessionId, setBitwardenOpenSessionId] = useState('');
   useEffect(() => {
@@ -8571,6 +8648,7 @@ function SessionsPage({
               onSftpTransferRemove={onSftpTransferRemove}
               onSshInput={onSshInput}
               onTrustSshHostKey={onTrustSshHostKey}
+              onVncStatusChange={onVncStatusChange}
               session={session}
             />
           </div>
@@ -8784,6 +8862,7 @@ function SessionSurface({
   onSftpTransferRemove,
   onSshInput,
   onTrustSshHostKey,
+  onVncStatusChange,
   session,
 }: {
   autoCopyOnSelect: boolean;
@@ -8827,6 +8906,7 @@ function SessionSurface({
   onSftpTransferRemove: (sessionId: string, transferId: string, itemId: string) => void;
   onSshInput: (sessionId: string, value: string) => void;
   onTrustSshHostKey: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
+  onVncStatusChange: (sessionId: string, status: Session['status']) => void;
 }) {
   if (session.protocol === 'ssh') {
     return (
@@ -8917,6 +8997,11 @@ function SessionSurface({
         onBitwardenUnlockRequired={(reason, retry) =>
           onBitwardenUnlockRequired(session.id, reason, retry)
         }
+        onStatusChange={(status) =>
+          status === 'idle'
+            ? undefined
+            : onVncStatusChange(session.id, status === 'disconnected' ? 'closed' : status)
+        }
         session={{
           id: session.id,
           nodeId: session.nodeId,
@@ -8945,7 +9030,7 @@ function SessionSurface({
         <p className="font-mono text-[9px] uppercase tracking-[0.14em] text-muted-foreground">
           {protocolLabel(session.protocol)}
         </p>
-        <p className="mt-2 text-sm font-medium">Protocol surface ready for migration</p>
+        <p className="mt-2 text-sm font-medium">Unsupported protocol surface</p>
         <p className="mt-1 text-xs text-muted-foreground">
           {session.host || 'inherited target'}:{session.port ?? 'default'}
         </p>
@@ -11671,12 +11756,14 @@ function ReleaseNotesMarkdown({ markdown }: { markdown: string }) {
 
 function SettingsPage({
   autoCopyOnSelect,
+  confirmOnTabClose,
   theme,
   onThemeChange,
   authGate,
   authState,
   onAuthStateChange,
   onAutoCopyOnSelectChange,
+  onConfirmOnTabCloseChange,
   onBackupImported,
   onRequestAuthentication,
   onCheckForUpdates,
@@ -11689,12 +11776,14 @@ function SettingsPage({
   onWorkspaceCredentialsChanged,
 }: {
   autoCopyOnSelect: boolean;
+  confirmOnTabClose: boolean;
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
   authGate: 'loading' | 'locked' | 'unlocked' | 'error';
   authState: WormholeAuthState | null;
   onAuthStateChange: (state: WormholeAuthState) => void;
   onAutoCopyOnSelectChange: (enabled: boolean) => void;
+  onConfirmOnTabCloseChange: (enabled: boolean) => void;
   onBackupImported: (workspace: WormholeWorkspaceSnapshot) => void;
   onRequestAuthentication: (reason: string) => Promise<boolean>;
   onCheckForUpdates: () => void;
@@ -11716,7 +11805,6 @@ function SettingsPage({
   onWorkspaceCredentialsChanged: () => Promise<void>;
 }) {
   const [activeTab, setActiveTab] = useState('general');
-  const [confirmOnTabClose, setConfirmOnTabClose] = useState(true);
   const [promptBeforeTunnelConnect, setPromptBeforeTunnelConnect] = useState(true);
   const [authMethod, setAuthMethod] = useState<WormholeAuthMode>(authState?.mode ?? 'disabled');
   const [helloFallback, setHelloFallback] = useState<WormholeAuthFallback>(
@@ -12829,7 +12917,7 @@ function SettingsPage({
               checked={confirmOnTabClose}
               description="Ask before closing a connected session tab."
               label="Confirm before closing a connected tab"
-              onCheckedChange={setConfirmOnTabClose}
+              onCheckedChange={onConfirmOnTabCloseChange}
             />
           </SettingsSection>
 
@@ -13876,21 +13964,11 @@ function UtilityPage({
               0{index + 1}
             </span>
             <strong className="text-xs">{card}</strong>
-            <span className="text-[10px] text-muted-foreground">Ready for migration</span>
+            <span className="text-[10px] text-muted-foreground">Available in Wormhole</span>
             <MoreHorizontal className="absolute bottom-4 right-4 size-4 text-muted-foreground" />
           </Card>
         ))}
       </div>
-      <Alert className="mt-6 max-w-4xl">
-        <Wifi />
-        <div>
-          <AlertTitle className="text-xs">WinUI implementation remains active</AlertTitle>
-          <AlertDescription className="text-[10px]">
-            This Electron surface is intentionally beside the existing desktop shell. The next
-            migration step can replace the remaining provider actions one surface at a time.
-          </AlertDescription>
-        </div>
-      </Alert>
     </section>
   );
 }
