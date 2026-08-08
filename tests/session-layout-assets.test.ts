@@ -9,6 +9,14 @@ const vncSource = readFileSync(
 );
 const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
 const preloadSource = readFileSync(new URL('../electron/preload.cts', import.meta.url), 'utf8');
+const rdpHostSource = readFileSync(
+  new URL('../tools/wormhole-rdp-host/Program.cs', import.meta.url),
+  'utf8',
+);
+const rdpHostFormSource = readFileSync(
+  new URL('../Interop/Rdp/RdpHostForm.cs', import.meta.url),
+  'utf8',
+);
 
 test('live surfaces are keyed only by session identity in one stable workspace layer', () => {
   const surfaceLayer = appSource.slice(
@@ -46,13 +54,56 @@ test('first-open RDP startup reads the committed session snapshot', () => {
   assert.doesNotMatch(requestSource, /const session = sessions\.find/);
 });
 
-test('RDP bounds updates are frame-coalesced and deduplicated', () => {
+test('RDP bounds updates avoid renderer-frame latency and are deduplicated', () => {
   const rdpSource = readFileSync(
     new URL('../src/components/RdpSurface.tsx', import.meta.url),
     'utf8',
   );
-  assert.match(rdpSource, /requestAnimationFrame\(reportBounds\)/);
+  assert.match(rdpSource, /const observer = new ResizeObserver\(reportBounds\)/);
+  assert.match(rdpSource, /window\.addEventListener\('resize', reportBounds\)/);
+  assert.doesNotMatch(rdpSource, /requestAnimationFrame\(reportBounds\)/);
   assert.match(rdpSource, /signature === boundsSignature\.current/);
+  assert.match(rdpSource, /data-rdp-session-id=\{sessionId\}/);
+  assert.match(rdpSource, /const shouldShowNativeSurface = status === 'connected'/);
+  assert.match(rdpSource, /void api\.resizeRdpSession\(\{ sessionId, bounds \}\)/);
+  assert.match(
+    rdpSource,
+    /if \(!shouldShowNativeSurface \|\| nativeSurfaceVisible\.current\) return/,
+  );
+  assert.match(appSource, /waitForRdpSurfaceBounds\(sessionId\)[\s\S]*bounds,/);
+});
+
+test('RDP overlays track owner-window moves in screen coordinates', () => {
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  assert.match(
+    mainSource,
+    /window\.on\('move', \(\) => scheduleRdpSurfacePlacementSync\(window\)\)/,
+  );
+  assert.match(mainSource, /placement\.rendererBounds/);
+  assert.match(mainSource, /toScreenBounds\(owner, placement\.rendererBounds\)/);
+  assert.match(mainSource, /rdpClient\.resize\(\{ sessionId, bounds \}, ownerWindow\)/);
+});
+
+test('native RDP prompts and dynamic resolution use the measured connection surface', () => {
+  const startSource = rdpHostSource.slice(
+    rdpHostSource.indexOf('private void Start(RdpHostCommand command)'),
+    rdpHostSource.indexOf('private void ScheduleRemoteResolution'),
+  );
+  const positionIndex = startSource.indexOf('if (!form.SetHostBounds(');
+  const configureIndex = startSource.indexOf('form.Configure(');
+  assert.ok(positionIndex >= 0 && positionIndex < configureIndex);
+  assert.match(startSource, /form\.Configure\([\s\S]*?\n\s*hwnd,/);
+  assert.match(rdpHostFormSource, /ocx\.UIParentWindowHandle = ownerHwnd\.ToInt64\(\)/);
+  assert.doesNotMatch(rdpHostFormSource, /adv\.UIParentWindowHandle/);
+  assert.match(rdpHostSource, /ResolutionDebounceMs = 100/);
+  assert.match(rdpHostSource, /if \(command\.Op == "resize"\)[\s\S]*QueueResize\(command\)/);
+  assert.match(rdpHostSource, /_pendingResize = command/);
+  assert.match(rdpHostSource, /private void FlushPendingResize\(\)/);
+  assert.match(rdpHostSource, /form\.TryUpdateRemoteResolution/);
+  assert.match(rdpHostFormSource, /MoveWindow\([\s\S]*bRepaint: false\)/);
+  assert.match(rdpHostFormSource, /RequestHostTreeRedraw\(hostHwnd, immediate: false\)/);
+  assert.match(rdpHostFormSource, /RDW_ALLCHILDREN/);
+  assert.doesNotMatch(rdpHostFormSource, /PerformLayout\(\)/);
 });
 
 test('editing an open RDP session releases and resets its native lifecycle', () => {

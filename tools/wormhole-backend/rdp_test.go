@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"reflect"
 	"runtime"
 	"strings"
@@ -60,6 +61,43 @@ func TestRdpCommandsWithoutAProcessAreIdempotentWhereTheSurfaceNeedsIt(t *testin
 	}
 }
 
+func TestWindowsRdpCredentialFailureExcludesNonErrorLogonNotifications(t *testing.T) {
+	for _, code := range []int{-7, -6, -5, -4, -3, -2, 3} {
+		if isWindowsRdpCredentialFailure(code) {
+			t.Fatalf("non-credential logon notification %d was classified as a credential failure", code)
+		}
+	}
+}
+
+func TestWindowsRdpCredentialFailureIncludesRetryableAuthenticationErrors(t *testing.T) {
+	for _, code := range []int{-1, 0, 1, 2, -1073741714, -1073741715, -1073741276} {
+		if !isWindowsRdpCredentialFailure(code) {
+			t.Fatalf("authentication error %d did not allow a credential retry", code)
+		}
+	}
+}
+
+func TestNativeRdpEventClassificationIsAuthoritative(t *testing.T) {
+	tests := []struct {
+		name  string
+		event rdpEvent
+		want  bool
+	}{
+		{name: "continue logon", event: rdpEvent{Type: "logonError", Code: -2}, want: false},
+		{name: "bad password", event: rdpEvent{Type: "logonError", Code: 0}, want: true},
+		{name: "unrelated event", event: rdpEvent{Type: "connected", Code: 0}, want: false},
+		{name: "untrusted marker", event: rdpEvent{Type: "connected", CredentialFailure: true}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			classifyNativeRdpEvent(&test.event)
+			if test.event.CredentialFailure != test.want {
+				t.Fatalf("CredentialFailure = %t, want %t", test.event.CredentialFailure, test.want)
+			}
+		})
+	}
+}
+
 func TestRouteRdpThroughTunnelValidatesExplicitQuickConnectTunnel(t *testing.T) {
 	controller := &rdpController{}
 	command := &rdpCommand{Profile: rdpProfile{TunnelConfigID: "not-a-uuid"}}
@@ -76,6 +114,33 @@ func TestRouteRdpThroughTunnelRejectsSavedTunnelOverride(t *testing.T) {
 	}}
 	if err := controller.routeRdpThroughTunnel(command, "rdp.example", rdpDefaultPort); err == nil {
 		t.Fatal("RDP command allowed a saved connection tunnel override")
+	}
+}
+
+func TestRouteRdpThroughTunnelAcceptsResolvedSavedTunnelHandoff(t *testing.T) {
+	proxy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.Close()
+
+	enabled := true
+	controller := &rdpController{}
+	command := &rdpCommand{Profile: rdpProfile{
+		NodeID:         "saved-rdp",
+		TunnelConfigID: "11111111-2222-3333-4444-555555555555",
+		SocksEndpoint:  proxy.Addr().String(),
+		TunnelEnabled:  &enabled,
+	}}
+	if err := controller.routeRdpThroughTunnel(command, "rdp.internal.example", rdpDefaultPort); err != nil {
+		t.Fatalf("resolved saved RDP tunnel handoff was rejected: %v", err)
+	}
+	defer command.forwarder.close()
+	if command.tunnel != nil {
+		t.Fatal("resolved SOCKS handoff started a second VPN tunnel")
+	}
+	if command.forwarder == nil || command.Profile.Host != "127.0.0.1" || command.Profile.Port < 1 {
+		t.Fatalf("resolved SOCKS handoff did not create a loopback forwarder: %#v", command.Profile)
 	}
 }
 

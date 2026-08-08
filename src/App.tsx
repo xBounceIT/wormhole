@@ -739,6 +739,25 @@ function newSessionToken(): string {
     : `ssh-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+function measuredRdpSurfaceBounds(sessionId: string): WormholeRdpSurfaceRect | undefined {
+  const surface = [...document.querySelectorAll<HTMLElement>('[data-rdp-session-id]')].find(
+    (candidate) => candidate.dataset.rdpSessionId === sessionId,
+  );
+  if (!surface) return undefined;
+  const rect = surface.getBoundingClientRect();
+  if (rect.width < 1 || rect.height < 1) return undefined;
+  return { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
+}
+
+async function waitForRdpSurfaceBounds(
+  sessionId: string,
+): Promise<WormholeRdpSurfaceRect | undefined> {
+  const measured = measuredRdpSurfaceBounds(sessionId);
+  if (measured) return measured;
+  await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
+  return measuredRdpSurfaceBounds(sessionId);
+}
+
 function encodeTerminalData(value: string): string {
   const bytes = new TextEncoder().encode(value);
   let binary = '';
@@ -2338,12 +2357,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   useEffect(() => {
     const unsubscribe = window.wormhole?.onRdpEvent((event) => {
       if (!event.sessionId) return;
-      const bitwardenAuthenticationFailure =
-        rdpSavedCredentialAttempts.current.has(event.sessionId) &&
-        (event.type === 'logonError' ||
-          (event.type === 'fatalError' &&
-            /authenticat|credential|logon|password/i.test(event.message ?? '')));
-      if (bitwardenAuthenticationFailure) {
+      const savedCredentialFailure =
+        rdpSavedCredentialAttempts.current.has(event.sessionId) && event.credentialFailure === true;
+      if (savedCredentialFailure) {
         rdpSavedCredentialAttempts.current.delete(event.sessionId);
         setRdpCredentialForm({ username: '', domain: '', password: '' });
         setRdpCredentialPrompt(event.sessionId);
@@ -2579,8 +2595,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           } else if (promptTarget === 'quick') {
             const sessionId =
               frontendSessionId ??
-              sessionsRef.current.find((candidate) => candidate.backendSessionId === request.sessionId)
-                ?.id;
+              sessionsRef.current.find(
+                (candidate) => candidate.backendSessionId === request.sessionId,
+              )?.id;
             if (sessionId) {
               setSshCredentialForm({ username: '', password: '' });
               setSshCredentialPrompt({ kind: 'quick', sessionId });
@@ -2881,7 +2898,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       ),
     );
 
-    if (!window.wormhole) {
+    const wormhole = window.wormhole;
+    if (!wormhole) {
       setSessions((current) =>
         current.map((candidate) =>
           candidate.id === sessionId
@@ -2896,16 +2914,23 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       return;
     }
 
-    void window.wormhole
-      .startRdpSession({
-        sessionId,
-        profile: {
-          ...defaultRdpProfile(session),
-          username: manualCredentials ? normalizedCredentials.username || undefined : undefined,
-          domain: manualCredentials ? normalizedCredentials.domain || undefined : undefined,
-          password: manualCredentials ? normalizedCredentials.password || undefined : undefined,
-        },
-        manualCredentials,
+    void waitForRdpSurfaceBounds(sessionId)
+      .then((bounds) => {
+        // Opening a saved connection creates and starts its tab in one event. Wait one frame for
+        // that tab's real layout so the native host never centers prompts or initializes the
+        // remote desktop from the backend's 1x1 startup placeholder.
+        if (!sessionsRef.current.some((candidate) => candidate.id === sessionId)) return;
+        return wormhole.startRdpSession({
+          sessionId,
+          profile: {
+            ...defaultRdpProfile(session),
+            username: manualCredentials ? normalizedCredentials.username || undefined : undefined,
+            domain: manualCredentials ? normalizedCredentials.domain || undefined : undefined,
+            password: manualCredentials ? normalizedCredentials.password || undefined : undefined,
+          },
+          bounds,
+          manualCredentials,
+        });
       })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : 'The RDP backend could not start.';
@@ -2915,10 +2940,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
               ? requestRdpCredentials(sessionId)
               : startRdpSession(sessionId, normalizedCredentials, false),
           );
-        } else if (
-          !manualCredentials &&
-          requiresRdpCredentialPrompt(message)
-        ) {
+        } else if (!manualCredentials && requiresRdpCredentialPrompt(message)) {
           rdpSavedCredentialAttempts.current.delete(sessionId);
           setRdpCredentialForm({ username: '', domain: '', password: '' });
           setRdpCredentialPrompt(sessionId);
@@ -4546,7 +4568,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const host = newConnectionForm.host.trim() || 'localhost';
     const portText = newConnectionForm.port.trim();
     const port = portText ? Number(portText) : undefined;
-    if (portText && (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535)) {
+    if (
+      portText &&
+      (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535)
+    ) {
       setEditorError('Port must be a whole number between 1 and 65535.');
       quickConnectSubmitInFlight.current = false;
       return;
@@ -4578,7 +4603,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       newConnectionForm.protocol === 'serial'
         ? newSessionToken()
         : undefined;
-    const tunnelConfigId = quickConnectTunnelId(newConnectionForm.protocol, newConnectionForm.tunnel);
+    const tunnelConfigId = quickConnectTunnelId(
+      newConnectionForm.protocol,
+      newConnectionForm.tunnel,
+    );
     const session: Session = {
       id,
       title: name,
@@ -6083,21 +6111,21 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
                     {connectionEditorMode === 'saved' ? (
                       <div className="grid max-w-[280px] gap-2">
-                      <Label htmlFor="connection-folder">Folder</Label>
-                      <SearchableCombobox
-                        id="connection-folder"
-                        emptyMessage="No folders found."
-                        onValueChange={(folder) =>
-                          setNewConnectionForm((form) => ({
-                            ...form,
-                            folder: folder === rootFolderSelectionValue ? '' : folder,
-                          }))
-                        }
-                        options={folderSelectionOptions}
-                        placeholder="Root"
-                        searchPlaceholder="Search folders…"
-                        value={newConnectionForm.folder || rootFolderSelectionValue}
-                      />
+                        <Label htmlFor="connection-folder">Folder</Label>
+                        <SearchableCombobox
+                          id="connection-folder"
+                          emptyMessage="No folders found."
+                          onValueChange={(folder) =>
+                            setNewConnectionForm((form) => ({
+                              ...form,
+                              folder: folder === rootFolderSelectionValue ? '' : folder,
+                            }))
+                          }
+                          options={folderSelectionOptions}
+                          placeholder="Root"
+                          searchPlaceholder="Search folders…"
+                          value={newConnectionForm.folder || rootFolderSelectionValue}
+                        />
                       </div>
                     ) : null}
 

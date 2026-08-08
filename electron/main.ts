@@ -117,6 +117,11 @@ const bitwardenExtensionReadyTimeoutMs = 15_000;
 const bitwardenExtensionHostMaxListeners = 64;
 let rdpClient: RdpBackendClient | undefined;
 const rdpTunnelLeases = new Map<string, string>();
+const rdpSurfacePlacements = new Map<
+  string,
+  { owner: BrowserWindow; rendererBounds: RdpSurfaceRect }
+>();
+const rdpOwnerSyncTasks = new Map<number, NodeJS.Immediate>();
 let serialBackend: SerialBackendClient | undefined;
 let latestUpdateCheck: UpdateCheckResult | undefined;
 let updateCheckInFlight: Promise<UpdateCheckResult> | undefined;
@@ -1236,9 +1241,7 @@ function isSshOpenRequest(value: unknown): value is SshOpenRequest {
     host.trim().length > 0 &&
     host.length <= 4096 &&
     !/[\r\n\0]/.test(host) &&
-    ((isTunnelID(credentialId) &&
-      username === undefined &&
-      password === undefined) ||
+    ((isTunnelID(credentialId) && username === undefined && password === undefined) ||
       (credentialId === undefined &&
         typeof username === 'string' &&
         username.trim().length > 0 &&
@@ -2827,7 +2830,9 @@ async function resolveNativeRdpProfile(
   return response.result as RdpProfile;
 }
 
-async function resolveNativeRdpCredential(credentialId: string): Promise<BitwardenResolvedCredential> {
+async function resolveNativeRdpCredential(
+  credentialId: string,
+): Promise<BitwardenResolvedCredential> {
   const response = await getNativeBackend().send(
     { action: 'rdp.resolve-credential', credentialId },
     cliOperationTimeoutMs,
@@ -7204,11 +7209,11 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     const request = parseRdpStartRequest(value);
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
+    if (request.bounds) rememberRdpSurfacePlacement(ownerWindow, request.sessionId, request.bounds);
 
     return runAuthorizedOperation(
       async (authorizationEpoch) => {
         const client = getRdpClient();
-        const bounds = toScreenBounds(ownerWindow, request.bounds);
         let resolvedProfile = request.profile;
         if (request.profile.nodeId) {
           try {
@@ -7242,7 +7247,8 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
             try {
               gateway = await resolveNativeRdpCredential(gatewayCredentialId);
             } catch (error) {
-              const message = error instanceof Error ? error.message : 'credential resolution failed';
+              const message =
+                error instanceof Error ? error.message : 'credential resolution failed';
               throw new Error(`RDP Gateway credential is unavailable: ${message}`);
             }
             resolvedProfile.gatewayUsername = rdpGatewayUsername(gateway.username, gateway.domain);
@@ -7268,7 +7274,9 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
             if (rdpTunnelLeases.get(request.sessionId) === leaseId) {
               rdpTunnelLeases.delete(request.sessionId);
             }
-            throw error;
+            const message =
+              error instanceof Error ? error.message : 'VPN tunnel establishment failed.';
+            throw new Error(`RDP VPN tunnel is unavailable: ${message}`);
           }
           if (rdpTunnelLeases.get(request.sessionId) !== leaseId) {
             throw new Error('RDP connection closed while opening its VPN tunnel.');
@@ -7286,6 +7294,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         if (!socksEndpoint) releaseRdpTunnel(request.sessionId);
         try {
           const { manualCredentials: _manualCredentials, ...nativeRequest } = request;
+          const bounds = currentRdpSurfaceScreenBounds(ownerWindow, request.sessionId);
           return await client.start(
             {
               ...nativeRequest,
@@ -7326,13 +7335,15 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     const request = parseRdpCommandRequest(value);
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
-
-    return serializeAuthOperation(async () => {
-      await requireWorkspaceAuth();
-      const client = getRdpClient();
-      const bounds = request.bounds ? toScreenBounds(ownerWindow, request.bounds) : undefined;
-      return client.resize({ ...request, bounds }, nativeWindowHandle(ownerWindow));
-    });
+    // Geometry is high-frequency, non-secret state. Checking the current auth snapshot keeps it
+    // off the global auth-operation queue, where native resize acknowledgements would otherwise
+    // serialize every animation frame and make the overlay trail the BrowserWindow.
+    await ensureAuthSession();
+    authSession.requireUnlocked();
+    if (request.bounds) rememberRdpSurfacePlacement(ownerWindow, request.sessionId, request.bounds);
+    const client = getRdpClient();
+    const bounds = request.bounds ? toScreenBounds(ownerWindow, request.bounds) : undefined;
+    return client.resize({ ...request, bounds }, nativeWindowHandle(ownerWindow));
   });
 
   ipcMain.handle('rdp:command', async (event, value: unknown) => {
@@ -7348,12 +7359,16 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     }
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
+    if (request.bounds) rememberRdpSurfacePlacement(ownerWindow, request.sessionId, request.bounds);
     const bounds = request.bounds ? toScreenBounds(ownerWindow, request.bounds) : undefined;
     const command = () =>
       getRdpClient().command(operation, request.sessionId, nativeWindowHandle(ownerWindow), bounds);
     if (operation === 'hide' || operation === 'disconnect') {
       const result = command();
-      if (operation === 'disconnect') releaseRdpTunnel(request.sessionId);
+      if (operation === 'disconnect') {
+        releaseRdpTunnel(request.sessionId);
+        forgetRdpSurfacePlacement(request.sessionId);
+      }
       return result;
     }
     return serializeAuthOperation(async () => {
@@ -7374,16 +7389,18 @@ function getRdpClient(): RdpBackendClient {
 
   rdpClient = new RdpBackendClient({ executable: backendPath(), args });
   rdpClient.onEvent((event: RdpBackendEvent) => {
+    const terminalEvent =
+      event.type === 'disconnected' ||
+      event.type === 'fatalError' ||
+      event.type === 'exited' ||
+      event.type === 'error';
     if (
       event.sessionId &&
-      (event.type === 'disconnected' ||
-        event.type === 'fatalError' ||
-        event.type === 'logonError' ||
-        event.type === 'exited' ||
-        event.type === 'error')
+      (terminalEvent || (event.type === 'logonError' && event.credentialFailure === true))
     ) {
       releaseRdpTunnel(event.sessionId);
     }
+    if (event.sessionId && terminalEvent) forgetRdpSurfacePlacement(event.sessionId);
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed()) window.webContents.send('rdp:event', event);
     }
@@ -7396,6 +7413,54 @@ function releaseRdpTunnel(sessionId: string): void {
   if (!leaseId) return;
   rdpTunnelLeases.delete(sessionId);
   void nativeBackend?.releaseTunnel(leaseId).catch(() => undefined);
+}
+
+function rememberRdpSurfacePlacement(
+  owner: BrowserWindow,
+  sessionId: string,
+  rendererBounds: RdpSurfaceRect,
+): void {
+  rdpSurfacePlacements.set(sessionId, { owner, rendererBounds: { ...rendererBounds } });
+}
+
+function forgetRdpSurfacePlacement(sessionId: string): void {
+  rdpSurfacePlacements.delete(sessionId);
+}
+
+function currentRdpSurfaceScreenBounds(
+  owner: BrowserWindow,
+  sessionId: string,
+): RdpSurfaceRect | undefined {
+  const placement = rdpSurfacePlacements.get(sessionId);
+  if (!placement || placement.owner !== owner) return undefined;
+  return toScreenBounds(owner, placement.rendererBounds);
+}
+
+function clearRdpSurfacePlacements(owner: BrowserWindow): void {
+  const task = rdpOwnerSyncTasks.get(owner.id);
+  if (task) clearImmediate(task);
+  rdpOwnerSyncTasks.delete(owner.id);
+  for (const [sessionId, placement] of rdpSurfacePlacements) {
+    if (placement.owner === owner) rdpSurfacePlacements.delete(sessionId);
+  }
+}
+
+function scheduleRdpSurfacePlacementSync(owner: BrowserWindow): void {
+  if (owner.isDestroyed() || rdpOwnerSyncTasks.has(owner.id)) return;
+  const task = setImmediate(() => {
+    rdpOwnerSyncTasks.delete(owner.id);
+    if (owner.isDestroyed() || !rdpClient) return;
+    const ownerWindow = nativeWindowHandle(owner);
+    for (const [sessionId, placement] of rdpSurfacePlacements) {
+      if (placement.owner !== owner) continue;
+      const bounds = toScreenBounds(owner, placement.rendererBounds);
+      if (!bounds) continue;
+      void rdpClient.resize({ sessionId, bounds }, ownerWindow).catch(() => {
+        // Moving the owner can race with an RDP close. The terminal event owns cleanup.
+      });
+    }
+  });
+  rdpOwnerSyncTasks.set(owner.id, task);
 }
 
 function getSerialBackend(): SerialBackendClient {
@@ -7599,6 +7664,9 @@ function createWindow() {
   });
   const closeCoordinator = new WindowCloseCoordinator();
   windowCloseCoordinators.set(window, closeCoordinator);
+  window.on('move', () => scheduleRdpSurfacePlacementSync(window));
+  window.on('resize', () => scheduleRdpSurfacePlacementSync(window));
+  window.once('closed', () => clearRdpSurfacePlacements(window));
 
   // Wormhole has no user-facing page zoom. Normalize the renderer to its native CSS scale so a
   // previously persisted Chromium zoom level cannot make the whole workspace look oversized.
@@ -7622,6 +7690,7 @@ function createWindow() {
     startupReadyWindows.delete(window);
     window.setOpacity(startupWindowOpacity);
     webSurfaces.closeForWindow(window);
+    clearRdpSurfacePlacements(window);
     void serializeAuthOperation(async () => {
       // A renderer reload creates a fresh UI process context. Do not let a previous renderer's
       // native unlock survive into the new context before it proves possession of the secret.

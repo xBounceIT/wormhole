@@ -26,7 +26,13 @@ export function requiresSshCredentialPrompt(message: string): boolean {
 }
 
 export function requiresRdpCredentialPrompt(message: string): boolean {
-  if (message.toLowerCase().includes('rdp gateway credential is unavailable')) return false;
+  const value = message.toLowerCase();
+  if (
+    value.includes('rdp gateway credential is unavailable') ||
+    value.includes('rdp vpn tunnel is unavailable')
+  ) {
+    return false;
+  }
   return isBitwardenCredentialError(message) || /credential|password/i.test(message);
 }
 

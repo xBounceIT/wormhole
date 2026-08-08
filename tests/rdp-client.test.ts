@@ -10,6 +10,65 @@ test('RDP cleanup is a no-op when the backend is not running', async () => {
   assert.equal((client as any).process, undefined);
 });
 
+test('RDP remembers pre-connect surface bounds without spawning the backend', async () => {
+  const client = new RdpBackendClient({ executable: 'unused', args: [] });
+
+  const result = await client.resize(
+    { sessionId: 'measured-session', bounds: { x: 12, y: 24, width: 900, height: 600 } },
+    'window',
+  );
+
+  assert.equal(result.type, 'ack');
+  assert.deepEqual((client as any).bounds.get('measured-session'), {
+    x: 12,
+    y: 24,
+    width: 900,
+    height: 600,
+  });
+  assert.equal((client as any).process, undefined);
+});
+
+test('RDP forwards newer bounds without waiting for an older native acknowledgement', async () => {
+  const client = new RdpBackendClient({ executable: 'unused', args: [] });
+  const commands: Array<Record<string, any>> = [];
+  const internals = client as any;
+  internals.sessionIds.add('live-session');
+  internals.process = {
+    killed: false,
+    stdin: {
+      writable: true,
+      write(payload: string, callback: (error?: Error | null) => void) {
+        commands.push(JSON.parse(payload) as Record<string, any>);
+        callback();
+        return true;
+      },
+    },
+  };
+
+  const first = client.resize(
+    { sessionId: 'live-session', bounds: { x: 0, y: 0, width: 800, height: 600 } },
+    'window',
+  );
+  const second = client.resize(
+    { sessionId: 'live-session', bounds: { x: 0, y: 0, width: 900, height: 700 } },
+    'window',
+  );
+  assert.equal(commands.length, 2);
+  assert.deepEqual(commands[0].bounds, { x: 0, y: 0, width: 800, height: 600 });
+  assert.deepEqual(commands[1].bounds, { x: 0, y: 0, width: 900, height: 700 });
+  internals.handleLine(
+    JSON.stringify({ type: 'ack', requestId: commands[0].requestId, sessionId: 'live-session' }),
+  );
+  internals.handleLine(
+    JSON.stringify({ type: 'ack', requestId: commands[1].requestId, sessionId: 'live-session' }),
+  );
+  const responses = await Promise.all([first, second]);
+  assert.deepEqual(
+    responses.map((response) => response.type),
+    ['ack', 'ack'],
+  );
+});
+
 test('hideAll hides every started or measured RDP session', async () => {
   const client = new RdpBackendClient({ executable: 'unused', args: [] });
   const commands: Array<Record<string, unknown>> = [];

@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using Wormhole.Helpers;
 using Wormhole.Interop.Rdp;
 using Wormhole.Models;
+using FormsTimer = System.Windows.Forms.Timer;
 
 namespace Wormhole.RdpHost;
 
@@ -21,6 +22,7 @@ internal static class Program
 
 internal sealed class RdpHostApplicationContext : ApplicationContext
 {
+    private const int ResolutionDebounceMs = 100;
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -29,8 +31,18 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
     };
 
     private readonly object _outputLock = new();
+    private readonly object _resizeLock = new();
     private readonly Control _dispatcher;
+    private readonly List<string> _pendingResizeRequestIds = [];
     private RdpHostForm? _form;
+    private RdpHostCommand? _pendingResize;
+    private bool _resizeDispatchScheduled;
+    private FormsTimer? _resolutionTimer;
+    private bool _dynamicResolution;
+    private int _pendingResolutionWidth;
+    private int _pendingResolutionHeight;
+    private int _lastResolutionWidth;
+    private int _lastResolutionHeight;
     private bool _closing;
 
     public RdpHostApplicationContext()
@@ -60,6 +72,12 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
                     continue;
                 }
                 if (command is null) continue;
+
+                if (command.Op == "resize")
+                {
+                    QueueResize(command);
+                    continue;
+                }
 
                 try
                 {
@@ -94,17 +112,7 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
                     Start(command);
                     break;
                 case "resize":
-                    if (_form is not null && command.Bounds.IsUsable)
-                    {
-                        if (!_form.SetHostBounds(
-                                command.Bounds.X,
-                                command.Bounds.Y,
-                                command.Bounds.Width,
-                                command.Bounds.Height))
-                        {
-                            throw new InvalidOperationException("native RDP surface resize failed");
-                        }
-                    }
+                    ApplyResize(command);
                     Write(new RdpHostEvent("ack", command.RequestId));
                     break;
                 case "show":
@@ -156,6 +164,62 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
         }
     }
 
+    private void QueueResize(RdpHostCommand command)
+    {
+        var schedule = false;
+        lock (_resizeLock)
+        {
+            _pendingResize = command;
+            _pendingResizeRequestIds.Add(command.RequestId);
+            if (!_resizeDispatchScheduled)
+            {
+                _resizeDispatchScheduled = true;
+                schedule = true;
+            }
+        }
+        if (schedule) TryBeginInvoke(FlushPendingResize);
+    }
+
+    private void FlushPendingResize()
+    {
+        RdpHostCommand? command;
+        string[] requestIds;
+        lock (_resizeLock)
+        {
+            command = _pendingResize;
+            requestIds = [.. _pendingResizeRequestIds];
+            _pendingResize = null;
+            _pendingResizeRequestIds.Clear();
+            _resizeDispatchScheduled = false;
+        }
+        if (command is null) return;
+
+        try
+        {
+            ApplyResize(command);
+            WriteBatch(requestIds.Select(requestId => new RdpHostEvent("ack", requestId)));
+        }
+        catch (Exception)
+        {
+            WriteBatch(requestIds.Select(requestId =>
+                new RdpHostEvent("error", requestId, "native Windows RDP host operation failed")));
+        }
+    }
+
+    private void ApplyResize(RdpHostCommand command)
+    {
+        if (_form is null || !command.Bounds.IsUsable) return;
+        if (!_form.SetHostBounds(
+                command.Bounds.X,
+                command.Bounds.Y,
+                command.Bounds.Width,
+                command.Bounds.Height))
+        {
+            throw new InvalidOperationException("native RDP surface resize failed");
+        }
+        ScheduleRemoteResolution(command.Bounds.Width, command.Bounds.Height);
+    }
+
     private void Start(RdpHostCommand command)
     {
         if (_form is not null)
@@ -204,11 +268,13 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
         form.Connected += () =>
         {
             Reveal("connected", focus: true);
+            ScheduleRemoteResolution(_pendingResolutionWidth, _pendingResolutionHeight);
             Write(new RdpHostEvent("connected"));
         };
         form.LoginComplete += () =>
         {
             Reveal("login-complete", focus: true);
+            ScheduleRemoteResolution(_pendingResolutionWidth, _pendingResolutionHeight);
             Write(new RdpHostEvent("loginComplete"));
         };
         form.Disconnected += code =>
@@ -243,12 +309,25 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
         var hwnd = form.Hwnd;
         ConfigureAsOwnedOverlay(hwnd, owner);
         var profile = command.Profile.ToConnectionProfile();
+        _dynamicResolution =
+            !profile.RdpFullScreen && RdpScreenSizes.IsFullConnectionContent(profile.RdpScreenSize);
+        // Establish the real connection rectangle while the host is still hidden. Native ActiveX
+        // dialogs use this HWND as their UI parent, so the certificate prompt centers over the
+        // connection surface instead of the whole Electron window or the 1x1 startup seed.
+        if (!form.SetHostBounds(
+                command.Bounds.X,
+                command.Bounds.Y,
+                command.Bounds.Width,
+                command.Bounds.Height))
+        {
+            throw new InvalidOperationException("native RDP surface positioning failed");
+        }
         form.Configure(
             profile,
             command.Profile.Password,
             command.Profile.GatewayUsername,
             command.Profile.GatewayPassword,
-            owner,
+            hwnd,
             command.Bounds.Width,
             command.Bounds.Height);
         if (!form.SetHostBounds(
@@ -263,9 +342,46 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
 
         // Start only after every event subscription and the owned overlay relationship are in
         // place. This mirrors RdpSessionService's early-event race fix in the WinUI client.
+        ScheduleRemoteResolution(command.Bounds.Width, command.Bounds.Height);
         form.Start();
         if (!_closing && !connectionVisible) Conceal();
         if (!_closing) Write(new RdpHostEvent("ready"));
+    }
+
+    private void ScheduleRemoteResolution(int width, int height)
+    {
+        if (!_dynamicResolution || _form is null || width < 1 || height < 1) return;
+        if (width == _lastResolutionWidth && height == _lastResolutionHeight) return;
+        if (_resolutionTimer is { Enabled: true } &&
+            width == _pendingResolutionWidth &&
+            height == _pendingResolutionHeight)
+        {
+            return;
+        }
+        _pendingResolutionWidth = width;
+        _pendingResolutionHeight = height;
+        if (_resolutionTimer is null)
+        {
+            _resolutionTimer = new FormsTimer { Interval = ResolutionDebounceMs };
+            _resolutionTimer.Tick += (_, _) => ApplyRemoteResolution();
+        }
+        _resolutionTimer.Stop();
+        _resolutionTimer.Start();
+    }
+
+    private void ApplyRemoteResolution()
+    {
+        _resolutionTimer?.Stop();
+        var form = _form;
+        if (form is null) return;
+        if (_pendingResolutionWidth == _lastResolutionWidth &&
+            _pendingResolutionHeight == _lastResolutionHeight)
+        {
+            return;
+        }
+        if (!form.TryUpdateRemoteResolution(_pendingResolutionWidth, _pendingResolutionHeight)) return;
+        _lastResolutionWidth = _pendingResolutionWidth;
+        _lastResolutionHeight = _pendingResolutionHeight;
     }
 
     private static RdpHostForm CreateRealizedHostForm()
@@ -311,6 +427,9 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
         }
         finally
         {
+            _resolutionTimer?.Stop();
+            _resolutionTimer?.Dispose();
+            _resolutionTimer = null;
             _form = null;
             _dispatcher.Dispose();
             ExitThread();
@@ -331,11 +450,19 @@ internal sealed class RdpHostApplicationContext : ApplicationContext
 
     private void Write(RdpHostEvent response)
     {
+        WriteBatch([response]);
+    }
+
+    private void WriteBatch(IEnumerable<RdpHostEvent> responses)
+    {
         lock (_outputLock)
         {
             try
             {
-                Console.Out.WriteLine(JsonSerializer.Serialize(response, JsonOptions));
+                foreach (var response in responses)
+                {
+                    Console.Out.WriteLine(JsonSerializer.Serialize(response, JsonOptions));
+                }
                 Console.Out.Flush();
             }
             catch (IOException)

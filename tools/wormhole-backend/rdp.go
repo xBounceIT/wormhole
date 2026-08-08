@@ -95,14 +95,15 @@ type rdpCommand struct {
 }
 
 type rdpEvent struct {
-	Type      string `json:"type"`
-	RequestID string `json:"requestId,omitempty"`
-	SessionID string `json:"sessionId,omitempty"`
-	Backend   string `json:"backend,omitempty"`
-	Code      int    `json:"code,omitempty"`
-	Attempt   int    `json:"attempt,omitempty"`
-	Max       int    `json:"max,omitempty"`
-	Message   string `json:"message,omitempty"`
+	Type              string `json:"type"`
+	RequestID         string `json:"requestId,omitempty"`
+	SessionID         string `json:"sessionId,omitempty"`
+	Backend           string `json:"backend,omitempty"`
+	Code              int    `json:"code,omitempty"`
+	Attempt           int    `json:"attempt,omitempty"`
+	Max               int    `json:"max,omitempty"`
+	Message           string `json:"message,omitempty"`
+	CredentialFailure bool   `json:"credentialFailure,omitempty"`
 }
 
 type rdpProcess struct {
@@ -242,7 +243,10 @@ func (c *rdpController) routeRdpThroughTunnel(command *rdpCommand, host string, 
 	}
 	enabled := tunnelID != ""
 	nodeID := strings.TrimSpace(command.Profile.NodeID)
-	if nodeID != "" && tunnelID != "" {
+	// Electron's tunnel broker hands an already-resolved saved route to this supervisor with
+	// both identifiers plus its loopback SOCKS endpoint. Without that handoff, the tunnel ID is
+	// still an unauthorized override of the saved connection.
+	if nodeID != "" && tunnelID != "" && command.Profile.SocksEndpoint == "" {
 		return errors.New("RDP tunnel configuration cannot override a saved connection")
 	}
 	if nodeID != "" && tunnelID == "" {
@@ -528,6 +532,7 @@ func (c *rdpController) readNativeEvents(process *rdpProcess, stdout io.ReadClos
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
 			continue
 		}
+		classifyNativeRdpEvent(&event)
 		event.SessionID = process.sessionID
 		event.Backend = process.backend
 		if event.Type == "disconnected" || event.Type == "fatalError" {
@@ -536,6 +541,25 @@ func (c *rdpController) readNativeEvents(process *rdpProcess, stdout io.ReadClos
 		// The helper may include a request id for command acknowledgements, but it must never
 		// echo profile or password fields across this boundary.
 		writeRdpEvent(event)
+	}
+}
+
+func classifyNativeRdpEvent(event *rdpEvent) {
+	event.CredentialFailure = event.Type == "logonError" && isWindowsRdpCredentialFailure(event.Code)
+}
+
+func isWindowsRdpCredentialFailure(code int) bool {
+	switch code {
+	case -1, // ERROR_CODE_ACCESS_DENIED
+		0,           // LOGON_FAILED_BAD_PASSWORD
+		1,           // LOGON_FAILED_UPDATE_PASSWORD
+		2,           // LOGON_FAILED_OTHER
+		-1073741714, // STATUS_ACCOUNT_RESTRICTION
+		-1073741715, // STATUS_LOGON_FAILURE
+		-1073741276: // STATUS_PASSWORD_MUST_CHANGE
+		return true
+	default:
+		return false
 	}
 }
 

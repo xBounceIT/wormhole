@@ -108,6 +108,7 @@ interface WormholeRdpBackendEvent {
   attempt?: number;
   max?: number;
   message?: string;
+  credentialFailure?: boolean;
 }
 
 interface WormholeWorkspaceNode {

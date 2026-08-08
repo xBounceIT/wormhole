@@ -66,7 +66,10 @@ export function rdpGatewayCredentialIdForResolution(profile: RdpProfile): string
   return profile.gatewayCredentialId;
 }
 
-export function rdpGatewayUsername(username: string | undefined, domain: string | undefined): string | undefined {
+export function rdpGatewayUsername(
+  username: string | undefined,
+  domain: string | undefined,
+): string | undefined {
   if (!username || !domain || username.includes('\\')) return username;
   return `${domain}\\${username}`;
 }
@@ -97,4 +100,6 @@ export type RdpBackendEvent = {
   attempt?: number;
   max?: number;
   message?: string;
+  /** Go-classified ActiveX logon failure for which transient credentials can help. */
+  credentialFailure?: boolean;
 };

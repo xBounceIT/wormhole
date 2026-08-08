@@ -155,7 +155,6 @@ internal sealed class RdpHostForm : FormsForm
         try
         {
             _ax.SetBounds(0, 0, width, height);
-            PerformLayout();
         }
         catch (Exception ex)
         {
@@ -163,7 +162,7 @@ internal sealed class RdpHostForm : FormsForm
         }
 
         Marshal.SetLastSystemError(0);
-        var childMoved = Win32Interop.MoveWindow(axHwnd, 0, 0, width, height, bRepaint: true);
+        var childMoved = Win32Interop.MoveWindow(axHwnd, 0, 0, width, height, bRepaint: false);
         if (!childMoved)
         {
             _logger?.LogWarning(
@@ -171,39 +170,15 @@ internal sealed class RdpHostForm : FormsForm
                 width, height, Marshal.GetLastWin32Error());
         }
 
-        // Best-effort re-assert of SmartSizing after the externally-driven MoveWindow. SmartSizing
-        // is already enabled at Configure time; the real resize mechanism is the preceding
-        // _ax.SetBounds/MoveWindow (which retriggers the OCX's own fit) plus, for fill/full-screen
-        // profiles, dynamic resolution via TryUpdateRemoteResolution — this is just a cheap safety
-        // net for the unsupported-server fallback, NOT the primary path. It MUST sit in its own
-        // broad catch rather than TrySetOptional: TrySetOptional only swallows
-        // DISP_E_UNKNOWNNAME/MEMBERNOTFOUND, but a resize racing a disconnect can surface
-        // RPC_E_DISCONNECTED / CO_E_OBJNOTCONNECTED / InvalidComObjectException on the OCX RCW, and
-        // an escape here would propagate through SetHostBounds → adapter → RdpSessionViewModel.SetBounds
-        // and tear the session down — which a resize must never do.
-        try
-        {
-            if (TryGetOcx() is { } ocxObj)
-            {
-                dynamic ocx = ocxObj;
-                ocx.AdvancedSettings9.SmartSizing = true;
-            }
-        }
-        catch (Exception ex) when (
-            ex is COMException or RuntimeBinderException or InvalidOperationException or InvalidComObjectException)
-        {
-            _logger?.LogDebug(ex, "RDP SmartSizing re-assert skipped during resize (teardown race or unsupported property).");
-        }
-
-        _ax.Invalidate();
-        Invalidate(invalidateChildren: true);
         if (reveal)
         {
             if (!EnsureVisibleAndRedraw("bounds")) return false;
         }
         else
         {
-            RequestHostAndAxRedraw(hostHwnd);
+            // Queue paint work instead of forcing RDW_UPDATENOW on every drag frame. Windows can
+            // then collapse superseded invalidations while geometry remains current.
+            RequestHostTreeRedraw(hostHwnd, immediate: false);
         }
 
         if (childMoved)
@@ -478,18 +453,16 @@ internal sealed class RdpHostForm : FormsForm
             axVisible = ForceVisibleTop(_ax.Handle, "axhost", context);
         }
 
-        RequestHostAndAxRedraw(hostHwnd);
+        RequestHostTreeRedraw(hostHwnd);
 
         return hostVisible && axVisible;
     }
 
-    private void RequestHostAndAxRedraw(IntPtr hostHwnd)
+    private void RequestHostTreeRedraw(IntPtr hostHwnd, bool immediate = true)
     {
-        RequestRedraw(hostHwnd, "host");
-        if (_ax.IsHandleCreated)
-        {
-            RequestRedraw(_ax.Handle, "axhost");
-        }
+        // RDW_ALLCHILDREN recursively includes the AxHost HWND. One host-tree invalidation avoids
+        // scheduling the same ActiveX repaint a second time through an explicit child call.
+        RequestRedraw(hostHwnd, "host", immediate);
     }
 
     /// <summary>Initiate the RDP handshake. Configure must have been called first.</summary>
@@ -715,14 +688,16 @@ internal sealed class RdpHostForm : FormsForm
 
     private object? TryGetOcx() => _ax.Ocx;
 
-    private void RequestRedraw(IntPtr hwnd, string label)
+    private void RequestRedraw(IntPtr hwnd, string label, bool immediate)
     {
+        var flags = Win32Interop.RDW_INVALIDATE | Win32Interop.RDW_ALLCHILDREN;
+        if (immediate) flags |= Win32Interop.RDW_UPDATENOW;
         Marshal.SetLastSystemError(0);
         if (!Win32Interop.RedrawWindow(
                 hwnd,
                 IntPtr.Zero,
                 IntPtr.Zero,
-                Win32Interop.RDW_INVALIDATE | Win32Interop.RDW_ALLCHILDREN | Win32Interop.RDW_UPDATENOW))
+                flags))
         {
             _logger?.LogWarning(
                 "RDP {Label} RedrawWindow failed for HWND 0x{Hwnd:X} (Win32 error {Error}).",
@@ -763,7 +738,10 @@ internal sealed class RdpHostForm : FormsForm
     {
         if (ownerHwnd != IntPtr.Zero)
         {
-            TrySetOptionalCredential(() => adv.UIParentWindowHandle = ownerHwnd.ToInt64(), out _);
+            // UIParentWindowHandle belongs to IMsRdpClientNonScriptable2, surfaced by the OCX
+            // itself rather than AdvancedSettings. Setting it on adv is silently unsupported on
+            // current mstscax builds and leaves certificate/authentication dialogs unparented.
+            TrySetOptionalCredential(() => ocx.UIParentWindowHandle = ownerHwnd.ToInt64(), out _);
         }
 
         if (!hasPassword)

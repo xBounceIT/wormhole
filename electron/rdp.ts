@@ -81,7 +81,18 @@ export class RdpBackendClient {
 
   async resize(request: RdpCommandRequest, ownerWindow: string): Promise<RdpBackendEvent> {
     if (request.bounds) this.rememberBounds(request.sessionId, request.bounds);
-    await this.ensureProcess();
+    // Renderer measurement starts before the native connection so Start can use real surface
+    // bounds instead of the backend's 1x1 race placeholder. Measuring an idle surface must not
+    // spawn the backend; if Start is already creating it, wait for that one process.
+    if (this.starting) await this.starting;
+    if (
+      !this.sessionIds.has(request.sessionId) ||
+      !this.process ||
+      this.process.killed ||
+      !this.process.stdin.writable
+    ) {
+      return { type: 'ack', sessionId: request.sessionId };
+    }
     return this.send({
       op: 'resize',
       sessionId: request.sessionId,

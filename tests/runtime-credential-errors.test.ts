@@ -22,6 +22,15 @@ test('RDP gateway failures do not open the unrelated primary credential prompt',
   );
 });
 
+test('RDP VPN failures do not open the unrelated primary credential prompt', () => {
+  assert.equal(
+    requiresRdpCredentialPrompt(
+      'RDP VPN tunnel is unavailable: the VPN credential password was rejected',
+    ),
+    false,
+  );
+});
+
 test('saved and Quick Connect SSH credentials select the correct manual fallback', () => {
   const missing = 'Stored SSH secret is missing';
   assert.equal(sshCredentialPromptTarget({ nodeId: 'node' }, missing), 'saved');

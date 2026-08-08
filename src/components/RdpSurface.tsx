@@ -43,42 +43,41 @@ export function RdpSurface({
       void api?.commandRdpSession({ sessionId, operation: 'hide' }).catch(() => undefined);
     };
 
-    if (!surface || !isActive || !isAuthorized || status !== 'connected') {
+    if (!surface || !api || !isActive || !isAuthorized) {
       hideNativeSurface();
       return;
     }
 
-    let frame = 0;
+    const shouldShowNativeSurface = status === 'connected';
+    if (!shouldShowNativeSurface) hideNativeSurface();
+
     const reportBounds = () => {
-      frame = 0;
       const rect = surface.getBoundingClientRect();
       if (rect.width < 1 || rect.height < 1) return;
       const bounds = { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
       const signature = `${bounds.x}:${bounds.y}:${bounds.width}:${bounds.height}`;
       if (signature === boundsSignature.current && nativeSurfaceVisible.current) return;
       boundsSignature.current = signature;
-      void api
-        ?.resizeRdpSession({
-          sessionId,
-          bounds,
-        })
-        .catch(() => undefined);
+      // The native STA host coalesces resize commands just before applying HWND geometry. Do not
+      // await an older native acknowledgement here: doing so makes a slow ActiveX layout frame
+      // hold the next, newer rectangle outside the only queue that can safely supersede it.
+      void api.resizeRdpSession({ sessionId, bounds }).catch(() => undefined);
+      if (!shouldShowNativeSurface || nativeSurfaceVisible.current) return;
       nativeSurfaceVisible.current = true;
       void api?.commandRdpSession({ sessionId, operation: 'show', bounds }).catch(() => undefined);
     };
-    const scheduleBounds = () => {
-      if (!frame) frame = window.requestAnimationFrame(reportBounds);
-    };
 
-    scheduleBounds();
-    const observer = new ResizeObserver(scheduleBounds);
+    // ResizeObserver is already delivered after layout. Reporting directly avoids adding a full
+    // requestAnimationFrame of latency while Windows is in its native sizing loop; the STA host
+    // performs the cross-process coalescing immediately before touching the HWND.
+    reportBounds();
+    const observer = new ResizeObserver(reportBounds);
     observer.observe(surface);
-    window.addEventListener('resize', scheduleBounds);
+    window.addEventListener('resize', reportBounds);
 
     return () => {
-      if (frame) window.cancelAnimationFrame(frame);
       observer.disconnect();
-      window.removeEventListener('resize', scheduleBounds);
+      window.removeEventListener('resize', reportBounds);
       hideNativeSurface();
     };
   }, [isActive, isAuthorized, sessionId, status]);
@@ -90,6 +89,7 @@ export function RdpSurface({
   return (
     <div
       aria-label="RDP remote desktop surface"
+      data-rdp-session-id={sessionId}
       className="relative flex h-full min-h-0 min-w-0 items-center justify-center overflow-hidden bg-black"
       ref={surfaceRef}
     >
