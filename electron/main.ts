@@ -19,6 +19,7 @@ import { createInterface, type Interface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { ElectronChromeExtensions } from 'electron-chrome-extensions';
 import { AuthSession } from './auth-session.js';
+import { isAppTheme, parseThemeStartupRequest, type AppTheme } from './theme-settings.js';
 import {
   runWindowTeardown,
   WindowCloseCoordinator,
@@ -312,7 +313,6 @@ type MigrationResponse = {
   migrated: number;
   missing: number;
 };
-type AppTheme = 'system' | 'light' | 'dark';
 type AppSettings = {
   theme: AppTheme;
   promptBeforeTunnelConnect: boolean;
@@ -408,17 +408,6 @@ type StartupResponse = {
   migrationFailed: boolean;
 };
 
-function isAppTheme(value: unknown): value is AppTheme {
-  return value === 'system' || value === 'light' || value === 'dark';
-}
-
-function parseStartupRequest(value: unknown): { legacyTheme?: AppTheme } {
-  if (value === undefined) return {};
-  if (!isRecord(value)) throw new Error('Startup settings request is invalid.');
-  if (value.legacyTheme === undefined) return {};
-  if (!isAppTheme(value.legacyTheme)) throw new Error('Legacy application theme is invalid.');
-  return { legacyTheme: value.legacyTheme };
-}
 type StartupUnlockResponse = {
   succeeded: boolean;
   message: string;
@@ -5933,7 +5922,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   });
 
   ipcMain.handle('startup:load', async (_event, value: unknown) => {
-    const request = parseStartupRequest(value);
+    const request = parseThemeStartupRequest(value);
     return serializeAuthOperation(async () => {
       const startup = await runBackend<StartupResponse>('startup', request);
       if (startup.auth.configured && startup.workspace) {

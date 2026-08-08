@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
+import { parseThemeStartupRequest } from '../electron/theme-settings.ts';
 import {
   clearLegacyTheme,
   getInitialTheme,
@@ -33,6 +34,16 @@ test('legacy renderer theme is cleared only through the explicit migration clean
   const storage = memoryStorage('light');
   clearLegacyTheme(storage);
   assert.equal(readLegacyTheme(storage), null);
+});
+
+test('startup theme migration accepts only its narrow IPC request shape', () => {
+  assert.deepEqual(parseThemeStartupRequest(undefined), {});
+  assert.deepEqual(parseThemeStartupRequest({}), {});
+  assert.deepEqual(parseThemeStartupRequest({ legacyTheme: 'dark' }), { legacyTheme: 'dark' });
+
+  for (const value of [null, [], new Date(), { unexpected: true }, { legacyTheme: 'sepia' }]) {
+    assert.throws(() => parseThemeStartupRequest(value), /settings request|theme is invalid/i);
+  }
 });
 
 test('theme persistence crosses the validated Electron-to-Go settings bridge', () => {

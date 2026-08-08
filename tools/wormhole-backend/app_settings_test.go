@@ -313,73 +313,89 @@ func TestWriteApplicationThemeUsesWinUIEnumAndPreservesOtherSettings(t *testing.
 }
 
 func TestLegacyElectronThemeMigrationPreservesExplicitSharedTheme(t *testing.T) {
-	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
-	bitwardenTestWriteSettings(t, databasePath, map[string]any{
-		themeKey:                "Light",
-		"AppAuthenticationMode": 1,
-	})
-	_, settingsPath := authPaths(databasePath)
-	before, err := os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	legacyTheme := "dark"
-	result, err := migrateLegacyElectronTheme(databasePath, &legacyTheme)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !result.Handled || result.Migrated {
-		t.Fatalf("migration result = %+v", result)
-	}
-	after, err := os.ReadFile(settingsPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(after, before) {
-		t.Fatalf("explicit shared theme was rewritten:\n%s", after)
-	}
-}
-
-func TestLegacyElectronThemeMigrationImportsAndPreservesOtherSettings(t *testing.T) {
-	for name, existingTheme := range map[string]any{
-		"missing":   nil,
-		"malformed": "sepia",
+	for name, sharedTheme := range map[string]any{
+		"valid":             "Light",
+		"invalid-string":    "sepia",
+		"invalid-number":    42,
+		"explicit-null":     nil,
+		"invalid-structure": map[string]any{"future": true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			databasePath := filepath.Join(t.TempDir(), "wormhole.db")
-			values := map[string]any{
+			bitwardenTestWriteSettings(t, databasePath, map[string]any{
+				themeKey:                sharedTheme,
 				"AppAuthenticationMode": 1,
-				"FutureSetting":         "keep-me",
+			})
+			_, settingsPath := authPaths(databasePath)
+			before, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
 			}
-			if existingTheme != nil {
-				values[themeKey] = existingTheme
-			}
-			bitwardenTestWriteSettings(t, databasePath, values)
-
 			legacyTheme := "dark"
 			result, err := migrateLegacyElectronTheme(databasePath, &legacyTheme)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !result.Handled || !result.Migrated {
+			if !result.Handled || result.Migrated {
 				t.Fatalf("migration result = %+v", result)
 			}
-
-			_, settingsPath := authPaths(databasePath)
-			contents, err := os.ReadFile(settingsPath)
+			after, err := os.ReadFile(settingsPath)
 			if err != nil {
 				t.Fatal(err)
 			}
-			var document map[string]json.RawMessage
-			if err := json.Unmarshal(contents, &document); err != nil {
-				t.Fatal(err)
-			}
-			if string(document[themeKey]) != "2" ||
-				string(document["AppAuthenticationMode"]) != "1" ||
-				string(document["FutureSetting"]) != `"keep-me"` {
-				t.Fatalf("unexpected migrated settings: %s", contents)
+			if !bytes.Equal(after, before) {
+				t.Fatalf("explicit shared theme was rewritten:\n%s", after)
 			}
 		})
+	}
+}
+
+func TestLegacyElectronThemeMigrationImportsAndPreservesOtherSettings(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	bitwardenTestWriteSettings(t, databasePath, map[string]any{
+		"AppAuthenticationMode": 1,
+		"FutureSetting":         "keep-me",
+	})
+
+	legacyTheme := "dark"
+	result, err := migrateLegacyElectronTheme(databasePath, &legacyTheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Handled || !result.Migrated {
+		t.Fatalf("migration result = %+v", result)
+	}
+
+	_, settingsPath := authPaths(databasePath)
+	contents, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(contents, &document); err != nil {
+		t.Fatal(err)
+	}
+	if string(document[themeKey]) != "2" ||
+		string(document["AppAuthenticationMode"]) != "1" ||
+		string(document["FutureSetting"]) != `"keep-me"` {
+		t.Fatalf("unexpected migrated settings: %s", contents)
+	}
+
+	beforeRetry := append([]byte(nil), contents...)
+	retryTheme := "light"
+	retry, err := migrateLegacyElectronTheme(databasePath, &retryTheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !retry.Handled || retry.Migrated {
+		t.Fatalf("idempotent migration result = %+v", retry)
+	}
+	afterRetry, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterRetry, beforeRetry) {
+		t.Fatalf("idempotent migration rewrote settings:\n%s", afterRetry)
 	}
 }
 

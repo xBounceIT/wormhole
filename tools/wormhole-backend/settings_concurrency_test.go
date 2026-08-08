@@ -19,6 +19,7 @@ func TestConcurrentSettingsWritersPreserveIndependentSections(t *testing.T) {
 	extension.Enabled = true
 	prompt := false
 	mcp := mcpSettings{Enabled: true, Port: 9876}
+	legacyTheme := "light"
 
 	writers := []func() error{
 		func() error { return saveAuthSettings(settingsPath, auth) },
@@ -26,6 +27,11 @@ func TestConcurrentSettingsWritersPreserveIndependentSections(t *testing.T) {
 		func() error { return writeBitwardenExtensionSettings(databasePath, extension) },
 		func() error { return writePromptBeforeTunnelConnect(databasePath, prompt) },
 		func() error { return saveMcpSettings(databasePath, mcp) },
+		func() error { return writeApplicationTheme(databasePath, applicationThemeDark) },
+		func() error {
+			_, err := migrateLegacyElectronTheme(databasePath, &legacyTheme)
+			return err
+		},
 	}
 	start := make(chan struct{})
 	errors := make(chan error, len(writers))
@@ -65,11 +71,15 @@ func TestConcurrentSettingsWritersPreserveIndependentSections(t *testing.T) {
 		bwExtKeyEnabled,
 		bwExtKeySource,
 		promptBeforeTunnelConnectKey,
+		themeKey,
 		"EnableMcpServer",
 		"McpServerPort",
 	} {
 		if _, ok := document[key]; !ok {
 			t.Fatalf("concurrent update lost %s: %s", key, contents)
 		}
+	}
+	if theme, valid := readApplicationTheme(document[themeKey]); !valid || theme != applicationThemeDark {
+		t.Fatalf("concurrent legacy migration overwrote the explicit theme: %s", contents)
 	}
 }

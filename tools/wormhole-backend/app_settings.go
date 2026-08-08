@@ -252,8 +252,8 @@ func writeApplicationTheme(databasePath string, theme applicationTheme) error {
 	return writeSettingsValues(databasePath, map[string]any{themeKey: persisted})
 }
 
-// migrateLegacyElectronTheme imports the former renderer-only preference exactly once. A valid
-// shared Theme always wins, and a malformed document is left untouched so app-auth and unknown
+// migrateLegacyElectronTheme imports the former renderer-only preference exactly once. Any
+// explicit shared Theme wins, and a malformed document is left untouched so app-auth and unknown
 // keys cannot be destroyed by a best-effort migration.
 func migrateLegacyElectronTheme(databasePath string, legacyTheme *string) (themeMigrationResult, error) {
 	if legacyTheme == nil {
@@ -270,11 +270,9 @@ func migrateLegacyElectronTheme(databasePath string, legacyTheme *string) (theme
 		settingsPath,
 		settingsDocumentUpdateOptions{ReplaceMalformed: false},
 		func(document map[string]json.RawMessage) (bool, error) {
-			if existing, present := document[themeKey]; present {
-				if _, valid := readApplicationTheme(existing); valid {
-					result.Handled = true
-					return false, nil
-				}
+			if _, present := document[themeKey]; present {
+				result.Handled = true
+				return false, nil
 			}
 			encoded, encodeErr := json.Marshal(persisted)
 			if encodeErr != nil {
