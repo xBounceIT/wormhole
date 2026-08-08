@@ -267,6 +267,8 @@ $shimBuilt = $false
 # the build just silently fell back to the mock-only stub. We record it here and dump
 # the tail on failure regardless of -Quiet (see the fallback block below).
 $shimOutput = [System.Collections.Generic.List[string]]::new()
+$patchesAppliedByBuild = [System.Collections.Generic.List[string]]::new()
+try {
 if ($buildTag -eq "ovpn3") {
     # Apply vendored patches to the OpenVPN3 submodule before building. These carry fixes we need
     # ahead of (or instead of) bumping the pinned submodule. Idempotent: skip a patch that already
@@ -292,6 +294,11 @@ if ($buildTag -eq "ovpn3") {
             & git -C $openvpn3Dir apply --check $patch.FullName 2>$null
             if ($LASTEXITCODE -eq 0) {
                 & git -C $openvpn3Dir apply $patch.FullName 2>&1 | ForEach-Object { Write-Info $_.ToString() }
+                if ($LASTEXITCODE -ne 0) {
+                    $failedPatches += $patch.Name
+                    continue
+                }
+                $patchesAppliedByBuild.Add($patch.FullName) | Out-Null
                 Write-Info "PATCH applied: $($patch.Name)"
             }
             else {
@@ -479,3 +486,23 @@ if ($RequireReal) {
     throw "wormhole-ovpnproxy.exe build failed for '$Arch' ($failureDetail); refusing to continue without the required real OpenVPN3 sidecar."
 }
 Write-Warning "wormhole-ovpnproxy.exe build failed ($failureDetail). Continuing without the sidecar; OpenVPN tunnels will surface a runtime error if used."
+}
+finally {
+    # The vendored patches are build inputs, not developer worktree changes. Reverse only the
+    # patches this invocation applied; a patch that was already present before the build remains
+    # untouched. `finally` covers successful returns and every fail-closed error path.
+    $previousPatchRestorePreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        for ($index = $patchesAppliedByBuild.Count - 1; $index -ge 0; $index--) {
+            $patchPath = $patchesAppliedByBuild[$index]
+            & git -C $openvpn3Dir apply --reverse $patchPath 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Could not restore the OpenVPN3 source after applying build patch '$patchPath'."
+            }
+        }
+    }
+    finally {
+        $ErrorActionPreference = $previousPatchRestorePreference
+    }
+}

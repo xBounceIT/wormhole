@@ -1,24 +1,21 @@
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createDevRuntimeBuildPlan } from './dev-runtime-plan.ts';
 
-if (process.platform !== 'win32') {
-  console.info(`[Wormhole] Skipping Windows Go backend on ${process.platform}.`);
-  process.exit(0);
-}
-
-const architecture = process.arch === 'arm64' ? 'arm64' : 'x64';
 const scriptDirectory = fileURLToPath(new URL('.', import.meta.url));
-const buildScripts = ['Build-ElectronBackend.ps1', 'Build-CredentialReader.ps1'];
+const buildPlan = createDevRuntimeBuildPlan({
+  platform: process.platform,
+  architecture: process.arch,
+  scriptDirectory,
+  nodeExecutable: process.execPath,
+});
 
-for (const scriptName of buildScripts) {
-  const scriptPath = `${scriptDirectory}${scriptName}`;
-  const result = spawnSync(
-    'powershell.exe',
-    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath, '-Arch', architecture],
-    { stdio: 'inherit' },
-  );
+console.info(`[Wormhole] Preparing development runtime for ${process.platform}/${process.arch}.`);
+
+for (const step of buildPlan) {
+  const result = spawnSync(step.command, step.args, { stdio: 'inherit', windowsHide: true });
   if (result.error) {
-    console.error(`[Wormhole] Failed to start ${scriptName}: ${result.error.message}`);
+    console.error(`[Wormhole] Failed to start ${step.name}: ${result.error.message}`);
     process.exit(1);
   }
   if (result.status !== 0) {

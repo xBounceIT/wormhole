@@ -13,18 +13,22 @@ npm run dev
 ```
 
 The default `npm run dev` command detects the host platform and architecture.
-On Windows it builds the Go backend and Credential Manager reader before
-Electron starts; on other platforms it skips the Windows-only binaries.
-`npm run dev:windows:arm64` remains available for an explicit ARM64 Windows
-build.
+It always builds the Go backend and portable sidecars. On Windows it also
+builds the native VPN sidecars, Credential Manager reader, and ActiveX RDP
+host before Electron starts. The Windows path requires a real OpenVPN3 sidecar
+and fails instead of accepting the development-only mock; initialize the
+pinned sources with `git submodule update --init --recursive` and install the
+toolchain documented in `tools/wormhole-ovpnproxy/README.md` before the first
+run. `npm run dev:windows:arm64` remains available for an explicit ARM64
+Windows build.
 
 The renderer uses Vite 8, React, TypeScript 7, Shadcn/Radix components, Oxlint,
 and Oxfmt. `npm run build` creates the static renderer in `dist/` and
 the Electron process bundle in `dist-electron/`.
 
-The generic `dev` and `build` commands also compile the Go backend for the
-current host platform. Windows adds the Credential Manager reader and native
-ActiveX host through the `dev:windows` / `build:windows` commands.
+The generic `build` command compiles the Go backend for the current host
+platform without the Windows-only helpers. Use `build:windows` when preparing
+all Windows distributable inputs without starting the development app.
 
 The renderer loads connection, credential, and tunnel metadata from the Go
 backend over the Electron preload bridge. If the database is missing or empty,
