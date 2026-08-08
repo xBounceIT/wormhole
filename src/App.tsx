@@ -20,6 +20,14 @@ import { backupExportPasswordsMatch } from './backup-state';
 import wormholeIcon from '../Assets/Wormhole.png';
 import bitwardenIcon from '../Assets/Bitwarden/bitwarden-icon.png';
 import { mergeCredential } from './credential-state';
+import {
+  bitwardenCliIsLoggedIn,
+  bitwardenCliServerRegionCode,
+  formatBitwardenCurrentServerLabel,
+  formatBitwardenLoginStatus,
+  formatBitwardenSyncResult,
+  formatBitwardenVaultStatus,
+} from './bitwarden-cli-view';
 import { writeClipboardText } from './clipboard';
 import {
   normalizeTerminalPasteText,
@@ -714,31 +722,6 @@ function formatBitwardenExtensionStatus(state: WormholeBitwardenExtensionState):
   if (state.availableVersion) parts.push(`Available version: ${state.availableVersion}.`);
   if (state.lastUpdateError) parts.push(`Last update error: ${state.lastUpdateError}.`);
   return parts.join(' ');
-}
-
-function formatBitwardenCliStatus(status: WormholeBitwardenCliStatus): string {
-  switch (status.status) {
-    case 'Unlocked':
-      return 'Unlocked';
-    case 'Locked':
-      return 'Locked';
-    case 'Unauthenticated':
-      return 'Not logged in';
-    default:
-      return 'Unknown';
-  }
-}
-
-function bitwardenCliServerRegionCode(serverUrl: string | null | undefined): 'US' | 'EU' | null {
-  if (!serverUrl) return null;
-  try {
-    const hostname = new URL(serverUrl).hostname.toLowerCase();
-    if (hostname === 'bitwarden.eu' || hostname.endsWith('.bitwarden.eu')) return 'EU';
-    if (hostname === 'bitwarden.com' || hostname.endsWith('.bitwarden.com')) return 'US';
-  } catch {
-    // A custom or malformed CLI server URL has no US/EU shorthand.
-  }
-  return null;
 }
 
 type TunnelRecord = {
@@ -11771,11 +11754,15 @@ function BitwardenCliDialog({
                   value={serverRegion}
                 >
                   <SelectTrigger className="w-full">
-                    <SelectValue />
+                    <SelectValue>
+                      {serverRegion === 'Current'
+                        ? formatBitwardenCurrentServerLabel(currentServerRegion)
+                        : undefined}
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="Current">
-                      Current CLI setting{currentServerRegion ? ` (${currentServerRegion})` : ''}
+                      {formatBitwardenCurrentServerLabel(currentServerRegion)}
                     </SelectItem>
                     <SelectItem value="UnitedStates">
                       United States (vault.bitwarden.com)
@@ -11858,6 +11845,68 @@ function BitwardenCliDialog({
             </Button>
           </DialogFooter>
         </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+type BitwardenOperationDialogState = {
+  status: 'working' | 'success' | 'warning' | 'error';
+  message: string;
+};
+
+function BitwardenOperationDialog({
+  description,
+  state,
+  title,
+  onClose,
+}: {
+  description: string;
+  state: BitwardenOperationDialogState | null;
+  title: string;
+  onClose: () => void;
+}) {
+  const working = state?.status === 'working';
+  return (
+    <Dialog
+      onOpenChange={(open) => {
+        if (!open && !working) onClose();
+      }}
+      open={state !== null}
+    >
+      <DialogContent
+        className="border-border/70 bg-card text-card-foreground sm:max-w-sm"
+        onEscapeKeyDown={(event) => {
+          if (working) event.preventDefault();
+        }}
+        onPointerDownOutside={(event) => {
+          if (working) event.preventDefault();
+        }}
+        showCloseButton={!working}
+      >
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
+        <div className="flex items-start gap-3 rounded-lg border border-border/70 bg-background/40 p-3">
+          {state?.status === 'working' ? (
+            <LoaderCircle className="mt-0.5 size-4 shrink-0 animate-spin text-muted-foreground" />
+          ) : state?.status === 'success' ? (
+            <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-500" />
+          ) : state?.status === 'warning' ? (
+            <AlertCircle className="mt-0.5 size-4 shrink-0 text-amber-500" />
+          ) : (
+            <AlertCircle className="mt-0.5 size-4 shrink-0 text-destructive" />
+          )}
+          <p className="text-xs leading-relaxed">
+            {state?.message ?? 'Preparing Bitwarden operation…'}
+          </p>
+        </div>
+        <DialogFooter>
+          <Button disabled={working} onClick={onClose} type="button">
+            Close
+          </Button>
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );
@@ -12326,6 +12375,11 @@ function SettingsPage({
   const [bitwardenServerRegion, setBitwardenServerRegion] = useState<
     'UnitedStates' | 'Europe' | 'Current'
   >('UnitedStates');
+  const bitwardenSavedConfig = useRef<{
+    path: string;
+    serverRegion: 'UnitedStates' | 'Europe' | 'Current';
+  }>({ path: 'bw', serverRegion: 'UnitedStates' });
+  const bitwardenConfigSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [bitwardenCliStatus, setBitwardenCliStatus] = useState<WormholeBitwardenCliStatus | null>(
     null,
   );
@@ -12334,12 +12388,20 @@ function SettingsPage({
   const [bitwardenLastSyncStatus, setBitwardenLastSyncStatus] = useState('');
   const [bitwardenAvailableCount, setBitwardenAvailableCount] = useState<number | null>(null);
   const [bitwardenBusy, setBitwardenBusy] = useState(false);
+  const [bitwardenInstallBusy, setBitwardenInstallBusy] = useState(false);
   const [bitwardenError, setBitwardenError] = useState('');
   const [bitwardenCliDialog, setBitwardenCliDialog] = useState<'login' | 'unlock' | null>(null);
+  const [bitwardenSyncDialog, setBitwardenSyncDialog] =
+    useState<BitwardenOperationDialogState | null>(null);
+  const [bitwardenCliUpdateDialog, setBitwardenCliUpdateDialog] =
+    useState<BitwardenOperationDialogState | null>(null);
   const [browserExtensionEnabled, setBrowserExtensionEnabled] = useState(false);
   const [browserExtensionStatus, setBrowserExtensionStatus] = useState('Disabled');
   const [browserExtensionBusy, setBrowserExtensionBusy] = useState(false);
+  const [browserExtensionUpdateBusy, setBrowserExtensionUpdateBusy] = useState(false);
   const [browserExtensionError, setBrowserExtensionError] = useState('');
+  const [bitwardenExtensionUpdateDialog, setBitwardenExtensionUpdateDialog] =
+    useState<BitwardenOperationDialogState | null>(null);
   const [retentionDays, setRetentionDays] = useState('14');
   const [mcpState, setMcpState] = useState<WormholeMcpStatus | null>(null);
   const [mcpPort, setMcpPort] = useState('8765');
@@ -12376,6 +12438,15 @@ function SettingsPage({
   const backupAuthGateRef = useRef(authGate);
   backupAuthGateRef.current = authGate;
 
+  useEffect(
+    () => () => {
+      if (bitwardenConfigSaveTimer.current !== null) {
+        clearTimeout(bitwardenConfigSaveTimer.current);
+      }
+    },
+    [],
+  );
+
   useEffect(() => {
     if (settingsUpdatesRequest > 0) setActiveTab('updates');
   }, [settingsUpdatesRequest]);
@@ -12384,6 +12455,9 @@ function SettingsPage({
     if (authGate === 'unlocked') return;
     setSecretDialog(null);
     setBitwardenCliDialog(null);
+    setBitwardenSyncDialog(null);
+    setBitwardenCliUpdateDialog(null);
+    setBitwardenExtensionUpdateDialog(null);
     pendingSecretAction.current = null;
     setBackupExportOpen(false);
     setBackupExportPassword('');
@@ -12498,9 +12572,11 @@ function SettingsPage({
   }
 
   function applyBitwardenCliState(state: WormholeBitwardenCliState) {
+    const path = state.path || 'bw';
     setBitwardenEnabled(state.enabled);
-    setBitwardenPath(state.path || 'bw');
+    setBitwardenPath(path);
     setBitwardenServerRegion(state.serverRegion);
+    bitwardenSavedConfig.current = { path, serverRegion: state.serverRegion };
     setBitwardenInstalledVersion(state.installed?.version || '');
     setBitwardenInstallError(state.installError || '');
     setBitwardenLastSyncStatus(state.lastSyncStatus || '');
@@ -12535,35 +12611,67 @@ function SettingsPage({
   async function runBitwardenCliInstall() {
     if (bitwardenBusy || !window.wormhole) return;
     setBitwardenBusy(true);
+    setBitwardenInstallBusy(true);
     setBitwardenError('');
+    setBitwardenCliUpdateDialog({ status: 'working', message: 'Updating Bitwarden CLI…' });
     try {
       const state = await window.wormhole.installBitwardenCli();
       await reloadBitwardenCliStatus(state);
+      setBitwardenCliUpdateDialog({
+        status: 'success',
+        message: state.installed?.version
+          ? `Bitwarden CLI is up to date (version ${state.installed.version}).`
+          : 'Bitwarden CLI updated successfully.',
+      });
     } catch (error) {
       const message = backendErrorMessage(error);
       setBitwardenError(message);
       setBitwardenInstallError(message);
+      setBitwardenCliUpdateDialog({ status: 'error', message });
     } finally {
+      setBitwardenInstallBusy(false);
       setBitwardenBusy(false);
     }
   }
 
-  async function handleBitwardenCliConfigSave() {
+  async function handleBitwardenCliConfigSave(
+    path: string,
+    serverRegion: 'UnitedStates' | 'Europe' | 'Current',
+  ) {
     if (bitwardenBusy || !window.wormhole) return;
     setBitwardenBusy(true);
     setBitwardenError('');
     try {
       const state = await window.wormhole.setBitwardenCliConfig({
-        path: bitwardenPath,
-        serverRegion:
-          bitwardenServerRegion === 'UnitedStates' ? 0 : bitwardenServerRegion === 'Europe' ? 1 : 2,
+        path,
+        serverRegion: serverRegion === 'UnitedStates' ? 0 : serverRegion === 'Europe' ? 1 : 2,
       });
       await reloadBitwardenCliStatus(state);
     } catch (error) {
+      setBitwardenPath(bitwardenSavedConfig.current.path);
+      setBitwardenServerRegion(bitwardenSavedConfig.current.serverRegion);
       setBitwardenError(backendErrorMessage(error));
     } finally {
       setBitwardenBusy(false);
     }
+  }
+
+  function cancelScheduledBitwardenCliConfigSave() {
+    if (bitwardenConfigSaveTimer.current !== null) {
+      clearTimeout(bitwardenConfigSaveTimer.current);
+      bitwardenConfigSaveTimer.current = null;
+    }
+  }
+
+  function scheduleBitwardenCliConfigSave(
+    path: string,
+    serverRegion: 'UnitedStates' | 'Europe' | 'Current',
+  ) {
+    cancelScheduledBitwardenCliConfigSave();
+    bitwardenConfigSaveTimer.current = setTimeout(() => {
+      bitwardenConfigSaveTimer.current = null;
+      void handleBitwardenCliConfigSave(path, serverRegion);
+    }, 400);
   }
 
   async function handleBitwardenCliEnabledChange(enabled: boolean) {
@@ -12601,16 +12709,38 @@ function SettingsPage({
         authenticatorCode: authenticatorCode?.trim() || undefined,
         serverRegion: serverRegion === 'UnitedStates' ? 0 : serverRegion === 'Europe' ? 1 : 2,
       });
-      setBitwardenCliDialog(null);
-      await reloadBitwardenCliStatus();
-      await onWorkspaceCredentialsChanged();
-      return true;
     } catch (error) {
       setBitwardenError(backendErrorMessage(error));
-      return false;
-    } finally {
       setBitwardenBusy(false);
+      return false;
     }
+
+    // Authentication is complete at this point. Close the secret prompt before the potentially
+    // slower initial vault sync so successful credentials never leave the dialog stuck on Working.
+    setBitwardenCliDialog(null);
+    let syncSucceeded = false;
+    try {
+      const result = await window.wormhole.syncBitwardenCli();
+      setBitwardenLastSyncStatus(result.lastSyncStatus);
+      setBitwardenAvailableCount(result.availableCount);
+      syncSucceeded = true;
+    } catch (error) {
+      setBitwardenError(backendErrorMessage(error));
+    }
+    try {
+      await reloadBitwardenCliStatus();
+    } catch (error) {
+      if (syncSucceeded) setBitwardenError(backendErrorMessage(error));
+    }
+    if (syncSucceeded) {
+      try {
+        await onWorkspaceCredentialsChanged();
+      } catch (error) {
+        setBitwardenError(backendErrorMessage(error));
+      }
+    }
+    setBitwardenBusy(false);
+    return true;
   }
 
   async function handleBitwardenCliUnlock(masterPassword: string) {
@@ -12635,14 +12765,18 @@ function SettingsPage({
     if (bitwardenBusy || !window.wormhole) return;
     setBitwardenBusy(true);
     setBitwardenError('');
+    setBitwardenSyncDialog({ status: 'working', message: 'Syncing Bitwarden vault…' });
     try {
       const result = await window.wormhole.syncBitwardenCli();
       setBitwardenLastSyncStatus(result.lastSyncStatus);
       setBitwardenAvailableCount(result.availableCount);
       await reloadBitwardenCliStatus();
       await onWorkspaceCredentialsChanged();
+      setBitwardenSyncDialog(formatBitwardenSyncResult(result));
     } catch (error) {
-      setBitwardenError(backendErrorMessage(error));
+      const message = backendErrorMessage(error);
+      setBitwardenError(message);
+      setBitwardenSyncDialog({ status: 'error', message });
     } finally {
       setBitwardenBusy(false);
     }
@@ -12687,19 +12821,32 @@ function SettingsPage({
     }
   }
 
-  async function runBitwardenExtensionInstall(initialStatus: string) {
+  async function runBitwardenExtensionUpdate() {
     if (browserExtensionBusy || !window.wormhole) return;
     setBrowserExtensionBusy(true);
+    setBrowserExtensionUpdateBusy(true);
     setBrowserExtensionError('');
-    setBrowserExtensionStatus(initialStatus);
+    setBrowserExtensionStatus('Updating Bitwarden browser extension...');
+    setBitwardenExtensionUpdateDialog({
+      status: 'working',
+      message: 'Updating Bitwarden browser extension…',
+    });
     try {
       const state = await window.wormhole.installBitwardenExtension();
       applyBitwardenExtensionState(state);
+      setBitwardenExtensionUpdateDialog({
+        status: 'success',
+        message: state.installed?.version
+          ? `Bitwarden browser extension is up to date (version ${state.installed.version}).`
+          : 'Bitwarden browser extension updated successfully.',
+      });
     } catch (error) {
       const message = backendErrorMessage(error);
       setBrowserExtensionError(message);
       setBrowserExtensionStatus(message);
+      setBitwardenExtensionUpdateDialog({ status: 'error', message });
     } finally {
+      setBrowserExtensionUpdateBusy(false);
       setBrowserExtensionBusy(false);
     }
   }
@@ -13338,6 +13485,8 @@ function SettingsPage({
     backupExportPassword,
     backupExportConfirmation,
   );
+  const bitwardenLoggedIn = bitwardenCliIsLoggedIn(bitwardenCliStatus?.status);
+  const currentBitwardenServerRegion = bitwardenCliServerRegionCode(bitwardenCliStatus?.serverUrl);
 
   return (
     <section className="flex h-full min-h-0 flex-col overflow-hidden p-6">
@@ -13590,7 +13739,27 @@ function SettingsPage({
                 <Input
                   disabled={bitwardenBusy}
                   id="settings-bitwarden-path"
-                  onChange={(event) => setBitwardenPath(event.target.value)}
+                  onBlur={(event) => {
+                    if (
+                      event.relatedTarget instanceof Element &&
+                      event.relatedTarget.closest('[data-slot="select-trigger"]')
+                    ) {
+                      return;
+                    }
+                    cancelScheduledBitwardenCliConfigSave();
+                    void handleBitwardenCliConfigSave(
+                      event.currentTarget.value,
+                      bitwardenServerRegion,
+                    );
+                  }}
+                  onChange={(event) => {
+                    const path = event.target.value;
+                    setBitwardenPath(path);
+                    scheduleBitwardenCliConfigSave(path, bitwardenServerRegion);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') event.currentTarget.blur();
+                  }}
                   placeholder="bw"
                   spellCheck={false}
                   value={bitwardenPath}
@@ -13600,38 +13769,42 @@ function SettingsPage({
                 <Label>Server region</Label>
                 <Select
                   disabled={bitwardenBusy}
-                  onValueChange={(value) =>
-                    setBitwardenServerRegion(value as 'UnitedStates' | 'Europe' | 'Current')
-                  }
+                  onValueChange={(value) => {
+                    const serverRegion = value as 'UnitedStates' | 'Europe' | 'Current';
+                    cancelScheduledBitwardenCliConfigSave();
+                    setBitwardenServerRegion(serverRegion);
+                    void handleBitwardenCliConfigSave(bitwardenPath, serverRegion);
+                  }}
                   value={bitwardenServerRegion}
                 >
                   <SelectTrigger className="w-full sm:max-w-[280px]">
-                    <SelectValue />
+                    <SelectValue>
+                      {bitwardenServerRegion === 'Current'
+                        ? formatBitwardenCurrentServerLabel(currentBitwardenServerRegion)
+                        : undefined}
+                    </SelectValue>
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="UnitedStates">bitwarden.com (US)</SelectItem>
                     <SelectItem value="Europe">bitwarden.eu (EU)</SelectItem>
-                    <SelectItem value="Current">Current server</SelectItem>
+                    <SelectItem value="Current">
+                      {formatBitwardenCurrentServerLabel(currentBitwardenServerRegion)}
+                    </SelectItem>
                   </SelectContent>
                 </Select>
-              </div>
-              <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  disabled={bitwardenBusy}
-                  onClick={() => void handleBitwardenCliConfigSave()}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  Save path &amp; region
-                </Button>
               </div>
               {bitwardenCliStatus ? (
                 <div className="grid gap-1 text-[11px] leading-relaxed text-muted-foreground">
                   <p>
                     Status:{' '}
                     <span className="text-foreground">
-                      {formatBitwardenCliStatus(bitwardenCliStatus)}
+                      {formatBitwardenLoginStatus(bitwardenCliStatus.status)}
+                    </span>
+                  </p>
+                  <p>
+                    Vault:{' '}
+                    <span className="text-foreground">
+                      {formatBitwardenVaultStatus(bitwardenCliStatus.status)}
                     </span>
                   </p>
                   {bitwardenCliStatus.userEmail ? (
@@ -13686,44 +13859,52 @@ function SettingsPage({
                   type="button"
                   variant="outline"
                 >
-                  {bitwardenBusy ? 'Working…' : 'Update'}
+                  {bitwardenInstallBusy ? 'Working…' : 'Update CLI'}
                 </Button>
-                <Button
-                  disabled={bitwardenBusy || !bitwardenEnabled}
-                  onClick={() => setBitwardenCliDialog('login')}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  Log in
-                </Button>
-                <Button
-                  disabled={bitwardenBusy || !bitwardenEnabled}
-                  onClick={() => setBitwardenCliDialog('unlock')}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  Unlock
-                </Button>
-                <Button
-                  disabled={bitwardenBusy || !bitwardenEnabled}
-                  onClick={() => void handleBitwardenCliSync()}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  Sync
-                </Button>
-                <Button
-                  disabled={bitwardenBusy || !bitwardenEnabled}
-                  onClick={() => void handleBitwardenCliLogout()}
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                >
-                  Log out
-                </Button>
+                {bitwardenCliStatus?.status === 'Unauthenticated' ? (
+                  <Button
+                    disabled={bitwardenBusy || !bitwardenEnabled}
+                    onClick={() => setBitwardenCliDialog('login')}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    Log in
+                  </Button>
+                ) : null}
+                {bitwardenCliStatus?.status === 'Locked' ? (
+                  <Button
+                    disabled={bitwardenBusy || !bitwardenEnabled}
+                    onClick={() => setBitwardenCliDialog('unlock')}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    Unlock
+                  </Button>
+                ) : null}
+                {bitwardenLoggedIn ? (
+                  <>
+                    <Button
+                      disabled={bitwardenBusy || !bitwardenEnabled}
+                      onClick={() => void handleBitwardenCliSync()}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      Sync
+                    </Button>
+                    <Button
+                      disabled={bitwardenBusy || !bitwardenEnabled}
+                      onClick={() => void handleBitwardenCliLogout()}
+                      size="sm"
+                      type="button"
+                      variant="outline"
+                    >
+                      Log out
+                    </Button>
+                  </>
+                ) : null}
               </div>
             </SettingsSection>
 
@@ -13750,14 +13931,12 @@ function SettingsPage({
               <div className="flex flex-wrap gap-2">
                 <Button
                   disabled={browserExtensionBusy}
-                  onClick={() =>
-                    void runBitwardenExtensionInstall('Updating Bitwarden browser extension...')
-                  }
+                  onClick={() => void runBitwardenExtensionUpdate()}
                   size="sm"
                   type="button"
                   variant="outline"
                 >
-                  {browserExtensionBusy ? 'Working…' : 'Update'}
+                  {browserExtensionUpdateBusy ? 'Working…' : 'Update Extension'}
                 </Button>
                 <Button
                   disabled={browserExtensionBusy}
@@ -13783,7 +13962,7 @@ function SettingsPage({
         </SettingsTabPanel>
 
         <BitwardenCliDialog
-          currentServerRegion={bitwardenCliServerRegionCode(bitwardenCliStatus?.serverUrl)}
+          currentServerRegion={currentBitwardenServerRegion}
           defaultServerRegion={bitwardenServerRegion}
           loginBusy={bitwardenBusy}
           mode={bitwardenCliDialog}
@@ -13792,6 +13971,27 @@ function SettingsPage({
             void handleBitwardenCliLogin(email, masterPassword, authenticatorCode, serverRegion)
           }
           onUnlock={(masterPassword) => void handleBitwardenCliUnlock(masterPassword)}
+        />
+
+        <BitwardenOperationDialog
+          description="Refresh the Bitwarden credentials available to Wormhole."
+          onClose={() => setBitwardenSyncDialog(null)}
+          state={bitwardenSyncDialog}
+          title="Sync Bitwarden vault"
+        />
+
+        <BitwardenOperationDialog
+          description="Download and install the latest Bitwarden command-line client."
+          onClose={() => setBitwardenCliUpdateDialog(null)}
+          state={bitwardenCliUpdateDialog}
+          title="Update Bitwarden CLI"
+        />
+
+        <BitwardenOperationDialog
+          description="Download and install the latest official Bitwarden browser extension."
+          onClose={() => setBitwardenExtensionUpdateDialog(null)}
+          state={bitwardenExtensionUpdateDialog}
+          title="Update Bitwarden extension"
         />
 
         <SettingsTabPanel value="updates">

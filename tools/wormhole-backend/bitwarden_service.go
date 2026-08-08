@@ -104,7 +104,7 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 			command.AuthenticatorCode,
 		)
 		if err == nil && m.setBitwardenSessionForGeneration(sessionKey, expectedGeneration) {
-			result, err = m.syncBitwardenCredentials(sessionKey)
+			result = map[string]any{"loggedIn": true}
 		} else if err == nil {
 			err = errBitwardenSessionInvalidated
 		}
@@ -351,6 +351,8 @@ func (m *vncManager) syncBitwardenCredentials(sessionKey string) (any, error) {
 		"lastSyncUtc":    lastSyncUTC,
 		"lastSyncStatus": settings.LastSyncStatus,
 		"availableCount": availableCount,
+		"usedCache":      true,
+		"lastSyncError":  settings.LastSyncError,
 	}, nil
 }
 

@@ -4,9 +4,34 @@ import { Dialog as DialogPrimitive } from 'radix-ui';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { XIcon } from 'lucide-react';
+import { selectDialogVisuals } from '@/dialog-lifecycle';
 
-function Dialog({ ...props }: React.ComponentProps<typeof DialogPrimitive.Root>) {
-  return <DialogPrimitive.Root data-slot="dialog" {...props} />;
+const DialogOpenContext = React.createContext<boolean | undefined>(undefined);
+
+function Dialog({
+  defaultOpen,
+  onOpenChange,
+  open: controlledOpen,
+  ...props
+}: React.ComponentProps<typeof DialogPrimitive.Root>) {
+  const [uncontrolledOpen, setUncontrolledOpen] = React.useState(defaultOpen ?? false);
+  const controlled = controlledOpen !== undefined;
+  const open = controlled ? controlledOpen : uncontrolledOpen;
+
+  return (
+    <DialogOpenContext.Provider value={open}>
+      <DialogPrimitive.Root
+        data-slot="dialog"
+        defaultOpen={defaultOpen}
+        onOpenChange={(nextOpen) => {
+          if (!controlled) setUncontrolledOpen(nextOpen);
+          onOpenChange?.(nextOpen);
+        }}
+        open={controlledOpen}
+        {...props}
+      />
+    </DialogOpenContext.Provider>
+  );
 }
 
 function DialogTrigger({ ...props }: React.ComponentProps<typeof DialogPrimitive.Trigger>) {
@@ -45,20 +70,27 @@ function DialogContent({
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean;
 }) {
+  const open = React.useContext(DialogOpenContext);
+  const retainedVisuals = React.useRef({ children, showCloseButton });
+  React.useLayoutEffect(() => {
+    if (open !== false) retainedVisuals.current = { children, showCloseButton };
+  }, [children, open, showCloseButton]);
+  const visible = selectDialogVisuals(open, { children, showCloseButton }, retainedVisuals.current);
+
   return (
     <DialogPortal>
       <DialogOverlay />
       <DialogPrimitive.Content
         data-slot="dialog-content"
         className={cn(
-          'fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-75 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0 motion-reduce:animate-none',
+          'fixed top-1/2 left-1/2 z-50 grid w-full max-w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 gap-4 rounded-xl bg-popover p-4 text-sm text-popover-foreground ring-1 ring-foreground/10 duration-75 outline-none sm:max-w-sm data-open:animate-in data-open:fade-in-0 data-closed:pointer-events-none data-closed:animate-out data-closed:fade-out-0 motion-reduce:animate-none',
           className,
         )}
         {...props}
       >
         <div className="pointer-events-none absolute inset-0" data-slot="dialog-popover-layer" />
-        {children}
-        {showCloseButton && (
+        {visible.children}
+        {visible.showCloseButton && (
           <DialogPrimitive.Close data-slot="dialog-close" asChild>
             <Button variant="ghost" className="absolute top-2 right-2" size="icon-sm">
               <XIcon />

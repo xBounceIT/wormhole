@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
+
+import { selectDialogVisuals } from '../src/dialog-lifecycle.ts';
 import {
   runWindowTeardown,
   WindowCloseCoordinator,
@@ -21,6 +23,33 @@ import {
   minSidebarWidth,
   normalizeSidebarWidth,
 } from '../src/sidebar-settings.ts';
+
+test('dialog close animations retain the last open visuals instead of rendering cleared state', () => {
+  const retained = { icon: 'success', message: 'Extension updated.' };
+
+  assert.deepEqual(
+    selectDialogVisuals(true, { icon: 'success', message: 'Extension updated.' }, retained),
+    { icon: 'success', message: 'Extension updated.' },
+  );
+  assert.deepEqual(
+    selectDialogVisuals(false, { icon: 'error', message: 'Missing state.' }, retained),
+    { icon: 'success', message: 'Extension updated.' },
+  );
+  assert.deepEqual(
+    selectDialogVisuals(true, { icon: 'working', message: 'Trying again…' }, retained),
+    { icon: 'working', message: 'Trying again…' },
+  );
+});
+
+test('shared dialog content applies lifecycle retention and blocks closing interactions', () => {
+  const dialogSource = readFileSync(
+    new URL('../src/components/ui/dialog.tsx', import.meta.url),
+    'utf8',
+  );
+  assert.match(dialogSource, /DialogOpenContext/);
+  assert.match(dialogSource, /selectDialogVisuals\(open,/);
+  assert.match(dialogSource, /data-closed:pointer-events-none/);
+});
 
 test('session activity excludes failed, closed, disconnected, and idle tabs', () => {
   assert.equal(isSessionActive({ protocol: 'ssh', status: 'connected' }), true);

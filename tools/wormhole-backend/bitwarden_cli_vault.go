@@ -415,6 +415,9 @@ func bitwardenCliThrowProcessFailure(result bitwardenCliProcessResult, sensitive
 	sanitized := bitwardenCliSanitizeError(result.StandardErr, sensitiveValues...)
 	authError := bitwardenCliIsAuthenticationError(result.StandardErr) || bitwardenCliIsAuthenticationError(result.StandardOut)
 	message := sanitized
+	if authError && bitwardenCliIsInteractivePrompt(message) {
+		message = "Bitwarden authentication is required. Unlock the vault and try again."
+	}
 	if strings.TrimSpace(message) == "" {
 		if authError {
 			message = "Bitwarden vault is locked or the session is invalid."
@@ -429,7 +432,7 @@ func bitwardenCliSanitizeError(value string, sensitiveValues ...string) string {
 	if strings.TrimSpace(value) == "" {
 		return ""
 	}
-	redacted := strings.TrimSpace(value)
+	redacted := strings.TrimSpace(string(stripMcpAnsi([]byte(value))))
 	// A misbehaving or user-selected bw executable can echo an environment value without its key.
 	// Redact actual secrets as well as recognizable CLI/env syntax before errors reach IPC or logs.
 	// Longest-first replacement avoids leaving a suffix when one secret contains another.
@@ -450,6 +453,7 @@ func bitwardenCliSanitizeError(value string, sensitiveValues ...string) string {
 	redacted = bitwardenCliSessionEnvRegex.ReplaceAllString(redacted, "${1}[redacted]")
 	redacted = bitwardenCliCodeArgRegex.ReplaceAllString(redacted, "${1}[redacted]")
 	redacted = bitwardenCliPasswordEnvRegex.ReplaceAllString(redacted, "${1}[redacted]")
+	redacted = strings.Join(strings.Fields(redacted), " ")
 	runes := []rune(redacted)
 	if len(runes) <= 500 {
 		return redacted
@@ -487,9 +491,16 @@ func bitwardenCliIsAuthenticationError(value string) bool {
 		strings.Contains(lower, "log in") ||
 		strings.Contains(lower, "login") ||
 		strings.Contains(lower, "session") ||
+		strings.Contains(lower, "master password") ||
+		strings.Contains(lower, "input is hidden") ||
 		strings.Contains(lower, "two-step") ||
 		strings.Contains(lower, "two factor") ||
 		strings.Contains(lower, "two-factor")
+}
+
+func bitwardenCliIsInteractivePrompt(value string) bool {
+	lower := strings.ToLower(value)
+	return strings.Contains(lower, "master password") || strings.Contains(lower, "input is hidden")
 }
 
 func bitwardenCliIsAlreadyLoggedOut(value string) bool {

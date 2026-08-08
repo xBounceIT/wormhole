@@ -912,6 +912,8 @@ interface Window {
       lastSyncUtc: string;
       lastSyncStatus: string;
       availableCount: number;
+      usedCache: boolean;
+      lastSyncError?: string;
     }>;
     searchBitwardenItems(query: string): Promise<{ items: WormholeBitwardenLoginItem[] }>;
     nodeUsesBitwarden(request: {

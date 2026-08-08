@@ -258,9 +258,12 @@ func setBitwardenCliEnabled(databasePath string, enabled bool) (bitwardenCliStat
 }
 
 func summarizeBitwardenCliError(err error) string {
-	message := err.Error()
+	message := strings.Join(strings.Fields(string(stripMcpAnsi([]byte(err.Error())))), " ")
 	if message == "" {
 		return "Bitwarden CLI operation failed."
+	}
+	if bitwardenCliIsInteractivePrompt(message) {
+		return "Bitwarden authentication is required. Unlock the vault and try again."
 	}
 	runes := []rune(message)
 	if len(runes) <= bitwardenCliMaxErrorLength {

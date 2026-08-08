@@ -131,6 +131,7 @@ func bitwardenCliSyncOperation(databasePath, sessionKey string) (any, error) {
 		"lastSyncUtc":    now.Format(time.RFC3339Nano),
 		"lastSyncStatus": settings.LastSyncStatus,
 		"availableCount": availableCount,
+		"usedCache":      false,
 	}, nil
 }
 

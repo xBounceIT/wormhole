@@ -481,6 +481,17 @@ func TestBitwardenCliSanitizeErrorRedactsSecrets(t *testing.T) {
 	}
 }
 
+func TestBitwardenCliErrorSummaryStripsAnsiAndExplainsInteractivePrompt(t *testing.T) {
+	errorText := "\x1b[32m\x1b[39m\n\x1b[1mMaster password:\x1b[22m\n\x1b[2m[input is hidden]\x1b[22m"
+	summary := summarizeBitwardenCliError(errors.New(errorText))
+	if summary != "Bitwarden authentication is required. Unlock the vault and try again." {
+		t.Fatalf("summary = %q", summary)
+	}
+	if strings.Contains(summary, "\x1b") || strings.Contains(summary, "[32m") {
+		t.Fatalf("ANSI sequence leaked into summary: %q", summary)
+	}
+}
+
 func TestBitwardenCliSanitizeErrorRedactsBareRuntimeSecrets(t *testing.T) {
 	sanitized := bitwardenCliSanitizeError(
 		"helper leaked master-password, session-value, and 654321",

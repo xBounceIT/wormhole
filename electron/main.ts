@@ -6362,6 +6362,8 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
           lastSyncUtc: string;
           lastSyncStatus: string;
           availableCount: number;
+          usedCache: boolean;
+          lastSyncError?: string;
         }>('bitwarden.sync'),
       clearBitwardenSessionAfterAuthorizationLoss,
     );
