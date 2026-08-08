@@ -127,6 +127,7 @@ interface WormholeTunnelDetails {
 interface WormholeWorkspaceSnapshot {
   tree: WormholeWorkspaceNode[];
   credentials: WormholeWorkspaceCredential[];
+  credentialOptions: Record<'ssh' | 'rdp' | 'vnc', WormholeWorkspaceCredential[]>;
   tunnels: WormholeWorkspaceTunnel[];
 }
 

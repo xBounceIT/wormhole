@@ -87,6 +87,17 @@ func TestBitwardenVirtualProfilesLoadBeforeCredentialTableExists(t *testing.T) {
 	if err != nil || len(profiles) != 1 || profiles[0].ID != bitwardenVirtualCredentialID("item-1", 1) {
 		t.Fatalf("first-launch RDP profiles = %#v, %v", profiles, err)
 	}
+
+	workspace, err := loadWorkspace(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for protocol, protocolValue := range map[string]int64{"ssh": 0, "rdp": 1, "vnc": 6} {
+		options := workspace.CredentialOptions[protocol]
+		if len(options) != 1 || options[0].ID != bitwardenVirtualCredentialID("item-1", protocolValue) {
+			t.Fatalf("workspace %s credential options = %#v", protocol, options)
+		}
+	}
 }
 
 func TestBitwardenCredentialCachePrunesLargeVaultWithoutSqlParameterFanout(t *testing.T) {

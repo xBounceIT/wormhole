@@ -133,35 +133,42 @@
   animation: terminal-cursor-blink 1s steps(1, end) infinite;
 }
 
-.terminal-scrollbar {
-  scrollbar-color: rgb(82 82 91 / 0.9) transparent;
+* {
+  scrollbar-color: var(--border) transparent;
   scrollbar-width: thin;
 }
 
-.terminal-scrollbar::-webkit-scrollbar {
-  width: 11px;
-  height: 11px;
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
 }
 
-.terminal-scrollbar::-webkit-scrollbar-track {
+*::-webkit-scrollbar-track {
   background: transparent;
 }
 
-.terminal-scrollbar::-webkit-scrollbar-thumb {
+*::-webkit-scrollbar-thumb {
   min-height: 36px;
-  border: 3px solid transparent;
+  min-width: 36px;
+  border: 1.5px solid transparent;
   border-radius: 999px;
-  background: rgb(82 82 91 / 0.9);
+  background: var(--border);
   background-clip: padding-box;
 }
 
-.terminal-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: rgb(161 161 170 / 0.95);
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground);
   background-clip: padding-box;
 }
 
-.terminal-scrollbar::-webkit-scrollbar-corner {
-  background: #090909;
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
 }
 
 @media (prefers-reduced-motion: reduce) {

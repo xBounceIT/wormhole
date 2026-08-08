@@ -56,6 +56,7 @@ function DialogContent({
         )}
         {...props}
       >
+        <div className="pointer-events-none absolute inset-0" data-slot="dialog-popover-layer" />
         {children}
         {showCloseButton && (
           <DialogPrimitive.Close data-slot="dialog-close" asChild>

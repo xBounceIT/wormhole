@@ -52,6 +52,7 @@
     "format:check": "oxfmt --check src electron scripts/patch-electron-exe.mjs tests/patch-electron-exe.test.mjs tests/tree-layout.test.ts tests/tree-parent.test.ts tests/list-search.test.ts tests/virtual-grid.test.ts tests/credential-state.test.ts tests/backup-state.test.ts tests/tunnel-state.test.ts tests/quick-connect-state.test.ts tests/tunnel-auth.test.ts tests/sftp-state.test.ts tests/sftp-format.test.ts tests/rdp-state.test.ts tests/rdp-client.test.ts tests/serial-client.test.ts tests/terminal-clipboard.test.ts tests/web-session-attempt.test.ts tests/keyed-single-flight.test.ts tests/keyed-task-tracker.test.ts tests/keyed-retry-queue.test.ts tests/runtime-credential-errors.test.ts tests/extension-reload-policy.test.ts tests/extension-mutation-guard.test.ts tests/bitwarden-active-tab-bridge.test.ts tests/bitwarden-browser-profile.test.ts tests/bitwarden-cookie-seed.test.ts tests/bitwarden-popup-layout.test.ts tests/bitwarden-popup-lifecycle.test.ts tests/bitwarden-storage.test.ts tests/web-new-window-navigation.test.ts vite.config.ts"
   },
   "dependencies": {
+    "@base-ui/react": "^1.7.0",
     "@fontsource-variable/geist": "^5.3.0",
     "@radix-ui/react-dialog": "^1.1.23",
     "@radix-ui/react-separator": "^1.1.7",

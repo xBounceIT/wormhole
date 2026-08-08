@@ -48,9 +48,10 @@ type credentialReaderEntry struct {
 }
 
 type workspaceSnapshot struct {
-	Tree        []*treeNode        `json:"tree"`
-	Credentials []credentialRecord `json:"credentials"`
-	Tunnels     []tunnelRecord     `json:"tunnels"`
+	Tree              []*treeNode                   `json:"tree"`
+	Credentials       []credentialRecord            `json:"credentials"`
+	CredentialOptions map[string][]credentialRecord `json:"credentialOptions"`
+	Tunnels           []tunnelRecord                `json:"tunnels"`
 }
 
 type appSettingsSnapshot struct {
@@ -1193,7 +1194,12 @@ func loadWorkspace(databasePath string) (workspaceSnapshot, error) {
 		return workspaceSnapshot{}, err
 	}
 	if database == nil {
-		return workspaceSnapshot{Tree: []*treeNode{}, Credentials: []credentialRecord{}, Tunnels: []tunnelRecord{}}, nil
+		return workspaceSnapshot{
+			Tree:              []*treeNode{},
+			Credentials:       []credentialRecord{},
+			CredentialOptions: emptyCredentialOptions(),
+			Tunnels:           []tunnelRecord{},
+		}, nil
 	}
 	defer database.Close()
 
@@ -1205,11 +1211,35 @@ func loadWorkspace(databasePath string) (workspaceSnapshot, error) {
 	if err != nil {
 		return workspaceSnapshot{}, err
 	}
+	credentialOptions := emptyCredentialOptions()
+	for _, protocol := range []string{"ssh", "rdp", "vnc"} {
+		credentialOptions[protocol], err = loadCredentialsForProtocolFromDatabase(
+			database,
+			databasePath,
+			protocol,
+		)
+		if err != nil {
+			return workspaceSnapshot{}, err
+		}
+	}
 	tunnels, err := loadTunnels(database)
 	if err != nil {
 		return workspaceSnapshot{}, err
 	}
-	return workspaceSnapshot{Tree: tree, Credentials: credentials, Tunnels: tunnels}, nil
+	return workspaceSnapshot{
+		Tree:              tree,
+		Credentials:       credentials,
+		CredentialOptions: credentialOptions,
+		Tunnels:           tunnels,
+	}, nil
+}
+
+func emptyCredentialOptions() map[string][]credentialRecord {
+	return map[string][]credentialRecord{
+		"ssh": {},
+		"rdp": {},
+		"vnc": {},
+	}
 }
 
 func loadTree(database *sql.DB) ([]*treeNode, error) {
@@ -1826,14 +1856,7 @@ FROM CredentialProfiles ORDER BY Name, Id;`)
 
 func loadCredentialsForProtocol(databasePath, protocol string) ([]credentialRecord, error) {
 	protocol = strings.ToLower(strings.TrimSpace(protocol))
-	protocolValue := int64(0)
-	switch protocol {
-	case "ssh":
-	case "rdp":
-		protocolValue = 1
-	case "vnc":
-		protocolValue = 6
-	default:
+	if protocol != "ssh" && protocol != "rdp" && protocol != "vnc" {
 		return nil, errors.New("credential protocol is invalid")
 	}
 	database, err := openDatabase(databasePath, true)
@@ -1844,6 +1867,21 @@ func loadCredentialsForProtocol(databasePath, protocol string) ([]credentialReco
 		return []credentialRecord{}, nil
 	}
 	defer database.Close()
+	return loadCredentialsForProtocolFromDatabase(database, databasePath, protocol)
+}
+
+func loadCredentialsForProtocolFromDatabase(
+	database *sql.DB,
+	databasePath string,
+	protocol string,
+) ([]credentialRecord, error) {
+	protocolValue := int64(0)
+	switch protocol {
+	case "rdp":
+		protocolValue = 1
+	case "vnc":
+		protocolValue = 6
+	}
 	storedCredentials, _, err := loadStoredCredentials(database)
 	if err != nil {
 		return nil, err

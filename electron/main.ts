@@ -317,6 +317,7 @@ type UpdateDownloadRequest = {
 type WorkspaceResponse = {
   tree: unknown[];
   credentials: WorkspaceCredential[];
+  credentialOptions: Record<CredentialProtocol, WorkspaceCredential[]>;
   tunnels: unknown[];
 };
 type BackupInspectBackendResponse = {

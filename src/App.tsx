@@ -183,6 +183,7 @@ import { VncSurface } from './components/VncSurface';
 import { RdpSurface, type RdpUiStatus } from './components/RdpSurface';
 import { WebSurface } from './components/WebSurface';
 import { ConnectionStepper } from './components/ConnectionStepper';
+import { SearchableCombobox, type SearchableComboboxOption } from './components/SearchableCombobox';
 import { VirtualCardGrid } from './components/VirtualCardGrid';
 import {
   applyTheme,
@@ -210,6 +211,7 @@ import {
 } from './tunnel-state';
 
 type Protocol = QuickConnectProtocol;
+type CredentialProtocol = Extract<Protocol, 'ssh' | 'rdp' | 'vnc'>;
 type AutoSudoMode = 'inherit' | 'on' | 'off';
 type CredentialSelection = 'inherit' | 'none' | string;
 type NavItem = 'sessions' | 'credentials' | 'tunnels' | 'settings';
@@ -501,6 +503,44 @@ type CredentialRecord = {
   bitwardenItemName?: string;
   isVirtualBitwarden?: boolean;
 };
+
+type CredentialOptionGroups = Record<CredentialProtocol, CredentialRecord[]>;
+
+function workspaceCredentialOptions(workspace: WormholeWorkspaceSnapshot): CredentialOptionGroups {
+  return {
+    ssh: workspace.credentialOptions.ssh as CredentialRecord[],
+    rdp: workspace.credentialOptions.rdp as CredentialRecord[],
+    vnc: workspace.credentialOptions.vnc as CredentialRecord[],
+  };
+}
+
+function isCredentialProtocol(protocol: Protocol): protocol is CredentialProtocol {
+  return protocol === 'ssh' || protocol === 'rdp' || protocol === 'vnc';
+}
+
+function mergeCredentialOption(
+  groups: CredentialOptionGroups,
+  credential: CredentialRecord,
+): CredentialOptionGroups {
+  const next = {
+    ssh: groups.ssh.filter((candidate) => candidate.id !== credential.id),
+    rdp: groups.rdp.filter((candidate) => candidate.id !== credential.id),
+    vnc: groups.vnc.filter((candidate) => candidate.id !== credential.id),
+  };
+  if (!isCredentialProtocol(credential.protocol)) return next;
+  next[credential.protocol] = mergeCredential(
+    next[credential.protocol].filter(
+      (candidate) =>
+        !(
+          candidate.isVirtualBitwarden &&
+          credential.bitwardenItemId &&
+          candidate.bitwardenItemId === credential.bitwardenItemId
+        ),
+    ),
+    credential,
+  );
+  return next;
+}
 
 type CredentialDialogState =
   | { kind: 'credentials'; result: WormholeWorkspaceCredentialReveal }
@@ -1240,6 +1280,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme);
   const [tree, setTree] = useState<TreeNode[]>(initialWorkspace.tree);
   const [credentials, setCredentials] = useState<CredentialRecord[]>(initialWorkspace.credentials);
+  const [credentialOptions, setCredentialOptions] = useState<CredentialOptionGroups>(() =>
+    workspaceCredentialOptions(initialWorkspace),
+  );
   const [tunnels, setTunnels] = useState<TunnelRecord[]>(initialWorkspace.tunnels);
   const [authState, setAuthState] = useState<WormholeAuthState | null>(initialAuthState);
   const [authGate, setAuthGate] = useState<'locked' | 'unlocked'>('unlocked');
@@ -1324,7 +1367,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     tunnel: 'inherit' as TunnelMode,
     credential: 'inherit' as CredentialSelection,
   });
-  const [folderCredentialOptions, setFolderCredentialOptions] = useState<CredentialRecord[]>([]);
   const [editorError, setEditorError] = useState('');
   const [editorBusy, setEditorBusy] = useState(false);
   const [credentialDialog, setCredentialDialog] = useState<CredentialDialogState | null>(null);
@@ -1348,9 +1390,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     credential: 'inherit' as CredentialSelection,
     serial: { ...defaultSerialSettings },
   });
-  const [connectionCredentialOptions, setConnectionCredentialOptions] = useState<
-    CredentialRecord[]
-  >([]);
   const [newFolderOpen, setNewFolderOpen] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [newFolderParentId, setNewFolderParentId] = useState<string | null>(null);
@@ -1391,6 +1430,44 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     [searchText, tree],
   );
   const folders = useMemo(() => collectFolders(tree), [tree]);
+  const folderSelectionOptions = useMemo<SearchableComboboxOption[]>(
+    () => [
+      { value: rootFolderSelectionValue, label: 'Root' },
+      ...folders.map((folder) => ({ value: folder.id, label: folder.name })),
+    ],
+    [folders],
+  );
+  const connectionCredentialSelectionOptions = useMemo<SearchableComboboxOption[]>(() => {
+    const options = isCredentialProtocol(newConnectionForm.protocol)
+      ? credentialOptions[newConnectionForm.protocol]
+      : [];
+    return [
+      { value: 'inherit', label: 'Inherit from folder' },
+      { value: 'none', label: 'No saved credential' },
+      ...options.map((credential) => ({
+        value: credential.id,
+        label: `${credential.name} · ${credential.provider}`,
+      })),
+    ];
+  }, [credentialOptions, newConnectionForm.protocol]);
+  const folderCredentialOptions = useMemo(() => {
+    const byID = new Map<string, CredentialRecord>();
+    for (const protocol of ['ssh', 'rdp', 'vnc'] as const) {
+      for (const credential of credentialOptions[protocol]) byID.set(credential.id, credential);
+    }
+    return [...byID.values()].sort((left, right) => left.name.localeCompare(right.name));
+  }, [credentialOptions]);
+  const folderCredentialSelectionOptions = useMemo<SearchableComboboxOption[]>(
+    () => [
+      { value: 'inherit', label: 'Inherit from parent folder' },
+      { value: 'none', label: 'No saved credential' },
+      ...folderCredentialOptions.map((credential) => ({
+        value: credential.id,
+        label: `${credential.name} · ${protocolLabel(credential.protocol)} · ${credential.provider}`,
+      })),
+    ],
+    [folderCredentialOptions],
+  );
   const selectedSession =
     sessions.find((session) => session.id === selectedSessionId) ?? sessions[0];
   const resolvedTheme = theme === 'system' ? systemTheme : theme;
@@ -1521,69 +1598,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       // The release page is a convenience; a failure is not user-actionable here.
     });
   }
-
-  useEffect(() => {
-    const protocol = newConnectionForm.protocol;
-    if (
-      !newConnectionOpen ||
-      !window.wormhole ||
-      (protocol !== 'ssh' && protocol !== 'rdp' && protocol !== 'vnc')
-    ) {
-      setConnectionCredentialOptions([]);
-      return;
-    }
-    let active = true;
-    void window.wormhole
-      .listCredentialsForProtocol(protocol)
-      .then((items) => {
-        if (active) setConnectionCredentialOptions(items as CredentialRecord[]);
-      })
-      .catch((error: unknown) => {
-        if (active) {
-          setConnectionCredentialOptions([]);
-          setEditorError(
-            error instanceof Error ? error.message : 'Could not load saved credentials.',
-          );
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [credentials, newConnectionForm.protocol, newConnectionOpen]);
-
-  useEffect(() => {
-    if (!folderDetailsOpen || !window.wormhole) {
-      setFolderCredentialOptions([]);
-      return;
-    }
-    let active = true;
-    void Promise.all(
-      (['ssh', 'rdp', 'vnc'] as const).map((protocol) =>
-        window.wormhole!.listCredentialsForProtocol(protocol),
-      ),
-    )
-      .then((groups) => {
-        if (!active) return;
-        const byID = new Map<string, CredentialRecord>();
-        for (const credential of groups.flat() as CredentialRecord[]) {
-          byID.set(credential.id, credential);
-        }
-        setFolderCredentialOptions(
-          [...byID.values()].sort((left, right) => left.name.localeCompare(right.name)),
-        );
-      })
-      .catch((error: unknown) => {
-        if (active) {
-          setFolderCredentialOptions([]);
-          setEditorError(
-            error instanceof Error ? error.message : 'Could not load saved credentials.',
-          );
-        }
-      });
-    return () => {
-      active = false;
-    };
-  }, [credentials, folderDetailsOpen]);
 
   const requestAuthentication = useCallback(
     (reason: string) => {
@@ -4044,6 +4058,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const nextTree = workspace.tree as TreeNode[];
     setTree(nextTree);
     setCredentials(workspace.credentials as CredentialRecord[]);
+    setCredentialOptions(workspaceCredentialOptions(workspace));
     setTunnels(workspace.tunnels as TunnelRecord[]);
     setExpanded(
       (current) =>
@@ -4291,6 +4306,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const workspace = await window.wormhole.loadWorkspace();
     setTree(workspace.tree as TreeNode[]);
     setCredentials(workspace.credentials as CredentialRecord[]);
+    setCredentialOptions(workspaceCredentialOptions(workspace));
     setTunnels(workspace.tunnels as TunnelRecord[]);
   }
 
@@ -4783,6 +4799,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (!window.wormhole) throw new Error('The native credential bridge is unavailable.');
     const credential = (await window.wormhole.createCredential(draft)) as CredentialRecord;
     setCredentials((current) => mergeCredential(current, credential));
+    setCredentialOptions((current) => mergeCredentialOption(current, credential));
+    void refreshWorkspaceCredentials().catch(() => {
+      // The new option is already visible; a later workspace refresh can reconcile vault aliases.
+    });
   }
 
   async function updateCredential(id: string, draft: CredentialDraft): Promise<void> {
@@ -4792,6 +4812,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       id,
     })) as CredentialRecord;
     setCredentials((current) => mergeCredential(current, credential));
+    setCredentialOptions((current) => mergeCredentialOption(current, credential));
+    void refreshWorkspaceCredentials().catch(() => {
+      // The edited option is already visible; a later workspace refresh can reconcile vault aliases.
+    });
   }
 
   async function deleteSavedCredential(id: string): Promise<void> {
@@ -4799,12 +4823,21 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const result = await window.wormhole.deleteCredential({ id });
     if (!result.deleted) throw new Error(result.error ?? 'The credential was not deleted.');
     setCredentials((current) => current.filter((credential) => credential.id !== id));
+    setCredentialOptions((current) => ({
+      ssh: current.ssh.filter((credential) => credential.id !== id),
+      rdp: current.rdp.filter((credential) => credential.id !== id),
+      vnc: current.vnc.filter((credential) => credential.id !== id),
+    }));
+    void refreshWorkspaceCredentials().catch(() => {
+      // The deletion succeeded; the next workspace refresh will restore any virtual vault option.
+    });
   }
 
   async function refreshWorkspaceCredentials(): Promise<void> {
     if (!window.wormhole) return;
     const workspace = await window.wormhole.loadWorkspace();
     setCredentials(workspace.credentials);
+    setCredentialOptions(workspaceCredentialOptions(workspace));
   }
 
   const currentPage = navItems.find((item) => item.id === activePage)!;
@@ -5319,6 +5352,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   onBackupImported={(workspace) => {
                     setTree(workspace.tree);
                     setCredentials(workspace.credentials);
+                    setCredentialOptions(workspaceCredentialOptions(workspace));
                     setTunnels(workspace.tunnels);
                     setExpanded(
                       (current) => new Set([...current, ...collectFolderIds(workspace.tree)]),
@@ -5469,28 +5503,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 </div>
               ) : null}
               {quickConnectSupportsTunnel(quickConnectForm.protocol) ? (
-                <div className="grid gap-2">
-                  <Label htmlFor="quick-tunnel-route">VPN route</Label>
-                  <Select
-                    onValueChange={(tunnel) => setQuickConnectForm((form) => ({ ...form, tunnel }))}
-                    value={quickConnectForm.tunnel}
-                  >
-                    <SelectTrigger id="quick-tunnel-route">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="off">No VPN tunnel</SelectItem>
-                      {tunnels.map((tunnel) => (
-                        <SelectItem key={tunnel.id} value={tunnel.id}>
-                          {tunnel.name} · {tunnel.kind}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <p className="text-[11px] leading-relaxed text-muted-foreground">
-                    The selected VPN tunnel starts before this temporary connection.
-                  </p>
-                </div>
+                <TunnelRouteField
+                  id="quick-tunnel-route"
+                  mode={quickConnectForm.tunnel}
+                  onChange={(tunnel) => setQuickConnectForm((form) => ({ ...form, tunnel }))}
+                  scope="quick"
+                  tunnels={tunnels}
+                />
               ) : null}
               {quickConnectForm.protocol === 'https' ? (
                 <label className="flex items-center gap-2 text-xs">
@@ -5774,58 +5793,38 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
                     <div className="grid max-w-[280px] gap-2">
                       <Label htmlFor="connection-folder">Folder</Label>
-                      <Select
+                      <SearchableCombobox
+                        id="connection-folder"
+                        emptyMessage="No folders found."
                         onValueChange={(folder) =>
                           setNewConnectionForm((form) => ({
                             ...form,
                             folder: folder === rootFolderSelectionValue ? '' : folder,
                           }))
                         }
+                        options={folderSelectionOptions}
+                        placeholder="Root"
+                        searchPlaceholder="Search folders…"
                         value={newConnectionForm.folder || rootFolderSelectionValue}
-                      >
-                        <SelectTrigger id="connection-folder" className="w-full">
-                          <SelectValue placeholder="Root" />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value={rootFolderSelectionValue}>Root</SelectItem>
-                          {folders.map((folder) => (
-                            <SelectItem key={folder.id} value={folder.id}>
-                              {folder.name}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                      />
                     </div>
 
                     {newConnectionForm.protocol === 'ssh' ||
                     newConnectionForm.protocol === 'rdp' ||
                     newConnectionForm.protocol === 'vnc' ? (
-                      <div className="grid gap-2">
+                      <div className="grid max-w-[280px] gap-2">
                         <Label htmlFor="connection-credential">Credential</Label>
-                        <Select
+                        <SearchableCombobox
+                          id="connection-credential"
+                          emptyMessage="No credentials found."
                           onValueChange={(credential) =>
                             setNewConnectionForm((form) => ({ ...form, credential }))
                           }
+                          options={connectionCredentialSelectionOptions}
+                          placeholder="Select a credential"
+                          searchPlaceholder="Search credentials…"
                           value={newConnectionForm.credential}
-                        >
-                          <SelectTrigger id="connection-credential" className="w-full">
-                            <SelectValue placeholder="Select a credential" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="inherit">Inherit from folder</SelectItem>
-                            <SelectItem value="none">No saved credential</SelectItem>
-                            {connectionCredentialOptions.map((credential) => (
-                              <SelectItem key={credential.id} value={credential.id}>
-                                {credential.name} · {credential.provider}
-                                {credential.isVirtualBitwarden ? ' · vault' : ''}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                        <p className="text-[11px] leading-relaxed text-muted-foreground">
-                          Bitwarden items are resolved by the Go backend only when the connection
-                          starts; passwords are never exposed to this editor.
-                        </p>
+                        />
                       </div>
                     ) : null}
 
@@ -6184,29 +6183,19 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   value={folderDetailsForm.name}
                 />
               </div>
-              <div className="grid gap-2">
+              <div className="grid max-w-[280px] gap-2">
                 <Label htmlFor="folder-credential">Credential</Label>
-                <Select
+                <SearchableCombobox
+                  id="folder-credential"
+                  emptyMessage="No credentials found."
                   onValueChange={(credential) =>
                     setFolderDetailsForm((form) => ({ ...form, credential }))
                   }
+                  options={folderCredentialSelectionOptions}
+                  placeholder="Select a credential"
+                  searchPlaceholder="Search credentials…"
                   value={folderDetailsForm.credential}
-                >
-                  <SelectTrigger id="folder-credential">
-                    <SelectValue placeholder="Select a credential" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="inherit">Inherit from parent folder</SelectItem>
-                    <SelectItem value="none">No saved credential</SelectItem>
-                    {folderCredentialOptions.map((credential) => (
-                      <SelectItem key={credential.id} value={credential.id}>
-                        {credential.name} · {protocolLabel(credential.protocol)} ·{' '}
-                        {credential.provider}
-                        {credential.isVirtualBitwarden ? ' · vault' : ''}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                />
               </div>
               <AutoSudoField
                 id="folder-auto-sudo"
@@ -9181,13 +9170,33 @@ function TunnelRouteField({
   id: string;
   mode: TunnelMode;
   onChange: (mode: TunnelMode) => void;
-  scope: 'connection' | 'folder';
+  scope: 'connection' | 'folder' | 'quick';
   tunnels: TunnelRecord[];
   disabled?: boolean;
 }) {
   const isFolder = scope === 'folder';
-  const description =
-    mode === 'off'
+  const isQuick = scope === 'quick';
+  const options = useMemo<SearchableComboboxOption[]>(
+    () => [
+      ...(isQuick
+        ? []
+        : [
+            {
+              value: 'inherit',
+              label: isFolder ? 'Inherit from parent' : 'Inherit from folder',
+            },
+          ]),
+      { value: 'off', label: 'No VPN tunnel' },
+      ...tunnels.map((tunnel) => ({
+        value: tunnel.id,
+        label: `${tunnel.name} · ${tunnel.kind}`,
+      })),
+    ],
+    [isFolder, isQuick, tunnels],
+  );
+  const description = isQuick
+    ? 'The selected VPN tunnel starts before this temporary connection.'
+    : mode === 'off'
       ? 'Always connect directly for this item and its descendants that inherit the route.'
       : mode === 'inherit'
         ? isFolder
@@ -9197,22 +9206,17 @@ function TunnelRouteField({
   return (
     <div className="grid gap-2">
       <Label htmlFor={id}>{isFolder ? 'VPN route default' : 'VPN route'}</Label>
-      <Select disabled={disabled} onValueChange={onChange} value={mode}>
-        <SelectTrigger className="w-full sm:max-w-[360px]" id={id}>
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="inherit">
-            {isFolder ? 'Inherit from parent' : 'Inherit from folder'}
-          </SelectItem>
-          <SelectItem value="off">No VPN tunnel</SelectItem>
-          {tunnels.map((tunnel) => (
-            <SelectItem key={tunnel.id} value={tunnel.id}>
-              {tunnel.name} · {tunnel.kind}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      <SearchableCombobox
+        className="sm:max-w-[360px]"
+        disabled={disabled}
+        emptyMessage="No VPN routes found."
+        id={id}
+        onValueChange={(value) => onChange(value as TunnelMode)}
+        options={options}
+        placeholder="Select a VPN route"
+        searchPlaceholder="Search VPN routes…"
+        value={mode}
+      />
       <p className="text-[11px] leading-relaxed text-muted-foreground">{description}</p>
     </div>
   );
