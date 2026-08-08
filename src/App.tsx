@@ -14047,14 +14047,16 @@ function SettingsPage({
                 </Button>
               ) : null}
             </div>
+          </SettingsSection>
+
+          <SettingsSection title="Release notes">
             <Card className="border-border/70 bg-card/40 p-4 shadow-none">
-              <p className="text-xs font-semibold">Release notes</p>
               {updateAvailable ? (
-                <div className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                <div className="text-[11px] leading-relaxed text-muted-foreground">
                   <ReleaseNotesMarkdown markdown={update.result?.releaseNotes ?? ''} />
                 </div>
               ) : (
-                <p className="mt-2 text-[11px] leading-relaxed text-muted-foreground">
+                <p className="text-[11px] leading-relaxed text-muted-foreground">
                   {update.result?.checkFailed
                     ? "Couldn't reach the update server. Try again later."
                     : update.result?.latestVersion
