@@ -47,7 +47,10 @@ test('Quick Connect resolves a gateway credential only when it is actually selec
   };
   assert.equal(rdpGatewayCredentialIdForResolution(base), base.gatewayCredentialId);
   assert.equal(rdpGatewayCredentialIdForResolution({ ...base, gatewayUsageMethod: 0 }), undefined);
-  assert.equal(rdpGatewayCredentialIdForResolution({ ...base, gatewayUseSameCreds: true }), undefined);
+  assert.equal(
+    rdpGatewayCredentialIdForResolution({ ...base, gatewayUseSameCreds: true }),
+    undefined,
+  );
   assert.equal(rdpGatewayUsername('operator', 'CONTOSO'), 'CONTOSO\\operator');
   assert.equal(rdpGatewayUsername('CONTOSO\\operator', 'IGNORED'), 'CONTOSO\\operator');
 });
