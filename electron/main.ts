@@ -573,10 +573,6 @@ type WebCommandRequest = {
   sessionId: string;
   operation: 'back' | 'forward' | 'reload' | 'stop';
 };
-type SessionTabContextMenuRequest = {
-  canTransfer: boolean;
-};
-type SessionTabContextMenuAction = 'duplicate' | 'reconnect' | 'fileTransfer' | 'close';
 type TreeTooltipRequest = {
   text: string;
   anchor: { x: number; y: number; width: number; height: number };
@@ -1111,10 +1107,6 @@ function isWebCommandRequest(value: unknown): value is WebCommandRequest {
       value.operation === 'reload' ||
       value.operation === 'stop')
   );
-}
-
-function isSessionTabContextMenuRequest(value: unknown): value is SessionTabContextMenuRequest {
-  return isRecord(value) && typeof value.canTransfer === 'boolean';
 }
 
 function isTreeTooltipRequest(value: unknown): value is TreeTooltipRequest {
@@ -6865,35 +6857,6 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
       await ensureAuthSession();
       authSession.requireUnlocked();
       return runBackend<{ updated: boolean }>('workspace-update-node-web-settings', request);
-    });
-  });
-  ipcMain.handle('session-tab:context-menu', async (event, request: unknown) => {
-    if (!isSessionTabContextMenuRequest(request)) {
-      throw new Error('Session tab context menu request is invalid.');
-    }
-    const ownerWindow = BrowserWindow.fromWebContents(event.sender);
-    if (!ownerWindow || ownerWindow.isDestroyed()) return null;
-
-    return new Promise<SessionTabContextMenuAction | null>((resolve) => {
-      let resolved = false;
-      const finish = (action: SessionTabContextMenuAction | null) => {
-        if (resolved) return;
-        resolved = true;
-        resolve(action);
-      };
-      const template: Electron.MenuItemConstructorOptions[] = [
-        { label: 'Duplicate', click: () => finish('duplicate') },
-        { label: 'Reconnect', click: () => finish('reconnect') },
-      ];
-      if (request.canTransfer) {
-        template.push({ label: 'SFTP browser', click: () => finish('fileTransfer') });
-      }
-      template.push({ type: 'separator' }, { label: 'Close', click: () => finish('close') });
-
-      Menu.buildFromTemplate(template).popup({
-        window: ownerWindow,
-        callback: () => setImmediate(() => finish(null)),
-      });
     });
   });
   ipcMain.handle('tree-tooltip:show', (event, request: unknown) => {

@@ -179,8 +179,6 @@ const wormholeBridge = {
     sessionId: string;
     operation: 'back' | 'forward' | 'reload' | 'stop';
   }) => ipcRenderer.invoke('web:command', request),
-  showSessionTabContextMenu: (request: { canTransfer: boolean }) =>
-    ipcRenderer.invoke('session-tab:context-menu', request),
   showTreeTooltip: (request: {
     text: string;
     anchor: { x: number; y: number; width: number; height: number };

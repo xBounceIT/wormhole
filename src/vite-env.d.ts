@@ -789,9 +789,6 @@ interface Window {
       sessionId: string;
       operation: 'back' | 'forward' | 'reload' | 'stop';
     }): Promise<void>;
-    showSessionTabContextMenu(request: {
-      canTransfer: boolean;
-    }): Promise<'duplicate' | 'reconnect' | 'fileTransfer' | 'close' | null>;
     showTreeTooltip(request: {
       text: string;
       anchor: { x: number; y: number; width: number; height: number };

@@ -1029,26 +1029,31 @@ function SessionTabContextMenu({
   onClose: () => void;
   onFileTransfer: () => void;
 }) {
-  async function openContextMenu() {
-    const action = await window.wormhole?.showSessionTabContextMenu({
-      canTransfer: session.canTransfer === true && session.status === 'connected',
-    });
-    if (action === 'duplicate') onDuplicate();
-    else if (action === 'reconnect') onReconnect();
-    else if (action === 'fileTransfer') onFileTransfer();
-    else if (action === 'close') onClose();
-  }
-
   return (
-    <div
-      className="contents"
-      onContextMenu={(event: MouseEvent<HTMLDivElement>) => {
-        event.preventDefault();
-        void openContextMenu().catch(() => undefined);
-      }}
-    >
-      {children}
-    </div>
+    <ContextMenu>
+      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
+      <ContextMenuContent className="w-48">
+        <ContextMenuItem onSelect={onDuplicate}>
+          <Copy />
+          Duplicate
+        </ContextMenuItem>
+        <ContextMenuItem onSelect={onReconnect}>
+          <RefreshCcw />
+          Reconnect
+        </ContextMenuItem>
+        {session.canTransfer === true && session.status === 'connected' ? (
+          <ContextMenuItem onSelect={onFileTransfer}>
+            <FolderOpen />
+            SFTP browser
+          </ContextMenuItem>
+        ) : null}
+        <ContextMenuSeparator />
+        <ContextMenuItem onSelect={onClose}>
+          <X />
+          Close
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 

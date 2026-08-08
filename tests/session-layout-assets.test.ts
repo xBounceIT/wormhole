@@ -7,6 +7,8 @@ const vncSource = readFileSync(
   new URL('../src/components/VncSurface.tsx', import.meta.url),
   'utf8',
 );
+const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+const preloadSource = readFileSync(new URL('../electron/preload.cts', import.meta.url), 'utf8');
 
 test('live surfaces are keyed only by session identity in one stable workspace layer', () => {
   const surfaceLayer = appSource.slice(
@@ -86,6 +88,22 @@ test('active session close uses the themed confirmation dialog', () => {
   assert.match(appSource, /<DialogTitle>Disconnect active connection\?<\/DialogTitle>/);
   assert.match(appSource, /role="alertdialog"/);
   assert.match(appSource, /Close and disconnect/);
+});
+
+test('session tab actions use the themed renderer context menu with dedicated icons', () => {
+  const menuSource = appSource.slice(
+    appSource.indexOf('function SessionTabContextMenu'),
+    appSource.indexOf('const nodeTooltipDelayMs'),
+  );
+  assert.match(menuSource, /<ContextMenu>/);
+  assert.match(menuSource, /<ContextMenuTrigger asChild>/);
+  assert.match(menuSource, /<Copy \/>[\s\S]*Duplicate/);
+  assert.match(menuSource, /<RefreshCcw \/>[\s\S]*Reconnect/);
+  assert.match(menuSource, /<FolderOpen \/>[\s\S]*SFTP browser/);
+  assert.match(menuSource, /<X \/>[\s\S]*Close/);
+  assert.doesNotMatch(appSource, /showSessionTabContextMenu/);
+  assert.doesNotMatch(preloadSource, /session-tab:context-menu/);
+  assert.doesNotMatch(mainSource, /session-tab:context-menu/);
 });
 
 test('surface bounds reserve a reachable gutter for split handles above native views', () => {
