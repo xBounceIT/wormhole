@@ -467,6 +467,7 @@ type Session = {
   webUrl?: string;
   webCanGoBack?: boolean;
   webCanGoForward?: boolean;
+  webIsLoading?: boolean;
   bitwardenPopupUrl?: string;
 };
 
@@ -928,42 +929,81 @@ function SessionTabContextMenu({
   onClose: () => void;
   onFileTransfer: () => void;
 }) {
+  async function openContextMenu() {
+    const action = await window.wormhole?.showSessionTabContextMenu({
+      canTransfer: session.canTransfer === true && session.status === 'connected',
+    });
+    if (action === 'duplicate') onDuplicate();
+    else if (action === 'reconnect') onReconnect();
+    else if (action === 'fileTransfer') onFileTransfer();
+    else if (action === 'close') onClose();
+  }
+
   return (
-    <ContextMenu>
-      <ContextMenuTrigger asChild>{children}</ContextMenuTrigger>
-      <ContextMenuContent className="w-44">
-        <ContextMenuItem onSelect={onDuplicate}>
-          <Copy />
-          Duplicate
-        </ContextMenuItem>
-        <ContextMenuItem onSelect={onReconnect}>
-          <RefreshCcw />
-          Reconnect
-        </ContextMenuItem>
-        {session.canTransfer && session.status === 'connected' ? (
-          <ContextMenuItem onSelect={onFileTransfer}>
-            <ArrowRightLeft />
-            SFTP browser
-          </ContextMenuItem>
-        ) : null}
-        <ContextMenuSeparator />
-        <ContextMenuItem onSelect={onClose}>
-          <X />
-          Close
-        </ContextMenuItem>
-      </ContextMenuContent>
-    </ContextMenu>
+    <div
+      className="contents"
+      onContextMenu={(event: MouseEvent<HTMLDivElement>) => {
+        event.preventDefault();
+        void openContextMenu().catch(() => undefined);
+      }}
+    >
+      {children}
+    </div>
   );
 }
 
+const nodeTooltipDelayMs = 300;
+
 function NodeTooltip({ node, children }: { node: TreeNode; children: ReactNode }) {
-  if (!node.host) return children;
+  const host = node.host;
+  const anchorRef = useRef<HTMLDivElement>(null);
+  const openTimer = useRef<number | undefined>(undefined);
+  const clearOpenTimer = useCallback(() => {
+    if (openTimer.current !== undefined) window.clearTimeout(openTimer.current);
+    openTimer.current = undefined;
+  }, []);
+
+  useEffect(
+    () => () => {
+      clearOpenTimer();
+      void window.wormhole?.hideTreeTooltip();
+    },
+    [clearOpenTimer],
+  );
+  if (!host) return children;
+
+  const scheduleOpen = () => {
+    clearOpenTimer();
+    openTimer.current = window.setTimeout(() => {
+      openTimer.current = undefined;
+      const anchor = anchorRef.current;
+      if (!anchor) return;
+      const bounds = anchor.getBoundingClientRect();
+      const context = document.createElement('canvas').getContext('2d');
+      if (context) context.font = getComputedStyle(anchor).font;
+      const textWidth = context?.measureText(host).width ?? host.length * 7;
+      void window.wormhole?.showTreeTooltip({
+        text: host,
+        anchor: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
+        width: Math.min(328, Math.max(48, Math.ceil(textWidth) + 29)),
+      });
+    }, nodeTooltipDelayMs);
+  };
+  const close = () => {
+    clearOpenTimer();
+    void window.wormhole?.hideTreeTooltip();
+  };
 
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>{children}</TooltipTrigger>
-      <TooltipContent side="left">{node.host}</TooltipContent>
-    </Tooltip>
+    <div
+      ref={anchorRef}
+      onBlurCapture={close}
+      onFocusCapture={scheduleOpen}
+      onPointerEnter={scheduleOpen}
+      onPointerLeave={close}
+    >
+      {children}
+    </div>
   );
 }
 
@@ -2221,6 +2261,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             return {
               ...session,
               status: 'failed',
+              webIsLoading: false,
               error: event.error || 'The browser could not open this connection.',
               tunnelProgress: null,
               webUrl: event.url || session.webUrl,
@@ -2231,6 +2272,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           return {
             ...session,
             status: event.type === 'connected' ? 'connected' : session.status,
+            webIsLoading: event.isLoading,
             error: undefined,
             tunnelProgress: event.type === 'connected' ? null : session.tunnelProgress,
             webUrl: event.url || session.webUrl,
@@ -3018,6 +3060,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         error: undefined,
         webCanGoBack: false,
         webCanGoForward: false,
+        webIsLoading: false,
       };
       setSessions((current) => current.map((session) => (session.id === id ? restarted : session)));
       void closeWebSession(source.id)

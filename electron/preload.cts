@@ -124,8 +124,18 @@ const wormholeBridge = {
     height: number;
     visible: boolean;
   }) => ipcRenderer.invoke('web:set-bounds', request),
-  commandWebSession: (request: { sessionId: string; operation: 'back' | 'forward' | 'reload' }) =>
-    ipcRenderer.invoke('web:command', request),
+  commandWebSession: (request: {
+    sessionId: string;
+    operation: 'back' | 'forward' | 'reload' | 'stop';
+  }) => ipcRenderer.invoke('web:command', request),
+  showSessionTabContextMenu: (request: { canTransfer: boolean }) =>
+    ipcRenderer.invoke('session-tab:context-menu', request),
+  showTreeTooltip: (request: {
+    text: string;
+    anchor: { x: number; y: number; width: number; height: number };
+    width: number;
+  }) => ipcRenderer.invoke('tree-tooltip:show', request),
+  hideTreeTooltip: () => ipcRenderer.invoke('tree-tooltip:hide'),
   closeWebSession: (sessionId: string) => ipcRenderer.invoke('web:close', sessionId),
   onWebEvent: (
     listener: (event: {
@@ -135,6 +145,7 @@ const wormholeBridge = {
       url: string;
       canGoBack: boolean;
       canGoForward: boolean;
+      isLoading: boolean;
       error?: string;
     }) => void,
   ) => {

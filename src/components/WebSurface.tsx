@@ -6,10 +6,10 @@ import {
   Globe,
   LoaderCircle,
   RefreshCcw,
+  X,
 } from 'lucide-react';
 import bitwardenIcon from '../../Assets/Bitwarden/bitwarden-icon.png';
 import { Button } from '@/components/ui/button';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { ConnectionStepper, type TunnelProgress } from './ConnectionStepper';
 
 type WebSessionSurface = {
@@ -23,6 +23,7 @@ type WebSessionSurface = {
   webUrl?: string;
   webCanGoBack?: boolean;
   webCanGoForward?: boolean;
+  webIsLoading?: boolean;
   bitwardenPopupUrl?: string;
 };
 
@@ -117,7 +118,7 @@ export function WebSurface({
     };
   }, [session.id, visible]);
 
-  const command = (operation: 'back' | 'forward' | 'reload') => {
+  const command = (operation: 'back' | 'forward' | 'reload' | 'stop') => {
     void window.wormhole?.commandWebSession({ sessionId: session.id, operation });
   };
   const address =
@@ -142,8 +143,12 @@ export function WebSurface({
           >
             <ChevronRight />
           </ToolbarButton>
-          <ToolbarButton disabled={!visible} label="Reload" onClick={() => command('reload')}>
-            <RefreshCcw />
+          <ToolbarButton
+            disabled={!visible}
+            label={session.webIsLoading ? 'Stop loading' : 'Reload'}
+            onClick={() => command(session.webIsLoading ? 'stop' : 'reload')}
+          >
+            {session.webIsLoading ? <X /> : <RefreshCcw />}
           </ToolbarButton>
           {session.bitwardenPopupUrl ? (
             <ToolbarButton
@@ -221,23 +226,18 @@ function ToolbarButton({
   onClick: () => void;
 }) {
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Button
-          aria-label={label}
-          ref={buttonRef}
-          className="size-7 p-0"
-          disabled={disabled}
-          onClick={onClick}
-          size="icon"
-          type="button"
-          variant="ghost"
-        >
-          {children}
-        </Button>
-      </TooltipTrigger>
-      <TooltipContent side="bottom">{label}</TooltipContent>
-    </Tooltip>
+    <Button
+      aria-label={label}
+      ref={buttonRef}
+      className="size-7 p-0"
+      disabled={disabled}
+      onClick={onClick}
+      size="icon"
+      type="button"
+      variant="ghost"
+    >
+      {children}
+    </Button>
   );
 }
 

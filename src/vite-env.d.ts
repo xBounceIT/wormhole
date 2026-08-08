@@ -219,6 +219,7 @@ interface WormholeWebEvent {
   url: string;
   canGoBack: boolean;
   canGoForward: boolean;
+  isLoading: boolean;
   error?: string;
 }
 
@@ -687,8 +688,17 @@ interface Window {
     }): Promise<void>;
     commandWebSession(request: {
       sessionId: string;
-      operation: 'back' | 'forward' | 'reload';
+      operation: 'back' | 'forward' | 'reload' | 'stop';
     }): Promise<void>;
+    showSessionTabContextMenu(request: {
+      canTransfer: boolean;
+    }): Promise<'duplicate' | 'reconnect' | 'fileTransfer' | 'close' | null>;
+    showTreeTooltip(request: {
+      text: string;
+      anchor: { x: number; y: number; width: number; height: number };
+      width: number;
+    }): Promise<void>;
+    hideTreeTooltip(): Promise<void>;
     closeWebSession(sessionId: string): Promise<void>;
     onWebEvent(listener: (event: WormholeWebEvent) => void): () => void;
     updateWorkspaceNodeTunnelSettings(
