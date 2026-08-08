@@ -159,6 +159,7 @@ type BackendOperation =
   | 'credential-delete'
   | 'workspace-duplicate-node'
   | 'workspace-delete-node'
+  | 'workspace-delete-nodes'
   | 'workspace-show-credentials'
   | 'credentials-for-protocol'
   | 'workspace-update-node'
@@ -496,6 +497,7 @@ type CredentialCreateRequest = {
 type CredentialUpdateRequest = CredentialCreateRequest & { id: string };
 type CredentialDeleteRequest = { id: string };
 type WorkspaceNodeRequest = { nodeId: string };
+type WorkspaceNodesRequest = { nodeIds: string[] };
 type WorkspaceDuplicateNodeResponse = { nodeId: string; name: string };
 type WorkspaceDeleteNodeResponse = { deleted: boolean };
 type WorkspaceCredentialRevealResponse = {
@@ -1290,6 +1292,19 @@ function parseWorkspaceNodeRequest(value: unknown): WorkspaceNodeRequest {
     throw new Error('Workspace connection is invalid.');
   }
   return { nodeId: value.nodeId };
+}
+
+function parseWorkspaceNodesRequest(value: unknown): WorkspaceNodesRequest {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.nodeIds) ||
+    value.nodeIds.length === 0 ||
+    value.nodeIds.length > 1_000 ||
+    !value.nodeIds.every(isSshSessionId)
+  ) {
+    throw new Error('Workspace connections are invalid.');
+  }
+  return { nodeIds: [...new Set(value.nodeIds)] };
 }
 
 function parseCredentialCreateRequest(
@@ -5980,6 +5995,14 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
       return runBackend<WorkspaceDeleteNodeResponse>('workspace-delete-node', request);
+    });
+  });
+
+  ipcMain.handle('workspace:delete-nodes', async (_event, value: unknown) => {
+    const request = parseWorkspaceNodesRequest(value);
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<WorkspaceDeleteNodeResponse>('workspace-delete-nodes', request);
     });
   });
 

@@ -200,6 +200,11 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { getTreeRowGeometry } from './tree-layout';
 import { findParentFolderId } from './tree-parent';
 import {
+  canonicalizeConnectionTreeNodeIds,
+  isEditableConnectionTreeShortcutTarget,
+  resolveConnectionTreeShortcut,
+} from './tree-shortcuts';
+import {
   quickConnectStartsImmediately,
   quickConnectTunnelId,
   type QuickConnectProtocol,
@@ -400,13 +405,6 @@ function containsTreeNode(node: TreeNode, nodeId: string): boolean {
 
 function collectTreeNodeIds(node: TreeNode): string[] {
   return [node.id, ...(node.children?.flatMap(collectTreeNodeIds) ?? [])];
-}
-
-function removeTreeNode(nodes: TreeNode[], nodeId: string): TreeNode[] {
-  return nodes.flatMap((node) => {
-    if (node.id === nodeId) return [];
-    return node.children ? [{ ...node, children: removeTreeNode(node.children, nodeId) }] : [node];
-  });
 }
 
 function extractTreeNodes(
@@ -1446,7 +1444,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [credentialRevealBusy, setCredentialRevealBusy] = useState(false);
   const credentialRevealRequest = useRef(0);
   const copiedCredentialTimer = useRef<number | undefined>(undefined);
-  const [pendingDeleteNode, setPendingDeleteNode] = useState<TreeNode | null>(null);
+  const [pendingDeleteNodes, setPendingDeleteNodes] = useState<TreeNode[]>([]);
   const [deleteNodeBusy, setDeleteNodeBusy] = useState(false);
   const [deleteNodeError, setDeleteNodeError] = useState('');
   const [newConnectionForm, setNewConnectionForm] = useState({
@@ -2337,7 +2335,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setEditorError('');
     setCredentialDialog(null);
     setCopiedCredentialField(null);
-    setPendingDeleteNode(null);
+    setPendingDeleteNodes([]);
     setDeleteNodeError('');
     setSessions((current) => {
       if (!current.some((session) => session.sftp)) return current;
@@ -2431,9 +2429,42 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
-      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
-        event.preventDefault();
+      const target = event.target instanceof Element ? event.target : null;
+      const editableTarget = target?.closest<HTMLElement>(
+        'input, textarea, select, [contenteditable]:not([contenteditable="false"])',
+      );
+      const action = resolveConnectionTreeShortcut(event, {
+        unlocked: authGate === 'unlocked',
+        dialogOpen: Boolean(document.querySelector('[role="dialog"], [role="alertdialog"]')),
+        editableTarget: isEditableConnectionTreeShortcutTarget({
+          tagName: editableTarget?.tagName,
+          isContentEditable:
+            editableTarget?.isContentEditable ||
+            (target instanceof HTMLElement && target.isContentEditable),
+        }),
+        withinTree: Boolean(target?.closest('[data-connection-tree-shortcut-scope]')),
+        deleteBusy: deleteNodeBusy,
+        tree,
+        visibleTree,
+        selectedNodeId,
+        selectedNodeIds: [...selectedTreeNodeIds],
+      });
+      if (!action) return;
+
+      event.preventDefault();
+      if (action.kind === 'quick-connect') {
         openQuickConnect();
+      } else if (action.kind === 'new-folder') {
+        openNewFolder(action.parentFolderId);
+      } else if (action.kind === 'new-connection') {
+        openNewConnection(action.parentFolderId);
+      } else if (action.kind === 'delete') {
+        openDeleteNodes(action.nodeIds);
+      } else {
+        const node = findTreeNode(tree, action.nodeId);
+        if (!node) return;
+        if (action.kind === 'edit') openEditNode(node);
+        else openConnection(node);
       }
     };
 
@@ -2441,7 +2472,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     return () => {
       window.removeEventListener('keydown', handleKeyDown);
     };
-  }, []);
+  });
 
   function toggleFolder(id: string, value?: boolean) {
     setExpanded((current) => {
@@ -2454,12 +2485,17 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   function toggleTreeNodeSelection(id: string, checked: boolean) {
-    setSelectedTreeNodeIds((current) => {
-      const next = new Set(current);
-      if (checked) next.add(id);
-      else next.delete(id);
-      return next;
-    });
+    const next = new Set(selectedTreeNodeIds);
+    if (checked) next.add(id);
+    else next.delete(id);
+    setSelectedTreeNodeIds(next);
+    setSelectedNodeId(checked ? id : ([...next].at(-1) ?? ''));
+  }
+
+  function updateTreeSearchText(value: string) {
+    setSearchText(value);
+    setSelectedTreeNodeIds(new Set());
+    setSelectedNodeId('');
   }
 
   function getDraggedNodeIds(node: TreeNode): string[] {
@@ -4402,28 +4438,43 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     }
   }
 
-  function openDeleteNode(node: TreeNode) {
+  function openDeleteNodes(nodeIds: readonly string[]) {
     if (deleteNodeBusy) return;
+    const canonicalIds = canonicalizeConnectionTreeNodeIds(tree, nodeIds);
+    const nodes = canonicalIds
+      .map((nodeId) => findTreeNode(tree, nodeId))
+      .filter((node): node is TreeNode => Boolean(node));
+    if (nodes.length === 0) return;
+
     setDeleteNodeError('');
-    setPendingDeleteNode(findTreeNode(tree, node.id) ?? node);
+    setPendingDeleteNodes(nodes);
   }
 
-  async function confirmDeleteNode() {
-    const node = pendingDeleteNode;
-    if (!node || deleteNodeBusy) return;
+  function openDeleteNode(node: TreeNode) {
+    const selectedIds = selectedTreeNodeIds.has(node.id) ? [...selectedTreeNodeIds] : [node.id];
+    openDeleteNodes(selectedIds);
+  }
+
+  async function confirmDeleteNodes() {
+    const nodes = pendingDeleteNodes;
+    if (nodes.length === 0 || deleteNodeBusy) return;
 
     setDeleteNodeBusy(true);
     setDeleteNodeError('');
     try {
-      const deletedNodeIds = new Set(collectTreeNodeIds(node));
-      if (node.persisted) {
+      const deletedNodeIds = new Set(nodes.flatMap(collectTreeNodeIds));
+      const persistedNodeIds = canonicalizeConnectionTreeNodeIds(
+        tree,
+        [...deletedNodeIds].filter((nodeId) => findTreeNode(tree, nodeId)?.persisted),
+      );
+      if (persistedNodeIds.length > 0) {
         const api = window.wormhole;
         if (!api) throw new Error('The native workspace bridge is unavailable.');
-        const result = await api.deleteWorkspaceNode({ nodeId: node.id });
-        if (!result.deleted) throw new Error('The workspace node was not deleted.');
+        const result = await api.deleteWorkspaceNodes({ nodeIds: persistedNodeIds });
+        if (!result.deleted) throw new Error('The workspace nodes were not deleted.');
         await closeSessionsForNodeIds(deletedNodeIds);
-        applyDeletedTreeState(removeTreeNode(tree, node.id));
-        setPendingDeleteNode(null);
+        applyDeletedTreeState(extractTreeNodes(tree, new Set(nodes.map((node) => node.id))).nodes);
+        setPendingDeleteNodes([]);
         try {
           applyWorkspaceSnapshot(await api.loadWorkspace());
         } catch {
@@ -4432,11 +4483,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         }
       } else {
         await closeSessionsForNodeIds(deletedNodeIds);
-        applyDeletedTreeState(removeTreeNode(tree, node.id));
-        setPendingDeleteNode(null);
+        applyDeletedTreeState(extractTreeNodes(tree, new Set(nodes.map((node) => node.id))).nodes);
+        setPendingDeleteNodes([]);
       }
     } catch (error: unknown) {
-      setDeleteNodeError(error instanceof Error ? error.message : 'Could not delete the node.');
+      setDeleteNodeError(error instanceof Error ? error.message : 'Could not delete the nodes.');
     } finally {
       setDeleteNodeBusy(false);
     }
@@ -5016,6 +5067,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       const row = (
         <Button
           aria-current={isSelected ? 'true' : undefined}
+          aria-keyshortcuts={isFolder ? 'F2 Delete' : 'F2 Delete Enter'}
           className={[
             'relative z-10 h-8 w-full cursor-grab justify-start gap-1.5 rounded-md px-2 text-left !text-xs font-medium text-sidebar-foreground/80 transition-[background-color,box-shadow,opacity] duration-150 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground aria-expanded:bg-transparent aria-expanded:text-sidebar-foreground/80 active:cursor-grabbing',
             isSelected
@@ -5034,6 +5086,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           onDragEnd={handleTreeDragEnd}
           onDragStart={(event) => handleTreeDragStart(event, node)}
           onDoubleClick={() => openConnection(node)}
+          onFocus={() => setSelectedNodeId(node.id)}
           style={{ paddingLeft: `${treeGeometry.paddingLeft}px` }}
           variant="ghost"
         >
@@ -5216,9 +5269,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       : null);
   const credentialResult =
     credentialDialog?.kind === 'credentials' ? credentialDialog.result : null;
-  const deleteNodeDescendantCount = pendingDeleteNode
-    ? collectTreeNodeIds(pendingDeleteNode).length - 1
-    : 0;
+  const pendingDeleteNode = pendingDeleteNodes[0];
+  const deleteNodeDescendantCount = pendingDeleteNodes.reduce(
+    (count, node) => count + collectTreeNodeIds(node).length - 1,
+    0,
+  );
 
   return (
     <TooltipProvider delayDuration={300}>
@@ -5321,21 +5376,27 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       <Dialog
         onOpenChange={(open) => {
           if (!open && !deleteNodeBusy) {
-            setPendingDeleteNode(null);
+            setPendingDeleteNodes([]);
             setDeleteNodeError('');
           }
         }}
-        open={pendingDeleteNode !== null}
+        open={pendingDeleteNodes.length > 0}
       >
         <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
           <DialogHeader>
             <DialogTitle>
-              Delete {pendingDeleteNode?.kind === 'folder' ? 'folder' : 'connection'}
+              {pendingDeleteNodes.length > 1
+                ? `Delete ${pendingDeleteNodes.length} items`
+                : `Delete ${pendingDeleteNode?.kind === 'folder' ? 'folder' : 'connection'}`}
             </DialogTitle>
             <DialogDescription>
-              {pendingDeleteNode?.kind === 'folder' && deleteNodeDescendantCount > 0
-                ? `Delete “${pendingDeleteNode.name}” and its ${deleteNodeDescendantCount} ${deleteNodeDescendantCount === 1 ? 'child' : 'children'}? This cannot be undone.`
-                : `Delete “${pendingDeleteNode?.name ?? 'this item'}”? This cannot be undone.`}
+              {pendingDeleteNodes.length > 1
+                ? deleteNodeDescendantCount > 0
+                  ? `Delete ${pendingDeleteNodes.length} selected items and their ${deleteNodeDescendantCount} nested ${deleteNodeDescendantCount === 1 ? 'item' : 'items'}? This cannot be undone.`
+                  : `Delete ${pendingDeleteNodes.length} selected items? This cannot be undone.`
+                : deleteNodeDescendantCount > 0
+                  ? `Delete “${pendingDeleteNode?.name ?? 'this item'}” and its ${deleteNodeDescendantCount} nested ${deleteNodeDescendantCount === 1 ? 'item' : 'items'}? This cannot be undone.`
+                  : `Delete “${pendingDeleteNode?.name ?? 'this item'}”? This cannot be undone.`}
             </DialogDescription>
           </DialogHeader>
           {deleteNodeError ? (
@@ -5347,7 +5408,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             <Button
               disabled={deleteNodeBusy}
               onClick={() => {
-                setPendingDeleteNode(null);
+                setPendingDeleteNodes([]);
                 setDeleteNodeError('');
               }}
               type="button"
@@ -5357,7 +5418,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             </Button>
             <Button
               disabled={deleteNodeBusy}
-              onClick={() => void confirmDeleteNode()}
+              onClick={() => void confirmDeleteNodes()}
               type="button"
               variant="destructive"
             >
@@ -5574,15 +5635,24 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                           </DropdownMenuItem>
                         </DropdownMenuContent>
                       </DropdownMenu>
-                      <IconButton label="New folder" onClick={() => openNewFolder(null)}>
+                      <IconButton
+                        aria-keyshortcuts="Control+Shift+N Meta+Shift+N"
+                        label="New folder"
+                        onClick={() => openNewFolder(null)}
+                      >
                         <FolderPlus />
                       </IconButton>
-                      <IconButton label="New connection" onClick={() => openNewConnection(null)}>
+                      <IconButton
+                        aria-keyshortcuts="Control+N Meta+N"
+                        label="New connection"
+                        onClick={() => openNewConnection(null)}
+                      >
                         <Plus />
                       </IconButton>
                     </div>
                   </div>
                   <Button
+                    aria-keyshortcuts="Control+K Meta+K"
                     className="w-full justify-center gap-2 !text-xs"
                     onClick={openQuickConnect}
                     size="default"
@@ -5596,7 +5666,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     <SidebarInput
                       aria-label="Search connections"
                       className="bg-background/60 pl-8 pr-8 !text-xs shadow-none"
-                      onChange={(event) => setSearchText(event.target.value)}
+                      onChange={(event) => updateTreeSearchText(event.target.value)}
                       placeholder="Search connections"
                       value={searchText}
                     />
@@ -5604,7 +5674,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       <IconButton
                         label="Clear search"
                         className="absolute right-1 top-1/2 size-7 -translate-y-1/2 text-muted-foreground"
-                        onClick={() => setSearchText('')}
+                        onClick={() => updateTreeSearchText('')}
                       >
                         <X />
                       </IconButton>
@@ -5622,7 +5692,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 <SidebarContent className="min-h-0 overflow-hidden px-2">
                   <ContextMenu>
                     <ContextMenuTrigger asChild>
-                      <div className="flex min-h-0 flex-1 flex-col">
+                      <div
+                        className="flex min-h-0 flex-1 flex-col"
+                        data-connection-tree-shortcut-scope=""
+                      >
                         <ScrollArea className="min-h-0 flex-1 px-1">
                           {visibleTree.length > 0 ? (
                             renderTree(visibleTree)

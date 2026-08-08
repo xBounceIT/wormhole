@@ -195,7 +195,7 @@ type tunnelRow struct {
 }
 
 func main() {
-	operation := flag.String("operation", "workspace", "backend operation: startup, startup-unlock, workspace, workspace-duplicate-node, workspace-delete-node, workspace-show-credentials, backup-*, credential-*, tunnel-*, workspace-node-*, workspace-update-node-*, web-target, migrate, ssh, serial, ssh-trust-host-key, logs-info, settings-set-log-retention, settings-set-log-level, open-log-file, open-logs-folder, serve, rdp, extension-*, bitwarden-*, or auth-*")
+	operation := flag.String("operation", "workspace", "backend operation: startup, startup-unlock, workspace, workspace-duplicate-node, workspace-delete-node, workspace-delete-nodes, workspace-show-credentials, backup-*, credential-*, tunnel-*, workspace-node-*, workspace-update-node-*, web-target, migrate, ssh, serial, ssh-trust-host-key, logs-info, settings-set-log-retention, settings-set-log-level, open-log-file, open-logs-folder, serve, rdp, extension-*, bitwarden-*, or auth-*")
 	databasePath := flag.String("database", "", "path to the Wormhole SQLite database")
 	electronUserDataPath := flag.String("electron-user-data", "", "path to the Electron user-data directory")
 	credentialReader := flag.String("credential-reader", "", "path to the Windows Credential Manager reader")
@@ -278,6 +278,12 @@ func main() {
 		err = decodeInput(&request)
 		if err == nil {
 			result, err = deleteWorkspaceNode(*databasePath, request)
+		}
+	case "workspace-delete-nodes":
+		var request workspaceNodesRequest
+		err = decodeInput(&request)
+		if err == nil {
+			result, err = deleteWorkspaceNodes(*databasePath, request)
 		}
 	case "workspace-show-credentials":
 		var request workspaceNodeRequest

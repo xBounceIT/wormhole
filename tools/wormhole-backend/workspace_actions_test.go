@@ -165,6 +165,109 @@ VALUES ('inline', 'inline-secret', 'test', 'now'),
 	}
 }
 
+func TestDeleteWorkspaceNodesDeletesCanonicalSubtreesInOneTransaction(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    ParentId TEXT NULL,
+    Name TEXT NOT NULL,
+    Kind INTEGER NOT NULL
+);
+INSERT INTO Nodes (Id, ParentId, Name, Kind)
+VALUES ('folder', NULL, 'Servers', 0),
+       ('child', 'folder', 'Nested connection', 1),
+       ('root-connection', NULL, 'Root connection', 1),
+       ('keep', NULL, 'Keep me', 1);`)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	result, err := deleteWorkspaceNodes(databasePath, workspaceNodesRequest{
+		NodeIDs: []string{"CHILD", "folder", "root-connection", "folder"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Deleted {
+		t.Fatal("workspace node batch deletion was not reported")
+	}
+
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var remainingID string
+	if err := database.QueryRow("SELECT Id FROM Nodes;").Scan(&remainingID); err != nil {
+		t.Fatal(err)
+	}
+	if remainingID != "keep" {
+		t.Fatalf("remaining node = %q, want keep", remainingID)
+	}
+}
+
+func TestDeleteWorkspaceNodesRejectsMissingTargetBeforeDeletingAnything(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    ParentId TEXT NULL,
+    Name TEXT NOT NULL,
+    Kind INTEGER NOT NULL
+);
+INSERT INTO Nodes (Id, ParentId, Name, Kind)
+VALUES ('existing', NULL, 'Existing', 1);`)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	_, err = deleteWorkspaceNodes(databasePath, workspaceNodesRequest{
+		NodeIDs: []string{"existing", "missing"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("deleteWorkspaceNodes error = %v, want missing-node failure", err)
+	}
+
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var count int
+	if err := database.QueryRow("SELECT COUNT(*) FROM Nodes WHERE Id = 'existing';").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("existing node count = %d, want 1", count)
+	}
+}
+
+func TestDeleteWorkspaceNodesValidatesBatchBounds(t *testing.T) {
+	if _, err := deleteWorkspaceNodes("unused.db", workspaceNodesRequest{}); err == nil {
+		t.Fatal("empty workspace node batch was accepted")
+	}
+	tooMany := make([]string, 1001)
+	for index := range tooMany {
+		tooMany[index] = "node"
+	}
+	if _, err := deleteWorkspaceNodes("unused.db", workspaceNodesRequest{NodeIDs: tooMany}); err == nil {
+		t.Fatal("oversized workspace node batch was accepted")
+	}
+}
+
 func TestShowWorkspaceNodeCredentialsResolvesInheritedMetadataWithoutExposingMissingSecret(t *testing.T) {
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	database, err := openDatabase(databasePath, false)

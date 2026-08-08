@@ -67,6 +67,8 @@ const wormholeBridge = {
     ipcRenderer.invoke('workspace:duplicate-node', request),
   deleteWorkspaceNode: (request: { nodeId: string }) =>
     ipcRenderer.invoke('workspace:delete-node', request),
+  deleteWorkspaceNodes: (request: { nodeIds: string[] }) =>
+    ipcRenderer.invoke('workspace:delete-nodes', request),
   showWorkspaceCredentials: (request: { nodeId: string }) =>
     ipcRenderer.invoke('workspace:show-credentials', request),
   exportBackup: (password: string) => ipcRenderer.invoke('backup:export', { password }),

@@ -679,6 +679,7 @@ interface Window {
     clearMRemoteImport(): void;
     duplicateWorkspaceNode(request: { nodeId: string }): Promise<{ nodeId: string; name: string }>;
     deleteWorkspaceNode(request: { nodeId: string }): Promise<{ deleted: boolean }>;
+    deleteWorkspaceNodes(request: { nodeIds: string[] }): Promise<{ deleted: boolean }>;
     showWorkspaceCredentials(request: {
       nodeId: string;
     }): Promise<WormholeWorkspaceCredentialReveal>;

@@ -12,6 +12,10 @@ type workspaceNodeRequest struct {
 	NodeID string `json:"nodeId"`
 }
 
+type workspaceNodesRequest struct {
+	NodeIDs []string `json:"nodeIds"`
+}
+
 type workspaceDuplicateNodeResponse struct {
 	NodeID string `json:"nodeId"`
 	Name   string `json:"name"`
@@ -286,10 +290,34 @@ func deleteWorkspaceNode(
 	databasePath string,
 	request workspaceNodeRequest,
 ) (workspaceDeleteNodeResponse, error) {
-	nodeID, err := normalizeWorkspaceNodeID(request.NodeID)
-	if err != nil {
-		return workspaceDeleteNodeResponse{}, err
+	return deleteWorkspaceNodes(databasePath, workspaceNodesRequest{NodeIDs: []string{request.NodeID}})
+}
+
+func deleteWorkspaceNodes(
+	databasePath string,
+	request workspaceNodesRequest,
+) (workspaceDeleteNodeResponse, error) {
+	if len(request.NodeIDs) == 0 {
+		return workspaceDeleteNodeResponse{}, errors.New("at least one workspace node is required")
 	}
+	if len(request.NodeIDs) > 1000 {
+		return workspaceDeleteNodeResponse{}, errors.New("too many workspace nodes were requested")
+	}
+
+	nodeIDs := make([]string, 0, len(request.NodeIDs))
+	requested := make(map[string]struct{}, len(request.NodeIDs))
+	for _, rawNodeID := range request.NodeIDs {
+		nodeID, err := normalizeWorkspaceNodeID(rawNodeID)
+		if err != nil {
+			return workspaceDeleteNodeResponse{}, err
+		}
+		if _, duplicate := requested[nodeID]; duplicate {
+			continue
+		}
+		requested[nodeID] = struct{}{}
+		nodeIDs = append(nodeIDs, nodeID)
+	}
+
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
 		return workspaceDeleteNodeResponse{}, err
@@ -348,27 +376,42 @@ func deleteWorkspaceNode(
 	if err := rows.Close(); err != nil {
 		return workspaceDeleteNodeResponse{}, fmt.Errorf("cannot close workspace nodes: %w", err)
 	}
-	if _, found := entries[nodeID]; !found {
-		return workspaceDeleteNodeResponse{}, errors.New("workspace node was not found")
+	for _, nodeID := range nodeIDs {
+		if _, found := entries[nodeID]; !found {
+			return workspaceDeleteNodeResponse{}, errors.New("workspace node was not found")
+		}
 	}
 
-	deletedIDs := make([]string, 0, 1)
-	stack := []string{nodeID}
+	type deleteFrame struct {
+		id             string
+		childrenQueued bool
+	}
+	deletedIDs := make([]string, 0, len(nodeIDs))
+	stack := make([]deleteFrame, 0, len(nodeIDs))
+	for _, nodeID := range nodeIDs {
+		stack = append(stack, deleteFrame{id: nodeID})
+	}
 	visited := make(map[string]struct{})
 	for len(stack) > 0 {
 		last := len(stack) - 1
-		currentID := stack[last]
+		frame := stack[last]
 		stack = stack[:last]
-		if _, alreadyVisited := visited[currentID]; alreadyVisited {
+		if frame.childrenQueued {
+			deletedIDs = append(deletedIDs, frame.id)
 			continue
 		}
-		_, found := entries[currentID]
+		if _, alreadyVisited := visited[frame.id]; alreadyVisited {
+			continue
+		}
+		_, found := entries[frame.id]
 		if !found {
 			continue
 		}
-		visited[currentID] = struct{}{}
-		deletedIDs = append(deletedIDs, currentID)
-		stack = append(stack, children[currentID]...)
+		visited[frame.id] = struct{}{}
+		stack = append(stack, deleteFrame{id: frame.id, childrenQueued: true})
+		for _, childID := range children[frame.id] {
+			stack = append(stack, deleteFrame{id: childID})
+		}
 	}
 
 	credentialSecretsExist, err := tableExists(database, "CredentialSecrets")
@@ -428,8 +471,7 @@ func deleteWorkspaceNode(
 		}
 	}
 
-	for index := len(deletedIDs) - 1; index >= 0; index-- {
-		id := deletedIDs[index]
+	for _, id := range deletedIDs {
 		result, err := tx.Exec("DELETE FROM \"Nodes\" WHERE lower(\"Id\") = ?;", id)
 		if err != nil {
 			return workspaceDeleteNodeResponse{}, fmt.Errorf("could not delete workspace node: %w", err)
