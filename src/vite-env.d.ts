@@ -861,6 +861,12 @@ interface Window {
     setConfirmOnTabClose(enabled: boolean): Promise<{ updated: boolean }>;
     setSidebarWidth(width: number): Promise<{ updated: boolean; sidebarWidth: number }>;
     reportActiveSessionCount(count: number): void;
+    onWindowCloseConfirmationRequested(
+      listener: (request: {
+        activeSessionCount: number;
+        action: 'window' | 'quit';
+      }) => boolean | Promise<boolean>,
+    ): () => void;
     onWindowCloseRequested(listener: () => Promise<void>): () => void;
     setAutoCopyOnSelect(enabled: boolean): Promise<{ updated: boolean }>;
     setUpdatePreferences(preferences: {

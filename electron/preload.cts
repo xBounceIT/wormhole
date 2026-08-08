@@ -267,6 +267,46 @@ const wormholeBridge = {
   setSidebarWidth: (width: number) => ipcRenderer.invoke('settings:set-sidebar-width', width),
   reportActiveSessionCount: (count: number) =>
     ipcRenderer.send('lifecycle:active-session-count', count),
+  onWindowCloseConfirmationRequested: (
+    listener: (request: {
+      activeSessionCount: number;
+      action: 'window' | 'quit';
+    }) => boolean | Promise<boolean>,
+  ) => {
+    const handler = (_event: Electron.IpcRendererEvent, requestId: unknown, request: unknown) => {
+      if (
+        typeof requestId !== 'string' ||
+        !request ||
+        typeof request !== 'object' ||
+        !('activeSessionCount' in request) ||
+        typeof request.activeSessionCount !== 'number' ||
+        !Number.isInteger(request.activeSessionCount) ||
+        request.activeSessionCount < 1 ||
+        !('action' in request) ||
+        (request.action !== 'window' && request.action !== 'quit')
+      ) {
+        return;
+      }
+      void Promise.resolve(
+        listener({
+          activeSessionCount: request.activeSessionCount,
+          action: request.action,
+        }),
+      )
+        .then((confirmed) => {
+          ipcRenderer.send('lifecycle:close-confirmation-response', requestId, confirmed === true);
+        })
+        .catch(() => {
+          ipcRenderer.send('lifecycle:close-confirmation-response', requestId, false);
+        });
+    };
+    ipcRenderer.on('lifecycle:confirm-close', handler);
+    ipcRenderer.send('lifecycle:close-confirmation-ready');
+    return () => {
+      ipcRenderer.send('lifecycle:close-confirmation-unready');
+      ipcRenderer.removeListener('lifecycle:confirm-close', handler);
+    };
+  },
   onWindowCloseRequested: (listener: () => Promise<void>) => {
     const handler = (_event: Electron.IpcRendererEvent, requestId: unknown) => {
       if (typeof requestId !== 'string') return;

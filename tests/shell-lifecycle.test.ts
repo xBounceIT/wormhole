@@ -51,6 +51,18 @@ test('shared dialog content applies lifecycle retention and blocks closing inter
   assert.match(dialogSource, /data-closed:pointer-events-none/);
 });
 
+test('active-session app close uses the renderer shadcn confirmation contract', () => {
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const preloadSource = readFileSync(new URL('../electron/preload.cts', import.meta.url), 'utf8');
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+
+  assert.match(mainSource, /requestRendererCloseConfirmation\(window, activeCount, 'window'\)/);
+  assert.match(mainSource, /requestRendererCloseConfirmation\(owner, activeCount, 'quit'\)/);
+  assert.match(preloadSource, /onWindowCloseConfirmationRequested/);
+  assert.match(appSource, /role="alertdialog"/);
+  assert.match(appSource, /Close and terminate sessions/);
+});
+
 test('session activity excludes failed, closed, disconnected, and idle tabs', () => {
   assert.equal(isSessionActive({ protocol: 'ssh', status: 'connected' }), true);
   assert.equal(isSessionActive({ protocol: 'serial', status: 'connecting' }), true);

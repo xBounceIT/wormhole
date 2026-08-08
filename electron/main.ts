@@ -310,6 +310,11 @@ type AppSettings = {
 };
 
 const windowCloseCoordinators = new WeakMap<BrowserWindow, WindowCloseCoordinator>();
+const closeConfirmationReadyWindows = new WeakSet<BrowserWindow>();
+const closeConfirmationWaiters = new Map<
+  string,
+  { webContentsId: number; resolve: (confirmed: boolean) => void }
+>();
 const rendererTeardownWaiters = new Map<
   string,
   { webContentsId: number; resolve: () => void; timer: NodeJS.Timeout }
@@ -336,6 +341,43 @@ function requestRendererTeardown(window: BrowserWindow, timeoutMs = 5_000): Prom
       window.webContents.send('lifecycle:prepare-close', requestId);
     } catch {
       rendererTeardownWaiters.get(requestId)?.resolve();
+    }
+  });
+}
+
+function requestRendererCloseConfirmation(
+  window: BrowserWindow | undefined,
+  activeSessionCount: number,
+  action: 'window' | 'quit',
+): Promise<boolean> {
+  if (
+    !window ||
+    window.isDestroyed() ||
+    window.webContents.isDestroyed() ||
+    !closeConfirmationReadyWindows.has(window)
+  ) {
+    return Promise.resolve(false);
+  }
+  const requestId = randomUUID();
+  return new Promise((resolve) => {
+    const finish = (confirmed: boolean) => {
+      closeConfirmationWaiters.delete(requestId);
+      window.webContents.removeListener('destroyed', rendererDestroyed);
+      resolve(confirmed);
+    };
+    const rendererDestroyed = () => finish(false);
+    closeConfirmationWaiters.set(requestId, {
+      webContentsId: window.webContents.id,
+      resolve: finish,
+    });
+    window.webContents.once('destroyed', rendererDestroyed);
+    try {
+      window.webContents.send('lifecycle:confirm-close', requestId, {
+        activeSessionCount,
+        action,
+      });
+    } catch {
+      finish(false);
     }
   });
 }
@@ -5695,6 +5737,22 @@ async function runFirstLaunchMigrations(): Promise<void> {
 }
 
 function registerIpcHandlers(sshBackend: NativeSshBackend): void {
+  ipcMain.on('lifecycle:close-confirmation-ready', (event) => {
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (owner) closeConfirmationReadyWindows.add(owner);
+  });
+  ipcMain.on('lifecycle:close-confirmation-unready', (event) => {
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (owner) closeConfirmationReadyWindows.delete(owner);
+  });
+  ipcMain.on(
+    'lifecycle:close-confirmation-response',
+    (event, requestId: unknown, value: unknown) => {
+      if (typeof requestId !== 'string' || typeof value !== 'boolean') return;
+      const waiter = closeConfirmationWaiters.get(requestId);
+      if (waiter?.webContentsId === event.sender.id) waiter.resolve(value);
+    },
+  );
   ipcMain.on('lifecycle:active-session-count', (event, value: unknown) => {
     const owner = BrowserWindow.fromWebContents(event.sender);
     if (!owner) return;
@@ -7615,22 +7673,7 @@ function createWindow() {
     void closeCoordinator
       .request({
         reason: closeReason.reason,
-        confirm: async (activeCount) => {
-          const result = await dialog.showMessageBox(window, {
-            type: 'warning',
-            title: 'Close Wormhole?',
-            message: 'Close Wormhole?',
-            detail:
-              activeCount === 1
-                ? '1 connection is still active. Closing the window will disconnect it.'
-                : `${activeCount} connections are still active. Closing the window will disconnect them.`,
-            buttons: ['Close and disconnect', 'Cancel'],
-            defaultId: 1,
-            cancelId: 1,
-            noLink: true,
-          });
-          return result.response === 0;
-        },
+        confirm: (activeCount) => requestRendererCloseConfirmation(window, activeCount, 'window'),
         teardown: async () => {
           await runWindowTeardown(
             async () => {
@@ -7746,25 +7789,7 @@ app.on('before-quit', (event) => {
       );
       if (activeCount > 0) {
         const owner = BrowserWindow.getFocusedWindow() ?? windows[0];
-        let confirmed = false;
-        try {
-          const result = await dialog.showMessageBox(owner, {
-            type: 'warning',
-            title: 'Quit Wormhole?',
-            message: 'Quit Wormhole?',
-            detail:
-              activeCount === 1
-                ? '1 connection is still active. Quitting Wormhole will disconnect it.'
-                : `${activeCount} connections are still active. Quitting Wormhole will disconnect them.`,
-            buttons: ['Quit and disconnect', 'Cancel'],
-            defaultId: 1,
-            cancelId: 1,
-            noLink: true,
-          });
-          confirmed = result.response === 0;
-        } catch {
-          confirmed = false;
-        }
+        const confirmed = await requestRendererCloseConfirmation(owner, activeCount, 'quit');
         if (!confirmed) {
           quitCleanupStarted = false;
           return;

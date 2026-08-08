@@ -121,6 +121,7 @@ import {
   Terminal,
   Trash2,
   Upload,
+  TriangleAlert,
   X,
   XCircle,
   Zap,
@@ -1468,6 +1469,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     preferredNextSessionId?: string;
   } | null>(null);
   const [sessionCloseBusy, setSessionCloseBusy] = useState(false);
+  const [pendingWindowClose, setPendingWindowClose] = useState<{
+    activeSessionCount: number;
+    action: 'window' | 'quit';
+    resolve: (confirmed: boolean) => void;
+  } | null>(null);
+  const [windowCloseBusy, setWindowCloseBusy] = useState(false);
   const sidebarWidth = normalizeSidebarWidth(initialSettings.sidebarWidth);
   const sidebarWriter = useMemo(
     () =>
@@ -3197,6 +3204,33 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       setSelectedSessionId('');
     });
   }, [sidebarWriter]);
+
+  useEffect(() => {
+    return window.wormhole?.onWindowCloseConfirmationRequested(
+      (request) =>
+        new Promise<boolean>((resolve) => {
+          setPendingWindowClose((current) => {
+            if (current) {
+              resolve(false);
+              return current;
+            }
+            return { ...request, resolve };
+          });
+        }),
+    );
+  }, []);
+
+  function cancelWindowClose() {
+    if (!pendingWindowClose || windowCloseBusy) return;
+    pendingWindowClose.resolve(false);
+    setPendingWindowClose(null);
+  }
+
+  function confirmWindowClose() {
+    if (!pendingWindowClose || windowCloseBusy) return;
+    setWindowCloseBusy(true);
+    pendingWindowClose.resolve(true);
+  }
 
   function reconnectSession(id: string) {
     const source = sessions.find((session) => session.id === id);
@@ -5752,6 +5786,69 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           onOpenChange={setMremoteImportOpen}
           open={mremoteImportOpen}
         />
+
+        <Dialog
+          onOpenChange={(open) => {
+            if (!open) cancelWindowClose();
+          }}
+          open={pendingWindowClose !== null}
+        >
+          <DialogContent
+            aria-describedby="wormhole-close-description"
+            className="overflow-hidden border-border/70 bg-card p-0 text-card-foreground sm:max-w-md"
+            onEscapeKeyDown={(event) => {
+              if (windowCloseBusy) event.preventDefault();
+            }}
+            onInteractOutside={(event) => event.preventDefault()}
+            role="alertdialog"
+            showCloseButton={false}
+          >
+            <DialogHeader className="gap-4 p-5 pb-4">
+              <div className="flex items-start gap-3">
+                <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-destructive/10 text-destructive ring-1 ring-destructive/15">
+                  <TriangleAlert className="size-5" />
+                </div>
+                <div className="grid min-w-0 flex-1 gap-2 pt-0.5">
+                  <div className="flex items-center justify-between gap-3">
+                    <DialogTitle>
+                      {pendingWindowClose?.action === 'quit' ? 'Quit Wormhole?' : 'Close Wormhole?'}
+                    </DialogTitle>
+                    <Badge className="shrink-0 font-mono" variant="destructive">
+                      {pendingWindowClose?.activeSessionCount} active
+                    </Badge>
+                  </div>
+                  <DialogDescription id="wormhole-close-description">
+                    {pendingWindowClose?.activeSessionCount === 1
+                      ? '1 session is still active. Closing Wormhole will terminate it.'
+                      : `${pendingWindowClose?.activeSessionCount ?? 0} sessions are still active. Closing Wormhole will terminate them.`}
+                  </DialogDescription>
+                </div>
+              </div>
+            </DialogHeader>
+            <div className="mx-5 rounded-lg border border-border/70 bg-muted/40 px-3 py-2.5 text-xs text-muted-foreground">
+              Terminal processes and remote connections in these sessions will be disconnected.
+            </div>
+            <DialogFooter className="m-0">
+              <Button
+                disabled={windowCloseBusy}
+                onClick={cancelWindowClose}
+                type="button"
+                variant="outline"
+              >
+                Cancel
+              </Button>
+              <Button
+                disabled={windowCloseBusy}
+                onClick={confirmWindowClose}
+                type="button"
+                variant="destructive"
+              >
+                {windowCloseBusy ? <LoaderCircle className="animate-spin" /> : <Power />}
+                {windowCloseBusy ? 'Terminating sessions…' : 'Close and terminate sessions'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         <Dialog
           onOpenChange={(open) => {
