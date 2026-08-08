@@ -27,6 +27,24 @@ import {
   shouldUseTerminalClipboardShortcut,
 } from './terminal-clipboard';
 import {
+  canSplitSession,
+  createSessionLayout,
+  focusSessionPane,
+  moveSession,
+  reconcileSessionLayout,
+  selectSession,
+  sessionPaneRects,
+  sessionPanes,
+  sessionSplitDividers,
+  setSessionSplitRatio,
+  splitSession,
+  type SessionLayoutEdge,
+  type SessionLayoutState,
+  type SessionPane,
+  type SessionPaneRect,
+  type SessionSplitDivider,
+} from './session-layout';
+import {
   filterListSearchIndex,
   listSearchResultsArePending,
   normalizeListSearch,
@@ -2972,7 +2990,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (session.protocol === 'http' || session.protocol === 'https') startWebSession(session);
   }
 
-  function closeSession(id: string) {
+  function closeSession(id: string, preferredNextSessionId?: string) {
     const closing = sessions.find((session) => session.id === id);
     runtimeBitwardenRetries.current.remove(`rdp:${id}`);
     runtimeBitwardenRetries.current.remove(`vnc:${id}`);
@@ -3011,7 +3029,15 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     }
 
     if (selectedSessionId === id) {
-      setSelectedSessionId(nextSessions[index]?.id ?? nextSessions[index - 1]?.id ?? '');
+      setSelectedSessionId(
+        (preferredNextSessionId &&
+        nextSessions.some((session) => session.id === preferredNextSessionId)
+          ? preferredNextSessionId
+          : undefined) ??
+          nextSessions[index]?.id ??
+          nextSessions[index - 1]?.id ??
+          '',
+      );
     }
     setRdpCredentials((current) => {
       if (!(id in current)) return current;
@@ -8202,7 +8228,7 @@ function SessionsPage({
   sessions: Session[];
   selectedSession?: Session;
   onBitwardenUnlockRequired: (sessionId: string, reason: string, retry: () => void) => void;
-  onCloseSession: (id: string) => void;
+  onCloseSession: (id: string, preferredNextSessionId?: string) => void;
   onConnectRdp: (id: string) => void;
   onDuplicateSession: (id: string) => void;
   onCloseSftpBrowser: (id: string) => void;
@@ -8247,6 +8273,32 @@ function SessionsPage({
       setBitwardenOpenSessionId(state.open ? state.sessionId : '');
     });
   }, []);
+  const [layout, setLayout] = useState<SessionLayoutState>(() =>
+    createSessionLayout(
+      sessions.map((session) => session.id),
+      selectedSession?.id,
+    ),
+  );
+  const [draggedSessionId, setDraggedSessionId] = useState('');
+  const [resizingSplitId, setResizingSplitId] = useState('');
+  const [dropPreview, setDropPreview] = useState<{
+    paneId: string;
+    edge?: SessionLayoutEdge;
+    tabIndex?: number;
+  } | null>(null);
+  const sessionIdsKey = JSON.stringify(sessions.map((session) => session.id));
+  const sessionIds = useMemo(() => JSON.parse(sessionIdsKey) as string[], [sessionIdsKey]);
+
+  useEffect(() => {
+    setLayout((current) => reconcileSessionLayout(current, sessionIds, selectedSession?.id));
+  }, [selectedSession?.id, sessionIds]);
+
+  useEffect(() => {
+    if (draggedSessionId && !sessionIds.includes(draggedSessionId)) {
+      setDraggedSessionId('');
+      setDropPreview(null);
+    }
+  }, [draggedSessionId, sessionIds]);
 
   if (!selectedSession || sessions.length === 0) {
     return (
@@ -8269,186 +8321,626 @@ function SessionsPage({
     );
   }
 
+  const panes = sessionPanes(layout.root);
+  const rects = sessionPaneRects(layout.root);
+  const dividers = sessionSplitDividers(layout.root);
+  const rectByPane = new Map(rects.map((rect) => [rect.paneId, rect]));
+  const sessionById = new Map(sessions.map((session) => [session.id, session]));
+  const paneBySessionId = new Map(
+    panes.flatMap((pane) => pane.tabs.map((sessionId) => [sessionId, pane] as const)),
+  );
+
+  function activateSession(paneId: string, sessionId: string) {
+    setLayout((current) => selectSession(current, paneId, sessionId));
+    onSelectSession(sessionId);
+  }
+
+  function closePaneSession(pane: SessionPane, sessionId: string) {
+    const index = pane.tabs.indexOf(sessionId);
+    const preferredNextSessionId =
+      pane.tabs[index + 1] ??
+      pane.tabs[index - 1] ??
+      panes.find((candidate) => candidate.id !== pane.id)?.activeSessionId;
+    onCloseSession(sessionId, preferredNextSessionId);
+  }
+
+  function finishDrop(sessionId: string) {
+    if (!sessionIds.includes(sessionId) || !dropPreview) {
+      setDraggedSessionId('');
+      setDropPreview(null);
+      return;
+    }
+    setLayout((current) =>
+      dropPreview.edge
+        ? splitSession(current, dropPreview.paneId, dropPreview.edge, sessionId)
+        : moveSession(current, dropPreview.paneId, sessionId, dropPreview.tabIndex),
+    );
+    onSelectSession(sessionId);
+    setDraggedSessionId('');
+    setDropPreview(null);
+  }
+
+  function updateDropPreview(event: DragEvent<HTMLElement>) {
+    const sessionId = draggedSessionId || event.dataTransfer.getData('text/wormhole-session');
+    if (!sessionId) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const x = ((event.clientX - bounds.left) / bounds.width) * 100;
+    const y = ((event.clientY - bounds.top) / bounds.height) * 100;
+    const rect = rects.find(
+      (candidate) =>
+        x >= candidate.x &&
+        x <= candidate.x + candidate.width &&
+        y >= candidate.y &&
+        y <= candidate.y + candidate.height,
+    );
+    if (!rect) return;
+    event.preventDefault();
+    const headerHeight = (36 / bounds.height) * 100;
+    if (y <= rect.y + headerHeight) {
+      const tab = (event.target as HTMLElement).closest<HTMLElement>('[data-session-tab-index]');
+      setDropPreview({
+        paneId: rect.paneId,
+        tabIndex: tab ? Number(tab.dataset.sessionTabIndex) : undefined,
+      });
+      return;
+    }
+    if (!canSplitSession(layout, rect.paneId, sessionId)) {
+      event.dataTransfer.dropEffect = 'none';
+      setDropPreview(null);
+      return;
+    }
+    const localX = (x - rect.x) / rect.width;
+    const localY = (y - rect.y) / rect.height;
+    const distances: Array<[SessionLayoutEdge, number]> = [
+      ['left', localX],
+      ['right', 1 - localX],
+      ['top', localY],
+      ['bottom', 1 - localY],
+    ];
+    distances.sort((left, right) => left[1] - right[1]);
+    setDropPreview({ paneId: rect.paneId, edge: distances[0][0] });
+  }
+
+  function keyboardMove(
+    event: ReactKeyboardEvent<HTMLButtonElement>,
+    pane: SessionPane,
+    sessionId: string,
+  ) {
+    const edgeByKey: Partial<Record<string, SessionLayoutEdge>> = {
+      ArrowLeft: 'left',
+      ArrowRight: 'right',
+      ArrowUp: 'top',
+      ArrowDown: 'bottom',
+    };
+    if (event.altKey && event.shiftKey && edgeByKey[event.key]) {
+      event.preventDefault();
+      const edge = edgeByKey[event.key]!;
+      setLayout((current) => splitSession(current, pane.id, edge, sessionId));
+      onSelectSession(sessionId);
+      return;
+    }
+    if (!event.altKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+      event.preventDefault();
+      const offset = event.key === 'ArrowLeft' ? -1 : 1;
+      const index = pane.tabs.indexOf(sessionId);
+      const next = pane.tabs[(index + offset + pane.tabs.length) % pane.tabs.length];
+      activateSession(pane.id, next);
+      document.querySelector<HTMLElement>(`[data-session-tab-id="${CSS.escape(next)}"]`)?.focus();
+    }
+  }
+
   return (
-    <section className="flex h-full min-h-0 min-w-0 flex-col">
-      <Tabs
-        className="flex h-full min-h-0 flex-1 flex-col gap-0"
-        onValueChange={onSelectSession}
-        value={selectedSession.id}
-      >
-        <div className="flex h-9 shrink-0 items-stretch justify-between border-b border-border bg-card/35">
-          <TabsList
-            className="h-full min-w-0 flex-1 items-stretch justify-start gap-0 rounded-none bg-transparent p-0"
-            variant="line"
+    <section
+      aria-label="Session pane workspace"
+      className="relative h-full min-h-0 min-w-0 overflow-hidden bg-background"
+      onDragLeave={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropPreview(null);
+      }}
+      onDragOver={updateDropPreview}
+      onDrop={(event) => {
+        event.preventDefault();
+        finishDrop(draggedSessionId || event.dataTransfer.getData('text/wormhole-session'));
+      }}
+    >
+      {panes.map((pane) => {
+        const rect = rectByPane.get(pane.id)!;
+        return (
+          <SessionPaneChrome
+            active={pane.id === layout.activePaneId}
+            dropTarget={dropPreview?.paneId === pane.id && !dropPreview.edge}
+            key={pane.id}
+            onActivate={() => setLayout((current) => focusSessionPane(current, pane.id))}
+            rect={rect}
           >
-            {sessions.map((session) => (
-              <SessionTabContextMenu
-                key={session.id}
-                onClose={() => onCloseSession(session.id)}
-                onDuplicate={() => onDuplicateSession(session.id)}
-                onFileTransfer={() => onOpenFileTransfer(session.id)}
-                onReconnect={() => onReconnectSession(session.id)}
-                session={session}
-              >
-                <div className="relative flex h-full min-w-[12rem] max-w-[17rem] flex-1 border-r border-border/60">
-                  <TabsTrigger
-                    className="h-full min-w-0 justify-start gap-0 rounded-none border-0 px-4 py-0 pr-14 text-left text-muted-foreground after:z-10 after:bottom-[-1px] hover:bg-muted/20 data-active:bg-card/70 data-active:text-foreground"
-                    onAuxClick={(event) => {
-                      if (event.button !== 1) return;
-                      event.preventDefault();
-                      onCloseSession(session.id);
-                    }}
-                    value={session.id}
-                  >
-                    <span className="min-w-0 flex-1 truncate !text-xs font-semibold">
-                      {session.title}
-                    </span>
-                  </TabsTrigger>
-                  <div className="absolute right-1.5 top-1/2 z-20 flex -translate-y-1/2 items-center gap-0.5 bg-transparent">
-                    {session.canTransfer && session.status === 'connected' ? (
-                      <IconButton
-                        label={`Open SFTP browser for ${session.title}`}
-                        onClick={() => onOpenFileTransfer(session.id)}
-                      >
-                        <ArrowRightLeft />
-                      </IconButton>
-                    ) : null}
-                    <IconButton
-                      label={`Close ${session.title}`}
-                      className="text-muted-foreground hover:bg-transparent hover:text-foreground dark:hover:bg-transparent"
-                      onClick={() => onCloseSession(session.id)}
-                    >
-                      <X />
-                    </IconButton>
-                  </div>
-                </div>
-              </SessionTabContextMenu>
-            ))}
-          </TabsList>
-        </div>
-        {sessions.map((session) => (
-          <TabsContent
-            className="flex h-full min-h-0 flex-1 flex-col"
-            forceMount
-            key={session.id}
-            value={session.id}
-          >
-            {session.protocol === 'ssh' ? (
-              <>
-                <SshTerminalSurface
-                  autoCopyOnSelect={autoCopyOnSelect}
-                  isActive={session.id === selectedSession.id}
-                  onInput={onSshInput}
-                  onReconnect={onReconnectSession}
-                  onTrustHostKey={onTrustSshHostKey}
+            {pane.tabs.map((sessionId, tabIndex) => {
+              const session = sessionById.get(sessionId);
+              if (!session) return null;
+              const active = sessionId === pane.activeSessionId;
+              return (
+                <SessionTabContextMenu
+                  key={session.id}
+                  onClose={() => closePaneSession(pane, session.id)}
+                  onDuplicate={() => onDuplicateSession(session.id)}
+                  onFileTransfer={() => onOpenFileTransfer(session.id)}
+                  onReconnect={() => onReconnectSession(session.id)}
                   session={session}
-                />
-                {session.sftp && session.id === selectedSession.id ? (
-                  <Dialog
-                    onOpenChange={(open) => {
-                      if (!open) onCloseSftpBrowser(session.id);
-                    }}
-                    open
+                >
+                  <div
+                    className={`relative flex h-9 min-w-[8rem] max-w-[15rem] flex-1 border-r border-border/60 ${active ? 'bg-card text-foreground' : 'text-muted-foreground hover:bg-muted/25'}`}
+                    data-session-tab-index={tabIndex}
                   >
-                    <DialogContent
-                      className="flex h-[88vh] max-h-[900px] min-h-[560px] w-[92vw] max-w-[1720px] flex-col overflow-hidden border-border/80 bg-background p-5 sm:max-w-none"
-                      showCloseButton={false}
+                    <button
+                      aria-label={`${session.title}. Drag to a pane edge to split.`}
+                      aria-selected={active}
+                      className="min-w-0 flex-1 cursor-grab truncate px-3 pr-12 text-left text-xs font-semibold outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                      data-session-tab-id={session.id}
+                      draggable
+                      onAuxClick={(event) => {
+                        if (event.button === 1) closePaneSession(pane, session.id);
+                      }}
+                      onClick={() => activateSession(pane.id, session.id)}
+                      onDragEnd={() => {
+                        setDraggedSessionId('');
+                        setDropPreview(null);
+                      }}
+                      onDragStart={(event) => {
+                        event.dataTransfer.effectAllowed = 'move';
+                        event.dataTransfer.setData('text/wormhole-session', session.id);
+                        setDraggedSessionId(session.id);
+                        activateSession(pane.id, session.id);
+                      }}
+                      onFocus={() => activateSession(pane.id, session.id)}
+                      onKeyDown={(event) => keyboardMove(event, pane, session.id)}
+                      role="tab"
+                      tabIndex={active ? 0 : -1}
+                      title="Drag to another tab bar to move, or to a pane edge to split. Alt+Shift+Arrow also splits."
+                      type="button"
                     >
-                      <SftpBrowserSurface
-                        onClose={() => onCloseSftpBrowser(session.id)}
-                        onConflict={(transferId, itemId, decision, applyToAll) =>
-                          onSftpConflict(session.id, transferId, itemId, decision, applyToAll)
-                        }
-                        onLocalNavigate={(path) => onSftpLocalNavigate(session.id, path)}
-                        onNavigate={(path) => onSftpNavigate(session.id, path)}
-                        onOperation={(pane, operation, path, destinationPath) =>
-                          onSftpOperation(session.id, pane, operation, path, destinationPath)
-                        }
-                        onRefresh={(pane) =>
-                          pane === 'local'
-                            ? onSftpLocalNavigate(session.id, session.sftp?.local?.path ?? '')
-                            : onSftpRefresh(session.id)
-                        }
-                        onTransfer={(direction, destinationPath, items) =>
-                          onSftpTransfer(session.id, direction, destinationPath, items)
-                        }
-                        onTransferCancel={(transferId, itemId) =>
-                          onSftpTransferCancel(session.id, transferId, itemId)
-                        }
-                        onTransferErrorClear={() => onSftpTransferErrorClear(session.id)}
-                        onTransferRemove={(transferId, itemId) =>
-                          onSftpTransferRemove(session.id, transferId, itemId)
-                        }
-                        session={session}
-                      />
-                    </DialogContent>
-                  </Dialog>
-                ) : null}
-              </>
-            ) : session.protocol === 'serial' ? (
-              <SshTerminalSurface
-                autoCopyOnSelect={autoCopyOnSelect}
-                isActive={session.id === selectedSession.id}
-                isSerial
-                onInput={onSerialInput}
-                onReconnect={onReconnectSession}
-                session={session}
-              />
-            ) : session.protocol === 'rdp' ? (
-              <RdpSurface
-                backend={session.rdpBackend}
-                error={session.rdpError}
-                isActive={session.id === selectedSession.id}
-                isAuthorized={isAuthorized}
-                onConnect={() => onConnectRdp(session.id)}
-                onRetry={() => onRetryRdp(session.id)}
-                sessionId={session.id}
-                status={session.rdpStatus ?? 'idle'}
-                tunnelProgress={session.tunnelProgress}
-              />
-            ) : session.protocol === 'vnc' ? (
-              <VncSurface
-                isAuthorized={isAuthorized}
-                onBitwardenUnlockRequired={(reason, retry) =>
-                  onBitwardenUnlockRequired(session.id, reason, retry)
-                }
-                session={{
-                  id: session.id,
-                  nodeId: session.nodeId,
-                  host: session.host,
-                  port: session.port,
-                  tunnelConfigId: session.tunnelConfigId,
-                  tunnelProgress: session.tunnelProgress,
-                }}
-              />
-            ) : session.protocol === 'http' || session.protocol === 'https' ? (
-              <WebSurface
-                bitwardenOpen={bitwardenOpenSessionId === session.id}
-                isActive={session.id === selectedSession.id}
-                isAuthorized={isAuthorized && isWebSurfaceVisible}
-                onReconnect={onReconnectSession}
-                session={session}
-              />
-            ) : (
-              <div
-                aria-label="Connection canvas"
-                className="grid h-full place-items-center bg-background p-8 text-center"
-              >
-                <div>
-                  <p className="font-mono text-[9px] uppercase tracking-[0.14em] text-muted-foreground">
-                    {protocolLabel(session.protocol)}
-                  </p>
-                  <p className="mt-2 text-sm font-medium">Protocol surface ready for migration</p>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {session.host || 'inherited target'}:{session.port ?? 'default'}
-                  </p>
-                </div>
-              </div>
-            )}
-          </TabsContent>
-        ))}
-      </Tabs>
+                      {session.title}
+                    </button>
+                    <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center">
+                      {session.canTransfer && session.status === 'connected' ? (
+                        <IconButton
+                          label={`Open SFTP browser for ${session.title}`}
+                          onClick={() => onOpenFileTransfer(session.id)}
+                        >
+                          <ArrowRightLeft />
+                        </IconButton>
+                      ) : null}
+                      <IconButton
+                        className="text-muted-foreground hover:bg-transparent hover:text-foreground"
+                        label={`Close ${session.title}`}
+                        onClick={() => closePaneSession(pane, session.id)}
+                      >
+                        <X />
+                      </IconButton>
+                    </div>
+                  </div>
+                </SessionTabContextMenu>
+              );
+            })}
+          </SessionPaneChrome>
+        );
+      })}
+
+      {sessions.map((session) => {
+        const pane = paneBySessionId.get(session.id);
+        const rect = pane ? rectByPane.get(pane.id) : undefined;
+        const active = Boolean(pane && rect && pane.activeSessionId === session.id);
+        return (
+          <div
+            aria-hidden={!active}
+            className="absolute min-h-0 min-w-0 overflow-hidden"
+            key={session.id}
+            onPointerDownCapture={() => {
+              if (pane) activateSession(pane.id, session.id);
+            }}
+            style={sessionSurfaceStyle(rect, active)}
+          >
+            <SessionSurface
+              autoCopyOnSelect={autoCopyOnSelect}
+              bitwardenOpen={bitwardenOpenSessionId === session.id}
+              isActive={active}
+              isAuthorized={isAuthorized}
+              isWebSurfaceVisible={isWebSurfaceVisible}
+              nativeSurfaceActive={active && !draggedSessionId && !resizingSplitId}
+              onBitwardenUnlockRequired={onBitwardenUnlockRequired}
+              onCloseSftpBrowser={onCloseSftpBrowser}
+              onConnectRdp={onConnectRdp}
+              onReconnectSession={onReconnectSession}
+              onRetryRdp={onRetryRdp}
+              onSerialInput={onSerialInput}
+              onSftpConflict={onSftpConflict}
+              onSftpLocalNavigate={onSftpLocalNavigate}
+              onSftpNavigate={onSftpNavigate}
+              onSftpOperation={onSftpOperation}
+              onSftpRefresh={onSftpRefresh}
+              onSftpTransfer={onSftpTransfer}
+              onSftpTransferCancel={onSftpTransferCancel}
+              onSftpTransferErrorClear={onSftpTransferErrorClear}
+              onSftpTransferRemove={onSftpTransferRemove}
+              onSshInput={onSshInput}
+              onTrustSshHostKey={onTrustSshHostKey}
+              session={session}
+            />
+          </div>
+        );
+      })}
+
+      {dividers.map((divider) => (
+        <SessionSplitHandle
+          divider={divider}
+          key={divider.splitId}
+          onResizeEnd={() => setResizingSplitId('')}
+          onResizeStart={() => setResizingSplitId(divider.splitId)}
+          onRatioChange={(ratio) =>
+            setLayout((current) => setSessionSplitRatio(current, divider.splitId, ratio))
+          }
+        />
+      ))}
+
+      {dropPreview?.edge ? (
+        <SessionDropPreview edge={dropPreview.edge} rect={rectByPane.get(dropPreview.paneId)} />
+      ) : null}
+      <p aria-live="polite" className="sr-only">
+        {dropPreview?.edge
+          ? `Drop to split ${dropPreview.edge}`
+          : dropPreview
+            ? 'Drop to move this tab into the pane'
+            : ''}
+      </p>
     </section>
+  );
+}
+
+function SessionSplitHandle({
+  divider,
+  onRatioChange,
+  onResizeEnd,
+  onResizeStart,
+}: {
+  divider: SessionSplitDivider;
+  onRatioChange: (ratio: number) => void;
+  onResizeEnd: () => void;
+  onResizeStart: () => void;
+}) {
+  const horizontal = divider.orientation === 'horizontal';
+  const style: CSSProperties = horizontal
+    ? {
+        left: `calc(${divider.x + divider.width * divider.ratio}% - 3px)`,
+        top: `${divider.y}%`,
+        width: '6px',
+        height: `${divider.height}%`,
+      }
+    : {
+        left: `${divider.x}%`,
+        top: `calc(${divider.y + divider.height * divider.ratio}% - 3px)`,
+        width: `${divider.width}%`,
+        height: '6px',
+      };
+
+  function updateFromPointer(event: React.PointerEvent<HTMLDivElement>) {
+    if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+    const bounds = event.currentTarget.parentElement?.getBoundingClientRect();
+    if (!bounds || bounds.width < 1 || bounds.height < 1) return;
+    const position = horizontal
+      ? ((event.clientX - bounds.left) / bounds.width) * 100
+      : ((event.clientY - bounds.top) / bounds.height) * 100;
+    const origin = horizontal ? divider.x : divider.y;
+    const size = horizontal ? divider.width : divider.height;
+    onRatioChange((position - origin) / size);
+  }
+
+  return (
+    <div
+      aria-label={`Resize ${horizontal ? 'left and right' : 'top and bottom'} session panes`}
+      aria-orientation={horizontal ? 'vertical' : 'horizontal'}
+      aria-valuemax={85}
+      aria-valuemin={15}
+      aria-valuenow={Math.round(divider.ratio * 100)}
+      className={`absolute z-30 touch-none bg-transparent outline-none after:absolute after:bg-border hover:after:bg-primary focus-visible:after:bg-primary ${horizontal ? 'cursor-col-resize after:inset-y-0 after:left-[2px] after:w-px' : 'cursor-row-resize after:inset-x-0 after:top-[2px] after:h-px'}`}
+      onKeyDown={(event) => {
+        const decrease = horizontal ? event.key === 'ArrowLeft' : event.key === 'ArrowUp';
+        const increase = horizontal ? event.key === 'ArrowRight' : event.key === 'ArrowDown';
+        if (!decrease && !increase) return;
+        event.preventDefault();
+        onRatioChange(divider.ratio + (decrease ? -0.05 : 0.05));
+      }}
+      onPointerDown={(event) => {
+        onResizeStart();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        updateFromPointer(event);
+      }}
+      onPointerCancel={onResizeEnd}
+      onPointerUp={(event) => {
+        if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+          event.currentTarget.releasePointerCapture(event.pointerId);
+        }
+        onResizeEnd();
+      }}
+      onPointerMove={updateFromPointer}
+      role="separator"
+      style={style}
+      tabIndex={0}
+    />
+  );
+}
+
+function sessionSurfaceStyle(rect: SessionPaneRect | undefined, active: boolean): CSSProperties {
+  if (!rect) {
+    return {
+      left: 0,
+      top: 0,
+      width: 1,
+      height: 1,
+      visibility: 'hidden',
+      pointerEvents: 'none',
+    };
+  }
+  return {
+    left: `calc(${rect.x}% + 3px)`,
+    top: `calc(${rect.y}% + 39px)`,
+    width: `calc(${rect.width}% - 6px)`,
+    height: `calc(${rect.height}% - 42px)`,
+    visibility: active ? 'visible' : 'hidden',
+    pointerEvents: active ? 'auto' : 'none',
+    zIndex: active ? 10 : 0,
+  };
+}
+
+function SessionPaneChrome({
+  active,
+  children,
+  dropTarget,
+  onActivate,
+  rect,
+}: {
+  active: boolean;
+  children: ReactNode;
+  dropTarget: boolean;
+  onActivate: () => void;
+  rect: SessionPaneRect;
+}) {
+  return (
+    <div
+      aria-label={`Session pane ${rect.paneId}`}
+      className={`pointer-events-none absolute border ${active ? 'border-primary/70' : 'border-border'}`}
+      role="group"
+      style={{
+        left: `${rect.x}%`,
+        top: `${rect.y}%`,
+        width: `${rect.width}%`,
+        height: `${rect.height}%`,
+      }}
+    >
+      <div
+        aria-label="Pane tabs"
+        className={`pointer-events-auto relative z-30 flex h-9 min-w-0 items-stretch overflow-x-auto overflow-y-hidden border-b border-border ${dropTarget ? 'bg-primary/20 ring-2 ring-inset ring-primary' : 'bg-card/55'}`}
+        onFocusCapture={onActivate}
+        onPointerDown={onActivate}
+        role="tablist"
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function SessionDropPreview({
+  edge,
+  rect,
+}: {
+  edge: SessionLayoutEdge;
+  rect: SessionPaneRect | undefined;
+}) {
+  if (!rect) return null;
+  const style: CSSProperties = {
+    left: `${rect.x + (edge === 'right' ? rect.width / 2 : 0)}%`,
+    top: `${rect.y + (edge === 'bottom' ? rect.height / 2 : 0)}%`,
+    width: `${edge === 'left' || edge === 'right' ? rect.width / 2 : rect.width}%`,
+    height: `${edge === 'top' || edge === 'bottom' ? rect.height / 2 : rect.height}%`,
+  };
+  return (
+    <div
+      className="pointer-events-none absolute z-40 grid place-items-center border-2 border-primary bg-primary/20 text-xs font-semibold uppercase tracking-wider text-primary"
+      style={style}
+    >
+      Split {edge}
+    </div>
+  );
+}
+
+function SessionSurface({
+  autoCopyOnSelect,
+  bitwardenOpen,
+  isActive,
+  isAuthorized,
+  isWebSurfaceVisible,
+  nativeSurfaceActive,
+  onBitwardenUnlockRequired,
+  onCloseSftpBrowser,
+  onConnectRdp,
+  onReconnectSession,
+  onRetryRdp,
+  onSerialInput,
+  onSftpConflict,
+  onSftpLocalNavigate,
+  onSftpNavigate,
+  onSftpOperation,
+  onSftpRefresh,
+  onSftpTransfer,
+  onSftpTransferCancel,
+  onSftpTransferErrorClear,
+  onSftpTransferRemove,
+  onSshInput,
+  onTrustSshHostKey,
+  session,
+}: {
+  autoCopyOnSelect: boolean;
+  bitwardenOpen: boolean;
+  isActive: boolean;
+  isAuthorized: boolean;
+  isWebSurfaceVisible: boolean;
+  nativeSurfaceActive: boolean;
+  session: Session;
+  onBitwardenUnlockRequired: (sessionId: string, reason: string, retry: () => void) => void;
+  onCloseSftpBrowser: (id: string) => void;
+  onConnectRdp: (id: string) => void;
+  onReconnectSession: (id: string) => void;
+  onRetryRdp: (id: string) => void;
+  onSerialInput: (sessionId: string, value: string) => void;
+  onSftpConflict: (
+    sessionId: string,
+    transferId: string,
+    itemId: string,
+    decision: 'overwrite' | 'skip',
+    applyToAll: boolean,
+  ) => void;
+  onSftpLocalNavigate: (sessionId: string, path: string) => void;
+  onSftpNavigate: (sessionId: string, path: string) => void;
+  onSftpOperation: (
+    sessionId: string,
+    pane: SftpPaneKind,
+    operation: SftpOperation,
+    path: string,
+    destinationPath?: string,
+  ) => void;
+  onSftpRefresh: (id: string) => void;
+  onSftpTransfer: (
+    sessionId: string,
+    direction: SftpTransferDirection,
+    destinationPath: string,
+    items: SftpTransferItem[],
+  ) => void;
+  onSftpTransferCancel: (sessionId: string, transferId: string, itemId: string) => void;
+  onSftpTransferErrorClear: (sessionId: string) => void;
+  onSftpTransferRemove: (sessionId: string, transferId: string, itemId: string) => void;
+  onSshInput: (sessionId: string, value: string) => void;
+  onTrustSshHostKey: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
+}) {
+  if (session.protocol === 'ssh') {
+    return (
+      <>
+        <SshTerminalSurface
+          autoCopyOnSelect={autoCopyOnSelect}
+          isActive={isActive}
+          onInput={onSshInput}
+          onReconnect={onReconnectSession}
+          onTrustHostKey={onTrustSshHostKey}
+          session={session}
+        />
+        {session.sftp && isActive ? (
+          <Dialog
+            onOpenChange={(open) => {
+              if (!open) onCloseSftpBrowser(session.id);
+            }}
+            open
+          >
+            <DialogContent
+              className="flex h-[88vh] max-h-[900px] min-h-[560px] w-[92vw] max-w-[1720px] flex-col overflow-hidden border-border/80 bg-background p-5 sm:max-w-none"
+              showCloseButton={false}
+            >
+              <SftpBrowserSurface
+                onClose={() => onCloseSftpBrowser(session.id)}
+                onConflict={(transferId, itemId, decision, applyToAll) =>
+                  onSftpConflict(session.id, transferId, itemId, decision, applyToAll)
+                }
+                onLocalNavigate={(path) => onSftpLocalNavigate(session.id, path)}
+                onNavigate={(path) => onSftpNavigate(session.id, path)}
+                onOperation={(pane, operation, path, destinationPath) =>
+                  onSftpOperation(session.id, pane, operation, path, destinationPath)
+                }
+                onRefresh={(pane) =>
+                  pane === 'local'
+                    ? onSftpLocalNavigate(session.id, session.sftp?.local?.path ?? '')
+                    : onSftpRefresh(session.id)
+                }
+                onTransfer={(direction, destinationPath, items) =>
+                  onSftpTransfer(session.id, direction, destinationPath, items)
+                }
+                onTransferCancel={(transferId, itemId) =>
+                  onSftpTransferCancel(session.id, transferId, itemId)
+                }
+                onTransferErrorClear={() => onSftpTransferErrorClear(session.id)}
+                onTransferRemove={(transferId, itemId) =>
+                  onSftpTransferRemove(session.id, transferId, itemId)
+                }
+                session={session}
+              />
+            </DialogContent>
+          </Dialog>
+        ) : null}
+      </>
+    );
+  }
+  if (session.protocol === 'serial') {
+    return (
+      <SshTerminalSurface
+        autoCopyOnSelect={autoCopyOnSelect}
+        isActive={isActive}
+        isSerial
+        onInput={onSerialInput}
+        onReconnect={onReconnectSession}
+        session={session}
+      />
+    );
+  }
+  if (session.protocol === 'rdp') {
+    return (
+      <RdpSurface
+        backend={session.rdpBackend}
+        error={session.rdpError}
+        isActive={nativeSurfaceActive}
+        isAuthorized={isAuthorized}
+        onConnect={() => onConnectRdp(session.id)}
+        onRetry={() => onRetryRdp(session.id)}
+        sessionId={session.id}
+        status={session.rdpStatus ?? 'idle'}
+        tunnelProgress={session.tunnelProgress}
+      />
+    );
+  }
+  if (session.protocol === 'vnc') {
+    return (
+      <VncSurface
+        isAuthorized={isAuthorized}
+        onBitwardenUnlockRequired={(reason, retry) =>
+          onBitwardenUnlockRequired(session.id, reason, retry)
+        }
+        session={{
+          id: session.id,
+          nodeId: session.nodeId,
+          host: session.host,
+          port: session.port,
+          tunnelConfigId: session.tunnelConfigId,
+          tunnelProgress: session.tunnelProgress,
+        }}
+      />
+    );
+  }
+  if (session.protocol === 'http' || session.protocol === 'https') {
+    return (
+      <WebSurface
+        bitwardenOpen={bitwardenOpen}
+        isActive={nativeSurfaceActive}
+        isAuthorized={isAuthorized && isWebSurfaceVisible}
+        onReconnect={onReconnectSession}
+        session={session}
+      />
+    );
+  }
+  return (
+    <div aria-label="Connection canvas" className="grid h-full place-items-center p-8 text-center">
+      <div>
+        <p className="font-mono text-[9px] uppercase tracking-[0.14em] text-muted-foreground">
+          {protocolLabel(session.protocol)}
+        </p>
+        <p className="mt-2 text-sm font-medium">Protocol surface ready for migration</p>
+        <p className="mt-1 text-xs text-muted-foreground">
+          {session.host || 'inherited target'}:{session.port ?? 'default'}
+        </p>
+      </div>
+    </div>
   );
 }
 

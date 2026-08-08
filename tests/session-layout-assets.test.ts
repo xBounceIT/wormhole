@@ -1,0 +1,57 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import test from 'node:test';
+
+const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+const vncSource = readFileSync(
+  new URL('../src/components/VncSurface.tsx', import.meta.url),
+  'utf8',
+);
+
+test('live surfaces are keyed only by session identity in one stable workspace layer', () => {
+  const surfaceLayer = appSource.slice(
+    appSource.indexOf('{sessions.map((session) => {', appSource.indexOf('function SessionsPage')),
+    appSource.indexOf('{dropPreview?.edge ?', appSource.indexOf('function SessionsPage')),
+  );
+  assert.match(surfaceLayer, /key=\{session\.id\}/);
+  assert.match(surfaceLayer, /<SessionSurface/);
+  assert.doesNotMatch(surfaceLayer, /key=\{`?\$?\{?pane/);
+});
+
+test('layout moves do not call protocol close or disconnect operations', () => {
+  const layoutSource = readFileSync(new URL('../src/session-layout.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(layoutSource, /wormhole|disconnect|closeWebSession|closeRdpSession/);
+  assert.match(appSource, /function closeSession\(id: string, preferredNextSessionId\?: string\)/);
+});
+
+test('stable VNC identity is required because unmount owns native disconnect cleanup', () => {
+  assert.match(vncSource, /return \(\) => \{/);
+  assert.match(vncSource, /action: 'vnc\.disconnect'/);
+  assert.match(appSource, /visibility: active \? 'visible' : 'hidden'/);
+});
+
+test('native web and RDP overlays are hidden while a layout drag is active', () => {
+  assert.match(
+    appSource,
+    /nativeSurfaceActive=\{active && !draggedSessionId && !resizingSplitId\}/,
+  );
+  assert.match(appSource, /<WebSurface[\s\S]*isActive=\{nativeSurfaceActive\}/);
+  assert.match(appSource, /<RdpSurface[\s\S]*isActive=\{nativeSurfaceActive\}/);
+  assert.match(appSource, /session\.sftp && isActive/);
+});
+
+test('surface bounds reserve a reachable gutter for split handles above native views', () => {
+  assert.match(appSource, /left: `calc\(\$\{rect\.x\}% \+ 3px\)`/);
+  assert.match(appSource, /width: `calc\(\$\{rect\.width\}% - 6px\)`/);
+  assert.match(appSource, /className=\{`absolute z-30 touch-none/);
+  assert.match(appSource, /onResizeStart=\{\(\) => setResizingSplitId\(divider\.splitId\)\}/);
+  assert.match(appSource, /onPointerCancel=\{onResizeEnd\}/);
+});
+
+test('drag cancellation clears both the dragged tab and its visual target', () => {
+  assert.match(
+    appSource,
+    /onDragEnd=\{\(\) => \{\s*setDraggedSessionId\(''\);\s*setDropPreview\(null\);/,
+  );
+  assert.match(appSource, /!sessionIds\.includes\(draggedSessionId\)/);
+});
