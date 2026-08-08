@@ -94,3 +94,18 @@ test('drag cancellation clears both the dragged tab and its visual target', () =
   );
   assert.match(appSource, /!sessionIds\.includes\(draggedSessionId\)/);
 });
+
+test('session pane chrome stays neutral and tab labels match connection tree typography', () => {
+  const sessionsSource = appSource.slice(
+    appSource.indexOf('function SessionsPage'),
+    appSource.indexOf('function SessionPaneChrome'),
+  );
+  const paneChromeSource = appSource.slice(
+    appSource.indexOf('function SessionPaneChrome'),
+    appSource.indexOf('function SessionDropPreview'),
+  );
+
+  assert.match(sessionsSource, /cursor-grab truncate px-3 pr-12 text-left !text-xs font-medium/);
+  assert.match(paneChromeSource, /absolute border border-border/);
+  assert.doesNotMatch(paneChromeSource, /active \? 'border-primary/);
+});

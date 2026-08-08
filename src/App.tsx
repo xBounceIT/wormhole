@@ -8954,7 +8954,6 @@ function SessionsPage({
         const rect = rectByPane.get(pane.id)!;
         return (
           <SessionPaneChrome
-            active={pane.id === layout.activePaneId}
             dropTarget={dropPreview?.paneId === pane.id && !dropPreview.edge}
             key={pane.id}
             onActivate={() => setLayout((current) => focusSessionPane(current, pane.id))}
@@ -8980,7 +8979,7 @@ function SessionsPage({
                     <button
                       aria-label={`${session.title}. Drag to a pane edge to split.`}
                       aria-selected={active}
-                      className="min-w-0 flex-1 cursor-grab truncate px-3 pr-12 text-left text-xs font-semibold outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                      className="min-w-0 flex-1 cursor-grab truncate px-3 pr-12 text-left !text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
                       data-session-tab-id={session.id}
                       draggable
                       onAuxClick={(event) => {
@@ -9198,13 +9197,11 @@ function sessionSurfaceStyle(rect: SessionPaneRect | undefined, active: boolean)
 }
 
 function SessionPaneChrome({
-  active,
   children,
   dropTarget,
   onActivate,
   rect,
 }: {
-  active: boolean;
   children: ReactNode;
   dropTarget: boolean;
   onActivate: () => void;
@@ -9213,7 +9210,7 @@ function SessionPaneChrome({
   return (
     <div
       aria-label={`Session pane ${rect.paneId}`}
-      className={`pointer-events-none absolute border ${active ? 'border-primary/70' : 'border-border'}`}
+      className="pointer-events-none absolute border border-border"
       role="group"
       style={{
         left: `${rect.x}%`,
