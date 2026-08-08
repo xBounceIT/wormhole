@@ -61,10 +61,8 @@ Toolchain prerequisites (Windows, x64):
    C:\vcpkg\bootstrap-vcpkg.bat
    [Environment]::SetEnvironmentVariable("VCPKG_ROOT", "C:\vcpkg", "User")
    ```
-3. **OpenVPN3 + mbedTLS submodules** (pinned in this repo):
-   ```powershell
-   git submodule update --init --recursive
-   ```
+3. **Git access to the OpenVPN3 + mbedTLS submodules**. The build script initializes
+   these pinned sources automatically when a real sidecar is required.
 
 Then build:
 

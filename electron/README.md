@@ -16,10 +16,10 @@ The default `npm run dev` command detects the host platform and architecture.
 It always builds the Go backend and portable sidecars. On Windows it also
 builds the native VPN sidecars, Credential Manager reader, and ActiveX RDP
 host before Electron starts. The Windows path requires a real OpenVPN3 sidecar
-and fails instead of accepting the development-only mock; initialize the
-pinned sources with `git submodule update --init --recursive` and install the
-toolchain documented in `tools/wormhole-ovpnproxy/README.md` before the first
-run. `npm run dev:windows:arm64` remains available for an explicit ARM64
+and fails instead of accepting the development-only mock. The first run
+automatically initializes the pinned OpenVPN3 and mbedTLS submodules; install
+the toolchain documented in `tools/wormhole-ovpnproxy/README.md` before the
+first run. `npm run dev:windows:arm64` remains available for an explicit ARM64
 Windows build.
 
 The renderer uses Vite 8, React, TypeScript 7, Shadcn/Radix components, Oxlint,

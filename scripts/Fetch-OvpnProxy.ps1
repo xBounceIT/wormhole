@@ -201,6 +201,44 @@ if (-not $go) {
 # strictly better than a build break or a half-linked binary.
 $cmake = Get-Command cmake -ErrorAction SilentlyContinue
 $haveOvpn3Src = (Test-Path $openvpn3) -and (Test-Path $mbedtls)
+
+# A normal Electron development run requires the real sidecar. Make a fresh clone/worktree
+# self-bootstrapping instead of asking every developer to initialize these pinned sources by
+# hand. Keep the non-RequireReal path offline-friendly: it may intentionally build the mock-only
+# sidecar without fetching native sources.
+if ($RequireReal -and -not $haveOvpn3Src) {
+    $git = Get-Command git -ErrorAction SilentlyContinue
+    if ($git) {
+        Write-Info "INIT  OpenVPN3 + mbedTLS submodules"
+        $previousSubmodulePreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        $submoduleOutput = @()
+        $submoduleExitCode = -1
+        $submoduleArgs = @(
+            "-C", $repoRoot,
+            "submodule", "update", "--init", "--recursive", "--",
+            "tools/wormhole-ovpnproxy/third_party/openvpn3",
+            "tools/wormhole-ovpnproxy/third_party/mbedtls"
+        )
+        try {
+            $submoduleOutput = @(& $git.Source $submoduleArgs 2>&1)
+            $submoduleExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $previousSubmodulePreference
+        }
+
+        if ($submoduleExitCode -ne 0) {
+            Remove-StagedBinary
+            if ($submoduleOutput.Count -gt 0) {
+                foreach ($line in ($submoduleOutput | Select-Object -Last 40)) { Write-Host $line }
+            }
+            throw "Could not initialize the pinned OpenVPN3/mbedTLS submodules (git exit code $submoduleExitCode)."
+        }
+
+        $haveOvpn3Src = (Test-Path $openvpn3) -and (Test-Path $mbedtls)
+    }
+}
 $cCompilerNames = if ($Arch -eq "arm64") {
     # llvm-mingw provides GCC-compatible aliases for clang. Prefer the aliases to
     # preserve existing CMake caches while ovpn_cgo.go links its libc++ explicitly.
@@ -256,7 +294,11 @@ if ($cmake -and $haveOvpn3Src -and $haveCompiler) {
 }
 if ($RequireReal -and $buildTag -ne "ovpn3") {
     Remove-StagedBinary
-    throw "A real OpenVPN3 sidecar is required for '$Arch', but its source/toolchain prerequisites are incomplete."
+    $missingPrerequisites = [System.Collections.Generic.List[string]]::new()
+    if (-not $haveOvpn3Src) { $missingPrerequisites.Add("OpenVPN3/mbedTLS sources") }
+    if (-not $cmake) { $missingPrerequisites.Add("cmake") }
+    if (-not $haveCompiler) { $missingPrerequisites.Add("target gcc/g++ toolchain") }
+    throw "A real OpenVPN3 sidecar is required for '$Arch', but these prerequisites are unavailable: $($missingPrerequisites -join ', ')."
 }
 
 # If we're going to enable ovpn3, build the shim static lib first.
