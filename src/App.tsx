@@ -1,6 +1,7 @@
 import {
   memo,
   useCallback,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -19,6 +20,11 @@ import { backupExportPasswordsMatch } from './backup-state';
 import wormholeIcon from '../Assets/Wormhole.png';
 import bitwardenIcon from '../Assets/Bitwarden/bitwarden-icon.png';
 import { mergeCredential } from './credential-state';
+import {
+  filterListSearchIndex,
+  listSearchResultsArePending,
+  normalizeListSearch,
+} from './list-search';
 import {
   parentLocalSftpPath,
   parentSftpPath,
@@ -171,6 +177,7 @@ import { VncSurface } from './components/VncSurface';
 import { RdpSurface, type RdpUiStatus } from './components/RdpSurface';
 import { WebSurface } from './components/WebSurface';
 import { ConnectionStepper } from './components/ConnectionStepper';
+import { VirtualCardGrid } from './components/VirtualCardGrid';
 import {
   applyTheme,
   getInitialTheme,
@@ -8329,7 +8336,7 @@ function CredentialsPage({
   onDelete: (id: string) => Promise<void>;
 }) {
   const [searchText, setSearchText] = useState('');
-  const [selectedCredentials, setSelectedCredentials] = useState<string[]>([]);
+  const [selectedCredentials, setSelectedCredentials] = useState<Set<string>>(() => new Set());
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingCredential, setEditingCredential] = useState<CredentialRecord | null>(null);
   const [credentialForm, setCredentialForm] = useState<CredentialDraft>(emptyCredentialDraft);
@@ -8344,7 +8351,7 @@ function CredentialsPage({
   const bitwardenSearchAttempts = useRef(new WebSessionAttemptTracker());
 
   useEffect(() => {
-    setSelectedCredentials([]);
+    setSelectedCredentials((current) => (current.size === 0 ? current : new Set()));
   }, [initialCredentials]);
 
   useEffect(() => {
@@ -8365,34 +8372,59 @@ function CredentialsPage({
   }, [isAuthorized]);
 
   const credentials = initialCredentials;
+  const deferredSearchText = useDeferredValue(searchText);
+  const normalizedCredentialSearch = normalizeListSearch(deferredSearchText);
+  const credentialSearchResultsPending = listSearchResultsArePending(
+    searchText,
+    deferredSearchText,
+  );
+  const credentialSearchActive = normalizedCredentialSearch.length > 0;
+  const credentialSearchIndex = useMemo(
+    () =>
+      credentialSearchActive
+        ? credentials.map((credential) => ({
+            item: credential,
+            text: [credential.name, credential.username, credential.domain, credential.provider]
+              .filter(Boolean)
+              .join('\u0000')
+              .toLowerCase(),
+          }))
+        : [],
+    [credentialSearchActive, credentials],
+  );
 
-  const filteredCredentials = useMemo(() => {
-    const query = searchText.trim().toLowerCase();
-    if (!query) return credentials;
+  const filteredCredentials = useMemo(
+    () => filterListSearchIndex(credentials, credentialSearchIndex, normalizedCredentialSearch),
+    [credentialSearchIndex, credentials, normalizedCredentialSearch],
+  );
 
-    return credentials.filter((credential) =>
-      [credential.name, credential.username, credential.domain, credential.provider]
-        .filter(Boolean)
-        .some((value) => value!.toLowerCase().includes(query)),
-    );
-  }, [credentials, searchText]);
+  const credentialLookupRequired = selectedCredentials.size > 0 || pendingDeletion.length > 0;
+  const credentialById = useMemo(
+    () =>
+      credentialLookupRequired
+        ? new Map(credentials.map((credential) => [credential.id, credential]))
+        : new Map<string, CredentialRecord>(),
+    [credentialLookupRequired, credentials],
+  );
 
   const allVisibleSelected =
     filteredCredentials.length > 0 &&
-    filteredCredentials.every((credential) => selectedCredentials.includes(credential.id));
-  const deletableSelectedCredentials = selectedCredentials.filter((id) => {
-    const credential = credentials.find((candidate) => candidate.id === id);
-    return credential?.canDelete;
-  });
+    filteredCredentials.every((credential) => selectedCredentials.has(credential.id));
+  const deletableSelectedCredentials = [...selectedCredentials].filter(
+    (id) => credentialById.get(id)?.canDelete,
+  );
 
   const deletingCredentials = pendingDeletion
-    .map((id) => credentials.find((credential) => credential.id === id))
+    .map((id) => credentialById.get(id))
     .filter((credential): credential is CredentialRecord => Boolean(credential));
 
   function toggleCredential(id: string, checked: boolean) {
-    setSelectedCredentials((current) =>
-      checked ? [...new Set([...current, id])] : current.filter((selectedId) => selectedId !== id),
-    );
+    setSelectedCredentials((current) => {
+      const next = new Set(current);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
   }
 
   function openNewCredential() {
@@ -8556,10 +8588,7 @@ function CredentialsPage({
 
   async function deletePendingCredentials() {
     if (busy || pendingDeletion.length === 0) return;
-    const ids = pendingDeletion.filter((id) => {
-      const credential = credentials.find((candidate) => candidate.id === id);
-      return credential?.canDelete;
-    });
+    const ids = pendingDeletion.filter((id) => credentialById.get(id)?.canDelete);
     if (ids.length === 0) {
       setPendingDeletion([]);
       return;
@@ -8571,12 +8600,12 @@ function CredentialsPage({
       try {
         await onDelete(id);
       } catch (error) {
-        const name = credentials.find((credential) => credential.id === id)?.name ?? 'Credential';
+        const name = credentialById.get(id)?.name ?? 'Credential';
         const message = error instanceof Error ? error.message : 'Could not delete the credential.';
         failures.push(`${name}: ${message}`);
       }
     }
-    setSelectedCredentials([]);
+    setSelectedCredentials(new Set());
     setPendingDeletion([]);
     setBusy(false);
     if (failures.length > 0) setOperationError(failures.join(' '));
@@ -8597,9 +8626,12 @@ function CredentialsPage({
           />
           <Button
             className="!text-xs"
+            disabled={credentialSearchResultsPending}
             onClick={() =>
               setSelectedCredentials(
-                allVisibleSelected ? [] : filteredCredentials.map((credential) => credential.id),
+                allVisibleSelected
+                  ? new Set()
+                  : new Set(filteredCredentials.map((credential) => credential.id)),
               )
             }
             size="default"
@@ -8614,16 +8646,16 @@ function CredentialsPage({
           </Button>
         </div>
 
-        {selectedCredentials.length > 0 ? (
+        {selectedCredentials.size > 0 ? (
           <div className="mt-3 flex shrink-0 flex-wrap items-center justify-between gap-3 rounded-lg border border-border bg-muted/30 px-3 py-2">
             <div className="flex items-center gap-2 text-xs text-foreground/80">
               <Check className="size-3.5" />
-              <span>{selectedCredentials.length} credential(s) selected</span>
+              <span>{selectedCredentials.size} credential(s) selected</span>
             </div>
             <div className="flex gap-2">
               <Button
                 className="!text-xs"
-                onClick={() => setSelectedCredentials([])}
+                onClick={() => setSelectedCredentials(new Set())}
                 size="default"
                 variant="ghost"
               >
@@ -8663,69 +8695,72 @@ function CredentialsPage({
               </div>
             </div>
           ) : (
-            <ScrollArea className="mt-4 h-full">
-              <div className="grid grid-cols-[repeat(auto-fill,minmax(280px,1fr))] gap-4 pb-5 pr-2">
-                {filteredCredentials.map((credential) => (
-                  <Card
-                    className="min-h-44 transition-colors hover:bg-muted/50"
-                    key={credential.id}
-                  >
-                    <CardHeader>
-                      <CardTitle className="min-w-0 truncate text-sm">{credential.name}</CardTitle>
-                      <CardAction>
-                        <Badge className="shrink-0" variant="secondary">
-                          {credential.isVirtualBitwarden
-                            ? 'ANY'
-                            : protocolLabel(credential.protocol)}
-                        </Badge>
-                      </CardAction>
-                      <CardDescription className="flex min-w-0 items-center gap-1.5 text-xs">
-                        <KeyRound className="size-3 shrink-0" />
-                        <span className="truncate">{credential.username}</span>
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent className="flex-1 space-y-2">
-                      <div className="flex flex-wrap gap-2">
-                        {credential.domain ? (
-                          <Badge variant="outline">Domain · {credential.domain}</Badge>
-                        ) : null}
-                        <CredentialProviderIcon provider={credential.provider} />
-                      </div>
-                    </CardContent>
-                    <CardFooter className="justify-between gap-2">
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Checkbox
-                            aria-label={`Select ${credential.name}`}
-                            checked={selectedCredentials.includes(credential.id)}
-                            onCheckedChange={(checked) =>
-                              toggleCredential(credential.id, checked === true)
-                            }
-                          />
-                        </TooltipTrigger>
-                        <TooltipContent side="bottom">Select credential</TooltipContent>
-                      </Tooltip>
-                      <div className="flex items-center gap-1">
-                        <IconButton
-                          disabled={!credential.canEdit}
-                          label={`Edit ${credential.name}`}
-                          onClick={() => openEditCredential(credential)}
-                        >
-                          <Pencil />
-                        </IconButton>
-                        <IconButton
-                          disabled={!credential.canDelete}
-                          label={`Delete ${credential.name}`}
-                          onClick={() => setPendingDeletion([credential.id])}
-                        >
-                          <X />
-                        </IconButton>
-                      </div>
-                    </CardFooter>
-                  </Card>
-                ))}
-              </div>
-            </ScrollArea>
+            <VirtualCardGrid
+              ariaLabel="Credentials"
+              bottomPadding={20}
+              className="mt-4 h-full"
+              endPadding={8}
+              gap={16}
+              getKey={(credential) => credential.id}
+              items={filteredCredentials}
+              minimumColumnWidth={280}
+              renderItem={(credential) => (
+                <Card className="h-full transition-colors hover:bg-muted/50">
+                  <CardHeader>
+                    <CardTitle className="min-w-0 truncate text-sm">{credential.name}</CardTitle>
+                    <CardAction>
+                      <Badge className="shrink-0" variant="secondary">
+                        {credential.isVirtualBitwarden ? 'ANY' : protocolLabel(credential.protocol)}
+                      </Badge>
+                    </CardAction>
+                    <CardDescription className="flex min-w-0 items-center gap-1.5 text-xs">
+                      <KeyRound className="size-3 shrink-0" />
+                      <span className="truncate">{credential.username}</span>
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="flex-1 space-y-2">
+                    <div className="flex flex-wrap gap-2">
+                      {credential.domain ? (
+                        <Badge variant="outline">Domain · {credential.domain}</Badge>
+                      ) : null}
+                      <CredentialProviderIcon provider={credential.provider} />
+                    </div>
+                  </CardContent>
+                  <CardFooter className="justify-between gap-2">
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <Checkbox
+                          aria-label={`Select ${credential.name}`}
+                          checked={selectedCredentials.has(credential.id)}
+                          onCheckedChange={(checked) =>
+                            toggleCredential(credential.id, checked === true)
+                          }
+                        />
+                      </TooltipTrigger>
+                      <TooltipContent side="bottom">Select credential</TooltipContent>
+                    </Tooltip>
+                    <div className="flex items-center gap-1">
+                      <IconButton
+                        disabled={!credential.canEdit}
+                        label={`Edit ${credential.name}`}
+                        onClick={() => openEditCredential(credential)}
+                      >
+                        <Pencil />
+                      </IconButton>
+                      <IconButton
+                        disabled={!credential.canDelete}
+                        label={`Delete ${credential.name}`}
+                        onClick={() => setPendingDeletion([credential.id])}
+                      >
+                        <X />
+                      </IconButton>
+                    </div>
+                  </CardFooter>
+                </Card>
+              )}
+              resetKey={normalizedCredentialSearch}
+              rowHeight={176}
+            />
           )}
         </div>
       </section>
@@ -10085,14 +10120,23 @@ function TunnelsPage({
     error?: string;
   } | null>(null);
   const testAttemptRef = useRef(0);
-  const filteredTunnels = useMemo(() => {
-    const query = searchText.trim().toLowerCase();
-    return query
-      ? tunnels.filter((tunnel) =>
-          [tunnel.name, tunnel.kind].some((value) => value.toLowerCase().includes(query)),
-        )
-      : tunnels;
-  }, [searchText, tunnels]);
+  const deferredSearchText = useDeferredValue(searchText);
+  const normalizedTunnelSearch = normalizeListSearch(deferredSearchText);
+  const tunnelSearchActive = normalizedTunnelSearch.length > 0;
+  const tunnelSearchIndex = useMemo(
+    () =>
+      tunnelSearchActive
+        ? tunnels.map((tunnel) => ({
+            item: tunnel,
+            text: `${tunnel.name}\u0000${tunnel.kind}`.toLowerCase(),
+          }))
+        : [],
+    [tunnelSearchActive, tunnels],
+  );
+  const filteredTunnels = useMemo(
+    () => filterListSearchIndex(tunnels, tunnelSearchIndex, normalizedTunnelSearch),
+    [normalizedTunnelSearch, tunnelSearchIndex, tunnels],
+  );
 
   function addTunnel() {
     setActionError('');
@@ -10221,52 +10265,50 @@ function TunnelsPage({
             </div>
           </div>
         ) : (
-          <ScrollArea className="mt-3 h-full">
-            <div className="grid grid-cols-[repeat(auto-fill,minmax(260px,1fr))] gap-3 pb-4 pr-2">
-              {filteredTunnels.map((tunnel) => (
-                <Card
-                  className="min-h-[140px] max-w-[260px] transition-colors hover:bg-muted/50"
-                  key={tunnel.id}
-                  size="sm"
-                >
-                  <CardHeader className="grid grid-cols-[1fr_auto] gap-1">
-                    <CardTitle className="min-w-0 truncate text-xs font-semibold">
-                      {tunnel.name}
-                    </CardTitle>
-                    <CardAction>
-                      <Badge className="shrink-0 text-[10px]" variant="outline">
-                        {tunnel.kind}
-                      </Badge>
-                    </CardAction>
-                    <CardDescription className="flex min-w-0 items-center gap-1.5 text-[11px]">
-                      <Network className="size-3 shrink-0" />
-                      <span className="truncate">In-process userspace tunnel</span>
-                    </CardDescription>
-                  </CardHeader>
-                  <CardFooter className="mt-auto justify-end gap-0.5">
-                    <IconButton
-                      label={`Test ${tunnel.name}`}
-                      onClick={() => void testTunnel(tunnel)}
-                    >
-                      <FlaskConical />
-                    </IconButton>
-                    <IconButton
-                      label={`Edit ${tunnel.name}`}
-                      onClick={() => void editTunnel(tunnel)}
-                    >
-                      <Pencil />
-                    </IconButton>
-                    <IconButton
-                      label={`Delete ${tunnel.name}`}
-                      onClick={() => void deleteTunnel(tunnel)}
-                    >
-                      <X />
-                    </IconButton>
-                  </CardFooter>
-                </Card>
-              ))}
-            </div>
-          </ScrollArea>
+          <VirtualCardGrid
+            ariaLabel="VPN tunnels"
+            bottomPadding={16}
+            className="mt-3 h-full"
+            endPadding={8}
+            gap={12}
+            getKey={(tunnel) => tunnel.id}
+            items={filteredTunnels}
+            minimumColumnWidth={260}
+            renderItem={(tunnel) => (
+              <Card className="h-full max-w-[260px] transition-colors hover:bg-muted/50" size="sm">
+                <CardHeader className="grid grid-cols-[1fr_auto] gap-1">
+                  <CardTitle className="min-w-0 truncate text-xs font-semibold">
+                    {tunnel.name}
+                  </CardTitle>
+                  <CardAction>
+                    <Badge className="shrink-0 text-[10px]" variant="outline">
+                      {tunnel.kind}
+                    </Badge>
+                  </CardAction>
+                  <CardDescription className="flex min-w-0 items-center gap-1.5 text-[11px]">
+                    <Network className="size-3 shrink-0" />
+                    <span className="truncate">In-process userspace tunnel</span>
+                  </CardDescription>
+                </CardHeader>
+                <CardFooter className="mt-auto justify-end gap-0.5">
+                  <IconButton label={`Test ${tunnel.name}`} onClick={() => void testTunnel(tunnel)}>
+                    <FlaskConical />
+                  </IconButton>
+                  <IconButton label={`Edit ${tunnel.name}`} onClick={() => void editTunnel(tunnel)}>
+                    <Pencil />
+                  </IconButton>
+                  <IconButton
+                    label={`Delete ${tunnel.name}`}
+                    onClick={() => void deleteTunnel(tunnel)}
+                  >
+                    <X />
+                  </IconButton>
+                </CardFooter>
+              </Card>
+            )}
+            resetKey={normalizedTunnelSearch}
+            rowHeight={140}
+          />
         )}
       </div>
       <TunnelEditorDialog
