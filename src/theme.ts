@@ -3,15 +3,33 @@ export type ResolvedTheme = Exclude<Theme, 'system'>;
 
 export const themeStorageKey = 'wormhole-theme';
 
+type ThemeStorage = Pick<Storage, 'getItem' | 'removeItem'>;
+
 export function isTheme(value: string | null): value is Theme {
   return value === 'system' || value === 'light' || value === 'dark';
 }
 
-export function getInitialTheme(): Theme {
-  if (typeof window === 'undefined') return 'dark';
+export function readLegacyTheme(storage?: ThemeStorage): Theme | null {
+  if (!storage && typeof window === 'undefined') return null;
+  try {
+    const storedTheme = (storage ?? window.localStorage).getItem(themeStorageKey);
+    return isTheme(storedTheme) ? storedTheme : null;
+  } catch {
+    return null;
+  }
+}
 
-  const storedTheme = window.localStorage.getItem(themeStorageKey);
-  return isTheme(storedTheme) ? storedTheme : 'dark';
+export function clearLegacyTheme(storage?: ThemeStorage): void {
+  if (!storage && typeof window === 'undefined') return;
+  try {
+    (storage ?? window.localStorage).removeItem(themeStorageKey);
+  } catch {
+    // A disabled storage area must not block startup after Go accepted the migration.
+  }
+}
+
+export function getInitialTheme(legacyTheme: Theme | null): Theme {
+  return legacyTheme ?? 'system';
 }
 
 export function getSystemTheme(): ResolvedTheme {

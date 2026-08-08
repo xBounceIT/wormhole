@@ -555,6 +555,7 @@ interface WormholeUpdateCheckResult {
 }
 
 interface WormholeAppSettings {
+  theme: 'system' | 'light' | 'dark';
   promptBeforeTunnelConnect: boolean;
   autoCopyOnSelect: boolean;
   confirmOnTabClose: boolean;
@@ -634,6 +635,10 @@ interface WormholeStartupSnapshot {
   auth: WormholeAuthState;
   workspace?: WormholeWorkspaceSnapshot;
   settings: WormholeAppSettings;
+  themeMigration: {
+    handled: boolean;
+    migrated: boolean;
+  };
   migration: {
     status: 'completed' | 'already-completed' | 'skipped-non-windows';
     migrated: number;
@@ -657,7 +662,7 @@ interface WormholeLogsInfo {
 
 interface Window {
   wormhole?: {
-    loadStartup(): Promise<WormholeStartupSnapshot>;
+    loadStartup(legacyTheme?: 'system' | 'light' | 'dark'): Promise<WormholeStartupSnapshot>;
     unlockStartup(request: WormholeAuthVerificationRequest): Promise<WormholeStartupUnlock>;
     markStartupReady(): void;
     loadWorkspace(): Promise<WormholeWorkspaceSnapshot>;
@@ -858,6 +863,7 @@ interface Window {
       choice: 'tunnel' | 'direct' | 'cancel';
     }): Promise<void>;
     readAppSettings(): Promise<WormholeAppSettings>;
+    setTheme(theme: 'system' | 'light' | 'dark'): Promise<{ updated: boolean }>;
     setPromptBeforeTunnelConnect(enabled: boolean): Promise<{ updated: boolean }>;
     setConfirmOnTabClose(enabled: boolean): Promise<{ updated: boolean }>;
     setSidebarWidth(width: number): Promise<{ updated: boolean; sidebarWidth: number }>;

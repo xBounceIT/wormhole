@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -240,6 +241,169 @@ func TestAutoCopyOnSelectDefaultsOnAndPersistsChanges(t *testing.T) {
 	}
 	if settings.AutoCopyOnSelect {
 		t.Fatal("disabled auto-copy selection setting was not persisted")
+	}
+}
+
+func TestApplicationThemeReadsWinUIAndLegacyRepresentationsSafely(t *testing.T) {
+	for name, test := range map[string]struct {
+		value   any
+		present bool
+		want    applicationTheme
+	}{
+		"missing":        {want: applicationThemeSystem},
+		"winui-system":   {value: 0, present: true, want: applicationThemeSystem},
+		"winui-light":    {value: 1, present: true, want: applicationThemeLight},
+		"winui-dark":     {value: 2, present: true, want: applicationThemeDark},
+		"string-system":  {value: "System", present: true, want: applicationThemeSystem},
+		"string-light":   {value: "light", present: true, want: applicationThemeLight},
+		"invalid-number": {value: 42, present: true, want: applicationThemeSystem},
+		"invalid-string": {value: "sepia", present: true, want: applicationThemeSystem},
+		"invalid-type":   {value: true, present: true, want: applicationThemeSystem},
+	} {
+		t.Run(name, func(t *testing.T) {
+			databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+			if test.present {
+				bitwardenTestWriteSettings(t, databasePath, map[string]any{themeKey: test.value})
+			}
+			settings, err := readAppSettings(databasePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if settings.Theme != test.want {
+				t.Fatalf("theme = %q, want %q", settings.Theme, test.want)
+			}
+		})
+	}
+}
+
+func TestWriteApplicationThemeUsesWinUIEnumAndPreservesOtherSettings(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	bitwardenTestWriteSettings(t, databasePath, map[string]any{
+		themeKey:                     1,
+		"AppAuthenticationMode":      2,
+		"AppAuthenticationFutureKey": "keep-auth",
+		"FutureSetting":              map[string]any{"enabled": true},
+	})
+
+	if err := writeApplicationTheme(databasePath, applicationThemeDark); err != nil {
+		t.Fatal(err)
+	}
+
+	_, settingsPath := authPaths(databasePath)
+	contents, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(contents, &document); err != nil {
+		t.Fatal(err)
+	}
+	if string(document[themeKey]) != "2" {
+		t.Fatalf("persisted Theme = %s, want WinUI enum value 2", document[themeKey])
+	}
+	var futureSetting map[string]bool
+	if err := json.Unmarshal(document["FutureSetting"], &futureSetting); err != nil {
+		t.Fatal(err)
+	}
+	if string(document["AppAuthenticationMode"]) != "2" ||
+		string(document["AppAuthenticationFutureKey"]) != `"keep-auth"` ||
+		!futureSetting["enabled"] {
+		t.Fatalf("theme save dropped unrelated settings: %s", contents)
+	}
+}
+
+func TestLegacyElectronThemeMigrationPreservesExplicitSharedTheme(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	bitwardenTestWriteSettings(t, databasePath, map[string]any{
+		themeKey:                "Light",
+		"AppAuthenticationMode": 1,
+	})
+	_, settingsPath := authPaths(databasePath)
+	before, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyTheme := "dark"
+	result, err := migrateLegacyElectronTheme(databasePath, &legacyTheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Handled || result.Migrated {
+		t.Fatalf("migration result = %+v", result)
+	}
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("explicit shared theme was rewritten:\n%s", after)
+	}
+}
+
+func TestLegacyElectronThemeMigrationImportsAndPreservesOtherSettings(t *testing.T) {
+	for name, existingTheme := range map[string]any{
+		"missing":   nil,
+		"malformed": "sepia",
+	} {
+		t.Run(name, func(t *testing.T) {
+			databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+			values := map[string]any{
+				"AppAuthenticationMode": 1,
+				"FutureSetting":         "keep-me",
+			}
+			if existingTheme != nil {
+				values[themeKey] = existingTheme
+			}
+			bitwardenTestWriteSettings(t, databasePath, values)
+
+			legacyTheme := "dark"
+			result, err := migrateLegacyElectronTheme(databasePath, &legacyTheme)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !result.Handled || !result.Migrated {
+				t.Fatalf("migration result = %+v", result)
+			}
+
+			_, settingsPath := authPaths(databasePath)
+			contents, err := os.ReadFile(settingsPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var document map[string]json.RawMessage
+			if err := json.Unmarshal(contents, &document); err != nil {
+				t.Fatal(err)
+			}
+			if string(document[themeKey]) != "2" ||
+				string(document["AppAuthenticationMode"]) != "1" ||
+				string(document["FutureSetting"]) != `"keep-me"` {
+				t.Fatalf("unexpected migrated settings: %s", contents)
+			}
+		})
+	}
+}
+
+func TestLegacyElectronThemeMigrationLeavesMalformedDocumentUntouched(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	_, settingsPath := authPaths(databasePath)
+	malformed := []byte(`{"AppAuthenticationMode": 1, "Theme":`)
+	if err := os.WriteFile(settingsPath, malformed, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacyTheme := "light"
+	result, err := migrateLegacyElectronTheme(databasePath, &legacyTheme)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Handled || result.Migrated {
+		t.Fatalf("malformed settings were reported as handled: %+v", result)
+	}
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, malformed) {
+		t.Fatalf("malformed settings were overwritten: %q", after)
 	}
 }
 

@@ -180,6 +180,7 @@ type BackendOperation =
   | 'auth-system-idle'
   | 'ssh-trust-host-key'
   | 'settings-read'
+  | 'settings-set-theme'
   | 'settings-set-prompt-before-tunnel'
   | 'settings-set-update-preferences'
   | 'update-check'
@@ -311,7 +312,9 @@ type MigrationResponse = {
   migrated: number;
   missing: number;
 };
+type AppTheme = 'system' | 'light' | 'dark';
 type AppSettings = {
+  theme: AppTheme;
   promptBeforeTunnelConnect: boolean;
   autoCopyOnSelect: boolean;
   confirmOnTabClose: boolean;
@@ -397,9 +400,25 @@ type StartupResponse = {
   auth: AuthStateResponse;
   workspace?: WorkspaceResponse;
   settings: AppSettings;
+  themeMigration: {
+    handled: boolean;
+    migrated: boolean;
+  };
   migration: MigrationResponse;
   migrationFailed: boolean;
 };
+
+function isAppTheme(value: unknown): value is AppTheme {
+  return value === 'system' || value === 'light' || value === 'dark';
+}
+
+function parseStartupRequest(value: unknown): { legacyTheme?: AppTheme } {
+  if (value === undefined) return {};
+  if (!isRecord(value)) throw new Error('Startup settings request is invalid.');
+  if (value.legacyTheme === undefined) return {};
+  if (!isAppTheme(value.legacyTheme)) throw new Error('Legacy application theme is invalid.');
+  return { legacyTheme: value.legacyTheme };
+}
 type StartupUnlockResponse = {
   succeeded: boolean;
   message: string;
@@ -5913,9 +5932,10 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (owner.isVisible()) owner.setOpacity(1);
   });
 
-  ipcMain.handle('startup:load', async () => {
+  ipcMain.handle('startup:load', async (_event, value: unknown) => {
+    const request = parseStartupRequest(value);
     return serializeAuthOperation(async () => {
-      const startup = await runBackend<StartupResponse>('startup');
+      const startup = await runBackend<StartupResponse>('startup', request);
       if (startup.auth.configured && startup.workspace) {
         throw new Error('Electron Go backend exposed a locked workspace.');
       }
@@ -6237,6 +6257,14 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   ipcMain.handle('settings:read', async () => {
     return serializeAuthOperation(async () => {
       return runBackend<AppSettings>('settings-read');
+    });
+  });
+
+  ipcMain.handle('settings:set-theme', async (_event, value: unknown) => {
+    if (!isAppTheme(value)) throw new Error('Application theme is invalid.');
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ updated: boolean }>('settings-set-theme', { theme: value });
     });
   });
 

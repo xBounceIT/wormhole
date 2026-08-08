@@ -55,13 +55,14 @@ type workspaceSnapshot struct {
 }
 
 type appSettingsSnapshot struct {
-	PromptBeforeTunnelConnect bool    `json:"promptBeforeTunnelConnect"`
-	AutoCopyOnSelect          bool    `json:"autoCopyOnSelect"`
-	ConfirmOnTabClose         bool    `json:"confirmOnTabClose"`
-	SidebarWidth              int     `json:"sidebarWidth"`
-	AutoCheckForUpdates       bool    `json:"autoCheckForUpdates"`
-	LastUpdateCheck           *string `json:"lastUpdateCheck"`
-	SkippedUpdateVersion      *string `json:"skippedUpdateVersion"`
+	Theme                     applicationTheme `json:"theme"`
+	PromptBeforeTunnelConnect bool             `json:"promptBeforeTunnelConnect"`
+	AutoCopyOnSelect          bool             `json:"autoCopyOnSelect"`
+	ConfirmOnTabClose         bool             `json:"confirmOnTabClose"`
+	SidebarWidth              int              `json:"sidebarWidth"`
+	AutoCheckForUpdates       bool             `json:"autoCheckForUpdates"`
+	LastUpdateCheck           *string          `json:"lastUpdateCheck"`
+	SkippedUpdateVersion      *string          `json:"skippedUpdateVersion"`
 }
 
 // startupSnapshot deliberately returns the workspace only while app authentication is disabled.
@@ -69,11 +70,16 @@ type appSettingsSnapshot struct {
 // user's secret. Combining these reads in one process avoids paying the Windows process, logging,
 // settings, and SQLite initialization costs several times during every launch.
 type startupSnapshot struct {
-	Auth            authStateResponse   `json:"auth"`
-	Workspace       *workspaceSnapshot  `json:"workspace,omitempty"`
-	Settings        appSettingsSnapshot `json:"settings"`
-	Migration       migrationResult     `json:"migration"`
-	MigrationFailed bool                `json:"migrationFailed"`
+	Auth            authStateResponse    `json:"auth"`
+	Workspace       *workspaceSnapshot   `json:"workspace,omitempty"`
+	Settings        appSettingsSnapshot  `json:"settings"`
+	ThemeMigration  themeMigrationResult `json:"themeMigration"`
+	Migration       migrationResult      `json:"migration"`
+	MigrationFailed bool                 `json:"migrationFailed"`
+}
+
+type startupRequest struct {
+	LegacyTheme *string `json:"legacyTheme"`
 }
 
 type startupUnlockSnapshot struct {
@@ -243,7 +249,11 @@ func main() {
 	logDebug("backend operation %s started", *operation)
 	switch *operation {
 	case "startup":
-		result, err = loadStartupSnapshot(*databasePath, *credentialReader)
+		var request startupRequest
+		err = decodeOptionalInput(&request)
+		if err == nil {
+			result, err = loadStartupSnapshot(*databasePath, *credentialReader, request.LegacyTheme)
+		}
 	case "startup-unlock":
 		var request authVerifyRequest
 		err = decodeInput(&request)
@@ -482,6 +492,7 @@ func main() {
 		settings, err = readAppSettings(*databasePath)
 		if err == nil {
 			result = map[string]any{
+				"theme":                     settings.Theme,
 				"promptBeforeTunnelConnect": settings.PromptBeforeTunnelConnect,
 				"autoCopyOnSelect":          settings.AutoCopyOnSelect,
 				"confirmOnTabClose":         settings.ConfirmOnTabClose,
@@ -493,6 +504,24 @@ func main() {
 		}
 	case "settings-migrate":
 		result, err = persistLegacySettingsMigration(*databasePath)
+	case "settings-set-theme":
+		var request struct {
+			Theme string `json:"theme"`
+		}
+		err = decodeInput(&request)
+		if err == nil {
+			var theme applicationTheme
+			var valid bool
+			theme, valid = parseApplicationTheme(request.Theme)
+			if !valid {
+				err = errors.New("application theme is invalid")
+			} else {
+				err = writeApplicationTheme(*databasePath, theme)
+				if err == nil {
+					result = map[string]bool{"updated": true}
+				}
+			}
+		}
 	case "settings-set-prompt-before-tunnel":
 		var request struct {
 			Enabled bool `json:"enabled"`
@@ -715,6 +744,20 @@ func decodeInput[T any](target *T) error {
 	return decodeInputReader(os.Stdin, target)
 }
 
+func decodeOptionalInput[T any](target *T) error {
+	contents, err := io.ReadAll(io.LimitReader(os.Stdin, backendMaxRequestBytes+1))
+	if err != nil || len(contents) > backendMaxRequestBytes {
+		return errors.New("backend request was invalid")
+	}
+	if len(bytes.TrimSpace(contents)) == 0 {
+		return nil
+	}
+	if err := json.Unmarshal(contents, target); err != nil {
+		return errors.New("backend request was invalid")
+	}
+	return nil
+}
+
 func decodeInputReader[T any](reader io.Reader, target *T) error {
 	return decodeInputLimit(reader, target, backendMaxRequestBytes)
 }
@@ -848,7 +891,11 @@ func migrateCredentials(databasePath, readerPath string) (migrationResult, error
 	return migrateCredentialsWithReader(databasePath, readerPath, readWindowsCredentials)
 }
 
-func loadStartupSnapshot(databasePath, readerPath string) (startupSnapshot, error) {
+func loadStartupSnapshot(
+	databasePath string,
+	readerPath string,
+	legacyTheme *string,
+) (startupSnapshot, error) {
 	migration, migrationErr := migrateCredentials(databasePath, readerPath)
 	if migrationErr != nil {
 		// Credential migration is retryable and has never been allowed to make the application
@@ -856,6 +903,10 @@ func loadStartupSnapshot(databasePath, readerPath string) (startupSnapshot, erro
 		logError("credential migration failed during startup: %v", migrationErr)
 	}
 
+	themeMigration, err := migrateLegacyElectronTheme(databasePath, legacyTheme)
+	if err != nil {
+		return startupSnapshot{}, err
+	}
 	auth, err := authState(databasePath)
 	if err != nil {
 		return startupSnapshot{}, err
@@ -867,6 +918,7 @@ func loadStartupSnapshot(databasePath, readerPath string) (startupSnapshot, erro
 	result := startupSnapshot{
 		Auth:            auth,
 		Settings:        settings,
+		ThemeMigration:  themeMigration,
 		Migration:       migration,
 		MigrationFailed: migrationErr != nil,
 	}
@@ -907,6 +959,7 @@ func loadAppSettingsSnapshot(databasePath string) (appSettingsSnapshot, error) {
 		return appSettingsSnapshot{}, err
 	}
 	return appSettingsSnapshot{
+		Theme:                     settings.Theme,
 		PromptBeforeTunnelConnect: settings.PromptBeforeTunnelConnect,
 		AutoCopyOnSelect:          settings.AutoCopyOnSelect,
 		ConfirmOnTabClose:         settings.ConfirmOnTabClose,

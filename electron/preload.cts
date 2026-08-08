@@ -50,7 +50,8 @@ type WorkspaceRdpSettings = {
 };
 
 const wormholeBridge = {
-  loadStartup: () => ipcRenderer.invoke('startup:load'),
+  loadStartup: (legacyTheme?: 'system' | 'light' | 'dark') =>
+    ipcRenderer.invoke('startup:load', { legacyTheme }),
   unlockStartup: (request: { method: 'pin' | 'password'; secret: string }) =>
     ipcRenderer.invoke('startup:unlock', request),
   markStartupReady: () => ipcRenderer.send('startup:ready'),
@@ -250,6 +251,7 @@ const wormholeBridge = {
   }) => ipcRenderer.invoke('tunnel:route-response', request),
   readAppSettings: () =>
     ipcRenderer.invoke('settings:read') as Promise<{
+      theme: 'system' | 'light' | 'dark';
       promptBeforeTunnelConnect: boolean;
       autoCopyOnSelect: boolean;
       confirmOnTabClose: boolean;
@@ -258,6 +260,7 @@ const wormholeBridge = {
       lastUpdateCheck: string | null;
       skippedUpdateVersion: string | null;
     }>,
+  setTheme: (theme: 'system' | 'light' | 'dark') => ipcRenderer.invoke('settings:set-theme', theme),
   setPromptBeforeTunnelConnect: (enabled: boolean) =>
     ipcRenderer.invoke('settings:set-prompt-before-tunnel', enabled),
   setAutoCopyOnSelect: (enabled: boolean) =>

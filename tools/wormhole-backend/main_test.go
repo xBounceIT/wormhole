@@ -84,7 +84,7 @@ func TestStartupMigrationsAlreadyAppliedUsesCompletionMarkers(t *testing.T) {
 
 func TestLoadStartupSnapshotReturnsUnlockedWorkspaceAndSettings(t *testing.T) {
 	databasePath := prepareStartupTestDatabase(t)
-	startup, err := loadStartupSnapshot(databasePath, "")
+	startup, err := loadStartupSnapshot(databasePath, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,6 +96,9 @@ func TestLoadStartupSnapshotReturnsUnlockedWorkspaceAndSettings(t *testing.T) {
 	}
 	if !startup.Settings.PromptBeforeTunnelConnect || !startup.Settings.AutoCheckForUpdates {
 		t.Fatalf("unexpected default startup settings: %#v", startup.Settings)
+	}
+	if startup.Settings.Theme != applicationThemeSystem {
+		t.Fatalf("unexpected default startup theme: %q", startup.Settings.Theme)
 	}
 	if startup.Migration.Status != "already-completed" || startup.MigrationFailed {
 		t.Fatalf("unexpected migration result: %#v, failed=%v", startup.Migration, startup.MigrationFailed)
@@ -118,7 +121,8 @@ func TestLoadStartupSnapshotKeepsLockedWorkspacePrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	startup, err := loadStartupSnapshot(databasePath, "")
+	legacyTheme := "dark"
+	startup, err := loadStartupSnapshot(databasePath, "", &legacyTheme)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,6 +131,10 @@ func TestLoadStartupSnapshotKeepsLockedWorkspacePrivate(t *testing.T) {
 	}
 	if startup.Workspace != nil {
 		t.Fatalf("locked startup exposed workspace: %#v", startup.Workspace)
+	}
+	if startup.Settings.Theme != applicationThemeDark ||
+		!startup.ThemeMigration.Handled || !startup.ThemeMigration.Migrated {
+		t.Fatalf("locked startup did not import the legacy theme: %#v", startup)
 	}
 
 	failed, err := unlockStartup(databasePath, authVerifyRequest{Method: "pin", Secret: "0000"})

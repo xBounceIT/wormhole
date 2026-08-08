@@ -217,15 +217,7 @@ import { ConnectionStepper } from './components/ConnectionStepper';
 import { MRemoteImportDialog } from './components/MRemoteImportDialog';
 import { SearchableCombobox, type SearchableComboboxOption } from './components/SearchableCombobox';
 import { VirtualCardGrid } from './components/VirtualCardGrid';
-import {
-  applyTheme,
-  getInitialTheme,
-  getSystemTheme,
-  isTheme,
-  themeStorageKey,
-  type ResolvedTheme,
-  type Theme,
-} from './theme';
+import { applyTheme, getSystemTheme, isTheme, type ResolvedTheme, type Theme } from './theme';
 import { applyRdpBackendEvent } from './rdp-state';
 import { formatSftpDate, formatSftpSize } from './sftp-format';
 import { hasSftpDragPayload, sftpDragDataType } from './sftp-dnd';
@@ -1361,7 +1353,7 @@ type WormholeAppProps = {
 };
 
 function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAppProps) {
-  const [theme, setTheme] = useState<Theme>(getInitialTheme);
+  const [theme, setTheme] = useState<Theme>(initialSettings.theme);
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme);
   const [tree, setTree] = useState<TreeNode[]>(initialWorkspace.tree);
   const [credentials, setCredentials] = useState<CredentialRecord[]>(initialWorkspace.credentials);
@@ -1589,10 +1581,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }, [resolvedTheme]);
 
   useEffect(() => {
-    window.localStorage.setItem(themeStorageKey, theme);
-  }, [theme]);
-
-  useEffect(() => {
     if (!window.wormhole) return;
     let active = true;
 
@@ -1660,6 +1648,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   function handleAutoCopyOnSelectChange(enabled: boolean) {
     setAutoCopyOnSelect(enabled);
     void window.wormhole?.setAutoCopyOnSelect(enabled).catch(() => {
+      // Keep the responsive local value; the next launch re-syncs the persisted setting.
+    });
+  }
+
+  function handleThemeChange(nextTheme: Theme) {
+    setTheme(nextTheme);
+    void window.wormhole?.setTheme(nextTheme).catch(() => {
       // Keep the responsive local value; the next launch re-syncs the persisted setting.
     });
   }
@@ -5759,7 +5754,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     );
                   }}
                   onRequestAuthentication={requestAuthentication}
-                  onThemeChange={setTheme}
+                  onThemeChange={handleThemeChange}
                   onCheckForUpdates={() => void handleCheckForUpdates()}
                   onDismissUpdate={handleDismissUpdate}
                   onInstallUpdate={() => void handleInstallUpdate()}

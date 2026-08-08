@@ -16,6 +16,21 @@ const promptBeforeTunnelConnectKey = "PromptBeforeTunnelConnect"
 
 const autoCopyOnSelectKey = "AutoCopyOnSelect"
 
+const themeKey = "Theme"
+
+type applicationTheme string
+
+const (
+	applicationThemeSystem applicationTheme = "system"
+	applicationThemeLight  applicationTheme = "light"
+	applicationThemeDark   applicationTheme = "dark"
+)
+
+type themeMigrationResult struct {
+	Handled  bool `json:"handled"`
+	Migrated bool `json:"migrated"`
+}
+
 const (
 	confirmOnTabCloseKey = "ConfirmOnTabClose"
 	sidebarWidthKey      = "SidebarWidth"
@@ -180,6 +195,103 @@ func readSettingsInteger(document map[string]json.RawMessage, key string) int {
 	return value
 }
 
+func parseApplicationTheme(value string) (applicationTheme, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case string(applicationThemeSystem):
+		return applicationThemeSystem, true
+	case string(applicationThemeLight):
+		return applicationThemeLight, true
+	case string(applicationThemeDark):
+		return applicationThemeDark, true
+	default:
+		return applicationThemeSystem, false
+	}
+}
+
+// readApplicationTheme accepts both the numeric representation written by System.Text.Json for
+// the WinUI enum and string enum names found in hand-edited or older shared documents.
+func readApplicationTheme(value json.RawMessage) (applicationTheme, bool) {
+	var numeric int
+	if json.Unmarshal(value, &numeric) == nil {
+		switch numeric {
+		case 0:
+			return applicationThemeSystem, true
+		case 1:
+			return applicationThemeLight, true
+		case 2:
+			return applicationThemeDark, true
+		default:
+			return applicationThemeSystem, false
+		}
+	}
+	var label string
+	if json.Unmarshal(value, &label) != nil {
+		return applicationThemeSystem, false
+	}
+	return parseApplicationTheme(label)
+}
+
+func persistedApplicationTheme(theme applicationTheme) (int, bool) {
+	switch theme {
+	case applicationThemeSystem:
+		return 0, true
+	case applicationThemeLight:
+		return 1, true
+	case applicationThemeDark:
+		return 2, true
+	default:
+		return 0, false
+	}
+}
+
+func writeApplicationTheme(databasePath string, theme applicationTheme) error {
+	persisted, ok := persistedApplicationTheme(theme)
+	if !ok {
+		return errors.New("application theme is invalid")
+	}
+	return writeSettingsValues(databasePath, map[string]any{themeKey: persisted})
+}
+
+// migrateLegacyElectronTheme imports the former renderer-only preference exactly once. A valid
+// shared Theme always wins, and a malformed document is left untouched so app-auth and unknown
+// keys cannot be destroyed by a best-effort migration.
+func migrateLegacyElectronTheme(databasePath string, legacyTheme *string) (themeMigrationResult, error) {
+	if legacyTheme == nil {
+		return themeMigrationResult{}, nil
+	}
+	theme, ok := parseApplicationTheme(*legacyTheme)
+	if !ok {
+		return themeMigrationResult{}, errors.New("legacy application theme is invalid")
+	}
+	persisted, _ := persistedApplicationTheme(theme)
+	_, settingsPath := authPaths(databasePath)
+	result := themeMigrationResult{}
+	err := updateSettingsDocumentWithOptions(
+		settingsPath,
+		settingsDocumentUpdateOptions{ReplaceMalformed: false},
+		func(document map[string]json.RawMessage) (bool, error) {
+			if existing, present := document[themeKey]; present {
+				if _, valid := readApplicationTheme(existing); valid {
+					result.Handled = true
+					return false, nil
+				}
+			}
+			encoded, encodeErr := json.Marshal(persisted)
+			if encodeErr != nil {
+				return false, fmt.Errorf("cannot encode Wormhole theme: %w", encodeErr)
+			}
+			document[themeKey] = encoded
+			result.Handled = true
+			result.Migrated = true
+			return true, nil
+		},
+	)
+	if errors.Is(err, errMalformedSettingsDocument) {
+		return themeMigrationResult{}, nil
+	}
+	return result, err
+}
+
 func bitwardenAppMajorMinor(version string) (int, int, bool) {
 	parts := strings.SplitN(strings.TrimSpace(strings.TrimPrefix(version, "v")), ".", 3)
 	if len(parts) < 2 {
@@ -230,6 +342,7 @@ func writeSidebarWidth(databasePath string, width int) error {
 }
 
 type appSettingsValues struct {
+	Theme                     applicationTheme
 	PromptBeforeTunnelConnect bool
 	AutoCopyOnSelect          bool
 	ConfirmOnTabClose         bool
@@ -243,6 +356,7 @@ type appSettingsValues struct {
 // defaults, including confirmation for connected tabs and a bounded sidebar width.
 func readAppSettings(databasePath string) (appSettingsValues, error) {
 	settings := appSettingsValues{
+		Theme:                     applicationThemeSystem,
 		PromptBeforeTunnelConnect: true,
 		AutoCopyOnSelect:          true,
 		ConfirmOnTabClose:         true,
@@ -262,6 +376,11 @@ func readAppSettings(databasePath string) (appSettingsValues, error) {
 		return settings, nil
 	}
 	migrateLegacySettingsDocument(document)
+	if value, ok := document[themeKey]; ok {
+		if theme, valid := readApplicationTheme(value); valid {
+			settings.Theme = theme
+		}
+	}
 	if value, ok := document[promptBeforeTunnelConnectKey]; ok {
 		var enabled bool
 		if json.Unmarshal(value, &enabled) == nil {

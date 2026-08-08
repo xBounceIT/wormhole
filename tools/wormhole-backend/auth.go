@@ -183,6 +183,32 @@ func updateSettingsDocument(
 	settingsPath string,
 	mutate func(map[string]json.RawMessage) error,
 ) error {
+	return updateSettingsDocumentWithOptions(
+		settingsPath,
+		settingsDocumentUpdateOptions{ReplaceMalformed: true},
+		func(document map[string]json.RawMessage) (bool, error) {
+			if err := mutate(document); err != nil {
+				return false, err
+			}
+			return true, nil
+		},
+	)
+}
+
+var errMalformedSettingsDocument = errors.New("Wormhole settings document is malformed")
+
+type settingsDocumentUpdateOptions struct {
+	ReplaceMalformed bool
+}
+
+// updateSettingsDocumentWithOptions is the transactional settings primitive used by cautious
+// migrations. Existing explicit writes keep their historical repair behavior, while migrations
+// can leave a malformed document byte-for-byte untouched for a later recovery attempt.
+func updateSettingsDocumentWithOptions(
+	settingsPath string,
+	options settingsDocumentUpdateOptions,
+	mutate func(map[string]json.RawMessage) (bool, error),
+) error {
 	cleanPath := filepath.Clean(settingsPath)
 	lockValue, _ := settingsProcessLocks.LoadOrStore(cleanPath, &sync.Mutex{})
 	processLock := lockValue.(*sync.Mutex)
@@ -204,6 +230,9 @@ func updateSettingsDocument(
 		if json.Unmarshal(contents, &document) == nil && document != nil {
 			migrateLegacySettingsDocument(document)
 		} else {
+			if !options.ReplaceMalformed {
+				return errMalformedSettingsDocument
+			}
 			document = map[string]json.RawMessage{}
 			currentSchema, _ := json.Marshal(currentSettingsSchemaVersion)
 			document[settingsSchemaVersionKey] = currentSchema
@@ -217,8 +246,12 @@ func updateSettingsDocument(
 	if document == nil {
 		document = map[string]json.RawMessage{}
 	}
-	if err := mutate(document); err != nil {
+	updated, err := mutate(document)
+	if err != nil {
 		return err
+	}
+	if !updated {
+		return nil
 	}
 	contents, err = json.MarshalIndent(document, "", "  ")
 	if err != nil {

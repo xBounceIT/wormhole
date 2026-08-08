@@ -1,11 +1,12 @@
 import startupLogo from '../Assets/wormhole-logo-transparent.png';
-import { applyTheme, getInitialTheme } from './theme';
+import { applyTheme, clearLegacyTheme, getInitialTheme, readLegacyTheme } from './theme';
 
 // Resolve the stored/system theme before React renders so the very first painted
 // frame already has the correct background. Deferring this to a post-mount effect
 // leaves a light-theme frame visible until the `.dark` class lands — the startup
 // flash.
-applyTheme(getInitialTheme());
+const legacyTheme = readLegacyTheme();
+applyTheme(getInitialTheme(legacyTheme));
 
 const rootElement = document.getElementById('root');
 if (!rootElement) throw new Error('Wormhole startup root is missing.');
@@ -206,7 +207,11 @@ async function bootstrap() {
     return;
   }
   try {
-    startupRequest ??= window.wormhole.loadStartup();
+    startupRequest ??= window.wormhole.loadStartup(legacyTheme ?? undefined).then((startup) => {
+      applyTheme(startup.settings.theme);
+      if (startup.themeMigration.handled) clearLegacyTheme();
+      return startup;
+    });
     const startup = await startupRequest;
     if (startup.auth.configured) {
       showUnlock(startup);
