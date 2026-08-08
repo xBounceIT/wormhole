@@ -4833,7 +4833,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 </Button>
               </DialogFooter>
             </>
-          ) : (
+          ) : credentialDialog?.kind === 'error' ? (
             <>
               <DialogHeader>
                 <DialogTitle>Couldn&apos;t show credentials</DialogTitle>
@@ -4850,7 +4850,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 </Button>
               </DialogFooter>
             </>
-          )}
+          ) : null}
         </DialogContent>
       </Dialog>
       <Dialog
