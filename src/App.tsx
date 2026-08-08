@@ -10321,7 +10321,7 @@ function TunnelRouteField({
     <div className="grid gap-2">
       <Label htmlFor={id}>{isFolder ? 'VPN route default' : 'VPN route'}</Label>
       <SearchableCombobox
-        className="sm:max-w-[360px]"
+        className="sm:max-w-[280px]"
         disabled={disabled}
         emptyMessage="No VPN routes found."
         id={id}
