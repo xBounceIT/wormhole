@@ -2,6 +2,7 @@ import {
   app,
   BrowserWindow,
   clipboard,
+  crashReporter,
   dialog,
   ipcMain,
   Menu,
@@ -19,6 +20,7 @@ import { createInterface, type Interface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { ElectronChromeExtensions } from 'electron-chrome-extensions';
 import { AuthSession } from './auth-session.js';
+import { initializeLocalCrashDiagnostics } from './crash-diagnostics.js';
 import { isAppTheme, parseThemeStartupRequest, type AppTheme } from './theme-settings.js';
 import {
   runWindowTeardown,
@@ -135,6 +137,19 @@ const startupUpdateDelayMs = 10_000;
 const bitwardenBrowserNavigationTimeoutMs = 15_000;
 const bitwardenExtensionReadyTimeoutMs = 15_000;
 const bitwardenExtensionHostMaxListeners = 64;
+
+// Crashpad must start before any renderer or utility process is created. This adapter keeps every
+// report local, records only bounded non-secret context, and degrades without blocking startup.
+initializeLocalCrashDiagnostics({
+  app,
+  reporter: crashReporter,
+  platform: process.platform,
+  arch: process.arch,
+  electronVersion: process.versions.electron ?? 'unknown',
+  processId: process.pid,
+  localAppData: process.env.LOCALAPPDATA,
+});
+
 let rdpClient: RdpBackendClient | undefined;
 const rdpTunnelLeases = new TunnelLeaseRegistry();
 const rdpTunnelLeaseSessions = new Map<string, string>();
