@@ -1,14 +1,20 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import {
   canonicalizeConnectionTreeNodeIds,
   isEditableConnectionTreeShortcutTarget,
   resolveConnectionTreeShortcut,
+  resolveVisibleConnectionTreeSelection,
   type ConnectionTreeShortcutContext,
   type ConnectionTreeShortcutEvent,
   type ConnectionTreeShortcutNode,
 } from '../src/tree-shortcuts.ts';
+import {
+  parseWorkspaceNodesRequest,
+  workspaceDeleteNodesMaxRequestBytes,
+} from '../electron/workspace-delete-contract.ts';
 
 const tree: ConnectionTreeShortcutNode[] = [
   {
@@ -34,6 +40,7 @@ const baseContext: ConnectionTreeShortcutContext = {
   unlocked: true,
   dialogOpen: false,
   editableTarget: false,
+  portaledWidgetOpen: false,
   withinTree: true,
   deleteBusy: false,
   tree,
@@ -84,6 +91,14 @@ test('creation accelerators always target the explicit root on Windows and macOS
     ),
     null,
   );
+  for (const modifiers of [
+    { ctrlKey: true, altKey: true },
+    { metaKey: true, altKey: true },
+    { ctrlKey: true, metaKey: true },
+    { ctrlKey: true, getModifierState: (key: string) => key === 'AltGraph' },
+  ]) {
+    assert.equal(resolveConnectionTreeShortcut(shortcutEvent('n', modifiers), baseContext), null);
+  }
 });
 
 test('single-target accelerators prefer checked selection and reject multiple targets', () => {
@@ -127,6 +142,7 @@ test('delete canonicalizes multi-selection in tree order', () => {
     ]),
     ['folder', 'root-connection'],
   );
+  assert.deepEqual(canonicalizeConnectionTreeNodeIds(tree, ['folder', 'folder']), ['folder']);
   assert.deepEqual(
     resolveConnectionTreeShortcut(
       shortcutEvent('Delete'),
@@ -138,6 +154,13 @@ test('delete canonicalizes multi-selection in tree order', () => {
   );
   assert.equal(
     resolveConnectionTreeShortcut(shortcutEvent('Delete'), shortcutContext({ deleteBusy: true })),
+    null,
+  );
+  assert.equal(
+    resolveConnectionTreeShortcut(
+      shortcutEvent('Delete'),
+      shortcutContext({ selectedNodeId: '', selectedNodeIds: [] }),
+    ),
     null,
   );
 });
@@ -168,12 +191,20 @@ test('search projection excludes hidden selections and stale primary targets', (
     ),
     null,
   );
+  assert.deepEqual(
+    resolveVisibleConnectionTreeSelection(visibleTree, 'nested-connection', [
+      'root-connection',
+      'nested-connection',
+    ]),
+    ['nested-connection'],
+  );
 });
 
 test('guards block shortcuts while typing, in dialogs, outside the tree, or locked', () => {
   for (const context of [
     shortcutContext({ editableTarget: true }),
     shortcutContext({ dialogOpen: true }),
+    shortcutContext({ portaledWidgetOpen: true }),
     shortcutContext({ unlocked: false }),
   ]) {
     assert.equal(
@@ -194,6 +225,17 @@ test('guards block shortcuts while typing, in dialogs, outside the tree, or lock
     resolveConnectionTreeShortcut(shortcutEvent('Delete', { repeat: true }), baseContext),
     null,
   );
+  assert.equal(
+    resolveConnectionTreeShortcut(
+      shortcutEvent('n', { ctrlKey: true, isComposing: true }),
+      baseContext,
+    ),
+    null,
+  );
+  assert.equal(
+    resolveConnectionTreeShortcut(shortcutEvent('k', { metaKey: true, repeat: true }), baseContext),
+    null,
+  );
   assert.deepEqual(
     resolveConnectionTreeShortcut(
       shortcutEvent('k', { metaKey: true }),
@@ -208,5 +250,77 @@ test('editable-target classification covers form controls and contenteditable su
     assert.equal(isEditableConnectionTreeShortcutTarget({ tagName }), true);
   }
   assert.equal(isEditableConnectionTreeShortcutTarget({ isContentEditable: true }), true);
+  assert.equal(isEditableConnectionTreeShortcutTarget({ isContentEditable: false }), false);
   assert.equal(isEditableConnectionTreeShortcutTarget({ tagName: 'button' }), false);
+});
+
+test('irrelevant tree keys do not traverse the tree selection', () => {
+  const poisonNode = { id: 'poison', kind: 'folder' as const } as ConnectionTreeShortcutNode;
+  Object.defineProperty(poisonNode, 'children', {
+    get() {
+      throw new Error('tree traversal was not expected');
+    },
+  });
+
+  assert.equal(
+    resolveConnectionTreeShortcut(
+      shortcutEvent('ArrowDown'),
+      shortcutContext({ tree: [poisonNode], visibleTree: [poisonNode] }),
+    ),
+    null,
+  );
+});
+
+test('async batch deletion reconciles against current tree and session state', () => {
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+
+  assert.match(appSource, /const treeRef = useRef\(tree\)/);
+  assert.match(appSource, /const currentTree = treeRef\.current/);
+  assert.match(appSource, /const closing = sessionsRef\.current\.filter/);
+  assert.match(appSource, /setSessions\(\(current\) => current\.filter/);
+});
+
+test('workspace batch deletion IPC accepts one or many IDs and deduplicates in request order', () => {
+  assert.deepEqual(parseWorkspaceNodesRequest({ nodeIds: ['one'] }), { nodeIds: ['one'] });
+  assert.deepEqual(parseWorkspaceNodesRequest({ nodeIds: ['two', 'one', 'two'] }), {
+    nodeIds: ['two', 'one'],
+  });
+});
+
+test('workspace batch deletion IPC rejects empty, sparse, malformed, and oversized arrays', () => {
+  const sparse = new Array<string>(1);
+  for (const nodeIds of [
+    [],
+    sparse,
+    [''],
+    [' spaced '],
+    ['line\nbreak'],
+    [42],
+    ['x'.repeat(129)],
+    Array.from({ length: 1_001 }, (_, index) => `node-${index}`),
+  ]) {
+    assert.throws(() => parseWorkspaceNodesRequest({ nodeIds }));
+  }
+});
+
+test('workspace batch deletion IPC uses the backend UTF-8 ID boundary', () => {
+  assert.deepEqual(parseWorkspaceNodesRequest({ nodeIds: ['é'.repeat(64)] }), {
+    nodeIds: ['é'.repeat(64)],
+  });
+  assert.throws(() => parseWorkspaceNodesRequest({ nodeIds: ['é'.repeat(65)] }));
+});
+
+test('maximum valid workspace batch fits its dedicated Electron backend wire limit', () => {
+  const request = parseWorkspaceNodesRequest({
+    nodeIds: Array.from(
+      { length: 1_000 },
+      (_, index) => `${'\\'.repeat(120)}${String(index).padStart(8, '0')}`,
+    ),
+  });
+  const payloadBytes = Buffer.byteLength(JSON.stringify(request), 'utf8');
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+
+  assert.ok(payloadBytes > 64 * 1024);
+  assert.ok(payloadBytes <= workspaceDeleteNodesMaxRequestBytes);
+  assert.match(mainSource, /operation === 'workspace-delete-nodes'/);
 });

@@ -54,6 +54,10 @@ import {
 } from './bitwarden-cookie-seed.js';
 import { ExtensionMutationGuard } from './extension-mutation-guard.js';
 import { KeyedSingleFlight } from './keyed-single-flight.js';
+import {
+  parseWorkspaceNodesRequest,
+  workspaceDeleteNodesMaxRequestBytes,
+} from './workspace-delete-contract.js';
 import { KeyedTaskTracker } from './keyed-task-tracker.js';
 import { shouldDeferExtensionReload } from './extension-reload-policy.js';
 import { encodeTerminalClipboardText, isEncodedSshInput } from './terminal-clipboard.js';
@@ -497,7 +501,6 @@ type CredentialCreateRequest = {
 type CredentialUpdateRequest = CredentialCreateRequest & { id: string };
 type CredentialDeleteRequest = { id: string };
 type WorkspaceNodeRequest = { nodeId: string };
-type WorkspaceNodesRequest = { nodeIds: string[] };
 type WorkspaceDuplicateNodeResponse = { nodeId: string; name: string };
 type WorkspaceDeleteNodeResponse = { deleted: boolean };
 type WorkspaceCredentialRevealResponse = {
@@ -1292,19 +1295,6 @@ function parseWorkspaceNodeRequest(value: unknown): WorkspaceNodeRequest {
     throw new Error('Workspace connection is invalid.');
   }
   return { nodeId: value.nodeId };
-}
-
-function parseWorkspaceNodesRequest(value: unknown): WorkspaceNodesRequest {
-  if (
-    !isRecord(value) ||
-    !Array.isArray(value.nodeIds) ||
-    value.nodeIds.length === 0 ||
-    value.nodeIds.length > 1_000 ||
-    !value.nodeIds.every(isSshSessionId)
-  ) {
-    throw new Error('Workspace connections are invalid.');
-  }
-  return { nodeIds: [...new Set(value.nodeIds)] };
 }
 
 function parseCredentialCreateRequest(
@@ -3106,9 +3096,12 @@ async function runBackend<T>(
   let requestPayload: string | undefined;
   if (request !== undefined) {
     requestPayload = JSON.stringify(request);
-    const requestLimit = operation.startsWith('tunnel-')
-      ? backendMaxTunnelRequestBytes
-      : backendMaxRequestBytes;
+    const requestLimit =
+      operation === 'workspace-delete-nodes'
+        ? workspaceDeleteNodesMaxRequestBytes
+        : operation.startsWith('tunnel-')
+          ? backendMaxTunnelRequestBytes
+          : backendMaxRequestBytes;
     if (requestPayload === undefined || Buffer.byteLength(requestPayload, 'utf8') > requestLimit) {
       throw new Error('Electron Go backend request is too large.');
     }

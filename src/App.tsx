@@ -203,6 +203,7 @@ import {
   canonicalizeConnectionTreeNodeIds,
   isEditableConnectionTreeShortcutTarget,
   resolveConnectionTreeShortcut,
+  resolveVisibleConnectionTreeSelection,
 } from './tree-shortcuts';
 import {
   quickConnectStartsImmediately,
@@ -1350,10 +1351,21 @@ type WormholeAppProps = {
   initialSettings: WormholeAppSettings;
 };
 
+const connectionTreeShortcutPortaledWidgetSelector = [
+  '[data-slot="context-menu-content"][data-state="open"]',
+  '[data-slot="context-menu-sub-content"][data-state="open"]',
+  '[data-slot="dropdown-menu-content"][data-state="open"]',
+  '[data-slot="dropdown-menu-sub-content"][data-state="open"]',
+  '[data-slot="popover-content"][data-state="open"]',
+  '[data-slot="select-content"][data-state="open"]',
+].join(', ');
+
 function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAppProps) {
   const [theme, setTheme] = useState<Theme>(initialSettings.theme);
   const [systemTheme, setSystemTheme] = useState<ResolvedTheme>(getSystemTheme);
   const [tree, setTree] = useState<TreeNode[]>(initialWorkspace.tree);
+  const treeRef = useRef(tree);
+  treeRef.current = tree;
   const [credentials, setCredentials] = useState<CredentialRecord[]>(initialWorkspace.credentials);
   const [credentialOptions, setCredentialOptions] = useState<CredentialOptionGroups>(() =>
     workspaceCredentialOptions(initialWorkspace),
@@ -2442,6 +2454,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             editableTarget?.isContentEditable ||
             (target instanceof HTMLElement && target.isContentEditable),
         }),
+        portaledWidgetOpen: Boolean(
+          document.querySelector(connectionTreeShortcutPortaledWidgetSelector),
+        ),
         withinTree: Boolean(target?.closest('[data-connection-tree-shortcut-scope]')),
         deleteBusy: deleteNodeBusy,
         tree,
@@ -3216,7 +3231,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   async function closeSessionsForNodeIds(nodeIds: ReadonlySet<string>) {
-    const closing = sessions.filter((session) => session.nodeId && nodeIds.has(session.nodeId));
+    const closing = sessionsRef.current.filter(
+      (session) => session.nodeId && nodeIds.has(session.nodeId),
+    );
     if (closing.length === 0) return;
     const closingIds = new Set(closing.map((session) => session.id));
     for (const session of closing) {
@@ -3234,11 +3251,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       clearSftpCancelRequestsForBrowser(sftpCancelRequests.current, session.sftp);
     }
 
-    const nextSessions = sessions.filter((session) => !closingIds.has(session.id));
-    setSessions(nextSessions);
+    const currentSessions = sessionsRef.current;
+    setSessions((current) => current.filter((session) => !closingIds.has(session.id)));
     setSelectedSessionId((current) => {
       if (!closingIds.has(current)) return current;
-      return nextSelectedSessionId(sessions, current, (sessionId) => closingIds.has(sessionId));
+      return nextSelectedSessionId(currentSessions, current, (sessionId) =>
+        closingIds.has(sessionId),
+      );
     });
     setRdpCredentialPrompt((current) => (current && closingIds.has(current) ? null : current));
     setSshCredentialPrompt((current) =>
@@ -4451,7 +4470,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   function openDeleteNode(node: TreeNode) {
-    const selectedIds = selectedTreeNodeIds.has(node.id) ? [...selectedTreeNodeIds] : [node.id];
+    const selectedIds = resolveVisibleConnectionTreeSelection(
+      visibleTree,
+      node.id,
+      selectedTreeNodeIds.has(node.id) ? [...selectedTreeNodeIds] : [],
+    );
     openDeleteNodes(selectedIds);
   }
 
@@ -4462,18 +4485,42 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setDeleteNodeBusy(true);
     setDeleteNodeError('');
     try {
-      const deletedNodeIds = new Set(nodes.flatMap(collectTreeNodeIds));
+      const requestedNodeIds = nodes.map((node) => node.id);
+      const currentTree = treeRef.current;
+      const currentNodes = canonicalizeConnectionTreeNodeIds(currentTree, requestedNodeIds)
+        .map((nodeId) => findTreeNode(currentTree, nodeId))
+        .filter((node): node is TreeNode => Boolean(node));
+      if (currentNodes.length !== requestedNodeIds.length) {
+        throw new Error('The selected workspace nodes are no longer available.');
+      }
+      const deletedNodeIds = new Set(currentNodes.flatMap(collectTreeNodeIds));
       const persistedNodeIds = canonicalizeConnectionTreeNodeIds(
-        tree,
-        [...deletedNodeIds].filter((nodeId) => findTreeNode(tree, nodeId)?.persisted),
+        currentTree,
+        [...deletedNodeIds].filter((nodeId) => findTreeNode(currentTree, nodeId)?.persisted),
       );
+      const reconcileDeletedNodes = async () => {
+        const latestTree = treeRef.current;
+        const latestDeletedNodeIds = new Set(deletedNodeIds);
+        for (const nodeId of requestedNodeIds) {
+          const latestNode = findTreeNode(latestTree, nodeId);
+          if (latestNode) {
+            for (const descendantID of collectTreeNodeIds(latestNode)) {
+              latestDeletedNodeIds.add(descendantID);
+            }
+          }
+        }
+        await closeSessionsForNodeIds(latestDeletedNodeIds);
+        const treeAfterSessionClose = treeRef.current;
+        applyDeletedTreeState(
+          extractTreeNodes(treeAfterSessionClose, new Set(requestedNodeIds)).nodes,
+        );
+      };
       if (persistedNodeIds.length > 0) {
         const api = window.wormhole;
         if (!api) throw new Error('The native workspace bridge is unavailable.');
         const result = await api.deleteWorkspaceNodes({ nodeIds: persistedNodeIds });
         if (!result.deleted) throw new Error('The workspace nodes were not deleted.');
-        await closeSessionsForNodeIds(deletedNodeIds);
-        applyDeletedTreeState(extractTreeNodes(tree, new Set(nodes.map((node) => node.id))).nodes);
+        await reconcileDeletedNodes();
         setPendingDeleteNodes([]);
         try {
           applyWorkspaceSnapshot(await api.loadWorkspace());
@@ -4482,8 +4529,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           // transient refresh failure must not leave a deleted node visible or invite a retry.
         }
       } else {
-        await closeSessionsForNodeIds(deletedNodeIds);
-        applyDeletedTreeState(extractTreeNodes(tree, new Set(nodes.map((node) => node.id))).nodes);
+        await reconcileDeletedNodes();
         setPendingDeleteNodes([]);
       }
     } catch (error: unknown) {

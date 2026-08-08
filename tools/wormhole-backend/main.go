@@ -281,7 +281,7 @@ func main() {
 		}
 	case "workspace-delete-nodes":
 		var request workspaceNodesRequest
-		err = decodeInput(&request)
+		err = decodeInputLimit(os.Stdin, &request, workspaceDeleteNodesMaxRequestBytes)
 		if err == nil {
 			result, err = deleteWorkspaceNodes(*databasePath, request)
 		}

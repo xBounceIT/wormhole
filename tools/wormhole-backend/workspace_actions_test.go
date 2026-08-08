@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -86,6 +89,14 @@ FROM Nodes WHERE Id = ?;`, result.NodeID).Scan(
 }
 
 func TestDeleteWorkspaceNodeDeletesSubtreeAndInlineSecret(t *testing.T) {
+	previousDelete := credentialSecretDelete
+	deletedSecretIDs := make(map[string]struct{})
+	credentialSecretDelete = func(id, _, _ string) error {
+		deletedSecretIDs[id] = struct{}{}
+		return nil
+	}
+	t.Cleanup(func() { credentialSecretDelete = previousDelete })
+
 	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
 	database, err := openDatabase(databasePath, false)
 	if err != nil {
@@ -163,6 +174,15 @@ VALUES ('inline', 'inline-secret', 'test', 'now'),
 	if inlineSecretCount != 0 || staleSecretCount != 0 || sharedSecretCount != 1 {
 		t.Fatalf("secret cleanup = inline %d, stale %d, shared %d; want 0, 0, 1", inlineSecretCount, staleSecretCount, sharedSecretCount)
 	}
+	if _, found := deletedSecretIDs["inline"]; !found {
+		t.Fatal("inline platform secret was not cleaned up")
+	}
+	if _, found := deletedSecretIDs["stale"]; !found {
+		t.Fatal("stale platform secret was not cleaned up")
+	}
+	if _, found := deletedSecretIDs["shared-profile"]; found {
+		t.Fatal("shared profile platform secret was deleted with a workspace node")
+	}
 }
 
 func TestDeleteWorkspaceNodesDeletesCanonicalSubtreesInOneTransaction(t *testing.T) {
@@ -210,6 +230,113 @@ VALUES ('folder', NULL, 'Servers', 0),
 	}
 	if remainingID != "keep" {
 		t.Fatalf("remaining node = %q, want keep", remainingID)
+	}
+}
+
+func TestDeleteWorkspaceNodesHonorsLateForeignKeyCascade(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+PRAGMA foreign_keys = ON;
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    ParentId TEXT NULL REFERENCES Nodes(Id) ON DELETE CASCADE,
+    Name TEXT NOT NULL,
+    Kind INTEGER NOT NULL
+);
+CREATE TRIGGER add_late_child BEFORE DELETE ON Nodes
+WHEN OLD.Id = 'folder' AND NOT EXISTS (SELECT 1 FROM Nodes WHERE Id = 'late-child')
+BEGIN
+    INSERT INTO Nodes (Id, ParentId, Name, Kind)
+    VALUES ('late-child', OLD.Id, 'Late child', 1);
+END;
+INSERT INTO Nodes (Id, ParentId, Name, Kind)
+VALUES ('folder', NULL, 'Servers', 0),
+       ('child', 'folder', 'Existing child', 1),
+       ('keep', NULL, 'Keep me', 1);`)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	if _, err := deleteWorkspaceNodes(databasePath, workspaceNodesRequest{
+		NodeIDs: []string{"folder"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var remaining string
+	if err := database.QueryRow("SELECT group_concat(Id, ',') FROM Nodes;").Scan(&remaining); err != nil {
+		t.Fatal(err)
+	}
+	if remaining != "keep" {
+		t.Fatalf("remaining nodes = %q, want keep", remaining)
+	}
+}
+
+func TestDeleteWorkspaceNodesRollsBackNodesAndSecretsTogether(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+	database, err := openDatabase(databasePath, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`
+CREATE TABLE Nodes (
+    Id TEXT PRIMARY KEY NOT NULL,
+    ParentId TEXT NULL,
+    Name TEXT NOT NULL,
+    Kind INTEGER NOT NULL
+);
+CREATE TABLE CredentialSecrets (
+    Id TEXT PRIMARY KEY NOT NULL,
+    Secret TEXT NOT NULL,
+    Encoding TEXT NOT NULL,
+    UpdatedAt TEXT NOT NULL
+);
+CREATE TRIGGER reject_folder_delete BEFORE DELETE ON Nodes
+WHEN OLD.Id = 'folder'
+BEGIN
+    SELECT RAISE(ABORT, 'forced rollback');
+END;
+INSERT INTO Nodes (Id, ParentId, Name, Kind)
+VALUES ('folder', NULL, 'Servers', 0), ('child', 'folder', 'Child', 1);
+INSERT INTO CredentialSecrets (Id, Secret, Encoding, UpdatedAt)
+VALUES ('child', 'secret', 'test', 'now');`)
+	if err != nil {
+		database.Close()
+		t.Fatal(err)
+	}
+	database.Close()
+
+	if _, err := deleteWorkspaceNodes(databasePath, workspaceNodesRequest{
+		NodeIDs: []string{"folder"},
+	}); err == nil {
+		t.Fatal("triggered deletion unexpectedly succeeded")
+	}
+
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var nodeCount, secretCount int
+	if err := database.QueryRow("SELECT COUNT(*) FROM Nodes;").Scan(&nodeCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow("SELECT COUNT(*) FROM CredentialSecrets;").Scan(&secretCount); err != nil {
+		t.Fatal(err)
+	}
+	if nodeCount != 2 || secretCount != 1 {
+		t.Fatalf("rollback left %d nodes and %d secrets; want 2 and 1", nodeCount, secretCount)
 	}
 }
 
@@ -265,6 +392,40 @@ func TestDeleteWorkspaceNodesValidatesBatchBounds(t *testing.T) {
 	}
 	if _, err := deleteWorkspaceNodes("unused.db", workspaceNodesRequest{NodeIDs: tooMany}); err == nil {
 		t.Fatal("oversized workspace node batch was accepted")
+	}
+}
+
+func TestWorkspaceDeleteNodesWireLimitAcceptsTheMaximumElectronPayload(t *testing.T) {
+	nodeIDs := make([]string, 1000)
+	for index := range nodeIDs {
+		nodeIDs[index] = strings.Repeat("\\", 120) + fmt.Sprintf("%08d", index)
+	}
+	payload, err := json.Marshal(workspaceNodesRequest{NodeIDs: nodeIDs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload) <= backendMaxRequestBytes {
+		t.Fatalf("test payload = %d bytes, want more than the generic %d-byte limit", len(payload), backendMaxRequestBytes)
+	}
+	var decoded workspaceNodesRequest
+	if err := decodeInputLimit(
+		bytes.NewReader(payload),
+		&decoded,
+		workspaceDeleteNodesMaxRequestBytes,
+	); err != nil {
+		t.Fatalf("maximum Electron batch payload was rejected: %v", err)
+	}
+	if len(decoded.NodeIDs) != len(nodeIDs) {
+		t.Fatalf("decoded node count = %d, want %d", len(decoded.NodeIDs), len(nodeIDs))
+	}
+
+	oversized := append(payload, bytes.Repeat([]byte{' '}, workspaceDeleteNodesMaxRequestBytes-len(payload)+1)...)
+	if err := decodeInputLimit(
+		bytes.NewReader(oversized),
+		&decoded,
+		workspaceDeleteNodesMaxRequestBytes,
+	); err == nil {
+		t.Fatal("oversized workspace delete payload was accepted")
 	}
 }
 
@@ -407,6 +568,23 @@ VALUES ('source', 'First', 1, 0), ('SOURCE', 'Second', 1, 0);`)
 		filepath.Dir(databasePath),
 	); err == nil {
 		t.Fatal("show credentials unexpectedly selected one of two case-insensitive node IDs")
+	}
+	if _, err := deleteWorkspaceNodes(databasePath, workspaceNodesRequest{
+		NodeIDs: []string{"source"},
+	}); err == nil {
+		t.Fatal("delete unexpectedly selected one of two case-insensitive node IDs")
+	}
+	database, err = openDatabase(databasePath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var count int
+	if err := database.QueryRow("SELECT COUNT(*) FROM Nodes;").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("ambiguous delete left %d nodes, want 2", count)
 	}
 }
 

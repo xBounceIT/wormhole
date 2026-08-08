@@ -16,6 +16,8 @@ type workspaceNodesRequest struct {
 	NodeIDs []string `json:"nodeIds"`
 }
 
+const workspaceDeleteNodesMaxRequestBytes = 256 * 1024
+
 type workspaceDuplicateNodeResponse struct {
 	NodeID string `json:"nodeId"`
 	Name   string `json:"name"`
@@ -343,7 +345,29 @@ func deleteWorkspaceNodes(
 	if parentIndex, ok := indexes["parentid"]; ok {
 		parentExpression = workspaceQuotedIdentifier(columns[parentIndex])
 	}
-	rows, err := database.Query(
+	credentialSecretsExist, err := tableExists(database, "CredentialSecrets")
+	if err != nil {
+		return workspaceDeleteNodeResponse{}, err
+	}
+	credentialProfilesExist, err := tableExists(database, "CredentialProfiles")
+	if err != nil {
+		return workspaceDeleteNodeResponse{}, err
+	}
+	if _, err := database.Exec("PRAGMA foreign_keys = ON;"); err != nil {
+		return workspaceDeleteNodeResponse{}, fmt.Errorf("could not enable workspace relationship checks: %w", err)
+	}
+	tx, err := database.Begin()
+	if err != nil {
+		return workspaceDeleteNodeResponse{}, fmt.Errorf("could not start workspace deletion: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	rows, err := tx.Query(
 		"SELECT " + workspaceQuotedIdentifier(columns[idIndex]) + ", " + parentExpression + " FROM \"Nodes\";",
 	)
 	if err != nil {
@@ -413,25 +437,6 @@ func deleteWorkspaceNodes(
 			stack = append(stack, deleteFrame{id: childID})
 		}
 	}
-
-	credentialSecretsExist, err := tableExists(database, "CredentialSecrets")
-	if err != nil {
-		return workspaceDeleteNodeResponse{}, err
-	}
-	credentialProfilesExist, err := tableExists(database, "CredentialProfiles")
-	if err != nil {
-		return workspaceDeleteNodeResponse{}, err
-	}
-	tx, err := database.Begin()
-	if err != nil {
-		return workspaceDeleteNodeResponse{}, fmt.Errorf("could not start workspace deletion: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = tx.Rollback()
-		}
-	}()
 
 	deletedSecrets := make([]workspaceDeletedSecret, 0)
 	if credentialSecretsExist {

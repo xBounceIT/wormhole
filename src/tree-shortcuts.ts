@@ -12,12 +12,14 @@ export type ConnectionTreeShortcutEvent = {
   altKey: boolean;
   isComposing?: boolean;
   repeat?: boolean;
+  getModifierState?(keyArg: string): boolean;
 };
 
 export type ConnectionTreeShortcutContext = {
   unlocked: boolean;
   dialogOpen: boolean;
   editableTarget: boolean;
+  portaledWidgetOpen: boolean;
   withinTree: boolean;
   deleteBusy: boolean;
   tree: readonly ConnectionTreeShortcutNode[];
@@ -89,13 +91,15 @@ export function canonicalizeConnectionTreeNodeIds(
   return result;
 }
 
-function resolveSelection(context: ConnectionTreeShortcutContext): string[] {
-  const visibleIds = collectNodeIds(context.visibleTree);
-  const selectedIds = [...new Set(context.selectedNodeIds)].filter((id) => visibleIds.has(id));
+export function resolveVisibleConnectionTreeSelection(
+  visibleTree: readonly ConnectionTreeShortcutNode[],
+  selectedNodeId: string,
+  selectedNodeIds: readonly string[],
+): string[] {
+  const visibleIds = collectNodeIds(visibleTree);
+  const selectedIds = [...new Set(selectedNodeIds)].filter((id) => visibleIds.has(id));
   if (selectedIds.length > 0) return selectedIds;
-  return context.selectedNodeId && visibleIds.has(context.selectedNodeId)
-    ? [context.selectedNodeId]
-    : [];
+  return selectedNodeId && visibleIds.has(selectedNodeId) ? [selectedNodeId] : [];
 }
 
 function isUnmodified(event: ConnectionTreeShortcutEvent): boolean {
@@ -103,7 +107,12 @@ function isUnmodified(event: ConnectionTreeShortcutEvent): boolean {
 }
 
 function usesPrimaryModifier(event: ConnectionTreeShortcutEvent): boolean {
-  return (event.ctrlKey || event.metaKey) && !(event.ctrlKey && event.metaKey) && !event.altKey;
+  return (
+    (event.ctrlKey || event.metaKey) &&
+    !(event.ctrlKey && event.metaKey) &&
+    !event.altKey &&
+    event.getModifierState?.('AltGraph') !== true
+  );
 }
 
 export function resolveConnectionTreeShortcut(
@@ -115,7 +124,8 @@ export function resolveConnectionTreeShortcut(
     event.repeat ||
     !context.unlocked ||
     context.dialogOpen ||
-    context.editableTarget
+    context.editableTarget ||
+    context.portaledWidgetOpen
   ) {
     return null;
   }
@@ -130,14 +140,18 @@ export function resolveConnectionTreeShortcut(
       : { kind: 'new-connection', parentFolderId: null };
   }
   if (!isUnmodified(event) || !context.withinTree) return null;
+  if (event.key !== 'Delete' && event.key !== 'F2' && event.key !== 'Enter') return null;
 
-  const selection = resolveSelection(context);
+  const selection = resolveVisibleConnectionTreeSelection(
+    context.visibleTree,
+    context.selectedNodeId,
+    context.selectedNodeIds,
+  );
   if (event.key === 'Delete') {
     if (context.deleteBusy || selection.length === 0) return null;
     const nodeIds = canonicalizeConnectionTreeNodeIds(context.tree, selection);
     return nodeIds.length > 0 ? { kind: 'delete', nodeIds } : null;
   }
-  if (event.key !== 'F2' && event.key !== 'Enter') return null;
   if (selection.length !== 1) return null;
 
   const node = findNode(context.tree, selection[0]);
