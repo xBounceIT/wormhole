@@ -13919,8 +13919,10 @@ function SettingsPage({
               </Select>
             </div>
             <p className="text-[11px] leading-relaxed text-muted-foreground">
-              Info logs high-level events (boot, connections, tunnels, errors). Debug adds verbose
-              per-operation detail for diagnosing failures. Changes apply immediately.
+              {logLevel === 'debug'
+                ? 'Debug adds verbose per-operation detail for diagnosing failures.'
+                : 'Info logs high-level events (boot, connections, tunnels, errors).'}{' '}
+              Changes apply immediately.
             </p>
             {logsError ? <p className="text-[11px] text-destructive">{logsError}</p> : null}
           </SettingsSection>
