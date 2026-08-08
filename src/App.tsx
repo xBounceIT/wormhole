@@ -21,6 +21,12 @@ import wormholeIcon from '../Assets/Wormhole.png';
 import bitwardenIcon from '../Assets/Bitwarden/bitwarden-icon.png';
 import { mergeCredential } from './credential-state';
 import {
+  createLogLevelSaveState,
+  drainLogLevelChanges,
+  isLogLevel,
+  type LogLevel,
+} from './log-level-settings';
+import {
   bitwardenCliIsLoggedIn,
   bitwardenCliServerRegionCode,
   formatBitwardenCurrentServerLabel,
@@ -11706,16 +11712,110 @@ function SettingsSwitch({
   );
 }
 
-function SettingsTabPanel({ value, children }: { value: string; children: ReactNode }) {
+function SettingsTabPanel({
+  value,
+  children,
+  forceMount,
+}: {
+  value: string;
+  children: ReactNode;
+  forceMount?: true;
+}) {
   return (
     <TabsContent
       className="min-h-0 flex-1 overflow-hidden data-[state=inactive]:hidden"
+      forceMount={forceMount}
       value={value}
     >
       <ScrollArea className="h-full">
         <div className="max-w-[720px] space-y-7 px-1 py-5 pb-12">{children}</div>
       </ScrollArea>
     </TabsContent>
+  );
+}
+
+function logsErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) return error.message;
+  return "Wormhole couldn't complete this action. Try again.";
+}
+
+function LogLevelSetting({
+  error,
+  initialValue,
+  loaded,
+  onErrorChange,
+  onSaved,
+}: {
+  error: string;
+  initialValue: LogLevel;
+  loaded: boolean;
+  onErrorChange: (error: string) => void;
+  onSaved: (level: LogLevel) => void;
+}) {
+  const [logLevel, setLogLevel] = useState<LogLevel>(initialValue);
+  const [busy, setBusy] = useState(false);
+  const busyRef = useRef(false);
+  const saveState = useRef(createLogLevelSaveState(initialValue));
+
+  useEffect(() => {
+    if (!loaded || busyRef.current) return;
+    saveState.current.desired = initialValue;
+    saveState.current.persisted = initialValue;
+    setLogLevel(initialValue);
+  }, [initialValue, loaded]);
+
+  async function persistDesiredLogLevel() {
+    const api = window.wormhole;
+    if (busyRef.current || !api) return;
+    busyRef.current = true;
+    setBusy(true);
+    try {
+      await drainLogLevelChanges(
+        saveState.current,
+        async (target) => (await api.setLogLevel(target)).logLevel,
+        onSaved,
+      );
+      setLogLevel(saveState.current.persisted);
+    } catch (error) {
+      saveState.current.desired = saveState.current.persisted;
+      setLogLevel(saveState.current.persisted);
+      onErrorChange(logsErrorMessage(error));
+    } finally {
+      busyRef.current = false;
+      setBusy(false);
+    }
+  }
+
+  function commitLogLevel(next: string) {
+    if (!loaded || !isLogLevel(next) || next === saveState.current.desired) return;
+    saveState.current.desired = next;
+    setLogLevel(next);
+    if (error) onErrorChange('');
+    void persistDesiredLogLevel();
+  }
+
+  return (
+    <SettingsSection title="Log level">
+      <div className="grid max-w-52 gap-2">
+        <Label htmlFor="settings-log-level">Detail level</Label>
+        <Select disabled={!loaded} onValueChange={commitLogLevel} value={logLevel}>
+          <SelectTrigger aria-busy={busy} id="settings-log-level" size="sm">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="info">Info</SelectItem>
+            <SelectItem value="debug">Debug</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        {logLevel === 'debug'
+          ? 'Debug adds verbose per-operation detail for diagnosing failures.'
+          : 'Info logs high-level events (boot, connections, tunnels, errors).'}{' '}
+        Changes apply immediately.
+      </p>
+      {error ? <p className="text-[11px] text-destructive">{error}</p> : null}
+    </SettingsSection>
   );
 }
 
@@ -12467,7 +12567,7 @@ function SettingsPage({
   const [logsInfo, setLogsInfo] = useState<WormholeLogsInfo | null>(null);
   const [logsOpenBusy, setLogsOpenBusy] = useState(false);
   const [retentionBusy, setRetentionBusy] = useState(false);
-  const [logLevel, setLogLevelState] = useState('info');
+  const savedLogLevel = useRef<LogLevel>('info');
   const [logsError, setLogsError] = useState('');
   const [backupExportOpen, setBackupExportOpen] = useState(false);
   const [backupExportPassword, setBackupExportPassword] = useState('');
@@ -12599,15 +12699,18 @@ function SettingsPage({
   }, [authGate]);
 
   useEffect(() => {
-    if (authGate !== 'unlocked' || !window.wormhole) return;
+    if (authGate !== 'unlocked' || !window.wormhole) {
+      setLogsInfo(null);
+      return;
+    }
     let active = true;
     void window.wormhole
       .readLogsInfo()
       .then((info) => {
         if (!active) return;
+        if (isLogLevel(info.logLevel)) savedLogLevel.current = info.logLevel;
         setLogsInfo(info);
         setRetentionDays(String(info.logRetentionDays));
-        setLogLevelState(info.logLevel);
         setLogsError('');
       })
       .catch((error) => {
@@ -12987,11 +13090,6 @@ function SettingsPage({
       return error.message;
     }
     return "Wormhole couldn't save this change. Try again.";
-  }
-
-  function logsErrorMessage(error: unknown): string {
-    if (error instanceof Error && error.message) return error.message;
-    return "Wormhole couldn't complete this action. Try again.";
   }
 
   async function persistAuthSettings(
@@ -13388,25 +13486,6 @@ function SettingsPage({
       );
     } catch (error) {
       setRetentionDays(String(saved));
-      setLogsError(logsErrorMessage(error));
-    } finally {
-      setRetentionBusy(false);
-    }
-  }
-
-  async function commitLogLevel(next: string) {
-    if (retentionBusy || !window.wormhole) return;
-    const saved = logsInfo?.logLevel ?? 'info';
-    if (next !== 'info' && next !== 'debug') return;
-    if (next === saved) return;
-    setRetentionBusy(true);
-    setLogsError('');
-    try {
-      const result = await window.wormhole.setLogLevel(next);
-      setLogLevelState(result.logLevel);
-      setLogsInfo((current) => (current ? { ...current, logLevel: result.logLevel } : current));
-    } catch (error) {
-      setLogLevelState(saved);
       setLogsError(logsErrorMessage(error));
     } finally {
       setRetentionBusy(false);
@@ -14121,7 +14200,7 @@ function SettingsPage({
           </SettingsSection>
         </SettingsTabPanel>
 
-        <SettingsTabPanel value="logs">
+        <SettingsTabPanel forceMount value="logs">
           <SettingsSection title="Current log">
             <div className="grid gap-2">
               <Label htmlFor="settings-log-file">Today&apos;s log file</Label>
@@ -14156,31 +14235,15 @@ function SettingsPage({
             </div>
           </SettingsSection>
 
-          <SettingsSection title="Log level">
-            <div className="grid max-w-52 gap-2">
-              <Label htmlFor="settings-log-level">Detail level</Label>
-              <Select
-                disabled={retentionBusy}
-                onValueChange={(value) => void commitLogLevel(value)}
-                value={logLevel}
-              >
-                <SelectTrigger id="settings-log-level" size="sm">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="info">Info</SelectItem>
-                  <SelectItem value="debug">Debug</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
-            <p className="text-[11px] leading-relaxed text-muted-foreground">
-              {logLevel === 'debug'
-                ? 'Debug adds verbose per-operation detail for diagnosing failures.'
-                : 'Info logs high-level events (boot, connections, tunnels, errors).'}{' '}
-              Changes apply immediately.
-            </p>
-            {logsError ? <p className="text-[11px] text-destructive">{logsError}</p> : null}
-          </SettingsSection>
+          <LogLevelSetting
+            error={logsError}
+            initialValue={savedLogLevel.current}
+            loaded={logsInfo !== null}
+            onErrorChange={setLogsError}
+            onSaved={(level) => {
+              savedLogLevel.current = level;
+            }}
+          />
 
           <SettingsSection title="Rotation">
             <div className="grid max-w-52 gap-2">

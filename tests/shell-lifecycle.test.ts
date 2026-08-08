@@ -11,6 +11,7 @@ import {
   WindowCloseCoordinator,
   WindowCloseReasonTracker,
 } from '../electron/window-lifecycle.ts';
+import { createLogLevelSaveState, drainLogLevelChanges } from '../src/log-level-settings.ts';
 import {
   isSessionActive,
   nextSelectedSessionId,
@@ -64,6 +65,70 @@ test('active-session app close uses the renderer shadcn confirmation contract', 
   assert.match(preloadSource, /onWindowCloseConfirmationRequested/);
   assert.match(appSource, /role="alertdialog"/);
   assert.match(appSource, /Close and terminate sessions/);
+});
+
+test('log level changes stay isolated without disrupting Radix select close focus', () => {
+  const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+  const settingSource = appSource.slice(
+    appSource.indexOf('function LogLevelSetting'),
+    appSource.indexOf('function BitwardenCliDialog'),
+  );
+  const settingsPageSource = appSource.slice(
+    appSource.indexOf('function SettingsPage'),
+    appSource.indexOf('function UtilityPage'),
+  );
+
+  assert.match(settingSource, /const \[logLevel, setLogLevel\] = useState/);
+  assert.match(settingSource, /busyRef\.current/);
+  assert.match(settingSource, /drainLogLevelChanges/);
+  assert.match(settingSource, /disabled=\{!loaded\}/);
+  assert.match(settingSource, /aria-busy=\{busy\}/);
+  assert.doesNotMatch(settingSource, /disabled=\{busy\}/);
+  assert.match(settingsPageSource, /<SettingsTabPanel forceMount value="logs">/);
+  assert.match(settingsPageSource, /loaded=\{logsInfo !== null\}/);
+  assert.doesNotMatch(settingsPageSource, /setLogLevelState|function commitLogLevel/);
+});
+
+test('log level persistence drains the latest selection without dropping rapid changes', async () => {
+  const state = createLogLevelSaveState('info');
+  state.desired = 'debug';
+  let releaseFirst!: (level: string) => void;
+  const firstWrite = new Promise<string>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const writes: string[] = [];
+  const persisted: string[] = [];
+  const draining = drainLogLevelChanges(
+    state,
+    async (level) => {
+      writes.push(level);
+      return writes.length === 1 ? firstWrite : level;
+    },
+    (level) => persisted.push(level),
+  );
+
+  state.desired = 'info';
+  releaseFirst('debug');
+  await draining;
+
+  assert.deepEqual(writes, ['debug', 'info']);
+  assert.deepEqual(persisted, ['debug', 'info']);
+  assert.deepEqual(state, { desired: 'info', persisted: 'info' });
+});
+
+test('log level persistence rejects a mismatched backend response atomically', async () => {
+  const state = createLogLevelSaveState('info');
+  state.desired = 'debug';
+
+  await assert.rejects(
+    drainLogLevelChanges(
+      state,
+      async () => 'info',
+      () => assert.fail('must not commit'),
+    ),
+    /log level response is invalid/i,
+  );
+  assert.deepEqual(state, { desired: 'debug', persisted: 'info' });
 });
 
 test('session activity excludes failed, closed, disconnected, and idle tabs', () => {
