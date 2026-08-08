@@ -1484,6 +1484,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   );
   const [autoCopyOnSelect, setAutoCopyOnSelect] = useState(initialSettings.autoCopyOnSelect);
   const [confirmOnTabClose, setConfirmOnTabClose] = useState(initialSettings.confirmOnTabClose);
+  const [pendingSessionClose, setPendingSessionClose] = useState<{
+    id: string;
+    preferredNextSessionId?: string;
+  } | null>(null);
+  const [sessionCloseBusy, setSessionCloseBusy] = useState(false);
   const sidebarWidth = normalizeSidebarWidth(initialSettings.sidebarWidth);
   const sidebarWriter = useMemo(
     () =>
@@ -3092,16 +3097,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     void window.wormhole?.setConfirmOnTabClose(enabled).catch(() => undefined);
   }
 
-  async function closeSession(id: string, preferredNextSessionId?: string) {
+  async function performSessionClose(id: string, preferredNextSessionId?: string) {
     const closing = sessions.find((session) => session.id === id);
     if (!closing) return;
     await sessionCloseGate.current.run(id, async () => {
-      if (
-        shouldConfirmConnectedTabClose(confirmOnTabClose, [closing]) &&
-        !window.confirm(connectedTabCloseMessage(1))
-      ) {
-        return;
-      }
       for (const key of sessionRuntimeRetryKeys(closing)) {
         runtimeBitwardenRetries.current.remove(key);
       }
@@ -3137,6 +3136,28 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         current?.sessionId === id || current?.backendSessionId === id ? null : current,
       );
     });
+  }
+
+  async function closeSession(id: string, preferredNextSessionId?: string) {
+    const closing = sessions.find((session) => session.id === id);
+    if (!closing) return;
+    if (shouldConfirmConnectedTabClose(confirmOnTabClose, [closing])) {
+      setPendingSessionClose((current) => current ?? { id, preferredNextSessionId });
+      return;
+    }
+    await performSessionClose(id, preferredNextSessionId);
+  }
+
+  async function confirmSessionClose() {
+    const pending = pendingSessionClose;
+    if (!pending || sessionCloseBusy) return;
+    setSessionCloseBusy(true);
+    try {
+      await performSessionClose(pending.id, pending.preferredNextSessionId);
+      setPendingSessionClose(null);
+    } finally {
+      setSessionCloseBusy(false);
+    }
   }
 
   async function closeSessionsForNodeIds(nodeIds: ReadonlySet<string>) {
@@ -5535,7 +5556,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     !newFolderOpen &&
                     !authPrompt &&
                     !rdpCredentialPrompt &&
-                    !sshCredentialPrompt
+                    !sshCredentialPrompt &&
+                    !pendingSessionClose
                   }
                   selectedSession={selectedSession}
                   sessions={sessions}
@@ -5629,6 +5651,51 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           onOpenChange={setMremoteImportOpen}
           open={mremoteImportOpen}
         />
+
+        <Dialog
+          onOpenChange={(open) => {
+            if (!open && !sessionCloseBusy) setPendingSessionClose(null);
+          }}
+          open={pendingSessionClose !== null}
+        >
+          <DialogContent
+            aria-describedby="active-connection-close-description"
+            className="border-border/70 bg-card text-card-foreground sm:max-w-md"
+            role="alertdialog"
+            showCloseButton={false}
+          >
+            <DialogHeader className="gap-3">
+              <div className="flex size-9 items-center justify-center rounded-lg bg-destructive/10 text-destructive">
+                <AlertCircle className="size-5" />
+              </div>
+              <div className="grid gap-2">
+                <DialogTitle>Disconnect active connection?</DialogTitle>
+                <DialogDescription id="active-connection-close-description">
+                  {connectedTabCloseMessage(1)}
+                </DialogDescription>
+              </div>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                disabled={sessionCloseBusy}
+                onClick={() => setPendingSessionClose(null)}
+                type="button"
+                variant="outline"
+              >
+                Cancel
+              </Button>
+              <Button
+                disabled={sessionCloseBusy}
+                onClick={() => void confirmSessionClose()}
+                type="button"
+                variant="destructive"
+              >
+                {sessionCloseBusy ? <LoaderCircle className="animate-spin" /> : null}
+                {sessionCloseBusy ? 'Disconnecting…' : 'Close and disconnect'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         <Dialog onOpenChange={setQuickConnectOpen} open={quickConnectOpen}>
           <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
@@ -9050,7 +9117,9 @@ function SessionsPage({
               isActive={active}
               isAuthorized={isAuthorized}
               isWebSurfaceVisible={isWebSurfaceVisible}
-              nativeSurfaceActive={active && !draggedSessionId && !resizingSplitId}
+              nativeSurfaceActive={
+                active && isWebSurfaceVisible && !draggedSessionId && !resizingSplitId
+              }
               onBitwardenUnlockRequired={onBitwardenUnlockRequired}
               onCloseSftpBrowser={onCloseSftpBrowser}
               onConnectRdp={onConnectRdp}

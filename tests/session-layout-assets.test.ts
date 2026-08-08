@@ -70,13 +70,22 @@ test('editing an open RDP session releases and resets its native lifecycle', () 
 });
 
 test('native web and RDP overlays are hidden while a layout drag is active', () => {
-  assert.match(
-    appSource,
-    /nativeSurfaceActive=\{active && !draggedSessionId && !resizingSplitId\}/,
-  );
+  assert.match(appSource, /active && isWebSurfaceVisible && !draggedSessionId && !resizingSplitId/);
   assert.match(appSource, /<WebSurface[\s\S]*isActive=\{nativeSurfaceActive\}/);
   assert.match(appSource, /<RdpSurface[\s\S]*isActive=\{nativeSurfaceActive\}/);
   assert.match(appSource, /session\.sftp && isActive/);
+});
+
+test('active session close uses the themed confirmation dialog', () => {
+  const closeSource = appSource.slice(
+    appSource.indexOf('async function performSessionClose'),
+    appSource.indexOf('async function closeSessionsForNodeIds'),
+  );
+  assert.doesNotMatch(closeSource, /window\.confirm\(/);
+  assert.match(closeSource, /setPendingSessionClose/);
+  assert.match(appSource, /<DialogTitle>Disconnect active connection\?<\/DialogTitle>/);
+  assert.match(appSource, /role="alertdialog"/);
+  assert.match(appSource, /Close and disconnect/);
 });
 
 test('surface bounds reserve a reachable gutter for split handles above native views', () => {
