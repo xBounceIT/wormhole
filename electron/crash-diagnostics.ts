@@ -1,12 +1,15 @@
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  chmodSync,
+  closeSync,
+  constants as fsConstants,
+  fchmodSync,
+  fstatSync,
+  fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
-  closeSync,
   opendirSync,
-  readFileSync,
+  readSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -20,6 +23,8 @@ const maintenanceLockFileName = 'electron-crashdumps-maintenance.lock';
 const crashpadDumpDirectories = ['', 'completed', 'pending', 'reports', 'new'] as const;
 const stateVersion = 1;
 const staleMaintenanceLockMs = 5 * 60 * 1000;
+const maximumMaintenanceLockLifetimeMs = 24 * 60 * 60 * 1000;
+const maximumFutureDumpSkewMs = 24 * 60 * 60 * 1000;
 const dumpKeyPattern = /^[a-f0-9]{64}$/;
 
 export type CrashDiagnosticsPolicy = {
@@ -96,10 +101,28 @@ type InitializeCrashDiagnosticsOptions = {
 type CrashDumpCandidate = {
   path: string;
   directoryName: (typeof crashpadDumpDirectories)[number];
+  directoryIdentity: FileIdentity;
+  fileIdentity: FileIdentity;
   name: string;
   size: number;
   modifiedMs: number;
   key: string;
+};
+
+type FileIdentity = {
+  dev: number;
+  ino: number;
+  birthtimeMs: number;
+};
+
+type MaintenanceLock = {
+  descriptor: number;
+  identity: FileIdentity;
+};
+
+type MaintenanceLockRecord = {
+  pid: number;
+  token: string;
 };
 
 type ReportState = {
@@ -115,10 +138,14 @@ export function resolveCrashDiagnosticsPaths(options: {
   const pathApi = options.platform === 'win32' ? path.win32 : path.posix;
   const localAppData = options.localAppData?.trim();
   const preferredRoot =
-    options.platform === 'win32' && localAppData && path.win32.isAbsolute(localAppData)
+    options.platform === 'win32' && localAppData && isWindowsLocalDrivePath(localAppData)
       ? localAppData
       : options.userData;
-  if (!preferredRoot || !pathApi.isAbsolute(preferredRoot)) {
+  const isSafeRoot =
+    options.platform === 'win32'
+      ? isWindowsLocalDrivePath(preferredRoot)
+      : pathApi.isAbsolute(preferredRoot);
+  if (!preferredRoot || !isSafeRoot) {
     throw new Error('Crash diagnostics requires an absolute application-data path.');
   }
 
@@ -178,18 +205,20 @@ export function initializeLocalCrashDiagnostics(
   });
   if (!started.enabled) return started;
 
-  const lockDescriptor = acquireMaintenanceLock(paths.lockPath, options.now ?? Date.now());
-  if (lockDescriptor === undefined) {
+  const requestedNow = options.now ?? Date.now();
+  const now = Number.isFinite(requestedNow) ? requestedNow : Date.now();
+  const maintenanceLock = acquireMaintenanceLock(paths.lockPath, now);
+  if (maintenanceLock === undefined) {
     safeLog(
       logger,
       'info',
-      '[Wormhole] Crash diagnostics startup maintenance is already running in another process.',
+      '[Wormhole] Crash diagnostics startup maintenance was skipped because its bounded lock is unavailable or held by another process.',
     );
     return started;
   }
 
   try {
-    const maintenance = maintainCrashDumps(paths, logger, options.now ?? Date.now(), policy);
+    const maintenance = maintainCrashDumps(paths, logger, now, policy);
     return { ...started, ...maintenance };
   } catch (error) {
     safeLog(
@@ -199,7 +228,7 @@ export function initializeLocalCrashDiagnostics(
     );
     return started;
   } finally {
-    releaseMaintenanceLock(paths.lockPath, lockDescriptor);
+    releaseMaintenanceLock(paths.lockPath, maintenanceLock);
   }
 }
 
@@ -267,6 +296,7 @@ function maintainCrashDumps(
   for (const dump of ordered) {
     const ageMs = Math.max(0, now - dump.modifiedMs);
     const fits =
+      dump.modifiedMs <= now + maximumFutureDumpSkewMs &&
       ageMs <= policy.maxAgeMs &&
       retained.length < policy.maxDumps &&
       dump.size <= policy.maxTotalBytes - retainedBytes;
@@ -278,11 +308,67 @@ function maintainCrashDumps(
     }
   }
 
+  let reportedDumps = 0;
+  const retainedCandidateKeys = new Set(retained.map((dump) => dump.key));
+  const retainedKeys = new Set<string>();
+  const newlyReportedKeys = new Set<string>();
+  for (const dump of retained) {
+    if (retainedKeys.has(dump.key)) continue;
+    if (state.keys.has(dump.key)) {
+      retainedKeys.add(dump.key);
+      continue;
+    }
+    if (
+      safeLog(
+        logger,
+        'error',
+        `[Wormhole] Previous crash dump detected: modifiedUtc=${new Date(dump.modifiedMs).toISOString()}, sizeBytes=${dump.size}.`,
+      )
+    ) {
+      retainedKeys.add(dump.key);
+      newlyReportedKeys.add(dump.key);
+      reportedDumps++;
+    }
+  }
+
+  const newPrunedKeys = new Set<string>();
+  for (const dump of pruned) {
+    if (
+      !state.keys.has(dump.key) &&
+      !retainedCandidateKeys.has(dump.key) &&
+      !newlyReportedKeys.has(dump.key)
+    ) {
+      newPrunedKeys.add(dump.key);
+    }
+  }
+  if (
+    newPrunedKeys.size > 0 &&
+    safeLog(
+      logger,
+      'error',
+      `[Wormhole] ${newPrunedKeys.size} additional previous crash dump(s) were detected outside retention bounds and will be pruned locally.`,
+    )
+  ) {
+    for (const key of newPrunedKeys) newlyReportedKeys.add(key);
+    reportedDumps += newPrunedKeys.size;
+  }
+
   let prunedDumps = 0;
   let pruneFailures = 0;
+  let deferredPrunes = 0;
+  const failedPruneKeys = new Set<string>();
   for (const dump of pruned) {
+    if (!state.keys.has(dump.key) && !newlyReportedKeys.has(dump.key)) {
+      deferredPrunes++;
+      continue;
+    }
     if (deleteRegularDump(paths.dumpDirectory, dump)) prunedDumps++;
-    else pruneFailures++;
+    else {
+      pruneFailures++;
+      if (state.keys.has(dump.key) || newlyReportedKeys.has(dump.key)) {
+        failedPruneKeys.add(dump.key);
+      }
+    }
   }
   if (prunedDumps > 0) {
     safeLog(
@@ -298,28 +384,20 @@ function maintainCrashDumps(
       `[Wormhole] Crash diagnostics could not prune ${pruneFailures} bounded local dump(s).`,
     );
   }
-
-  let reportedDumps = 0;
-  const retainedKeys = new Set<string>();
-  for (const dump of retained) {
-    if (state.keys.has(dump.key)) {
-      retainedKeys.add(dump.key);
-      continue;
-    }
-    if (
-      safeLog(
-        logger,
-        'error',
-        `[Wormhole] Previous crash dump detected: dumpId=${dump.key.slice(0, 12)}, modifiedUtc=${new Date(dump.modifiedMs).toISOString()}, sizeBytes=${dump.size}.`,
-      )
-    ) {
-      retainedKeys.add(dump.key);
-      reportedDumps++;
-    }
+  if (deferredPrunes > 0) {
+    safeLog(
+      logger,
+      'warn',
+      `[Wormhole] Crash diagnostics deferred pruning ${deferredPrunes} dump(s) because their detection could not be reported safely.`,
+    );
   }
 
   const boundedKeys = new Set([...retainedKeys].slice(0, policy.maxStateEntries));
-  if (scan.truncated) {
+  for (const key of failedPruneKeys) {
+    if (boundedKeys.size >= policy.maxStateEntries) break;
+    boundedKeys.add(key);
+  }
+  if (scan.truncated || scan.incomplete) {
     for (const key of [...state.keys].sort()) {
       if (boundedKeys.size >= policy.maxStateEntries) break;
       boundedKeys.add(key);
@@ -343,9 +421,11 @@ function scanCrashDumps(
   dumpDirectory: string,
   logger: CrashDiagnosticsLogger,
   policy: CrashDiagnosticsPolicy,
-): { dumps: CrashDumpCandidate[]; truncated: boolean } {
+): { dumps: CrashDumpCandidate[]; truncated: boolean; incomplete: boolean } {
   const dumps: CrashDumpCandidate[] = [];
   let truncated = false;
+  let incomplete = false;
+  let skippedDumpEntries = 0;
 
   for (const directoryName of crashpadDumpDirectories) {
     if (dumps.length >= policy.maxCandidates) {
@@ -355,7 +435,8 @@ function scanCrashDumps(
     const directoryPath = directoryName ? path.join(dumpDirectory, directoryName) : dumpDirectory;
     const directoryInfo = tryLstat(directoryPath);
     if (!directoryInfo) continue;
-    if (!directoryInfo.isDirectory() || directoryInfo.isSymbolicLink()) {
+    if (!isSafeDirectory(directoryInfo)) {
+      incomplete = true;
       safeLog(
         logger,
         'warn',
@@ -367,23 +448,55 @@ function scanCrashDumps(
     let directory;
     try {
       directory = opendirSync(directoryPath);
+      const openedDirectoryInfo = tryLstat(directoryPath);
+      if (
+        !isSafeDirectory(openedDirectoryInfo) ||
+        !sameFileIdentity(fileIdentity(directoryInfo), fileIdentity(openedDirectoryInfo))
+      ) {
+        incomplete = true;
+        safeLog(
+          logger,
+          'warn',
+          `[Wormhole] Crash diagnostics skipped a dump directory that changed during inspection, label=${directoryName || 'root'}.`,
+        );
+        continue;
+      }
+      const directoryIdentity = fileIdentity(openedDirectoryInfo);
       let entriesRead = 0;
       while (entriesRead < policy.maxEntriesPerDirectory) {
         const entry = directory.readSync();
         if (!entry) break;
         entriesRead++;
-        if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.dmp')) continue;
+        if (!entry.name.toLowerCase().endsWith('.dmp')) continue;
+        if (!entry.isFile()) {
+          incomplete = true;
+          skippedDumpEntries++;
+          continue;
+        }
         if (dumps.length >= policy.maxCandidates) {
           truncated = true;
           break;
         }
         const dumpPath = path.join(directoryPath, entry.name);
         if (!isPathInside(path, dumpDirectory, dumpPath)) continue;
-        const info = tryLstat(dumpPath);
-        if (!isSafeDumpFile(info)) continue;
+        let info: Stats | undefined;
+        try {
+          info = tryLstat(dumpPath);
+        } catch {
+          incomplete = true;
+          skippedDumpEntries++;
+          continue;
+        }
+        if (!isSafeDumpFile(info)) {
+          incomplete = true;
+          skippedDumpEntries++;
+          continue;
+        }
         dumps.push({
           path: dumpPath,
           directoryName,
+          directoryIdentity,
+          fileIdentity: fileIdentity(info),
           name: entry.name,
           size: info.size,
           modifiedMs: info.mtimeMs,
@@ -392,6 +505,7 @@ function scanCrashDumps(
       }
       if (entriesRead === policy.maxEntriesPerDirectory && directory.readSync()) truncated = true;
     } catch (error) {
+      incomplete = true;
       safeLog(
         logger,
         'warn',
@@ -406,33 +520,49 @@ function scanCrashDumps(
     }
   }
 
-  return { dumps, truncated };
+  if (skippedDumpEntries > 0) {
+    safeLog(
+      logger,
+      'warn',
+      `[Wormhole] Crash diagnostics skipped ${skippedDumpEntries} unsafe or unstable dump entry/entries.`,
+    );
+  }
+
+  return { dumps, truncated, incomplete };
 }
 
 function loadReportState(statePath: string, policy: CrashDiagnosticsPolicy): ReportState {
-  const info = tryLstat(statePath);
+  const info = safeLstat(statePath);
   if (!info) return { keys: new Set(), needsRewrite: false };
   if (!info.isFile() || info.isSymbolicLink() || info.size > policy.maxStateBytes) {
     return { keys: new Set(), needsRewrite: true };
   }
-  if (process.platform !== 'win32') chmodSync(statePath, 0o600);
 
   try {
-    const parsed = JSON.parse(readFileSync(statePath, 'utf8')) as unknown;
+    const contents = readBoundedRegularFile(statePath, policy.maxStateBytes, true);
+    if (contents === undefined) return { keys: new Set(), needsRewrite: true };
+    const parsed = JSON.parse(contents) as unknown;
     if (!parsed || typeof parsed !== 'object') return { keys: new Set(), needsRewrite: true };
     const record = parsed as Record<string, unknown>;
     if (record.version !== stateVersion || !Array.isArray(record.reportedDumpKeys)) {
       return { keys: new Set(), needsRewrite: true };
     }
+    const hasExactSchema =
+      Object.keys(record).length === 2 &&
+      Object.hasOwn(record, 'version') &&
+      Object.hasOwn(record, 'reportedDumpKeys');
     const validKeys = record.reportedDumpKeys.filter(
       (value): value is string => typeof value === 'string' && dumpKeyPattern.test(value),
     );
-    const boundedKeys = validKeys.slice(-policy.maxStateEntries);
+    const normalizedKeys = [...new Set(validKeys)].sort();
+    const boundedKeys = normalizedKeys.slice(-policy.maxStateEntries);
     return {
       keys: new Set(boundedKeys),
       needsRewrite:
+        !hasExactSchema ||
         validKeys.length !== record.reportedDumpKeys.length ||
-        boundedKeys.length !== validKeys.length,
+        boundedKeys.length !== validKeys.length ||
+        boundedKeys.some((key, index) => key !== validKeys[index]),
     };
   } catch {
     return { keys: new Set(), needsRewrite: true };
@@ -447,16 +577,25 @@ function saveReportState(statePath: string, keys: Set<string>): void {
     reportedDumpKeys: [...keys].sort(),
   });
   let temporaryCreated = false;
+  let descriptor: number | undefined;
   try {
-    writeFileSync(temporaryPath, contents, {
-      encoding: 'utf8',
-      flag: 'wx',
-      mode: 0o600,
-    });
+    descriptor = openSync(temporaryPath, 'wx', 0o600);
     temporaryCreated = true;
+    writeFileSync(descriptor, contents, { encoding: 'utf8' });
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = undefined;
     renameSync(temporaryPath, statePath);
     temporaryCreated = false;
+    syncDirectory(path.dirname(statePath));
   } finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // The temporary file cleanup below remains safe even if close reports an error.
+      }
+    }
     if (temporaryCreated) {
       try {
         unlinkSync(temporaryPath);
@@ -467,77 +606,60 @@ function saveReportState(statePath: string, keys: Set<string>): void {
   }
 }
 
-function acquireMaintenanceLock(lockPath: string, now: number): number | undefined {
+function acquireMaintenanceLock(lockPath: string, now: number): MaintenanceLock | undefined {
   for (let attempt = 0; attempt < 2; attempt++) {
     let descriptor: number;
     try {
       descriptor = openSync(lockPath, 'wx', 0o600);
     } catch (error) {
       if (errorCode(error) !== 'EEXIST') return undefined;
-      let info: Stats | undefined;
-      try {
-        info = tryLstat(lockPath);
-      } catch {
+      const info = safeLstat(lockPath);
+      if (attempt > 0 || !isReclaimableMaintenanceLock(lockPath, info, now)) {
         return undefined;
       }
-      if (
-        attempt > 0 ||
-        !info?.isFile() ||
-        info.isSymbolicLink() ||
-        !Number.isFinite(info.mtimeMs) ||
-        Math.max(0, now - info.mtimeMs) <= staleMaintenanceLockMs
-      ) {
-        return undefined;
-      }
-      try {
-        unlinkSync(lockPath);
-      } catch {
+      if (!unlinkIfIdentityMatches(lockPath, fileIdentity(info), true)) {
         return undefined;
       }
       continue;
     }
 
+    let identity: FileIdentity | undefined;
     try {
-      writeFileSync(descriptor, String(process.pid));
-      return descriptor;
+      identity = fileIdentity(fstatSync(descriptor));
+      writeFileSync(
+        descriptor,
+        JSON.stringify({ pid: process.pid, token: randomUUID() } satisfies MaintenanceLockRecord),
+      );
+      return { descriptor, identity };
     } catch {
       try {
         closeSync(descriptor);
-        unlinkSync(lockPath);
       } catch {
-        // A stale lock is reclaimed after a short timeout on a future launch.
+        // Identity-checked cleanup below remains safe if close reports an error.
       }
+      if (identity) unlinkIfIdentityMatches(lockPath, identity);
       return undefined;
     }
   }
   return undefined;
 }
 
-function releaseMaintenanceLock(lockPath: string, descriptor: number): void {
+function releaseMaintenanceLock(lockPath: string, lock: MaintenanceLock): void {
   try {
-    closeSync(descriptor);
+    closeSync(lock.descriptor);
   } catch {
-    // The exclusive file itself still prevents a second scanner from racing this one.
+    // Re-check the path identity before attempting cleanup below.
   }
-  let info: Stats | undefined;
-  try {
-    info = tryLstat(lockPath);
-  } catch {
-    return;
-  }
-  if (!info?.isFile() || info.isSymbolicLink()) return;
-  try {
-    unlinkSync(lockPath);
-  } catch {
-    // A stale lock is reclaimed after a short timeout on a future launch.
-  }
+  unlinkIfIdentityMatches(lockPath, lock.identity);
 }
 
 function deleteRegularDump(dumpDirectory: string, dump: CrashDumpCandidate): boolean {
   if (!isPathInside(path, dumpDirectory, dump.path)) return false;
-  const current = tryLstat(dump.path);
+  if (!dumpDirectoryIdentityMatches(dumpDirectory, dump)) return false;
+  const current = safeLstat(dump.path);
   if (
     !isSafeDumpFile(current) ||
+    !sameFileIdentity(dump.fileIdentity, fileIdentity(current)) ||
     current.size !== dump.size ||
     current.mtimeMs !== dump.modifiedMs
   ) {
@@ -557,7 +679,8 @@ function deleteSidecarIfSafe(dumpDirectory: string, dump: CrashDumpCandidate): v
   const parent = dump.directoryName ? path.join(dumpDirectory, dump.directoryName) : dumpDirectory;
   const sidecarPath = path.join(parent, sidecarName);
   if (!isPathInside(path, dumpDirectory, sidecarPath)) return;
-  const info = tryLstat(sidecarPath);
+  if (!dumpDirectoryIdentityMatches(dumpDirectory, dump)) return;
+  const info = safeLstat(sidecarPath);
   if (!info?.isFile() || info.isSymbolicLink()) return;
   try {
     unlinkSync(sidecarPath);
@@ -566,21 +689,49 @@ function deleteSidecarIfSafe(dumpDirectory: string, dump: CrashDumpCandidate): v
   }
 }
 
+function dumpDirectoryIdentityMatches(dumpDirectory: string, dump: CrashDumpCandidate): boolean {
+  const directoryPath = dump.directoryName
+    ? path.join(dumpDirectory, dump.directoryName)
+    : dumpDirectory;
+  const info = safeLstat(directoryPath);
+  return Boolean(
+    isSafeDirectory(info) && sameFileIdentity(dump.directoryIdentity, fileIdentity(info)),
+  );
+}
+
 function ensurePrivateDirectory(directoryPath: string): void {
   mkdirSync(directoryPath, { recursive: true, mode: 0o700 });
   const info = lstatSync(directoryPath);
-  if (!info.isDirectory() || info.isSymbolicLink()) {
+  if (!isSafeDirectory(info)) {
     throw new Error('Crash diagnostics directory is not a regular directory.');
   }
-  if (process.platform !== 'win32') chmodSync(directoryPath, 0o700);
+  if (process.platform === 'win32') return;
+
+  const descriptor = openDirectoryNoFollow(directoryPath);
+  try {
+    const opened = fstatSync(descriptor);
+    if (!opened.isDirectory()) {
+      throw new Error('Crash diagnostics directory changed during validation.');
+    }
+    fchmodSync(descriptor, 0o700);
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 function ensureSafeStateTarget(statePath: string): void {
   const info = tryLstat(statePath);
-  if (info && (!info.isFile() || info.isSymbolicLink())) {
+  if (info?.isSymbolicLink()) {
+    if (unlinkIfIdentityMatches(statePath, fileIdentity(info), true)) return;
+    throw new Error('Crash diagnostics state symlink changed during validation.');
+  }
+  if (info && !info.isFile()) {
     throw new Error('Crash diagnostics state target is not a regular file.');
   }
-  if (info && process.platform !== 'win32') chmodSync(statePath, 0o600);
+}
+
+function isSafeDirectory(info: Stats | undefined): info is Stats {
+  return Boolean(info?.isDirectory() && !info.isSymbolicLink());
 }
 
 function isSafeDumpFile(info: Stats | undefined): info is Stats {
@@ -594,12 +745,167 @@ function isSafeDumpFile(info: Stats | undefined): info is Stats {
   );
 }
 
+function fileIdentity(info: Stats): FileIdentity {
+  return { dev: info.dev, ino: info.ino, birthtimeMs: info.birthtimeMs };
+}
+
+function sameFileIdentity(left: FileIdentity, right: FileIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.birthtimeMs === right.birthtimeMs;
+}
+
 function tryLstat(candidate: string): Stats | undefined {
   try {
     return lstatSync(candidate);
   } catch (error) {
     if (errorCode(error) === 'ENOENT') return undefined;
     throw error;
+  }
+}
+
+function safeLstat(candidate: string): Stats | undefined {
+  try {
+    return tryLstat(candidate);
+  } catch {
+    return undefined;
+  }
+}
+
+function readBoundedRegularFile(
+  filePath: string,
+  maxBytes: number,
+  makePrivate: boolean,
+): string | undefined {
+  const before = safeLstat(filePath);
+  if (!before?.isFile() || before.isSymbolicLink()) return undefined;
+
+  let descriptor: number | undefined;
+  try {
+    const noFollow = process.platform === 'win32' ? 0 : (fsConstants.O_NOFOLLOW ?? 0);
+    descriptor = openSync(filePath, fsConstants.O_RDONLY | noFollow);
+    const opened = fstatSync(descriptor);
+    if (
+      !opened.isFile() ||
+      (makePrivate && (before.nlink !== 1 || opened.nlink !== 1)) ||
+      opened.size > maxBytes ||
+      !sameFileIdentity(fileIdentity(before), fileIdentity(opened))
+    ) {
+      return undefined;
+    }
+    if (makePrivate && process.platform !== 'win32') fchmodSync(descriptor, 0o600);
+
+    const buffer = Buffer.allocUnsafe(maxBytes + 1);
+    let total = 0;
+    while (total < buffer.length) {
+      const bytesRead = readSync(descriptor, buffer, total, buffer.length - total, null);
+      if (bytesRead === 0) break;
+      total += bytesRead;
+    }
+    const after = fstatSync(descriptor);
+    if (
+      total > maxBytes ||
+      total !== after.size ||
+      opened.size !== after.size ||
+      opened.mtimeMs !== after.mtimeMs ||
+      !sameFileIdentity(fileIdentity(opened), fileIdentity(after))
+    ) {
+      return undefined;
+    }
+    return buffer.subarray(0, total).toString('utf8');
+  } catch {
+    return undefined;
+  } finally {
+    if (descriptor !== undefined) {
+      try {
+        closeSync(descriptor);
+      } catch {
+        // Bounded reads are best effort and never block application startup.
+      }
+    }
+  }
+}
+
+function openDirectoryNoFollow(directoryPath: string): number {
+  return openSync(
+    directoryPath,
+    fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0) | (fsConstants.O_NOFOLLOW ?? 0),
+  );
+}
+
+function syncDirectory(directoryPath: string): void {
+  if (process.platform === 'win32') return;
+  const descriptor = openDirectoryNoFollow(directoryPath);
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function isReclaimableMaintenanceLock(
+  lockPath: string,
+  info: Stats | undefined,
+  now: number,
+): info is Stats {
+  if (!info || !Number.isFinite(info.mtimeMs)) return false;
+  if (info.isSymbolicLink()) return true;
+  if (!info.isFile()) return false;
+  const ageMs = now - info.mtimeMs;
+  if (ageMs < -staleMaintenanceLockMs || ageMs > maximumMaintenanceLockLifetimeMs) return true;
+
+  const record = readMaintenanceLockRecord(lockPath);
+  if (record) return !isProcessAlive(record.pid);
+
+  return ageMs > staleMaintenanceLockMs;
+}
+
+function readMaintenanceLockRecord(lockPath: string): MaintenanceLockRecord | undefined {
+  const contents = readBoundedRegularFile(lockPath, 512, false);
+  if (contents === undefined) return undefined;
+  try {
+    const parsed = JSON.parse(contents) as unknown;
+    if (!parsed || typeof parsed !== 'object') return undefined;
+    const record = parsed as Record<string, unknown>;
+    if (
+      typeof record.pid !== 'number' ||
+      !Number.isSafeInteger(record.pid) ||
+      record.pid <= 0 ||
+      typeof record.token !== 'string' ||
+      !/^[a-f0-9-]{36}$/i.test(record.token)
+    ) {
+      return undefined;
+    }
+    return { pid: record.pid, token: record.token };
+  } catch {
+    return undefined;
+  }
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return errorCode(error) !== 'ESRCH';
+  }
+}
+
+function unlinkIfIdentityMatches(
+  candidate: string,
+  expected: FileIdentity,
+  allowSymbolicLink = false,
+): boolean {
+  const current = safeLstat(candidate);
+  if (
+    (!current?.isFile() && !(allowSymbolicLink && current?.isSymbolicLink())) ||
+    !sameFileIdentity(expected, fileIdentity(current))
+  ) {
+    return false;
+  }
+  try {
+    unlinkSync(candidate);
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -616,9 +922,14 @@ function crashDumpKey(name: string, info: Stats): string {
 function compareNewestFirst(left: CrashDumpCandidate, right: CrashDumpCandidate): number {
   const byTime = right.modifiedMs - left.modifiedMs;
   if (byTime !== 0) return byTime;
-  const byName = left.name.localeCompare(right.name);
+  const byName = compareOrdinal(left.name, right.name);
   if (byName !== 0) return byName;
-  return left.directoryName.localeCompare(right.directoryName);
+  return compareOrdinal(left.directoryName, right.directoryName);
+}
+
+function compareOrdinal(left: string, right: string): number {
+  if (left === right) return 0;
+  return left < right ? -1 : 1;
 }
 
 function isPathInside(pathApi: typeof path, parent: string, candidate: string): boolean {
@@ -629,6 +940,10 @@ function isPathInside(pathApi: typeof path, parent: string, candidate: string): 
     relative !== '..' &&
     !pathApi.isAbsolute(relative)
   );
+}
+
+function isWindowsLocalDrivePath(candidate: string): boolean {
+  return /^[A-Za-z]:[\\/]/.test(candidate) && path.win32.isAbsolute(candidate);
 }
 
 function validatePolicy(policy: CrashDiagnosticsPolicy): void {
