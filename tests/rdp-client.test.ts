@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import { RdpBackendClient } from '../electron/rdp.ts';
 
@@ -8,6 +9,15 @@ test('RDP cleanup is a no-op when the backend is not running', async () => {
   assert.equal((await client.command('hide', 'session', 'window')).type, 'ack');
   assert.equal((await client.command('disconnect', 'session', 'window')).type, 'ack');
   assert.equal((client as any).process, undefined);
+});
+
+test('RDP cannot spawn a replacement controller while disposal is in progress', async () => {
+  const client = new RdpBackendClient({ executable: 'unused', args: [] });
+  const internals = client as any;
+  internals.disposing = new Promise<void>(() => undefined);
+
+  await assert.rejects(internals.ensureProcess(), /backend is stopping/);
+  assert.equal(internals.process, undefined);
 });
 
 test('RDP remembers pre-connect surface bounds without spawning the backend', async () => {
@@ -160,6 +170,78 @@ test('cancelPendingStarts disconnects only RDP handshakes still in progress', as
   assert.equal(internals.sessionIds.has('connected-session'), true);
 });
 
+test('cancelling an older pending RDP start preserves its prepared replacement lifecycle', async () => {
+  const client = new RdpBackendClient({ executable: 'unused', args: [] });
+  const internals = client as any;
+  const commands: Array<Record<string, unknown>> = [];
+  const oldLifecycle = client.beginStart('shared-session');
+  const fakeProcess = {
+    killed: false,
+    stdin: {
+      writable: true,
+      write(payload: string, callback: (error?: Error | null) => void) {
+        const command = JSON.parse(payload) as Record<string, unknown>;
+        commands.push(command);
+        callback();
+        if (command.op === 'disconnect') {
+          queueMicrotask(() =>
+            internals.handleLine(
+              JSON.stringify({
+                type: 'ack',
+                requestId: command.requestId,
+                sessionId: command.sessionId,
+                lifecycleId: command.lifecycleId,
+              }),
+            ),
+          );
+        }
+        return true;
+      },
+    },
+  };
+  internals.process = fakeProcess;
+  const oldStart = internals.send({
+    op: 'start',
+    sessionId: 'shared-session',
+    lifecycleId: oldLifecycle,
+  });
+  const replacementLifecycle = client.beginStart('shared-session');
+
+  client.cancelPendingStarts('window-handle');
+
+  await assert.rejects(oldStart, /cancelled while Wormhole locked/);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(client.currentLifecycleId('shared-session'), replacementLifecycle);
+  assert.deepEqual(
+    commands.map((command) => [command.op, command.lifecycleId]),
+    [
+      ['start', oldLifecycle],
+      ['disconnect', oldLifecycle],
+    ],
+  );
+});
+
+test('targeted RDP disconnect cannot forget a newer lifecycle with the same session id', async () => {
+  const client = new RdpBackendClient({ executable: 'unused', args: [] });
+  const internals = client as any;
+  const oldLifecycle = client.beginStart('retry-session');
+  const replacementLifecycle = client.beginStart('retry-session');
+  const commands: Array<Record<string, unknown>> = [];
+  internals.process = { killed: false, stdin: { writable: true } };
+  internals.send = async (command: Record<string, unknown>) => {
+    commands.push(command);
+    return { type: 'ack', sessionId: command.sessionId, lifecycleId: command.lifecycleId };
+  };
+
+  await client.command('disconnect', 'retry-session', 'window-handle', undefined, oldLifecycle);
+
+  assert.equal(client.currentLifecycleId('retry-session'), replacementLifecycle);
+  assert.deepEqual(
+    commands.map((command) => command.lifecycleId),
+    [oldLifecycle],
+  );
+});
+
 test('RDP ignores events from a superseded backend process', () => {
   const client = new RdpBackendClient({ executable: 'unused', args: [] });
   const events: Array<Record<string, unknown>> = [];
@@ -181,12 +263,74 @@ test('RDP ignores events from a superseded backend process', () => {
   assert.deepEqual(events, [{ type: 'connected', sessionId: 'current-session' }]);
 });
 
-test('RDP disposal accepts the shutdown acknowledgement before releasing the process', async () => {
+test('RDP ignores terminal events from a superseded lifecycle in the current controller', () => {
+  const client = new RdpBackendClient({ executable: 'unused', args: [] });
+  const events: Array<Record<string, unknown>> = [];
+  client.onEvent((event) => events.push(event as Record<string, unknown>));
+  const oldLifecycle = client.beginStart('retry-session');
+  const newLifecycle = client.beginStart('retry-session');
+  const internals = client as any;
+
+  internals.handleLine(
+    JSON.stringify({
+      type: 'disconnected',
+      sessionId: 'retry-session',
+      lifecycleId: oldLifecycle,
+    }),
+  );
+  assert.equal(internals.sessionIds.has('retry-session'), true);
+  assert.equal(events.length, 0);
+
+  internals.handleLine(
+    JSON.stringify({
+      type: 'connected',
+      sessionId: 'retry-session',
+      lifecycleId: newLifecycle,
+    }),
+  );
+  assert.deepEqual(events, [
+    { type: 'connected', sessionId: 'retry-session', lifecycleId: newLifecycle },
+  ]);
+});
+
+test('failed RDP start disconnects the native attempt before forgetting the session', async () => {
   const client = new RdpBackendClient({ executable: 'unused', args: [] });
   const internals = client as any;
+  const commands: Array<Record<string, unknown>> = [];
+  const fakeProcess = { killed: false, stdin: { writable: true } };
+  internals.process = fakeProcess;
+  internals.send = async () => Promise.reject(new Error('start timed out'));
+  internals.sendToProcess = async (_child: unknown, command: Record<string, unknown>) => {
+    commands.push(command);
+    return { type: 'ack', sessionId: command.sessionId };
+  };
+
+  await assert.rejects(
+    client.start({ sessionId: 'late-session', profile: { host: 'server.test' } }, 'window'),
+    /start timed out/,
+  );
+
+  assert.deepEqual(
+    commands.map((command) => [command.op, command.sessionId]),
+    [['disconnect', 'late-session']],
+  );
+  assert.equal(internals.sessionIds.has('late-session'), false);
+});
+
+test('RDP disposal emits terminal events and waits for graceful process exit', async () => {
+  const client = new RdpBackendClient({ executable: 'unused', args: [] });
+  const internals = client as any;
+  const processEvents = new EventEmitter();
+  const events: Array<Record<string, unknown>> = [];
+  client.onEvent((event) => events.push(event as Record<string, unknown>));
+  internals.sessionIds.add('vpn-session');
   let fakeProcess: any;
   fakeProcess = {
     killed: false,
+    exitCode: null,
+    signalCode: null,
+    once: processEvents.once.bind(processEvents),
+    removeListener: processEvents.removeListener.bind(processEvents),
     stdin: {
       writable: true,
       write(payload: string, callback: (error?: Error | null) => void) {
@@ -199,6 +343,10 @@ test('RDP disposal accepts the shutdown acknowledgement before releasing the pro
           ),
         );
         return true;
+      },
+      end() {
+        fakeProcess.exitCode = 0;
+        queueMicrotask(() => processEvents.emit('close'));
       },
     },
     kill() {
@@ -219,6 +367,10 @@ test('RDP disposal accepts the shutdown acknowledgement before releasing the pro
     if (timeout) clearTimeout(timeout);
   }
 
-  assert.equal(fakeProcess.killed, true);
+  assert.equal(fakeProcess.killed, false);
   assert.equal(internals.process, undefined);
+  assert.deepEqual(
+    events.filter((event) => event.type === 'exited'),
+    [{ type: 'exited', sessionId: 'vpn-session' }],
+  );
 });

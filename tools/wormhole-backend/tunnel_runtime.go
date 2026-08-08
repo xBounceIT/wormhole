@@ -124,6 +124,7 @@ type sharedTunnelEntry struct {
 	cancel           context.CancelFunc
 	establish        context.Context
 	progressHandlers []tunnelProgressSubscription
+	promptHandlers   []tunnelPromptSubscription
 	lastPhase        string
 	lastDetail       string
 	hasProgress      bool
@@ -134,10 +135,17 @@ type tunnelProgressSubscription struct {
 	handler tunnelProgressHandler
 }
 
+type tunnelPromptSubscription struct {
+	id      uint64
+	ctx     context.Context
+	handler tunnelPromptHandler
+}
+
 type tunnelRuntimePool struct {
 	mu             sync.Mutex
 	entries        map[string]*sharedTunnelEntry
 	nextProgressID uint64
+	nextPromptID   uint64
 	loadSettings   bool
 	probe          func(context.Context, *tunnelProcess) error
 	start          func(context.Context, tunnelConfigSnapshot) (*tunnelProcess, error)
@@ -322,6 +330,7 @@ func (pool *tunnelRuntimePool) acquire(
 	pool.mu.Lock()
 	entry := pool.entries[key]
 	var subscriptionID uint64
+	var promptSubscriptionID uint64
 	var replayPhase, replayDetail string
 	reusedReady := false
 	joinedEstablishment := false
@@ -336,9 +345,14 @@ func (pool *tunnelRuntimePool) acquire(
 			cancel: cancel,
 		}
 		entry.establish = withTunnelProgressHandler(establish, pool.progress(entry))
+		entry.establish = withTunnelPromptHandler(entry.establish, pool.prompt(entry))
 		if snapshot.progress != nil {
 			subscriptionID = pool.subscribeProgressLocked(entry, snapshot.progress)
 		}
+		if snapshot.prompt != nil {
+			promptSubscriptionID = pool.subscribePromptLocked(entry, ctx, snapshot.prompt)
+		}
+		snapshot.prompt = pool.prompt(entry)
 		pool.entries[key] = entry
 		go pool.establish(entry, snapshot)
 	} else {
@@ -352,6 +366,9 @@ func (pool *tunnelRuntimePool) acquire(
 					replayPhase, replayDetail = entry.lastPhase, entry.lastDetail
 				}
 			}
+		}
+		if snapshot.prompt != nil && entry.process == nil && entry.err == nil {
+			promptSubscriptionID = pool.subscribePromptLocked(entry, ctx, snapshot.prompt)
 		}
 		reusedReady = entry.process != nil && entry.err == nil
 		joinedEstablishment = !reusedReady
@@ -382,6 +399,7 @@ func (pool *tunnelRuntimePool) acquire(
 	select {
 	case <-entry.ready:
 		pool.unsubscribeProgress(entry, subscriptionID)
+		pool.unsubscribePrompt(entry, promptSubscriptionID)
 		if entry.err != nil {
 			pool.release(entry)
 			return nil, entry.err
@@ -389,6 +407,7 @@ func (pool *tunnelRuntimePool) acquire(
 		return &tunnelRuntime{entry: entry, pool: pool}, nil
 	case <-ctx.Done():
 		pool.unsubscribeProgress(entry, subscriptionID)
+		pool.unsubscribePrompt(entry, promptSubscriptionID)
 		pool.release(entry)
 		return nil, ctx.Err()
 	}
@@ -440,6 +459,65 @@ func (pool *tunnelRuntimePool) unsubscribeProgress(entry *sharedTunnelEntry, id 
 	pool.mu.Unlock()
 }
 
+func (pool *tunnelRuntimePool) subscribePromptLocked(
+	entry *sharedTunnelEntry,
+	ctx context.Context,
+	handler tunnelPromptHandler,
+) uint64 {
+	pool.nextPromptID++
+	id := pool.nextPromptID
+	entry.promptHandlers = append(entry.promptHandlers, tunnelPromptSubscription{id: id, ctx: ctx, handler: handler})
+	return id
+}
+
+func (pool *tunnelRuntimePool) unsubscribePrompt(entry *sharedTunnelEntry, id uint64) {
+	if id == 0 {
+		return
+	}
+	pool.mu.Lock()
+	for index, subscription := range entry.promptHandlers {
+		if subscription.id == id {
+			entry.promptHandlers = append(entry.promptHandlers[:index], entry.promptHandlers[index+1:]...)
+			break
+		}
+	}
+	pool.mu.Unlock()
+}
+
+func (pool *tunnelRuntimePool) prompt(entry *sharedTunnelEntry) tunnelPromptHandler {
+	return func(_ context.Context, prompt tunnelPrompt) (string, error) {
+		tried := make(map[uint64]struct{})
+		for {
+			pool.mu.Lock()
+			var selected tunnelPromptSubscription
+			for _, subscription := range entry.promptHandlers {
+				if _, alreadyTried := tried[subscription.id]; alreadyTried || subscription.ctx.Err() != nil {
+					continue
+				}
+				selected = subscription
+				break
+			}
+			pool.mu.Unlock()
+			if selected.handler == nil {
+				return "", errors.New("this VPN tunnel requires interactive authentication")
+			}
+
+			value, err := selected.handler(selected.ctx, prompt)
+			if err == nil {
+				return value, nil
+			}
+			if selected.ctx.Err() == nil {
+				return "", err
+			}
+			// The connection that owned this prompt disappeared while a second connection was
+			// joining the same establishment. Retry through another live subscriber without starting
+			// a second sidecar.
+			tried[selected.id] = struct{}{}
+			pool.unsubscribePrompt(entry, selected.id)
+		}
+	}
+}
+
 func (pool *tunnelRuntimePool) progress(entry *sharedTunnelEntry) tunnelProgressHandler {
 	return func(ctx context.Context, phase, detail string) error {
 		pool.mu.Lock()
@@ -467,6 +545,7 @@ func (pool *tunnelRuntimePool) establish(entry *sharedTunnelEntry, snapshot tunn
 	entry.process = process
 	entry.err = err
 	entry.progressHandlers = nil
+	entry.promptHandlers = nil
 	if err != nil {
 		if current := pool.entries[entry.key]; current == entry {
 			delete(pool.entries, entry.key)

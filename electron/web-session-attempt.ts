@@ -6,22 +6,23 @@
  */
 export class WebSessionAttemptTracker {
   private readonly generations = new Map<string, number>();
+  private sequence = 0;
 
   begin(sessionId: string): number {
-    return this.advance(sessionId);
+    const generation = ++this.sequence;
+    this.generations.set(sessionId, generation);
+    return generation;
   }
 
   cancel(sessionId: string): void {
-    this.advance(sessionId);
+    this.generations.delete(sessionId);
+  }
+
+  cancelAll(): void {
+    this.generations.clear();
   }
 
   isCurrent(sessionId: string, generation: number): boolean {
     return this.generations.get(sessionId) === generation;
-  }
-
-  private advance(sessionId: string): number {
-    const generation = (this.generations.get(sessionId) ?? 0) + 1;
-    this.generations.set(sessionId, generation);
-    return generation;
   }
 }

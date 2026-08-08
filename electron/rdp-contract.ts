@@ -95,6 +95,8 @@ export type RdpBackendEvent = {
     | 'error';
   requestId?: string;
   sessionId?: string;
+  /** Main/controller lifecycle token used to discard events from a superseded native process. */
+  lifecycleId?: string;
   backend?: 'activex' | 'freerdp';
   code?: number;
   attempt?: number;

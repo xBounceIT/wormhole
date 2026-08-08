@@ -185,7 +185,7 @@ type vncManager struct {
 	sessions                           map[string]*vncSession
 	tunnelLeases                       map[string]*tunnelRuntime
 	tunnelForwarders                   map[string]*tunnelForwarder
-	tunnelStarts                       map[string]context.CancelFunc
+	tunnelStarts                       map[string]*pendingTunnelStart
 	tunnelPrompts                      map[string]*pendingTunnelPrompt
 	promptSequence                     uint64
 	routePrompts                       map[string]*pendingTunnelPrompt
@@ -204,6 +204,11 @@ type vncManager struct {
 type pendingTunnelPrompt struct {
 	leaseID string
 	result  chan tunnelPromptResult
+}
+
+type pendingTunnelStart struct {
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 type tunnelPromptResult struct {
@@ -227,7 +232,7 @@ func newVncManager(
 		sessions:             make(map[string]*vncSession),
 		tunnelLeases:         make(map[string]*tunnelRuntime),
 		tunnelForwarders:     make(map[string]*tunnelForwarder),
-		tunnelStarts:         make(map[string]context.CancelFunc),
+		tunnelStarts:         make(map[string]*pendingTunnelStart),
 		tunnelPrompts:        make(map[string]*pendingTunnelPrompt),
 		routePrompts:         make(map[string]*pendingTunnelPrompt),
 	}
@@ -343,8 +348,8 @@ func (m *vncManager) close() {
 	for _, lease := range m.tunnelLeases {
 		leases = append(leases, lease)
 	}
-	for _, cancel := range m.tunnelStarts {
-		cancel()
+	for _, start := range m.tunnelStarts {
+		start.cancel()
 	}
 	forwarders := make([]*tunnelForwarder, 0, len(m.tunnelForwarders))
 	for _, forwarder := range m.tunnelForwarders {
@@ -352,7 +357,7 @@ func (m *vncManager) close() {
 	}
 	m.tunnelLeases = make(map[string]*tunnelRuntime)
 	m.tunnelForwarders = make(map[string]*tunnelForwarder)
-	m.tunnelStarts = make(map[string]context.CancelFunc)
+	m.tunnelStarts = make(map[string]*pendingTunnelStart)
 	m.tunnelPrompts = make(map[string]*pendingTunnelPrompt)
 	m.routePrompts = make(map[string]*pendingTunnelPrompt)
 	m.mu.Unlock()
@@ -385,28 +390,30 @@ func (m *vncManager) acquireTunnel(command backendCommand) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tunnelStartTimeout)
-	m.tunnelStarts[command.SessionID] = cancel
+	start := &pendingTunnelStart{cancel: cancel, done: make(chan struct{})}
+	m.tunnelStarts[command.SessionID] = start
 	m.cleanup.Add(1)
 	m.mu.Unlock()
 
 	go func() {
 		defer m.cleanup.Done()
+		defer close(start.done)
 		defer cancel()
 		configID := normalizeTunnelID(command.TunnelConfigID)
 		if command.NodeID != "" {
 			resolvedID, enabled, err := resolveNodeTunnel(m.databasePath, command.NodeID)
 			if err != nil {
-				m.finishTunnelAcquire(command, nil, err)
+				m.finishTunnelAcquire(command, start, nil, err)
 				return
 			}
 			if !enabled {
-				m.finishTunnelAcquire(command, nil, nil)
+				m.finishTunnelAcquire(command, start, nil, nil)
 				return
 			}
 			configID = resolvedID
 		}
 		if configID == "" {
-			m.finishTunnelAcquire(command, nil, errors.New("VPN tunnel is enabled but no configuration is selected"))
+			m.finishTunnelAcquire(command, start, nil, errors.New("VPN tunnel is enabled but no configuration is selected"))
 			return
 		}
 		progressSessionID := command.ProgressSessionID
@@ -416,7 +423,7 @@ func (m *vncManager) acquireTunnel(command backendCommand) {
 		if command.NodeID != "" {
 			useTunnel, err := readPromptBeforeTunnelConnect(m.databasePath)
 			if err != nil {
-				m.finishTunnelAcquire(command, nil, err)
+				m.finishTunnelAcquire(command, start, nil, err)
 				return
 			}
 			if useTunnel {
@@ -427,11 +434,11 @@ func (m *vncManager) acquireTunnel(command backendCommand) {
 					tunnelConfigName(m.databasePath, configID),
 				)(ctx)
 				if err != nil {
-					m.finishTunnelAcquire(command, nil, err)
+					m.finishTunnelAcquire(command, start, nil, err)
 					return
 				}
 				if route == "direct" {
-					m.finishTunnelAcquire(command, nil, nil)
+					m.finishTunnelAcquire(command, start, nil, nil)
 					return
 				}
 			}
@@ -445,7 +452,7 @@ func (m *vncManager) acquireTunnel(command backendCommand) {
 		} else {
 			lease, err = startTunnelRuntime(promptContext, m.databasePath, configID)
 		}
-		m.finishTunnelAcquire(command, lease, err)
+		m.finishTunnelAcquire(command, start, lease, err)
 	}()
 }
 
@@ -571,10 +578,17 @@ func (m *vncManager) progressTunnel(progressSessionID string) tunnelProgressHand
 	}
 }
 
-func (m *vncManager) finishTunnelAcquire(command backendCommand, lease *tunnelRuntime, err error) {
+func (m *vncManager) finishTunnelAcquire(
+	command backendCommand,
+	start *pendingTunnelStart,
+	lease *tunnelRuntime,
+	err error,
+) {
 	m.mu.Lock()
-	_, stillPending := m.tunnelStarts[command.SessionID]
-	delete(m.tunnelStarts, command.SessionID)
+	stillPending := m.tunnelStarts[command.SessionID] == start && start != nil
+	if stillPending {
+		delete(m.tunnelStarts, command.SessionID)
+	}
 	if err == nil && lease != nil && stillPending {
 		m.tunnelLeases[command.SessionID] = lease
 	}
@@ -604,16 +618,31 @@ func (m *vncManager) releaseTunnel(command backendCommand) {
 	delete(m.tunnelLeases, command.SessionID)
 	forwarder := m.tunnelForwarders[command.SessionID]
 	delete(m.tunnelForwarders, command.SessionID)
-	if cancel := m.tunnelStarts[command.SessionID]; cancel != nil {
-		cancel()
+	start := m.tunnelStarts[command.SessionID]
+	if start != nil {
+		start.cancel()
 		delete(m.tunnelStarts, command.SessionID)
 	}
 	m.mu.Unlock()
 	forwarder.close()
-	m.respond(command.ID, nil)
-	if lease != nil {
-		m.cleanupNative(lease.close)
+	if lease == nil && start == nil {
+		m.respond(command.ID, nil)
+		return
 	}
+	m.cleanup.Add(1)
+	go func() {
+		defer m.cleanup.Done()
+		if start != nil && start.done != nil {
+			<-start.done
+		}
+		if lease != nil {
+			lease.close()
+		}
+		// A successful release acknowledges that the sidecar reference is gone. In particular, the
+		// final lease or cancelled pending acquire cannot race application shutdown or a subsequent
+		// connection attempt.
+		m.respond(command.ID, nil)
+	}()
 }
 
 func (m *vncManager) bindTunnelForwarder(command backendCommand) {

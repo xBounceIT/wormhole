@@ -56,7 +56,8 @@ import { KeyedSingleFlight } from './keyed-single-flight.js';
 import { KeyedTaskTracker } from './keyed-task-tracker.js';
 import { shouldDeferExtensionReload } from './extension-reload-policy.js';
 import { encodeTerminalClipboardText, isEncodedSshInput } from './terminal-clipboard.js';
-import { RdpBackendClient } from './rdp.js';
+import { RdpBackendClient, stopChildProcess } from './rdp.js';
+import { TunnelLeaseRegistry } from './tunnel-lease-registry.js';
 import {
   isMatchingOAuthRedirect,
   tunnelAuthPartition,
@@ -111,12 +112,18 @@ const backendMaxRequestBytes = 64 * 1024;
 const backendMaxTunnelRequestBytes = 4 * 1024 * 1024;
 const nativeBackendLineLimit = 64 * 1024 * 1024;
 const nativeBackendCommandTimeoutMs = 15_000;
+// Go may spend up to seven seconds cancelling an in-flight establishment and another six
+// stopping the resulting sidecar. Keep the broker alive long enough to finish that cleanup.
+const nativeBackendShutdownTimeoutMs = 20_000;
 const startupUpdateDelayMs = 10_000;
 const bitwardenBrowserNavigationTimeoutMs = 15_000;
 const bitwardenExtensionReadyTimeoutMs = 15_000;
 const bitwardenExtensionHostMaxListeners = 64;
 let rdpClient: RdpBackendClient | undefined;
-const rdpTunnelLeases = new Map<string, string>();
+const rdpTunnelLeases = new TunnelLeaseRegistry();
+const rdpTunnelLeaseSessions = new Map<string, string>();
+const rdpStartAttempts = new WebSessionAttemptTracker();
+const rdpConnectingLifecycles = new Map<string, string>();
 const rdpSurfacePlacements = new Map<
   string,
   { owner: BrowserWindow; rendererBounds: RdpSurfaceRect }
@@ -2411,6 +2418,9 @@ async function runTunnelBrowserAuth(
 class NativeBackendProcess {
   private child: ReturnType<typeof spawn> | undefined;
   private startPromise: Promise<void> | undefined;
+  private stopPromise: Promise<void> | undefined;
+  private stopping = false;
+  private permanentlyStopped = false;
   private outputBuffer = '';
   private requestSequence = 0;
   private readonly pending = new Map<
@@ -2545,23 +2555,33 @@ class NativeBackendProcess {
     if (!response.ok) throw new Error(response.error || 'Could not answer the VPN prompt.');
   }
 
-  stop(): void {
+  async stop(permanent = false): Promise<void> {
+    if (permanent) this.permanentlyStopped = true;
+    if (this.stopPromise) return this.stopPromise;
+    this.stopping = true;
     const child = this.child;
-    this.child = undefined;
     this.outputBuffer = '';
-    if (!child) return;
+    this.rejectAll(new Error('Native backend stopped.'));
 
-    const error = new Error('Native backend stopped.');
-    for (const pending of this.pending.values()) pending.reject(error);
-    this.pending.clear();
-    child.stdin?.end();
-    const forceKill = setTimeout(() => {
-      if (!child.killed) child.kill();
-    }, 7_000);
-    child.once('close', () => clearTimeout(forceKill));
+    this.stopPromise = (async () => {
+      if (!child) return;
+      const exited = await stopChildProcess(child, {
+        gracefulTimeoutMs: nativeBackendShutdownTimeoutMs,
+      });
+      if (!exited) {
+        console.warn('[Wormhole] Native backend did not exit after its force-kill timeout.');
+      }
+      if (this.child === child) this.child = undefined;
+    })().finally(() => {
+      this.stopping = false;
+      this.stopPromise = undefined;
+    });
+    return this.stopPromise;
   }
 
   private async start(): Promise<void> {
+    if (this.permanentlyStopped) throw new Error('Native backend has stopped.');
+    if (this.stopping) throw new Error('Native backend is stopping.');
     if (this.child) return;
     if (this.startPromise) return this.startPromise;
 
@@ -2584,7 +2604,7 @@ class NativeBackendProcess {
       child.stdout?.on('data', (chunk: string | Buffer) => this.readOutput(String(chunk)));
       child.stdout?.once('error', (error) => {
         this.rejectAll(error instanceof Error ? error : new Error(String(error)));
-        this.stop();
+        void this.stop();
       });
       child.stdin?.once('error', (error) => {
         this.rejectAll(error instanceof Error ? error : new Error(String(error)));
@@ -2594,12 +2614,12 @@ class NativeBackendProcess {
         resolve();
       });
       child.once('error', (error) => {
-        this.child = undefined;
+        if (this.child === child) this.child = undefined;
         this.rejectAll(error instanceof Error ? error : new Error(String(error)));
         if (!settled) reject(error instanceof Error ? error : new Error(String(error)));
       });
       child.once('close', (code) => {
-        this.child = undefined;
+        if (this.child === child) this.child = undefined;
         this.outputBuffer = '';
         const error = new Error(
           code === null ? 'Native backend stopped.' : `Native backend exited (${code}).`,
@@ -2617,7 +2637,7 @@ class NativeBackendProcess {
   private readOutput(chunk: string): void {
     this.outputBuffer += chunk;
     if (this.outputBuffer.length > nativeBackendLineLimit) {
-      this.stop();
+      void this.stop();
       return;
     }
 
@@ -2675,9 +2695,19 @@ let bitwardenBackgroundTimer: NodeJS.Timeout | undefined;
 let bitwardenOnboardingPromise: Promise<void> | undefined;
 let bitwardenStartupMaintenancePromise: Promise<void> | undefined;
 
+function requireNativeResourcesRunning(): void {
+  if (isQuitting) throw new Error('Native backend is stopping.');
+}
+
 function getNativeBackend(): NativeBackendProcess {
   nativeBackend ??= new NativeBackendProcess();
   return nativeBackend;
+}
+
+async function releaseNativeTunnelLease(leaseId: string): Promise<void> {
+  const backend = nativeBackend;
+  if (!backend) return;
+  await backend.releaseTunnel(leaseId);
 }
 
 async function runBitwardenCredentialMaintenance(ensureInstalled: boolean): Promise<void> {
@@ -3607,6 +3637,8 @@ const treeTooltips = new TreeTooltipManager();
 class WebSurfaceManager {
   private readonly surfaces = new Map<string, WebSurfaceRecord>();
   private readonly pendingOpenOwners = new Map<string, BrowserWindow>();
+  private readonly tunnelLeases = new TunnelLeaseRegistry();
+  private readonly tunnelLeaseOwners = new Map<string, BrowserWindow>();
   private readonly attempts = new WebSessionAttemptTracker();
   private readonly extensionLoads = new Map<string, Promise<void>>();
   private readonly extensionLoadKeys = new Map<string, string>();
@@ -3640,6 +3672,13 @@ class WebSurfaceManager {
     let openingLeaseId: string | undefined;
     let bitwardenUseRelease: (() => void) | undefined;
     try {
+      await this.releaseTunnel(request.sessionId);
+      this.assertOpenCurrent(
+        request.sessionId,
+        generation,
+        owner,
+        'Web session was superseded before its VPN tunnel could open.',
+      );
       const targetResult = await runBackend<WebTargetResponse>('web-target', {
         nodeId: request.nodeId,
         address: request.address,
@@ -3649,11 +3688,19 @@ class WebSurfaceManager {
         tunnelConfigId: request.tunnelConfigId,
       });
       const target = validateWebTarget(targetResult);
+      this.assertOpenCurrent(
+        request.sessionId,
+        generation,
+        owner,
+        'Web session was superseded before its VPN tunnel could open.',
+      );
       const logicalTargetUrl = target.url;
       let resolvedTunnelRoute: 'direct' | 'socks5' | 'forwarder' = 'direct';
       if (target.tunnelConfigId) {
         const leaseId = randomUUID();
         openingLeaseId = leaseId;
+        this.tunnelLeases.claim(request.sessionId, leaseId);
+        this.tunnelLeaseOwners.set(request.sessionId, owner);
         const tunnelRoute = await getNativeBackend().acquireTunnelRoute({
           leaseId,
           nodeId: request.nodeId,
@@ -3675,17 +3722,19 @@ class WebSurfaceManager {
           forwardedUrl.port = String(forwarder.port);
           target.url = forwardedUrl.toString();
         } else {
+          await this.releaseTunnel(request.sessionId);
           openingLeaseId = undefined;
         }
       }
-      if (
-        !isAuthorizationEpochCurrent(authorizationEpoch) ||
-        !this.attempts.isCurrent(request.sessionId, generation) ||
-        this.pendingOpenOwners.get(request.sessionId) !== owner ||
-        owner.isDestroyed()
-      ) {
+      if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
         throw new Error('Web session was superseded before its browser could open.');
       }
+      this.assertOpenCurrent(
+        request.sessionId,
+        generation,
+        owner,
+        'Web session was superseded before its browser could open.',
+      );
 
       let extensionPath: string | undefined;
       let bitwardenPartition: string | undefined;
@@ -3746,14 +3795,15 @@ class WebSurfaceManager {
           bitwardenInstallKey = `${freshInstall.path}\0${freshState.sha256 ?? freshInstall.version}`;
         }
       }
-      if (
-        !isAuthorizationEpochCurrent(authorizationEpoch) ||
-        !this.attempts.isCurrent(request.sessionId, generation) ||
-        this.pendingOpenOwners.get(request.sessionId) !== owner ||
-        owner.isDestroyed()
-      ) {
+      if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
         throw new Error('Web session was superseded before its browser could open.');
       }
+      this.assertOpenCurrent(
+        request.sessionId,
+        generation,
+        owner,
+        'Web session was superseded before its browser could open.',
+      );
 
       const partition =
         bitwardenPartition ??
@@ -3816,14 +3866,15 @@ class WebSurfaceManager {
       browserSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
         return isAllowedBitwardenPermission(permission, requestingOrigin);
       });
-      if (
-        !isAuthorizationEpochCurrent(authorizationEpoch) ||
-        !this.attempts.isCurrent(request.sessionId, generation) ||
-        this.pendingOpenOwners.get(request.sessionId) !== owner ||
-        owner.isDestroyed()
-      ) {
+      if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
         throw new Error('Web session was superseded while preparing its browser surface.');
       }
+      this.assertOpenCurrent(
+        request.sessionId,
+        generation,
+        owner,
+        'Web session was superseded while preparing its browser surface.',
+      );
 
       const view = new WebContentsView({
         webPreferences: {
@@ -3887,9 +3938,10 @@ class WebSurfaceManager {
       bitwardenUseRelease?.();
       if (this.surfaces.has(request.sessionId)) {
         this.dispose(request.sessionId);
-        openingLeaseId = undefined;
       }
-      if (openingLeaseId) void nativeBackend?.releaseTunnel(openingLeaseId).catch(() => undefined);
+      if (openingLeaseId || this.tunnelLeases.has(request.sessionId)) {
+        await this.releaseTunnel(request.sessionId).catch(() => undefined);
+      }
       if (
         this.attempts.isCurrent(request.sessionId, generation) &&
         this.pendingOpenOwners.get(request.sessionId) === owner
@@ -4664,6 +4716,9 @@ class WebSurfaceManager {
     this.attempts.cancel(sessionId);
     this.pendingOpenOwners.delete(sessionId);
     this.dispose(sessionId);
+    void this.releaseTunnel(sessionId).catch((error) => {
+      console.warn('[Wormhole] Could not release the web VPN tunnel.', error);
+    });
   }
 
   private dispose(sessionId: string, bitwardenAlreadyFlushed = false): void {
@@ -4713,8 +4768,12 @@ class WebSurfaceManager {
     ) {
       this.activeBitwardenSessions.delete(record.bitwarden.partition);
     }
-    if (record.tunnelLeaseId)
-      void nativeBackend?.releaseTunnel(record.tunnelLeaseId).catch(() => undefined);
+    if (record.tunnelLeaseId) {
+      record.tunnelLeaseId = undefined;
+      void this.releaseTunnel(sessionId).catch((error) => {
+        console.warn('[Wormhole] Could not release the web VPN tunnel.', error);
+      });
+    }
     try {
       record.owner.contentView.removeChildView(record.view);
     } catch {
@@ -4734,10 +4793,31 @@ class WebSurfaceManager {
     }
   }
 
+  private async releaseTunnel(sessionId: string): Promise<void> {
+    await this.tunnelLeases.release(sessionId, releaseNativeTunnelLease);
+    if (!this.tunnelLeases.has(sessionId)) this.tunnelLeaseOwners.delete(sessionId);
+  }
+
+  private assertOpenCurrent(
+    sessionId: string,
+    generation: number,
+    owner: BrowserWindow,
+    message: string,
+  ): void {
+    if (
+      !this.attempts.isCurrent(sessionId, generation) ||
+      this.pendingOpenOwners.get(sessionId) !== owner ||
+      owner.isDestroyed()
+    ) {
+      throw new Error(message);
+    }
+  }
+
   hideAll(): void {
     for (const sessionId of [...this.pendingOpenOwners.keys()]) {
       this.attempts.cancel(sessionId);
       this.pendingOpenOwners.delete(sessionId);
+      void this.releaseTunnel(sessionId).catch(() => undefined);
     }
     for (const record of this.surfaces.values()) {
       if (!record.disposed) record.view.setVisible(false);
@@ -4759,6 +4839,9 @@ class WebSurfaceManager {
     for (const [sessionId, pendingOwner] of this.pendingOpenOwners) {
       if (pendingOwner === owner) sessionIds.add(sessionId);
     }
+    for (const sessionId of this.tunnelLeases.keys()) {
+      if (this.tunnelLeaseOwners.get(sessionId) === owner) sessionIds.add(sessionId);
+    }
     for (const sessionId of sessionIds) this.close(sessionId);
   }
 
@@ -4769,6 +4852,9 @@ class WebSurfaceManager {
     }
     for (const [sessionId, pendingOwner] of this.pendingOpenOwners) {
       if (pendingOwner === owner) sessionIds.add(sessionId);
+    }
+    for (const sessionId of this.tunnelLeases.keys()) {
+      if (this.tunnelLeaseOwners.get(sessionId) === owner) sessionIds.add(sessionId);
     }
     const popupSessions = new Set(
       [...this.bitwardenPopups.keys()].filter(
@@ -4804,16 +4890,18 @@ class WebSurfaceManager {
       this.attempts.cancel(sessionId);
       this.pendingOpenOwners.delete(sessionId);
       const record = this.surfaces.get(sessionId);
-      if (record?.tunnelLeaseId) {
-        await nativeBackend?.releaseTunnel(record.tunnelLeaseId).catch(() => undefined);
-        record.tunnelLeaseId = undefined;
-      }
+      await this.releaseTunnel(sessionId).catch(() => undefined);
+      if (record) record.tunnelLeaseId = undefined;
       this.dispose(sessionId, true);
     }
   }
 
   async flushAndCloseAll(): Promise<void> {
-    const sessionIds = new Set([...this.surfaces.keys(), ...this.pendingOpenOwners.keys()]);
+    const sessionIds = new Set([
+      ...this.surfaces.keys(),
+      ...this.pendingOpenOwners.keys(),
+      ...this.tunnelLeases.keys(),
+    ]);
     const popupSessions = new Set(this.bitwardenPopups.keys());
     for (const sessionId of popupSessions) {
       await this.closeBitwardenPopup(sessionId, true);
@@ -4837,12 +4925,16 @@ class WebSurfaceManager {
       this.attempts.cancel(sessionId);
       this.pendingOpenOwners.delete(sessionId);
       const record = this.surfaces.get(sessionId);
-      if (record?.tunnelLeaseId) {
-        await nativeBackend?.releaseTunnel(record.tunnelLeaseId).catch(() => undefined);
-        record.tunnelLeaseId = undefined;
-      }
+      await this.releaseTunnel(sessionId).catch(() => undefined);
+      if (record) record.tunnelLeaseId = undefined;
       this.dispose(sessionId, true);
     }
+  }
+
+  backendStopped(): void {
+    this.tunnelLeases.clear();
+    this.tunnelLeaseOwners.clear();
+    for (const record of this.surfaces.values()) record.tunnelLeaseId = undefined;
   }
 
   private configureWebContents(
@@ -4933,11 +5025,21 @@ class WebSurfaceManager {
       },
     );
     contents.on('render-process-gone', () => {
-      if (!record.initialNavigationPending || record.disposed) return;
+      if (record.disposed || this.surfaces.get(sessionId) !== record) return;
       record.initialNavigationPending = false;
       this.sendEvent(sessionId, record, 'failed', {
         error: 'The browser process stopped unexpectedly.',
       });
+      // A crashed renderer no longer has a connection that can consume this route. Dispose the
+      // unusable surface and release its VPN lease instead of leaving the proxy alive until the
+      // user closes or retries the failed tab.
+      this.close(sessionId);
+    });
+    contents.once('destroyed', () => {
+      if (record.disposed || this.surfaces.get(sessionId) !== record) return;
+      // Covers destruction paths that do not emit render-process-gone (for example a native
+      // WebContents teardown during an owner-window failure).
+      this.close(sessionId);
     });
   }
 
@@ -5022,7 +5124,9 @@ class NativeSshBackend {
   private lineReader: Interface | undefined;
   private controlSequence = 0;
   private readonly activeSessions = new Set<string>();
-  private readonly tunnelLeases = new Map<string, string>();
+  private readonly tunnelLeases = new TunnelLeaseRegistry();
+  private readonly connectionAttempts = new WebSessionAttemptTracker();
+  private readonly pendingConnections = new Set<string>();
   private readonly openWaiters = new Map<
     string,
     {
@@ -5042,9 +5146,27 @@ class NativeSshBackend {
   >();
 
   async open(request: SshOpenRequest, authorizationEpoch: number): Promise<SshConnectedResponse> {
-    if (this.openWaiters.has(request.sessionId) || this.activeSessions.has(request.sessionId)) {
+    if (
+      this.pendingConnections.has(request.sessionId) ||
+      this.openWaiters.has(request.sessionId) ||
+      this.activeSessions.has(request.sessionId)
+    ) {
       throw new Error('SSH session id is already in use.');
     }
+    const generation = this.connectionAttempts.begin(request.sessionId);
+    this.pendingConnections.add(request.sessionId);
+    try {
+      return await this.openCurrent(request, authorizationEpoch, generation);
+    } finally {
+      this.pendingConnections.delete(request.sessionId);
+    }
+  }
+
+  private async openCurrent(
+    request: SshOpenRequest,
+    authorizationEpoch: number,
+    generation: number,
+  ): Promise<SshConnectedResponse> {
     let bitwardenCredential: BitwardenResolvedCredential = { bitwarden: false };
     if ((request.nodeId || request.credentialId) && !request.manualCredentials) {
       try {
@@ -5062,13 +5184,20 @@ class NativeSshBackend {
         throw new Error('Bitwarden credential is unavailable: the SSH username is missing.');
       }
     }
+    if (!this.connectionAttempts.isCurrent(request.sessionId, generation)) {
+      throw new Error('SSH connection closed before opening its VPN tunnel.');
+    }
     requireAuthorizationEpoch(authorizationEpoch);
+    await this.releaseTunnel(request.sessionId);
+    if (!this.connectionAttempts.isCurrent(request.sessionId, generation)) {
+      throw new Error('SSH connection closed before opening its VPN tunnel.');
+    }
     let socksEndpoint = '';
     const tunnelRequested = Boolean(request.nodeId || request.tunnelConfigId);
     let leaseId: string | undefined;
     if (tunnelRequested) {
       leaseId = randomUUID();
-      this.tunnelLeases.set(request.sessionId, leaseId);
+      this.tunnelLeases.claim(request.sessionId, leaseId);
       try {
         socksEndpoint = await getNativeBackend().acquireTunnel({
           leaseId,
@@ -5077,37 +5206,39 @@ class NativeSshBackend {
           progressSessionId: request.sessionId,
         });
       } catch (error) {
-        if (this.tunnelLeases.get(request.sessionId) === leaseId) {
-          this.tunnelLeases.delete(request.sessionId);
-        }
+        await this.releaseTunnel(request.sessionId).catch(() => undefined);
         throw error;
       }
-      if (this.tunnelLeases.get(request.sessionId) !== leaseId) {
-        void nativeBackend?.releaseTunnel(leaseId).catch(() => undefined);
+      if (
+        !this.connectionAttempts.isCurrent(request.sessionId, generation) ||
+        !this.tunnelLeases.isActive(request.sessionId, leaseId)
+      ) {
         throw new Error('SSH connection closed while opening its VPN tunnel.');
       }
       if (!socksEndpoint) {
-        this.tunnelLeases.delete(request.sessionId);
-        void nativeBackend?.releaseTunnel(leaseId).catch(() => undefined);
+        await this.releaseTunnel(request.sessionId);
         if (request.tunnelConfigId) {
           throw new Error('The VPN tunnel returned no SOCKS endpoint.');
         }
       }
     }
-    requireAuthorizationEpoch(authorizationEpoch);
     try {
+      if (!this.connectionAttempts.isCurrent(request.sessionId, generation)) {
+        throw new Error('SSH connection closed before the native session could start.');
+      }
+      requireAuthorizationEpoch(authorizationEpoch);
       this.ensureStarted();
     } catch (error) {
       await this.releaseTunnel(request.sessionId);
       throw error;
     }
 
-    return new Promise<SshConnectedResponse>((resolve, reject) => {
+    return await new Promise<SshConnectedResponse>((resolve, reject) => {
       const timeout = setTimeout(() => {
         const waiter = this.openWaiters.get(request.sessionId);
         if (!waiter || waiter.timeout !== timeout) return;
         this.openWaiters.delete(request.sessionId);
-        void this.releaseTunnel(request.sessionId);
+        void this.releaseTunnel(request.sessionId).catch(() => undefined);
         reject(new Error('SSH connection timed out.'));
         try {
           this.write({ type: 'close', session_id: request.sessionId });
@@ -5156,7 +5287,7 @@ class NativeSshBackend {
       } catch (error) {
         this.openWaiters.delete(request.sessionId);
         clearTimeout(timeout);
-        void this.releaseTunnel(request.sessionId);
+        void this.releaseTunnel(request.sessionId).catch(() => undefined);
         reject(error instanceof Error ? error : new Error(String(error)));
       }
     });
@@ -5274,6 +5405,7 @@ class NativeSshBackend {
   }
 
   async close(sessionId: string): Promise<void> {
+    this.connectionAttempts.cancel(sessionId);
     const waiter = this.openWaiters.get(sessionId);
     if (waiter) {
       this.openWaiters.delete(sessionId);
@@ -5292,14 +5424,11 @@ class NativeSshBackend {
   }
 
   cancelPendingConnections(): void {
-    for (const sessionId of [...this.openWaiters.keys()]) this.close(sessionId);
+    for (const sessionId of [...this.pendingConnections]) void this.close(sessionId);
   }
 
   private async releaseTunnel(sessionId: string): Promise<void> {
-    const leaseId = this.tunnelLeases.get(sessionId);
-    if (!leaseId) return;
-    this.tunnelLeases.delete(sessionId);
-    await nativeBackend?.releaseTunnel(leaseId).catch(() => undefined);
+    await this.tunnelLeases.release(sessionId, releaseNativeTunnelLease);
   }
 
   requestSnapshots(): void {
@@ -5371,7 +5500,8 @@ class NativeSshBackend {
     if (startError !== undefined) throw new Error(String(startError));
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
+    for (const sessionId of [...this.pendingConnections]) this.connectionAttempts.cancel(sessionId);
     for (const waiter of this.openWaiters.values()) {
       clearTimeout(waiter.timeout);
       waiter.reject(new Error('SSH backend stopped.'));
@@ -5379,14 +5509,22 @@ class NativeSshBackend {
     this.openWaiters.clear();
     this.failControlWaiters(new Error('Native SSH backend stopped.'));
     this.activeSessions.clear();
-    for (const sessionId of [...this.tunnelLeases.keys()]) void this.releaseTunnel(sessionId);
+    const tunnelReleases = this.tunnelLeases.releaseAll(releaseNativeTunnelLease);
     this.lineReader?.close();
     this.lineReader = undefined;
     const child = this.child;
     this.child = undefined;
-    if (!child || child.killed) return;
-    child.stdin.end();
-    child.kill();
+    if (child && !child.killed) {
+      const exited = await stopChildProcess(child);
+      if (!exited) {
+        console.warn('[Wormhole] Native SSH backend did not exit after its force-kill timeout.');
+      }
+    }
+    await tunnelReleases;
+  }
+
+  backendStopped(): void {
+    this.tunnelLeases.clear();
   }
 
   private ensureStarted(): void {
@@ -5439,7 +5577,7 @@ class NativeSshBackend {
       const failure = new Error('Native SSH backend stopped.');
       this.failOpenWaiters(failure);
       this.failControlWaiters(failure);
-      for (const sessionId of [...this.tunnelLeases.keys()]) void this.releaseTunnel(sessionId);
+      void this.tunnelLeases.releaseAll(releaseNativeTunnelLease);
     });
   }
 
@@ -5522,10 +5660,10 @@ class NativeSshBackend {
           ),
         );
       }
-      void this.releaseTunnel(event.sessionId);
+      void this.releaseTunnel(event.sessionId).catch(() => undefined);
     } else if (event.type === 'closed') {
       this.activeSessions.delete(event.sessionId);
-      void this.releaseTunnel(event.sessionId);
+      void this.releaseTunnel(event.sessionId).catch(() => undefined);
     }
 
     this.broadcast(event);
@@ -6549,9 +6687,11 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
   });
 
   ipcMain.handle('tunnel:test', async (_event, value: unknown) => {
+    requireNativeResourcesRunning();
     const request = parseTunnelIDRequest(value);
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
+      requireNativeResourcesRunning();
       const leaseId = randomUUID();
       try {
         const socksEndpoint = await getNativeBackend().acquireTunnel({
@@ -6573,7 +6713,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
         }
         return { connected: false, error: message };
       } finally {
-        await nativeBackend?.releaseTunnel(leaseId).catch(() => undefined);
+        await releaseNativeTunnelLease(leaseId);
       }
     });
   });
@@ -6814,6 +6954,7 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     // an immediate acknowledgement that covers cached SSH/VNC frames.
     void nativeBackend?.send({ action: 'bitwarden.clear-session' }).catch(() => undefined);
     void sshBackend.setMcpLocked(true).catch(() => undefined);
+    cancelPreparingRdpStarts();
     if (ownerWindow && !ownerWindow.isDestroyed()) {
       rdpClient?.cancelPendingStarts(nativeWindowHandle(ownerWindow));
       void rdpClient?.hideAll(nativeWindowHandle(ownerWindow)).catch(() => undefined);
@@ -6934,12 +7075,16 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     treeTooltips.hide(ownerWindow);
   });
   ipcMain.handle('web:open', async (event, request: unknown) => {
+    requireNativeResourcesRunning();
     if (!isWebOpenRequest(request)) throw new Error('Web connection request is invalid.');
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow || ownerWindow.isDestroyed())
       throw new Error('Web session owner window is unavailable.');
     return runAuthorizedOperation(
-      () => webSurfaces.open(ownerWindow, request),
+      () => {
+        requireNativeResourcesRunning();
+        return webSurfaces.open(ownerWindow, request);
+      },
       () => webSurfaces.closeForOwner(ownerWindow, request.sessionId),
     );
   });
@@ -6971,9 +7116,13 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     webSurfaces.closeForOwner(ownerWindow, sessionId);
   });
   ipcMain.handle('ssh:open', async (_event, request: unknown) => {
+    requireNativeResourcesRunning();
     if (!isSshOpenRequest(request)) throw new Error('SSH open request is invalid.');
     return runAuthorizedOperation(
-      (authorizationEpoch) => sshBackend.open(request, authorizationEpoch),
+      (authorizationEpoch) => {
+        requireNativeResourcesRunning();
+        return sshBackend.open(request, authorizationEpoch);
+      },
       () => sshBackend.close(request.sessionId),
     );
   });
@@ -7201,19 +7350,28 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     }
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
+      if (isQuitting) {
+        return { id: '', ok: false, error: 'Native backend is stopping.' };
+      }
       return getNativeBackend().send(command);
     });
   });
 
   ipcMain.handle('rdp:start', async (event, value: unknown) => {
+    requireNativeResourcesRunning();
     const request = parseRdpStartRequest(value);
     const ownerWindow = BrowserWindow.fromWebContents(event.sender);
     if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
     if (request.bounds) rememberRdpSurfacePlacement(ownerWindow, request.sessionId, request.bounds);
+    // Track the renderer's intent before authentication/profile resolution starts. A close or a
+    // newer Retry can now invalidate this work before it acquires a VPN lease.
+    const generation = rdpStartAttempts.begin(request.sessionId);
+    const client = getRdpClient();
+    let lifecycleId: string | undefined;
 
     return runAuthorizedOperation(
       async (authorizationEpoch) => {
-        const client = getRdpClient();
+        requireNativeResourcesRunning();
         let resolvedProfile = request.profile;
         if (request.profile.nodeId) {
           try {
@@ -7257,45 +7415,58 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
           delete resolvedProfile.credentialId;
           delete resolvedProfile.gatewayCredentialId;
         }
+        assertRdpStartCurrent(request.sessionId, generation);
         requireAuthorizationEpoch(authorizationEpoch);
-        releaseRdpTunnel(request.sessionId);
-        let socksEndpoint = '';
-        if (resolvedProfile.nodeId || resolvedProfile.tunnelConfigId) {
-          const leaseId = randomUUID();
-          rdpTunnelLeases.set(request.sessionId, leaseId);
-          try {
-            socksEndpoint = await getNativeBackend().acquireTunnel({
-              leaseId,
-              nodeId: resolvedProfile.nodeId,
-              tunnelConfigId: resolvedProfile.tunnelConfigId,
-              progressSessionId: request.sessionId,
-            });
-          } catch (error) {
-            if (rdpTunnelLeases.get(request.sessionId) === leaseId) {
-              rdpTunnelLeases.delete(request.sessionId);
-            }
-            const message =
-              error instanceof Error ? error.message : 'VPN tunnel establishment failed.';
-            throw new Error(`RDP VPN tunnel is unavailable: ${message}`);
-          }
-          if (rdpTunnelLeases.get(request.sessionId) !== leaseId) {
-            throw new Error('RDP connection closed while opening its VPN tunnel.');
-          }
-          if (!socksEndpoint) releaseRdpTunnel(request.sessionId);
-        }
-        if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
-          releaseRdpTunnel(request.sessionId);
-          throw new Error('Authentication is required before opening the RDP connection.');
-        }
-        if (!socksEndpoint && resolvedProfile.tunnelConfigId) {
-          releaseRdpTunnel(request.sessionId);
-          throw new Error('The VPN tunnel returned no SOCKS endpoint.');
-        }
-        if (!socksEndpoint) releaseRdpTunnel(request.sessionId);
+        const ownerHandle = nativeWindowHandle(ownerWindow);
+        const bounds = currentRdpSurfaceScreenBounds(ownerWindow, request.sessionId);
+        // A retry reuses the renderer session id. Retire the previous native attempt before its
+        // broker lease is released so it cannot overlap the replacement through a closing proxy.
+        const previousLifecycleId = client.currentLifecycleId(request.sessionId);
+        await client
+          .command('disconnect', request.sessionId, ownerHandle, bounds, previousLifecycleId)
+          .catch(() => undefined);
+        assertRdpStartCurrent(request.sessionId, generation);
+        await releaseRdpTunnelsForSession(request.sessionId);
+        assertRdpStartCurrent(request.sessionId, generation);
+        lifecycleId = client.beginStart(request.sessionId);
+        rdpConnectingLifecycles.set(lifecycleId, request.sessionId);
         try {
+          let socksEndpoint = '';
+          if (resolvedProfile.nodeId || resolvedProfile.tunnelConfigId) {
+            const leaseId = randomUUID();
+            rdpTunnelLeases.claim(lifecycleId, leaseId);
+            rdpTunnelLeaseSessions.set(lifecycleId, request.sessionId);
+            try {
+              socksEndpoint = await getNativeBackend().acquireTunnel({
+                leaseId,
+                nodeId: resolvedProfile.nodeId,
+                tunnelConfigId: resolvedProfile.tunnelConfigId,
+                progressSessionId: request.sessionId,
+              });
+            } catch (error) {
+              await releaseRdpTunnel(lifecycleId).catch(() => undefined);
+              const message =
+                error instanceof Error ? error.message : 'VPN tunnel establishment failed.';
+              throw new Error(`RDP VPN tunnel is unavailable: ${message}`);
+            }
+            assertRdpStartCurrent(request.sessionId, generation);
+            if (!rdpTunnelLeases.isActive(lifecycleId, leaseId)) {
+              throw new Error('RDP connection closed while opening its VPN tunnel.');
+            }
+            if (!socksEndpoint) await releaseRdpTunnel(lifecycleId);
+          }
+          if (!isAuthorizationEpochCurrent(authorizationEpoch)) {
+            await releaseRdpTunnel(lifecycleId);
+            throw new Error('Authentication is required before opening the RDP connection.');
+          }
+          if (!socksEndpoint && resolvedProfile.tunnelConfigId) {
+            await releaseRdpTunnel(lifecycleId);
+            throw new Error('The VPN tunnel returned no SOCKS endpoint.');
+          }
+          if (!socksEndpoint) await releaseRdpTunnel(lifecycleId);
+          assertRdpStartCurrent(request.sessionId, generation);
           const { manualCredentials: _manualCredentials, ...nativeRequest } = request;
-          const bounds = currentRdpSurfaceScreenBounds(ownerWindow, request.sessionId);
-          return await client.start(
+          const response = await client.start(
             {
               ...nativeRequest,
               profile: {
@@ -7307,26 +7478,33 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
                     : resolvedProfile.tunnelEnabled,
               },
             },
-            nativeWindowHandle(ownerWindow),
+            ownerHandle,
             bounds,
+            lifecycleId,
           );
+          rdpConnectingLifecycles.delete(lifecycleId);
+          return response;
         } catch (error) {
-          releaseRdpTunnel(request.sessionId);
+          rdpConnectingLifecycles.delete(lifecycleId);
+          client.cancelStart(request.sessionId, lifecycleId);
+          await releaseRdpTunnel(lifecycleId).catch(() => undefined);
           throw error;
         }
       },
       async () => {
-        releaseRdpTunnel(request.sessionId);
-        if (!ownerWindow.isDestroyed()) {
-          await rdpClient
-            ?.command(
+        if (lifecycleId) rdpConnectingLifecycles.delete(lifecycleId);
+        if (lifecycleId && !ownerWindow.isDestroyed()) {
+          await client
+            .command(
               'disconnect',
               request.sessionId,
               nativeWindowHandle(ownerWindow),
               toScreenBounds(ownerWindow, request.bounds),
+              lifecycleId,
             )
             .catch(() => undefined);
         }
+        if (lifecycleId) await releaseRdpTunnel(lifecycleId).catch(() => undefined);
       },
     );
   });
@@ -7361,15 +7539,31 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     if (!ownerWindow) throw new Error('RDP owner window is unavailable.');
     if (request.bounds) rememberRdpSurfacePlacement(ownerWindow, request.sessionId, request.bounds);
     const bounds = request.bounds ? toScreenBounds(ownerWindow, request.bounds) : undefined;
+    const client = getRdpClient();
+    const lifecycleId =
+      operation === 'disconnect' ? client.currentLifecycleId(request.sessionId) : undefined;
+    if (operation === 'disconnect') {
+      rdpStartAttempts.cancel(request.sessionId);
+      if (lifecycleId) rdpConnectingLifecycles.delete(lifecycleId);
+    }
     const command = () =>
-      getRdpClient().command(operation, request.sessionId, nativeWindowHandle(ownerWindow), bounds);
+      client.command(
+        operation,
+        request.sessionId,
+        nativeWindowHandle(ownerWindow),
+        bounds,
+        lifecycleId,
+      );
     if (operation === 'hide' || operation === 'disconnect') {
-      const result = command();
       if (operation === 'disconnect') {
-        releaseRdpTunnel(request.sessionId);
-        forgetRdpSurfacePlacement(request.sessionId);
+        try {
+          return await command();
+        } finally {
+          await releaseRdpTunnelsForSession(request.sessionId).catch(() => undefined);
+          forgetRdpSurfacePlacement(request.sessionId);
+        }
       }
-      return result;
+      return command();
     }
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
@@ -7396,9 +7590,13 @@ function getRdpClient(): RdpBackendClient {
       event.type === 'error';
     if (
       event.sessionId &&
+      event.lifecycleId &&
       (terminalEvent || (event.type === 'logonError' && event.credentialFailure === true))
     ) {
-      releaseRdpTunnel(event.sessionId);
+      rdpConnectingLifecycles.delete(event.lifecycleId);
+      void releaseRdpTunnel(event.lifecycleId).catch((error) => {
+        console.warn('[Wormhole] Could not release the RDP VPN tunnel.', error);
+      });
     }
     if (event.sessionId && terminalEvent) forgetRdpSurfacePlacement(event.sessionId);
     for (const window of BrowserWindow.getAllWindows()) {
@@ -7408,11 +7606,49 @@ function getRdpClient(): RdpBackendClient {
   return rdpClient;
 }
 
-function releaseRdpTunnel(sessionId: string): void {
-  const leaseId = rdpTunnelLeases.get(sessionId);
-  if (!leaseId) return;
-  rdpTunnelLeases.delete(sessionId);
-  void nativeBackend?.releaseTunnel(leaseId).catch(() => undefined);
+async function releaseRdpTunnel(lifecycleId: string): Promise<void> {
+  await rdpTunnelLeases.release(lifecycleId, releaseNativeTunnelLease);
+  if (!rdpTunnelLeases.has(lifecycleId)) rdpTunnelLeaseSessions.delete(lifecycleId);
+}
+
+async function releaseRdpTunnelsForSession(sessionId: string): Promise<void> {
+  const lifecycleIds = [...rdpTunnelLeaseSessions]
+    .filter(([, ownerSessionId]) => ownerSessionId === sessionId)
+    .map(([lifecycleId]) => lifecycleId);
+  const results = await Promise.allSettled(
+    lifecycleIds.map((lifecycleId) => releaseRdpTunnel(lifecycleId)),
+  );
+  const failed = results.find((result) => result.status === 'rejected');
+  if (failed?.status === 'rejected') throw failed.reason;
+}
+
+function assertRdpStartCurrent(sessionId: string, generation: number): void {
+  if (!rdpStartAttempts.isCurrent(sessionId, generation)) {
+    throw new Error(
+      'RDP connection was closed or superseded before its native session could start.',
+    );
+  }
+}
+
+function cancelPreparingRdpStarts(): void {
+  rdpStartAttempts.cancelAll();
+  for (const [lifecycleId, sessionId] of rdpConnectingLifecycles) {
+    rdpConnectingLifecycles.delete(lifecycleId);
+    rdpClient?.cancelStart(sessionId, lifecycleId);
+    void releaseRdpTunnel(lifecycleId).catch((error) => {
+      console.warn('[Wormhole] Could not release a pending RDP VPN tunnel.', error);
+    });
+  }
+}
+
+async function releaseAllRdpTunnels(): Promise<void> {
+  const results = await rdpTunnelLeases.releaseAll(releaseNativeTunnelLease);
+  for (const lifecycleId of [...rdpTunnelLeaseSessions.keys()]) {
+    if (!rdpTunnelLeases.has(lifecycleId)) rdpTunnelLeaseSessions.delete(lifecycleId);
+  }
+  if (results.some((result) => result.status === 'rejected')) {
+    console.warn('[Wormhole] One or more RDP VPN tunnel leases could not be released cleanly.');
+  }
 }
 
 function rememberRdpSurfacePlacement(
@@ -7691,6 +7927,7 @@ function createWindow() {
     window.setOpacity(startupWindowOpacity);
     webSurfaces.closeForWindow(window);
     clearRdpSurfacePlacements(window);
+    cancelPreparingRdpStarts();
     void serializeAuthOperation(async () => {
       // A renderer reload creates a fresh UI process context. Do not let a previous renderer's
       // native unlock survive into the new context before it proves possession of the secret.
@@ -7708,7 +7945,9 @@ function createWindow() {
       } catch {
         // The MCP process is allowed to exit while the renderer is being re-authenticated.
       }
+      await sshBackend.dispose();
       await rdpClient?.dispose();
+      await releaseAllRdpTunnels();
     }).catch((error) => {
       console.error('[Wormhole] Could not reset native authentication for the renderer.', error);
     });
@@ -7726,11 +7965,7 @@ function createWindow() {
     closeReason.confirmSystemShutdown();
     skipQuitConfirmation = true;
     isQuitting = true;
-    nativeBackend?.stop();
-    nativeBackend = undefined;
-    serialBackend?.dispose();
-    serialBackend = undefined;
-    sshBackend.dispose();
+    void shutdownNativeResources();
   });
   window.webContents.on('render-process-gone', () => {
     closeReason.rendererFailed();
@@ -7763,12 +7998,7 @@ function createWindow() {
               }
               // The renderer can no longer enumerate or close its sessions. Dispose every native
               // owner here so macOS cannot keep headless sessions alive after the last window closes.
-              serialBackend?.dispose();
-              serialBackend = undefined;
-              sshBackend.dispose();
-              await rdpClient?.dispose().catch(() => undefined);
-              nativeBackend?.stop();
-              nativeBackend = undefined;
+              await shutdownNativeResources();
             },
           );
         },
@@ -7810,6 +8040,34 @@ function isTrustedRendererNavigation(targetUrl: string, productionRendererPath: 
 }
 
 const sshBackend = new NativeSshBackend();
+let nativeResourceShutdownPromise: Promise<void> | undefined;
+
+function shutdownNativeResources(): Promise<void> {
+  if (nativeResourceShutdownPromise) return nativeResourceShutdownPromise;
+  const task = (async () => {
+    cancelPreparingRdpStarts();
+    serialBackend?.dispose();
+    serialBackend = undefined;
+    const results = await Promise.allSettled([sshBackend.dispose(), rdpClient?.dispose()]);
+    if (results.some((result) => result.status === 'rejected')) {
+      console.warn('[Wormhole] One or more native session backends did not stop cleanly.');
+    }
+    await releaseAllRdpTunnels();
+    const backend = nativeBackend;
+    if (nativeBackend === backend) nativeBackend = undefined;
+    await backend?.stop(true);
+    webSurfaces.backendStopped();
+    sshBackend.backendStopped();
+    rdpTunnelLeases.clear();
+    rdpTunnelLeaseSessions.clear();
+  })();
+  const tracked = task.finally(() => {
+    if (nativeResourceShutdownPromise === tracked) nativeResourceShutdownPromise = undefined;
+  });
+  nativeResourceShutdownPromise = tracked;
+  return tracked;
+}
+
 authSession.onUnlocked(() => {
   sshBackend.requestSnapshots();
   serialBackend?.requestSnapshots();
@@ -7887,12 +8145,7 @@ app.on('before-quit', (event) => {
       await Promise.allSettled(
         BrowserWindow.getAllWindows().map((window) => requestRendererTeardown(window)),
       );
-      nativeBackend?.stop();
-      nativeBackend = undefined;
-      serialBackend?.dispose();
-      serialBackend = undefined;
-      sshBackend.dispose();
-      await rdpClient?.dispose().catch(() => undefined);
+      await shutdownNativeResources();
       quitCleanupComplete = true;
       app.quit();
     }
@@ -7900,6 +8153,6 @@ app.on('before-quit', (event) => {
 });
 
 app.on('window-all-closed', () => {
-  void rdpClient?.dispose();
+  void shutdownNativeResources();
   if (process.platform !== 'darwin') app.quit();
 });

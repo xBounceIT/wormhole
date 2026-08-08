@@ -78,13 +78,81 @@ INSERT INTO TunnelConfigs (Id, Name, Kind, CreatedAt, UpdatedAt) VALUES
 	if !release.OK {
 		t.Fatalf("second release = %#v", release)
 	}
+	if process.alive() {
+		t.Fatal("last broker release was acknowledged before the sidecar exited")
+	}
+}
+
+func TestTunnelRuntimePoolHandsPromptToRemainingConcurrentLease(t *testing.T) {
+	firstPromptStarted := make(chan struct{})
+	starts := 0
+	process := newTestTunnelProcess()
+	pool := newTunnelRuntimePool(func(ctx context.Context, _ tunnelConfigSnapshot) (*tunnelProcess, error) {
+		starts++
+		answer, err := requestTunnelPrompt(ctx, tunnelPrompt{Title: "OTP"})
+		if err != nil {
+			return nil, err
+		}
+		if answer != "654321" {
+			return nil, errors.New("unexpected prompt response")
+		}
+		return process, nil
+	})
+
+	firstContext, cancelFirst := context.WithCancel(context.Background())
+	firstContext = withTunnelPromptHandler(firstContext, func(ctx context.Context, _ tunnelPrompt) (string, error) {
+		close(firstPromptStarted)
+		<-ctx.Done()
+		return "", ctx.Err()
+	})
+	firstResult := make(chan *tunnelRuntime, 1)
+	go func() {
+		runtime, _ := pool.acquire(firstContext, "shared", tunnelConfigSnapshot{updatedAt: "one", prompt: tunnelPromptHandlerFromContext(firstContext)})
+		firstResult <- runtime
+	}()
+	select {
+	case <-firstPromptStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first lease did not receive the shared authentication prompt")
+	}
+
+	secondPrompts := 0
+	secondContext := withTunnelPromptHandler(context.Background(), func(_ context.Context, _ tunnelPrompt) (string, error) {
+		secondPrompts++
+		return "654321", nil
+	})
+	secondResult := make(chan *tunnelRuntime, 1)
+	go func() {
+		runtime, _ := pool.acquire(secondContext, "shared", tunnelConfigSnapshot{updatedAt: "one", prompt: tunnelPromptHandlerFromContext(secondContext)})
+		secondResult <- runtime
+	}()
 	deadline := time.Now().Add(time.Second)
-	for process.alive() && time.Now().Before(deadline) {
+	for {
+		pool.mu.Lock()
+		entry := pool.entries["shared"]
+		joined := entry != nil && entry.refs == 2
+		pool.mu.Unlock()
+		if joined || time.Now().After(deadline) {
+			if !joined {
+				t.Fatal("second lease did not join the in-flight tunnel establishment")
+			}
+			break
+		}
 		time.Sleep(time.Millisecond)
 	}
-	if process.alive() {
-		t.Fatal("last broker release retained the sidecar")
+
+	cancelFirst()
+	if first := <-firstResult; first != nil {
+		first.close()
 	}
+	second := <-secondResult
+	if second == nil {
+		t.Fatal("remaining lease did not acquire the shared tunnel")
+	}
+	if starts != 1 || secondPrompts != 1 {
+		t.Fatalf("starts=%d second prompts=%d, want 1/1", starts, secondPrompts)
+	}
+	second.close()
 }
 
 func TestTunnelBrokerDedicatedAcquireDoesNotReuseLiveSidecar(t *testing.T) {

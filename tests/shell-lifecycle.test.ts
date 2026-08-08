@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 
 import { selectDialogVisuals } from '../src/dialog-lifecycle.ts';
+import { stopChildProcess } from '../electron/rdp.ts';
+import { TunnelLeaseRegistry } from '../electron/tunnel-lease-registry.ts';
 import {
   runWindowTeardown,
   WindowCloseCoordinator,
@@ -295,8 +298,133 @@ test('renderer failure replaces unavailable renderer teardown with native cleanu
   const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
   const start = mainSource.indexOf("if (closeReason.reason !== 'renderer-failure')");
   const failureBranch = mainSource.slice(start, start + 1_000);
-  assert.match(failureBranch, /serialBackend\?\.dispose\(\)/);
-  assert.match(failureBranch, /sshBackend\.dispose\(\)/);
-  assert.match(failureBranch, /await rdpClient\?\.dispose\(\)/);
-  assert.match(failureBranch, /nativeBackend\?\.stop\(\)/);
+  assert.match(failureBranch, /await shutdownNativeResources\(\)/);
+});
+
+test('RDP start cancellation and VPN ownership are scoped before asynchronous profile resolution', () => {
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const startHandler = mainSource.slice(
+    mainSource.indexOf("ipcMain.handle('rdp:start'"),
+    mainSource.indexOf("ipcMain.handle('rdp:resize'"),
+  );
+  assert.match(startHandler, /rdpStartAttempts\.begin\(request\.sessionId\)/);
+  assert.match(startHandler, /resolveNativeRdpProfile\(/);
+  assert.ok(
+    startHandler.indexOf('rdpStartAttempts.begin(request.sessionId)') <
+      startHandler.indexOf('resolveNativeRdpProfile('),
+  );
+  assert.match(startHandler, /assertRdpStartCurrent\(request\.sessionId, generation\)/);
+  assert.match(startHandler, /rdpTunnelLeases\.claim\(lifecycleId, leaseId\)/);
+  assert.match(startHandler, /rdpTunnelLeaseSessions\.set\(lifecycleId, request\.sessionId\)/);
+  assert.match(startHandler, /releaseRdpTunnelsForSession\(request\.sessionId\)/);
+  assert.doesNotMatch(startHandler, /rdpTunnelLeases\.claim\(request\.sessionId, leaseId\)/);
+  assert.match(
+    mainSource,
+    /function cancelPreparingRdpStarts\(\)[\s\S]*rdpStartAttempts\.cancelAll\(\)[\s\S]*releaseRdpTunnel\(lifecycleId\)/,
+  );
+});
+
+test('web renderer loss releases its VPN-backed surface immediately', () => {
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const crashHandler = mainSource.slice(
+    mainSource.indexOf("contents.on('render-process-gone'"),
+    mainSource.indexOf("contents.once('destroyed'"),
+  );
+  assert.match(crashHandler, /this\.close\(sessionId\)/);
+});
+
+test('application shutdown permanently stops the broker before dropping its reference', () => {
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const shutdown = mainSource.slice(
+    mainSource.indexOf('function shutdownNativeResources()'),
+    mainSource.indexOf('authSession.onUnlocked'),
+  );
+  assert.ok(
+    shutdown.indexOf('nativeBackend = undefined') < shutdown.indexOf('await backend?.stop(true)'),
+  );
+  assert.match(mainSource, /gracefulTimeoutMs: nativeBackendShutdownTimeoutMs/);
+  for (const channel of ['tunnel:test', 'web:open', 'ssh:open', 'rdp:start']) {
+    const handler = mainSource.slice(mainSource.indexOf(`ipcMain.handle('${channel}'`));
+    assert.match(handler.slice(0, 300), /requireNativeResourcesRunning\(\)/);
+  }
+});
+
+test('child process shutdown waits for graceful exit and force-kills only after timeout', async () => {
+  const gracefulEvents = new EventEmitter();
+  const graceful: any = {
+    exitCode: null,
+    signalCode: null,
+    stdin: {
+      end() {
+        graceful.exitCode = 0;
+        queueMicrotask(() => gracefulEvents.emit('close'));
+      },
+    },
+    once: gracefulEvents.once.bind(gracefulEvents),
+    removeListener: gracefulEvents.removeListener.bind(gracefulEvents),
+    killCalls: 0,
+    kill() {
+      graceful.killCalls++;
+      return true;
+    },
+  };
+  assert.equal(
+    await stopChildProcess(graceful, { gracefulTimeoutMs: 10, forceKillTimeoutMs: 10 }),
+    true,
+  );
+  assert.equal(graceful.killCalls, 0);
+
+  const forcedEvents = new EventEmitter();
+  const forced: any = {
+    exitCode: null,
+    signalCode: null,
+    stdin: { end() {} },
+    once: forcedEvents.once.bind(forcedEvents),
+    removeListener: forcedEvents.removeListener.bind(forcedEvents),
+    killCalls: 0,
+    kill() {
+      forced.killCalls++;
+      forced.signalCode = 'SIGTERM';
+      queueMicrotask(() => forcedEvents.emit('close'));
+      return true;
+    },
+  };
+  assert.equal(
+    await stopChildProcess(forced, { gracefulTimeoutMs: 1, forceKillTimeoutMs: 10 }),
+    true,
+  );
+  assert.equal(forced.killCalls, 1);
+});
+
+test('tunnel lease release is idempotent, cancels ownership immediately, and retries failures', async () => {
+  const leases = new TunnelLeaseRegistry();
+  leases.claim('rdp-session', 'lease-one');
+  let finish!: () => void;
+  let releases = 0;
+  const pending = () =>
+    new Promise<void>((resolve) => {
+      releases++;
+      finish = resolve;
+    });
+  const first = leases.release('rdp-session', pending);
+  const duplicate = leases.release('rdp-session', pending);
+  assert.equal(leases.isActive('rdp-session', 'lease-one'), false);
+  assert.equal(releases, 1);
+  finish();
+  await Promise.all([first, duplicate]);
+  assert.equal(leases.has('rdp-session'), false);
+
+  leases.claim('web-session', 'lease-two');
+  await assert.rejects(
+    leases.release('web-session', async () => Promise.reject(new Error('pipe'))),
+  );
+  assert.equal(leases.has('web-session'), true);
+  await leases.release('web-session', async () => undefined);
+  assert.equal(leases.has('web-session'), false);
+
+  leases.claim('rdp-old-lifecycle', 'lease-old');
+  leases.claim('rdp-new-lifecycle', 'lease-new');
+  await leases.release('rdp-old-lifecycle', async () => undefined);
+  assert.equal(leases.has('rdp-old-lifecycle'), false);
+  assert.equal(leases.isActive('rdp-new-lifecycle', 'lease-new'), true);
 });

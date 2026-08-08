@@ -7,8 +7,10 @@ test('web session attempts are invalidated when a tab closes before its open com
   const opening = attempts.begin('web-1');
 
   attempts.cancel('web-1');
+  const reopened = attempts.begin('web-1');
 
   assert.equal(attempts.isCurrent('web-1', opening), false);
+  assert.equal(attempts.isCurrent('web-1', reopened), true);
 });
 
 test('web session attempts use last-request-wins semantics for a retry', () => {
@@ -27,4 +29,15 @@ test('credential editor reset invalidates an in-flight Bitwarden search', () => 
   attempts.cancel('credential-search');
 
   assert.equal(attempts.isCurrent('credential-search', searching), false);
+});
+
+test('bulk cancellation invalidates every tracked asynchronous attempt', () => {
+  const attempts = new WebSessionAttemptTracker();
+  const first = attempts.begin('first');
+  const second = attempts.begin('second');
+
+  attempts.cancelAll();
+
+  assert.equal(attempts.isCurrent('first', first), false);
+  assert.equal(attempts.isCurrent('second', second), false);
 });

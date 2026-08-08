@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -252,6 +253,7 @@ func TestFinishTunnelAcquireHandlesCancellationBeforeLeaseCreation(t *testing.T)
 	manager.finishTunnelAcquire(
 		backendCommand{ID: "command-1", SessionID: "lease-1"},
 		nil,
+		nil,
 		errors.New("cancelled"),
 	)
 	if err := outputFile.Close(); err != nil {
@@ -263,6 +265,73 @@ func TestFinishTunnelAcquireHandlesCancellationBeforeLeaseCreation(t *testing.T)
 	}
 	if !strings.Contains(string(data), "VPN tunnel establishment was cancelled") {
 		t.Fatalf("unexpected cancellation response: %s", data)
+	}
+}
+
+func TestFinishTunnelAcquireCannotReplaceNewAttemptWithLateOldLease(t *testing.T) {
+	manager := newVncManager(nil, &backendLineWriter{writer: bufio.NewWriter(&bytes.Buffer{})})
+	oldStart := &pendingTunnelStart{cancel: func() {}}
+	newStart := &pendingTunnelStart{cancel: func() {}}
+	manager.tunnelStarts["shared-session"] = newStart
+
+	oldProcess := newTestTunnelProcess()
+	oldPool := newTunnelRuntimePool(func(context.Context, tunnelConfigSnapshot) (*tunnelProcess, error) {
+		return nil, errors.New("unexpected start")
+	})
+	oldEntry := &sharedTunnelEntry{key: "old", refs: 1, process: oldProcess}
+	oldPool.entries[oldEntry.key] = oldEntry
+	manager.finishTunnelAcquire(
+		backendCommand{ID: "old-command", SessionID: "shared-session"},
+		oldStart,
+		&tunnelRuntime{entry: oldEntry, pool: oldPool},
+		nil,
+	)
+
+	if manager.tunnelStarts["shared-session"] != newStart {
+		t.Fatal("late old acquisition removed the replacement attempt")
+	}
+	if manager.tunnelLeases["shared-session"] != nil {
+		t.Fatal("late old acquisition replaced the new attempt with its stale lease")
+	}
+	if oldProcess.alive() {
+		t.Fatal("late old acquisition did not close its orphaned sidecar reference")
+	}
+}
+
+func TestReleaseTunnelWaitsForPendingAcquireCleanup(t *testing.T) {
+	var output bytes.Buffer
+	writer := &backendLineWriter{writer: bufio.NewWriter(&output)}
+	manager := newVncManager(nil, writer)
+	cancelled := make(chan struct{})
+	finished := make(chan struct{})
+	manager.tunnelStarts["pending-session"] = &pendingTunnelStart{
+		cancel: func() { close(cancelled) },
+		done:   finished,
+	}
+
+	manager.releaseTunnel(backendCommand{
+		ID: "release-pending", Action: "tunnel.release", SessionID: "pending-session",
+	})
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("pending tunnel acquire was not cancelled")
+	}
+	time.Sleep(20 * time.Millisecond)
+	writer.mu.Lock()
+	earlyOutput := output.String()
+	writer.mu.Unlock()
+	if strings.Contains(earlyOutput, "release-pending") {
+		t.Fatal("pending tunnel release was acknowledged before acquire cleanup completed")
+	}
+
+	close(finished)
+	manager.cleanup.Wait()
+	writer.mu.Lock()
+	finalOutput := output.String()
+	writer.mu.Unlock()
+	if !strings.Contains(finalOutput, `"id":"release-pending"`) || !strings.Contains(finalOutput, `"ok":true`) {
+		t.Fatalf("pending tunnel release response = %q", finalOutput)
 	}
 }
 
