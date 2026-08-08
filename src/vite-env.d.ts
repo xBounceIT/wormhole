@@ -516,6 +516,7 @@ interface WormholeUpdateCheckResult {
 
 interface WormholeAppSettings {
   promptBeforeTunnelConnect: boolean;
+  autoCopyOnSelect: boolean;
   autoCheckForUpdates: boolean;
   lastUpdateCheck: string | null;
   skippedUpdateVersion: string | null;
@@ -762,6 +763,7 @@ interface Window {
     }): Promise<void>;
     readAppSettings(): Promise<WormholeAppSettings>;
     setPromptBeforeTunnelConnect(enabled: boolean): Promise<{ updated: boolean }>;
+    setAutoCopyOnSelect(enabled: boolean): Promise<{ updated: boolean }>;
     setUpdatePreferences(preferences: {
       autoCheckForUpdates?: boolean;
       skippedUpdateVersion?: string | null;
@@ -843,6 +845,7 @@ interface Window {
       received: string;
     }): Promise<{ updated: boolean }>;
     sendSshInput(sessionId: string, data: string): Promise<void>;
+    pasteClipboardToSsh(sessionId: string): Promise<{ pasted: boolean }>;
     resizeSshSession(sessionId: string, columns: number, rows: number): Promise<void>;
     openSftpBrowser(sessionId: string, requestId?: string): Promise<void>;
     listSftpDirectory(sessionId: string, path: string, requestId?: string): Promise<void>;

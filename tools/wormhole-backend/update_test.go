@@ -311,7 +311,7 @@ func TestServeUpdateDownloadShaMismatch(t *testing.T) {
 
 func mustReadAppSettings(t *testing.T, databasePath string) (bool, bool, *string, *string) {
 	t.Helper()
-	prompt, autoCheck, lastCheck, skipped, err := readAppSettings(databasePath)
+	prompt, _, autoCheck, lastCheck, skipped, err := readAppSettings(databasePath)
 	if err != nil {
 		t.Fatalf("readAppSettings failed: %v", err)
 	}

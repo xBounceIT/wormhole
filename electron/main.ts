@@ -1,6 +1,7 @@
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   Menu,
@@ -49,6 +50,7 @@ import { ExtensionMutationGuard } from './extension-mutation-guard.js';
 import { KeyedSingleFlight } from './keyed-single-flight.js';
 import { KeyedTaskTracker } from './keyed-task-tracker.js';
 import { shouldDeferExtensionReload } from './extension-reload-policy.js';
+import { encodeTerminalClipboardText, isEncodedSshInput } from './terminal-clipboard.js';
 import { RdpBackendClient } from './rdp.js';
 import {
   isMatchingOAuthRedirect,
@@ -159,7 +161,7 @@ type BackendOperation =
   | 'open-log-file'
   | 'open-logs-folder'
   | 'settings-migrate'
-  | 'settings-set-prompt-before-tunnel'
+  | 'settings-set-auto-copy-on-select'
   | 'bitwarden-onboarding-read'
   | 'bitwarden-onboarding-dismiss'
   | 'extension-read'
@@ -275,6 +277,7 @@ type MigrationResponse = {
 };
 type AppSettings = {
   promptBeforeTunnelConnect: boolean;
+  autoCopyOnSelect: boolean;
   autoCheckForUpdates: boolean;
   lastUpdateCheck: string | null;
   skippedUpdateVersion: string | null;
@@ -789,7 +792,6 @@ type McpApprovalEvent = {
 };
 
 const sshMaxSessionIdLength = 128;
-const sshMaxInputLength = 1_500_000;
 const sshMaxTerminalCells = 500 * 500;
 const sshMaxTerminalScrollbackLines = 5000;
 const sshMaxTerminalScrollbackLineLength = 2048;
@@ -1307,7 +1309,7 @@ function parseCredentialDeleteRequest(value: unknown): CredentialDeleteRequest {
 }
 
 function isSshInput(value: unknown): value is string {
-  return typeof value === 'string' && value.length <= sshMaxInputLength;
+  return isEncodedSshInput(value);
 }
 
 function isSftpPath(value: unknown): value is string {
@@ -5759,6 +5761,16 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     });
   });
 
+  ipcMain.handle('settings:set-auto-copy-on-select', async (_event, value: unknown) => {
+    if (typeof value !== 'boolean') throw new Error('Terminal clipboard setting is invalid.');
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      return runBackend<{ updated: boolean }>('settings-set-auto-copy-on-select', {
+        enabled: value,
+      });
+    });
+  });
+
   ipcMain.handle('settings:set-update-preferences', async (_event, value: unknown) => {
     if (!isRecord(value)) throw new Error('Update preferences are invalid.');
     const request: Record<string, unknown> = {};
@@ -6632,6 +6644,16 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     return serializeAuthOperation(async () => {
       await requireWorkspaceAuth();
       sshBackend.sendInput(sessionId, data);
+    });
+  });
+  ipcMain.handle('ssh:paste-clipboard', async (_event, sessionId: unknown) => {
+    if (!isSshSessionId(sessionId)) throw new Error('SSH paste request is invalid.');
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      const data = encodeTerminalClipboardText(clipboard.readText());
+      if (!data) return { pasted: false };
+      sshBackend.sendInput(sessionId, data);
+      return { pasted: true };
     });
   });
   ipcMain.handle(

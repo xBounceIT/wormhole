@@ -20,6 +20,12 @@ import { backupExportPasswordsMatch } from './backup-state';
 import wormholeIcon from '../Assets/Wormhole.png';
 import bitwardenIcon from '../Assets/Bitwarden/bitwarden-icon.png';
 import { mergeCredential } from './credential-state';
+import { writeClipboardText } from './clipboard';
+import {
+  normalizeTerminalPasteText,
+  shouldAutoCopyTerminalSelection,
+  shouldUseTerminalClipboardShortcut,
+} from './terminal-clipboard';
 import {
   filterListSearchIndex,
   listSearchResultsArePending,
@@ -1359,6 +1365,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [lastUpdateCheck, setLastUpdateCheck] = useState<string | null>(
     initialSettings.lastUpdateCheck,
   );
+  const [autoCopyOnSelect, setAutoCopyOnSelect] = useState(initialSettings.autoCopyOnSelect);
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateStatus, setUpdateStatus] = useState('');
   const [updateDownloadProgress, setUpdateDownloadProgress] = useState<number | null>(null);
@@ -1458,6 +1465,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     setSkippedUpdateVersion(latest);
     void window.wormhole?.setUpdatePreferences({ skippedUpdateVersion: latest }).catch(() => {
       // A failed save leaves the local state; the next settings read re-syncs it.
+    });
+  }
+
+  function handleAutoCopyOnSelectChange(enabled: boolean) {
+    setAutoCopyOnSelect(enabled);
+    void window.wormhole?.setAutoCopyOnSelect(enabled).catch(() => {
+      // Keep the responsive local value; the next launch re-syncs the persisted setting.
     });
   }
 
@@ -5257,6 +5271,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             <SidebarInset className="h-full min-h-0 min-w-0 rounded-none bg-background">
               {activePage === 'sessions' ? (
                 <SessionsPage
+                  autoCopyOnSelect={autoCopyOnSelect}
                   onBitwardenUnlockRequired={(sessionId, reason, retry) =>
                     requestRuntimeBitwardenUnlock(`vnc:${sessionId}`, reason, retry)
                   }
@@ -5296,9 +5311,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                 />
               ) : activePage === 'settings' ? (
                 <SettingsPage
+                  autoCopyOnSelect={autoCopyOnSelect}
                   authGate={authGate}
                   authState={authState}
                   onAuthStateChange={setAuthState}
+                  onAutoCopyOnSelectChange={handleAutoCopyOnSelectChange}
                   onBackupImported={(workspace) => {
                     setTree(workspace.tree);
                     setCredentials(workspace.credentials);
@@ -6714,9 +6731,25 @@ function terminalKeyData(event: React.KeyboardEvent, appCursor: boolean): string
   return undefined;
 }
 
+function terminalSelectionText(surface: HTMLElement): string {
+  const selection = window.getSelection();
+  if (
+    !selection ||
+    selection.isCollapsed ||
+    !selection.anchorNode ||
+    !selection.focusNode ||
+    !surface.contains(selection.anchorNode) ||
+    !surface.contains(selection.focusNode)
+  ) {
+    return '';
+  }
+  return selection.toString();
+}
+
 function SshTerminalSurface({
   session,
   isActive,
+  autoCopyOnSelect,
   onInput,
   onReconnect,
   onTrustHostKey,
@@ -6724,6 +6757,7 @@ function SshTerminalSurface({
 }: {
   session: Session;
   isActive: boolean;
+  autoCopyOnSelect: boolean;
   onInput: (sessionId: string, value: string) => void;
   onReconnect: (sessionId: string) => void;
   onTrustHostKey?: (sessionId: string, mismatch: NonNullable<Session['hostKeyMismatch']>) => void;
@@ -6958,6 +6992,14 @@ function SshTerminalSurface({
       className="terminal-scrollbar h-full min-h-0 min-w-0 flex-1 cursor-text overflow-x-auto overflow-y-auto overscroll-contain bg-[#090909] text-[#e5e7eb] outline-none"
       onClick={(event) => event.currentTarget.focus({ preventScroll: true })}
       onKeyDown={(event) => {
+        if (
+          shouldUseTerminalClipboardShortcut(
+            event,
+            Boolean(terminalSelectionText(event.currentTarget)),
+          )
+        ) {
+          return;
+        }
         const data = terminalKeyData(event, session.terminalFrame?.applicationCursor ?? false);
         if (data === undefined) return;
         event.preventDefault();
@@ -6967,7 +7009,17 @@ function SshTerminalSurface({
         const text = event.clipboardData.getData('text');
         if (!text) return;
         event.preventDefault();
-        onInput(session.id, text);
+        onInput(session.id, normalizeTerminalPasteText(text));
+      }}
+      onMouseUp={(event) => {
+        if (!shouldAutoCopyTerminalSelection(autoCopyOnSelect, event.button)) return;
+        const text = terminalSelectionText(event.currentTarget);
+        if (text) void copyTextToClipboard(text).catch(() => undefined);
+      }}
+      onContextMenu={(event) => {
+        if (isSerial || !session.backendSessionId) return;
+        event.preventDefault();
+        void window.wormhole?.pasteClipboardToSsh(session.backendSessionId).catch(() => undefined);
       }}
       onCompositionEnd={(event) => {
         if (event.data) onInput(session.id, event.data);
@@ -8085,6 +8137,7 @@ function SftpBrowserSurface({
 }
 
 function SessionsPage({
+  autoCopyOnSelect,
   isAuthorized,
   isWebSurfaceVisible,
   sessions,
@@ -8112,6 +8165,7 @@ function SessionsPage({
   onTrustSshHostKey,
   onRetryRdp,
 }: {
+  autoCopyOnSelect: boolean;
   isAuthorized: boolean;
   isWebSurfaceVisible: boolean;
   sessions: Session[];
@@ -8251,6 +8305,7 @@ function SessionsPage({
             {session.protocol === 'ssh' ? (
               <>
                 <SshTerminalSurface
+                  autoCopyOnSelect={autoCopyOnSelect}
                   isActive={session.id === selectedSession.id}
                   onInput={onSshInput}
                   onReconnect={onReconnectSession}
@@ -8301,6 +8356,7 @@ function SessionsPage({
               </>
             ) : session.protocol === 'serial' ? (
               <SshTerminalSurface
+                autoCopyOnSelect={autoCopyOnSelect}
                 isActive={session.id === selectedSession.id}
                 isSerial
                 onInput={onSerialInput}
@@ -10748,19 +10804,33 @@ function mcpClientCopyDetails(client: McpClient): { label: string; caption: stri
 }
 
 async function copyTextToClipboard(value: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(value);
-    return;
-  }
-  const textarea = document.createElement('textarea');
-  textarea.value = value;
-  textarea.style.position = 'fixed';
-  textarea.style.opacity = '0';
-  document.body.appendChild(textarea);
-  textarea.select();
-  const copied = document.execCommand('copy');
-  textarea.remove();
-  if (!copied) throw new Error('Clipboard access is unavailable.');
+  const asyncWrite = navigator.clipboard?.writeText.bind(navigator.clipboard);
+  await writeClipboardText(value, asyncWrite, () => {
+    const activeElement =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const selection = document.getSelection();
+    const ranges = selection
+      ? Array.from({ length: selection.rangeCount }, (_, index) =>
+          selection.getRangeAt(index).cloneRange(),
+        )
+      : [];
+    const textarea = document.createElement('textarea');
+    textarea.value = value;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    try {
+      textarea.select();
+      return document.execCommand('copy');
+    } finally {
+      textarea.remove();
+      activeElement?.focus({ preventScroll: true });
+      if (selection && ranges.length > 0) {
+        selection.removeAllRanges();
+        for (const range of ranges) selection.addRange(range);
+      }
+    }
+  });
 }
 
 function authSecretLabel(method: WormholeAuthFallback): string {
@@ -11052,11 +11122,13 @@ function ReleaseNotesMarkdown({ markdown }: { markdown: string }) {
 }
 
 function SettingsPage({
+  autoCopyOnSelect,
   theme,
   onThemeChange,
   authGate,
   authState,
   onAuthStateChange,
+  onAutoCopyOnSelectChange,
   onBackupImported,
   onRequestAuthentication,
   onCheckForUpdates,
@@ -11068,11 +11140,13 @@ function SettingsPage({
   update,
   onWorkspaceCredentialsChanged,
 }: {
+  autoCopyOnSelect: boolean;
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
   authGate: 'loading' | 'locked' | 'unlocked' | 'error';
   authState: WormholeAuthState | null;
   onAuthStateChange: (state: WormholeAuthState) => void;
+  onAutoCopyOnSelectChange: (enabled: boolean) => void;
   onBackupImported: (workspace: WormholeWorkspaceSnapshot) => void;
   onRequestAuthentication: (reason: string) => Promise<boolean>;
   onCheckForUpdates: () => void;
@@ -11095,7 +11169,6 @@ function SettingsPage({
 }) {
   const [activeTab, setActiveTab] = useState('general');
   const [confirmOnTabClose, setConfirmOnTabClose] = useState(true);
-  const [autoCopyOnSelect, setAutoCopyOnSelect] = useState(false);
   const [promptBeforeTunnelConnect, setPromptBeforeTunnelConnect] = useState(true);
   const [authMethod, setAuthMethod] = useState<WormholeAuthMode>(authState?.mode ?? 'disabled');
   const [helloFallback, setHelloFallback] = useState<WormholeAuthFallback>(
@@ -12217,7 +12290,7 @@ function SettingsPage({
               checked={autoCopyOnSelect}
               description="Copy selected terminal text to the clipboard automatically."
               label="Auto-copy selection to clipboard"
-              onCheckedChange={setAutoCopyOnSelect}
+              onCheckedChange={onAutoCopyOnSelectChange}
             />
           </SettingsSection>
 

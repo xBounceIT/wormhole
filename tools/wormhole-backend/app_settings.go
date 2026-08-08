@@ -14,6 +14,8 @@ import (
 // settings-read / settings-set-prompt-before-tunnel operations.
 const promptBeforeTunnelConnectKey = "PromptBeforeTunnelConnect"
 
+const autoCopyOnSelectKey = "AutoCopyOnSelect"
+
 // Update preferences share the same settings.json document and use the same JSON keys as the
 // WinUI 3 AppSettings model (AutoCheckForUpdates, LastUpdateCheck, SkippedUpdateVersion).
 const (
@@ -187,7 +189,7 @@ func bitwardenAppMajorMinor(version string) (int, int, bool) {
 // ask whether to use its configured VPN tunnel. Absent, invalid, or unreadable settings fall
 // back to true, matching the WinUI 3 default.
 func readPromptBeforeTunnelConnect(databasePath string) (bool, error) {
-	promptBeforeTunnel, _, _, _, err := readAppSettings(databasePath)
+	promptBeforeTunnel, _, _, _, _, err := readAppSettings(databasePath)
 	return promptBeforeTunnel, err
 }
 
@@ -197,36 +199,48 @@ func writePromptBeforeTunnelConnect(databasePath string, enabled bool) error {
 	return writeSettingsValues(databasePath, map[string]any{promptBeforeTunnelConnectKey: enabled})
 }
 
+func writeAutoCopyOnSelect(databasePath string, enabled bool) error {
+	return writeSettingsValues(databasePath, map[string]any{autoCopyOnSelectKey: enabled})
+}
+
 // readAppSettings reads the shared settings.json document. Absent, invalid, or unreadable
-// settings fall back to the WinUI 3 defaults: prompt-before-tunnel on, auto-check on, no last
-// check marker, no skipped version.
+// settings fall back to prompt-before-tunnel on, auto-copy-selection on, auto-check on, no last
+// check marker, and no skipped version.
 func readAppSettings(databasePath string) (
 	promptBeforeTunnel bool,
+	autoCopyOnSelect bool,
 	autoCheckForUpdates bool,
 	lastUpdateCheck *string,
 	skippedUpdateVersion *string,
 	err error,
 ) {
 	promptBeforeTunnel = true
+	autoCopyOnSelect = true
 	autoCheckForUpdates = true
 	_, settingsPath := authPaths(databasePath)
 	contents, err := readAuthSettingsFile(settingsPath)
 	if errors.Is(err, os.ErrNotExist) {
-		return promptBeforeTunnel, autoCheckForUpdates, nil, nil, nil
+		return promptBeforeTunnel, autoCopyOnSelect, autoCheckForUpdates, nil, nil, nil
 	}
 	if err != nil {
-		return promptBeforeTunnel, autoCheckForUpdates, nil, nil,
+		return promptBeforeTunnel, autoCopyOnSelect, autoCheckForUpdates, nil, nil,
 			fmt.Errorf("cannot read Wormhole settings: %w", err)
 	}
 	var document map[string]json.RawMessage
 	if json.Unmarshal(contents, &document) != nil || document == nil {
-		return promptBeforeTunnel, autoCheckForUpdates, nil, nil, nil
+		return promptBeforeTunnel, autoCopyOnSelect, autoCheckForUpdates, nil, nil, nil
 	}
 	migrateLegacySettingsDocument(document)
 	if value, ok := document[promptBeforeTunnelConnectKey]; ok {
 		var enabled bool
 		if json.Unmarshal(value, &enabled) == nil {
 			promptBeforeTunnel = enabled
+		}
+	}
+	if value, ok := document[autoCopyOnSelectKey]; ok {
+		var enabled bool
+		if json.Unmarshal(value, &enabled) == nil {
+			autoCopyOnSelect = enabled
 		}
 	}
 	if value, ok := document[autoCheckForUpdatesKey]; ok {
@@ -247,7 +261,7 @@ func readAppSettings(databasePath string) (
 			skippedUpdateVersion = &skipped
 		}
 	}
-	return promptBeforeTunnel, autoCheckForUpdates, lastUpdateCheck, skippedUpdateVersion, nil
+	return promptBeforeTunnel, autoCopyOnSelect, autoCheckForUpdates, lastUpdateCheck, skippedUpdateVersion, nil
 }
 
 // writeSettingsValues merges the given keys into settings.json, preserving every other key

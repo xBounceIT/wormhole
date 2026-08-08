@@ -219,3 +219,26 @@ func TestPromptReaderAppliesLegacySettingsMigrationInMemory(t *testing.T) {
 		t.Fatal("pre-v1 prompt setting was not migrated to the WinUI default")
 	}
 }
+
+func TestAutoCopyOnSelectDefaultsOnAndPersistsChanges(t *testing.T) {
+	databasePath := filepath.Join(t.TempDir(), "wormhole.db")
+
+	_, autoCopy, _, _, _, err := readAppSettings(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !autoCopy {
+		t.Fatal("auto-copy selection should be enabled by default")
+	}
+
+	if err := writeAutoCopyOnSelect(databasePath, false); err != nil {
+		t.Fatal(err)
+	}
+	_, autoCopy, _, _, _, err = readAppSettings(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if autoCopy {
+		t.Fatal("disabled auto-copy selection setting was not persisted")
+	}
+}

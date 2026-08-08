@@ -55,6 +55,7 @@ type workspaceSnapshot struct {
 
 type appSettingsSnapshot struct {
 	PromptBeforeTunnelConnect bool    `json:"promptBeforeTunnelConnect"`
+	AutoCopyOnSelect          bool    `json:"autoCopyOnSelect"`
 	AutoCheckForUpdates       bool    `json:"autoCheckForUpdates"`
 	LastUpdateCheck           *string `json:"lastUpdateCheck"`
 	SkippedUpdateVersion      *string `json:"skippedUpdateVersion"`
@@ -451,13 +452,14 @@ func main() {
 			result, err = authUpdateSettings(*databasePath, request)
 		}
 	case "settings-read":
-		var promptBeforeTunnel, autoCheckForUpdates bool
+		var promptBeforeTunnel, autoCopyOnSelect, autoCheckForUpdates bool
 		var lastUpdateCheck, skippedUpdateVersion *string
-		promptBeforeTunnel, autoCheckForUpdates, lastUpdateCheck, skippedUpdateVersion, err =
+		promptBeforeTunnel, autoCopyOnSelect, autoCheckForUpdates, lastUpdateCheck, skippedUpdateVersion, err =
 			readAppSettings(*databasePath)
 		if err == nil {
 			result = map[string]any{
 				"promptBeforeTunnelConnect": promptBeforeTunnel,
+				"autoCopyOnSelect":          autoCopyOnSelect,
 				"autoCheckForUpdates":       autoCheckForUpdates,
 				"lastUpdateCheck":           lastUpdateCheck,
 				"skippedUpdateVersion":      skippedUpdateVersion,
@@ -472,6 +474,17 @@ func main() {
 		err = decodeInput(&request)
 		if err == nil {
 			err = writePromptBeforeTunnelConnect(*databasePath, request.Enabled)
+			if err == nil {
+				result = map[string]bool{"updated": true}
+			}
+		}
+	case "settings-set-auto-copy-on-select":
+		var request struct {
+			Enabled bool `json:"enabled"`
+		}
+		err = decodeInput(&request)
+		if err == nil {
+			err = writeAutoCopyOnSelect(*databasePath, request.Enabled)
 			if err == nil {
 				result = map[string]bool{"updated": true}
 			}
@@ -835,13 +848,14 @@ func unlockStartup(databasePath string, request authVerifyRequest) (startupUnloc
 }
 
 func loadAppSettingsSnapshot(databasePath string) (appSettingsSnapshot, error) {
-	promptBeforeTunnel, autoCheckForUpdates, lastUpdateCheck, skippedUpdateVersion, err :=
+	promptBeforeTunnel, autoCopyOnSelect, autoCheckForUpdates, lastUpdateCheck, skippedUpdateVersion, err :=
 		readAppSettings(databasePath)
 	if err != nil {
 		return appSettingsSnapshot{}, err
 	}
 	return appSettingsSnapshot{
 		PromptBeforeTunnelConnect: promptBeforeTunnel,
+		AutoCopyOnSelect:          autoCopyOnSelect,
 		AutoCheckForUpdates:       autoCheckForUpdates,
 		LastUpdateCheck:           lastUpdateCheck,
 		SkippedUpdateVersion:      skippedUpdateVersion,

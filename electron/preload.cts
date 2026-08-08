@@ -202,12 +202,15 @@ const wormholeBridge = {
   readAppSettings: () =>
     ipcRenderer.invoke('settings:read') as Promise<{
       promptBeforeTunnelConnect: boolean;
+      autoCopyOnSelect: boolean;
       autoCheckForUpdates: boolean;
       lastUpdateCheck: string | null;
       skippedUpdateVersion: string | null;
     }>,
   setPromptBeforeTunnelConnect: (enabled: boolean) =>
     ipcRenderer.invoke('settings:set-prompt-before-tunnel', enabled),
+  setAutoCopyOnSelect: (enabled: boolean) =>
+    ipcRenderer.invoke('settings:set-auto-copy-on-select', enabled),
   setUpdatePreferences: (preferences: {
     autoCheckForUpdates?: boolean;
     skippedUpdateVersion?: string | null;
@@ -305,6 +308,7 @@ const wormholeBridge = {
     ipcRenderer.invoke('ssh:trust-host-key', request),
   sendSshInput: (sessionId: string, data: string) =>
     ipcRenderer.invoke('ssh:input', sessionId, data),
+  pasteClipboardToSsh: (sessionId: string) => ipcRenderer.invoke('ssh:paste-clipboard', sessionId),
   resizeSshSession: (sessionId: string, columns: number, rows: number) =>
     ipcRenderer.invoke('ssh:resize', sessionId, columns, rows),
   openSftpBrowser: (sessionId: string, requestId?: string) =>
