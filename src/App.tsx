@@ -245,7 +245,7 @@ import {
 type Protocol = QuickConnectProtocol;
 type CredentialProtocol = Extract<Protocol, 'ssh' | 'rdp' | 'vnc'>;
 type AutoSudoMode = 'inherit' | 'on' | 'off';
-type CredentialSelection = 'inherit' | 'none' | 'inline' | string;
+type CredentialSelection = 'inherit' | 'none' | string;
 type NavItem = 'sessions' | 'credentials' | 'tunnels' | 'settings';
 type AuthPromptKind = 'lock' | 'confirmation';
 
@@ -666,10 +666,7 @@ function emptyCredentialDraft(): CredentialDraft {
   };
 }
 
-function credentialSelectionFor(
-  node: Pick<TreeNode, 'credentialMode' | 'credentialId' | 'hasInlineCredential'>,
-) {
-  if (node.hasInlineCredential) return 'inline';
+function credentialSelectionFor(node: Pick<TreeNode, 'credentialMode' | 'credentialId'>) {
   if (node.credentialMode === 1) return 'none';
   if ((node.credentialMode === 2 || node.credentialMode == null) && node.credentialId) {
     return node.credentialId;
@@ -681,7 +678,6 @@ function credentialSettingsFor(selection: CredentialSelection): {
   mode: 0 | 1 | 2;
   credentialId: string;
 } {
-  if (selection === 'inline') return { mode: 1, credentialId: '' };
   if (selection === 'inherit') return { mode: 0, credentialId: '' };
   if (selection === 'none') return { mode: 1, credentialId: '' };
   return { mode: 2, credentialId: selection };
@@ -1464,6 +1460,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     sshAutoSudo: 'inherit' as AutoSudoMode,
     httpIgnoreCertErrors: false,
     tunnel: 'inherit' as TunnelMode,
+    useSavedCredentials: true,
     credential: 'inherit' as CredentialSelection,
     serial: { ...defaultSerialSettings },
     rdp: { ...defaultRdpSettings },
@@ -1545,9 +1542,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     return [
       { value: 'inherit', label: 'Inherit from folder' },
       { value: 'none', label: 'No saved credential' },
-      ...(newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'rdp'
-        ? [{ value: 'inline', label: 'Password stored for this connection' }]
-        : []),
       ...options.map((credential) => ({
         value: credential.id,
         label: `${credential.name} · ${credential.provider}`,
@@ -4246,6 +4240,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       sshAutoSudo: 'inherit',
       httpIgnoreCertErrors: false,
       tunnel: 'inherit',
+      useSavedCredentials: true,
       credential: 'inherit',
       serial: { ...defaultSerialSettings },
       rdp: { ...defaultRdpSettings },
@@ -4417,6 +4412,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       sshAutoSudo: autoSudoModeFor(node.sshAutoSudo),
       httpIgnoreCertErrors: node.httpIgnoreCertErrors === true,
       tunnel: tunnelModeFor(node),
+      useSavedCredentials: !node.hasInlineCredential,
       credential: credentialSelectionFor(node),
       serial: serialSettingsFromNode(node),
       rdp: { ...defaultRdpSettings, ...(node.rdp ?? {}) },
@@ -4559,7 +4555,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       const tunnel = tunnelValueFor(connectionTunnel);
       const credential = credentialSettingsFor(connectionCredential);
       const editingNode = editingId ? findTreeNode(tree, editingId) : undefined;
-      const usingInlinePassword = connectionCredential === 'inline';
+      const usingInlinePassword =
+        !newConnectionForm.useSavedCredentials &&
+        (newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'rdp');
       const inlinePasswordAction: 'preserve' | 'set' | 'clear' | null = usingInlinePassword
         ? newConnectionForm.inlinePassword
           ? 'set'
@@ -4578,7 +4576,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         host,
         port: newConnectionForm.protocol === 'serial' ? 0 : port,
         username:
-          newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'rdp'
+          !newConnectionForm.useSavedCredentials &&
+          (newConnectionForm.protocol === 'ssh' || newConnectionForm.protocol === 'rdp')
             ? newConnectionForm.username
             : '',
         inlinePasswordAction,
@@ -4588,8 +4587,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           newConnectionForm.protocol === 'https' ? newConnectionForm.httpIgnoreCertErrors : null,
         tunnelEnabled: tunnel.tunnelEnabled,
         tunnelConfigId: tunnel.tunnelConfigId,
-        credentialMode: credential.mode,
-        credentialId: credential.credentialId,
+        credentialMode: newConnectionForm.useSavedCredentials ? credential.mode : 1,
+        credentialId: newConnectionForm.useSavedCredentials ? credential.credentialId : '',
         serialBaudRate: newConnectionForm.serial.baudRate,
         serialDataBits: newConnectionForm.serial.dataBits,
         serialStopBits: newConnectionForm.serial.stopBits,
@@ -6109,27 +6108,45 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     {newConnectionForm.protocol === 'ssh' ||
                     newConnectionForm.protocol === 'rdp' ||
                     newConnectionForm.protocol === 'vnc' ? (
-                      <div className="grid max-w-[280px] gap-2">
-                        <Label htmlFor="connection-credential">Credential</Label>
-                        <SearchableCombobox
-                          id="connection-credential"
-                          emptyMessage="No credentials found."
-                          onValueChange={(credential) =>
-                            setNewConnectionForm((form) => ({ ...form, credential }))
-                          }
-                          options={connectionCredentialSelectionOptions}
-                          placeholder="Select a credential"
-                          searchPlaceholder="Search credentials…"
-                          value={newConnectionForm.credential}
-                        />
+                      <div className="grid gap-4">
+                        <label className="flex items-center gap-2 text-xs">
+                          <Checkbox
+                            checked={newConnectionForm.useSavedCredentials}
+                            onCheckedChange={(checked) =>
+                              setNewConnectionForm((form) => ({
+                                ...form,
+                                useSavedCredentials: checked === true,
+                              }))
+                            }
+                          />
+                          <span>Use saved credentials</span>
+                        </label>
+
+                        {newConnectionForm.useSavedCredentials ? (
+                          <div className="grid max-w-[280px] gap-2">
+                            <Label htmlFor="connection-credential">Saved credentials</Label>
+                            <SearchableCombobox
+                              id="connection-credential"
+                              emptyMessage="No credentials found."
+                              onValueChange={(credential) =>
+                                setNewConnectionForm((form) => ({ ...form, credential }))
+                              }
+                              options={connectionCredentialSelectionOptions}
+                              placeholder="Select a credential"
+                              searchPlaceholder="Search credentials…"
+                              value={newConnectionForm.credential}
+                            />
+                          </div>
+                        ) : null}
                       </div>
                     ) : null}
 
-                    {newConnectionForm.protocol === 'ssh' ||
-                    newConnectionForm.protocol === 'rdp' ? (
+                    {!newConnectionForm.useSavedCredentials &&
+                    (newConnectionForm.protocol === 'ssh' ||
+                      newConnectionForm.protocol === 'rdp') ? (
                       <div className="grid gap-4 sm:grid-cols-2">
                         <div className="grid gap-2">
-                          <Label htmlFor="connection-username">Username override</Label>
+                          <Label htmlFor="connection-username">Username</Label>
                           <Input
                             id="connection-username"
                             onChange={(event) =>
@@ -6138,30 +6155,28 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                                 username: event.target.value,
                               }))
                             }
-                            placeholder="Use credential or inherited username"
+                            placeholder="(optional)"
                             value={newConnectionForm.username}
                           />
                         </div>
-                        {newConnectionForm.credential === 'inline' ? (
-                          <div className="grid gap-2">
-                            <Label htmlFor="connection-inline-password">Connection password</Label>
-                            <Input
-                              autoComplete="new-password"
-                              id="connection-inline-password"
-                              onChange={(event) =>
-                                setNewConnectionForm((form) => ({
-                                  ...form,
-                                  inlinePassword: event.target.value,
-                                }))
-                              }
-                              placeholder={
-                                editingConnectionId ? 'Leave blank to keep stored password' : ''
-                              }
-                              type="password"
-                              value={newConnectionForm.inlinePassword}
-                            />
-                          </div>
-                        ) : null}
+                        <div className="grid gap-2">
+                          <Label htmlFor="connection-inline-password">Password</Label>
+                          <Input
+                            autoComplete="new-password"
+                            id="connection-inline-password"
+                            onChange={(event) =>
+                              setNewConnectionForm((form) => ({
+                                ...form,
+                                inlinePassword: event.target.value,
+                              }))
+                            }
+                            placeholder={
+                              editingConnectionId ? 'Leave blank to keep stored password' : ''
+                            }
+                            type="password"
+                            value={newConnectionForm.inlinePassword}
+                          />
+                        </div>
                       </div>
                     ) : null}
 
