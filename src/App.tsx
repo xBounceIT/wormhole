@@ -887,14 +887,14 @@ function NodeContextMenu({
               Show credentials
             </ContextMenuItem>
             <ContextMenuItem onSelect={() => onDuplicateConnection?.()}>
-              <Terminal />
+              <Copy />
               Duplicate connection
             </ContextMenuItem>
             <ContextMenuSeparator />
           </>
         ) : null}
         <ContextMenuItem onSelect={onEdit}>
-          <Settings2 />
+          <Pencil />
           Edit
         </ContextMenuItem>
         <ContextMenuItem onSelect={onDelete} variant="destructive">
