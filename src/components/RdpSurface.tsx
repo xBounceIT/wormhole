@@ -31,6 +31,7 @@ export function RdpSurface({
 }: RdpSurfaceProps) {
   const surfaceRef = useRef<HTMLDivElement>(null);
   const nativeSurfaceVisible = useRef(false);
+  const boundsSignature = useRef('');
 
   useEffect(() => {
     const surface = surfaceRef.current;
@@ -47,10 +48,15 @@ export function RdpSurface({
       return;
     }
 
+    let frame = 0;
     const reportBounds = () => {
+      frame = 0;
       const rect = surface.getBoundingClientRect();
       if (rect.width < 1 || rect.height < 1) return;
       const bounds = { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
+      const signature = `${bounds.x}:${bounds.y}:${bounds.width}:${bounds.height}`;
+      if (signature === boundsSignature.current && nativeSurfaceVisible.current) return;
+      boundsSignature.current = signature;
       void api
         ?.resizeRdpSession({
           sessionId,
@@ -60,15 +66,19 @@ export function RdpSurface({
       nativeSurfaceVisible.current = true;
       void api?.commandRdpSession({ sessionId, operation: 'show', bounds }).catch(() => undefined);
     };
+    const scheduleBounds = () => {
+      if (!frame) frame = window.requestAnimationFrame(reportBounds);
+    };
 
-    reportBounds();
-    const observer = new ResizeObserver(reportBounds);
+    scheduleBounds();
+    const observer = new ResizeObserver(scheduleBounds);
     observer.observe(surface);
-    window.addEventListener('resize', reportBounds);
+    window.addEventListener('resize', scheduleBounds);
 
     return () => {
+      if (frame) window.cancelAnimationFrame(frame);
       observer.disconnect();
-      window.removeEventListener('resize', reportBounds);
+      window.removeEventListener('resize', scheduleBounds);
       hideNativeSurface();
     };
   }, [isActive, isAuthorized, sessionId, status]);

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   parseMRemoteImportInspection,
@@ -78,4 +79,15 @@ test('mRemoteNG inspect and result contracts reject invalid values', () => {
       password: 'must-not-cross',
     }),
   );
+});
+
+test('mRemoteNG commit holds the serialized authentication boundary', () => {
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const handler = mainSource.slice(
+    mainSource.indexOf("ipcMain.handle('mremote-import:commit'"),
+    mainSource.indexOf("ipcMain.handle('backup:export'"),
+  );
+  assert.match(handler, /return serializeAuthOperation\(async \(\) => \{/);
+  assert.match(handler, /await requireWorkspaceAuth\(\)/);
+  assert.doesNotMatch(handler, /runAuthorizedOperation/);
 });

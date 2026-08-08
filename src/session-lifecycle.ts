@@ -1,8 +1,21 @@
 export type SessionLifecycleState = {
+  id?: string;
+  backendSessionId?: string;
   protocol: string;
   status: string;
   rdpStatus?: string;
 };
+
+export function sessionRuntimeRetryKeys(
+  session: Pick<SessionLifecycleState, 'id' | 'backendSessionId'>,
+): string[] {
+  const keys: string[] = [];
+  if (session.id) {
+    keys.push(`rdp:${session.id}`, `vnc:${session.id}`);
+  }
+  if (session.backendSessionId) keys.push(`ssh:${session.backendSessionId}`);
+  return keys;
+}
 
 export function isSessionActive(session: SessionLifecycleState): boolean {
   if (session.protocol === 'rdp') {
@@ -40,6 +53,29 @@ export class SessionCloseGate {
 
   activeSessionIds(): ReadonlySet<string> {
     return new Set(this.active);
+  }
+}
+
+export class SessionResourceReleaseGate {
+  private readonly completed = new Set<string>();
+  private readonly pending = new Map<string, Promise<void>>();
+
+  release(sessionId: string, release: () => Promise<void>): Promise<void> {
+    if (this.completed.has(sessionId)) return Promise.resolve();
+    const existing = this.pending.get(sessionId);
+    if (existing) return existing;
+    const operation = Promise.resolve()
+      .then(release)
+      .finally(() => {
+        this.pending.delete(sessionId);
+        this.completed.add(sessionId);
+      });
+    this.pending.set(sessionId, operation);
+    return operation;
+  }
+
+  reset(sessionId: string): void {
+    this.completed.delete(sessionId);
   }
 }
 

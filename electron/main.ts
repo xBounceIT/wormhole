@@ -5847,27 +5847,24 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
     ) {
       throw new Error('Analyze the mRemoteNG file with these options before importing it.');
     }
-    return runAuthorizedOperation(
-      async () =>
-        parseMRemoteImportResult(
-          await runBackend(
-            'mremote-import-commit',
-            {
-              path: selection.path,
-              password: options.password,
-              structureOnly: options.structureOnly,
-              planNonce: selection.planNonce,
-              planToken: selection.planToken,
-            },
-            backupTimeoutMs,
-          ),
+    return serializeAuthOperation(async () => {
+      await requireWorkspaceAuth();
+      const result = parseMRemoteImportResult(
+        await runBackend(
+          'mremote-import-commit',
+          {
+            path: selection.path,
+            password: options.password,
+            structureOnly: options.structureOnly,
+            planNonce: selection.planNonce,
+            planToken: selection.planToken,
+          },
+          backupTimeoutMs,
         ),
-      undefined,
-      (result) => {
-        mremoteImportSelections.delete(event.sender);
-        return result;
-      },
-    );
+      );
+      mremoteImportSelections.delete(event.sender);
+      return result;
+    });
   });
 
   ipcMain.handle('backup:export', async (event, value: unknown) => {
@@ -7606,10 +7603,20 @@ function createWindow() {
                 console.warn('[Wormhole] Browser window shutdown did not finish cleanly.', error);
               }
             },
-            () =>
-              closeReason.reason === 'renderer-failure'
-                ? Promise.resolve()
-                : requestRendererTeardown(window),
+            async () => {
+              if (closeReason.reason !== 'renderer-failure') {
+                await requestRendererTeardown(window);
+                return;
+              }
+              // The renderer can no longer enumerate or close its sessions. Dispose every native
+              // owner here so macOS cannot keep headless sessions alive after the last window closes.
+              serialBackend?.dispose();
+              serialBackend = undefined;
+              sshBackend.dispose();
+              await rdpClient?.dispose().catch(() => undefined);
+              nativeBackend?.stop();
+              nativeBackend = undefined;
+            },
           );
         },
         close: () => {

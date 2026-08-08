@@ -24,10 +24,49 @@ test('layout moves do not call protocol close or disconnect operations', () => {
   assert.match(appSource, /function closeSession\(id: string, preferredNextSessionId\?: string\)/);
 });
 
-test('stable VNC identity is required because unmount owns native disconnect cleanup', () => {
+test('stable VNC identity preserves the single App-owned disconnect lifecycle', () => {
   assert.match(vncSource, /return \(\) => \{/);
-  assert.match(vncSource, /action: 'vnc\.disconnect'/);
+  assert.doesNotMatch(vncSource, /action: 'vnc\.disconnect'/);
   assert.match(appSource, /visibility: active \? 'visible' : 'hidden'/);
+  const releaseSource = appSource.slice(
+    appSource.indexOf('async function releaseSessionResources'),
+    appSource.indexOf('function handleConfirmOnTabCloseChange'),
+  );
+  assert.match(releaseSource, /vnc\.disconnect/);
+});
+
+test('first-open RDP startup reads the committed session snapshot', () => {
+  const requestSource = appSource.slice(
+    appSource.indexOf('async function requestRdpCredentials'),
+    appSource.indexOf('function retryRdpSession'),
+  );
+  assert.match(requestSource, /sessionsRef\.current\.find/);
+  assert.doesNotMatch(requestSource, /const session = sessions\.find/);
+});
+
+test('RDP bounds updates are frame-coalesced and deduplicated', () => {
+  const rdpSource = readFileSync(
+    new URL('../src/components/RdpSurface.tsx', import.meta.url),
+    'utf8',
+  );
+  assert.match(rdpSource, /requestAnimationFrame\(reportBounds\)/);
+  assert.match(rdpSource, /signature === boundsSignature\.current/);
+});
+
+test('editing an open RDP session releases and resets its native lifecycle', () => {
+  const editorSource = appSource.slice(
+    appSource.indexOf('const editedSessionId = `session-${editingId}`'),
+    appSource.indexOf(
+      '} else {',
+      appSource.indexOf('const editedSessionId = `session-${editingId}`'),
+    ),
+  );
+  assert.match(editorSource, /await releaseSessionResources\(editedSession\)/);
+  assert.match(
+    editorSource,
+    /rdpStatus: newConnectionForm\.protocol === 'rdp' \? 'idle' : undefined/,
+  );
+  assert.match(editorSource, /requestRdpCredentials\(editedSessionId\)/);
 });
 
 test('native web and RDP overlays are hidden while a layout drag is active', () => {

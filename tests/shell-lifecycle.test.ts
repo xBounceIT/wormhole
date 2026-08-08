@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   runWindowTeardown,
@@ -8,7 +9,9 @@ import {
 import {
   isSessionActive,
   nextSelectedSessionId,
+  sessionRuntimeRetryKeys,
   SessionCloseGate,
+  SessionResourceReleaseGate,
   shouldConfirmConnectedTabClose,
 } from '../src/session-lifecycle.ts';
 import {
@@ -174,6 +177,34 @@ test('connected tab close gate rejects duplicates until the first close settles'
   assert.equal(await gate.run('session-1', async () => undefined), true);
 });
 
+test('session resources release exactly once across overlapping close paths', async () => {
+  const gate = new SessionResourceReleaseGate();
+  let releases = 0;
+  let finish!: () => void;
+  const pending = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const first = gate.release('session-1', async () => {
+    releases++;
+    await pending;
+  });
+  const overlapping = gate.release('session-1', async () => {
+    releases++;
+  });
+  finish();
+  await Promise.all([first, overlapping]);
+  await gate.release('session-1', async () => {
+    releases++;
+  });
+  assert.equal(releases, 1);
+
+  gate.reset('session-1');
+  await gate.release('session-1', async () => {
+    releases++;
+  });
+  assert.equal(releases, 2);
+});
+
 test('concurrent tab removal never selects or restores another closing tab', () => {
   const sessions = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
   const closing = new Set(['a', 'b']);
@@ -191,6 +222,17 @@ test('concurrent tab removal never selects or restores another closing tab', () 
   );
 });
 
+test('bulk session cleanup removes every protocol retry identity', () => {
+  assert.deepEqual(
+    sessionRuntimeRetryKeys({ id: 'visible-session', backendSessionId: 'native-ssh-session' }),
+    ['rdp:visible-session', 'vnc:visible-session', 'ssh:native-ssh-session'],
+  );
+  assert.deepEqual(sessionRuntimeRetryKeys({ id: 'visible-session' }), [
+    'rdp:visible-session',
+    'vnc:visible-session',
+  ]);
+});
+
 test('cancelled OS shutdown restores ordinary close confirmation policy', () => {
   let reset = () => undefined;
   const tracker = new WindowCloseReasonTracker({
@@ -206,4 +248,14 @@ test('cancelled OS shutdown restores ordinary close confirmation policy', () => 
   assert.equal(tracker.reason, 'system-shutdown');
   reset();
   assert.equal(tracker.reason, 'window');
+});
+
+test('renderer failure replaces unavailable renderer teardown with native cleanup', () => {
+  const mainSource = readFileSync(new URL('../electron/main.ts', import.meta.url), 'utf8');
+  const start = mainSource.indexOf("if (closeReason.reason !== 'renderer-failure')");
+  const failureBranch = mainSource.slice(start, start + 1_000);
+  assert.match(failureBranch, /serialBackend\?\.dispose\(\)/);
+  assert.match(failureBranch, /sshBackend\.dispose\(\)/);
+  assert.match(failureBranch, /await rdpClient\?\.dispose\(\)/);
+  assert.match(failureBranch, /nativeBackend\?\.stop\(\)/);
 });

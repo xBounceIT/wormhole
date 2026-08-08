@@ -220,7 +220,9 @@ import {
   connectedTabCloseMessage,
   isSessionActive,
   nextSelectedSessionId,
+  sessionRuntimeRetryKeys,
   SessionCloseGate,
+  SessionResourceReleaseGate,
   shouldConfirmConnectedTabClose,
 } from './session-lifecycle';
 import {
@@ -1492,6 +1494,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     [initialSettings.sidebarWidth],
   );
   const sessionCloseGate = useRef(new SessionCloseGate());
+  const sessionResourceReleaseGate = useRef(new SessionResourceReleaseGate());
   const [updateBusy, setUpdateBusy] = useState(false);
   const [updateStatus, setUpdateStatus] = useState('');
   const [updateDownloadProgress, setUpdateDownloadProgress] = useState<number | null>(null);
@@ -2833,7 +2836,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   async function requestRdpCredentials(sessionId: string) {
-    const session = sessions.find((candidate) => candidate.id === sessionId);
+    const session = sessionsRef.current.find((candidate) => candidate.id === sessionId);
     if (!session || session.protocol !== 'rdp') return;
     setSelectedSessionId(sessionId);
     setActivePage('sessions');
@@ -2850,7 +2853,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     credentials: RdpCredentials,
     manualCredentials: boolean,
   ) {
-    const session = sessions.find((candidate) => candidate.id === sessionId);
+    const session = sessionsRef.current.find((candidate) => candidate.id === sessionId);
     if (!session || session.protocol !== 'rdp') return;
 
     const normalizedCredentials = {
@@ -3034,6 +3037,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       webIgnoreCertErrors: node.protocol === 'https' && node.httpIgnoreCertErrors === true,
     };
 
+    sessionResourceReleaseGate.current.reset(session.id);
     setSessions((current) => [...current, session]);
     setSelectedSessionId(session.id);
     setActivePage('sessions');
@@ -3055,30 +3059,32 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   }
 
   async function releaseSessionResources(closing: Session): Promise<void> {
-    const releases: Promise<unknown>[] = [];
-    if (closing.protocol === 'rdp') {
-      releases.push(
-        window.wormhole
-          ?.commandRdpSession({ sessionId: closing.id, operation: 'disconnect' })
-          .catch(() => undefined) ?? Promise.resolve(),
-      );
-    } else if (closing.protocol === 'http' || closing.protocol === 'https') {
-      releases.push(closeWebSession(closing.id).catch(() => undefined));
-    } else if (closing.protocol === 'vnc') {
-      releases.push(
-        window.wormhole
-          ?.sendVncCommand({ action: 'vnc.disconnect', sessionId: closing.id })
-          .catch(() => undefined) ?? Promise.resolve(),
-      );
-    }
-    if (closing.backendSessionId) {
-      const release =
-        closing.protocol === 'serial'
-          ? window.wormhole?.closeSerialSession(closing.backendSessionId)
-          : window.wormhole?.closeSshSession(closing.backendSessionId);
-      if (release) releases.push(release.catch(() => undefined));
-    }
-    await Promise.allSettled(releases);
+    await sessionResourceReleaseGate.current.release(closing.id, async () => {
+      const releases: Promise<unknown>[] = [];
+      if (closing.protocol === 'rdp') {
+        releases.push(
+          window.wormhole
+            ?.commandRdpSession({ sessionId: closing.id, operation: 'disconnect' })
+            .catch(() => undefined) ?? Promise.resolve(),
+        );
+      } else if (closing.protocol === 'http' || closing.protocol === 'https') {
+        releases.push(closeWebSession(closing.id).catch(() => undefined));
+      } else if (closing.protocol === 'vnc') {
+        releases.push(
+          window.wormhole
+            ?.sendVncCommand({ action: 'vnc.disconnect', sessionId: closing.id })
+            .catch(() => undefined) ?? Promise.resolve(),
+        );
+      }
+      if (closing.backendSessionId) {
+        const release =
+          closing.protocol === 'serial'
+            ? window.wormhole?.closeSerialSession(closing.backendSessionId)
+            : window.wormhole?.closeSshSession(closing.backendSessionId);
+        if (release) releases.push(release.catch(() => undefined));
+      }
+      await Promise.allSettled(releases);
+    });
   }
 
   function handleConfirmOnTabCloseChange(enabled: boolean) {
@@ -3096,10 +3102,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       ) {
         return;
       }
-      runtimeBitwardenRetries.current.remove(`rdp:${id}`);
-      runtimeBitwardenRetries.current.remove(`vnc:${id}`);
-      if (closing.backendSessionId) {
-        runtimeBitwardenRetries.current.remove(`ssh:${closing.backendSessionId}`);
+      for (const key of sessionRuntimeRetryKeys(closing)) {
+        runtimeBitwardenRetries.current.remove(key);
       }
       if (runtimeBitwardenRetries.current.isEmpty && bitwardenUnlockPrompt) {
         dismissRuntimeBitwardenUnlock();
@@ -3139,6 +3143,15 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     const closing = sessions.filter((session) => session.nodeId && nodeIds.has(session.nodeId));
     if (closing.length === 0) return;
     const closingIds = new Set(closing.map((session) => session.id));
+    for (const session of closing) {
+      for (const key of sessionRuntimeRetryKeys(session)) {
+        runtimeBitwardenRetries.current.remove(key);
+      }
+      rdpSavedCredentialAttempts.current.delete(session.id);
+    }
+    if (runtimeBitwardenRetries.current.isEmpty && bitwardenUnlockPrompt) {
+      dismissRuntimeBitwardenUnlock();
+    }
     await Promise.allSettled(closing.map(releaseSessionResources));
     for (const session of closing) {
       sftpRequestIds.current.delete(session.id);
@@ -4568,15 +4581,21 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         if (!result.updated) throw new Error('The workspace did not save the connection.');
         const editedSessionId = `session-${editingId}`;
         const editedSession = sessions.find((session) => session.id === editedSessionId);
-        if (editedSession?.backendSessionId) {
-          if (editedSession.protocol === 'serial') {
-            void window.wormhole?.closeSerialSession(editedSession.backendSessionId);
-          } else {
-            void window.wormhole?.closeSshSession(editedSession.backendSessionId);
+        if (editedSession) {
+          for (const key of sessionRuntimeRetryKeys(editedSession)) {
+            runtimeBitwardenRetries.current.remove(key);
           }
-        }
-        if (editedSession?.protocol === 'http' || editedSession?.protocol === 'https') {
-          await closeWebSession(editedSession.id).catch(() => undefined);
+          rdpSavedCredentialAttempts.current.delete(editedSession.id);
+          if (rdpCredentialPrompt === editedSession.id) setRdpCredentialPrompt(null);
+          if (sshCredentialPrompt?.backendSessionId === editedSession.backendSessionId) {
+            setSshCredentialPrompt(null);
+            setSshCredentialForm({ username: '', password: '' });
+          }
+          if (runtimeBitwardenRetries.current.isEmpty && bitwardenUnlockPrompt) {
+            dismissRuntimeBitwardenUnlock();
+          }
+          await releaseSessionResources(editedSession);
+          sessionResourceReleaseGate.current.reset(editedSession.id);
         }
         clearSftpCancelRequestsForBrowser(sftpCancelRequests.current, editedSession?.sftp);
         const backendSessionId =
@@ -4612,6 +4631,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     newConnectionForm.protocol === 'serial'
                       ? { ...newConnectionForm.serial }
                       : undefined,
+                  rdpStatus: newConnectionForm.protocol === 'rdp' ? 'idle' : undefined,
+                  rdpBackend: undefined,
+                  rdpError: undefined,
+                  rdpProfile: undefined,
+                  tunnelProgress: null,
                   webTargetNodeId:
                     newConnectionForm.protocol === 'http' || newConnectionForm.protocol === 'https'
                       ? editingId
@@ -4634,6 +4658,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
             host,
             newConnectionForm.serial,
           );
+        }
+        if (editedSession && newConnectionForm.protocol === 'rdp') {
+          window.setTimeout(() => void requestRdpCredentials(editedSessionId), 0);
         }
         if (
           editedSession &&

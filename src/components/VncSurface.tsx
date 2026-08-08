@@ -262,7 +262,6 @@ export function VncSurface({
       pointerMoveGeneration.current += 1;
       pendingPointerMove.current = null;
       buttons.current = 0;
-      void sendCommand({ action: 'vnc.disconnect', sessionId: session.id });
     };
   }, [connect, sendCommand, session.id]);
 
