@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   quickConnectSupportsTunnel,
+  quickConnectStartsImmediately,
   quickConnectTunnelId,
   type QuickConnectProtocol,
 } from '../src/quick-connect-state.ts';
@@ -12,6 +13,14 @@ test('Quick Connect exposes VPN only for supported network surfaces', () => {
 
   for (const protocol of supported) assert.equal(quickConnectSupportsTunnel(protocol), true);
   for (const protocol of unsupported) assert.equal(quickConnectSupportsTunnel(protocol), false);
+});
+
+test('Quick Connect only marks SSH as connecting when credentials are immediately usable', () => {
+  assert.equal(quickConnectStartsImmediately('ssh', true, undefined), false);
+  assert.equal(quickConnectStartsImmediately('ssh', true, 'credential-id'), true);
+  assert.equal(quickConnectStartsImmediately('ssh', false, undefined), true);
+  assert.equal(quickConnectStartsImmediately('rdp', true, 'credential-id'), false);
+  assert.equal(quickConnectStartsImmediately('https', true, undefined), true);
 });
 
 test('Quick Connect maps the selected tunnel only when routing is supported and enabled', () => {

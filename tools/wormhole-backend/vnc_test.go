@@ -232,6 +232,16 @@ func TestVncCommandRejectsSavedTunnelOverride(t *testing.T) {
 	}
 }
 
+func TestVncCommandRejectsSavedCredentialOverride(t *testing.T) {
+	err := validateBackendCommand(backendCommand{
+		ID: "command-1", Action: "vnc.connect", SessionID: "session-1",
+		NodeID: "saved-vnc", CredentialID: "11111111-2222-3333-4444-555555555555",
+	})
+	if err == nil {
+		t.Fatal("VNC command allowed a saved connection credential override")
+	}
+}
+
 func TestFinishTunnelAcquireHandlesCancellationBeforeLeaseCreation(t *testing.T) {
 	outputFile, err := os.CreateTemp(t.TempDir(), "backend-output-*.jsonl")
 	if err != nil {

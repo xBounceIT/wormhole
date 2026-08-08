@@ -18,3 +18,12 @@ export function quickConnectTunnelId(
     return undefined;
   return tunnelMode;
 }
+
+export function quickConnectStartsImmediately(
+  protocol: QuickConnectProtocol,
+  useSavedCredentials: boolean,
+  credentialId: string | undefined,
+): boolean {
+  if (protocol !== 'ssh') return protocol !== 'rdp';
+  return !useSavedCredentials || Boolean(credentialId);
+}

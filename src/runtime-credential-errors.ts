@@ -24,3 +24,17 @@ export function requiresSshCredentialPrompt(message: string): boolean {
     value.includes('stored ssh secret is missing')
   );
 }
+
+export function requiresRdpCredentialPrompt(message: string): boolean {
+  if (message.toLowerCase().includes('rdp gateway credential is unavailable')) return false;
+  return isBitwardenCredentialError(message) || /credential|password/i.test(message);
+}
+
+export function sshCredentialPromptTarget(
+  request: { nodeId?: string; credentialId?: string; manualCredentials?: boolean },
+  message: string,
+): 'saved' | 'quick' | null {
+  if (request.manualCredentials || !requiresSshCredentialPrompt(message)) return null;
+  if (request.nodeId) return 'saved';
+  return request.credentialId ? 'quick' : null;
+}

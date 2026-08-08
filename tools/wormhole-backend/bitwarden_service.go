@@ -151,6 +151,8 @@ func (m *vncManager) handleBitwarden(command backendCommand, expectedGeneration 
 		result, err = m.resolveBitwardenCredential(command.CredentialID, bitwardenProtocolValue(command.Protocol))
 	case "bitwarden.resolve-node":
 		result, err = m.resolveBitwardenNodeCredential(command.NodeID, bitwardenProtocolValue(command.Protocol))
+	case "rdp.resolve-credential":
+		result, err = m.resolveRdpCredential(command.CredentialID)
 	case "rdp.resolve-profile":
 		var manual *rdpManualCredential
 		if command.ManualCredentials {

@@ -110,6 +110,24 @@ func TestResolveWebTargetParsesQuickConnectAddressInGo(t *testing.T) {
 	}
 }
 
+func TestResolveWebTargetUsesQuickConnectPortField(t *testing.T) {
+	target, err := resolveWebTarget("", webTargetRequest{
+		Address: "[fd00::1]:9443", Port: 8443, Protocol: "https",
+	})
+	if err != nil {
+		t.Fatalf("resolve direct web target with explicit port: %v", err)
+	}
+	if target.URL != "https://[fd00::1]:8443/" || target.Port != 8443 {
+		t.Fatalf("explicit quick-connect port was ignored: %#v", target)
+	}
+}
+
+func TestResolveWebTargetRejectsPortOverrideForSavedNode(t *testing.T) {
+	if _, err := resolveWebTarget("ignored.db", webTargetRequest{NodeID: "web", Port: 8443}); err == nil {
+		t.Fatal("saved web target accepted a direct port override")
+	}
+}
+
 func TestResolveWebTargetPreservesQuickConnectTunnel(t *testing.T) {
 	const tunnelID = "11111111-2222-3333-4444-555555555555"
 	target, err := resolveWebTarget("", webTargetRequest{

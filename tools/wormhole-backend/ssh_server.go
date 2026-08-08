@@ -73,6 +73,8 @@ type sshWireCommand struct {
 	Type                          string                `json:"type"`
 	SessionID                     string                `json:"session_id"`
 	NodeID                        string                `json:"node_id"`
+	CredentialID                  string                `json:"credential_id"`
+	AutoSudo                      bool                  `json:"auto_sudo"`
 	Host                          string                `json:"host"`
 	Username                      string                `json:"username"`
 	Password                      string                `json:"password"`
@@ -449,6 +451,7 @@ func (server *sshServer) open(command sshWireCommand) {
 			command.Port != 0 ||
 			command.Username != "" ||
 			command.Password != "" ||
+			command.CredentialID != "" ||
 			command.TunnelConfigID != "" {
 			server.writeError(command.SessionID, "SSH connection target is invalid")
 			return
@@ -457,6 +460,10 @@ func (server *sshServer) open(command sshWireCommand) {
 		target, err := resolveDirectSSHTarget(command)
 		if err != nil {
 			server.writeError(command.SessionID, err.Error())
+			return
+		}
+		if command.CredentialID != "" && !validCredentialID(normalizeID(command.CredentialID)) {
+			server.writeError(command.SessionID, "SSH credential is invalid")
 			return
 		}
 		directTarget = &target
@@ -501,6 +508,7 @@ func (server *sshServer) open(command sshWireCommand) {
 			server.electronUserDataPath,
 			nodeID,
 			directTarget,
+			command.CredentialID,
 			command.SocksEndpoint,
 			command.TunnelEnabled,
 			command.UsernameOverride,
@@ -2559,7 +2567,7 @@ func resolveDirectSSHTarget(command sshWireCommand) (sshTarget, error) {
 		return sshTarget{}, errors.New("SSH host is invalid")
 	}
 	username := strings.TrimSpace(command.Username)
-	if username == "" {
+	if username == "" && command.CredentialID == "" {
 		return sshTarget{}, errors.New("SSH username is required")
 	}
 	if len([]byte(username)) > sshMaxUsernameLength || strings.ContainsAny(username, "\r\n\x00") {
@@ -2585,6 +2593,7 @@ func resolveDirectSSHTarget(command sshWireCommand) (sshTarget, error) {
 		port:           port,
 		username:       username,
 		password:       command.Password,
+		autoSudo:       command.AutoSudo,
 		tunnelConfigID: tunnelConfigID,
 	}, nil
 }
@@ -2595,6 +2604,7 @@ func openNativeSSH(
 	electronUserDataPath string,
 	nodeID string,
 	directTarget *sshTarget,
+	directCredentialID string,
 	socksEndpoint string,
 	tunnelEnabled *bool,
 	usernameOverride string,
@@ -2611,6 +2621,33 @@ func openNativeSSH(
 	var err error
 	if directTarget != nil {
 		target = *directTarget
+		if directCredentialID != "" {
+			database, openErr := openDatabase(databasePath, false)
+			if openErr != nil {
+				return nil, sshTarget{}, errors.New("Wormhole database is unavailable")
+			}
+			credentialErr := loadSSHCredential(
+				database,
+				databasePath,
+				normalizeID(directCredentialID),
+				&target,
+				"",
+				"",
+				false,
+				false,
+				electronUserDataPath,
+			)
+			closeErr := database.Close()
+			if credentialErr != nil {
+				return nil, sshTarget{}, credentialErr
+			}
+			if closeErr != nil {
+				return nil, sshTarget{}, errors.New("Wormhole database could not be closed")
+			}
+		}
+		if target.username == "" {
+			return nil, sshTarget{}, errors.New("SSH username is required")
+		}
 	} else if nodeID != "" {
 		target, err = loadSSHTargetWithOverrides(
 			databasePath,

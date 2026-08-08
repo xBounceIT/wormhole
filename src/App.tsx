@@ -193,15 +193,15 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { getTreeRowGeometry } from './tree-layout';
 import { findParentFolderId } from './tree-parent';
 import {
-  quickConnectSupportsTunnel,
+  quickConnectStartsImmediately,
   quickConnectTunnelId,
   type QuickConnectProtocol,
 } from './quick-connect-state';
 import { KeyedRetryQueue } from './keyed-retry-queue';
 import {
-  isBitwardenCredentialError,
   isBitwardenUnlockError,
-  requiresSshCredentialPrompt,
+  requiresRdpCredentialPrompt,
+  sshCredentialPromptTarget,
 } from './runtime-credential-errors';
 import { VncSurface } from './components/VncSurface';
 import { RdpSurface, type RdpUiStatus } from './components/RdpSurface';
@@ -534,6 +534,8 @@ type Session = {
   terminalFrame?: WormholeSshTerminalFrame;
   tunnelProgress?: { phase: string; detail?: string } | null;
   tunnelConfigId?: string;
+  credentialId?: string;
+  sshAutoSudo?: boolean;
   serialSettings?: SerialSettings;
   sftp?: SftpBrowserState;
   error?: string;
@@ -920,9 +922,10 @@ function AutoSudoField({
   id: string;
   mode: AutoSudoMode;
   onChange: (mode: AutoSudoMode) => void;
-  scope: 'connection' | 'folder';
+  scope: 'connection' | 'folder' | 'quick';
 }) {
   const isFolder = scope === 'folder';
+  const isQuick = scope === 'quick';
   const inheritLabel = isFolder ? 'Inherit from parent' : 'Inherit from folder';
   const description =
     mode === 'on'
@@ -943,7 +946,7 @@ function AutoSudoField({
           <SelectValue />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="inherit">{inheritLabel}</SelectItem>
+          {isQuick ? null : <SelectItem value="inherit">{inheritLabel}</SelectItem>}
           <SelectItem value="on">On</SelectItem>
           <SelectItem value="off">Off</SelectItem>
         </SelectContent>
@@ -1399,18 +1402,9 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
   const [bitwardenUnlockPassword, setBitwardenUnlockPassword] = useState('');
   const [bitwardenUnlockBusy, setBitwardenUnlockBusy] = useState(false);
   const [bitwardenUnlockError, setBitwardenUnlockError] = useState('');
-  const [quickConnectOpen, setQuickConnectOpen] = useState(false);
   const [mremoteImportOpen, setMremoteImportOpen] = useState(false);
-  const [quickConnectForm, setQuickConnectForm] = useState({
-    name: '',
-    host: '',
-    port: '',
-    protocol: 'ssh' as Protocol,
-    tunnel: 'off' as TunnelMode,
-    httpIgnoreCertErrors: false,
-    serial: { ...defaultSerialSettings },
-  });
   const [newConnectionOpen, setNewConnectionOpen] = useState(false);
+  const [connectionEditorMode, setConnectionEditorMode] = useState<'saved' | 'quick'>('saved');
   const [editingConnectionId, setEditingConnectionId] = useState<string | null>(null);
   const [folderDetailsOpen, setFolderDetailsOpen] = useState(false);
   const [editingFolderId, setEditingFolderId] = useState<string | null>(null);
@@ -2289,7 +2283,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     }
     sftpRequestIds.current.clear();
     sftpCancelRequests.current.clear();
-    setQuickConnectOpen(false);
     setMremoteImportOpen(false);
     window.wormhole?.clearMRemoteImport();
     setSshCredentialPrompt(null);
@@ -2531,8 +2524,11 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     port?: number;
     username?: string;
     password?: string;
+    credentialId?: string;
+    autoSudo?: boolean;
     tunnelConfigId?: string;
     manualCredentials?: boolean;
+    frontendSessionId?: string;
   }) {
     const api = window.wormhole;
     if (!api) {
@@ -2546,9 +2542,10 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       return;
     }
 
+    const { frontendSessionId, ...nativeRequest } = request;
     void api
       .openSshSession({
-        ...request,
+        ...nativeRequest,
         columns: 80,
         rows: 24,
       })
@@ -2558,17 +2555,25 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           requestRuntimeBitwardenUnlock(`ssh:${request.sessionId}`, message, () =>
             startSshSession(request),
           );
-        } else if (
-          request.nodeId &&
-          !request.manualCredentials &&
-          requiresSshCredentialPrompt(message)
-        ) {
-          setSshCredentialForm({ username: '', password: '' });
-          setSshCredentialPrompt({
-            kind: 'saved',
-            backendSessionId: request.sessionId,
-            nodeId: request.nodeId,
-          });
+        } else {
+          const promptTarget = sshCredentialPromptTarget(request, message);
+          if (promptTarget === 'saved' && request.nodeId) {
+            setSshCredentialForm({ username: '', password: '' });
+            setSshCredentialPrompt({
+              kind: 'saved',
+              backendSessionId: request.sessionId,
+              nodeId: request.nodeId,
+            });
+          } else if (promptTarget === 'quick') {
+            const sessionId =
+              frontendSessionId ??
+              sessionsRef.current.find((candidate) => candidate.backendSessionId === request.sessionId)
+                ?.id;
+            if (sessionId) {
+              setSshCredentialForm({ username: '', password: '' });
+              setSshCredentialPrompt({ kind: 'quick', sessionId });
+            }
+          }
         }
         setSessions((current) =>
           current.map((session) =>
@@ -2729,6 +2734,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           sessionId: session.id,
           attempt: generation,
           address: session.host,
+          port: session.port,
           protocol: session.protocol as 'http' | 'https',
           ignoreCertErrors: session.webIgnoreCertErrors === true,
           tunnelConfigId: session.tunnelConfigId,
@@ -2794,24 +2800,25 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       };
     }
     return {
+      ...session.rdpProfile,
       nodeId: session.nodeId,
       name: session.title,
       host: session.host,
       port: session.port,
-      screenSize: 'Full connection content',
-      colorDepth: 32,
-      redirectClipboard: true,
-      connectionSpeed: 7,
-      desktopBackground: true,
-      fontSmoothing: true,
-      desktopComposition: true,
-      windowDrag: true,
-      menuAnimation: true,
-      visualStyles: true,
-      bitmapCaching: true,
-      autoReconnect: true,
-      serverAuthentication: 2,
-      gatewayBypassLocal: true,
+      screenSize: session.rdpProfile?.screenSize ?? 'Full connection content',
+      colorDepth: session.rdpProfile?.colorDepth ?? 32,
+      redirectClipboard: session.rdpProfile?.redirectClipboard ?? true,
+      connectionSpeed: session.rdpProfile?.connectionSpeed ?? 7,
+      desktopBackground: session.rdpProfile?.desktopBackground ?? true,
+      fontSmoothing: session.rdpProfile?.fontSmoothing ?? true,
+      desktopComposition: session.rdpProfile?.desktopComposition ?? true,
+      windowDrag: session.rdpProfile?.windowDrag ?? true,
+      menuAnimation: session.rdpProfile?.menuAnimation ?? true,
+      visualStyles: session.rdpProfile?.visualStyles ?? true,
+      bitmapCaching: session.rdpProfile?.bitmapCaching ?? true,
+      autoReconnect: session.rdpProfile?.autoReconnect ?? true,
+      serverAuthentication: session.rdpProfile?.serverAuthentication ?? 2,
+      gatewayBypassLocal: session.rdpProfile?.gatewayBypassLocal ?? true,
       tunnelConfigId: session.tunnelConfigId,
       tunnelEnabled: session.tunnelConfigId ? true : undefined,
     };
@@ -2822,7 +2829,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (!session || session.protocol !== 'rdp') return;
     setSelectedSessionId(sessionId);
     setActivePage('sessions');
-    if (session.nodeId) {
+    if (session.nodeId || session.credentialId) {
       startRdpSession(sessionId, { username: '', domain: '', password: '' }, false);
       return;
     }
@@ -2898,7 +2905,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           );
         } else if (
           !manualCredentials &&
-          (isBitwardenCredentialError(message) || /credential|password/i.test(message))
+          requiresRdpCredentialPrompt(message)
         ) {
           rdpSavedCredentialAttempts.current.delete(sessionId);
           setRdpCredentialForm({ username: '', domain: '', password: '' });
@@ -3230,6 +3237,33 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
         ),
       );
       startSshSession({ sessionId: backendSessionId, nodeId: source.nodeId });
+    } else if (source.protocol === 'ssh' && source.credentialId) {
+      const backendSessionId = newSessionToken();
+      setSessions((current) =>
+        current.map((session) =>
+          session.id === id
+            ? {
+                ...session,
+                backendSessionId,
+                status: 'connecting',
+                terminalFrame: undefined,
+                sftp: undefined,
+                error: undefined,
+                hostKeyMismatch: undefined,
+                tunnelProgress: null,
+              }
+            : session,
+        ),
+      );
+      startSshSession({
+        sessionId: backendSessionId,
+        host: source.host,
+        port: source.port,
+        credentialId: source.credentialId,
+        autoSudo: source.sshAutoSudo,
+        tunnelConfigId: source.tunnelConfigId,
+        frontendSessionId: source.id,
+      });
     } else if (source.protocol === 'ssh') {
       setSessions((current) =>
         current.map((session) =>
@@ -3287,11 +3321,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
       id: `session-duplicate-${newSessionToken()}`,
       title: `${source.title} (copy)`,
       backendSessionId:
-        (source.protocol === 'ssh' && source.nodeId) || source.protocol === 'serial'
+        (source.protocol === 'ssh' && (source.nodeId || source.credentialId)) ||
+        source.protocol === 'serial'
           ? newSessionToken()
           : undefined,
       status:
-        source.protocol === 'ssh' && !source.nodeId
+        source.protocol === 'ssh' && !source.nodeId && !source.credentialId
           ? 'placeholder'
           : source.protocol === 'ssh' || source.protocol === 'serial'
             ? 'connecting'
@@ -3321,7 +3356,18 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     if (duplicate.backendSessionId && duplicate.nodeId && duplicate.protocol === 'ssh') {
       startSshSession({ sessionId: duplicate.backendSessionId, nodeId: duplicate.nodeId });
     }
-    if (duplicate.protocol === 'ssh' && !duplicate.nodeId) {
+    if (duplicate.backendSessionId && duplicate.credentialId && duplicate.protocol === 'ssh') {
+      startSshSession({
+        sessionId: duplicate.backendSessionId,
+        host: duplicate.host,
+        port: duplicate.port,
+        credentialId: duplicate.credentialId,
+        autoSudo: duplicate.sshAutoSudo,
+        tunnelConfigId: duplicate.tunnelConfigId,
+        frontendSessionId: duplicate.id,
+      });
+    }
+    if (duplicate.protocol === 'ssh' && !duplicate.nodeId && !duplicate.credentialId) {
       sshCredentialSubmitInFlight.current = false;
       setSshCredentialForm({ username: '', password: '' });
       setSshCredentialPrompt({ kind: 'quick', sessionId: duplicate.id });
@@ -4157,16 +4203,26 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   function openQuickConnect() {
     quickConnectSubmitInFlight.current = false;
-    setQuickConnectForm({
+    setEditingConnectionId(null);
+    setConnectionEditorMode('quick');
+    setEditorError('');
+    setNewConnectionForm({
       name: '',
       host: '',
       port: '',
+      username: '',
+      inlinePassword: '',
       protocol: 'ssh',
+      folder: '',
+      sshAutoSudo: 'off',
       tunnel: 'off',
+      useSavedCredentials: true,
+      credential: 'none',
       httpIgnoreCertErrors: false,
       serial: { ...defaultSerialSettings },
+      rdp: { ...defaultRdpSettings },
     });
-    setQuickConnectOpen(true);
+    setNewConnectionOpen(true);
   }
 
   function applyWorkspaceSnapshot(workspace: WormholeWorkspaceSnapshot) {
@@ -4211,6 +4267,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
 
   function openNewConnection(folderId?: string | null) {
     setEditingConnectionId(null);
+    setConnectionEditorMode('saved');
     setEditorError('');
     setNewConnectionForm({
       name: '',
@@ -4446,64 +4503,122 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
     event.preventDefault();
     if (quickConnectSubmitInFlight.current) return;
     quickConnectSubmitInFlight.current = true;
-    const name = quickConnectForm.name.trim() || quickConnectForm.host.trim() || 'New connection';
-    const host = quickConnectForm.host.trim() || 'localhost';
-    const portText = quickConnectForm.port.trim();
-    const sshPort = portText ? Number(portText) : undefined;
+    const name = newConnectionForm.name.trim() || newConnectionForm.host.trim() || 'New connection';
+    const host = newConnectionForm.host.trim() || 'localhost';
+    const portText = newConnectionForm.port.trim();
+    const port = portText ? Number(portText) : undefined;
+    if (portText && (typeof port !== 'number' || !Number.isInteger(port) || port < 1 || port > 65535)) {
+      setEditorError('Port must be a whole number between 1 and 65535.');
+      quickConnectSubmitInFlight.current = false;
+      return;
+    }
+    const credentialId =
+      newConnectionForm.useSavedCredentials &&
+      newConnectionForm.credential !== 'inherit' &&
+      newConnectionForm.credential !== 'none'
+        ? newConnectionForm.credential
+        : undefined;
     if (
-      quickConnectForm.protocol === 'ssh' &&
-      portText &&
-      (typeof sshPort !== 'number' || !Number.isInteger(sshPort) || sshPort < 1 || sshPort > 65535)
+      newConnectionForm.protocol === 'ssh' &&
+      !credentialId &&
+      !newConnectionForm.useSavedCredentials &&
+      !newConnectionForm.username.trim()
     ) {
+      setEditorError('Enter a username for this SSH connection.');
       quickConnectSubmitInFlight.current = false;
       return;
     }
     const id = `session-quick-${newSessionToken()}`;
-    const backendSessionId = quickConnectForm.protocol === 'serial' ? newSessionToken() : undefined;
-
+    const startsImmediately = quickConnectStartsImmediately(
+      newConnectionForm.protocol,
+      newConnectionForm.useSavedCredentials,
+      credentialId,
+    );
+    const backendSessionId =
+      (newConnectionForm.protocol === 'ssh' && startsImmediately) ||
+      newConnectionForm.protocol === 'serial'
+        ? newSessionToken()
+        : undefined;
+    const tunnelConfigId = quickConnectTunnelId(newConnectionForm.protocol, newConnectionForm.tunnel);
     const session: Session = {
       id,
       title: name,
-      protocol: quickConnectForm.protocol,
+      protocol: newConnectionForm.protocol,
       host,
-      port: quickConnectForm.protocol === 'ssh' ? sshPort : undefined,
-      tunnelConfigId: quickConnectTunnelId(quickConnectForm.protocol, quickConnectForm.tunnel),
-      canTransfer: quickConnectForm.protocol === 'ssh',
+      port,
+      credentialId,
+      sshAutoSudo: newConnectionForm.protocol === 'ssh' && newConnectionForm.sshAutoSudo === 'on',
+      tunnelConfigId,
+      canTransfer: newConnectionForm.protocol === 'ssh',
       backendSessionId,
-      status:
-        quickConnectForm.protocol === 'serial' ||
-        quickConnectForm.protocol === 'vnc' ||
-        quickConnectForm.protocol === 'http' ||
-        quickConnectForm.protocol === 'https'
-          ? 'connecting'
-          : 'placeholder',
+      status: startsImmediately ? 'connecting' : 'placeholder',
       serialSettings:
-        quickConnectForm.protocol === 'serial' ? { ...quickConnectForm.serial } : undefined,
-      rdpStatus: quickConnectForm.protocol === 'rdp' ? 'idle' : undefined,
+        newConnectionForm.protocol === 'serial' ? { ...newConnectionForm.serial } : undefined,
+      rdpStatus: newConnectionForm.protocol === 'rdp' ? 'idle' : undefined,
+      rdpProfile:
+        newConnectionForm.protocol === 'rdp'
+          ? {
+              ...newConnectionForm.rdp,
+              credentialId,
+              gatewayCredentialId: newConnectionForm.rdp.gatewayCredentialId || undefined,
+              name,
+              host,
+              port,
+              tunnelConfigId,
+              tunnelEnabled: tunnelConfigId ? true : undefined,
+            }
+          : undefined,
       webIgnoreCertErrors:
-        quickConnectForm.protocol === 'https' && quickConnectForm.httpIgnoreCertErrors,
+        newConnectionForm.protocol === 'https' && newConnectionForm.httpIgnoreCertErrors,
     };
     setSessions((current) => [...current, session]);
     setSelectedSessionId(id);
     setActivePage('sessions');
-    setQuickConnectOpen(false);
-    if (quickConnectForm.protocol === 'ssh') {
-      sshCredentialSubmitInFlight.current = false;
-      setSshCredentialForm({ username: '', password: '' });
-      setSshCredentialPrompt({ kind: 'quick', sessionId: id });
+    setNewConnectionForm((form) => ({ ...form, inlinePassword: '' }));
+    setNewConnectionOpen(false);
+    if (newConnectionForm.protocol === 'ssh') {
+      if (backendSessionId && credentialId) {
+        startSshSession({
+          sessionId: backendSessionId,
+          host,
+          port,
+          credentialId,
+          autoSudo: newConnectionForm.sshAutoSudo === 'on',
+          tunnelConfigId,
+          frontendSessionId: id,
+        });
+      } else if (backendSessionId && !newConnectionForm.useSavedCredentials) {
+        startSshSession({
+          sessionId: backendSessionId,
+          host,
+          port,
+          username: newConnectionForm.username,
+          password: newConnectionForm.inlinePassword,
+          autoSudo: newConnectionForm.sshAutoSudo === 'on',
+          tunnelConfigId,
+        });
+      } else {
+        sshCredentialSubmitInFlight.current = false;
+        setSshCredentialForm({ username: '', password: '' });
+        setSshCredentialPrompt({ kind: 'quick', sessionId: id });
+      }
     }
-    if (backendSessionId) {
-      startSerialSession(backendSessionId, undefined, host, quickConnectForm.serial);
+    if (backendSessionId && newConnectionForm.protocol === 'serial') {
+      startSerialSession(backendSessionId, undefined, host, newConnectionForm.serial);
     }
-    if (quickConnectForm.protocol === 'rdp') {
-      setRdpCredentialForm({ username: '', domain: '', password: '' });
-      setRdpCredentialPrompt(id);
+    if (newConnectionForm.protocol === 'rdp') {
+      const manual = !newConnectionForm.useSavedCredentials;
+      const credentials = {
+        username: newConnectionForm.username,
+        domain: newConnectionForm.rdp.domain,
+        password: newConnectionForm.inlinePassword,
+      };
+      window.setTimeout(() => startRdpSession(id, credentials, manual), 0);
     }
-    if (quickConnectForm.protocol === 'http' || quickConnectForm.protocol === 'https') {
+    if (newConnectionForm.protocol === 'http' || newConnectionForm.protocol === 'https') {
       startWebSession(session);
     }
   }
-
   async function submitNewConnection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (editorBusy) return;
@@ -5532,7 +5647,6 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   }
                   isAuthorized={authGate === 'unlocked'}
                   isWebSurfaceVisible={
-                    !quickConnectOpen &&
                     !newConnectionOpen &&
                     !folderDetailsOpen &&
                     !newFolderOpen &&
@@ -5679,232 +5793,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           </DialogContent>
         </Dialog>
 
-        <Dialog onOpenChange={setQuickConnectOpen} open={quickConnectOpen}>
-          <DialogContent className="border-border/70 bg-card text-card-foreground sm:max-w-md">
-            <DialogHeader>
-              <DialogTitle>Quick Connect</DialogTitle>
-              <DialogDescription>
-                Start a temporary session without adding it to your connection tree.
-              </DialogDescription>
-            </DialogHeader>
-            <form className="grid gap-4" onSubmit={submitQuickConnect}>
-              <div className="grid gap-2">
-                <Label htmlFor="quick-name">Connection name</Label>
-                <Input
-                  autoFocus
-                  id="quick-name"
-                  onChange={(event) =>
-                    setQuickConnectForm((form) => ({ ...form, name: event.target.value }))
-                  }
-                  placeholder="e.g. staging gateway"
-                  value={quickConnectForm.name}
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="quick-host">Host or address</Label>
-                <Input
-                  id="quick-host"
-                  onChange={(event) =>
-                    setQuickConnectForm((form) => ({ ...form, host: event.target.value }))
-                  }
-                  placeholder={
-                    quickConnectForm.protocol === 'http' || quickConnectForm.protocol === 'https'
-                      ? '10.0.0.1:8443'
-                      : 'hostname, IP, or COM port'
-                  }
-                  required
-                  value={quickConnectForm.host}
-                />
-              </div>
-              <div className="grid gap-2">
-                <Label htmlFor="quick-protocol">Protocol</Label>
-                <Select
-                  onValueChange={(protocol: Protocol) =>
-                    setQuickConnectForm((form) => ({ ...form, protocol }))
-                  }
-                  value={quickConnectForm.protocol}
-                >
-                  <SelectTrigger id="quick-protocol">
-                    <SelectValue placeholder="Select protocol" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="ssh">SSH</SelectItem>
-                    <SelectItem value="rdp">RDP</SelectItem>
-                    <SelectItem value="http">HTTP</SelectItem>
-                    <SelectItem value="https">HTTPS</SelectItem>
-                    <SelectItem value="vnc">VNC</SelectItem>
-                    <SelectItem value="serial">Serial</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              {quickConnectForm.protocol === 'ssh' ? (
-                <div className="grid gap-2">
-                  <Label htmlFor="quick-ssh-port">SSH port</Label>
-                  <Input
-                    id="quick-ssh-port"
-                    inputMode="numeric"
-                    max={65535}
-                    min={1}
-                    onChange={(event) =>
-                      setQuickConnectForm((form) => ({ ...form, port: event.target.value }))
-                    }
-                    placeholder="22 (default)"
-                    type="number"
-                    value={quickConnectForm.port}
-                  />
-                  <p className="text-[11px] leading-relaxed text-muted-foreground">
-                    SSH credentials are requested next and kept only for this temporary session.
-                  </p>
-                </div>
-              ) : null}
-              {quickConnectSupportsTunnel(quickConnectForm.protocol) ? (
-                <TunnelRouteField
-                  id="quick-tunnel-route"
-                  mode={quickConnectForm.tunnel}
-                  onChange={(tunnel) => setQuickConnectForm((form) => ({ ...form, tunnel }))}
-                  scope="quick"
-                  tunnels={tunnels}
-                />
-              ) : null}
-              {quickConnectForm.protocol === 'https' ? (
-                <label className="flex items-center gap-2 text-xs">
-                  <Checkbox
-                    checked={quickConnectForm.httpIgnoreCertErrors}
-                    onCheckedChange={(checked) =>
-                      setQuickConnectForm((form) => ({
-                        ...form,
-                        httpIgnoreCertErrors: checked === true,
-                      }))
-                    }
-                  />
-                  <span>Ignore certificate errors</span>
-                </label>
-              ) : null}
-              {quickConnectForm.protocol === 'serial' ? (
-                <div className="grid gap-3 rounded-lg border border-border/70 bg-background/35 p-3 sm:grid-cols-2">
-                  <div className="grid gap-2">
-                    <Label htmlFor="quick-serial-baud">Speed (baud)</Label>
-                    <Input
-                      id="quick-serial-baud"
-                      inputMode="numeric"
-                      onChange={(event) =>
-                        setQuickConnectForm((form) => ({
-                          ...form,
-                          serial: { ...form.serial, baudRate: Number(event.target.value) || 0 },
-                        }))
-                      }
-                      value={String(quickConnectForm.serial.baudRate)}
-                    />
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="quick-serial-data-bits">Data bits</Label>
-                    <Select
-                      onValueChange={(value) =>
-                        setQuickConnectForm((form) => ({
-                          ...form,
-                          serial: { ...form.serial, dataBits: Number(value) },
-                        }))
-                      }
-                      value={String(quickConnectForm.serial.dataBits)}
-                    >
-                      <SelectTrigger id="quick-serial-data-bits">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="5">5</SelectItem>
-                        <SelectItem value="6">6</SelectItem>
-                        <SelectItem value="7">7</SelectItem>
-                        <SelectItem value="8">8</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="quick-serial-stop-bits">Stop bits</Label>
-                    <Select
-                      onValueChange={(value) =>
-                        setQuickConnectForm((form) => ({
-                          ...form,
-                          serial: { ...form.serial, stopBits: Number(value) },
-                        }))
-                      }
-                      value={String(quickConnectForm.serial.stopBits)}
-                    >
-                      <SelectTrigger id="quick-serial-stop-bits">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="1">1</SelectItem>
-                        <SelectItem value="2">2</SelectItem>
-                        <SelectItem value="3">1.5</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="quick-serial-parity">Parity</Label>
-                    <Select
-                      onValueChange={(value) =>
-                        setQuickConnectForm((form) => ({
-                          ...form,
-                          serial: { ...form.serial, parity: Number(value) },
-                        }))
-                      }
-                      value={String(quickConnectForm.serial.parity)}
-                    >
-                      <SelectTrigger id="quick-serial-parity">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="0">None</SelectItem>
-                        <SelectItem value="1">Odd</SelectItem>
-                        <SelectItem value="2">Even</SelectItem>
-                        <SelectItem value="3">Mark</SelectItem>
-                        <SelectItem value="4">Space</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="grid gap-2 sm:col-span-2">
-                    <Label htmlFor="quick-serial-flow">Flow control</Label>
-                    <Select
-                      onValueChange={(value) =>
-                        setQuickConnectForm((form) => ({
-                          ...form,
-                          serial: { ...form.serial, flowControl: Number(value) },
-                        }))
-                      }
-                      value={String(quickConnectForm.serial.flowControl)}
-                    >
-                      <SelectTrigger id="quick-serial-flow" className="sm:max-w-[240px]">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="0">None</SelectItem>
-                        <SelectItem value="1">Software (XON/XOFF)</SelectItem>
-                        <SelectItem value="2">Hardware (RTS/CTS)</SelectItem>
-                        <SelectItem value="3">DSR/DTR</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                </div>
-              ) : null}
-              <DialogFooter>
-                <Button onClick={() => setQuickConnectOpen(false)} type="button" variant="ghost">
-                  Cancel
-                </Button>
-                <Button type="submit">
-                  <Power data-icon="inline-start" />
-                  Connect
-                </Button>
-              </DialogFooter>
-            </form>
-          </DialogContent>
-        </Dialog>
-
         <Dialog
           onOpenChange={(open) => {
             setNewConnectionOpen(open);
             if (!open) {
               setNewConnectionForm((form) => ({ ...form, inlinePassword: '' }));
               setEditingConnectionId(null);
+              setConnectionEditorMode('saved');
               setEditorError('');
             }
           }}
@@ -5913,15 +5808,24 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
           <DialogContent className="flex h-[min(36rem,calc(100vh-2rem))] max-h-[calc(100vh-2rem)] flex-col overflow-hidden border-border/70 bg-card text-card-foreground sm:max-w-2xl">
             <DialogHeader>
               <DialogTitle>
-                {editingConnectionId ? 'Edit connection' : 'New connection'}
+                {connectionEditorMode === 'quick'
+                  ? 'Quick Connect'
+                  : editingConnectionId
+                    ? 'Edit connection'
+                    : 'New connection'}
               </DialogTitle>
               <DialogDescription>
-                {editingConnectionId
-                  ? 'Update the connection settings used by this tree item.'
-                  : 'Save a connection to the tree for reuse later.'}
+                {connectionEditorMode === 'quick'
+                  ? 'Start a temporary session without adding it to your connection tree.'
+                  : editingConnectionId
+                    ? 'Update the connection settings used by this tree item.'
+                    : 'Save a connection to the tree for reuse later.'}
               </DialogDescription>
             </DialogHeader>
-            <form className="flex min-h-0 flex-1 flex-col gap-4" onSubmit={submitNewConnection}>
+            <form
+              className="flex min-h-0 flex-1 flex-col gap-4"
+              onSubmit={connectionEditorMode === 'quick' ? submitQuickConnect : submitNewConnection}
+            >
               <Tabs
                 className="flex min-h-0 flex-1 flex-col gap-0 overflow-hidden"
                 defaultValue="general"
@@ -6001,7 +5905,12 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                               ...form,
                               protocol,
                               port: protocol === form.protocol ? form.port : '',
-                              credential: protocol === form.protocol ? form.credential : 'inherit',
+                              credential:
+                                protocol === form.protocol
+                                  ? form.credential
+                                  : connectionEditorMode === 'quick'
+                                    ? 'none'
+                                    : 'inherit',
                             }))
                           }
                           value={newConnectionForm.protocol}
@@ -6070,7 +5979,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                       </p>
                     ) : null}
 
-                    <div className="grid max-w-[280px] gap-2">
+                    {connectionEditorMode === 'saved' ? (
+                      <div className="grid max-w-[280px] gap-2">
                       <Label htmlFor="connection-folder">Folder</Label>
                       <SearchableCombobox
                         id="connection-folder"
@@ -6086,7 +5996,8 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         searchPlaceholder="Search folders…"
                         value={newConnectionForm.folder || rootFolderSelectionValue}
                       />
-                    </div>
+                      </div>
+                    ) : null}
 
                     {newConnectionForm.protocol === 'ssh' ||
                     newConnectionForm.protocol === 'rdp' ||
@@ -6114,7 +6025,13 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                               onValueChange={(credential) =>
                                 setNewConnectionForm((form) => ({ ...form, credential }))
                               }
-                              options={connectionCredentialSelectionOptions}
+                              options={
+                                connectionEditorMode === 'quick'
+                                  ? connectionCredentialSelectionOptions.filter(
+                                      (option) => option.value !== 'inherit',
+                                    )
+                                  : connectionCredentialSelectionOptions
+                              }
                               placeholder="Select a credential"
                               searchPlaceholder="Search credentials…"
                               value={newConnectionForm.credential}
@@ -6170,7 +6087,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         onChange={(sshAutoSudo) =>
                           setNewConnectionForm((form) => ({ ...form, sshAutoSudo }))
                         }
-                        scope="connection"
+                        scope={connectionEditorMode === 'quick' ? 'quick' : 'connection'}
                       />
                     ) : null}
 
@@ -6181,7 +6098,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                         newConnectionForm.protocol === 'serial' ? 'off' : newConnectionForm.tunnel
                       }
                       onChange={(tunnel) => setNewConnectionForm((form) => ({ ...form, tunnel }))}
-                      scope="connection"
+                      scope={connectionEditorMode === 'quick' ? 'quick' : 'connection'}
                       tunnels={tunnels}
                     />
 
@@ -6769,6 +6686,7 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                     setNewConnectionForm((form) => ({ ...form, inlinePassword: '' }));
                     setNewConnectionOpen(false);
                     setEditingConnectionId(null);
+                    setConnectionEditorMode('saved');
                   }}
                   type="button"
                   variant="ghost"
@@ -6776,16 +6694,20 @@ function App({ initialAuthState, initialWorkspace, initialSettings }: WormholeAp
                   Cancel
                 </Button>
                 <Button disabled={editorBusy} type="submit">
-                  {editingConnectionId ? (
+                  {connectionEditorMode === 'quick' ? (
+                    <Power data-icon="inline-start" />
+                  ) : editingConnectionId ? (
                     <Check data-icon="inline-start" />
                   ) : (
                     <Plus data-icon="inline-start" />
                   )}
-                  {editorBusy
-                    ? 'Saving…'
-                    : editingConnectionId
-                      ? 'Save changes'
-                      : 'Save connection'}
+                  {connectionEditorMode === 'quick'
+                    ? 'Connect'
+                    : editorBusy
+                      ? 'Saving…'
+                      : editingConnectionId
+                        ? 'Save changes'
+                        : 'Save connection'}
                 </Button>
               </DialogFooter>
             </form>
@@ -9490,6 +9412,7 @@ function SessionSurface({
         session={{
           id: session.id,
           nodeId: session.nodeId,
+          credentialId: session.credentialId,
           host: session.host,
           port: session.port,
           tunnelConfigId: session.tunnelConfigId,

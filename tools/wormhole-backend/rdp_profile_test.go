@@ -307,3 +307,17 @@ func TestResolveRdpProfileOperationRejectsMalformedNodeIDs(t *testing.T) {
 		t.Fatal("accepted an injected manual RDP credential operation")
 	}
 }
+
+func TestResolveRdpCredentialOperationDoesNotRequireSessionIdentity(t *testing.T) {
+	if err := validateBackendCommand(backendCommand{
+		ID: "request-1", Action: "rdp.resolve-credential",
+		CredentialID: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+	}); err != nil {
+		t.Fatalf("rejected a valid RDP credential operation: %v", err)
+	}
+	if err := validateBackendCommand(backendCommand{
+		ID: "request-1", Action: "rdp.resolve-credential", CredentialID: "not-a-credential",
+	}); err == nil {
+		t.Fatal("accepted an invalid RDP credential operation")
+	}
+}

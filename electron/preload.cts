@@ -162,6 +162,7 @@ const wormholeBridge = {
     attempt: number;
     nodeId?: string;
     address?: string;
+    port?: number;
     protocol?: 'http' | 'https';
     ignoreCertErrors?: boolean;
     tunnelConfigId?: string;
@@ -364,6 +365,8 @@ const wormholeBridge = {
     nodeId?: string;
     host?: string;
     port?: number;
+    credentialId?: string;
+    autoSudo?: boolean;
     tunnelConfigId?: string;
     columns: number;
     rows: number;

@@ -81,6 +81,7 @@ import type {
   RdpStartRequest,
   RdpSurfaceRect,
 } from './rdp-contract.js';
+import { rdpGatewayCredentialIdForResolution, rdpGatewayUsername } from './rdp-contract.js';
 import {
   parseMRemoteImportInspection,
   parseMRemoteImportOptions,
@@ -215,6 +216,7 @@ type NativeBackendAction =
   | 'bitwarden.get'
   | 'bitwarden.resolve-credential'
   | 'bitwarden.resolve-node'
+  | 'rdp.resolve-credential'
   | 'rdp.resolve-profile'
   | 'bitwarden.node-reference'
   | 'bitwarden.browser-storage-read'
@@ -554,6 +556,7 @@ type WebOpenRequest = {
   attempt: number;
   nodeId?: string;
   address?: string;
+  port?: number;
   protocol?: 'http' | 'https';
   ignoreCertErrors?: boolean;
   tunnelConfigId?: string;
@@ -807,6 +810,8 @@ type SshOpenRequest = {
   port?: number;
   username?: string;
   password?: string;
+  credentialId?: string;
+  autoSudo?: boolean;
   tunnelConfigId?: string;
   columns: number;
   rows: number;
@@ -1052,6 +1057,7 @@ function isWebOpenRequest(value: unknown): value is WebOpenRequest {
     return (
       isSshSessionId(value.nodeId) &&
       value.address === undefined &&
+      value.port === undefined &&
       value.protocol === undefined &&
       value.ignoreCertErrors === undefined &&
       value.tunnelConfigId === undefined
@@ -1066,6 +1072,11 @@ function isWebOpenRequest(value: unknown): value is WebOpenRequest {
     return false;
   }
   return (
+    (value.port === undefined ||
+      (typeof value.port === 'number' &&
+        Number.isInteger(value.port) &&
+        value.port >= 1 &&
+        value.port <= 65535)) &&
     (value.ignoreCertErrors === undefined || typeof value.ignoreCertErrors === 'boolean') &&
     (value.tunnelConfigId === undefined || isTunnelID(value.tunnelConfigId))
   );
@@ -1168,6 +1179,8 @@ function isSshOpenRequest(value: unknown): value is SshOpenRequest {
       value.host === undefined &&
       value.port === undefined &&
       value.tunnelConfigId === undefined &&
+      value.credentialId === undefined &&
+      value.autoSudo === undefined &&
       (value.manualCredentials === undefined || typeof value.manualCredentials === 'boolean') &&
       (value.username === undefined ||
         (typeof value.username === 'string' &&
@@ -1183,23 +1196,29 @@ function isSshOpenRequest(value: unknown): value is SshOpenRequest {
   const host = value.host;
   const username = value.username;
   const password = value.password;
+  const credentialId = value.credentialId;
   return (
     typeof host === 'string' &&
     host.trim().length > 0 &&
     host.length <= 4096 &&
     !/[\r\n\0]/.test(host) &&
-    typeof username === 'string' &&
-    username.trim().length > 0 &&
-    username.length <= credentialMaxUsernameLength &&
-    !/[\r\n\0]/.test(username) &&
-    typeof password === 'string' &&
-    Buffer.byteLength(password, 'utf8') <= credentialMaxPasswordLength &&
+    ((isTunnelID(credentialId) &&
+      username === undefined &&
+      password === undefined) ||
+      (credentialId === undefined &&
+        typeof username === 'string' &&
+        username.trim().length > 0 &&
+        username.length <= credentialMaxUsernameLength &&
+        !/[\r\n\0]/.test(username) &&
+        typeof password === 'string' &&
+        Buffer.byteLength(password, 'utf8') <= credentialMaxPasswordLength)) &&
     (value.port === undefined ||
       (typeof value.port === 'number' &&
         Number.isInteger(value.port) &&
         value.port >= 1 &&
         value.port <= 65535)) &&
     (value.tunnelConfigId === undefined || isTunnelID(value.tunnelConfigId)) &&
+    (value.autoSudo === undefined || typeof value.autoSudo === 'boolean') &&
     value.manualCredentials !== true
   );
 }
@@ -2774,6 +2793,15 @@ async function resolveNativeRdpProfile(
   return response.result as RdpProfile;
 }
 
+async function resolveNativeRdpCredential(credentialId: string): Promise<BitwardenResolvedCredential> {
+  const response = await getNativeBackend().send(
+    { action: 'rdp.resolve-credential', credentialId },
+    cliOperationTimeoutMs,
+  );
+  if (!response.ok) throw new Error(response.error || 'RDP credential resolution failed.');
+  return response.result as BitwardenResolvedCredential;
+}
+
 type BitwardenResolvedCredential = {
   bitwarden: boolean;
   itemId?: string;
@@ -3576,6 +3604,7 @@ class WebSurfaceManager {
       const targetResult = await runBackend<WebTargetResponse>('web-target', {
         nodeId: request.nodeId,
         address: request.address,
+        port: request.port,
         protocol: request.protocol,
         ignoreCertErrors: request.ignoreCertErrors,
         tunnelConfigId: request.tunnelConfigId,
@@ -4978,11 +5007,13 @@ class NativeSshBackend {
       throw new Error('SSH session id is already in use.');
     }
     let bitwardenCredential: BitwardenResolvedCredential = { bitwarden: false };
-    if (request.nodeId && !request.manualCredentials) {
+    if ((request.nodeId || request.credentialId) && !request.manualCredentials) {
       try {
         bitwardenCredential = await runBitwardenBackend<BitwardenResolvedCredential>(
-          'bitwarden.resolve-node',
-          { nodeId: request.nodeId, protocol: 'ssh' },
+          request.nodeId ? 'bitwarden.resolve-node' : 'bitwarden.resolve-credential',
+          request.nodeId
+            ? { nodeId: request.nodeId, protocol: 'ssh' }
+            : { credentialId: request.credentialId, protocol: 'ssh' },
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : 'The vault could not be read.';
@@ -5056,6 +5087,11 @@ class NativeSshBackend {
           type: 'open',
           session_id: request.sessionId,
           node_id: request.nodeId,
+          credential_id:
+            request.credentialId && !bitwardenCredential.bitwarden
+              ? request.credentialId
+              : undefined,
+          auto_sudo: request.autoSudo,
           host: request.host,
           port: request.port,
           username: request.nodeId ? undefined : request.username,
@@ -7165,6 +7201,34 @@ function registerIpcHandlers(sshBackend: NativeSshBackend): void {
               error instanceof Error ? error.message : 'The RDP profile could not be read.';
             throw new Error(`RDP profile is unavailable: ${message}`);
           }
+        } else {
+          resolvedProfile = { ...request.profile };
+          if (request.profile.credentialId && request.manualCredentials !== true) {
+            const credential = await resolveNativeRdpCredential(request.profile.credentialId);
+            resolvedProfile.username = credential.username;
+            resolvedProfile.domain = credential.domain;
+            resolvedProfile.password = credential.password;
+          }
+          const gatewayCredentialId = rdpGatewayCredentialIdForResolution(request.profile);
+          if (request.profile.gatewayUsageMethod && request.profile.gatewayUseSameCreds) {
+            resolvedProfile.gatewayUsername = rdpGatewayUsername(
+              resolvedProfile.username,
+              resolvedProfile.domain,
+            );
+            resolvedProfile.gatewayPassword = resolvedProfile.password;
+          } else if (gatewayCredentialId) {
+            let gateway: BitwardenResolvedCredential;
+            try {
+              gateway = await resolveNativeRdpCredential(gatewayCredentialId);
+            } catch (error) {
+              const message = error instanceof Error ? error.message : 'credential resolution failed';
+              throw new Error(`RDP Gateway credential is unavailable: ${message}`);
+            }
+            resolvedProfile.gatewayUsername = rdpGatewayUsername(gateway.username, gateway.domain);
+            resolvedProfile.gatewayPassword = gateway.password;
+          }
+          delete resolvedProfile.credentialId;
+          delete resolvedProfile.gatewayCredentialId;
         }
         requireAuthorizationEpoch(authorizationEpoch);
         releaseRdpTunnel(request.sessionId);
@@ -7395,6 +7459,18 @@ function parseRdpStartRequest(value: unknown): RdpStartRequest {
   }
   if (profile.nodeId !== undefined && profile.tunnelConfigId !== undefined) {
     throw new Error('RDP tunnel configuration cannot override a saved connection.');
+  }
+  if (
+    profile.nodeId !== undefined &&
+    (profile.credentialId !== undefined || profile.gatewayCredentialId !== undefined)
+  ) {
+    throw new Error('RDP credentials cannot override a saved connection.');
+  }
+  if (
+    (profile.credentialId !== undefined && !isTunnelID(profile.credentialId)) ||
+    (profile.gatewayCredentialId !== undefined && !isTunnelID(profile.gatewayCredentialId))
+  ) {
+    throw new Error('RDP credential selection is invalid.');
   }
   if (profile.tunnelConfigId !== undefined && !isTunnelID(profile.tunnelConfigId)) {
     throw new Error('RDP tunnel configuration is invalid.');

@@ -16,6 +16,7 @@ import (
 type webTargetRequest struct {
 	NodeID           string `json:"nodeId"`
 	Address          string `json:"address"`
+	Port             int    `json:"port"`
 	Protocol         string `json:"protocol"`
 	IgnoreCertErrors bool   `json:"ignoreCertErrors"`
 	TunnelConfigID   string `json:"tunnelConfigId"`
@@ -51,7 +52,7 @@ func resolveWebTarget(databasePath string, request webTargetRequest) (webTargetR
 	if nodeID == "" {
 		return resolveDirectWebTarget(request)
 	}
-	if len(nodeID) > 128 || request.Address != "" || request.Protocol != "" || request.IgnoreCertErrors || request.TunnelConfigID != "" {
+	if len(nodeID) > 128 || request.Address != "" || request.Port != 0 || request.Protocol != "" || request.IgnoreCertErrors || request.TunnelConfigID != "" {
 		return webTargetResponse{}, errors.New("web connection id is invalid")
 	}
 
@@ -87,6 +88,12 @@ func resolveDirectWebTarget(request webTargetRequest) (webTargetResponse, error)
 	host, port, err := parseWebAddress(request.Address)
 	if err != nil {
 		return webTargetResponse{}, err
+	}
+	if request.Port < 0 || request.Port > 65535 {
+		return webTargetResponse{}, errors.New("web connection has an invalid port")
+	}
+	if request.Port != 0 {
+		port = request.Port
 	}
 	defaultPort := 80
 	if request.Protocol == "https" {

@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { parseWorkspaceRdpSettings } from '../electron/workspace-rdp-contract.ts';
+import {
+  rdpGatewayCredentialIdForResolution,
+  rdpGatewayUsername,
+} from '../electron/rdp-contract.ts';
 
 const validSettings = () => ({
   domain: 'CONTOSO',
@@ -33,6 +37,19 @@ const validSettings = () => ({
   gatewayBypassLocal: true,
   gatewayUseSameCreds: false,
   useExternalClient: false,
+});
+
+test('Quick Connect resolves a gateway credential only when it is actually selected for use', () => {
+  const base = {
+    host: 'server.example',
+    gatewayUsageMethod: 1,
+    gatewayCredentialId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+  };
+  assert.equal(rdpGatewayCredentialIdForResolution(base), base.gatewayCredentialId);
+  assert.equal(rdpGatewayCredentialIdForResolution({ ...base, gatewayUsageMethod: 0 }), undefined);
+  assert.equal(rdpGatewayCredentialIdForResolution({ ...base, gatewayUseSameCreds: true }), undefined);
+  assert.equal(rdpGatewayUsername('operator', 'CONTOSO'), 'CONTOSO\\operator');
+  assert.equal(rdpGatewayUsername('CONTOSO\\operator', 'IGNORED'), 'CONTOSO\\operator');
 });
 
 test('workspace RDP IPC contract accepts the complete persisted profile', () => {

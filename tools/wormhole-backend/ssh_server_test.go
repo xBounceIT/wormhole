@@ -461,6 +461,18 @@ func TestResolveDirectSSHTargetUsesTemporaryCredentialsAndDefaultsPort(t *testin
 	}
 }
 
+func TestResolveDirectSSHTargetDefersIdentityToSelectedCredential(t *testing.T) {
+	target, err := resolveDirectSSHTarget(sshWireCommand{
+		Host: "ssh.example", CredentialID: "11111111-2222-4333-8444-555555555555", AutoSudo: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.username != "" || !target.autoSudo {
+		t.Fatalf("selected credential target was resolved prematurely: %#v", target)
+	}
+}
+
 func TestResolveDirectSSHTargetRejectsInvalidTunnelAndBounds(t *testing.T) {
 	_, err := resolveDirectSSHTarget(sshWireCommand{
 		Host: "ssh.example", Username: "operator", Password: "secret",

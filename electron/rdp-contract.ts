@@ -7,6 +7,9 @@ export type RdpSurfaceRect = {
 
 export type RdpProfile = {
   nodeId?: string;
+  /** Main-process credential resolution for an unsaved Quick Connect target. */
+  credentialId?: string;
+  gatewayCredentialId?: string;
   tunnelConfigId?: string;
   name?: string;
   host: string;
@@ -57,6 +60,16 @@ export type RdpStartRequest = {
   /** Renderer supplied transient credentials; skip saved/Bitwarden resolution for this attempt. */
   manualCredentials?: boolean;
 };
+
+export function rdpGatewayCredentialIdForResolution(profile: RdpProfile): string | undefined {
+  if (!profile.gatewayUsageMethod || profile.gatewayUseSameCreds) return undefined;
+  return profile.gatewayCredentialId;
+}
+
+export function rdpGatewayUsername(username: string | undefined, domain: string | undefined): string | undefined {
+  if (!username || !domain || username.includes('\\')) return username;
+  return `${domain}\\${username}`;
+}
 
 export type RdpCommandRequest = {
   sessionId: string;

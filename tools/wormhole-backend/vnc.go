@@ -272,7 +272,7 @@ func (m *vncManager) handle(command backendCommand) {
 		"bitwarden.get", "bitwarden.resolve-credential", "bitwarden.resolve-node",
 		"bitwarden.node-reference", "bitwarden.browser-storage-read",
 		"bitwarden.browser-storage-capture", "bitwarden.browser-profile-seed",
-		"bitwarden.browser-profile-register", "rdp.resolve-profile":
+		"bitwarden.browser-profile-register", "rdp.resolve-credential", "rdp.resolve-profile":
 		generation := m.bitwardenGeneration()
 		go m.handleBitwarden(command, generation)
 	default:
@@ -1359,7 +1359,9 @@ func validateBackendCommand(command backendCommand) error {
 		return errors.New("backend command ID is invalid")
 	}
 	bitwardenAction := strings.HasPrefix(command.Action, "bitwarden.")
-	requiresSession := !bitwardenAction && command.Action != "rdp.resolve-profile"
+	requiresSession := !bitwardenAction &&
+		command.Action != "rdp.resolve-profile" &&
+		command.Action != "rdp.resolve-credential"
 	if requiresSession && (command.SessionID == "" || len(command.SessionID) > 128) {
 		return errors.New("backend session ID is invalid")
 	}
@@ -1367,6 +1369,9 @@ func validateBackendCommand(command backendCommand) error {
 	case "vnc.connect":
 		if len(command.NodeID) > 128 || len(command.CredentialID) > 128 {
 			return errors.New("VNC connection identity is invalid")
+		}
+		if command.NodeID != "" && command.CredentialID != "" {
+			return errors.New("VNC credentials cannot override a saved connection")
 		}
 		if command.NodeID != "" && command.TunnelConfigID != "" {
 			return errors.New("VNC tunnel configuration cannot override a saved connection")
@@ -1473,6 +1478,10 @@ func validateBackendCommand(command backendCommand) error {
 	case "bitwarden.resolve-credential":
 		if len(command.CredentialID) > 128 || bitwardenProtocolValue(command.Protocol) < 0 {
 			return errors.New("Bitwarden credential request is invalid")
+		}
+	case "rdp.resolve-credential":
+		if !validCredentialID(normalizeID(command.CredentialID)) {
+			return errors.New("RDP credential request is invalid")
 		}
 	case "bitwarden.resolve-node", "bitwarden.node-reference":
 		if len(command.NodeID) == 0 || len(command.NodeID) > 128 || bitwardenProtocolValue(command.Protocol) < 0 {

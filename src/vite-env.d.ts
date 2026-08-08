@@ -11,6 +11,8 @@ interface WormholeRdpSurfaceRect {
 
 interface WormholeRdpProfile {
   nodeId?: string;
+  credentialId?: string;
+  gatewayCredentialId?: string;
   tunnelConfigId?: string;
   name?: string;
   host: string;
@@ -770,6 +772,7 @@ interface Window {
       attempt: number;
       nodeId?: string;
       address?: string;
+      port?: number;
       protocol?: 'http' | 'https';
       ignoreCertErrors?: boolean;
       tunnelConfigId?: string;
@@ -935,6 +938,8 @@ interface Window {
       port?: number;
       username?: string;
       password?: string;
+      credentialId?: string;
+      autoSudo?: boolean;
       tunnelConfigId?: string;
       columns: number;
       rows: number;
